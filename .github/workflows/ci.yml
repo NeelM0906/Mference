@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release products
+        run: swift build -c release
+      - name: Run serial tests
+        run: Scripts/test.sh
+      - name: Check Markdown links
+        run: ruby Scripts/check_markdown_links.rb

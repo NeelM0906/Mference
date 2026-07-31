@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mference — Bounded Flux</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&family=Lora:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        /* Anthropic Brand Colors */
+        :root {
+            --anthropic-dark: #141413;
+            --anthropic-light: #faf9f5;
+            --anthropic-mid-gray: #b0aea5;
+            --anthropic-light-gray: #e8e6dc;
+            --anthropic-orange: #d97757;
+            --anthropic-blue: #6a9bcc;
+            --anthropic-green: #788c5d;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, var(--anthropic-light) 0%, #f5f3ee 100%);
+            min-height: 100vh;
+            color: var(--anthropic-dark);
+        }
+
+        .container {
+            display: flex;
+            min-height: 100vh;
+            padding: 20px;
+            gap: 20px;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 320px;
+            flex-shrink: 0;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(20, 20, 19, 0.1);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .sidebar h1 {
+            font-family: 'Lora', serif;
+            font-size: 24px;
+            font-weight: 500;
+            color: var(--anthropic-dark);
+            margin-bottom: 8px;
+        }
+
+        .sidebar .subtitle {
+            color: var(--anthropic-mid-gray);
+            font-size: 14px;
+            margin-bottom: 32px;
+            line-height: 1.4;
+        }
+
+        /* Control Sections */
+        .control-section {
+            margin-bottom: 32px;
+        }
+
+        .control-section h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--anthropic-dark);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .control-section h3::before {
+            content: '•';
+            color: var(--anthropic-orange);
+            font-weight: bold;
+        }
+
+        /* Seed Controls */
+        .seed-input {
+            width: 100%;
+            background: var(--anthropic-light);
+            padding: 12px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            margin-bottom: 12px;
+            border: 1px solid var(--anthropic-light-gray);
+            text-align: center;
+        }
+
+        .seed-input:focus {
+            outline: none;
+            border-color: var(--anthropic-orange);
+            box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.1);
+            background: white;
+        }
+
+        .seed-controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .regen-button {
+            margin-bottom: 0;
+        }
+
+        /* Parameter Controls */
+        .control-group {
+            margin-bottom: 20px;
+        }
+
+        .control-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--anthropic-dark);
+            margin-bottom: 8px;
+        }
+
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .slider-container input[type="range"] {
+            flex: 1;
+            height: 4px;
+            background: var(--anthropic-light-gray);
+            border-radius: 2px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .slider-container input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--anthropic-orange);
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .slider-container input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.1);
+            background: #c86641;
+        }
+
+        .slider-container input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            background: var(--anthropic-orange);
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .value-display {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: var(--anthropic-mid-gray);
+            min-width: 60px;
+            text-align: right;
+        }
+
+        /* Color Pickers */
+        .color-group {
+            margin-bottom: 16px;
+        }
+
+        .color-group label {
+            display: block;
+            font-size: 12px;
+            color: var(--anthropic-mid-gray);
+            margin-bottom: 4px;
+        }
+
+        .color-picker-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .color-picker-container input[type="color"] {
+            width: 32px;
+            height: 32px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            background: none;
+            padding: 0;
+        }
+
+        .color-value {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: var(--anthropic-mid-gray);
+        }
+
+        /* Buttons */
+        .button {
+            background: var(--anthropic-orange);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        .button:hover {
+            background: #c86641;
+            transform: translateY(-1px);
+        }
+
+        .button:active {
+            transform: translateY(0);
+        }
+
+        .button.secondary {
+            background: var(--anthropic-blue);
+        }
+
+        .button.secondary:hover {
+            background: #5a8bb8;
+        }
+
+        .button.tertiary {
+            background: var(--anthropic-green);
+        }
+
+        .button.tertiary:hover {
+            background: #6b7b52;
+        }
+
+        .button-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        .button-row .button {
+            flex: 1;
+        }
+
+        /* Canvas Area */
+        .canvas-area {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 0;
+        }
+
+        #canvas-container {
+            width: 100%;
+            max-width: 1000px;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 20px 40px rgba(20, 20, 19, 0.1);
+            background: white;
+        }
+
+        #canvas-container canvas {
+            display: block;
+            width: 100% !important;
+            height: auto !important;
+        }
+
+        /* Loading State */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: var(--anthropic-mid-gray);
+        }
+
+        /* Responsive - Stack on mobile */
+        @media (max-width: 600px) {
+            .container {
+                flex-direction: column;
+            }
+
+            .sidebar {
+                width: 100%;
+            }
+
+            .canvas-area {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Control Sidebar -->
+        <div class="sidebar">
+            <h1>Mference — Bounded Flux</h1>
+            <div class="subtitle">A generative logo study. Many streams cross the window; a chosen few are admitted; the mark condenses from what the boundary lets through.</div>
+
+            <!-- Seed Section (ALWAYS KEEP THIS) -->
+            <div class="control-section">
+                <h3>Seed</h3>
+                <input type="number" id="seed-input" class="seed-input" value="12345" onchange="updateSeed()">
+                <div class="seed-controls">
+                    <button class="button secondary" onclick="previousSeed()">← Prev</button>
+                    <button class="button secondary" onclick="nextSeed()">Next →</button>
+                </div>
+                <button class="button tertiary regen-button" onclick="randomSeedAndUpdate()">↻ Random</button>
+            </div>
+
+            <!-- Parameters Section -->
+            <div class="control-section">
+                <h3>Parameters</h3>
+
+                <div class="control-group">
+                    <label>Streams</label>
+                    <div class="slider-container">
+                        <input type="range" id="streams" min="64" max="512" step="32" value="256" oninput="updateParam('streams', this.value)">
+                        <span class="value-display" id="streams-value">256</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Admitted Streams</label>
+                    <div class="slider-container">
+                        <input type="range" id="elected" min="2" max="16" step="1" value="8" oninput="updateParam('elected', this.value)">
+                        <span class="value-display" id="elected-value">8</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Ring Segments</label>
+                    <div class="slider-container">
+                        <input type="range" id="ringSlots" min="8" max="32" step="4" value="16" oninput="updateParam('ringSlots', this.value)">
+                        <span class="value-display" id="ringSlots-value">16</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Turbulence</label>
+                    <div class="slider-container">
+                        <input type="range" id="turbulence" min="0.0" max="2.0" step="0.05" value="0.85" oninput="updateParam('turbulence', this.value)">
+                        <span class="value-display" id="turbulence-value">0.85</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Convergence</label>
+                    <div class="slider-container">
+                        <input type="range" id="convergence" min="0.2" max="2.0" step="0.05" value="1.0" oninput="updateParam('convergence', this.value)">
+                        <span class="value-display" id="convergence-value">1.0</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Flow Speed</label>
+                    <div class="slider-container">
+                        <input type="range" id="flowSpeed" min="0.3" max="2.0" step="0.05" value="1.0" oninput="updateParam('flowSpeed', this.value)">
+                        <span class="value-display" id="flowSpeed-value">1.0</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Glow</label>
+                    <div class="slider-container">
+                        <input type="range" id="glow" min="0.3" max="2.0" step="0.05" value="1.0" oninput="updateParam('glow', this.value)">
+                        <span class="value-display" id="glow-value">1.0</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Forgetting</label>
+                    <div class="slider-container">
+                        <input type="range" id="decay" min="0.000" max="0.050" step="0.002" value="0.010" oninput="updateParam('decay', this.value)">
+                        <span class="value-display" id="decay-value">0.010</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Colors Section -->
+            <div class="control-section">
+                <h3>Colors</h3>
+
+                <div class="color-group">
+                    <label>Ember (admitted streams)</label>
+                    <div class="color-picker-container">
+                        <input type="color" id="color1" value="#d97757" onchange="updateColor('color1', this.value)">
+                        <span class="color-value" id="color1-value">#d97757</span>
+                    </div>
+                </div>
+
+                <div class="color-group">
+                    <label>Core (settled light)</label>
+                    <div class="color-picker-container">
+                        <input type="color" id="color2" value="#f0c674" onchange="updateColor('color2', this.value)">
+                        <span class="color-value" id="color2-value">#f0c674</span>
+                    </div>
+                </div>
+
+                <div class="color-group">
+                    <label>Reservoir (unlit streams)</label>
+                    <div class="color-picker-container">
+                        <input type="color" id="color3" value="#46505e" onchange="updateColor('color3', this.value)">
+                        <span class="color-value" id="color3-value">#46505e</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Actions Section (ALWAYS KEEP THIS) -->
+            <div class="control-section">
+                <h3>Actions</h3>
+                <div class="button-row" style="margin-bottom: 8px;">
+                    <button class="button" onclick="regenerate()">Regenerate</button>
+                    <button class="button" onclick="resetParameters()">Reset</button>
+                </div>
+                <button class="button tertiary" onclick="downloadPNG()">↓ Download PNG</button>
+            </div>
+        </div>
+
+        <!-- Main Canvas Area -->
+        <div class="canvas-area">
+            <div id="canvas-container">
+                <div class="loading">Initializing generative art...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════════════════════════
+        // BOUNDED FLUX — the Mference mark
+        //
+        // Many streams are born on the outer rim. A seeded few are admitted —
+        // brighter, faster, longer-lived. The field blends turbulence at the
+        // edge with attraction toward a hidden skeleton at the core; nothing
+        // strokes the letterform, it condenses from accumulated arrivals. A
+        // segmented ring between passage and core counts crossings and lights
+        // by frequency. Every trace decays exponentially: the mark persists
+        // only because it is continually re-earned.
+        // ═══════════════════════════════════════════════════════════════════════
+
+        let params = {
+            seed: 12345,
+            streams: 256,
+            elected: 8,
+            ringSlots: 16,
+            turbulence: 0.85,
+            convergence: 1.0,
+            flowSpeed: 1.0,
+            glow: 1.0,
+            decay: 0.010,
+            colorPalette: ['#d97757', '#f0c674', '#46505e']
+        };
+
+        let defaultParams = JSON.parse(JSON.stringify(params));
+        const STRUCTURAL = new Set(['streams', 'elected', 'ringSlots']);
+
+        // ── System state ──────────────────────────────────────────────────────
+        const W = 1200, H = 1200;
+        const CX = W / 2, CY = H / 2;
+        const OUTER_R = 545;        // the reservoir rim (where streams are born)
+        const RING_R = 344;         // the segmented ring (the bounded window)
+        const SETTLE_DIST = 7;      // arrival threshold at the skeleton
+        const INK = [15, 15, 18];   // background ink
+
+        let pg;                     // accumulation buffer (the memory of the piece)
+        let particles = [];
+        let electedSet = new Set();
+        let sectorCounts = [];
+        let skeleton = [];          // the hidden M: segments the field bends toward
+        let emberC, coreC, faintC;
+        let fieldT = 0;
+
+        // The M skeleton, in canvas coordinates. Never drawn — only attracted to.
+        function buildSkeleton() {
+            const hw = 196;         // half width of the glyph
+            const top = CY - 148, bot = CY + 158, mid = CY + 66;
+            skeleton = [
+                { x1: CX - hw, y1: bot, x2: CX - hw, y2: top },
+                { x1: CX - hw, y1: top, x2: CX,      y2: mid },
+                { x1: CX,      y1: mid, x2: CX + hw, y2: top },
+                { x1: CX + hw, y1: top, x2: CX + hw, y2: bot },
+            ];
+        }
+
+        function nearestOnSkeleton(px, py) {
+            let best = null, bestD2 = Infinity;
+            for (const s of skeleton) {
+                const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
+                const len2 = dx * dx + dy * dy;
+                let t = ((px - s.x1) * dx + (py - s.y1) * dy) / len2;
+                t = t < 0 ? 0 : (t > 1 ? 1 : t);
+                const qx = s.x1 + t * dx, qy = s.y1 + t * dy;
+                const d2 = (px - qx) * (px - qx) + (py - qy) * (py - qy);
+                if (d2 < bestD2) { bestD2 = d2; best = { x: qx, y: qy }; }
+            }
+            return { x: best.x, y: best.y, d: Math.sqrt(bestD2) };
+        }
+
+        // ── Particles ─────────────────────────────────────────────────────────
+        class Particle {
+            constructor(streamIdx, elected) {
+                this.stream = streamIdx;
+                this.elected = elected;
+                // Each stream owns a home angle on the rim: a spoke it is born from.
+                this.homeAngle = (TWO_PI * streamIdx) / params.streams;
+                this.respawn(true);
+            }
+
+            respawn(scatterAge) {
+                const jitter = randomGaussian(0, 0.05);
+                const a = this.homeAngle + jitter;
+                const r = OUTER_R + random(-14, 26);
+                this.x = CX + r * Math.cos(a);
+                this.y = CY + r * Math.sin(a);
+                this.px = this.x; this.py = this.y;
+                this.age = scatterAge ? floor(random(0, 400)) : 0;
+                this.maxAge = this.elected ? 900 : 620;
+            }
+
+            step() {
+                this.px = this.x; this.py = this.y;
+                const rx = this.x - CX, ry = this.y - CY;
+                const r = Math.sqrt(rx * rx + ry * ry) + 1e-6;
+
+                // Turbulence: two octaves of rotational noise, alive in time.
+                const ns = 0.0021;
+                const a1 = noise(this.x * ns, this.y * ns, fieldT) * TWO_PI * 2;
+                const a2 = noise(this.x * ns * 3.1 + 40, this.y * ns * 3.1 + 40, fieldT * 1.7) * TWO_PI * 2;
+                let nx = Math.cos(a1) * 0.72 + Math.cos(a2) * 0.28;
+                let ny = Math.sin(a1) * 0.72 + Math.sin(a2) * 0.28;
+
+                // Attraction: toward the nearest point of the hidden skeleton,
+                // gaining authority as the radius shrinks. Chaos at the rim,
+                // intent at the core.
+                const near = nearestOnSkeleton(this.x, this.y);
+                const ax = (near.x - this.x) / (near.d + 1e-6);
+                const ay = (near.y - this.y) / (near.d + 1e-6);
+                // Chaos owns the reservoir; intent owns the window. The
+                // attraction ramp reaches full authority exactly at the ring.
+                let w = (OUTER_R - r) / (OUTER_R - RING_R);
+                w = w < 0 ? 0 : (w > 1 ? 1 : w);
+                w = w * w * (3 - 2 * w) * params.convergence;   // smoothstep
+                if (w > 1) w = 1;
+
+                // A touch of tangential swirl just outside the ring, so
+                // entries curve into the window instead of hitting it flat.
+                const swirl = Math.exp(-Math.pow((r - (RING_R + 46)) / 70, 2)) * 0.22;
+                const tx = -ry / r, ty = rx / r;
+
+                let vx = nx * params.turbulence * (1 - w) + ax * w + tx * swirl;
+                let vy = ny * params.turbulence * (1 - w) + ay * w + ty * swirl;
+                if (r < RING_R) {
+                    // Inside the bounded window the elect trace the skeleton
+                    // almost purely; only a whisper of noise keeps the line alive.
+                    const inner = this.elected ? 0.06 : 0.30;
+                    vx = ax + nx * inner;
+                    vy = ay + ny * inner;
+                }
+                const m = Math.sqrt(vx * vx + vy * vy) + 1e-6;
+                const speed = params.flowSpeed * (this.elected ? 2.5 : 1.7);
+                this.x += (vx / m) * speed;
+                this.y += (vy / m) * speed;
+
+                // Ring crossing: the bounded window counts what it admits.
+                const nr = Math.sqrt((this.x - CX) ** 2 + (this.y - CY) ** 2);
+                if (r > RING_R && nr <= RING_R) {
+                    let ang = Math.atan2(this.y - CY, this.x - CX);
+                    if (ang < 0) ang += TWO_PI;
+                    const sector = Math.min(params.ringSlots - 1, Math.floor(ang / TWO_PI * params.ringSlots));
+                    sectorCounts[sector] += this.elected ? 3 : 1;
+                }
+
+                // Deposit. The elect burn; the reservoir barely whispers.
+                if (this.elected) {
+                    const closeness = Math.max(0, 1 - near.d / 220);
+                    const c = lerpColor(emberC, coreC, closeness * closeness);
+                    pg.stroke(red(c), green(c), blue(c), 20 * params.glow);
+                    pg.strokeWeight(1.25);
+                } else {
+                    pg.stroke(red(faintC), green(faintC), blue(faintC), 5.5 * params.glow);
+                    pg.strokeWeight(0.8);
+                }
+                pg.line(this.px, this.py, this.x, this.y);
+
+                // Arrival: settled light, then the stream is re-requested.
+                if (near.d < SETTLE_DIST) {
+                    if (this.elected) {
+                        pg.noStroke();
+                        pg.fill(red(coreC), green(coreC), blue(coreC), 46 * params.glow);
+                        pg.circle(this.x + random(-1.5, 1.5), this.y + random(-1.5, 1.5), random(1.5, 3.4));
+                    }
+                    this.respawn(false);
+                    return;
+                }
+                if (++this.age > this.maxAge || nr > OUTER_R + 46) this.respawn(false);
+            }
+        }
+
+        // ── Setup / teardown ──────────────────────────────────────────────────
+        function setup() {
+            let canvas = createCanvas(W, H);
+            canvas.parent('canvas-container');
+            pg = createGraphics(W, H);
+            initializeSystem();
+            document.querySelector('.loading').style.display = 'none';
+        }
+
+        function refreshColors() {
+            emberC = color(params.colorPalette[0]);
+            coreC = color(params.colorPalette[1]);
+            faintC = color(params.colorPalette[2]);
+        }
+
+        function initializeSystem() {
+            randomSeed(params.seed);
+            noiseSeed(params.seed);
+            refreshColors();
+            buildSkeleton();
+            fieldT = 0;
+
+            // Seeded election: a handful of streams among the many.
+            const order = [];
+            for (let i = 0; i < params.streams; i++) order.push(i);
+            for (let i = order.length - 1; i > 0; i--) {
+                const j = floor(random(i + 1));
+                [order[i], order[j]] = [order[j], order[i]];
+            }
+            electedSet = new Set(order.slice(0, params.elected));
+
+            sectorCounts = new Array(params.ringSlots).fill(0);
+
+            // The reservoir: one whisper per stream. The elect: a working set.
+            particles = [];
+            for (let i = 0; i < params.streams; i++) {
+                if (electedSet.has(i)) {
+                    for (let k = 0; k < 30; k++) particles.push(new Particle(i, true));
+                } else {
+                    particles.push(new Particle(i, false));
+                }
+            }
+
+            pg.background(INK[0], INK[1], INK[2]);
+        }
+
+        function draw() {
+            fieldT += 0.0028;
+
+            // Forgetting: exponential decay of every trace. The mark persists
+            // only while it is re-earned.
+            if (params.decay > 0) {
+                pg.noStroke();
+                pg.fill(INK[0], INK[1], INK[2], params.decay * 255);
+                pg.rect(0, 0, W, H);
+            }
+
+            for (const p of particles) p.step();
+
+            image(pg, 0, 0);
+            drawRing();
+        }
+
+        function drawRing() {
+            // The reservoir rim: barely there.
+            noFill();
+            stroke(red(faintC), green(faintC), blue(faintC), 34);
+            strokeWeight(1);
+            circle(CX, CY, OUTER_R * 2);
+
+            // The bounded window: fixed segments, lit by what actually flowed.
+            const slots = params.ringSlots;
+            const gap = 0.055;
+            let maxC = 1;
+            for (const c of sectorCounts) if (c > maxC) maxC = c;
+            for (let i = 0; i < slots; i++) {
+                const a0 = (TWO_PI * i) / slots + gap;
+                const a1 = (TWO_PI * (i + 1)) / slots - gap;
+                const heat = Math.log(1 + sectorCounts[i]) / Math.log(1 + maxC);
+                const c = lerpColor(faintC, emberC, heat);
+                stroke(red(c), green(c), blue(c), 52 + 190 * heat);
+                strokeWeight(7.5);
+                arc(CX, CY, RING_R * 2, RING_R * 2, a0, a1);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // UI CONTROL HANDLERS
+        // ═══════════════════════════════════════════════════════════════════════
+
+        function updateParam(paramName, value) {
+            params[paramName] = parseFloat(value);
+            const display = document.getElementById(paramName + '-value');
+            if (display) display.textContent = value;
+            if (STRUCTURAL.has(paramName)) initializeSystem();
+        }
+
+        function updateColor(colorId, value) {
+            const index = { color1: 0, color2: 1, color3: 2 }[colorId];
+            params.colorPalette[index] = value;
+            document.getElementById(colorId + '-value').textContent = value;
+            refreshColors();
+        }
+
+        function regenerate() {
+            initializeSystem();
+        }
+
+        function downloadPNG() {
+            saveCanvas('mference-logo-seed-' + params.seed, 'png');
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // SEED CONTROL FUNCTIONS - ALWAYS KEEP THESE
+        // ═══════════════════════════════════════════════════════════════════════
+
+        function updateSeedDisplay() {
+            document.getElementById('seed-input').value = params.seed;
+        }
+
+        function updateSeed() {
+            let input = document.getElementById('seed-input');
+            let newSeed = parseInt(input.value);
+            if (newSeed && newSeed > 0) {
+                params.seed = newSeed;
+                initializeSystem();
+            } else {
+                updateSeedDisplay();
+            }
+        }
+
+        function previousSeed() {
+            params.seed = Math.max(1, params.seed - 1);
+            updateSeedDisplay();
+            initializeSystem();
+        }
+
+        function nextSeed() {
+            params.seed = params.seed + 1;
+            updateSeedDisplay();
+            initializeSystem();
+        }
+
+        function randomSeedAndUpdate() {
+            params.seed = Math.floor(Math.random() * 999999) + 1;
+            updateSeedDisplay();
+            initializeSystem();
+        }
+
+        function resetParameters() {
+            params = JSON.parse(JSON.stringify(defaultParams));
+
+            for (const name of ['streams', 'elected', 'ringSlots', 'turbulence',
+                                'convergence', 'flowSpeed', 'glow', 'decay']) {
+                document.getElementById(name).value = params[name];
+                document.getElementById(name + '-value').textContent = params[name];
+            }
+            for (const [id, idx] of [['color1', 0], ['color2', 1], ['color3', 2]]) {
+                document.getElementById(id).value = params.colorPalette[idx];
+                document.getElementById(id + '-value').textContent = params.colorPalette[idx];
+            }
+
+            updateSeedDisplay();
+            initializeSystem();
+        }
+
+        window.addEventListener('load', function() {
+            updateSeedDisplay();
+        });
+    </script>
+</body>
+</html>
