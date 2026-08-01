@@ -840,6 +840,22 @@ public final class AppModel {
 
     public func addPromptAttachment(_ attachment: AppPromptAttachment) {
         guard !isRunning, let index = selectedChatIndex else { return }
+        // Extracted document text is held in the draft — and written to the
+        // chat archive — until the turn is sent. `AppPromptContext.compose`
+        // can never emit more than the transport ceiling, so anything past it
+        // would be stored and then discarded. Refuse visibly instead.
+        let retained = chats[index].draftAttachments
+            .reduce(0) { $0 + $1.characterCount }
+        guard retained + attachment.characterCount
+                <= AppPromptContext.maximumTransportCharacters else {
+            error = .invalidRequest("""
+            \(attachment.fileName) was not attached. Attachments on one prompt \
+            are limited to \(AppPromptContext.maximumTransportCharacters) \
+            characters of extracted text, which is all a single request can \
+            carry. Remove an attachment and try again.
+            """)
+            return
+        }
         chats[index].draftAttachments.append(attachment)
         chats[index].updatedAt = Date()
         persistChats()
@@ -1081,7 +1097,8 @@ public final class AppModel {
     private var transportCharacterBudget: Int {
         // The decode protocol has a 4 MiB frame limit. Exact token fitting and
         // rolling compression happen before the request crosses that boundary.
-        min(750_000, max(0, maxContextTokens * 12))
+        min(AppPromptContext.maximumTransportCharacters,
+            max(0, maxContextTokens * 12))
     }
 
     private func buildRequestContext(
@@ -1247,8 +1264,27 @@ public final class AppModel {
         chats[index].contextSummary = summary
         chats[index].summarizedThroughMessageID =
             plan.summarizedThroughMessageID
+        releaseSummarizedContext(inChatAt: index)
         chats[index].updatedAt = Date()
         persistChats()
+    }
+
+    /// Drops the hidden request-side text of every message the rolling summary
+    /// now stands in for. `chatContextComponents()` reads only the messages
+    /// after the boundary, so that text — which carries whole attached
+    /// documents — can never be sent again. The visible transcript is
+    /// untouched; only the invisible copy goes.
+    private func releaseSummarizedContext(inChatAt index: Int) {
+        guard let boundaryID = chats[index].summarizedThroughMessageID,
+              let boundaryIndex = chats[index].messages.firstIndex(where: {
+                  $0.id == boundaryID
+              }) else {
+            return
+        }
+        for messageIndex in 0...boundaryIndex {
+            chats[index].messages[messageIndex].contextContent =
+                chats[index].messages[messageIndex].content
+        }
     }
 
     private func generateRollingSummary(

@@ -155,6 +155,21 @@ struct ChatMLTemplateTests {
                 "expected enable_thinking=false generation prompt, got suffix: \(suffix)")
     }
 
+    /// Pins the constraint that makes the server fold `developer` into
+    /// `system` for this dialect: Qwen's message loop knows only
+    /// system/user/assistant/tool and raises on anything else.
+    @Test("Tool chat rejects the developer role")
+    func toolChatRejectsDeveloperRole() {
+        #expect(throws: (any Error).self) {
+            _ = try tok.encodeToolChat(
+                messages: [
+                    Message(role: .developer, content: "Be helpful."),
+                    Message(role: .user, content: "Hi"),
+                ],
+                tools: [])
+        }
+    }
+
     @Test("Union tool schemas reach the template unflattened")
     func toolChatKeepsUnionSchemas() throws {
         let ids = try tok.encodeToolChat(

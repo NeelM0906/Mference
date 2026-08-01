@@ -211,7 +211,11 @@ Chat Completions supports JSON and Server-Sent Events responses. Set
 
 Requests may contain system, developer, user, assistant, and tool messages.
 Guidance must precede the conversation, and consecutive messages of the same
-guidance role are merged into one block separated by a blank line.
+guidance role are merged into one block separated by a blank line. Qwen's chat
+template has no `developer` role, so with a Qwen model loaded a `developer`
+message is treated as a `system` message — it merges with adjacent system
+guidance instead of rendering as its own block. Gemma keeps the two roles
+distinct.
 Supported options include `temperature`, `top_p`, `top_k`,
 `repetition_penalty`, `seed`, `stop`, `max_tokens`,
 `max_completion_tokens`, and function-tool fields.

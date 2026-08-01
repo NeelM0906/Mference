@@ -403,10 +403,18 @@ public enum OpenAIRequestValidator {
         var result: [MFTokenizer.Message] = []
         var sawConversationMessage = false
         for message in input {
-            guard let role = MFTokenizer.Role(rawValue: message.role) else {
+            guard let declared = MFTokenizer.Role(rawValue: message.role) else {
                 throw invalid("unsupported message role \(message.role)",
                               "messages", "invalid_message")
             }
+            // ChatML has no `developer` role: Qwen's template raises
+            // 'Unexpected message role.' for anything outside
+            // system/user/assistant/tool. `developer` is OpenAI's newer name
+            // for the same author-supplied guidance, so fold it into `system`
+            // here instead of letting the render fail. Gemma's template names
+            // `developer` explicitly, so it stays distinct there.
+            let role: MFTokenizer.Role =
+                (dialect == .chatml && declared == .developer) ? .system : declared
             if role == .system || role == .developer {
                 guard !sawConversationMessage else {
                     throw invalid("system or developer guidance must precede the conversation",
