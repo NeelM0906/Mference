@@ -1,5 +1,6 @@
 import AppKit
 import MferenceAppCore
+import MferenceMacPresentation
 import SwiftUI
 
 // Run as a regular foreground app even when launched as a bare SwiftPM
@@ -27,6 +28,8 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
 struct MferenceMacApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: ForegroundAppDelegate
     @State private var model: AppModel
+    @AppStorage(AppAppearance.storageKey)
+    private var appearanceRawValue = AppAppearance.system.rawValue
 
     init() {
         _model = State(initialValue: AppModel(
@@ -37,12 +40,19 @@ struct MferenceMacApp: App {
     var body: some Scene {
         Window("Mference", id: "main") {
             RootView(model: model)
-                .frame(minWidth: 1040, minHeight: 560)
+                .preferredColorScheme(
+                    AppAppearance.resolve(appearanceRawValue)
+                        .preferredColorScheme)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1040, height: 720)
+        .defaultSize(width: 1280, height: 760)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandMenu("Chat") {
+                Button("New Chat") { model.createChat() }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .disabled(model.isRunning)
+            }
             CommandMenu("Generation") {
                 Button("Cancel Generation") { model.cancel() }
                     .keyboardShortcut(".", modifiers: .command)
@@ -51,12 +61,24 @@ struct MferenceMacApp: App {
                     .disabled(!model.canCancelInstall)
             }
             CommandMenu("Model") {
+                Button("Choose Model Folder…") {
+                    ModelLocationPicker.choose(for: model)
+                }
+                .disabled(model.isRunning || model.isInstallingModel || model.loadState.isLoading)
                 Button("Load Model", action: model.loadModel)
                     .disabled(!model.canLoadModel)
                 Button("Reload Model", action: model.reloadModel)
                     .disabled(!model.canReloadModel)
                 Button("Unload Model", action: model.unloadModel)
                     .disabled(!model.canUnloadModel)
+            }
+            CommandMenu("Appearance") {
+                Picker("Appearance", selection: $appearanceRawValue) {
+                    ForEach(AppAppearance.allCases) { appearance in
+                        Label(appearance.label, systemImage: appearance.systemImage)
+                            .tag(appearance.rawValue)
+                    }
+                }
             }
         }
     }
