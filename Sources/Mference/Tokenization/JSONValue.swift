@@ -11,7 +11,23 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
     case bool(Bool)
     case null
 
+    /// How deep a decoded tree may nest, counted from the root of the enclosing
+    /// document. Decoding recurses once per level, and so does every consumer of
+    /// the result — schema key validation, Gemma schema normalization, the Jinja
+    /// bridge — so the ceiling has to leave stack for all of them rather than
+    /// just for the decode. Request bodies are decoded on the sole event-loop
+    /// thread, whose 512 KiB stack a debug build exhausts at roughly 220 levels;
+    /// the JSON scanner does not help, because it accepts up to 512. A stack
+    /// overflow traps in hardware and cannot be caught, so the process dies
+    /// outright. Real tool schemas nest a handful of levels.
+    public static let maximumDepth = 64
+
     public init(from decoder: Decoder) throws {
+        guard decoder.codingPath.count <= Self.maximumDepth else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "JSON nests deeper than \(Self.maximumDepth) levels"))
+        }
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null
@@ -94,12 +110,14 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
     /// template renders carries a concrete scalar `type`. The template evaluates
     /// `value['type'] | upper` unconditionally for each property, so union
     /// (`anyOf`/`oneOf`/`allOf`), array-typed (`"type": ["string", "null"]`), or
-    /// type-less properties would abort rendering. Unions collapse to their first
-    /// branch that resolves to a concrete type (merging in the parent's sibling
-    /// keys, e.g. `description`); an array `type` takes its first non-null member;
-    /// a type-less node defaults to `object` when it carries `properties`,
-    /// otherwise `string`. Every nested `properties` value and `items` schema is
-    /// normalized recursively. Non-object values are returned unchanged.
+    /// type-less properties would abort rendering. `anyOf`/`oneOf` collapse to
+    /// the first branch resolving to a concrete non-null type, `allOf` merges
+    /// its branches; both take on the parent's sibling keys (e.g. `description`)
+    /// and run the result through normalization again. An array `type` takes its
+    /// first non-null member; a type-less node defaults to `object` when it
+    /// carries `properties`, otherwise `string`. Every nested `properties` value
+    /// and `items` schema is normalized recursively. Non-object values are
+    /// returned unchanged.
     ///
     /// The ChatML dialect renders `tool | tojson`, so it must not go through
     /// this: unions there are carried to the model intact.
@@ -114,7 +132,9 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
         if !object.hasScalarStringType {
             for keyword in Self.unionKeywords {
                 guard case .array(let branches)? = object[keyword] else { continue }
-                return Self.collapsedUnion(parent: object, branches: branches)
+                return keyword == "allOf"
+                    ? Self.mergedIntersection(parent: object, branches: branches)
+                    : Self.collapsedUnion(parent: object, branches: branches)
             }
         }
         if !object.hasScalarStringType {
@@ -140,20 +160,62 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
 
     private static let unionKeywords = ["anyOf", "oneOf", "allOf"]
 
+    /// Picks the single branch of an `anyOf`/`oneOf` that the template renders.
+    /// A `{"type":"null"}` branch is taken only when no other branch resolves:
+    /// a NULL-typed parameter reads to the model as "this argument is null",
+    /// which is the opposite of what a nullable parameter means.
     private static func collapsedUnion(parent: [String: JSONValue],
                                        branches: [JSONValue]) -> JSONValue {
-        for branch in branches {
-            guard case .object(var merged) = branch.gemmaSchemaNormalized(),
-                  merged.hasScalarStringType else { continue }
-            for (key, value) in parent where !unionKeywords.contains(key) {
-                if merged[key] == nil { merged[key] = value }
-            }
-            return .object(merged)
+        let resolved = branches
+            .compactMap { $0.gemmaSchemaNormalized().objectValue }
+            .filter(\.hasScalarStringType)
+        let chosen = resolved.first { $0["type"] != .string("null") } ?? resolved.first
+        return completed(chosen ?? [:], siblingsOf: parent)
+    }
+
+    /// `allOf` is an intersection, not a choice: every branch constrains the
+    /// same value. Keeping only the first would hide the parameters the later
+    /// branches declare, so branch keys are merged instead — earlier branches
+    /// win a conflict, and `properties` maps are unioned.
+    private static func mergedIntersection(parent: [String: JSONValue],
+                                           branches: [JSONValue]) -> JSONValue {
+        var merged: [String: JSONValue] = [:]
+        for case .object(let branch) in branches {
+            absorb(branch, into: &merged)
         }
-        var fallback = parent
-        for keyword in unionKeywords { fallback[keyword] = nil }
-        fallback["type"] = .string("string")
-        return .object(fallback)
+        return completed(merged, siblingsOf: parent)
+    }
+
+    /// Finishes a collapsed union or a merged intersection: the parent's own
+    /// keys (`description` and the like) join the result, which then goes back
+    /// through normalization. That second pass is what normalizes the keys the
+    /// parent contributed — nested `properties` and `items` above all — and what
+    /// gives a result that still names no type the same shape default as any
+    /// other type-less node. It terminates because every pass consumes the union
+    /// keyword it collapsed, and a keyword can only reappear from one level
+    /// further down a tree whose depth `maximumDepth` bounds.
+    private static func completed(_ collapsed: [String: JSONValue],
+                                  siblingsOf parent: [String: JSONValue]) -> JSONValue {
+        var result = collapsed
+        var siblings = parent
+        for keyword in unionKeywords { siblings[keyword] = nil }
+        absorb(siblings, into: &result)
+        return JSONValue.object(result).gemmaSchemaNormalized()
+    }
+
+    /// Adds `addition`'s keys to `base` without displacing what is already
+    /// there, unioning `properties` maps so no declared parameter is dropped.
+    private static func absorb(_ addition: [String: JSONValue],
+                               into base: inout [String: JSONValue]) {
+        for (key, value) in addition {
+            if key == "properties",
+               case .object(let existing)? = base[key],
+               case .object(let incoming) = value {
+                base[key] = .object(existing.merging(incoming) { current, _ in current })
+            } else if base[key] == nil {
+                base[key] = value
+            }
+        }
     }
 
     public func encoded(sortedKeys: Bool = true) throws -> String {

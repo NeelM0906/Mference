@@ -243,9 +243,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 do {
                     // Rendering and the context check happen before the head
                     // is written, so a rejected prompt still gets a status
-                    // code even when the client asked for a stream.
-                    let prepared = try await self.backend.prepare(request)
-                    let completion = try await self.coordinator.run(onQueued: startStream) {
+                    // code even when the client asked for a stream. The
+                    // coordinator claims the queue place first, so a request
+                    // bound for a 429 is never rendered at all.
+                    let completion = try await self.coordinator.run(
+                        onQueued: startStream,
+                        render: { try await self.backend.prepare(request) }
+                    ) { prepared in
                         startStream()
                         return try await self.backend.generate(prepared) { event in
                             guard request.stream else { return }

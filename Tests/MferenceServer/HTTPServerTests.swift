@@ -153,6 +153,41 @@ private actor RejectingPrepareBackend: ServerInferenceBackend {
     }
 }
 
+/// Counts renders and parks in `generate`, so a request that the queue turns
+/// away can be shown never to have paid for tokenization.
+private actor RenderCountingBackend: ServerInferenceBackend {
+    private(set) var prepareCount = 0
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+
+    func prepare(_ request: ValidatedChatRequest) throws -> PreparedGeneration {
+        prepareCount += 1
+        return PreparedGeneration(request: request)
+    }
+
+    func generate(
+        _ prepared: PreparedGeneration,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        if !released {
+            await withCheckedContinuation { parked.append($0) }
+        }
+        return ServerCompletion(
+            content: "done",
+            toolCalls: [],
+            finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2))
+    }
+
+    /// Latches open: a queued request that reaches `generate` only after the
+    /// release must not park again, or shutdown would wait on it forever.
+    func releaseAll() {
+        released = true
+        for continuation in parked { continuation.resume() }
+        parked.removeAll()
+    }
+}
+
 private actor CancellableServerBackend: ServerInferenceBackend {
     private(set) var startedCount = 0
     private(set) var cancellationCount = 0
@@ -515,6 +550,50 @@ struct HTTPServerTests {
         #expect(await backend.generationCount == 1)
 
         Darwin.close(socket)
+        try await server.shutdown()
+    }
+
+    @Test func queueOverflowIsRejectedBeforeTheRequestIsRendered() async throws {
+        let backend = RenderCountingBackend()
+        let server = MferenceHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: backend)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        let sockets = try (0..<3).map { _ in try connectedSocket(port: port) }
+        defer { sockets.forEach { Darwin.close($0) } }
+        let body =
+            #"{"model":"test-model","messages":[{"role":"user","content":"wait"}]}"#
+        let request =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            + "Host: 127.0.0.1:\(port)\r\n"
+            + "Content-Type: application/json\r\n"
+            + "Content-Length: \(body.utf8.count)\r\n"
+            + "Connection: keep-alive\r\n"
+            + "\r\n"
+            + body
+
+        // One generating, one queued: the gate is now full.
+        try writeAll(socket: sockets[0], text: request)
+        try writeAll(socket: sockets[1], text: request)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await server.queuedRequestCount != 1, ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        #expect(await server.queuedRequestCount == 1)
+        #expect(await backend.prepareCount == 2)
+
+        try writeAll(socket: sockets[2], text: request)
+        let response = try readUntil(
+            socket: sockets[2],
+            timeoutMilliseconds: 2_000,
+            condition: { $0.contains("queue_full") })
+        #expect(response.contains("HTTP/1.1 429"))
+        // The rejected request must never have reached the tokenizer.
+        #expect(await backend.prepareCount == 2)
+
+        await backend.releaseAll()
         try await server.shutdown()
     }
 

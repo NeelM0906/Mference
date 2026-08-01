@@ -67,29 +67,62 @@ public actor ServerCoordinator {
     private let queueLimit: Int
     private var active = false
     private var waiters: [Waiter] = []
+    private var claims = 0
     private var shuttingDown = false
 
     public init(queueLimit: Int) {
         self.queueLimit = queueLimit
     }
 
+    /// Claims a place, renders, then waits its turn. Rendering stays outside
+    /// the gate so it never stalls the request that is generating, but the
+    /// place is claimed before it starts: a request the queue has no room for
+    /// is turned away without having paid for tokenization first.
+    public func run<Rendered: Sendable, T: Sendable>(
+        onQueued: @escaping @Sendable () -> Void = {},
+        render: @escaping @Sendable () async throws -> Rendered,
+        _ operation: @escaping @Sendable (Rendered) async throws -> T
+    ) async throws -> T {
+        try claim()
+        let rendered: Rendered
+        do {
+            rendered = try await render()
+        } catch {
+            claims -= 1
+            throw error
+        }
+        try await acquire(onQueued: onQueued)
+        defer { release() }
+        return try await operation(rendered)
+    }
+
     public func run<T: Sendable>(
         onQueued: @escaping @Sendable () -> Void = {},
         _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        try await acquire(onQueued: onQueued)
-        defer { release() }
-        return try await operation()
+        try await run(onQueued: onQueued, render: {}) { _ in try await operation() }
+    }
+
+    /// Occupancy is the one generating request plus the queue behind it.
+    /// Outstanding claims count towards it from the moment they are taken, so
+    /// two requests rendering at once cannot both take the same free place.
+    private func claim() throws {
+        try Task.checkCancellation()
+        guard !shuttingDown else { throw CancellationError() }
+        let occupancy = (active ? 1 : 0) + waiters.count + claims
+        guard occupancy < queueLimit + 1 else { throw ServerRequestError.queueFull }
+        claims += 1
     }
 
     private func acquire(onQueued: @escaping @Sendable () -> Void) async throws {
+        // The claim becomes the active slot or a place in the queue.
+        claims -= 1
         try Task.checkCancellation()
         guard !shuttingDown else { throw CancellationError() }
         if !active {
             active = true
             return
         }
-        guard waiters.count < queueLimit else { throw ServerRequestError.queueFull }
         onQueued()
         let id = UUID()
         try await withTaskCancellationHandler {
