@@ -408,12 +408,18 @@ public struct MFTokenizer: @unchecked Sendable {
             return value
         }
         let upstreamTools: [ToolSpec] = try tools.map { tool in
-            [
+            // Gemma's template reads `value['type'] | upper` for every property,
+            // so union / array / type-less schemas must be flattened first.
+            // ChatML emits `tool | tojson` and carries them through unchanged.
+            let parameters = dialect == .gemma
+                ? tool.parameters.gemmaSchemaNormalized()
+                : tool.parameters
+            return [
                 "type": "function",
                 "function": [
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": try tool.parameters.jinjaSendableValue(),
+                    "parameters": try parameters.jinjaSendableValue(),
                 ] as [String: any Sendable],
             ]
         }
