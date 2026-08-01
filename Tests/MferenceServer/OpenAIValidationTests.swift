@@ -268,6 +268,74 @@ struct OpenAIValidationTests {
         #expect(scalar.gemmaSchemaNormalized().objectValue?["type"] == .string("string"))
     }
 
+    @Test func nullableUnionPrefersTheConcreteBranch() throws {
+        // A NULL-typed parameter tells the model the argument must be `null`,
+        // so a `{"type":"null"}` branch may never win over a real type.
+        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"anyOf":[{"type":"null"},{"type":"integer"}]}
+        """#.utf8))
+        #expect(schema.gemmaSchemaNormalized().objectValue?["type"] == .string("integer"))
+    }
+
+    @Test func unionOfNullAloneKeepsTheNullBranch() throws {
+        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"anyOf":[{"type":"null"}]}
+        """#.utf8))
+        #expect(schema.gemmaSchemaNormalized().objectValue?["type"] == .string("null"))
+    }
+
+    @Test func unionCollapseNormalizesKeysMergedFromTheParent() throws {
+        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"allOf":[{"type":"object"}],"properties":{"x":{"anyOf":[{"type":"string"}]}}}
+        """#.utf8))
+        let normalized = schema.gemmaSchemaNormalized().objectValue
+        #expect(normalized?["type"] == .string("object"))
+        let property = normalized?["properties"]?.objectValue?["x"]?.objectValue
+        #expect(property?["type"] == .string("string"))
+        #expect(property?["anyOf"] == nil)
+    }
+
+    @Test func unresolvableUnionFallsBackToTheShapeDefault() throws {
+        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"oneOf":[],"properties":{"x":{"anyOf":[{"type":"string"}]}}}
+        """#.utf8))
+        let normalized = schema.gemmaSchemaNormalized().objectValue
+        #expect(normalized?["type"] == .string("object"))
+        #expect(normalized?["properties"]?.objectValue?["x"]?.objectValue?["type"]
+                == .string("string"))
+    }
+
+    @Test func intersectionMergesPropertiesFromEveryBranch() throws {
+        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"allOf":[
+          {"type":"object","properties":{"a":{"type":"string"}}},
+          {"type":"object","properties":{"b":{"type":"integer"}},"description":"d"}
+        ]}
+        """#.utf8))
+        let normalized = schema.gemmaSchemaNormalized().objectValue
+        #expect(normalized?["type"] == .string("object"))
+        let properties = normalized?["properties"]?.objectValue
+        #expect(properties?["a"]?.objectValue?["type"] == .string("string"))
+        #expect(properties?["b"]?.objectValue?["type"] == .string("integer"))
+        #expect(normalized?["description"] == .string("d"))
+        #expect(normalized?["allOf"] == nil)
+    }
+
+    @Test func normalizationIsIdempotent() throws {
+        let schemas = [
+            #"{"anyOf":[{"type":"null"},{"type":"integer"}]}"#,
+            #"{"allOf":[{"type":"object"}],"properties":{"x":{"anyOf":[{"type":"string"}]}}}"#,
+            #"{"oneOf":[],"properties":{"x":{"anyOf":[{"type":"string"}]}}}"#,
+            #"{"allOf":[{"properties":{"a":{"type":"string"}}},{"properties":{"b":{}}}]}"#,
+            #"{"type":["string","null"],"items":{"anyOf":[{"type":"integer"}]}}"#,
+        ]
+        for text in schemas {
+            let schema = try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
+            let once = schema.gemmaSchemaNormalized()
+            #expect(once.gemmaSchemaNormalized() == once, "not idempotent: \(text)")
+        }
+    }
+
     @Test func deeplyNestedToolSchemaIsRejectedBeforeItRecurses() throws {
         // The unauthenticated shape that used to take the process down: the
         // nesting reaches `parameters`, which decodes through the recursive
