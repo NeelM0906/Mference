@@ -15,6 +15,9 @@ public struct RunResult: Equatable, Sendable {
 public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
+    if args.chat {
+        return await runChat(args: args, stdout: stdout, stderr: stderr)
+    }
     do {
         let modelURL = URL(fileURLWithPath: args.model)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
@@ -127,4 +130,168 @@ public func run(args: Args,
 private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
     stderr.write(Data("error: \(message)\n".utf8))
     return RunResult(exitCode: code)
+}
+
+/// Interactive multi-turn chat. The model is loaded once and every turn
+/// re-renders the whole history through the tokenizer's chat template, so the
+/// REPL follows whichever dialect the loaded checkpoint uses. Each turn starts
+/// from a reset KV cache (`runRawCompletion`'s default), so no state leaks
+/// between turns.
+private func runChat(args: Args,
+                     stdout: FileHandle,
+                     stderr: FileHandle) async -> RunResult {
+    do {
+        let modelURL = URL(fileURLWithPath: args.model)
+        let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
+        let baseConfig = GenerationConfig(
+            maxNewTokens: args.maxNew,
+            temperature: args.temperature,
+            topK: args.topK,
+            topP: args.topP,
+            repetitionPenalty: args.repetitionPenalty,
+            seed: args.seed,
+            stopStrings: args.stops,
+            extraStopTokens: [])
+        let runtime = RuntimeConfiguration(
+            expertCacheSlots: args.expertCacheSlots,
+            rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
+            forceLogitsHead: !baseConfig.isPureGreedy)
+
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            return errored(stderr, "no Metal device", 1)
+        }
+        let context = try MetalContext()
+        let model = try Model.load(
+            directoryURL: modelURL,
+            device: context.device,
+            streamingMode: .pread(slotCount: runtime.expertCacheSlots),
+            expertCachePolicy: runtime.modelExpertCachePolicy,
+            integrityPolicy: .fullSha256)
+        let runner = try RealForwardRunner(
+            model: model,
+            context: context,
+            maxContext: args.maxContext,
+            runtimeConfiguration: runtime)
+        let scratch = try RawCompletionScratch(context: context,
+                                               vocab: model.config.vocabSize,
+                                               logitSoftcap: Float(model.config.finalLogitSoftcap))
+
+        let opening: [MFTokenizer.Message] = args.systemPrompt.map {
+            [MFTokenizer.Message(role: .system, content: $0)]
+        } ?? []
+        var history = opening
+        let promptTokens = { (messages: [MFTokenizer.Message]) throws -> Int in
+            tokenizer.encode(try tokenizer.applyChatTemplate(messages), addBOS: false).count
+        }
+
+        stderr.write(Data("Interactive chat. Commands: /clear, /history, /quit.\n".utf8))
+        while true {
+            stderr.write(Data("\nyou> ".utf8))
+            // A nil line is EOF (Ctrl-D): leave the loop and exit cleanly.
+            guard let line = readLine(strippingNewline: true) else {
+                stderr.write(Data("\n".utf8))
+                return RunResult(exitCode: 0)
+            }
+            let input = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if input.isEmpty { continue }
+            if input.hasPrefix("/") {
+                switch input {
+                case "/quit", "/exit":
+                    return RunResult(exitCode: 0)
+                case "/clear":
+                    history = opening
+                    stderr.write(Data("history cleared\n".utf8))
+                case "/history":
+                    for message in history {
+                        stderr.write(Data("[\(message.role.rawValue)] \(message.content ?? "")\n".utf8))
+                    }
+                default:
+                    stderr.write(Data("unknown command \(input); try /clear, /history, or /quit\n".utf8))
+                }
+                continue
+            }
+
+            let turn = history + [MFTokenizer.Message(role: .user, content: input)]
+            let fitted = try trimChatHistory(turn, limit: args.maxContext, measure: promptTokens)
+            guard fitted.fits else {
+                stderr.write(Data(
+                    "error: message needs \(fitted.tokens) tokens and does not fit maxContext \(args.maxContext); shorten it or raise --max-context\n".utf8))
+                continue
+            }
+            if fitted.dropped > 0 {
+                stderr.write(Data("note: dropped \(fitted.dropped) oldest message(s) to fit the context\n".utf8))
+            }
+            history = fitted.messages
+
+            let promptIds = tokenizer.encode(try tokenizer.applyChatTemplate(history),
+                                             addBOS: false)
+            var config = baseConfig
+            config.maxNewTokens = min(args.maxNew, args.maxContext - promptIds.count)
+            let reply = try await streamChatTurn(promptIds: promptIds,
+                                                 config: config,
+                                                 tokenizer: tokenizer,
+                                                 runner: runner,
+                                                 context: context,
+                                                 scratch: scratch,
+                                                 runtime: runtime,
+                                                 quiet: args.quiet,
+                                                 stdout: stdout,
+                                                 stderr: stderr)
+            if !reply.isEmpty {
+                history.append(MFTokenizer.Message(role: .assistant, content: reply))
+            }
+        }
+    } catch is CancellationError {
+        stdout.write(Data("\n".utf8))
+        return RunResult(exitCode: 130)
+    } catch {
+        return errored(stderr, "\(error)", 1)
+    }
+}
+
+/// Generate one assistant turn, streaming deltas to `stdout`, and return the
+/// text that was streamed so the caller can append it to the history.
+private func streamChatTurn(promptIds: [Int32],
+                            config: GenerationConfig,
+                            tokenizer: MFTokenizer,
+                            runner: RealForwardRunner,
+                            context: MetalContext,
+                            scratch: RawCompletionScratch,
+                            runtime: RuntimeConfiguration,
+                            quiet: Bool,
+                            stdout: FileHandle,
+                            stderr: FileHandle) async throws -> String {
+    var reply = ""
+    let stats = try await runRawCompletion(
+        producer: runner,
+        tokenizer: tokenizer,
+        promptIds: promptIds,
+        config: config,
+        context: context,
+        scratch: scratch,
+        prefillConfig: runtime.prefillConfig) { progress in
+            switch progress {
+            case .prefill:
+                break
+            case .token(_, _, let delta):
+                if !delta.isEmpty {
+                    stdout.write(Data(delta.utf8))
+                    reply += delta
+                }
+            case .tail(let tail):
+                if !tail.isEmpty {
+                    stdout.write(Data(tail.utf8))
+                    reply += tail
+                }
+            }
+        }
+    stdout.write(Data("\n".utf8))
+    if !quiet {
+        let tokensPerSecond = stats.decodeSeconds > 0
+            ? Double(stats.newTokens) / stats.decodeSeconds
+            : 0
+        let footer = "[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
+        stderr.write(Data(footer.utf8))
+    }
+    return reply
 }

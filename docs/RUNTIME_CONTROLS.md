@@ -4,6 +4,39 @@ The Mac app exposes generation and runtime controls in its fixed right
 settings pane. FP16 is the fixed KV format. Generation settings apply to the
 next request; load-time settings require a reload.
 
+## CLI modes
+
+The CLI runs in exactly one of three modes, and they are mutually exclusive:
+
+| Mode | Flag | Effect |
+| --- | --- | --- |
+| Raw completion | `--prompt <string>` | Sends the text to the model with no chat formatting. |
+| Single-shot chat | `--messages-file <path>` | Renders a JSON message array through the model's chat template. |
+| Interactive chat | `--chat` | Reads turns from standard input and keeps the conversation in memory. |
+
+`--chat` loads the model once and re-renders the whole conversation through the
+loaded model's chat template on every turn, so it follows that checkpoint's own
+dialect. Type a message and press Return to send it; `/clear` starts a fresh
+conversation, `/history` prints the messages held so far, and `/quit` (or
+`/exit`, or end-of-file with <kbd>Control</kbd>+<kbd>D</kbd>) exits. Generated
+text goes to standard output and prompts, notices, and the timing footer go to
+standard error. <kbd>Control</kbd>+<kbd>C</kbd> does nothing while the prompt
+waits for input, and ends the whole session rather than one turn while a
+response is generating.
+
+Each turn re-prefills the entire conversation from a reset KV cache, so no
+state carries between turns and later turns in a long conversation take longer
+to start.
+
+`--system <string>` sets the system message for `--chat` and is repeatable;
+repeated values join with newlines. It requires `--chat`, because the other two
+modes carry their own prompt text.
+
+When a conversation no longer fits `--max-context`, the oldest messages are
+dropped until it does. The system message and the message just typed are never
+dropped; if that pair alone still does not fit, the turn is refused and the
+conversation is left untouched.
+
 ## Generation controls
 
 The Mac app and CLI expose these generation controls:

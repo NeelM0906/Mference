@@ -2,6 +2,8 @@ public struct Args: Equatable, Sendable {
     public var model: String
     public var prompt: String?
     public var messagesFile: String?
+    public var chat: Bool
+    public var systemPrompt: String?
     public var maxNew: Int
     public var maxContext: Int
     public var temperature: Float
@@ -17,6 +19,8 @@ public struct Args: Equatable, Sendable {
     public init(model: String,
                 prompt: String? = nil,
                 messagesFile: String? = nil,
+                chat: Bool = false,
+                systemPrompt: String? = nil,
                 maxNew: Int = 1_024,
                 maxContext: Int = 4096,
                 temperature: Float = 0.2,
@@ -31,6 +35,8 @@ public struct Args: Equatable, Sendable {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
+        self.chat = chat
+        self.systemPrompt = systemPrompt
         self.maxNew = maxNew
         self.maxContext = maxContext
         self.temperature = temperature
@@ -62,7 +68,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
         case .invalidValue(let flag, let value): return "invalid value for \(flag): \(value)"
         case .requiredMissing(let flag): return "required flag missing: \(flag)"
         case .mutuallyExclusive(let a, let b): return "\(a) and \(b) are mutually exclusive"
-        case .modeMissing: return "one of --prompt or --messages-file is required"
+        case .modeMissing: return "one of --prompt, --messages-file, or --chat is required"
         }
     }
 }
@@ -71,14 +77,18 @@ extension Args {
     public static let usage = """
     MferenceCLI — Gemma 4 26B-A4B / Qwen3.6 35B-A3B text generation
 
-    usage: MferenceCLI --model <dir> (--prompt <string> | --messages-file <path>) [options]
+    usage: MferenceCLI --model <dir> (--prompt <string> | --messages-file <path> | --chat) [options]
 
     required:
       --model <dir>             Path to a .gturbo model directory.
+
+    modes (exactly one):
       --prompt <string>         Raw-completion prompt.
       --messages-file <path>    JSON chat messages with role and content fields.
+      --chat                    Interactive multi-turn chat on stdin.
 
     options:
+      --system <string>         System message for --chat (repeatable).
       --max-new <int>           Generated-token limit (default 1024).
       --max-context <int>       Context limit in tokens (default 4096).
       --temperature <float>     Sampling temperature (default 0.2; 0 = greedy).
@@ -100,6 +110,8 @@ extension Args {
         var model: String?
         var prompt: String?
         var messagesFile: String?
+        var chat = false
+        var systemPrompt: String?
         var maxNew = 1_024
         var maxContext = 4096
         var temperature: Float = 0.2
@@ -127,6 +139,12 @@ extension Args {
                 prompt = try takeValue(argv, &index, flag: flag)
             case "--messages-file":
                 messagesFile = try takeValue(argv, &index, flag: flag)
+            case "--chat":
+                chat = true
+                index += 1
+            case "--system":
+                let value = try takeValue(argv, &index, flag: flag)
+                systemPrompt = systemPrompt.map { $0 + "\n" + value } ?? value
             case "--max-new":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), parsed > 0 else {
@@ -193,7 +211,16 @@ extension Args {
         if prompt != nil && messagesFile != nil {
             throw ArgsError.mutuallyExclusive("--prompt", "--messages-file")
         }
-        if prompt == nil && messagesFile == nil { throw ArgsError.modeMissing }
+        if chat && prompt != nil {
+            throw ArgsError.mutuallyExclusive("--prompt", "--chat")
+        }
+        if chat && messagesFile != nil {
+            throw ArgsError.mutuallyExclusive("--messages-file", "--chat")
+        }
+        if prompt == nil && messagesFile == nil && !chat { throw ArgsError.modeMissing }
+        if systemPrompt != nil && !chat {
+            throw ArgsError.invalidValue(flag: "--system", value: "requires --chat")
+        }
         if temperature > 0, topK == nil, let topP, topP < 1 {
             throw ArgsError.invalidValue(
                 flag: "--top-p",
@@ -202,6 +229,8 @@ extension Args {
         return Args(model: model,
                     prompt: prompt,
                     messagesFile: messagesFile,
+                    chat: chat,
+                    systemPrompt: systemPrompt,
                     maxNew: maxNew,
                     maxContext: maxContext,
                     temperature: temperature,
