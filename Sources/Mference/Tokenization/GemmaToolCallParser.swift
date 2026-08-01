@@ -48,7 +48,7 @@ public struct GemmaToolCallParser: Sendable {
         guard allowedTools.contains(name) else {
             throw ToolCallParserError.unknownTool(name)
         }
-        let arguments = try parser.object()
+        let arguments = try parser.object(depth: 0)
         parser.skipWhitespace()
         guard parser.isAtEnd else { throw ToolCallParserError.malformed }
         return ParsedToolCall(id: id,
@@ -94,7 +94,7 @@ private struct Parser {
         return String(characters[start..<index])
     }
 
-    mutating func object() throws -> JSONValue {
+    mutating func object(depth: Int) throws -> JSONValue {
         try consume("{")
         var result: [String: JSONValue] = [:]
         skipWhitespace()
@@ -102,19 +102,28 @@ private struct Parser {
         while true {
             let key = try objectKey()
             try consume(":")
-            result[key] = try value()
+            result[key] = try value(depth: depth + 1)
             skipWhitespace()
             if take("}") { return .object(result) }
             try consume(",")
         }
     }
 
-    mutating func value() throws -> JSONValue {
+    /// `depth` counts nesting from the argument object, matching what
+    /// `JSONValue.maximumDepth` bounds on the `Codable` side. This descent is
+    /// hand-rolled rather than routed through `JSONDecoder`, so it does not
+    /// inherit that guard, and its input is model output a prompt can steer.
+    /// Unbounded recursion here overflows the stack, which traps in hardware
+    /// and takes the process down uncatchably.
+    mutating func value(depth: Int) throws -> JSONValue {
+        guard depth <= JSONValue.maximumDepth else {
+            throw ToolCallParserError.malformed
+        }
         skipWhitespace()
         if starts(with: "<|\"|>") { return .string(try gemmaString()) }
         if starts(with: "\"") { return .string(try jsonString()) }
-        if starts(with: "{") { return try object() }
-        if starts(with: "[") { return try array() }
+        if starts(with: "{") { return try object(depth: depth) }
+        if starts(with: "[") { return try array(depth: depth) }
         if takeWord("true") { return .bool(true) }
         if takeWord("false") { return .bool(false) }
         if takeWord("null") { return .null }
@@ -137,13 +146,13 @@ private struct Parser {
         return String(characters[start..<index])
     }
 
-    mutating func array() throws -> JSONValue {
+    mutating func array(depth: Int) throws -> JSONValue {
         try consume("[")
         var result: [JSONValue] = []
         skipWhitespace()
         if take("]") { return .array(result) }
         while true {
-            result.append(try value())
+            result.append(try value(depth: depth + 1))
             skipWhitespace()
             if take("]") { return .array(result) }
             try consume(",")
