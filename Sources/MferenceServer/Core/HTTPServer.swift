@@ -178,7 +178,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func route(head: HTTPRequestHead,
                        body: ByteBuffer,
                        context: ChannelHandlerContext) {
-        switch (head.method, head.uri) {
+        // Clients may append a query component to any route; match on the path.
+        let path = String(head.uri.prefix { $0 != "?" })
+        switch (head.method, path) {
         case (.GET, "/health"):
             writeJSON(context, status: .ok, object: ["status": "ok"])
         case (.GET, "/v1/models"):
