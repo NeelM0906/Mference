@@ -269,12 +269,97 @@ import Testing
         }
     }
 
+    @Test func aForgedEntrySizeCannotSmuggleAnUnboundedStreamIntoMemory() throws {
+        let fixture = try makeOfficeArchive(
+            extensionName: "docx",
+            entries: [
+                "word/document.xml": """
+                <w:document xmlns:w="urn:word"><w:body><w:p><w:r><w:t>\
+                \(String(repeating: "a", count: 4 * 1_024 * 1_024))\
+                </w:t></w:r></w:p></w:body></w:document>
+                """,
+            ])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // The central directory is attacker-controlled: it now claims one
+        // kilobyte for an entry that inflates to four megabytes.
+        try forgeDeclaredSize(
+            of: "word/document.xml",
+            to: 1_024,
+            in: fixture.archive)
+
+        #expect(throws: DocumentTextExtractionError.documentTooLarge(
+            fixture.archive.lastPathComponent)) {
+            _ = try DocumentTextExtractor.extract(
+                from: fixture.archive,
+                limits: DocumentTextExtractor.Limits(
+                    maximumEntryBytes: 64 * 1_024,
+                    maximumSelectedBytes: 128 * 1_024))
+        }
+    }
+
+    @Test func forgedEntrySizesCannotAddUpPastTheWholeArchiveCeiling() throws {
+        let payload = String(repeating: "b", count: 100 * 1_024)
+        let fixture = try makeOfficeArchive(
+            extensionName: "docx",
+            entries: [
+                "word/document.xml": """
+                <w:document xmlns:w="urn:word"><w:body><w:p><w:r><w:t>\
+                \(payload)</w:t></w:r></w:p></w:body></w:document>
+                """,
+                "word/header1.xml": """
+                <w:hdr xmlns:w="urn:word"><w:p><w:r><w:t>\
+                \(payload)</w:t></w:r></w:p></w:hdr>
+                """,
+            ])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        for entry in ["word/document.xml", "word/header1.xml"] {
+            try forgeDeclaredSize(of: entry, to: 1_000, in: fixture.archive)
+        }
+
+        // Each entry stays under the per-entry ceiling, so only real bytes
+        // counted across the whole archive can stop this.
+        #expect(throws: DocumentTextExtractionError.documentTooLarge(
+            fixture.archive.lastPathComponent)) {
+            _ = try DocumentTextExtractor.extract(
+                from: fixture.archive,
+                limits: DocumentTextExtractor.Limits(
+                    maximumEntryBytes: 256 * 1_024,
+                    maximumSelectedBytes: 150 * 1_024))
+        }
+    }
+
+    @Test func archiveReadingGivesUpOnceTheTimeBudgetIsGone() throws {
+        let fixture = try makeOfficeArchive(
+            extensionName: "docx",
+            entries: [
+                "word/document.xml": """
+                <w:document xmlns:w="urn:word"><w:body>
+                  <w:p><w:r><w:t>Body</w:t></w:r></w:p>
+                </w:body></w:document>
+                """,
+            ])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        #expect(throws: DocumentTextExtractionError.extractionTimedOut(
+            fixture.archive.lastPathComponent)) {
+            _ = try DocumentTextExtractor.extract(
+                from: fixture.archive,
+                limits: DocumentTextExtractor.Limits(timeout: 0))
+        }
+        // A budget that is merely small still reads a healthy document.
+        let document = try DocumentTextExtractor.extract(
+            from: fixture.archive,
+            limits: DocumentTextExtractor.Limits(timeout: 30))
+        #expect(document.text.contains("Body"))
+    }
+
     @Test func extractionErrorsHaveActionableUserMessages() {
         let cases: [(DocumentTextExtractionError, String)] = [
             (.unsupportedFormat("a.txt"), "not a supported"),
             (.unreadableFile("a.pdf"), "could not be read"),
             (.invalidArchive("a.docx"), "not a valid Office document"),
             (.documentTooLarge("a.xlsx"), "too large"),
+            (.extractionTimedOut("a.pptx"), "took too long"),
             (.noExtractableText("scan.pdf"), "require OCR"),
         ]
 
@@ -321,6 +406,40 @@ import Testing
         return OfficeFixture(root: root, archive: archive)
     }
 
+    /// Rewrites the uncompressed size a zip central directory advertises for
+    /// one entry, which is what `unzip -l` reports and what a hostile document
+    /// would understate.
+    private func forgeDeclaredSize(
+        of entry: String,
+        to declaredSize: UInt32,
+        in archive: URL
+    ) throws {
+        var data = try Data(contentsOf: archive)
+        let signature = Data([0x50, 0x4B, 0x01, 0x02])
+        var searchStart = data.startIndex
+        var didPatch = false
+        while let found = data.range(
+            of: signature,
+            in: searchStart..<data.endIndex) {
+            let header = found.lowerBound
+            let nameLength = Int(data[header + 28]) | (Int(data[header + 29]) << 8)
+            let nameStart = header + 46
+            let name = String(
+                decoding: data[nameStart..<(nameStart + nameLength)],
+                as: UTF8.self)
+            if name == entry {
+                for byte in 0..<4 {
+                    data[header + 24 + byte] = UInt8(
+                        (declaredSize >> (8 * UInt32(byte))) & 0xFF)
+                }
+                didPatch = true
+            }
+            searchStart = found.upperBound
+        }
+        guard didPatch else { throw FixtureError.entryNotFound }
+        try data.write(to: archive)
+    }
+
     private func makeTemporaryRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -334,5 +453,6 @@ import Testing
 
     private enum FixtureError: Error {
         case zipFailed
+        case entryNotFound
     }
 }

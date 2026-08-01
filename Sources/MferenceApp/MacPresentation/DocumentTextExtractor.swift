@@ -24,6 +24,7 @@ public enum DocumentTextExtractionError: LocalizedError, Equatable, Sendable {
     case unreadableFile(String)
     case invalidArchive(String)
     case documentTooLarge(String)
+    case extractionTimedOut(String)
     case noExtractableText(String)
 
     public var errorDescription: String? {
@@ -36,6 +37,8 @@ public enum DocumentTextExtractionError: LocalizedError, Equatable, Sendable {
             return "\(file) is not a valid Office document."
         case .documentTooLarge(let file):
             return "\(file) is too large to extract safely."
+        case .extractionTimedOut(let file):
+            return "Reading \(file) took too long and was stopped."
         case .noExtractableText(let file):
             return "No selectable text was found in \(file). Scanned PDFs require OCR."
         }
@@ -45,6 +48,17 @@ public enum DocumentTextExtractionError: LocalizedError, Equatable, Sendable {
 public enum DocumentTextExtractor {
     public static let maximumExtractedCharacters = 240_000
 
+    /// Ceilings applied to the decompressed bytes an Office archive is allowed
+    /// to produce, and to how long it may take. Tests bound them far lower than
+    /// the shipping defaults.
+    struct Limits: Sendable {
+        static let `default` = Limits()
+
+        var maximumEntryBytes = 32 * 1_024 * 1_024
+        var maximumSelectedBytes = 64 * 1_024 * 1_024
+        var timeout: TimeInterval = 30
+    }
+
     public static var supportedContentTypes: [UTType] {
         [UTType.pdf] + ["docx", "pptx", "xlsx"].compactMap {
             UTType(filenameExtension: $0)
@@ -52,6 +66,11 @@ public enum DocumentTextExtractor {
     }
 
     public static func extract(from url: URL) throws -> ExtractedPromptDocument {
+        try extract(from: url, limits: .default)
+    }
+
+    static func extract(from url: URL,
+                        limits: Limits) throws -> ExtractedPromptDocument {
         let didAccessSecurityScope = url.startAccessingSecurityScopedResource()
         defer {
             if didAccessSecurityScope {
@@ -67,11 +86,11 @@ public enum DocumentTextExtractor {
         case "pdf":
             extracted = ("PDF", try extractPDF(at: url))
         case "docx":
-            extracted = ("Word", try extractDOCX(at: url))
+            extracted = ("Word", try extractDOCX(at: url, limits: limits))
         case "pptx":
-            extracted = ("PowerPoint", try extractPPTX(at: url))
+            extracted = ("PowerPoint", try extractPPTX(at: url, limits: limits))
         case "xlsx":
-            extracted = ("Excel", try extractXLSX(at: url))
+            extracted = ("Excel", try extractXLSX(at: url, limits: limits))
         default:
             throw DocumentTextExtractionError.unsupportedFormat(fileName)
         }
@@ -110,16 +129,16 @@ public enum DocumentTextExtractor {
         return pages.joined(separator: "\n\n")
     }
 
-    private static func extractDOCX(at url: URL) throws -> String {
-        let archive = try OfficeArchive(url: url)
-        var entries = archive.entries.keys.filter { entry in
+    private static func extractDOCX(at url: URL,
+                                    limits: Limits) throws -> String {
+        let archive = try OfficeArchive(url: url, limits: limits)
+        let entries = archive.entries.filter { entry in
             entry == "word/document.xml"
                 || (entry.hasPrefix("word/header") && entry.hasSuffix(".xml"))
                 || (entry.hasPrefix("word/footer") && entry.hasSuffix(".xml"))
                 || ["word/footnotes.xml", "word/endnotes.xml", "word/comments.xml"]
                     .contains(entry)
-        }
-        entries.sort { left, right in
+        }.sorted { left, right in
             docxPriority(left) < docxPriority(right)
         }
         guard entries.contains("word/document.xml") else {
@@ -135,9 +154,10 @@ public enum DocumentTextExtractor {
         }.joined(separator: "\n\n")
     }
 
-    private static func extractPPTX(at url: URL) throws -> String {
-        let archive = try OfficeArchive(url: url)
-        let slides = archive.entries.keys.compactMap { entry -> (Int, String)? in
+    private static func extractPPTX(at url: URL,
+                                    limits: Limits) throws -> String {
+        let archive = try OfficeArchive(url: url, limits: limits)
+        let slides = archive.entries.compactMap { entry -> (Int, String)? in
             guard entry.hasPrefix("ppt/slides/slide"),
                   entry.hasSuffix(".xml"),
                   !entry.contains("/_rels/") else {
@@ -157,10 +177,11 @@ public enum DocumentTextExtractor {
         }.joined(separator: "\n\n")
     }
 
-    private static func extractXLSX(at url: URL) throws -> String {
-        let archive = try OfficeArchive(url: url)
+    private static func extractXLSX(at url: URL,
+                                    limits: Limits) throws -> String {
+        let archive = try OfficeArchive(url: url, limits: limits)
         let sharedStrings: [String]
-        if archive.entries["xl/sharedStrings.xml"] != nil {
+        if archive.entries.contains("xl/sharedStrings.xml") {
             sharedStrings = try SharedStringsXMLParser().parse(
                 archive.data(for: "xl/sharedStrings.xml"))
         } else {
@@ -180,8 +201,8 @@ public enum DocumentTextExtractor {
     }
 
     private static func workbookSheets(in archive: OfficeArchive) throws -> [WorkbookSheet] {
-        if archive.entries["xl/workbook.xml"] != nil,
-           archive.entries["xl/_rels/workbook.xml.rels"] != nil {
+        if archive.entries.contains("xl/workbook.xml"),
+           archive.entries.contains("xl/_rels/workbook.xml.rels") {
             let sheetReferences = try WorkbookXMLParser().parse(
                 archive.data(for: "xl/workbook.xml"))
             let relationships = try RelationshipsXMLParser().parse(
@@ -189,7 +210,7 @@ public enum DocumentTextExtractor {
             let resolved = sheetReferences.compactMap { sheet -> WorkbookSheet? in
                 guard let target = relationships[sheet.relationshipID] else { return nil }
                 let entry = normalizedWorkbookTarget(target)
-                guard archive.entries[entry] != nil else { return nil }
+                guard archive.entries.contains(entry) else { return nil }
                 return WorkbookSheet(name: sheet.name, entry: entry)
             }
             if !resolved.isEmpty {
@@ -197,7 +218,7 @@ public enum DocumentTextExtractor {
             }
         }
 
-        return archive.entries.keys.compactMap { entry -> (Int, String)? in
+        return archive.entries.compactMap { entry -> (Int, String)? in
             guard entry.hasPrefix("xl/worksheets/sheet"),
                   entry.hasSuffix(".xml"),
                   !entry.contains("/_rels/") else {
@@ -255,70 +276,160 @@ public enum DocumentTextExtractor {
     }
 }
 
-private struct OfficeArchive {
-    static let maximumEntryBytes = 32 * 1_024 * 1_024
-    static let maximumSelectedBytes = 64 * 1_024 * 1_024
-
+/// Reads entries out of an untrusted `.docx`/`.pptx`/`.xlsx` zip container.
+/// Everything the container declares about itself is attacker-controlled, so
+/// nothing here trusts a declared size: the ceilings are enforced against the
+/// bytes actually streamed out of `unzip`.
+private final class OfficeArchive {
     let url: URL
-    let entries: [String: Int]
+    let limits: DocumentTextExtractor.Limits
+    let entries: Set<String>
+    private var consumedBytes = 0
 
-    init(url: URL) throws {
+    init(url: URL, limits: DocumentTextExtractor.Limits) throws {
         self.url = url
-        let result = try Self.runUnzip(arguments: ["-l", url.path])
+        self.limits = limits
+        let result = try Self.runUnzip(
+            arguments: ["-l", url.path],
+            maximumOutputBytes: limits.maximumEntryBytes,
+            timeout: limits.timeout,
+            fileName: url.lastPathComponent)
+        try Self.check(result, fileName: url.lastPathComponent)
         guard result.status == 0,
               let listing = String(data: result.output, encoding: .utf8) else {
             throw DocumentTextExtractionError.invalidArchive(url.lastPathComponent)
         }
 
-        var parsedEntries: [String: Int] = [:]
+        var parsedEntries: Set<String> = []
         for line in listing.split(separator: "\n") {
+            // The leading length column only tells us the line describes an
+            // entry; its value is the archive's own claim and is not kept.
             let fields = line.split(whereSeparator: \.isWhitespace)
-            guard fields.count >= 4, let length = Int(fields[0]) else { continue }
-            let name = fields.dropFirst(3).joined(separator: " ")
-            parsedEntries[name] = length
+            guard fields.count >= 4, Int(fields[0]) != nil else { continue }
+            parsedEntries.insert(fields.dropFirst(3).joined(separator: " "))
         }
         guard !parsedEntries.isEmpty else {
             throw DocumentTextExtractionError.invalidArchive(url.lastPathComponent)
-        }
-        let selectedBytes = parsedEntries.reduce(0) { partial, entry in
-            entry.key.hasSuffix(".xml") ? partial + entry.value : partial
-        }
-        guard selectedBytes <= Self.maximumSelectedBytes else {
-            throw DocumentTextExtractionError.documentTooLarge(url.lastPathComponent)
         }
         entries = parsedEntries
     }
 
     func data(for entry: String) throws -> Data {
-        guard let byteCount = entries[entry] else {
+        guard entries.contains(entry) else {
             throw DocumentTextExtractionError.invalidArchive(url.lastPathComponent)
         }
-        guard byteCount <= Self.maximumEntryBytes else {
-            throw DocumentTextExtractionError.documentTooLarge(url.lastPathComponent)
-        }
-        let result = try Self.runUnzip(arguments: ["-p", url.path, entry])
-        guard result.status == 0, result.output.count <= Self.maximumEntryBytes else {
+        let budget = min(
+            limits.maximumEntryBytes,
+            max(0, limits.maximumSelectedBytes - consumedBytes))
+        let result = try Self.runUnzip(
+            arguments: ["-p", url.path, entry],
+            maximumOutputBytes: budget,
+            timeout: limits.timeout,
+            fileName: url.lastPathComponent)
+        try Self.check(result, fileName: url.lastPathComponent)
+        guard result.status == 0 else {
             throw DocumentTextExtractionError.invalidArchive(url.lastPathComponent)
         }
+        consumedBytes += result.output.count
         return result.output
     }
 
-    private static func runUnzip(arguments: [String]) throws -> (status: Int32, output: Data) {
+    private static func check(_ result: UnzipResult, fileName: String) throws {
+        switch result.outcome {
+        case .completed:
+            return
+        case .exceededLimit:
+            throw DocumentTextExtractionError.documentTooLarge(fileName)
+        case .timedOut:
+            throw DocumentTextExtractionError.extractionTimedOut(fileName)
+        }
+    }
+
+    private enum UnzipOutcome {
+        case completed
+        case exceededLimit
+        case timedOut
+    }
+
+    private struct UnzipResult {
+        var status: Int32
+        var output: Data
+        var outcome: UnzipOutcome
+    }
+
+    /// Drains the child's stdout in bounded chunks and stops the moment the
+    /// output passes `maximumOutputBytes` or the deadline. Reading to end of
+    /// file first and checking the size afterwards would mean holding whatever
+    /// a crafted deflate stream expands to — gigabytes — in memory.
+    private static func runUnzip(
+        arguments: [String],
+        maximumOutputBytes: Int,
+        timeout: TimeInterval,
+        fileName: String
+    ) throws -> UnzipResult {
         let process = Process()
-        let output = Pipe()
+        let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         process.arguments = arguments
-        process.standardOutput = output
+        process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
         } catch {
-            throw DocumentTextExtractionError.unreadableFile(
-                arguments.last.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "document")
+            throw DocumentTextExtractionError.unreadableFile(fileName)
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
+
+        let readEnd = pipe.fileHandleForReading
+        let descriptor = readEnd.fileDescriptor
+        let deadline = Date().addingTimeInterval(timeout)
+        var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+        var output = Data()
+        var outcome = UnzipOutcome.completed
+
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                outcome = .timedOut
+                break
+            }
+            var poller = pollfd(
+                fd: descriptor,
+                events: Int16(POLLIN),
+                revents: 0)
+            let ready = poll(&poller, 1, Int32(clamping: Int(remaining * 1_000) + 1))
+            if ready < 0 {
+                guard errno == EINTR else { break }
+                continue
+            }
+            if ready == 0 {
+                outcome = .timedOut
+                break
+            }
+            let count = read(descriptor, &buffer, buffer.count)
+            if count < 0 {
+                guard errno == EINTR else { break }
+                continue
+            }
+            if count == 0 { break }
+            guard output.count + count <= maximumOutputBytes else {
+                outcome = .exceededLimit
+                break
+            }
+            output.append(contentsOf: buffer[0..<count])
+        }
+
+        // Signal before closing the pipe: a child blocked writing into a full
+        // pipe never reaches its own exit, and once the read end is gone any
+        // further write it attempts fails outright. Then reap it either way.
+        if outcome != .completed {
+            process.terminate()
+        }
+        try? readEnd.close()
         process.waitUntilExit()
-        return (process.terminationStatus, data)
+        return UnzipResult(
+            status: process.terminationStatus,
+            output: output,
+            outcome: outcome)
     }
 }
 
