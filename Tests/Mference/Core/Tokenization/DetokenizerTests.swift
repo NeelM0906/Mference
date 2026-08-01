@@ -116,3 +116,78 @@ struct DetokenizerTests {
                 "stream reassembly mismatch: got '\(assembled)' want '\(target)'")
     }
 }
+
+/// The Gemma suite above cannot reach the byte-level failure mode: SentencePiece
+/// pieces are whole scalars, and the bytes of a split codepoint arrive as
+/// `<0xNN>` byte-fallback tokens that `push` already holds back.
+///
+/// Qwen's GPT-2-style byte-level BPE has no byte-fallback tokens. One scalar's
+/// UTF-8 bytes simply span several ordinary tokens, and `ByteLevelDecoder`
+/// finishes with `String(decoding: utfCodepoints, as: UTF8.self)`, so a decode
+/// that stops mid-scalar materializes U+FFFD immediately. These tests run the
+/// real `ByteLevel` fixture tokenizer, not a simulation.
+@Suite("Detokenizer byte-level")
+struct ByteLevelDetokenizerTests {
+    let tok: MFTokenizer
+
+    init() async throws {
+        self.tok = try await MFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
+    }
+
+    @Test("Scalars split across tokens stream without corruption", arguments: [
+        "🦙",
+        "🧿",
+        "𓀀",
+        "ᨆ",
+        "🦙 llama",
+        "mixed 漢 and 🦝 text",
+        "👨\u{200D}👩\u{200D}👧\u{200D}👦 family",
+    ])
+    func splitScalarsStreamIntact(_ target: String) {
+        let ids = tok.encode(target, addBOS: false)
+        var detok = MFDetokenizer(tokenizer: tok)
+        var assembled = ""
+        for id in ids {
+            let delta = detok.push(id)
+            #expect(!delta.unicodeScalars.contains("\u{FFFD}"),
+                    "partial scalar leaked to the caller: '\(delta)'")
+            assembled += delta
+        }
+        assembled += detok.flush()
+        #expect(assembled == target,
+                "stream reassembly mismatch: got '\(assembled)' want '\(target)'")
+    }
+
+    @Test("A replacement char the model really produced survives the stream", arguments: [
+        "\u{FFFD}",
+        "a\u{FFFD}",
+        "\u{FFFD}b",
+    ])
+    func genuineReplacementCharIsNotSwallowed(_ target: String) {
+        let ids = tok.encode(target, addBOS: false)
+        var detok = MFDetokenizer(tokenizer: tok)
+        var assembled = ""
+        for id in ids {
+            assembled += detok.push(id)
+        }
+        assembled += detok.flush()
+        #expect(assembled == target,
+                "stream reassembly mismatch: got '\(assembled)' want '\(target)'")
+    }
+
+    @Test("A stream truncated mid-scalar flushes what the decoder saw")
+    func truncatedScalarFlushesReplacementChar() {
+        let ids = tok.encode("🦙", addBOS: false)
+        #expect(ids.count > 1, "fixture must split the emoji across tokens")
+        var detok = MFDetokenizer(tokenizer: tok)
+        var assembled = ""
+        for id in ids.dropLast() {
+            assembled += detok.push(id)
+        }
+        // The generation loop always flushes; a truncated codepoint has to
+        // surface as the decoder's own U+FFFD rather than vanish.
+        assembled += detok.flush()
+        #expect(assembled == "\u{FFFD}",
+                "truncated scalar mismatch: got '\(assembled)'")
+    }
+}
