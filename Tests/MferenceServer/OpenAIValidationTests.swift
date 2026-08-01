@@ -298,6 +298,48 @@ struct OpenAIValidationTests {
         #expect(validated.messages.first?.content == "first\n\nsecond")
     }
 
+    @Test func developerGuidanceBecomesSystemForChatML() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"system","content":"system"},
+          {"role":"developer","content":"developer"},
+          {"role":"user","content":"hello"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .chatml)
+        #expect(validated.messages.map(\.role) == [.system, .user])
+        #expect(validated.messages.first?.content == "system\n\ndeveloper")
+    }
+
+    @Test func soleDeveloperGuidanceBecomesSystemForChatML() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"developer","content":"guidance"},
+          {"role":"user","content":"hello"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .chatml)
+        #expect(validated.messages.map(\.role) == [.system, .user])
+        #expect(validated.messages.first?.content == "guidance")
+    }
+
+    @Test func rejectsLateDeveloperGuidanceForChatML() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"user","content":"hello"},
+          {"role":"developer","content":"late"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(request, modelID: "m", dialect: .chatml)
+        }
+    }
+
     @Test func chatMLDialectKeepsUnionBranchesInTheToolSchema() throws {
         // ChatML renders `tool | tojson`, so the union must survive validation
         // untouched; only the Gemma render path flattens it.
