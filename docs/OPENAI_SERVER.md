@@ -210,6 +210,8 @@ Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream_options": {"include_usage": true}` to receive a final usage chunk.
 
 Requests may contain system, developer, user, assistant, and tool messages.
+Guidance must precede the conversation, and consecutive messages of the same
+guidance role are merged into one block separated by a blank line.
 Supported options include `temperature`, `top_p`, `top_k`,
 `repetition_penalty`, `seed`, `stop`, `max_tokens`,
 `max_completion_tokens`, and function-tool fields.
