@@ -35,6 +35,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Report toolchain
         run: swift --version
+      - name: Hold the Swift floor
+        if: matrix.runner == 'macos-15'
+        run: |
+          # This leg exists only to prove the declared floor still builds. If
+          # the runner image's default Xcode moves forward, the leg would
+          # quietly start testing a newer toolchain and the floor would rot
+          # unnoticed, so fail loudly instead.
+          version=$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+          case "$version" in
+            6.1*)
+              echo "floor leg is exercising Swift $version, as intended"
+              ;;
+            *)
+              echo "::error::This leg must prove the Swift 6.1 floor declared in Package.swift, but the runner provides Swift $version. Select an Xcode that ships Swift 6.1, or change the declared floor."
+              exit 1
+              ;;
+          esac
       - name: Build release products
         run: swift build -c release
       - name: Run serial tests
@@ -46,4 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check Markdown links
-        run: ruby Scripts/check_markdown_links.rb
+        # The checker reads UTF-8 Markdown; without an explicit locale Ruby
+        # defaults to US-ASCII on a bare runner and aborts on the first
+        # non-ASCII byte.
+        run: LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
