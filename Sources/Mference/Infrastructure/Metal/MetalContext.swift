@@ -101,7 +101,25 @@ public final class MetalContext: @unchecked Sendable {
                                  subdirectory: subdirectory)
     }
 
-    private static func compileShaderLibrary(device: MTLDevice) throws -> MTLLibrary {
+    /// MSL version used for every runtime shader compile.
+    ///
+    /// The MPP prefill path requires MSL 4.0 tensor operations, which the Metal
+    /// compiler only accepts on macOS 26. `MTLLanguageVersion.msl4_0` is built
+    /// from a raw value and is non-nil on every SDK, so the `#available` check
+    /// is what actually keeps MSL 4.0 away from older systems — do not remove
+    /// it. Below macOS 26 we compile at 3.2; the shader sources guard their
+    /// tensor-ops kernels behind `__HAVE_TENSOR__`, so those kernels drop out of
+    /// the library and their Swift callers take the non-tensor path.
+    static var shaderLanguageVersion: MTLLanguageVersion {
+        if #available(macOS 26.0, iOS 26.0, *), let version4 = MTLLanguageVersion.msl4_0 {
+            return version4
+        }
+        return .version3_2
+    }
+
+    static func compileShaderLibrary(
+        device: MTLDevice,
+        languageVersion: MTLLanguageVersion = shaderLanguageVersion) throws -> MTLLibrary {
         var combined = ""
         for name in shaderModules {
             guard let url = shaderURL(module: name) else {
@@ -112,8 +130,7 @@ public final class MetalContext: @unchecked Sendable {
         }
         do {
             let opts = MTLCompileOptions()
-            // The MPP prefill path requires MSL 4.0 tensor operations.
-            opts.languageVersion = .version4_0
+            opts.languageVersion = languageVersion
             return try device.makeLibrary(source: combined, options: opts)
         } catch {
             throw MetalError.libraryCompileFailed("\(error)")
@@ -127,7 +144,7 @@ public final class MetalContext: @unchecked Sendable {
         }
         let src = try String(contentsOf: url, encoding: .utf8)
         let opts = MTLCompileOptions()
-        opts.languageVersion = .version4_0
+        opts.languageVersion = shaderLanguageVersion
         do {
             return try device.makeLibrary(source: src, options: opts)
         } catch {

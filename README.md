@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <img alt="Swift 6.2" src="https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white">
-  <img alt="Metal 4" src="https://img.shields.io/badge/Metal-4-5E5CE6">
-  <img alt="macOS 26 or later" src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white">
+  <img alt="Swift 6.1 or later" src="https://img.shields.io/badge/Swift-6.1%2B-F05138?logo=swift&logoColor=white">
+  <img alt="Metal 3 or later" src="https://img.shields.io/badge/Metal-3%2B-5E5CE6">
+  <img alt="macOS 15 or later" src="https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/License-MIT-2ea44f"></a>
 </p>
 
@@ -79,7 +79,7 @@ swift run -c release MferenceCLI \
 | Memory | ~2 GB (Gemma 4) · ~1.45 GB (Qwen 3.6), including a 4K KV cache |
 | Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
-| Platform | macOS 26, Metal 4, Swift 6.2 |
+| Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
 | Measured decode, Qwen 3.6 | 18.8–23.1 tok/s (M5) at a 1,447–1,464 MiB peak footprint |
 
@@ -114,9 +114,18 @@ from the installed model.
 ### Requirements
 
 - An Apple Silicon Mac (arm64 only)
-- macOS 26 with Metal 4; Xcode 26 and Swift 6.2 or newer
+- macOS 15 or later, with Metal 3; Xcode 16.3 and Swift 6.1 or newer
 - Free storage for the model install (~14.3 GB Gemma 4, ~19.6 GB Qwen 3.6)
 - An internet connection for the first install
+
+The shader library is compiled from source at startup, and the choice of
+shading-language version is made then, not at build time. A single binary
+therefore covers both worlds: *running* on macOS 26 with an Apple10 GPU
+compiles at MSL 4.0 and enables the Metal 4 tensor-ops prefill kernels, while
+every other supported configuration compiles at MSL 3.2 and selects the
+non-tensor kernels automatically. Both paths run the full Gemma 4 and Qwen 3.6
+feature set; they agree to within kernel tolerance rather than bit-exactly, so
+expect the same quality but not identical sampled tokens.
 
 ## How it works
 
