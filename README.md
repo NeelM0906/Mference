@@ -103,7 +103,7 @@ negative results.
 | `MferenceMac` | Native Mac app for installation and generation |
 | `MferenceDecodeService` | One-shot local model and Metal owner used by the Mac app |
 | `MferenceCLI` | Command-line instruction chat and raw completion |
-| `MferenceServer` | Loopback OpenAI-compatible Chat Completions server |
+| `MferenceServer` | OpenAI-compatible Chat Completions server, on loopback by default or a Tailnet address with `--bind tailnet` |
 | `MferenceRepack` | Streaming model installer and install verifier |
 
 Only one model-owning product should run at a time. The server speaks each
