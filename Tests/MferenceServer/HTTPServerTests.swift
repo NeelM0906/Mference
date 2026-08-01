@@ -162,6 +162,29 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    @Test func routesIgnoreQueryComponentOfRequestURI() async throws {
+        let server = MferenceHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        for uri in ["/v1/models", "/v1/models?", "/v1/models?foo=bar"] {
+            let response = try rawGET(uri: uri, port: port)
+            #expect(response.contains("HTTP/1.1 200"), "\(uri) did not return 200")
+            #expect(response.contains("test-model"), "\(uri) did not list the model")
+        }
+        let health = try rawGET(uri: "/health?probe=1", port: port)
+        #expect(health.contains(#""status":"ok""#))
+
+        let missing = try rawGET(uri: "/v1/nope?foo=bar", port: port)
+        #expect(missing.contains("HTTP/1.1 404"))
+        #expect(missing.contains("not_found"))
+
+        try await server.shutdown()
+    }
+
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = MferenceHTTPServer(
             modelID: "test-model",
@@ -460,6 +483,19 @@ private func writeAll(socket: Int32, text: String) throws {
         }
         written += count
     }
+}
+
+/// Sends a request line verbatim so the exact URI reaches the router, which
+/// `URLSession` would otherwise normalise.
+private func rawGET(uri: String, port: Int) throws -> String {
+    let socket = try connectedSocket(port: port)
+    defer { Darwin.close(socket) }
+    try writeAll(socket: socket,
+                 text: "GET \(uri) HTTP/1.1\r\n"
+                     + "Host: 127.0.0.1:\(port)\r\n"
+                     + "Connection: close\r\n"
+                     + "\r\n")
+    return try readAvailable(socket: socket, timeoutMilliseconds: 500)
 }
 
 private func readAvailable(socket: Int32, timeoutMilliseconds: Int32) throws -> String {
