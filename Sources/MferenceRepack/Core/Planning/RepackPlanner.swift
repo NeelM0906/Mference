@@ -106,7 +106,7 @@ enum RepackPlanner {
 
     static func classify(_ name: String, numLayers: Int,
                          family: RepackModelFamily) -> Bucket {
-        if name.hasPrefix("language_model.") {
+        if hasResidentPrefix(name, family: family) {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
                let layer = layerIndex(in: name),
@@ -121,12 +121,27 @@ enum RepackPlanner {
         return .unknown
     }
 
+    /// The LM prefix is a family contract: Gemma and Qwen ship multimodal
+    /// checkpoints whose text tower lives under `language_model.`; DeepSeek
+    /// V4 is text-only with a plain `model.` prefix and a top-level
+    /// `lm_head.` (mlx-lm conversion naming).
+    private static func hasResidentPrefix(_ name: String,
+                                          family: RepackModelFamily) -> Bool {
+        switch family {
+        case .gemma4, .qwen36:
+            return name.hasPrefix("language_model.")
+        case .deepseekV4Flash:
+            return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
+        }
+    }
+
     private static func routedExpertRole(in name: String,
                                          family: RepackModelFamily) -> String? {
         let routedContainer: String
         switch family {
-        case .gemma4: routedContainer = ".experts.switch_glu."
-        case .qwen36: routedContainer = ".mlp.switch_mlp."
+        case .gemma4:          routedContainer = ".experts.switch_glu."
+        case .qwen36:          routedContainer = ".mlp.switch_mlp."
+        case .deepseekV4Flash: routedContainer = ".mlp.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -443,15 +458,25 @@ enum RepackPlanner {
     private static func lmResidentOrdering(family: RepackModelFamily)
         -> (String, String) -> Bool {
         // Compute a sort key per name; we order by (group rank, layer, slot rank, name).
+        // Group 2 holds top-level tensors between the layers and the final
+        // norm (DeepSeek V4's `model.hc_head.*` stream collapse lands there).
         func key(_ n: String) -> (Int, Int, Int, String) {
-            if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
-            if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
-            if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
+            switch family {
+            case .gemma4, .qwen36:
+                if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
+                if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
+                if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
+            case .deepseekV4Flash:
+                if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
+                if n == "model.norm.weight"          { return (3, 0, 0, n) }
+                if n == "lm_head.weight"             { return (4, 0, 0, n) }
+            }
             if let li = layerIndex(in: n) {
                 let slot: Int
                 switch family {
-                case .gemma4: slot = slotRank(in: n)
-                case .qwen36: slot = qwenSlotRank(in: n)
+                case .gemma4:          slot = slotRank(in: n)
+                case .qwen36:          slot = qwenSlotRank(in: n)
+                case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -492,6 +517,57 @@ enum RepackPlanner {
         if n.contains(".mlp.shared_expert.down_proj.weight") { return 19 }
         if n.hasSuffix(".input_layernorm.weight")        { return 20 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 21 }
+        return 100
+    }
+
+    /// Within-layer slot order for the DeepSeek-V4-Flash family: the low-rank
+    /// attention path in pipeline order, then the CSA/HCA compressor and its
+    /// indexer, then router (with hash table / correction bias), shared
+    /// expert, layer norms, and the two hyper-connection mix sites. Indexer
+    /// patterns are matched before the compressor's so the shared suffixes
+    /// (`kv_proj`, `gate_proj`, `kv_norm`, `position_bias`) cannot
+    /// cross-match. Unquantized tensors (norms, sinks, position biases, hc
+    /// mixes, e_score_correction_bias, tid2eid) carry no `.scales`/`.biases`
+    /// companions and flow through the planner's non-U32/non-`.weight`
+    /// branch.
+    private static func deepseekV4SlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_a_proj.weight")             { return 0 }
+        if n.contains(".self_attn.q_a_norm.weight")             { return 1 }
+        if n.contains(".self_attn.q_b_proj.weight")             { return 2 }
+        if n.contains(".self_attn.kv_proj.weight")              { return 3 }
+        if n.contains(".self_attn.kv_norm.weight")              { return 4 }
+        if n.hasSuffix(".self_attn.sinks")                      { return 5 }
+        if n.contains(".self_attn.o_a_proj.weight")             { return 6 }
+        if n.contains(".self_attn.o_b_proj.weight")             { return 7 }
+        if n.contains(".compressor.indexer.kv_proj.weight")     { return 12 }
+        if n.contains(".compressor.indexer.gate_proj.weight")   { return 13 }
+        if n.contains(".compressor.indexer.kv_norm.weight")     { return 14 }
+        if n.hasSuffix(".compressor.indexer.position_bias")     { return 15 }
+        if n.contains(".compressor.indexer.q_b_proj.weight")    { return 16 }
+        if n.contains(".compressor.indexer.scorer.weights_proj.weight") { return 17 }
+        if n.contains(".compressor.kv_proj.weight")             { return 8 }
+        if n.contains(".compressor.gate_proj.weight")           { return 9 }
+        if n.contains(".compressor.kv_norm.weight")             { return 10 }
+        if n.hasSuffix(".compressor.position_bias")             { return 11 }
+        if n.contains(".mlp.gate.weight")                       { return 18 }
+        if n.hasSuffix(".mlp.gate.e_score_correction_bias")     { return 19 }
+        // NOTE: tid2eid is an integer lookup table; the safetensors reader
+        // only admits U32/BF16/F16/F32, so it rides as U32 (no `.weight`
+        // suffix, hence no quant companions). If the real checkpoint ships
+        // it as I64 the dtype table in Safetensors/TensorMetadata must be
+        // extended first.
+        if n.hasSuffix(".mlp.gate.tid2eid")                     { return 20 }
+        if n.contains(".mlp.shared_experts.gate_proj.weight")   { return 21 }
+        if n.contains(".mlp.shared_experts.up_proj.weight")     { return 22 }
+        if n.contains(".mlp.shared_experts.down_proj.weight")   { return 23 }
+        if n.hasSuffix(".input_layernorm.weight")               { return 24 }
+        if n.hasSuffix(".post_attention_layernorm.weight")      { return 25 }
+        if n.hasSuffix(".attn_hc.fn")                           { return 26 }
+        if n.hasSuffix(".attn_hc.base")                         { return 27 }
+        if n.hasSuffix(".attn_hc.scale")                        { return 28 }
+        if n.hasSuffix(".ffn_hc.fn")                            { return 29 }
+        if n.hasSuffix(".ffn_hc.base")                          { return 30 }
+        if n.hasSuffix(".ffn_hc.scale")                         { return 31 }
         return 100
     }
 

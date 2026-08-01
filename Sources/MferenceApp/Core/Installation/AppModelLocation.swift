@@ -39,6 +39,9 @@ public enum AppModelLocation {
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
+    // The default mirrors `AppModelInstallDescriptor.default.installDirectoryName`;
+    // callers with a selected descriptor (qwen36.gturbo, deepseekv4flash.gturbo)
+    // always pass its directory name explicitly.
     static func resolve(explicitURL: URL?,
                         executableURL: URL?,
                         currentDirectoryURL: URL,

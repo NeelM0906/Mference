@@ -167,6 +167,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let rope: RoPE?
     private let int8ScalarGate: DequantInt8GEMV?
 
+    // DeepSeek-V4 kernels and state. Nil on architectures without CSA/HCA
+    // layers.
+    private let dsv4: DSV4Kernels?
+    private let moeDSV4: MoEDeepseekV4?
+    private let dsv4State: DSV4StateManager?
+
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
     private let prefillEmbed: PrefillEmbedLookupInt4
@@ -218,6 +224,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let gdnY: MTLBuffer?             // [valueDim] delta-rule output
     private let gdnOut: MTLBuffer?           // [valueDim] gated-norm output
     private let sharedScalarGateBuf: MTLBuffer? // [1] shared-expert gate logit
+    // DeepSeek-V4 decode scratch (nil on other architectures). The residual
+    // streams ping-pong: `dsv4Streams` at layer entry/exit, `dsv4StreamsAlt`
+    // between the attention and FFN sites.
+    private let dsv4Streams: MTLBuffer?          // [mult * D] FP16
+    private let dsv4StreamsAlt: MTLBuffer?       // [mult * D] FP16
+    private let dsv4QA: MTLBuffer?               // [qLoraRank] FP16
+    private let dsv4OGrouped: MTLBuffer?         // [oGroups * oLoraRank] FP16
+    private let dsv4HCPreA: MTLBuffer?           // [mult] FP32, attention site
+    private let dsv4HCPostA: MTLBuffer?          // [mult] FP32
+    private let dsv4HCCombA: MTLBuffer?          // [mult * mult] FP32
+    private let dsv4HCPreF: MTLBuffer?           // [mult] FP32, FFN site
+    private let dsv4HCPostF: MTLBuffer?          // [mult] FP32
+    private let dsv4HCCombF: MTLBuffer?          // [mult * mult] FP32
+    private let dsv4CompKVRow: MTLBuffer?        // [2 * headDim] FP16
+    private let dsv4CompGateRow: MTLBuffer?      // [2 * headDim] FP16
+    private let dsv4IdxKVRow: MTLBuffer?         // [2 * indexHeadDim] FP16
+    private let dsv4IdxGateRow: MTLBuffer?       // [2 * indexHeadDim] FP16
+    private let dsv4IndexerQ: MTLBuffer?         // [indexNHeads * indexHeadDim]
+    private let dsv4IndexerW: MTLBuffer?         // [indexNHeads] FP16
+    private let dsv4IndexerScores: MTLBuffer?    // [maxContext / csaRate] FP32
+    private let dsv4Selected: MTLBuffer?         // [indexTopK] UInt32
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
     /// has no auxiliary scale tensors.
     private let onesPerExpertScale: MTLBuffer?
@@ -409,6 +436,66 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1) : nil
 
+        // DeepSeek-V4 kernels + scratch, keyed off the compressed-attention
+        // flag so other architectures pay no PSO compile or allocation cost.
+        if cfg.hasCompressedAttentionLayers {
+            let ca = cfg.compressedAttention
+            let mult = cfg.hyperConnections.mult
+            self.dsv4 = try DSV4Kernels(context: context, config: cfg)
+            self.moeDSV4 = try MoEDeepseekV4(
+                context: context,
+                specializedD: UInt32(cfg.hiddenSize),
+                specializedF: UInt32(cfg.moeIntermediateSize),
+                specializedNumExperts: UInt32(cfg.numExperts),
+                routeScale: Float(cfg.routedScalingFactor),
+                swigluLimit: Float(cfg.swigluLimit))
+            self.dsv4State = try DSV4StateManager(device: device,
+                                                  config: cfg,
+                                                  maxContext: maxContext)
+            self.dsv4Streams = try buf(mult * D)
+            self.dsv4StreamsAlt = try buf(mult * D)
+            self.dsv4QA = try buf(ca.qLoraRank)
+            self.dsv4OGrouped = try buf(ca.oGroups * ca.oLoraRank)
+            self.dsv4HCPreA = try buf(mult, MemoryLayout<Float>.size)
+            self.dsv4HCPostA = try buf(mult, MemoryLayout<Float>.size)
+            self.dsv4HCCombA = try buf(mult * mult, MemoryLayout<Float>.size)
+            self.dsv4HCPreF = try buf(mult, MemoryLayout<Float>.size)
+            self.dsv4HCPostF = try buf(mult, MemoryLayout<Float>.size)
+            self.dsv4HCCombF = try buf(mult * mult, MemoryLayout<Float>.size)
+            self.dsv4CompKVRow = try buf(2 * cfg.fullHeadDim)
+            self.dsv4CompGateRow = try buf(2 * cfg.fullHeadDim)
+            self.dsv4IdxKVRow = try buf(2 * ca.indexHeadDim)
+            self.dsv4IdxGateRow = try buf(2 * ca.indexHeadDim)
+            self.dsv4IndexerQ = try buf(ca.indexNHeads * ca.indexHeadDim)
+            self.dsv4IndexerW = try buf(ca.indexNHeads)
+            self.dsv4IndexerScores = try buf(
+                max(1, maxContext / max(ca.csaCompressRate, 1)) + 1,
+                MemoryLayout<Float>.size)
+            self.dsv4Selected = try buf(ca.indexTopK, MemoryLayout<UInt32>.size)
+        } else {
+            self.dsv4 = nil
+            self.moeDSV4 = nil
+            self.dsv4State = nil
+            self.dsv4Streams = nil
+            self.dsv4StreamsAlt = nil
+            self.dsv4QA = nil
+            self.dsv4OGrouped = nil
+            self.dsv4HCPreA = nil
+            self.dsv4HCPostA = nil
+            self.dsv4HCCombA = nil
+            self.dsv4HCPreF = nil
+            self.dsv4HCPostF = nil
+            self.dsv4HCCombF = nil
+            self.dsv4CompKVRow = nil
+            self.dsv4CompGateRow = nil
+            self.dsv4IdxKVRow = nil
+            self.dsv4IdxGateRow = nil
+            self.dsv4IndexerQ = nil
+            self.dsv4IndexerW = nil
+            self.dsv4IndexerScores = nil
+            self.dsv4Selected = nil
+        }
+
         func sharedProj(_ view: TensorView, rows: UInt32, cols: UInt32) -> SharedExpertProjection {
             SharedExpertProjection(weights: view.buffer,
                                  scales: view.buffer,
@@ -490,6 +577,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public func reset() {
         kv?.reset()
         gdnState?.reset()
+        dsv4State?.reset()
         resetTransientState()
     }
 
@@ -622,6 +710,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+        }
+
+        if cfg.hasCompressedAttentionLayers {
+            // DeepSeek-V4 v1 prefill runs the decode path token-by-token.
+            // The correctness contract is prefill(T) == T sequential decode
+            // steps (the Qwen port's chunked-prefill guarantee); the chunked
+            // implementation is follow-up work.
+            var pos = startPosition
+            var done = 0
+            for t in tokens {
+                let isLast = done == tokens.count - 1
+                try await produceTokenDSV4(token: t, position: pos,
+                                           into: logits,
+                                           emitHead: isLast,
+                                           outputMode: outputMode)
+                pos += 1
+                done += 1
+                onProgress(done)
+            }
+            if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+                return PrefillResult(newPosition: pos,
+                                     seed: .greedyToken(lastGreedyToken))
+            }
+            return PrefillResult(newPosition: pos, seed: .logitsWritten)
         }
 
         let scratch = try ensurePrefillScratch(config: config)
@@ -1624,6 +1736,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
+        if cfg.hasCompressedAttentionLayers {
+            try await produceTokenDSV4(token: token, position: position,
+                                       into: logits, emitHead: emitHead,
+                                       outputMode: outputMode)
+            return
+        }
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
@@ -2326,6 +2444,681 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     scales: o.buffer, scalesOffset: Int(o.scaleOffset),
                     biases: o.buffer, biasesOffset: Int(o.biasOffset),
                     x: attnOut, y: oOut, m: D, n: qDim)
+    }
+
+    /// DeepSeek-V4 decode: 4 mHC residual streams, shared-KV MQA attention
+    /// over [window ring ‖ compressed entries], softmax-gated window
+    /// compressors, lightning-indexer selection past `index_topk` entries,
+    /// sqrtsoftplus/hash top-6 routing, and INT2 streamed experts. Mirrors
+    /// `produceToken`'s cb1 → readback → I/O-overlap → routed-cb pipeline.
+    private func produceTokenDSV4(token: Int32,
+                                  position: Int,
+                                  into logits: MTLBuffer,
+                                  emitHead: Bool,
+                                  outputMode: PrefillOutputMode) async throws {
+        guard let dsv4, let moeDSV4, let dsv4State,
+              let streams = dsv4Streams, let streamsAlt = dsv4StreamsAlt,
+              let qaBuf = dsv4QA, let oGrouped = dsv4OGrouped,
+              let hcPreA = dsv4HCPreA, let hcPostA = dsv4HCPostA,
+              let hcCombA = dsv4HCCombA,
+              let hcPreF = dsv4HCPreF, let hcPostF = dsv4HCPostF,
+              let hcCombF = dsv4HCCombF,
+              let compKVRow = dsv4CompKVRow, let compGateRow = dsv4CompGateRow,
+              let idxKVRow = dsv4IdxKVRow, let idxGateRow = dsv4IdxGateRow,
+              let indexerQ = dsv4IndexerQ, let indexerW = dsv4IndexerW,
+              let indexerScores = dsv4IndexerScores,
+              let selected = dsv4Selected else {
+            preconditionFailure("DeepSeek-V4 decode without DSV4 kernels")
+        }
+        guard model.routedExpertWeightBits == 2 else {
+            throw PrefillError.prefillCursorMismatch(
+                "DeepSeek-V4 runtime supports 2-bit routed experts; manifest says \(model.routedExpertWeightBits)")
+        }
+        let D = UInt32(cfg.hiddenSize)
+        let FmoE = UInt32(cfg.moeIntermediateSize)
+        let FShared = UInt32(cfg.intermediateSize)
+        let eps: Float = 1e-6
+        let ca = cfg.compressedAttention
+        let hc = cfg.hyperConnections
+        let headDim = cfg.fullHeadDim
+        let numHeads = cfg.numHeads
+        let fp16 = MemoryLayout<Float16>.stride
+
+        struct PendingRoutedCommand {
+            let cb: MTLCommandBuffer
+            let sharedCB: MTLCommandBuffer?
+            let phase1HitCB: MTLCommandBuffer?
+            let encodeAndCommitNanos: UInt64
+        }
+        var pendingRouted: PendingRoutedCommand?
+        func finishPending(_ pending: PendingRoutedCommand, waitIfNeeded: Bool) {
+            if waitIfNeeded {
+                if let sharedCB = pending.sharedCB { waitForCompletion(sharedCB) }
+                if let hitCB = pending.phase1HitCB { waitForCompletion(hitCB) }
+                waitForCompletion(pending.cb)
+            } else if let err = pending.cb.error {
+                print("CB error: \(err)")
+            }
+            totalCb2Nanos &+= pending.encodeAndCommitNanos
+        }
+        func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
+            let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
+            for i in 0..<slots.count { ptr[i] = slots[i] }
+        }
+        func blitCopy(_ cb: MTLCommandBuffer,
+                      from src: MTLBuffer, srcOffset: Int,
+                      to dst: MTLBuffer, dstOffset: Int, bytes: Int) {
+            guard let blit = cb.makeBlitCommandEncoder() else { return }
+            blit.copy(from: src, sourceOffset: srcOffset,
+                      to: dst, destinationOffset: dstOffset, size: bytes)
+            blit.endEncoding()
+        }
+        func gemv(_ cb: MTLCommandBuffer, _ view: TensorView,
+                  x: MTLBuffer, xOffset: Int = 0,
+                  y: MTLBuffer, yOffset: Int = 0,
+                  m: Int, n: Int) {
+            int4.encode(commandBuffer: cb,
+                        weights: view.buffer, weightsOffset: Int(view.offset),
+                        scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                        biases: view.buffer, biasesOffset: Int(view.biasOffset),
+                        x: x, xOffset: xOffset,
+                        y: y, yOffset: yOffset,
+                        m: UInt32(m), n: UInt32(n))
+        }
+
+        // Embed, then broadcast into the residual streams.
+        let emb = model.embedding
+        runSync { cb in
+            embedInt4.encode(commandBuffer: cb,
+                             table: emb.buffer, tableOffset: Int(emb.offset),
+                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                             out: hidden,
+                             tokenId: UInt32(bitPattern: token),
+                             d: D,
+                             outScale: 1.0)
+            dsv4.encodeBroadcastStreams(commandBuffer: cb, x: hidden,
+                                        streams: streams,
+                                        hcMult: hc.mult, hidden: cfg.hiddenSize)
+        }
+
+        for L in 0..<cfg.numLayers {
+            let isCSA = cfg.layerIsCSA(L)
+            let isHCA = cfg.layerIsHCA(L)
+            let isCompressed = isCSA || isHCA
+            let theta = isCompressed
+                ? Float(ca.compressRopeTheta)
+                : Float(cfg.ropeTheta)
+            var counters = dsv4State.counters[L]
+
+            let inNorm = try model.inputNorm(layer: L)
+            let postAttn = try model.postAttnNorm(layer: L)
+            let qaView = try model.dsv4QAProj(layer: L)
+            let qaNormView = try model.dsv4QANorm(layer: L)
+            let qbView = try model.dsv4QBProj(layer: L)
+            let kvView = try model.dsv4KVProj(layer: L)
+            let kvNormView = try model.dsv4KVNorm(layer: L)
+            let oaView = try model.dsv4OAProj(layer: L)
+            let obView = try model.dsv4OBProj(layer: L)
+            let sinksView = try model.dsv4Sinks(layer: L)
+            let attnFn = try model.dsv4AttnHCFn(layer: L)
+            let attnBase = try model.dsv4AttnHCBase(layer: L)
+            let attnScale3 = try model.dsv4AttnHCScale(layer: L)
+            let ffnFn = try model.dsv4FFNHCFn(layer: L)
+            let ffnBase = try model.dsv4FFNHCBase(layer: L)
+            let ffnScale3 = try model.dsv4FFNHCScale(layer: L)
+            let routerW = try model.router(layer: L)
+            let sharedProj = sharedExpertProjections[L]
+
+            let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            var cb = ctx.queue.makeCommandBuffer()!
+
+            // Attention-site mHC: weights + collapse, then the input norm.
+            dsv4.encodeHCWeights(commandBuffer: cb, streams: streams,
+                                 fn: attnFn.buffer, fnOffset: Int(attnFn.offset),
+                                 base: attnBase.buffer, baseOffset: Int(attnBase.offset),
+                                 scale: attnScale3.buffer, scaleOffset: Int(attnScale3.offset),
+                                 outPre: hcPreA, outPost: hcPostA, outComb: hcCombA,
+                                 hcMult: hc.mult, hidden: cfg.hiddenSize,
+                                 sinkhornIters: hc.sinkhornIters,
+                                 hcEps: Float(hc.eps), rmsEps: eps)
+            dsv4.encodeHCCollapse(commandBuffer: cb, streams: streams,
+                                  pre: hcPreA, x: hidden,
+                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
+            rms.encodeBF16W(commandBuffer: cb, x: hidden,
+                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                            out: normed, d: D, eps: eps)
+
+            // Q path: low-rank down + norm + up, per-head unweighted norm,
+            // trailing interleaved RoPE.
+            gemv(cb, qaView, x: normed, y: qaBuf, m: ca.qLoraRank, n: cfg.hiddenSize)
+            rms.encodeBF16W(commandBuffer: cb, x: qaBuf,
+                            weight: qaNormView.buffer,
+                            weightOffset: Int(qaNormView.offset),
+                            out: qaBuf, d: UInt32(ca.qLoraRank), eps: eps)
+            gemv(cb, qbView, x: qaBuf, y: qScratch,
+                 m: numHeads * headDim, n: ca.qLoraRank)
+            rms.encodeNoScalePerHead(commandBuffer: cb, x: qScratch,
+                                     out: qScratch,
+                                     headDim: UInt32(headDim),
+                                     numHeads: numHeads, eps: eps)
+            dsv4.encodeRope(commandBuffer: cb, x: qScratch,
+                            numHeads: numHeads, headDim: headDim,
+                            ropeDim: ca.ropeHeadDim,
+                            position: position, theta: theta, direction: 1)
+
+            // Shared K=V row straight into the window ring slot, then norm +
+            // RoPE in place.
+            let slot = dsv4State.windowSlot(position: position)
+            let ring = dsv4State.windowKV[L]
+            let slotOffset = slot * headDim * fp16
+            gemv(cb, kvView, x: normed, y: ring, yOffset: slotOffset,
+                 m: headDim, n: cfg.hiddenSize)
+            rms.encodeBF16W(commandBuffer: cb, x: ring, xOffset: slotOffset,
+                            weight: kvNormView.buffer,
+                            weightOffset: Int(kvNormView.offset),
+                            out: ring, outOffset: slotOffset,
+                            d: UInt32(headDim), eps: eps)
+            dsv4.encodeRope(commandBuffer: cb, x: ring, xOffset: slotOffset,
+                            numHeads: 1, headDim: headDim,
+                            ropeDim: ca.ropeHeadDim,
+                            position: position, theta: theta, direction: 1)
+
+            // Compressor: project this token's kv/gate rows into the pending
+            // window; emit one compressed entry when the window fills. The
+            // emitted entry is visible to this token's attention (the
+            // reference runs the compressor before core attention).
+            var willEmit = false
+            var willEmitIndexer = false
+            if isCompressed {
+                let rate = isCSA ? ca.csaCompressRate : ca.hcaCompressRate
+                let rowWidth = isCSA ? 2 * headDim : headDim
+                let compKV = try model.dsv4CompressorKVProj(layer: L)
+                let compGate = try model.dsv4CompressorGateProj(layer: L)
+                let compNorm = try model.dsv4CompressorKVNorm(layer: L)
+                let compBias = try model.dsv4CompressorPositionBias(layer: L)
+                gemv(cb, compKV, x: normed, y: compKVRow,
+                     m: rowWidth, n: cfg.hiddenSize)
+                gemv(cb, compGate, x: normed, y: compGateRow,
+                     m: rowWidth, n: cfg.hiddenSize)
+                let rowOffset = counters.pendingRows * rowWidth * fp16
+                blitCopy(cb, from: compKVRow, srcOffset: 0,
+                         to: dsv4State.pendingKV[L]!, dstOffset: rowOffset,
+                         bytes: rowWidth * fp16)
+                blitCopy(cb, from: compGateRow, srcOffset: 0,
+                         to: dsv4State.pendingGate[L]!, dstOffset: rowOffset,
+                         bytes: rowWidth * fp16)
+                willEmit = counters.pendingRows + 1 == rate
+                if willEmit {
+                    let entry = counters.compressedEntries
+                    dsv4.encodeCompressEmit(
+                        commandBuffer: cb,
+                        pendingKV: dsv4State.pendingKV[L]!,
+                        pendingGate: dsv4State.pendingGate[L]!,
+                        priorCaKV: dsv4State.priorCaKV[L] ?? dsv4State.pendingKV[L]!,
+                        priorCaGate: dsv4State.priorCaGate[L] ?? dsv4State.pendingGate[L]!,
+                        positionBias: compBias.buffer,
+                        positionBiasOffset: Int(compBias.offset),
+                        normWeight: compNorm.buffer,
+                        normWeightOffset: Int(compNorm.offset),
+                        outEntry: dsv4State.compressedKV[L]!,
+                        outEntryOffset: entry * headDim * fp16,
+                        nextPriorCaKV: dsv4State.priorCaKV[L] ?? dsv4State.pendingKV[L]!,
+                        nextPriorCaGate: dsv4State.priorCaGate[L] ?? dsv4State.pendingGate[L]!,
+                        rate: rate, dim: headDim, dual: isCSA,
+                        hasPrior: counters.hasPrior, eps: eps)
+                    dsv4.encodeRope(commandBuffer: cb,
+                                    x: dsv4State.compressedKV[L]!,
+                                    xOffset: entry * headDim * fp16,
+                                    numHeads: 1, headDim: headDim,
+                                    ropeDim: ca.ropeHeadDim,
+                                    position: entry * rate,
+                                    theta: Float(ca.compressRopeTheta),
+                                    direction: 1)
+                }
+                if isCSA {
+                    let idxRate = ca.csaCompressRate
+                    let idxDim = ca.indexHeadDim
+                    let idxKV = try model.dsv4IndexerKVProj(layer: L)
+                    let idxGate = try model.dsv4IndexerGateProj(layer: L)
+                    let idxNorm = try model.dsv4IndexerKVNorm(layer: L)
+                    let idxBias = try model.dsv4IndexerPositionBias(layer: L)
+                    gemv(cb, idxKV, x: normed, y: idxKVRow,
+                         m: 2 * idxDim, n: cfg.hiddenSize)
+                    gemv(cb, idxGate, x: normed, y: idxGateRow,
+                         m: 2 * idxDim, n: cfg.hiddenSize)
+                    let idxRowOffset = counters.indexerPendingRows * 2 * idxDim * fp16
+                    blitCopy(cb, from: idxKVRow, srcOffset: 0,
+                             to: dsv4State.indexerPendingKV[L]!,
+                             dstOffset: idxRowOffset, bytes: 2 * idxDim * fp16)
+                    blitCopy(cb, from: idxGateRow, srcOffset: 0,
+                             to: dsv4State.indexerPendingGate[L]!,
+                             dstOffset: idxRowOffset, bytes: 2 * idxDim * fp16)
+                    willEmitIndexer = counters.indexerPendingRows + 1 == idxRate
+                    if willEmitIndexer {
+                        let entry = counters.indexerEntries
+                        dsv4.encodeCompressEmit(
+                            commandBuffer: cb,
+                            pendingKV: dsv4State.indexerPendingKV[L]!,
+                            pendingGate: dsv4State.indexerPendingGate[L]!,
+                            priorCaKV: dsv4State.indexerPriorCaKV[L]!,
+                            priorCaGate: dsv4State.indexerPriorCaGate[L]!,
+                            positionBias: idxBias.buffer,
+                            positionBiasOffset: Int(idxBias.offset),
+                            normWeight: idxNorm.buffer,
+                            normWeightOffset: Int(idxNorm.offset),
+                            outEntry: dsv4State.indexerKeys[L]!,
+                            outEntryOffset: entry * idxDim * fp16,
+                            nextPriorCaKV: dsv4State.indexerPriorCaKV[L]!,
+                            nextPriorCaGate: dsv4State.indexerPriorCaGate[L]!,
+                            rate: idxRate, dim: idxDim, dual: true,
+                            hasPrior: counters.indexerHasPrior, eps: eps)
+                        dsv4.encodeRope(commandBuffer: cb,
+                                        x: dsv4State.indexerKeys[L]!,
+                                        xOffset: entry * idxDim * fp16,
+                                        numHeads: 1, headDim: idxDim,
+                                        ropeDim: ca.ropeHeadDim,
+                                        position: entry * idxRate,
+                                        theta: Float(ca.compressRopeTheta),
+                                        direction: 1)
+                    }
+                }
+            }
+
+            let compressedCount = isCompressed
+                ? counters.compressedEntries + (willEmit ? 1 : 0)
+                : 0
+
+            // Lightning-indexer selection is only needed once the compressed
+            // entries exceed index_topk (context > topk * rate); the extra
+            // CPU sync point exists only on those layers/positions.
+            let needsSelection = isCSA && compressedCount > ca.indexTopK
+            var selectedCount = DSV4Kernels.selectAll
+            if needsSelection {
+                let idxQB = try model.dsv4IndexerQBProj(layer: L)
+                let idxWProj = try model.dsv4IndexerWeightsProj(layer: L)
+                let idxEntries = counters.indexerEntries + (willEmitIndexer ? 1 : 0)
+                gemv(cb, idxQB, x: qaBuf, y: indexerQ,
+                     m: ca.indexNHeads * ca.indexHeadDim, n: ca.qLoraRank)
+                dsv4.encodeRope(commandBuffer: cb, x: indexerQ,
+                                numHeads: ca.indexNHeads,
+                                headDim: ca.indexHeadDim,
+                                ropeDim: ca.ropeHeadDim,
+                                position: position,
+                                theta: Float(ca.compressRopeTheta),
+                                direction: 1)
+                gemv(cb, idxWProj, x: normed, y: indexerW,
+                     m: ca.indexNHeads, n: cfg.hiddenSize)
+                dsv4.encodeIndexerScore(
+                    commandBuffer: cb, q: indexerQ,
+                    keys: dsv4State.indexerKeys[L]!,
+                    weights: indexerW, scores: indexerScores,
+                    numHeads: ca.indexNHeads, indexDim: ca.indexHeadDim,
+                    entryCount: idxEntries,
+                    headScale: 1.0 / Float(ca.indexHeadDim).squareRoot(),
+                    weightScale: 1.0 / Float(ca.indexNHeads).squareRoot())
+                cb.commit()
+                waitForCompletion(cb)
+                // CPU top-k over the scores; attention gathers the same
+                // entry indices from the compressor cache (both caches share
+                // the emission schedule).
+                let scoresPtr = indexerScores.contents()
+                    .assumingMemoryBound(to: Float.self)
+                let k = min(ca.indexTopK, compressedCount)
+                var order = Array(0..<compressedCount)
+                order.sort { scoresPtr[$0] > scoresPtr[$1] }
+                let picks = order.prefix(k).sorted()
+                let selPtr = selected.contents().assumingMemoryBound(to: UInt32.self)
+                for (i, e) in picks.enumerated() { selPtr[i] = UInt32(e) }
+                selectedCount = UInt32(k)
+                cb = ctx.queue.makeCommandBuffer()!
+            }
+
+            // Core attention + conjugate output rotation.
+            dsv4.encodeAttention(
+                commandBuffer: cb, q: qScratch,
+                windowKV: ring,
+                compressedKV: dsv4State.compressedKV[L] ?? ring,
+                selected: selected,
+                sinks: sinksView.buffer, sinksOffset: Int(sinksView.offset),
+                out: attnOut,
+                headDim: headDim, numHeads: numHeads,
+                windowCount: dsv4State.windowCount(position: position),
+                windowStartPos: dsv4State.windowStartPosition(position: position),
+                ringCapacity: dsv4State.ringCapacity,
+                compressedCount: compressedCount,
+                selectedCount: selectedCount,
+                scale: Float(cfg.attentionScale))
+            dsv4.encodeRope(commandBuffer: cb, x: attnOut,
+                            numHeads: numHeads, headDim: headDim,
+                            ropeDim: ca.ropeHeadDim,
+                            position: position, theta: theta, direction: -1)
+
+            // Grouped low-rank output projection: one GEMV per head group,
+            // then the mixing projection.
+            let groupIn = numHeads * headDim / ca.oGroups
+            let oaRowBytes = groupIn / 2
+            let oaGroupsPerRow = groupIn / Quantization.groupSize
+            for g in 0..<ca.oGroups {
+                let rowBase = g * ca.oLoraRank
+                int4.encode(commandBuffer: cb,
+                            weights: oaView.buffer,
+                            weightsOffset: Int(oaView.offset) + rowBase * oaRowBytes,
+                            scales: oaView.buffer,
+                            scalesOffset: Int(oaView.scaleOffset) + rowBase * oaGroupsPerRow * 2,
+                            biases: oaView.buffer,
+                            biasesOffset: Int(oaView.biasOffset) + rowBase * oaGroupsPerRow * 2,
+                            x: attnOut, xOffset: g * groupIn * fp16,
+                            y: oGrouped, yOffset: g * ca.oLoraRank * fp16,
+                            m: UInt32(ca.oLoraRank), n: UInt32(groupIn))
+            }
+            gemv(cb, obView, x: oGrouped, y: oOut,
+                 m: cfg.hiddenSize, n: ca.oGroups * ca.oLoraRank)
+
+            // Attention-site placement + residual mix: streams -> streamsAlt.
+            dsv4.encodeHCPlaceMix(commandBuffer: cb, streams: streams,
+                                  sub: oOut, post: hcPostA, comb: hcCombA,
+                                  outStreams: streamsAlt,
+                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
+
+            // FFN-site mHC + norm, producing the MoE input.
+            dsv4.encodeHCWeights(commandBuffer: cb, streams: streamsAlt,
+                                 fn: ffnFn.buffer, fnOffset: Int(ffnFn.offset),
+                                 base: ffnBase.buffer, baseOffset: Int(ffnBase.offset),
+                                 scale: ffnScale3.buffer, scaleOffset: Int(ffnScale3.offset),
+                                 outPre: hcPreF, outPost: hcPostF, outComb: hcCombF,
+                                 hcMult: hc.mult, hidden: cfg.hiddenSize,
+                                 sinkhornIters: hc.sinkhornIters,
+                                 hcEps: Float(hc.eps), rmsEps: eps)
+            dsv4.encodeHCCollapse(commandBuffer: cb, streams: streamsAlt,
+                                  pre: hcPreF, x: hidden,
+                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
+            rms.encodeBF16W(commandBuffer: cb, x: hidden,
+                            weight: postAttn.buffer,
+                            weightOffset: Int(postAttn.offset),
+                            out: routedX, d: D, eps: eps)
+
+            // Router. Hash layers take their expert set from tid2eid[token]
+            // (written CPU-side before commit); the gate only weights them.
+            let isHash = cfg.layerIsHashRouted(L)
+            if isHash {
+                let table = try model.dsv4HashTable(layer: L)
+                // The table rides the resident file as U32 [vocab, topK];
+                // an I64 source table must be narrowed by the repacker.
+                let tPtr = table.buffer.contents()
+                    .advanced(by: Int(table.offset))
+                    .assumingMemoryBound(to: UInt32.self)
+                let row = min(max(Int(token), 0), cfg.vocabSize - 1) * cfg.topKExperts
+                let idxPtr = outIndices.contents().assumingMemoryBound(to: UInt32.self)
+                for i in 0..<cfg.topKExperts {
+                    idxPtr[i] = min(tPtr[row + i], UInt32(cfg.numExperts - 1))
+                }
+                moeDSV4.encodeRouterHashWeights(
+                    commandBuffer: cb,
+                    weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+                    scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
+                    biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
+                    hidden: routedX,
+                    onesScale: effectiveScaleBuffers[L],
+                    indices: outIndices,
+                    outWeights: outWeights,
+                    numExperts: UInt32(cfg.numExperts), d: D)
+            } else {
+                let bias = try model.dsv4RouterCorrectionBias(layer: L)
+                moeDSV4.encodeRouterTopK(
+                    commandBuffer: cb,
+                    weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+                    scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
+                    biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
+                    hidden: routedX,
+                    onesScale: effectiveScaleBuffers[L],
+                    correctionBias: bias.buffer, correctionBiasOffset: Int(bias.offset),
+                    outIndices: outIndices,
+                    outWeights: outWeights,
+                    numExperts: UInt32(cfg.numExperts), d: D)
+            }
+            cb.commit()
+            let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            waitForCompletion(cb)
+            let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+            if let pending = pendingRouted {
+                finishPending(pending, waitIfNeeded: false)
+                pendingRouted = nil
+            }
+            totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+
+            // Commit the compressor bookkeeping for this token.
+            counters.tokens += 1
+            if isCompressed {
+                if willEmit {
+                    counters.pendingRows = 0
+                    counters.compressedEntries += 1
+                    if isCSA { counters.hasPrior = true }
+                } else {
+                    counters.pendingRows += 1
+                }
+                if isCSA {
+                    if willEmitIndexer {
+                        counters.indexerPendingRows = 0
+                        counters.indexerEntries += 1
+                        counters.indexerHasPrior = true
+                    } else {
+                        counters.indexerPendingRows += 1
+                    }
+                }
+            }
+            dsv4State.counters[L] = counters
+
+            // Expert readback -> plan -> advise -> pread -> routed CB, the
+            // same overlap structure as `produceToken`.
+            let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
+                                                          capacity: cfg.topKExperts)
+            var experts = [Int](repeating: 0, count: cfg.topKExperts)
+            for i in 0..<cfg.topKExperts {
+                experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
+            }
+            let routedOffsets = model.routedExpertOffsets(layer: L)
+            let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
+            var phase1HitCB: MTLCommandBuffer?
+            var phase1HitSlots: [UInt32] = []
+            var phase1MissSlots: [UInt32] = []
+            var phase1HitSplitArgBuf: MTLBuffer?
+            let missSet = Set(plannedFetch.misses)
+            phase1HitSlots = (0..<cfg.topKExperts)
+                .filter { !missSet.contains($0) }
+                .map { UInt32($0) }
+            phase1MissSlots = plannedFetch.misses.map { UInt32($0) }
+
+            if plannedFetch.hits > 0, !plannedFetch.misses.isEmpty {
+                let plannedBlobs = try model.routedExpertBuffers(for: plannedFetch)
+                let bufs = plannedBlobs.map { $0.buffer }
+                writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
+                let hitCB = ctx.queue.makeCommandBuffer()!
+                let argBuf = moeDSV4.makeReusedRoutedArgumentBuffer(routedBlobs: bufs)
+                phase1HitSplitArgBuf = argBuf
+                moeDSV4.encodeRoutedPhase1Subset(
+                    commandBuffer: hitCB,
+                    routedArgBuffer: argBuf,
+                    routedBlobs: bufs,
+                    routedOffsets: routedOffsets,
+                    x: routedX, acts: moeActs,
+                    activeSlots: moeHitActiveSlots,
+                    activeSlotIndices: phase1HitSlots,
+                    activeCount: UInt32(phase1HitSlots.count),
+                    d: D, f: FmoE)
+                phase1HitCB = hitCB
+            }
+
+            // Shared expert (clamped SwiGLU) on its own CB so its GPU work
+            // overlaps the expert pread.
+            let sharedCB = ctx.queue.makeCommandBuffer()!
+            int4.encode(commandBuffer: sharedCB,
+                        weights: sharedProj.gate.weights,
+                        weightsOffset: sharedProj.gate.weightsOffset,
+                        scales: sharedProj.gate.scales,
+                        scalesOffset: sharedProj.gate.scalesOffset,
+                        biases: sharedProj.gate.biases,
+                        biasesOffset: sharedProj.gate.biasesOffset,
+                        x: routedX, y: denseScratchGate,
+                        m: FShared, n: D)
+            int4.encode(commandBuffer: sharedCB,
+                        weights: sharedProj.up.weights,
+                        weightsOffset: sharedProj.up.weightsOffset,
+                        scales: sharedProj.up.scales,
+                        scalesOffset: sharedProj.up.scalesOffset,
+                        biases: sharedProj.up.biases,
+                        biasesOffset: sharedProj.up.biasesOffset,
+                        x: routedX, y: denseScratchUp,
+                        m: FShared, n: D)
+            dsv4.encodeSwigluClampMul(commandBuffer: sharedCB,
+                                      gate: denseScratchGate,
+                                      up: denseScratchUp,
+                                      out: denseScratchAct,
+                                      n: cfg.intermediateSize,
+                                      limit: Float(cfg.swigluLimit))
+            int4.encode(commandBuffer: sharedCB,
+                        weights: sharedProj.down.weights,
+                        weightsOffset: sharedProj.down.weightsOffset,
+                        scales: sharedProj.down.scales,
+                        scalesOffset: sharedProj.down.scalesOffset,
+                        biases: sharedProj.down.biases,
+                        biasesOffset: sharedProj.down.biasesOffset,
+                        x: denseScratchAct, y: h1Buf,
+                        m: D, n: FShared)
+            sharedCB.commit()
+            if let hitCB = phase1HitCB { hitCB.commit() }
+
+            if rdadviseEnabled && rdadvisePolicyMode != .off {
+                let requestedMisses = plannedFetch.misses.count
+                let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
+                    layer: L, missCount: requestedMisses)
+                if let skipped = shouldSkipRDAdvice(position: position,
+                                                    requestedMisses: requestedMisses,
+                                                    estimatedBytes: estimatedAdviceBytes,
+                                                    canOverlapUsefulGPUWork: true) {
+                    recordRDAdvice(skipped, wallNanos: 0)
+                } else {
+                    let tAdvice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                    let result = try model.adviseRoutedExperts(plan: plannedFetch)
+                    let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tAdvice
+                    recordRDAdvice(result, wallNanos: wallNanos)
+                    updateRDAdvicePolicy(after: result, position: position)
+                }
+            }
+
+            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
+            let routedBufs = blobs.map { $0.buffer }
+
+            let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let routedCB = ctx.queue.makeCommandBuffer()!
+            let argBuf = phase1HitSplitArgBuf
+                ?? moeDSV4.makeReusedRoutedArgumentBuffer(routedBlobs: routedBufs)
+            if phase1HitCB != nil {
+                writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
+                moeDSV4.encodeRoutedPhase1Subset(
+                    commandBuffer: routedCB,
+                    routedArgBuffer: argBuf,
+                    routedBlobs: routedBufs,
+                    routedOffsets: routedOffsets,
+                    x: routedX, acts: moeActs,
+                    activeSlots: moeMissActiveSlots,
+                    activeSlotIndices: phase1MissSlots,
+                    activeCount: UInt32(phase1MissSlots.count),
+                    d: D, f: FmoE)
+            } else {
+                moeDSV4.encodeRoutedPhase1(
+                    commandBuffer: routedCB,
+                    routedArgBuffer: argBuf,
+                    routedBlobs: routedBufs,
+                    routedOffsets: routedOffsets,
+                    x: routedX, acts: moeActs,
+                    d: D, f: FmoE)
+            }
+            // Phase-2 seeds with the shared-expert output, so h2Buf holds
+            // routed + shared — exactly the reference's `routed +
+            // shared_experts(residual)`.
+            moeDSV4.encodeRoutedPhase2Reduce(
+                commandBuffer: routedCB,
+                routedArgBuffer: argBuf,
+                routedBlobs: routedBufs,
+                routedOffsets: routedOffsets,
+                acts: moeActs,
+                routingWeights: outWeights,
+                residual: h1Buf,
+                y: h2Buf,
+                d: D, f: FmoE)
+            // FFN-site placement + residual mix: streamsAlt -> streams.
+            dsv4.encodeHCPlaceMix(commandBuffer: routedCB, streams: streamsAlt,
+                                  sub: h2Buf, post: hcPostF, comb: hcCombF,
+                                  outStreams: streams,
+                                  hcMult: hc.mult, hidden: cfg.hiddenSize)
+            routedCB.commit()
+            precondition(pendingRouted == nil,
+                         "routed command-buffer pipeline drained before queuing the next layer")
+            pendingRouted = PendingRoutedCommand(
+                cb: routedCB,
+                sharedCB: sharedCB,
+                phase1HitCB: phase1HitCB,
+                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+        }
+        if let pending = pendingRouted {
+            finishPending(pending, waitIfNeeded: true)
+            pendingRouted = nil
+        }
+
+        if emitHead {
+            // Collapse the residual streams, then the standard head.
+            let hhFn = try model.dsv4HyperHeadFn
+            let hhBase = try model.dsv4HyperHeadBase
+            let hhScale = try model.dsv4HyperHeadScale
+            runSync { cb in
+                dsv4.encodeHyperHead(commandBuffer: cb, streams: streams,
+                                     fn: hhFn.buffer, fnOffset: Int(hhFn.offset),
+                                     base: hhBase.buffer, baseOffset: Int(hhBase.offset),
+                                     scale: hhScale.buffer, scaleOffset: Int(hhScale.offset),
+                                     x: hidden,
+                                     hcMult: hc.mult, hidden: cfg.hiddenSize,
+                                     hcEps: Float(hc.eps), rmsEps: eps)
+            }
+            let fNorm = model.finalNorm
+            let lm = model.lmHead
+            let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
+            let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            if useFusedHeadForThisToken {
+                runSync { cb in
+                    self.fusionHead.encodeGreedyDecode(
+                        commandBuffer: cb,
+                        hidden: self.hidden,
+                        normWeight: fNorm.buffer, normOffset: Int(fNorm.offset),
+                        weights: lm.buffer, weightsOffset: Int(lm.offset),
+                        scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                        biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                        outToken: self.greedyTokenBuf,
+                        d: D, vocab: UInt32(self.cfg.vocabSize),
+                        rmsEps: eps)
+                }
+                totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
+                lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
+            } else {
+                runSync { cb in
+                    self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
+                                         weight: fNorm.buffer,
+                                         weightOffset: Int(fNorm.offset),
+                                         out: self.normed, d: D, eps: eps)
+                    self.int4.encode(commandBuffer: cb,
+                                     weights: lm.buffer, weightsOffset: Int(lm.offset),
+                                     scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                                     biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                                     x: self.normed, y: logits,
+                                     m: UInt32(self.cfg.vocabSize), n: D)
+                }
+                totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
+            }
+        }
+
+        kv?.advance()
     }
 
     private func runSync(_ body: (MTLCommandBuffer) -> Void) {

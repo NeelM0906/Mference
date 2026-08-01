@@ -81,7 +81,8 @@ import Foundation
     }
 
     static func quant(sharedExpertBits: Int = 4,
-                      routerBits: Int = 8) -> [String: Any] {
+                      routerBits: Int = 8,
+                      routedExpertBits: Int = 4) -> [String: Any] {
         func slot(_ bits: Int) -> [String: Any] {
             [
                 "weightBits": bits,
@@ -96,8 +97,45 @@ import Foundation
             "attention": slot(4),
             "router": slot(routerBits),
             "sharedExpert": slot(sharedExpertBits),
-            "routedExpert": slot(4),
+            "routedExpert": slot(routedExpertBits),
         ]
+    }
+
+    /// Manifest `arch` values for the DeepSeek-V4 toy baseline. The family
+    /// booleans are always written (a dsv4 manifest never relies on the
+    /// Gemma defaults); the ca*/hc*/hash/router extension fields can be
+    /// withheld to exercise the absent-fields-mean-zeroed-defaults path.
+    static func deepseekArchOverrides(includeExtensionFields: Bool = true) -> [String: Any] {
+        var overrides: [String: Any] = [
+            "family": "deepseekV4Flash",
+            "attnOutputGate": false,
+            "attentionScale": 0.125,
+            "embeddingScaledBySqrtHidden": false,
+            "routerScaled": false,
+            "ffnSandwichNorms": false,
+            "sharedExpertGated": false,
+            "ropeNeoxSubdim": false,
+        ]
+        if includeExtensionFields {
+            overrides["caQLoraRank"] = 64
+            overrides["caOLoraRank"] = 64
+            overrides["caOGroups"] = 2
+            overrides["caRopeHeadDim"] = 8
+            overrides["caIndexNHeads"] = 2
+            overrides["caIndexHeadDim"] = 64
+            overrides["caIndexTopK"] = 16
+            overrides["caCSACompressRate"] = 4
+            overrides["caHCACompressRate"] = 128
+            overrides["caCompressRopeTheta"] = 160_000.0
+            overrides["hcMult"] = 2
+            overrides["hcSinkhornIters"] = 4
+            overrides["hcEps"] = 1e-6
+            overrides["numHashRoutedLayers"] = 1
+            overrides["routerScoringFunc"] = "sqrtsoftplus"
+            overrides["routedScalingFactor"] = 1.5
+            overrides["swigluLimit"] = 10.0
+        }
+        return overrides
     }
 
     @Test func loadsValidManifest() throws {
@@ -213,6 +251,61 @@ import Foundation
         #expect(manifest.quant?.sharedExpert.weightBits == 8)
     }
 
+    @Test func productionManifestAcceptsInt2RoutedExpert() throws {
+        // The DeepSeek-V4-Flash dynamic-quant checkpoint ships Q2 routed
+        // experts under a Q4 core.
+        let (dir, config) = try Self.writeToyManifest(
+            ["quant": Self.quant(routedExpertBits: 2)],
+            config: .gemma4_26B_A4B)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        #expect(manifest.quant?.routedExpert.weightBits == 2)
+    }
+
+    @Test func productionManifestRejectsInt3RoutedExpert() throws {
+        let (dir, config) = try Self.writeToyManifest(
+            ["quant": Self.quant(routedExpertBits: 3)],
+            config: .gemma4_26B_A4B)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: config)
+        } throws: { error in
+            guard case ModelError.indexCorrupt(let detail) = error else { return false }
+            return detail.contains("unsupported quantization")
+        }
+    }
+
+    @Test func deepseekArchExtensionFieldsValidate() throws {
+        let (dir, config) = try Self.writeToyManifest(
+            archOverrides: Self.deepseekArchOverrides(),
+            config: .deepseekV4FlashToy())
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        #expect(manifest.arch.family == "deepseekV4Flash")
+        #expect(manifest.arch.caQLoraRank == 64)
+        #expect(manifest.arch.caHCACompressRate == 128)
+        #expect(manifest.arch.hcMult == 2)
+        #expect(manifest.arch.numHashRoutedLayers == 1)
+        #expect(manifest.arch.routerScoringFunc == "sqrtsoftplus")
+        #expect(manifest.arch.routedScalingFactor == 1.5)
+        #expect(manifest.arch.swigluLimit == 10.0)
+    }
+
+    @Test func deepseekManifestMissingExtensionFieldsThrowsArchMismatch() throws {
+        // Absent extension fields decode as the zeroed defaults, which
+        // cannot match a family whose baseline carries real values.
+        let (dir, config) = try Self.writeToyManifest(
+            archOverrides: Self.deepseekArchOverrides(includeExtensionFields: false),
+            config: .deepseekV4FlashToy())
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: config)
+        } throws: { error in
+            guard case let ModelError.archMismatch(field, _, _) = error else { return false }
+            return field == "caQLoraRank"
+        }
+    }
+
     @Test func productionManifestRejectsUnsupportedQuantMetadata() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(sharedExpertBits: 3, routerBits: 4)],
@@ -305,6 +398,55 @@ extension ArchConfig {
             attentionKEqV: true,
             fullAttentionLayerMask: [0, 1],
             hiddenActivation: "gelu_pytorch_tanh"
+        )
+    }
+
+    /// Tiny DeepSeek-V4-Flash baseline: 2 layers (CSA then HCA), hidden 128,
+    /// 8 experts (layer 0 hash-routed), shared-KV MQA with the low-rank
+    /// attention extensions and 2 mHC streams. Numbers are intentionally toy.
+    static func deepseekV4FlashToy() -> ArchConfig {
+        ArchConfig(
+            hiddenSize: 128,
+            intermediateSize: 64,
+            moeIntermediateSize: 64,
+            numHeads: 2,
+            numKVHeads: 1,
+            numFullKVHeads: 1,
+            headDim: 64,
+            fullHeadDim: 64,
+            vocabSize: 256,
+            slidingWindow: 32,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 10_000.0,
+            fullRopeTheta: 10_000.0,
+            partialRotaryFactor: 0.125,
+            numLayers: 2,
+            numExperts: 8,
+            topKExperts: 2,
+            tieWordEmbeddings: false,
+            attentionKEqV: true,
+            fullAttentionLayerMask: [3, 4],
+            hiddenActivation: "silu",
+            family: .deepseekV4Flash,
+            attnOutputGate: false,
+            attentionScale: 0.125,
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: false,
+            compressedAttention: CompressedAttentionConfig(
+                qLoraRank: 64, oLoraRank: 64, oGroups: 2,
+                ropeHeadDim: 8,
+                indexNHeads: 2, indexHeadDim: 64, indexTopK: 16,
+                csaCompressRate: 4, hcaCompressRate: 128,
+                compressRopeTheta: 160_000.0),
+            hyperConnections: HyperConnectionConfig(
+                mult: 2, sinkhornIters: 4, eps: 1e-6),
+            numHashRoutedLayers: 1,
+            routerScoringFunc: "sqrtsoftplus",
+            routedScalingFactor: 1.5,
+            swigluLimit: 10.0
         )
     }
 }

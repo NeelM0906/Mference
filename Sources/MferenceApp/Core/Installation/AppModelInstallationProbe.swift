@@ -35,9 +35,13 @@ public enum AppModelInstallationProbe {
                     ?? AppModelInstallDescriptor.descriptor(for: family) else {
                 return .partial("no descriptor for family \(family.rawValue)")
             }
-            let expectedSource = "sha256:" + expected.sourceIndexSHA256
-            guard manifest.sourceSnapshotHash == expectedSource else {
-                return .partial("installed checkpoint does not match \(expected.displayName)")
+            // A descriptor without a pinned index hash installs
+            // trust-on-first-use, so there is no source pin to compare.
+            if let pinnedSHA = expected.sourceIndexSHA256 {
+                let expectedSource = "sha256:" + pinnedSHA
+                guard manifest.sourceSnapshotHash == expectedSource else {
+                    return .partial("installed checkpoint does not match \(expected.displayName)")
+                }
             }
             let layout = directory.appendingPathComponent("packed_experts/layout.json")
             guard FileManager.default.fileExists(atPath: layout.path) else {

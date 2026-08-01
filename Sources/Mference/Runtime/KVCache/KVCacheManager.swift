@@ -7,8 +7,12 @@ import Metal
 /// quirk). Qwen 3.6 interleaves 30 gated-DeltaNet linear-attention layers with
 /// 10 full-attention layers; linear layers keep a fixed-size recurrent state
 /// (owned by `GDNStateManager`) instead of per-token K/V rows. Sourced from
-/// `ArchConfig.fullAttentionLayerMask` (0 = swa, 1 = full, 2 = linear).
-public enum LayerKind: Sendable { case swa, full, linear }
+/// `ArchConfig.fullAttentionLayerMask` (0 = swa, 1 = full, 2 = linear,
+/// 3/4 = DeepSeek V4 CSA/HCA). DeepSeek-V4 architectures keep all attention
+/// state — including the sliding-window ring — in `DSV4StateManager`, so
+/// every layer of such a model is `.compressed` here with placeholder
+/// storage; this manager only supplies the position cursor.
+public enum LayerKind: Sendable { case swa, full, linear, compressed }
 
 /// A read view the attention kernels bind. `offset` stays 0; ring-enabled SWA
 /// layers expose the physical start slot for diagnostics while kernels map
@@ -98,11 +102,14 @@ public final class KVCacheManager {
 
         // Linear-attention layers keep no per-token K/V rows; they share one
         // page-sized placeholder so the parallel arrays stay non-optional.
+        // DeepSeek-V4 models own all attention state in `DSV4StateManager`,
+        // so every layer (mask 0/3/4 alike) gets the placeholder there.
         var linearPlaceholder: MTLBuffer? = nil
+        let allPlaceholder = config.hasCompressedAttentionLayers
 
         for layer in 0..<config.numLayers {
             let maskValue = config.fullAttentionLayerMask[layer]
-            if maskValue == 2 {
+            if maskValue == 2 || allPlaceholder {
                 let placeholder: MTLBuffer
                 if let existing = linearPlaceholder {
                     placeholder = existing
@@ -118,7 +125,7 @@ public final class KVCacheManager {
                 ks.append(placeholder)
                 vs.append(placeholder)
                 st.append(0)
-                kd.append(.linear)
+                kd.append(maskValue == 2 ? .linear : .compressed)
                 caps.append(0)
                 continue
             }
@@ -172,7 +179,8 @@ public final class KVCacheManager {
 
     /// Write target for this layer's K projection at `position`.
     public func kSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
-        precondition(kinds[layer] != .linear, "linear layers have no KV slots")
+        precondition(kinds[layer] != .linear && kinds[layer] != .compressed,
+                     "layer kind \(kinds[layer]) has no KV slots")
         validateRange(start: position, count: 1)
         return (kBuffers[layer], physicalSlot(layer: layer, position: position) * strides[layer])
     }
@@ -181,7 +189,8 @@ public final class KVCacheManager {
     /// distinct from `kSlot` — full layers no longer alias K and V (Gemma 4
     /// applies different per-head norms + RoPE to K vs V; gemma4-block.md §2.2).
     public func vSlot(layer: Int, position: Int) -> (buffer: MTLBuffer, offset: Int) {
-        precondition(kinds[layer] != .linear, "linear layers have no KV slots")
+        precondition(kinds[layer] != .linear && kinds[layer] != .compressed,
+                     "layer kind \(kinds[layer]) has no KV slots")
         validateRange(start: position, count: 1)
         return (vBuffers[layer], physicalSlot(layer: layer, position: position) * strides[layer])
     }

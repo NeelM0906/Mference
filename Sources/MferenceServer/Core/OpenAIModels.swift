@@ -371,8 +371,9 @@ public enum OpenAIRequestValidator {
                     }
                     for (key, definition) in definitions {
                         // Gemma's tool-call DSL cannot round-trip arbitrary
-                        // parameter names; ChatML tool calls are free-form.
-                        guard dialect == .chatml
+                        // parameter names; ChatML and DeepSeek tool calls are
+                        // free-form.
+                        guard dialect != .gemma
                                 || GemmaToolCallParser.isRepresentableObjectKey(key) else {
                             throw invalid(
                                 "tool parameter names may contain only letters, numbers, _, -, ., and $",
@@ -411,10 +412,12 @@ public enum OpenAIRequestValidator {
             // 'Unexpected message role.' for anything outside
             // system/user/assistant/tool. `developer` is OpenAI's newer name
             // for the same author-supplied guidance, so fold it into `system`
-            // here instead of letting the render fail. Gemma's template names
+            // here instead of letting the render fail. DeepSeek's native
+            // render frames `developer` like a user turn, which is not what
+            // guidance means, so it folds too. Gemma's template names
             // `developer` explicitly, so it stays distinct there.
             let role: MFTokenizer.Role =
-                (dialect == .chatml && declared == .developer) ? .system : declared
+                (dialect != .gemma && declared == .developer) ? .system : declared
             if role == .system || role == .developer {
                 guard !sawConversationMessage else {
                     throw invalid("system or developer guidance must precede the conversation",
@@ -439,7 +442,7 @@ public enum OpenAIRequestValidator {
                     throw invalid("historical tool arguments must be a JSON object",
                                   "messages", "invalid_tool_arguments")
                 }
-                guard dialect == .chatml
+                guard dialect != .gemma
                         || (try? arguments.gemmaToolArgumentBody()) != nil,
                       (try? arguments.jinjaSendableValue()) != nil else {
                     throw invalid(

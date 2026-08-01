@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--model <gemma4|qwen36>] --output <model.gturbo> [--overwrite] [--resume]
+  MferenceRepack [--model <gemma4|qwen36|deepseekv4flash>] --output <model.gturbo> [--overwrite] [--resume]
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
   MferenceRepack --help

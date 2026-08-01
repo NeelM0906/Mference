@@ -8,6 +8,7 @@ import Metal
 public enum ModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case deepseekV4Flash = "deepseekV4Flash"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -40,11 +41,85 @@ public struct LinearAttentionConfig: Sendable, Equatable {
     public var valueDim: Int { numVHeads * valueHeadDim }
 }
 
+/// DeepSeek-V4 compressed-attention dimensions. Zeroed for architectures
+/// without CSA/HCA layers.
+///
+/// V4 attention is shared-KV MQA (one 512-dim KV head read as both K and V)
+/// with a low-rank query path, a grouped low-rank output projection, per-head
+/// learnable attention sinks, and interleaved partial RoPE on the *trailing*
+/// `ropeHeadDim` channels of each head. CSA layers pool every `csaCompressRate`
+/// source tokens into one compressed KV entry (two overlapping series) and
+/// gather the top `indexTopK` entries per query with a lightning indexer; HCA
+/// layers pool every `hcaCompressRate` tokens non-overlapping and attend
+/// densely over the result. Sliding layers rope at `mainRopeTheta` (the
+/// ArchConfig `ropeTheta`); CSA/HCA layers and their compressors rope at
+/// `compressRopeTheta`.
+public struct CompressedAttentionConfig: Sendable, Equatable {
+    public let qLoraRank: Int
+    public let oLoraRank: Int
+    public let oGroups: Int
+    public let ropeHeadDim: Int
+    public let indexNHeads: Int
+    public let indexHeadDim: Int
+    public let indexTopK: Int
+    public let csaCompressRate: Int
+    public let hcaCompressRate: Int
+    public let compressRopeTheta: Double
+
+    public init(qLoraRank: Int, oLoraRank: Int, oGroups: Int,
+                ropeHeadDim: Int,
+                indexNHeads: Int, indexHeadDim: Int, indexTopK: Int,
+                csaCompressRate: Int, hcaCompressRate: Int,
+                compressRopeTheta: Double) {
+        self.qLoraRank = qLoraRank
+        self.oLoraRank = oLoraRank
+        self.oGroups = oGroups
+        self.ropeHeadDim = ropeHeadDim
+        self.indexNHeads = indexNHeads
+        self.indexHeadDim = indexHeadDim
+        self.indexTopK = indexTopK
+        self.csaCompressRate = csaCompressRate
+        self.hcaCompressRate = hcaCompressRate
+        self.compressRopeTheta = compressRopeTheta
+    }
+
+    public static let none = CompressedAttentionConfig(
+        qLoraRank: 0, oLoraRank: 0, oGroups: 0, ropeHeadDim: 0,
+        indexNHeads: 0, indexHeadDim: 0, indexTopK: 0,
+        csaCompressRate: 0, hcaCompressRate: 0, compressRopeTheta: 0)
+}
+
+/// Manifold-Constrained Hyper-Connection (mHC) residual dimensions. Zeroed
+/// for architectures with a plain single-stream residual.
+///
+/// The residual is `mult` parallel streams. Each sublayer site owns a learned
+/// mix `fn: [(2 + mult) * mult, mult * hiddenSize]` (plus per-output `base`
+/// biases and 3 scales) producing sigmoid `pre` collapse weights, sigmoid
+/// `post` placement weights (range [0, 2]), and a `mult × mult` combine
+/// matrix projected onto the doubly-stochastic manifold by `sinkhornIters`
+/// alternating row/column normalizations with floor `eps`.
+public struct HyperConnectionConfig: Sendable, Equatable {
+    public let mult: Int
+    public let sinkhornIters: Int
+    public let eps: Double
+
+    public init(mult: Int, sinkhornIters: Int, eps: Double) {
+        self.mult = mult
+        self.sinkhornIters = sinkhornIters
+        self.eps = eps
+    }
+
+    public static let none = HyperConnectionConfig(mult: 0, sinkhornIters: 0, eps: 0)
+}
+
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
 ///
 /// `fullAttentionLayerMask` values: 0 = sliding-window attention,
-/// 1 = full attention, 2 = gated-DeltaNet linear attention.
+/// 1 = full attention, 2 = gated-DeltaNet linear attention,
+/// 3 = compressed sparse attention (CSA), 4 = heavily compressed attention
+/// (HCA). Values 3/4 additionally include the sliding-window branch (DeepSeek
+/// V4 concatenates compressed entries onto the window KV).
 public struct ArchConfig: Sendable, Equatable {
     public let hiddenSize: Int
     public let intermediateSize: Int          // shared expert FFN (== ffnIntermediate in manifest)
@@ -95,6 +170,22 @@ public struct ArchConfig: Sendable, Equatable {
     public let ropeNeoxSubdim: Bool
     /// Gated-DeltaNet dimensions for layers with mask value 2.
     public let linearAttention: LinearAttentionConfig
+    /// DeepSeek-V4 compressed-attention dimensions for layers with mask
+    /// values 3/4 (and the family's shared-KV MQA sliding layers).
+    public let compressedAttention: CompressedAttentionConfig
+    /// Manifold-Constrained Hyper-Connection residual streams. `.none` means
+    /// a plain single-stream residual.
+    public let hyperConnections: HyperConnectionConfig
+    /// Leading MoE layers whose expert selection is a frozen token-id lookup
+    /// (`tid2eid`) instead of a learned argmax. 0 for Gemma/Qwen.
+    public let numHashRoutedLayers: Int
+    /// Router score activation applied to the logits before top-k selection:
+    /// "softmax" (Gemma/Qwen behavior) or "sqrtsoftplus" (DeepSeek V4).
+    public let routerScoringFunc: String
+    /// Multiplier applied to the renormalized top-k routing weights.
+    public let routedScalingFactor: Double
+    /// Clamp for expert gate (max) and up (±) pre-activations. 0 = no clamp.
+    public let swigluLimit: Double
 
     public init(
         hiddenSize: Int,
@@ -126,7 +217,13 @@ public struct ArchConfig: Sendable, Equatable {
         ffnSandwichNorms: Bool = true,
         sharedExpertGated: Bool = false,
         ropeNeoxSubdim: Bool = false,
-        linearAttention: LinearAttentionConfig = .none
+        linearAttention: LinearAttentionConfig = .none,
+        compressedAttention: CompressedAttentionConfig = .none,
+        hyperConnections: HyperConnectionConfig = .none,
+        numHashRoutedLayers: Int = 0,
+        routerScoringFunc: String = "softmax",
+        routedScalingFactor: Double = 1.0,
+        swigluLimit: Double = 0.0
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -158,6 +255,12 @@ public struct ArchConfig: Sendable, Equatable {
         self.sharedExpertGated = sharedExpertGated
         self.ropeNeoxSubdim = ropeNeoxSubdim
         self.linearAttention = linearAttention
+        self.compressedAttention = compressedAttention
+        self.hyperConnections = hyperConnections
+        self.numHashRoutedLayers = numHashRoutedLayers
+        self.routerScoringFunc = routerScoringFunc
+        self.routedScalingFactor = routedScalingFactor
+        self.swigluLimit = swigluLimit
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -245,10 +348,79 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Canonical DeepSeek-V4-Flash 284B-A13B baseline: 43 all-MoE layers
+    /// (1 shared + 256 routed experts of width 2048, top-6; layers 0–2 route
+    /// by frozen `tid2eid` hash), shared-KV MQA attention (64 query heads over
+    /// one 512-dim K=V head, low-rank Q, grouped low-rank output projection,
+    /// per-head attention sinks), sliding window 128 on every layer, and
+    /// compressed long-range KV: CSA (rate 4 + lightning indexer) on even
+    /// layers from 2, HCA (rate 128, dense) on odd layers from 3. The
+    /// residual is 4 mHC streams. Untied lm_head, no logit softcap.
+    ///
+    /// `numKVHeads`/`numFullKVHeads` are 1 (shared KV). `attentionKEqV` is
+    /// true in the strongest sense: K and V are the same cache entry.
+    /// `partialRotaryFactor = 64/512` with V4's interleaved-trailing RoPE
+    /// convention (neither Gemma's proportional nor Qwen's NeoX sub-dim
+    /// layout; the family's own kernels implement it).
+    public static let deepseekV4Flash_284B_A13B = ArchConfig(
+        hiddenSize: 4096,
+        intermediateSize: 2048,
+        moeIntermediateSize: 2048,
+        numHeads: 64,
+        numKVHeads: 1,
+        numFullKVHeads: 1,
+        headDim: 512,
+        fullHeadDim: 512,
+        vocabSize: 129_280,
+        slidingWindow: 128,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000.0,
+        fullRopeTheta: 10_000.0,
+        partialRotaryFactor: 0.125,
+        numLayers: 43,
+        numExperts: 256,
+        topKExperts: 6,
+        tieWordEmbeddings: false,
+        attentionKEqV: true,
+        fullAttentionLayerMask: Self.deepseekV4FlashLayerMask(),
+        hiddenActivation: "silu",
+        family: .deepseekV4Flash,
+        attnOutputGate: false,
+        attentionScale: 0.044194173824159216,   // 512^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: false,
+        linearAttention: .none,
+        compressedAttention: CompressedAttentionConfig(
+            qLoraRank: 1024, oLoraRank: 1024, oGroups: 8,
+            ropeHeadDim: 64,
+            indexNHeads: 64, indexHeadDim: 128, indexTopK: 512,
+            csaCompressRate: 4, hcaCompressRate: 128,
+            compressRopeTheta: 160_000.0),
+        hyperConnections: HyperConnectionConfig(
+            mult: 4, sinkhornIters: 20, eps: 1.0e-6),
+        numHashRoutedLayers: 3,
+        routerScoringFunc: "sqrtsoftplus",
+        routedScalingFactor: 1.5,
+        swigluLimit: 10.0
+    )
+
+    private static func deepseekV4FlashLayerMask() -> [UInt8] {
+        // Layer kinds: 0 = sliding-window only (layers 0-1), then 3 = CSA on
+        // even layers and 4 = HCA on odd layers (compress_ratios
+        // [0, 0, 4, 128, 4, 128, ...]).
+        var mask = [UInt8](repeating: 0, count: 43)
+        for i in 2..<43 { mask[i] = i.isMultiple(of: 2) ? 3 : 4 }
+        return mask
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
+        .deepseekV4Flash: .deepseekV4Flash_284B_A13B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -256,13 +428,29 @@ public struct ArchConfig: Sendable, Equatable {
     /// raises achieved bandwidth on the narrower projections.
     public var decodeInt4GEMVShapes: [(m: Int, n: Int)] {
         var shapes: [(m: Int, n: Int)] = []
-        if attnOutputGate {
+        if hasCompressedAttentionLayers {
+            // DeepSeek V4 low-rank attention path: q_a, q_b, kv, o_a (as
+            // oGroups separate group GEMVs), o_b, plus the compressor /
+            // indexer projections.
+            let ca = compressedAttention
+            shapes.append((m: ca.qLoraRank, n: hiddenSize))
+            shapes.append((m: numHeads * fullHeadDim, n: ca.qLoraRank))
+            shapes.append((m: fullHeadDim, n: hiddenSize))
+            shapes.append((m: ca.oLoraRank, n: numHeads * fullHeadDim / ca.oGroups))
+            shapes.append((m: hiddenSize, n: ca.oGroups * ca.oLoraRank))
+            shapes.append((m: 2 * fullHeadDim, n: hiddenSize))              // CSA compressor kv/gate
+            shapes.append((m: fullHeadDim, n: hiddenSize))                  // HCA compressor kv/gate
+            shapes.append((m: 2 * ca.indexHeadDim, n: hiddenSize))          // indexer kv/gate
+            shapes.append((m: ca.indexNHeads * ca.indexHeadDim, n: ca.qLoraRank))
+        } else if attnOutputGate {
             shapes.append((m: 2 * numHeads * fullHeadDim, n: hiddenSize))
         } else {
             shapes.append((m: numHeads * fullHeadDim, n: hiddenSize))
         }
-        shapes.append((m: numFullKVHeads * fullHeadDim, n: hiddenSize))
-        shapes.append((m: hiddenSize, n: numHeads * fullHeadDim))
+        if !hasCompressedAttentionLayers {
+            shapes.append((m: numFullKVHeads * fullHeadDim, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: numHeads * fullHeadDim))
+        }
         if hasLinearAttentionLayers {
             let la = linearAttention
             shapes.append((m: la.qkvDim, n: hiddenSize))
@@ -285,7 +473,19 @@ public struct ArchConfig: Sendable, Equatable {
     /// Layer kind helpers over the mask encoding.
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
+    public func layerIsCSA(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 3 }
+    public func layerIsHCA(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 4 }
+    /// True for any layer carrying a compressed long-range KV branch.
+    public func layerIsCompressed(_ layer: Int) -> Bool {
+        let v = fullAttentionLayerMask[layer]
+        return v == 3 || v == 4
+    }
     public var hasLinearAttentionLayers: Bool { fullAttentionLayerMask.contains(2) }
+    public var hasCompressedAttentionLayers: Bool {
+        fullAttentionLayerMask.contains(where: { $0 == 3 || $0 == 4 })
+    }
+    /// Hash-routed MoE layer: expert selection is `tid2eid[token]`.
+    public func layerIsHashRouted(_ layer: Int) -> Bool { layer < numHashRoutedLayers }
 }
 
 /// Failure modes for the validation gates in `Model.load`.

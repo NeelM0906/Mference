@@ -571,10 +571,13 @@ public final class RemoteStreamingRepacker {
             sharedExpert: 8,
             routedExpert: 4)
         for e in plan.resident.entries {
-            if e.name == "language_model.model.embed_tokens.weight", let s = e.quantSpec {
+            if e.name == "language_model.model.embed_tokens.weight"
+                || e.name == "model.embed_tokens.weight",
+               let s = e.quantSpec {
                 bits.embedding = s.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight")
+                || e.name.hasSuffix(".self_attn.q_a_proj.weight")
                 || e.name.hasSuffix(".linear_attn.in_proj_qkv.weight"),
                let s = e.quantSpec {
                 bits.attention = s.bits
@@ -585,7 +588,8 @@ public final class RemoteStreamingRepacker {
                 bits.router = s.bits
             }
             if e.name.hasSuffix(".mlp.gate_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight"),
+                || e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
+                || e.name.hasSuffix(".mlp.shared_experts.gate_proj.weight"),
                let s = e.quantSpec {
                 bits.sharedExpert = s.bits
             }
@@ -597,9 +601,15 @@ public final class RemoteStreamingRepacker {
         let files = audit.outputFiles.map {
             ($0.relativePath, GTurboJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }
+        // Pinned sources resolve their model ID through the fingerprint
+        // table; a trust-on-first-use source (no pinned index hash) takes its
+        // ID from the source entry itself.
+        let modelID = plan.matchedModelID
+            ?? SourceFingerprint.trustOnFirstUseModelID(forRepoID: options.repoID)
+            ?? "unknown/snapshot"
         let data = try GTurboJSON.encodeManifest(
             plan: plan,
-            modelID: plan.matchedModelID ?? "unknown/snapshot",
+            modelID: modelID,
             sourceSnapshotHash: "sha256:" + metadata.indexSha256Hex,
             files: files,
             expertsPerLayer: plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,

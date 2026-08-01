@@ -30,7 +30,7 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
             let resume = FileManager.default.fileExists(atPath: paths.checkpointFile)
             let options = RemoteStreamingRepackOptions(
                 repoID: descriptor.repoID,
-                revision: descriptor.revision,
+                revision: descriptor.revision ?? "main",
                 outputDir: outputDirectory.path,
                 token: ProcessInfo.processInfo.environment["HF_TOKEN"],
                 requireKnownSource: true,
@@ -58,7 +58,7 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
         let saved = try RemoteStreamingRepacker.inspectPersistentInstall(
             outputDirectory: outputDirectory.path,
             repoID: descriptor.repoID,
-            requestedRevision: descriptor.revision)
+            requestedRevision: descriptor.revision ?? "main")
         let remainingBytes: UInt64
         if let saved {
             let checkpointPath = try RemoteInstallPaths(

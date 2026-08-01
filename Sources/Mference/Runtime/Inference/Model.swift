@@ -34,6 +34,7 @@ public struct Model {
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
+    public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
 
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex
@@ -81,8 +82,24 @@ public struct Model {
 
     // MARK: - Resident accessors
 
+    /// Tensor-name prefix for the language-model trunk. Gemma and Qwen ship
+    /// inside a multimodal container (`language_model.model.`); DeepSeek V4
+    /// is text-only and uses the bare `model.` prefix.
+    var trunkPrefix: String {
+        switch config.family {
+        case .gemma4, .qwen36: return "language_model.model."
+        case .deepseekV4Flash: return "model."
+        }
+    }
+    private var lmHeadName: String {
+        switch config.family {
+        case .gemma4, .qwen36: return "language_model.lm_head.weight"
+        case .deepseekV4Flash: return "lm_head.weight"
+        }
+    }
+
     public var embedding: TensorView {
-        try! resident(name: "language_model.model.embed_tokens.weight")
+        try! resident(name: "\(trunkPrefix)embed_tokens.weight")
     }
 
     /// Gemma 4 ties lm_head to the embedding; Qwen 3.6 carries a separate
@@ -90,7 +107,7 @@ public struct Model {
     /// kernel's job, not the loader's.
     public var lmHead: TensorView {
         if config.tieWordEmbeddings { return embedding }
-        return try! resident(name: "language_model.lm_head.weight")
+        return try! resident(name: lmHeadName)
     }
 
     public func qProj(layer L: Int) throws -> TensorView {
@@ -113,6 +130,8 @@ public struct Model {
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
         case .qwen36:
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
+        case .deepseekV4Flash:
+            return try resident(name: "model.layers.\(L).mlp.gate.weight")
         }
     }
     /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
@@ -133,6 +152,8 @@ public struct Model {
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
         case .qwen36:
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
+        case .deepseekV4Flash:
+            return "model.layers.\(L).mlp.shared_experts.\(proj).weight"
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
@@ -141,13 +162,13 @@ public struct Model {
         try resident(name: "language_model.model.layers.\(L).mlp.shared_expert_gate.weight")
     }
     public func inputNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).input_layernorm.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
     }
     public func postAttnNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).post_attention_layernorm.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
     }
     public var finalNorm: TensorView {
-        try! resident(name: "language_model.model.norm.weight")
+        try! resident(name: "\(trunkPrefix)norm.weight")
     }
 
     // MARK: - Per-head attention norms (Q/K only)
@@ -244,6 +265,117 @@ public struct Model {
     /// Gated RMSNorm weight over the value head dim, shape `[valueHeadDim]`.
     public func linearNorm(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).linear_attn.norm.weight")
+    }
+
+    // MARK: - DeepSeek-V4 compressed attention, mHC, and MoE auxiliaries
+    //
+    // Trunk prefix is the bare `model.`. Attention projections and the
+    // compressor / indexer projections are 4-bit affine; norms, sinks,
+    // position biases, the hyper-connection mixes, `e_score_correction_bias`,
+    // and `tid2eid` are unquantized pass-through tensors.
+
+    private func dsv4Layer(_ L: Int) -> String { "model.layers.\(L)." }
+
+    public func dsv4QAProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.q_a_proj.weight")
+    }
+    public func dsv4QANorm(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.q_a_norm.weight")
+    }
+    public func dsv4QBProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.q_b_proj.weight")
+    }
+    public func dsv4KVProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.kv_proj.weight")
+    }
+    public func dsv4KVNorm(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.kv_norm.weight")
+    }
+    public func dsv4OAProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.o_a_proj.weight")
+    }
+    public func dsv4OBProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.o_b_proj.weight")
+    }
+    /// Per-head attention sink logits, shape `[numHeads]`, FP32.
+    public func dsv4Sinks(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.sinks")
+    }
+
+    public func dsv4CompressorKVProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.kv_proj.weight")
+    }
+    public func dsv4CompressorGateProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.gate_proj.weight")
+    }
+    public func dsv4CompressorKVNorm(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.kv_norm.weight")
+    }
+    /// Compressor position bias, shape `[rate, 2*headDim]` (CSA) or
+    /// `[rate, headDim]` (HCA), FP32.
+    public func dsv4CompressorPositionBias(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.position_bias")
+    }
+
+    public func dsv4IndexerKVProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.indexer.kv_proj.weight")
+    }
+    public func dsv4IndexerGateProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.indexer.gate_proj.weight")
+    }
+    public func dsv4IndexerKVNorm(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.indexer.kv_norm.weight")
+    }
+    public func dsv4IndexerPositionBias(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.indexer.position_bias")
+    }
+    public func dsv4IndexerQBProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.indexer.q_b_proj.weight")
+    }
+    public func dsv4IndexerWeightsProj(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "self_attn.compressor.indexer.scorer.weights_proj.weight")
+    }
+
+    /// Hyper-connection mix for the attention / FFN site: `fn`
+    /// `[(2+mult)*mult, mult*hidden]`, `base` `[(2+mult)*mult]`, `scale`
+    /// `[3]`, all FP32.
+    public func dsv4AttnHCFn(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "attn_hc.fn")
+    }
+    public func dsv4AttnHCBase(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "attn_hc.base")
+    }
+    public func dsv4AttnHCScale(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "attn_hc.scale")
+    }
+    public func dsv4FFNHCFn(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "ffn_hc.fn")
+    }
+    public func dsv4FFNHCBase(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "ffn_hc.base")
+    }
+    public func dsv4FFNHCScale(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "ffn_hc.scale")
+    }
+    public var dsv4HyperHeadFn: TensorView {
+        get throws { try resident(name: "model.hc_head.hc_fn") }
+    }
+    public var dsv4HyperHeadBase: TensorView {
+        get throws { try resident(name: "model.hc_head.hc_base") }
+    }
+    public var dsv4HyperHeadScale: TensorView {
+        get throws { try resident(name: "model.hc_head.hc_scale") }
+    }
+
+    /// Router selection bias (learned-router layers), shape `[numExperts]`,
+    /// FP32. Selection only — weights use raw sqrtsoftplus scores.
+    public func dsv4RouterCorrectionBias(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "mlp.gate.e_score_correction_bias")
+    }
+    /// Frozen token-id -> expert-id table for hash-routed layers, shape
+    /// `[vocabSize, topK]`.
+    public func dsv4HashTable(layer L: Int) throws -> TensorView {
+        try resident(name: dsv4Layer(L) + "mlp.gate.tid2eid")
     }
 
     /// Resolve a tensor name to a `TensorView` against the resident buffer.

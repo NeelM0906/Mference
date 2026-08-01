@@ -410,6 +410,21 @@ struct OpenAIValidationTests {
         #expect(validated.messages.first?.content == "guidance")
     }
 
+    @Test func developerGuidanceBecomesSystemForDeepseek() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"system","content":"system"},
+          {"role":"developer","content":"developer"},
+          {"role":"user","content":"hello"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .deepseek)
+        #expect(validated.messages.map(\.role) == [.system, .user])
+        #expect(validated.messages.first?.content == "system\n\ndeveloper")
+    }
+
     @Test func rejectsLateDeveloperGuidanceForChatML() throws {
         let data = Data(#"""
         {"model":"m","messages":[
@@ -452,6 +467,35 @@ struct OpenAIValidationTests {
         #expect(properties?["args"]?.objectValue?["anyOf"] != nil)
     }
 
+    @Test func deepseekDialectKeepsUnionBranchesInTheToolSchema() throws {
+        // DeepSeek serializes the whole schema to JSON in its native tools
+        // section, so the union must survive validation untouched too.
+        let data = Data(#"""
+        {
+          "model":"m",
+          "messages":[{"role":"user","content":"hi"}],
+          "tools":[{
+            "type":"function",
+            "function":{
+              "name":"mcp",
+              "parameters":{
+                "type":"object",
+                "properties":{
+                  "args":{"anyOf":[{"type":"string"},{"type":"object"}]}
+                }
+              }
+            }
+          }]
+        }
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .deepseek)
+        let properties = validated.tools[0].parameters
+            .objectValue?["properties"]?.objectValue
+        #expect(properties?["args"]?.objectValue?["anyOf"] != nil)
+    }
+
     @Test func ambiguousParameterKeysPassValidationForChatML() throws {
         let data = Data(#"""
         {
@@ -475,6 +519,32 @@ struct OpenAIValidationTests {
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         let validated = try OpenAIRequestValidator.validate(
             request, modelID: "m", dialect: .chatml)
+        #expect(validated.tools.count == 1)
+    }
+
+    @Test func ambiguousParameterKeysPassValidationForDeepseek() throws {
+        let data = Data(#"""
+        {
+          "model":"m",
+          "messages":[{"role":"user","content":"lookup"}],
+          "tools":[{
+            "type":"function",
+            "function":{
+              "name":"lookup",
+              "parameters":{
+                "type":"object",
+                "allOf":[{
+                  "type":"object",
+                  "properties":{"bad:key":{"type":"string"}}
+                }]
+              }
+            }
+          }]
+        }
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .deepseek)
         #expect(validated.tools.count == 1)
     }
 
