@@ -95,7 +95,7 @@ public struct QwenToolCallParser: Sendable {
         }
         let value = String(body[..<closeRange.lowerBound])
         body = body[closeRange.upperBound...]
-        return (key, parsedValue(value))
+        return (key, try parsedValue(value))
     }
 
     /// Handles `<parameter=k>\n</parameter>\n` where the single newline both
@@ -110,11 +110,20 @@ public struct QwenToolCallParser: Sendable {
         name.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil
     }
 
-    private func parsedValue(_ raw: String) -> JSONValue {
+    private func parsedValue(_ raw: String) throws -> JSONValue {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first,
-              "{[-0123456789tfn".contains(first),
-              let value = try? JSONDecoder().decode(JSONValue.self,
+              "{[-0123456789tfn".contains(first) else {
+            return .string(raw)
+        }
+        // The decode below bounds depth via `JSONValue.init(from:)`, but a
+        // failed decode falls back to `.string`, which would smuggle an
+        // over-deep value through as raw text instead of rejecting the call
+        // the way the Gemma parser does. Bound it explicitly first.
+        if "{[".contains(first), nestsBeyondLimit(trimmed) {
+            throw ToolCallParserError.malformed
+        }
+        guard let value = try? JSONDecoder().decode(JSONValue.self,
                                                     from: Data(trimmed.utf8)) else {
             return .string(raw)
         }
@@ -122,5 +131,37 @@ public struct QwenToolCallParser: Sendable {
         // unquoted, so literal quotes belong to the argument itself.
         if case .string = value { return .string(raw) }
         return value
+    }
+
+    /// Iteratively counts container nesting, ignoring brackets inside string
+    /// literals, so no input can drive recursion — this scan is the depth
+    /// guard for the recursive walks downstream of the parse (`JSONValue`
+    /// itself, `jinjaSendableValue`), matching `JSONValue.maximumDepth` on
+    /// the `Codable` boundary and the Gemma parser's descent guard.
+    private func nestsBeyondLimit(_ text: String) -> Bool {
+        var depth = 0
+        var isInString = false
+        var isEscaped = false
+        for character in text {
+            if isInString {
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    isInString = false
+                }
+                continue
+            }
+            switch character {
+            case "\"": isInString = true
+            case "{", "[":
+                depth += 1
+                if depth > JSONValue.maximumDepth { return true }
+            case "}", "]": depth -= 1
+            default: break
+            }
+        }
+        return false
     }
 }
