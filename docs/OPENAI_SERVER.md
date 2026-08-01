@@ -1,8 +1,9 @@
 # Local OpenAI-compatible server
 
 `MferenceServer` exposes a local Chat Completions API for one Gemma
-model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
-through a proxy or tunnel.
+model. It binds to `127.0.0.1` by default, or to the machine's exact Tailscale
+IPv4 address with `--bind tailnet`. It has no application-level authentication
+or TLS; do not expose it through a wildcard interface, proxy, or tunnel.
 
 ## Start the server
 
@@ -26,6 +27,28 @@ swift build -c release --product MferenceServer
 The server loads the model before opening the port. Wait for
 `MferenceServer ready`, then keep the process running while clients use
 it.
+
+To reach the server from other devices in the same Tailnet, let it detect and
+bind the machine's Tailscale IPv4 address:
+
+```bash
+.build/release/MferenceServer \
+  --model scratch/gemma4.gturbo \
+  --bind tailnet \
+  --port 8080 \
+  --max-context 32768 \
+  --queue-limit 32
+```
+
+This requires the `tailscale` CLI on `PATH`. The server binds only that one
+address; it never binds a wildcard interface. If Tailscale is missing, not
+running, or reports anything other than a single Tailscale IPv4 address, the
+command fails instead of falling back to a broader interface. The startup line
+prints the address it actually bound.
+
+`--bind tailnet` is not authentication. Access is governed entirely by the
+Tailnet ACL, and every device the ACL admits gets unauthenticated access to the
+full API. The server still has no application-level authentication or TLS.
 
 Check the server from another terminal:
 

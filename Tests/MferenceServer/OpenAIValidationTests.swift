@@ -297,6 +297,7 @@ struct ServerArgumentTests {
     @Test func defaults() throws {
         let arguments = try ServerArguments.parse(["--model", "model.gturbo"])
         #expect(arguments.port == 8080)
+        #expect(arguments.bindMode == .loopback)
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
         #expect(arguments.promptCacheMode == .singlePrefix)
@@ -318,6 +319,99 @@ struct ServerArgumentTests {
                 "--model", "model.gturbo",
                 "--prompt-cache-mode", "many",
             ])
+        }
+    }
+
+    @Test func parsesBindModeAndRejectsUnknownMode() throws {
+        let tailnet = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--bind", "tailnet",
+        ])
+        #expect(tailnet.bindMode == .tailnet)
+        let loopback = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--bind", "loopback",
+        ])
+        #expect(loopback.bindMode == .loopback)
+        for rejected in ["public", "0.0.0.0", "lan", ""] {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerArguments.parse([
+                    "--model", "model.gturbo",
+                    "--bind", rejected,
+                ])
+            }
+        }
+    }
+}
+
+@Suite("Server bind mode")
+struct ServerBindModeTests {
+    @Test func loopbackIgnoresTailscaleAndBindsLoopback() throws {
+        let host = try ServerBindMode.loopback.host(tailnetAddresses: { "100.101.102.103\n" })
+        #expect(host == "127.0.0.1")
+    }
+
+    @Test func tailnetBindsTheDetectedAddress() throws {
+        let host = try ServerBindMode.tailnet.host(tailnetAddresses: { "100.101.102.103\n" })
+        #expect(host == "100.101.102.103")
+    }
+
+    @Test func tailnetFailsWhenTailscaleCannotBeQueried() throws {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerBindMode.tailnet.host(tailnetAddresses: {
+                throw ServerArgumentError.invalid("could not run tailscale")
+            })
+        }
+    }
+
+    @Test func tailnetFailsOnEmptyOutput() throws {
+        for output in ["", "\n", "   \n\t"] {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
+        }
+    }
+
+    @Test func tailnetFailsOnMultipleAddresses() throws {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerBindMode.tailnet.host(tailnetAddresses: {
+                "100.101.102.103\n100.64.0.9\n"
+            })
+        }
+    }
+
+    @Test func tailnetFailsOnIPv6OnlyOutput() throws {
+        for output in ["fd7a:115c:a1e0::1\n", "::1\n"] {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
+        }
+    }
+
+    @Test func tailnetFailsOnMalformedOutput() throws {
+        let malformed = [
+            "no addresses available\n",
+            "100.101.102\n",
+            "100.101.102.103.4\n",
+            "100.101.102.999\n",
+            "100.101.102.-3\n",
+            "100.101.102.0x3\n",
+            "100.101.102.103/32\n",
+            "100.101.102.103:8080\n",
+        ]
+        for output in malformed {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
+        }
+    }
+
+    @Test func tailnetRefusesAddressesOutsideTheTailscaleRange() throws {
+        let refused = ["0.0.0.0\n", "127.0.0.1\n", "192.168.1.20\n", "10.0.0.4\n", "100.63.255.255\n"]
+        for output in refused {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
         }
     }
 }
