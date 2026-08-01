@@ -52,10 +52,24 @@ swift build -c release
 ```
 
 When the app opens, choose **Download** and let Mference fetch and repack the
-pinned model. Once it is ready, choose **Load Model**, type your prompt, and
-press **Generate**. The app installs Gemma 4 by default; select Qwen 3.6 with
-`defaults write Mference model qwen36` (or `MFERENCE_MODEL=qwen36` in the
-environment) before launching.
+pinned model — or choose **Choose Existing Model…** to point at a `.gturbo`
+directory already on disk. Once it is ready, choose **Load Model**, type your
+prompt, and press **Generate**. The app installs Gemma 4 by default; select
+Qwen 3.6 with `defaults write Mference model qwen36` (or `MFERENCE_MODEL=qwen36`
+in the environment) before launching.
+
+Each chat keeps its own multi-turn history in a collapsible left sidebar
+(<kbd>Command</kbd>+<kbd>N</kbd> for a new chat,
+<kbd>Control</kbd>+<kbd>Command</kbd>+<kbd>S</kbd> to toggle the sidebar).
+History is written locally next to the model directory and rendered through the
+installed model's own chat template, so both Gemma 4 and Qwen 3.6 see their
+native dialect. The composer can extract text locally from PDF, DOCX, PPTX, and
+XLSX files; nothing is uploaded. Extraction is bounded, so very long documents
+are trimmed and marked as truncated. Before a turn is committed, the app
+measures the rendered conversation with the model tokenizer; when older turns no
+longer fit the selected context, it compresses them into a rolling per-chat
+memory while the full transcript stays visible. Appearance follows System,
+Light, or Dark from the **Appearance** menu.
 
 From the command line:
 
