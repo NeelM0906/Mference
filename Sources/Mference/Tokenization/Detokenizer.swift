@@ -3,7 +3,7 @@ import Tokenizers
 
 /// Streaming detokenizer for generation loops.
 ///
-/// Three challenges drive the design:
+/// Four challenges drive the design:
 ///
 /// 1. BPE byte-fallback splits multi-byte codepoints (e.g. emoji) across several
 ///    tokens. Naively decoding each token in isolation yields broken UTF-8.
@@ -14,6 +14,11 @@ import Tokenizers
 ///    bytes simply span ordinary tokens, and `ByteLevelDecoder` ends with
 ///    `String(decoding:as:)`, so a decode stopping mid-scalar already contains
 ///    U+FFFD. Nothing upstream of us can hold those bytes back.
+/// 4. `Tokenizer.decode` applies `cleanUpTokenizationSpaces`, and it defaults to
+///    **true** when `tokenizer_config.json` omits the key. Gemma omits it; Qwen
+///    sets it false. Its rewrites delete a space an earlier decode already
+///    emitted (" 's" -> "'s"), so on Gemma the decode genuinely is not
+///    append-only and no amount of holding back can make it so.
 ///
 /// Strategy:
 ///   - During `push(_:)` we decode the longest prefix of accumulated IDs that
@@ -29,6 +34,14 @@ import Tokenizers
 ///     codepoint. `flush()` also releases any withheld U+FFFD, so a replacement
 ///     character the model genuinely produced — or a stream that really did stop
 ///     mid-scalar — still reaches the caller.
+///   - When a decode contradicts text already handed out, the resync path emits
+///     the divergent tail minus the part the caller has already seen, instead of
+///     dropping it. The stale text cannot be retracted; losing characters on top
+///     of that is strictly worse. On Gemma this is the difference between
+///     streaming "do n't" and streaming "do n'".
+///
+/// `flush()` is terminal in the generation loop, but pushing afterwards is not a
+/// trap: the committed prefix is clamped so that it can never rewind.
 struct MFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
     @usableFromInline var stableIDs: [Int] = []
@@ -76,13 +89,27 @@ struct MFDetokenizer {
         // swallows the delta. The views are borrowed, not copied: this runs per
         // token.
         //
-        // The decode is *not* guaranteed to extend byte-wise either. A byte-level
-        // BPE token can end mid-scalar, and the decoder renders the dangling
-        // bytes as U+FFFD; the next decode replaces those bytes outright. Holding
-        // the trailing U+FFFD run back keeps `emitted` a genuine byte prefix of
-        // every later decode, which is what makes the guard below meaningful.
-        let held = holdingPartialScalar ? Self.trailingReplacementByteCount(current) : 0
+        // The decode is *not* guaranteed to extend, byte-wise or otherwise, and
+        // two separate things break it:
+        //
+        //   - A byte-level BPE token can end mid-scalar, and the decoder renders
+        //     the dangling bytes as U+FFFD; the next decode replaces those bytes
+        //     outright. Withholding the trailing U+FFFD run removes this case.
+        //   - `Tokenizer.decode` applies `cleanUpTokenizationSpaces`, which
+        //     defaults to true when the key is absent from `tokenizer_config.json`
+        //     — as it is for Gemma. Its rewrites delete a space an earlier decode
+        //     already emitted (" 's" -> "'s"), so on that path the decode really
+        //     can contradict what was handed out. Nothing here can prevent that;
+        //     the resync branch keeps the damage to the retracted space.
         let cur = current.utf8
+        // Never withhold text already handed out. `flush()` releases the withheld
+        // run, so afterwards `emitted` can itself end with U+FFFD; without this
+        // clamp a subsequent `push` would re-withhold that run, shrink `emitted`,
+        // and hand the caller a duplicate on the following token. Clamping to
+        // `emitted`'s length keeps the committed prefix monotonic under any call
+        // order, and lands on a scalar boundary because `emitted` is one.
+        let held = min(holdingPartialScalar ? Self.trailingReplacementByteCount(current) : 0,
+                       max(0, cur.count - emitted.utf8.count))
         let committed = cur.dropLast(held)
         // `current` itself when nothing is withheld: no copy on the hot path.
         func committedText() -> String {
@@ -90,15 +117,63 @@ struct MFDetokenizer {
         }
 
         guard cur.starts(with: emitted.utf8) else {
-            // Decoder altered the prefix — extremely rare in append-only streams.
-            // Resync rather than emit garbage; the user-visible loss is bounded
-            // to whatever was retokenized.
+            // The decode contradicts what was already handed out (see the
+            // clean-up note above). The stale text cannot be retracted, but
+            // dropping the divergent tail loses characters outright — "do n't"
+            // decodes to "don't" and the "t" simply never reaches the caller.
+            // Emit the tail past the common prefix instead: worst case the
+            // caller sees a space that clean-up would have removed.
+            let shared = Self.sharedScalarAlignedPrefix(cur, emitted.utf8)
+            let newTail = committed.dropFirst(shared)
+            // The rewrite deleted a space *inside* the divergent region, so the
+            // new tail usually restates characters already shown ("it '" becomes
+            // "it's": the apostrophe moved, it is not new). Skip the part that
+            // the caller has already seen, or the stream gains "it ''s".
+            let overlap = Self.overlapCount(shown: emitted.utf8.dropFirst(shared),
+                                            tail: newTail)
+            let tail = String(decoding: newTail.dropFirst(overlap), as: UTF8.self)
             emitted = committedText()
-            return ""
+            return tail
         }
         let delta = String(decoding: committed.dropFirst(emitted.utf8.count), as: UTF8.self)
         emitted = committedText()
         return delta
+    }
+
+    /// Byte length of the longest common prefix of `a` and `b`, backed off to a
+    /// UTF-8 scalar boundary so slicing `a` at it cannot split a codepoint.
+    /// Only the resync branch needs this, so the linear walk is off the hot path.
+    @usableFromInline
+    static func sharedScalarAlignedPrefix(_ a: String.UTF8View, _ b: String.UTF8View) -> Int {
+        var matched = 0
+        var lastBoundary = 0
+        for (x, y) in zip(a, b) {
+            guard x == y else { break }
+            // Continuation bytes are 0b10xxxxxx; anything else starts a scalar.
+            if x & 0xC0 != 0x80 { lastBoundary = matched }
+            matched += 1
+        }
+        let splitsAScalar = a.dropFirst(matched).first.map { $0 & 0xC0 == 0x80 } ?? false
+        return splitsAScalar ? lastBoundary : matched
+    }
+
+    /// Largest `k` where the first `k` bytes of `tail` are also the last `k`
+    /// bytes of `shown`, i.e. how much of the rewritten tail the caller has
+    /// already been given. Candidates that would split a scalar are rejected.
+    ///
+    /// Both slices start at the first byte where the two decodes disagree, and a
+    /// clean-up rewrite disagrees only within its own match (at most four bytes),
+    /// so the quadratic scan is over a handful of bytes.
+    @usableFromInline
+    static func overlapCount(shown: String.UTF8View.SubSequence,
+                             tail: String.UTF8View.SubSequence) -> Int {
+        var k = min(shown.count, tail.count)
+        while k > 0 {
+            let splitsAScalar = tail.dropFirst(k).first.map { $0 & 0xC0 == 0x80 } ?? false
+            if !splitsAScalar, shown.suffix(k).elementsEqual(tail.prefix(k)) { return k }
+            k -= 1
+        }
+        return 0
     }
 
     /// UTF-8 length of the trailing run of U+FFFD in `text`, which is how the
@@ -130,7 +205,12 @@ struct MFDetokenizer {
             else { continue }
             bytes.append(byte)
         }
-        return String(bytes: bytes, encoding: .utf8) ?? ""
+        // Not `String(bytes:encoding:)`: that returns nil for the whole buffer
+        // if any part of it is invalid, so a tail holding a complete codepoint
+        // followed by a partial one would discard both. Decoding lossily keeps
+        // the complete codepoints and renders the remainder as U+FFFD, which is
+        // exactly what the byte-level path produces for the same situation.
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     @usableFromInline
