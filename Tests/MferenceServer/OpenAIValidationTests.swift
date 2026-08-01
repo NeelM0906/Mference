@@ -268,6 +268,21 @@ struct OpenAIValidationTests {
         #expect(scalar.gemmaSchemaNormalized().objectValue?["type"] == .string("string"))
     }
 
+    @Test func deeplyNestedToolSchemaIsRejectedBeforeItRecurses() throws {
+        // The unauthenticated shape that used to take the process down: the
+        // nesting reaches `parameters`, which decodes through the recursive
+        // `JSONValue`, and a stack overflow is not catchable.
+        let nesting = JSONValue.maximumDepth + 8
+        let data = Data(#"""
+        {"model":"m","max_tokens":1,"messages":[{"role":"user","content":"x"}],
+         "tools":[{"type":"function","function":{"name":"f","description":"d",
+         "parameters":{"type":"object","properties":{"p":{"x":\#(String(repeating: "[", count: nesting))\#(String(repeating: "]", count: nesting))}}}}}]}
+        """#.utf8)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        }
+    }
+
     @Test func consecutiveSystemMessagesCoalesceButKeepDeveloperDistinct() throws {
         let data = Data(#"""
         {"model":"m","messages":[

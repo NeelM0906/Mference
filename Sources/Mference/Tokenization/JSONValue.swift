@@ -11,7 +11,23 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
     case bool(Bool)
     case null
 
+    /// How deep a decoded tree may nest, counted from the root of the enclosing
+    /// document. Decoding recurses once per level, and so does every consumer of
+    /// the result — schema key validation, Gemma schema normalization, the Jinja
+    /// bridge — so the ceiling has to leave stack for all of them rather than
+    /// just for the decode. Request bodies are decoded on the sole event-loop
+    /// thread, whose 512 KiB stack a debug build exhausts at roughly 220 levels;
+    /// the JSON scanner does not help, because it accepts up to 512. A stack
+    /// overflow traps in hardware and cannot be caught, so the process dies
+    /// outright. Real tool schemas nest a handful of levels.
+    public static let maximumDepth = 64
+
     public init(from decoder: Decoder) throws {
+        guard decoder.codingPath.count <= Self.maximumDepth else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "JSON nests deeper than \(Self.maximumDepth) levels"))
+        }
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null
