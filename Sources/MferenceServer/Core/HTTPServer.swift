@@ -238,10 +238,16 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
             activeTask = childChannels.startTask {
                 defer { streamState.stop() }
+                let started = ContinuousClock.now
+                ServerLog.requestStarted(id: responseID, streaming: request.stream)
                 do {
+                    // Rendering and the context check happen before the head
+                    // is written, so a rejected prompt still gets a status
+                    // code even when the client asked for a stream.
+                    let prepared = try await self.backend.prepare(request)
                     let completion = try await self.coordinator.run(onQueued: startStream) {
                         startStream()
-                        return try await self.backend.generate(request) { event in
+                        return try await self.backend.generate(prepared) { event in
                             guard request.stream else { return }
                             switch event {
                             case .content(let text):
@@ -259,6 +265,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             }
                         }
                     }
+                    ServerLog.requestCompleted(id: responseID,
+                                               duration: started.duration(to: .now),
+                                               completion: completion)
                     if request.stream {
                         self.finishStream(contextBox.value,
                                           id: responseID,
@@ -274,6 +283,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 } catch {
                     self.handleAsyncError(error,
                                           context: contextBox.value,
+                                          id: responseID,
                                           stream: streamState.isStarted)
                 }
             }
@@ -424,21 +434,49 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     private func handleAsyncError(_ error: Error,
                                   context: ChannelHandlerContext,
+                                  id: String,
                                   stream: Bool) {
+        let (envelope, status) = failure(for: error)
+        ServerLog.requestFailed(id: id, status: status.code, streaming: stream, error: error)
         if stream {
-            let contextBox = SendableContext(context)
-            context.eventLoop.execute {
-                contextBox.value.close(promise: nil)
-            }
+            failStream(context, id: id, envelope: envelope)
+        } else {
+            writeError(context, status: status, envelope)
+        }
+    }
+
+    /// The status a failure would carry if nothing had been written yet. A
+    /// stream reports the same envelope in-band and keeps its committed `200`.
+    private func failure(for error: Error) -> (OpenAIErrorEnvelope, HTTPResponseStatus) {
+        if let requestError = error as? ServerRequestError {
+            return (requestError.envelope,
+                    requestError == .queueFull ? .tooManyRequests : .badRequest)
+        }
+        return (OpenAIErrorEnvelope(message: "generation failed",
+                                    type: "server_error",
+                                    code: "internal_error"),
+                .internalServerError)
+    }
+
+    /// Ends a committed stream on failure: one `error` frame, `[DONE]`, then a
+    /// normal end of the body. Closing the connection instead would reach the
+    /// client as an opaque transport error with no reason attached.
+    private func failStream(_ context: ChannelHandlerContext,
+                            id: String,
+                            envelope: OpenAIErrorEnvelope) {
+        let contextBox = SendableContext(context)
+        guard let data = try? JSONEncoder().encode(envelope) else {
+            ServerLog.streamAborted(id: id, reason: "error envelope could not be encoded")
+            context.eventLoop.execute { contextBox.value.close(promise: nil) }
             return
         }
-        if let requestError = error as? ServerRequestError {
-            let status: HTTPResponseStatus = requestError == .queueFull ? .tooManyRequests : .badRequest
-            writeError(context, status: status, requestError.envelope)
-        } else {
-            writeError(context, status: .internalServerError,
-                       OpenAIErrorEnvelope(message: "generation failed",
-                                           code: "internal_error"))
+        context.eventLoop.execute {
+            var buffer = contextBox.value.channel.allocator.buffer(capacity: data.count + 32)
+            buffer.writeString("data: ")
+            buffer.writeBytes(data)
+            buffer.writeString("\n\ndata: [DONE]\n\n")
+            contextBox.value.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+            contextBox.value.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
         }
     }
 
