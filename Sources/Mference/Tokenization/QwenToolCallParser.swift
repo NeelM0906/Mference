@@ -119,9 +119,18 @@ public struct QwenToolCallParser: Sendable {
         // The decode below bounds depth via `JSONValue.init(from:)`, but a
         // failed decode falls back to `.string`, which would smuggle an
         // over-deep value through as raw text instead of rejecting the call
-        // the way the Gemma parser does. Bound it explicitly first.
+        // the way the Gemma parser does. Bound it explicitly first — but only
+        // for values that really are structural JSON: unquoted string
+        // arguments may legitimately start with a bracket and nest deeply
+        // (code, minified JSON as string content), and those keep the
+        // raw-string fallback. `JSONSerialization` settles which case this is
+        // without hazard: its scanner caps nesting at 512, and it never
+        // builds a `JSONValue` tree.
         if "{[".contains(first), nestsBeyondLimit(trimmed) {
-            throw ToolCallParserError.malformed
+            if (try? JSONSerialization.jsonObject(with: Data(trimmed.utf8))) != nil {
+                throw ToolCallParserError.malformed
+            }
+            return .string(raw)
         }
         guard let value = try? JSONDecoder().decode(JSONValue.self,
                                                     from: Data(trimmed.utf8)) else {

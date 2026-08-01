@@ -61,6 +61,17 @@ struct QwenToolCallParserDepthTests {
         #expect(cursor == .array([]))
     }
 
+    @Test("Deeply bracketed non-JSON values keep the raw-string fallback")
+    func deeplyBracketedNonJSONStaysString() throws {
+        // Unquoted string arguments may legitimately start with a bracket and
+        // nest deeply — e.g. code or minified JSON passed as string content.
+        // Only values that really are structural JSON are depth-rejected.
+        let soup = String(repeating: "[", count: JSONValue.maximumDepth * 2)
+            + "not json"
+        let call = try parse(value: soup)
+        #expect(call.arguments == .object(["a": .string(soup)]))
+    }
+
     @Test("Brackets inside string literals do not count toward depth")
     func bracketsInsideStringsDoNotNest() throws {
         let brackets = String(repeating: "[", count: JSONValue.maximumDepth * 2)
