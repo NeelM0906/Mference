@@ -32,7 +32,7 @@ jobs:
           - macos-26
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Report toolchain
         run: swift --version
       - name: Hold the Swift floor
@@ -43,8 +43,11 @@ jobs:
           # quietly start testing a newer toolchain and the floor would rot
           # unnoticed, so fail loudly instead.
           version=$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+          # Exact match: the sed above yields major.minor only, so a glob like
+          # 6.1* would also accept a future 6.10 and silently stop testing the
+          # floor this leg exists to hold.
           case "$version" in
-            6.1*)
+            6.1)
               echo "floor leg is exercising Swift $version, as intended"
               ;;
             *)
@@ -61,7 +64,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check Markdown links
         # The checker reads UTF-8 Markdown; without an explicit locale Ruby
         # defaults to US-ASCII on a bare runner and aborts on the first

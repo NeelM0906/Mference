@@ -44,6 +44,17 @@ benchmark-results/
 scratch/
 tmp/
 
+# Internal working notes. The shipped documentation set is README, CONTRIBUTING,
+# AGENTS, SECURITY, THIRD_PARTY_NOTICES, docs/, and the .github templates;
+# anything below is process scaffolding that should not reach the public tree.
+design/PORTING_BRIEF.md
+*_SPEC.md
+*_NOTES.md
+*_PLAN.md
+PHASE*.md
+port-notes/
+notes/
+
 # Python
 __pycache__/
 *.pyc

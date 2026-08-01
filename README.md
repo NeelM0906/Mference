@@ -45,7 +45,7 @@ compile-time baseline, and manifest contract.
 ## Try it
 
 ```bash
-git clone <your-clone-url> Mference
+git clone https://github.com/NeelM0906/Mference.git
 cd Mference
 swift build -c release
 .build/release/MferenceMac
@@ -187,5 +187,5 @@ portions are licensed under the [Apache License 2.0](LICENSE-APACHE); see
 code is [MIT-licensed](LICENSE).
 
 Model weights remain subject to their own terms: the
-[Gemma Terms of Use](https://ai.google.dev/gemma/terms) and the
+[Gemma 4 license](https://ai.google.dev/gemma/apache_2) and the
 [Qwen license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE).

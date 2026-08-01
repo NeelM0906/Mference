@@ -23,14 +23,22 @@ versions included in that product.
 
 ## Model weights
 
-Model weights are not included in this repository. The installer downloads
-the pinned revision
-`0d77464eeb233a2da68ebf9d7dc4edaac7db956d` of
-[`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit)
-and repacks it locally. Its model card describes it as an Apache-2.0
-quantization of Google's Gemma 4 26B-A4B instruction checkpoint.
-Google publishes Gemma 4 under the
-[Apache License 2.0](https://ai.google.dev/gemma/apache_2).
+Model weights are not included in this repository. The installer downloads a
+pinned revision of one of two checkpoints and repacks it locally.
+
+Gemma 4: revision `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` of
+[`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit).
+Its model card describes it as an Apache-2.0 quantization of Google's Gemma 4
+26B-A4B instruction checkpoint. Google publishes Gemma 4 under the
+[Apache License 2.0](https://ai.google.dev/gemma/apache_2); note that earlier
+Gemma generations use the separate Gemma Terms of Use instead.
+
+Qwen 3.6: revision `38740b847e4cb78f352aba30aa41c76e08e6eb46` of
+[`mlx-community/Qwen3.6-35B-A3B-4bit`](https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit),
+a quantization of Alibaba's
+[Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkpoint, whose
+[license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE)
+governs those weights.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.

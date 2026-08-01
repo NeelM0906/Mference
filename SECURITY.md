@@ -12,7 +12,7 @@ multi-user, or security-critical deployments.
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected security vulnerability. Use
-[GitHub private vulnerability reporting](https://github.com/drumih/turbo-fieldfare/security/advisories/new)
+[GitHub private vulnerability reporting](https://github.com/NeelM0906/Mference/security/advisories/new)
 instead.
 
 Include:
