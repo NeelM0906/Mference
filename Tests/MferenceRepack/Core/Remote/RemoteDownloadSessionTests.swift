@@ -38,6 +38,43 @@ struct RemoteDownloadSessionTests {
         #expect(session.policy.maximumRedirects == 2)
     }
 
+    /// A 60 s per-request timeout resets only when data arrives, so one stalled
+    /// byte range aborts a multi-GB install. Every installer entry point that
+    /// omits an explicit session must inherit the stall-tolerant one.
+    @Test func installEntryPointsInheritStallTolerantDownloadSession() {
+        for options in installEntryPointOptions() {
+            #expect(options.downloadSession.policy.requestTimeoutSeconds == 300)
+            #expect(options.downloadSession.policy.resourceTimeoutSeconds
+                == 7 * 24 * 60 * 60)
+        }
+    }
+
+    /// Tolerating 5 minutes of silence only works because a genuinely dead
+    /// connection is still bounded by the retry policy.
+    @Test func installEntryPointsKeepBoundedRetries() {
+        for options in installEntryPointOptions() {
+            let policy = RemoteRetryPolicy(attempts: options.rangeRetryAttempts,
+                                           baseDelayNs: options.retryBaseDelayNs)
+            #expect(policy.attempts == 4)
+            #expect(policy.baseDelayNs == 1_000_000_000)
+            #expect(policy.maxDelayNs == 16_000_000_000)
+        }
+    }
+
+    /// Options as the CLI, the Mac app installer client and every pinned source
+    /// build them: no explicit session, no explicit retry tuning.
+    private func installEntryPointOptions() -> [RemoteStreamingRepackOptions] {
+        let outputDirectory = URL(fileURLWithPath: "/tmp/mference-install")
+        return [RemoteStreamingRepackOptions(repoID: "owner/model",
+                                             revision: "main",
+                                             outputDir: outputDirectory.path)]
+            + SupportedModelSource.all.map {
+                $0.installOptions(outputDirectory: outputDirectory,
+                                  overwrite: true,
+                                  token: nil)
+            }
+    }
+
     @Test func metadataRedirectsFollowOnlyBoundedSameHostHTTPS() {
         var original = URLRequest(url: URL(string: "https://hf.test/model/file")!)
         original.httpMethod = "HEAD"

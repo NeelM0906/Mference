@@ -62,7 +62,8 @@ import Testing
 
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
-            "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
+            "--model", "--prompt", "--messages-file", "--chat", "--system",
+            "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots",
@@ -102,6 +103,44 @@ import Testing
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--messages-file", "chat.json",
+            ])
+        }
+    }
+
+    @Test func chatSelectsInteractiveModeWithoutAPrompt() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--chat"])
+        #expect(arguments.chat)
+        #expect(arguments.prompt == nil)
+        #expect(arguments.messagesFile == nil)
+        #expect(arguments.systemPrompt == nil)
+    }
+
+    @Test func chatAndPromptAreMutuallyExclusive() {
+        #expect(throws: ArgsError.mutuallyExclusive("--prompt", "--chat")) {
+            _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--chat"])
+        }
+    }
+
+    @Test func chatAndMessagesFileAreMutuallyExclusive() {
+        #expect(throws: ArgsError.mutuallyExclusive("--messages-file", "--chat")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--messages-file", "chat.json", "--chat",
+            ])
+        }
+    }
+
+    @Test func repeatedSystemFlagsJoinIntoOneMessage() throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--chat",
+            "--system", "be terse", "--system", "answer in English",
+        ])
+        #expect(arguments.systemPrompt == "be terse\nanswer in English")
+    }
+
+    @Test func systemRequiresChatMode() {
+        #expect(throws: ArgsError.invalidValue(flag: "--system", value: "requires --chat")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi", "--system", "be terse",
             ])
         }
     }

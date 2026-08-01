@@ -34,14 +34,17 @@ checks, client setup, prompt reuse, tool loops, and supported API behavior.
 Apply the model-process checks below first; never start a second model process
 or terminate an existing one.
 
-Keep the server on `127.0.0.1`; it has no remote authentication or TLS, so do
-not proxy, tunnel, or expose it. A tool call from the local model never bypasses
-the client's normal permission policy. Keep the execution session alive while
-the server is needed, and stop only a server you launched.
+Keep the server on its default `127.0.0.1` binding unless the user explicitly
+asks for `--bind tailnet` and intends the Tailnet ACL to be the access
+boundary. It has no application-level authentication or TLS, so never bind it
+to a wildcard interface or expose it through a proxy or tunnel. A tool call
+from the local model never bypasses the client's normal permission policy. Keep
+the execution session alive while the server is needed, and stop only a server
+you launched.
 
 ## Test rules
 
-Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo`, and no process from `pgrep -fl 'MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
+Before a model run, require macOS 15+, Swift 6.1+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo`, and no process from `pgrep -fl 'MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
 
 Run package tests through `Scripts/test.sh`. Run only one app, CLI, or model-using test at a time.
 

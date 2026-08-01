@@ -154,4 +154,27 @@ struct ChatMLTemplateTests {
         #expect(text.hasSuffix("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
                 "expected enable_thinking=false generation prompt, got suffix: \(suffix)")
     }
+
+    @Test("Union tool schemas reach the template unflattened")
+    func toolChatKeepsUnionSchemas() throws {
+        let ids = try tok.encodeToolChat(
+            messages: [Message(role: .user, content: "Weather in Paris?")],
+            tools: [
+                .init(name: "get_weather",
+                      description: "Look up weather",
+                      parameters: .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "city": .object([
+                                "anyOf": .array([
+                                    .object(["type": .string("string")]),
+                                    .object(["type": .string("null")]),
+                                ]),
+                            ]),
+                        ]),
+                      ])),
+            ])
+        let text = tok.decode(ids, skipSpecialTokens: false)
+        #expect(text.contains("anyOf"))
+    }
 }

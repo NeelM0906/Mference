@@ -15,6 +15,7 @@ do {
 
 do {
     let signals = ServerTerminationSignals()
+    let host = try arguments.bindMode.host()
     let modelURL = URL(fileURLWithPath: arguments.model).standardizedFileURL
     let backend = try await ServerModelSession.load(
         modelDirectory: modelURL,
@@ -26,8 +27,11 @@ do {
         queueLimit: arguments.queueLimit,
         backend: backend,
         chatDialect: backend.chatDialect)
-    _ = try await server.start(port: arguments.port)
-    print("MferenceServer ready at http://127.0.0.1:\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue)")
+    _ = try await server.start(host: host, port: arguments.port)
+    print("MferenceServer ready at http://\(host):\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue)")
+    // Supervisors watch for the ready line through a pipe or log file, where
+    // stdout is block-buffered and would otherwise hold it back indefinitely.
+    fflush(stdout)
 
     _ = await signals.wait()
     try await server.shutdown()

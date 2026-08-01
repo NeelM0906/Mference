@@ -59,14 +59,21 @@ struct MFDetokenizer {
 
     @usableFromInline
     mutating func commitDelta(_ current: String) -> String {
-        guard current.hasPrefix(emitted) else {
+        // Compare UTF-8 bytes, not graphemes. `hasPrefix` / `dropFirst` work on
+        // extended grapheme clusters, so a token boundary that splits a cluster
+        // — a Thai consonant in one token, its tone mark in the next — makes
+        // "ห้าม" fail the prefix test against "ห" and the resync path below
+        // swallows the delta. Byte-wise an append-only decode is always a strict
+        // prefix. The views are borrowed, not copied: this runs per token.
+        let cur = current.utf8
+        guard cur.starts(with: emitted.utf8) else {
             // Decoder altered the prefix — extremely rare in append-only streams.
             // Resync rather than emit garbage; the user-visible loss is bounded
             // to whatever was retokenized.
             emitted = current
             return ""
         }
-        let delta = String(current.dropFirst(emitted.count))
+        let delta = String(decoding: cur.dropFirst(emitted.utf8.count), as: UTF8.self)
         emitted = current
         return delta
     }

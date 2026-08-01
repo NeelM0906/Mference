@@ -1,8 +1,9 @@
 # Local OpenAI-compatible server
 
 `MferenceServer` exposes a local Chat Completions API for one Gemma
-model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
-through a proxy or tunnel.
+model. It binds to `127.0.0.1` by default, or to the machine's exact Tailscale
+IPv4 address with `--bind tailnet`. It has no application-level authentication
+or TLS; do not expose it through a wildcard interface, proxy, or tunnel.
 
 ## Start the server
 
@@ -26,6 +27,28 @@ swift build -c release --product MferenceServer
 The server loads the model before opening the port. Wait for
 `MferenceServer ready`, then keep the process running while clients use
 it.
+
+To reach the server from other devices in the same Tailnet, let it detect and
+bind the machine's Tailscale IPv4 address:
+
+```bash
+.build/release/MferenceServer \
+  --model scratch/gemma4.gturbo \
+  --bind tailnet \
+  --port 8080 \
+  --max-context 32768 \
+  --queue-limit 32
+```
+
+This requires the `tailscale` CLI on `PATH`. The server binds only that one
+address; it never binds a wildcard interface. If Tailscale is missing, not
+running, or reports anything other than a single Tailscale IPv4 address, the
+command fails instead of falling back to a broader interface. The startup line
+prints the address it actually bound.
+
+`--bind tailnet` is not authentication. Access is governed entirely by the
+Tailnet ACL, and every device the ACL admits gets unauthenticated access to the
+full API. The server still has no application-level authentication or TLS.
 
 Check the server from another terminal:
 
@@ -119,6 +142,61 @@ The server accepts only function tools. Omit `tool_choice` or set it to `auto`
 to allow calls. Set it to `none` to disable them. The server does not support
 `required`, named tool selection, or `parallel_tool_calls: false`.
 
+## Errors
+
+The prompt is rendered and checked against the context window before any
+response is written, so an overlong prompt, an unknown model, an unsupported
+parameter, an oversized body, or a full queue comes back as a JSON error
+envelope with a real status code — `400`, `404`, `413`, `415`, or `429` — and
+no stream is started. Asking for `"stream": true` does not change this.
+
+A failure raised after that point cannot change the status, because a
+streaming request already has `200` and the SSE head on the wire. It is
+reported in-band instead: one frame carrying an `error` object, then
+`data: [DONE]`, then a normal end of the chunked body.
+
+```text
+data: {"error":{"message":"generation failed","type":"server_error","code":"internal_error"}}
+
+data: [DONE]
+
+```
+
+The frame carries the same envelope the blocking path would have returned, so
+a failure that can only surface once generation is under way still names its
+cause. Reusing a KV prefix is the case that reaches it: whether the retained
+prefix plus the new turn fits the context window is known only after the
+prompt cache has been matched, which happens after the head is committed.
+
+Treat any frame with an `error` key as fatal for that request; no
+`finish_reason` chunk precedes it. The stream is never terminated by dropping
+the connection, so a client that sees an aborted transport (`TypeError:
+terminated` under undici, for example) should look for a dead server process
+or its own timeout rather than a generation error.
+
+## Server log
+
+The server writes one line per request to stderr:
+
+```text
+[2026-07-31T17:03:10Z] request chatcmpl-f6a02587… started streaming=true
+[2026-07-31T17:03:12Z] request chatcmpl-f6a02587… completed in 2.4s prompt=812 cached=768 completion=96 finish=stop
+```
+
+The start line is written before the model runs, so a long prefill — which
+emits nothing for minutes — is distinguishable from a wedged server. The
+completion line reports how much of the prompt the KV prefix supplied in
+`cached`, matching `usage.prompt_tokens_details.cached_tokens`.
+
+A failed request logs the status it would have carried, whether or not a
+stream had already committed `200`, along with the underlying error — which is
+more detail than the response carries, since responses deliberately do not
+leak runtime internals:
+
+```text
+[2026-07-31T17:09:32Z] request chatcmpl-b36dd1ed… failed status=400 streaming=true error=context_length_exceeded: prompt exceeds the configured context
+```
+
 ## Supported API
 
 Endpoints:
@@ -132,6 +210,8 @@ Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream_options": {"include_usage": true}` to receive a final usage chunk.
 
 Requests may contain system, developer, user, assistant, and tool messages.
+Guidance must precede the conversation, and consecutive messages of the same
+guidance role are merged into one block separated by a blank line.
 Supported options include `temperature`, `top_p`, `top_k`,
 `repetition_penalty`, `seed`, `stop`, `max_tokens`,
 `max_completion_tokens`, and function-tool fields.

@@ -11,9 +11,12 @@ public struct OpenAIErrorEnvelope: Codable, Equatable, Sendable {
 
     public let error: Detail
 
-    public init(message: String, param: String? = nil, code: String) {
+    public init(message: String,
+                param: String? = nil,
+                type: String = "invalid_request_error",
+                code: String) {
         error = Detail(message: message,
-                       type: "invalid_request_error",
+                       type: type,
                        param: param,
                        code: code)
     }
@@ -455,11 +458,31 @@ public enum OpenAIRequestValidator {
                 throw invalid("message content is required",
                               "messages", "invalid_message")
             }
-            result.append(MFTokenizer.Message(role: role,
-                                              content: content,
-                                              toolCalls: calls,
-                                              toolCallID: message.toolCallID,
-                                              name: message.name))
+            // Merge consecutive same-role guidance into one message. Both chat
+            // templates accept only a single leading system block, so clients
+            // that split guidance across several system (or developer) messages
+            // — e.g. an opencode plugin appending its own system prompt — would
+            // otherwise fail to render. System and developer runs stay distinct.
+            if (role == .system || role == .developer),
+               calls.isEmpty,
+               let previous = result.last,
+               previous.role == role {
+                let merged = [previous.content, content]
+                    .compactMap { $0 }
+                    .joined(separator: "\n\n")
+                result[result.count - 1] = MFTokenizer.Message(
+                    role: role,
+                    content: merged.isEmpty ? nil : merged,
+                    toolCalls: previous.toolCalls,
+                    toolCallID: previous.toolCallID,
+                    name: previous.name)
+            } else {
+                result.append(MFTokenizer.Message(role: role,
+                                                  content: content,
+                                                  toolCalls: calls,
+                                                  toolCallID: message.toolCallID,
+                                                  name: message.name))
+            }
         }
         return result
     }

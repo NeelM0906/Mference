@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <img alt="Swift 6.2" src="https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white">
-  <img alt="Metal 4" src="https://img.shields.io/badge/Metal-4-5E5CE6">
-  <img alt="macOS 26 or later" src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white">
+  <img alt="Swift 6.1 or later" src="https://img.shields.io/badge/Swift-6.1%2B-F05138?logo=swift&logoColor=white">
+  <img alt="Metal 3 or later" src="https://img.shields.io/badge/Metal-3%2B-5E5CE6">
+  <img alt="macOS 15 or later" src="https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/License-MIT-2ea44f"></a>
 </p>
 
@@ -52,10 +52,24 @@ swift build -c release
 ```
 
 When the app opens, choose **Download** and let Mference fetch and repack the
-pinned model. Once it is ready, choose **Load Model**, type your prompt, and
-press **Generate**. The app installs Gemma 4 by default; select Qwen 3.6 with
-`defaults write Mference model qwen36` (or `MFERENCE_MODEL=qwen36` in the
-environment) before launching.
+pinned model — or choose **Choose Existing Model…** to point at a `.gturbo`
+directory already on disk. Once it is ready, choose **Load Model**, type your
+prompt, and press **Generate**. The app installs Gemma 4 by default; select
+Qwen 3.6 with `defaults write Mference model qwen36` (or `MFERENCE_MODEL=qwen36`
+in the environment) before launching.
+
+Each chat keeps its own multi-turn history in a collapsible left sidebar
+(<kbd>Command</kbd>+<kbd>N</kbd> for a new chat,
+<kbd>Control</kbd>+<kbd>Command</kbd>+<kbd>S</kbd> to toggle the sidebar).
+History is written locally next to the model directory and rendered through the
+installed model's own chat template, so both Gemma 4 and Qwen 3.6 see their
+native dialect. The composer can extract text locally from PDF, DOCX, PPTX, and
+XLSX files; nothing is uploaded. Extraction is bounded, so very long documents
+are trimmed and marked as truncated. Before a turn is committed, the app
+measures the rendered conversation with the model tokenizer; when older turns no
+longer fit the selected context, it compresses them into a rolling per-chat
+memory while the full transcript stays visible. Appearance follows System,
+Light, or Dark from the **Appearance** menu.
 
 From the command line:
 
@@ -79,7 +93,7 @@ swift run -c release MferenceCLI \
 | Memory | ~2 GB (Gemma 4) · ~1.45 GB (Qwen 3.6), including a 4K KV cache |
 | Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
-| Platform | macOS 26, Metal 4, Swift 6.2 |
+| Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
 | Measured decode, Qwen 3.6 | 18.8–23.1 tok/s (M5) at a 1,447–1,464 MiB peak footprint |
 
@@ -103,7 +117,7 @@ negative results.
 | `MferenceMac` | Native Mac app for installation and generation |
 | `MferenceDecodeService` | One-shot local model and Metal owner used by the Mac app |
 | `MferenceCLI` | Command-line instruction chat and raw completion |
-| `MferenceServer` | Loopback OpenAI-compatible Chat Completions server |
+| `MferenceServer` | OpenAI-compatible Chat Completions server, on loopback by default or a Tailnet address with `--bind tailnet` |
 | `MferenceRepack` | Streaming model installer and install verifier |
 
 Only one model-owning product should run at a time. The server speaks each
@@ -114,9 +128,18 @@ from the installed model.
 ### Requirements
 
 - An Apple Silicon Mac (arm64 only)
-- macOS 26 with Metal 4; Xcode 26 and Swift 6.2 or newer
+- macOS 15 or later, with Metal 3; Xcode 16.3 and Swift 6.1 or newer
 - Free storage for the model install (~14.3 GB Gemma 4, ~19.6 GB Qwen 3.6)
 - An internet connection for the first install
+
+The shader library is compiled from source at startup, and the choice of
+shading-language version is made then, not at build time. A single binary
+therefore covers both worlds: *running* on macOS 26 with an Apple10 GPU
+compiles at MSL 4.0 and enables the Metal 4 tensor-ops prefill kernels, while
+every other supported configuration compiles at MSL 3.2 and selects the
+non-tensor kernels automatically. Both paths run the full Gemma 4 and Qwen 3.6
+feature set; they agree to within kernel tolerance rather than bit-exactly, so
+expect the same quality but not identical sampled tokens.
 
 ## How it works
 

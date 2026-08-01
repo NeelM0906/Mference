@@ -1,8 +1,19 @@
 import Foundation
 
-enum AppModelLocation {
+public enum AppModelLocation {
+    public static let storageKey = "Mference.modelDirectory"
+
+    public static func remember(_ url: URL) {
+        remember(url, userDefaults: .standard)
+    }
+
+    static func remember(_ url: URL, userDefaults: UserDefaults) {
+        userDefaults.set(url.standardizedFileURL.path, forKey: storageKey)
+    }
+
     static func defaultURL(
-        descriptor: AppModelInstallDescriptor = .selected
+        descriptor: AppModelInstallDescriptor = .selected,
+        userDefaults: UserDefaults = .standard
     ) -> URL {
         let fileManager = FileManager.default
         let applicationSupport = (try? fileManager.url(
@@ -11,13 +22,21 @@ enum AppModelLocation {
             appropriateFor: nil,
             create: false)) ?? fileManager.homeDirectoryForCurrentUser
         return resolve(
-            explicitURL: nil,
+            explicitURL: preferredURL(userDefaults: userDefaults),
             executableURL: Bundle.main.executableURL,
             currentDirectoryURL: URL(fileURLWithPath: fileManager.currentDirectoryPath,
                                      isDirectory: true),
             applicationSupportURL: applicationSupport,
             fileExists: fileManager.fileExists(atPath:),
             installDirectoryName: descriptor.installDirectoryName)
+    }
+
+    private static func preferredURL(userDefaults: UserDefaults) -> URL? {
+        guard let path = userDefaults.string(forKey: storageKey),
+              !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
 
     static func resolve(explicitURL: URL?,

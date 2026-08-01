@@ -198,6 +198,161 @@ struct OpenAIValidationTests {
         #expect(parsed.arguments.objectValue?["file-path"] == .string("/tmp/x"))
     }
 
+    @Test func unionAndTypelessToolSchemasRenderWithoutThrowing() async throws {
+        // pi's `mcp` tool (anyOf string|object), a kagi-style nullable integer
+        // (anyOf integer|null), a github-style anyOf string|array, and a bare
+        // enum with no `type` — every shape that used to abort Gemma rendering.
+        let data = Data(#"""
+        {
+          "model":"m",
+          "messages":[{"role":"user","content":"hi"}],
+          "tools":[{
+            "type":"function",
+            "function":{
+              "name":"mcp",
+              "description":"gateway",
+              "parameters":{
+                "type":"object",
+                "properties":{
+                  "args":{"description":"tool args","anyOf":[
+                    {"type":"string"},
+                    {"type":"object","properties":{},"additionalProperties":true}
+                  ]},
+                  "limit":{"anyOf":[{"type":"integer"},{"type":"null"}]},
+                  "files":{"anyOf":[
+                    {"type":"string"},
+                    {"type":"array","items":{"type":"string"}}
+                  ]},
+                  "mode":{"enum":["a","b"]},
+                  "nick":{"type":["string","null"]}
+                }
+              }
+            }
+          }]
+        }
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        let tokenizer = try await MFTokenizer.load()
+        let rendered = tokenizer.decode(
+            try tokenizer.encodeToolChat(
+                messages: validated.messages, tools: validated.tools),
+            skipSpecialTokens: false)
+        #expect(rendered.contains("mcp"))
+        #expect(rendered.contains("args"))
+    }
+
+    @Test func unionSchemaCollapsesToFirstConcreteBranch() throws {
+        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"description":"d","anyOf":[{"type":"string"},{"type":"object"}]}
+        """#.utf8))
+        let normalized = schema.gemmaSchemaNormalized().objectValue
+        #expect(normalized?["type"] == .string("string"))
+        #expect(normalized?["description"] == .string("d"))
+        #expect(normalized?["anyOf"] == nil)
+    }
+
+    @Test func nullableTypeArrayCollapsesToConcreteType() throws {
+        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"type":["null","integer"]}
+        """#.utf8))
+        #expect(schema.gemmaSchemaNormalized().objectValue?["type"] == .string("integer"))
+    }
+
+    @Test func typelessSchemaDefaultsByShape() throws {
+        let object = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
+        {"properties":{"a":{"type":"string"}}}
+        """#.utf8))
+        #expect(object.gemmaSchemaNormalized().objectValue?["type"] == .string("object"))
+        let scalar = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"title":"x"}"#.utf8))
+        #expect(scalar.gemmaSchemaNormalized().objectValue?["type"] == .string("string"))
+    }
+
+    @Test func consecutiveSystemMessagesCoalesceButKeepDeveloperDistinct() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"system","content":"first"},
+          {"role":"system","content":"second"},
+          {"role":"developer","content":"dev"},
+          {"role":"user","content":"hello"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        #expect(validated.messages.map(\.role) == [.system, .developer, .user])
+        #expect(validated.messages.first?.content == "first\n\nsecond")
+    }
+
+    @Test func consecutiveSystemMessagesCoalesceForChatML() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"system","content":"first"},
+          {"role":"system","content":"second"},
+          {"role":"user","content":"hello"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .chatml)
+        #expect(validated.messages.map(\.role) == [.system, .user])
+        #expect(validated.messages.first?.content == "first\n\nsecond")
+    }
+
+    @Test func chatMLDialectKeepsUnionBranchesInTheToolSchema() throws {
+        // ChatML renders `tool | tojson`, so the union must survive validation
+        // untouched; only the Gemma render path flattens it.
+        let data = Data(#"""
+        {
+          "model":"m",
+          "messages":[{"role":"user","content":"hi"}],
+          "tools":[{
+            "type":"function",
+            "function":{
+              "name":"mcp",
+              "parameters":{
+                "type":"object",
+                "properties":{
+                  "args":{"anyOf":[{"type":"string"},{"type":"object"}]}
+                }
+              }
+            }
+          }]
+        }
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .chatml)
+        let properties = validated.tools[0].parameters
+            .objectValue?["properties"]?.objectValue
+        #expect(properties?["args"]?.objectValue?["anyOf"] != nil)
+    }
+
+    @Test func ambiguousParameterKeysPassValidationForChatML() throws {
+        let data = Data(#"""
+        {
+          "model":"m",
+          "messages":[{"role":"user","content":"lookup"}],
+          "tools":[{
+            "type":"function",
+            "function":{
+              "name":"lookup",
+              "parameters":{
+                "type":"object",
+                "allOf":[{
+                  "type":"object",
+                  "properties":{"bad:key":{"type":"string"}}
+                }]
+              }
+            }
+          }]
+        }
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .chatml)
+        #expect(validated.tools.count == 1)
+    }
+
     @Test func ambiguousParameterKeysFailValidation() throws {
         let data = Data(#"""
         {
@@ -297,6 +452,7 @@ struct ServerArgumentTests {
     @Test func defaults() throws {
         let arguments = try ServerArguments.parse(["--model", "model.gturbo"])
         #expect(arguments.port == 8080)
+        #expect(arguments.bindMode == .loopback)
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
         #expect(arguments.promptCacheMode == .singlePrefix)
@@ -318,6 +474,99 @@ struct ServerArgumentTests {
                 "--model", "model.gturbo",
                 "--prompt-cache-mode", "many",
             ])
+        }
+    }
+
+    @Test func parsesBindModeAndRejectsUnknownMode() throws {
+        let tailnet = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--bind", "tailnet",
+        ])
+        #expect(tailnet.bindMode == .tailnet)
+        let loopback = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--bind", "loopback",
+        ])
+        #expect(loopback.bindMode == .loopback)
+        for rejected in ["public", "0.0.0.0", "lan", ""] {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerArguments.parse([
+                    "--model", "model.gturbo",
+                    "--bind", rejected,
+                ])
+            }
+        }
+    }
+}
+
+@Suite("Server bind mode")
+struct ServerBindModeTests {
+    @Test func loopbackIgnoresTailscaleAndBindsLoopback() throws {
+        let host = try ServerBindMode.loopback.host(tailnetAddresses: { "100.101.102.103\n" })
+        #expect(host == "127.0.0.1")
+    }
+
+    @Test func tailnetBindsTheDetectedAddress() throws {
+        let host = try ServerBindMode.tailnet.host(tailnetAddresses: { "100.101.102.103\n" })
+        #expect(host == "100.101.102.103")
+    }
+
+    @Test func tailnetFailsWhenTailscaleCannotBeQueried() throws {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerBindMode.tailnet.host(tailnetAddresses: {
+                throw ServerArgumentError.invalid("could not run tailscale")
+            })
+        }
+    }
+
+    @Test func tailnetFailsOnEmptyOutput() throws {
+        for output in ["", "\n", "   \n\t"] {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
+        }
+    }
+
+    @Test func tailnetFailsOnMultipleAddresses() throws {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerBindMode.tailnet.host(tailnetAddresses: {
+                "100.101.102.103\n100.64.0.9\n"
+            })
+        }
+    }
+
+    @Test func tailnetFailsOnIPv6OnlyOutput() throws {
+        for output in ["fd7a:115c:a1e0::1\n", "::1\n"] {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
+        }
+    }
+
+    @Test func tailnetFailsOnMalformedOutput() throws {
+        let malformed = [
+            "no addresses available\n",
+            "100.101.102\n",
+            "100.101.102.103.4\n",
+            "100.101.102.999\n",
+            "100.101.102.-3\n",
+            "100.101.102.0x3\n",
+            "100.101.102.103/32\n",
+            "100.101.102.103:8080\n",
+        ]
+        for output in malformed {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
+        }
+    }
+
+    @Test func tailnetRefusesAddressesOutsideTheTailscaleRange() throws {
+        let refused = ["0.0.0.0\n", "127.0.0.1\n", "192.168.1.20\n", "10.0.0.4\n", "100.63.255.255\n"]
+        for output in refused {
+            #expect(throws: ServerArgumentError.self) {
+                try ServerBindMode.tailnet.host(tailnetAddresses: { output })
+            }
         }
     }
 }

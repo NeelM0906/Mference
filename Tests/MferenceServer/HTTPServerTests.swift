@@ -13,7 +13,7 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
     }
 
     func generate(
-        _ request: ValidatedChatRequest,
+        _ prepared: PreparedGeneration,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         if delayNanoseconds > 0 {
@@ -30,7 +30,7 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
 
 private actor MultipleToolBackend: ServerInferenceBackend {
     func generate(
-        _ request: ValidatedChatRequest,
+        _ prepared: PreparedGeneration,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         let first = ParsedToolCall(
@@ -55,7 +55,7 @@ private actor MultipleToolBackend: ServerInferenceBackend {
 
 private actor ContentAndToolBackend: ServerInferenceBackend {
     func generate(
-        _ request: ValidatedChatRequest,
+        _ prepared: PreparedGeneration,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         let content = "I will read it."
@@ -86,7 +86,7 @@ private actor PipelinedRequestBackend: ServerInferenceBackend {
     }
 
     func generate(
-        _ request: ValidatedChatRequest,
+        _ prepared: PreparedGeneration,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         generationCount += 1
@@ -100,12 +100,65 @@ private actor PipelinedRequestBackend: ServerInferenceBackend {
     }
 }
 
+private struct DecodeFailure: Error {}
+
+/// Fails after `onEvent` has already put content on the wire, the way a decode
+/// failure does mid-generation.
+private actor FailingMidStreamBackend: ServerInferenceBackend {
+    func generate(
+        _ prepared: PreparedGeneration,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        onEvent(.content("partial"))
+        throw DecodeFailure()
+    }
+}
+
+/// Rejects from inside `generate`, once the streaming head is committed. The
+/// live equivalent is the effective-prompt check, which cannot run earlier
+/// because it depends on the KV prefix the request is matched against.
+private actor RejectingBackend: ServerInferenceBackend {
+    func generate(
+        _ prepared: PreparedGeneration,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        throw ServerRequestError.invalid(
+            message: "effective prompt exceeds the configured context",
+            param: "messages",
+            code: "context_length_exceeded")
+    }
+}
+
+/// Rejects during `prepare`, the way an overlong prompt does. Mirrors the
+/// actor-isolated, non-`async` shape `ServerModelSession` uses, so a witness
+/// that silently fell back to the pass-through default would fail this test.
+private actor RejectingPrepareBackend: ServerInferenceBackend {
+    func prepare(_ request: ValidatedChatRequest) throws -> PreparedGeneration {
+        throw ServerRequestError.invalid(
+            message: "prompt exceeds the configured context",
+            param: "messages",
+            code: "context_length_exceeded")
+    }
+
+    func generate(
+        _ prepared: PreparedGeneration,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        Issue.record("generate must not run after prepare fails")
+        return ServerCompletion(
+            content: "unexpected",
+            toolCalls: [],
+            finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2))
+    }
+}
+
 private actor CancellableServerBackend: ServerInferenceBackend {
     private(set) var startedCount = 0
     private(set) var cancellationCount = 0
 
     func generate(
-        _ request: ValidatedChatRequest,
+        _ prepared: PreparedGeneration,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         startedCount += 1
@@ -162,6 +215,29 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    @Test func routesIgnoreQueryComponentOfRequestURI() async throws {
+        let server = MferenceHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        for uri in ["/v1/models", "/v1/models?", "/v1/models?foo=bar"] {
+            let response = try rawGET(uri: uri, port: port)
+            #expect(response.contains("HTTP/1.1 200"), "\(uri) did not return 200")
+            #expect(response.contains("test-model"), "\(uri) did not list the model")
+        }
+        let health = try rawGET(uri: "/health?probe=1", port: port)
+        #expect(health.contains(#""status":"ok""#))
+
+        let missing = try rawGET(uri: "/v1/nope?foo=bar", port: port)
+        #expect(missing.contains("HTTP/1.1 404"))
+        #expect(missing.contains("not_found"))
+
+        try await server.shutdown()
+    }
+
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = MferenceHTTPServer(
             modelID: "test-model",
@@ -186,6 +262,92 @@ struct HTTPServerTests {
         #expect(text.contains(#""prompt_tokens":3"#))
         #expect(text.contains(#""cached_tokens":0"#))
         #expect(text.hasSuffix("data: [DONE]\n\n"))
+
+        try await server.shutdown()
+    }
+
+    @Test func streamingFailureAfterHeadReportsErrorInBand() async throws {
+        let server = MferenceHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: FailingMidStreamBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""content":"partial""#))
+        #expect(text.contains(#""code":"internal_error""#))
+        #expect(text.contains(#""type":"server_error""#))
+        #expect(!text.contains(#""finish_reason":"stop""#))
+        #expect(text.hasSuffix("data: [DONE]\n\n"))
+
+        try await server.shutdown()
+    }
+
+    @Test func streamingPrepareRejectionKeepsItsStatusCode() async throws {
+        let server = MferenceHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: RejectingPrepareBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let httpResponse = try #require(response as? HTTPURLResponse)
+        // Rejected before the head, so the stream was never opened.
+        #expect(httpResponse.statusCode == 400)
+        #expect(httpResponse.value(forHTTPHeaderField: "content-type") == "application/json")
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""code":"context_length_exceeded""#))
+        #expect(!text.contains("data:"))
+
+        try await server.shutdown()
+    }
+
+    @Test func streamingRejectionAfterHeadNamesTheCause() async throws {
+        let server = MferenceHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: RejectingBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}
+        """#.utf8)
+        // A dropped connection fails this call: the body must end normally.
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""code":"context_length_exceeded""#))
+        #expect(text.contains(#""param":"messages""#))
+        #expect(!text.contains(#""finish_reason":"stop""#))
+        #expect(text.hasSuffix("data: [DONE]\n\n"))
+
+        // The same request without a stream still gets a real status code.
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}]}
+        """#.utf8)
+        let (blocking, blockingResponse) = try await URLSession.shared.data(for: request)
+        #expect((blockingResponse as? HTTPURLResponse)?.statusCode == 400)
+        #expect(String(decoding: blocking, as: UTF8.self)
+            .contains(#""code":"context_length_exceeded""#))
 
         try await server.shutdown()
     }
@@ -460,6 +622,19 @@ private func writeAll(socket: Int32, text: String) throws {
         }
         written += count
     }
+}
+
+/// Sends a request line verbatim so the exact URI reaches the router, which
+/// `URLSession` would otherwise normalise.
+private func rawGET(uri: String, port: Int) throws -> String {
+    let socket = try connectedSocket(port: port)
+    defer { Darwin.close(socket) }
+    try writeAll(socket: socket,
+                 text: "GET \(uri) HTTP/1.1\r\n"
+                     + "Host: 127.0.0.1:\(port)\r\n"
+                     + "Connection: close\r\n"
+                     + "\r\n")
+    return try readAvailable(socket: socket, timeoutMilliseconds: 500)
 }
 
 private func readAvailable(socket: Int32, timeoutMilliseconds: Int32) throws -> String {
