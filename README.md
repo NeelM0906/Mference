@@ -65,11 +65,17 @@ History is written locally next to the model directory and rendered through the
 installed model's own chat template, so both Gemma 4 and Qwen 3.6 see their
 native dialect. The composer can extract text locally from PDF, DOCX, PPTX, and
 XLSX files; nothing is uploaded. Extraction is bounded, so very long documents
-are trimmed and marked as truncated. Before a turn is committed, the app
-measures the rendered conversation with the model tokenizer; when older turns no
-longer fit the selected context, it compresses them into a rolling per-chat
-memory while the full transcript stays visible. Appearance follows System,
-Light, or Dark from the **Appearance** menu.
+are trimmed and marked as truncated. The attachments on one prompt hold at most
+750,000 characters of extracted text in total — all a single request can carry —
+and a file that would exceed that is refused with a message rather than silently
+dropped. Before a turn is committed, the app measures the rendered conversation
+with the model tokenizer; when older turns no longer fit the selected context,
+it compresses them into a rolling per-chat memory while the full transcript
+stays visible. Turns folded into that memory then release their hidden
+request-side copy — attached document text included — because the summary
+stands in for them from that point on; nothing visible changes. Chats and their
+transcripts are never evicted automatically, so delete chats you no longer want
+kept. Appearance follows System, Light, or Dark from the **Appearance** menu.
 
 From the command line:
 

@@ -189,6 +189,34 @@ import Testing
     }
 
     @MainActor
+    @Test func draftAttachmentsStopAtTheSendableCharacterCeiling() {
+        let model = AppModel()
+        let ceiling = AppPromptContext.maximumTransportCharacters
+        let bulk = AppPromptAttachment(
+            fileName: "bulk.pdf",
+            formatLabel: "PDF",
+            extractedText: String(repeating: "a", count: ceiling))
+        model.addPromptAttachment(bulk)
+        #expect(model.promptAttachments.map(\.fileName) == ["bulk.pdf"])
+        #expect(model.error == nil)
+
+        let overflow = AppPromptAttachment(
+            fileName: "overflow.pdf",
+            formatLabel: "PDF",
+            extractedText: "b")
+        model.addPromptAttachment(overflow)
+        #expect(model.promptAttachments.map(\.fileName) == ["bulk.pdf"])
+        #expect(model.error?.userMessage.contains("overflow.pdf") == true)
+
+        // Removing the bulk document frees the budget again.
+        model.error = nil
+        model.removePromptAttachment(id: bulk.id)
+        model.addPromptAttachment(overflow)
+        #expect(model.promptAttachments.map(\.fileName) == ["overflow.pdf"])
+        #expect(model.error == nil)
+    }
+
+    @MainActor
     @Test func examplesOnlyAppearInACompletelyEmptyChat() {
         let model = AppModel()
         #expect(model.showsPromptExamples)
@@ -705,6 +733,45 @@ import Testing
         #expect(model.selectedChat.messages.isEmpty)
         #expect(model.selectedChat.contextSummary == nil)
         #expect(model.selectedChat.summarizedThroughMessageID == nil)
+    }
+
+    @MainActor
+    @Test func summarizedTurnsReleaseTheirHiddenDocumentContext() async {
+        let client = CompressionInferenceClient()
+        let model = AppModel(client: client)
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.maxContextTokens = 512
+        model.maxNewTokensOverride = 1
+        model.loadState = .ready(modelDirectory: directory, loadSeconds: 0)
+
+        model.promptText = String(repeating: "alpha fact ", count: 120)
+        model.addPromptAttachment(AppPromptAttachment(
+            fileName: "facts.pdf",
+            formatLabel: "PDF",
+            extractedText: "DOCUMENT-MEMORY-MARKER: the launch date is Tuesday."))
+        model.run()
+        await waitForIdle(model)
+        #expect(model.selectedChat.messages.first?.contextContent
+            .contains("DOCUMENT-MEMORY-MARKER") == true)
+
+        model.promptText = String(repeating: "beta detail ", count: 70)
+        model.run()
+        await waitForIdle(model)
+
+        // The rolling summary now stands in for the first turn, so its hidden
+        // document payload can never be sent again. It must not keep sitting
+        // in memory and in the archive.
+        #expect(model.selectedChat.summarizedThroughMessageID
+            == model.selectedChat.messages[1].id)
+        #expect(client.compressionRequestsContain("DOCUMENT-MEMORY-MARKER"))
+        let summarized = model.selectedChat.messages[0]
+        #expect(summarized.content.contains("alpha fact"))
+        #expect(!summarized.contextContent.contains("DOCUMENT-MEMORY-MARKER"))
+        #expect(summarized.contextContent == summarized.content)
+        // Turns after the boundary keep their context untouched.
+        #expect(model.selectedChat.messages[2].contextContent
+            .contains("beta detail"))
     }
 
     @MainActor

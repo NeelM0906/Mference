@@ -25,6 +25,11 @@ public struct AppPromptAttachment: Identifiable, Codable, Equatable, Sendable {
 }
 
 public enum AppPromptContext {
+    /// Ceiling on the characters one request may carry to the decode service.
+    /// Also the ceiling on retained draft attachment text: `compose` never
+    /// emits more than this, so holding more is text that can never be sent.
+    public static let maximumTransportCharacters = 750_000
+
     public static func compose(
         userPrompt: String,
         attachments: [AppPromptAttachment],
