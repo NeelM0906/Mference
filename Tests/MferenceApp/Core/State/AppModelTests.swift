@@ -256,6 +256,62 @@ import Testing
     }
 
     @MainActor
+    @Test func aWhitespaceOnlyAnswerNeverEntersTheTranscript() async throws {
+        let client = WhitespaceResponseClient()
+        let model = AppModel(client: client)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.loadState = .ready(
+            modelDirectory: FileManager.default.temporaryDirectory,
+            loadSeconds: 1)
+        model.promptText = "first"
+
+        model.run()
+        await waitForIdle(model)
+
+        #expect(model.selectedChat.messages.map(\.role) == [.user])
+        // A committed blank answer would make every later turn unsendable.
+        model.promptText = "second"
+        #expect(model.canRun)
+        #expect(throws: Never.self) {
+            _ = try model.makeRequest()
+        }
+    }
+
+    @MainActor
+    @Test func aChatAlreadyHoldingABlankAnswerCanStillBeUsed() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "AppModelBlankAnswerTests-\(UUID().uuidString)",
+                isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelDirectory = root.appendingPathComponent(
+            "model.gturbo",
+            isDirectory: true)
+        // Written the way a previous build would have persisted it.
+        let poisoned = AppChat(
+            title: "Poisoned",
+            messages: [
+                AppChatMessage(role: .user, content: "question"),
+                AppChatMessage(role: .assistant, content: "\n\n"),
+            ])
+        try AppChatFileStore.save(
+            AppChatArchive(selectedChatID: poisoned.id, chats: [poisoned]),
+            forModelDirectory: modelDirectory)
+
+        let model = AppModel(
+            modelDirectory: modelDirectory,
+            client: MockInferenceClient(),
+            settingsPersistenceEnabled: true)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "follow-up"
+
+        let request = try model.makeRequest()
+
+        #expect(request.messages.map(\.content) == ["question", "follow-up"])
+        #expect(model.selectedChat.messages.count == 2)
+    }
+
+    @MainActor
     @Test func changingModelPathInvalidatesLoadedStateAndDiagnostics() {
         let model = AppModel(client: MockInferenceClient())
         let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.gturbo")
@@ -297,4 +353,30 @@ import Testing
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
     }
+}
+
+/// Test double: a model that emits nothing but whitespace before EOS.
+private final class WhitespaceResponseClient: AppInferenceClient, @unchecked Sendable {
+    func generate(_ request: AppGenerationRequest)
+        -> AsyncThrowingStream<AppInferenceEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.token(AppTokenEvent(
+                index: 0,
+                textDelta: "\n\n",
+                elapsedDecodeSeconds: 0.001)))
+            continuation.yield(.finished(AppDiagnostics(
+                generatedTokens: 1,
+                stopReason: .eos,
+                promptTokenCount: 1,
+                prefillSeconds: 0.001,
+                timeToFirstTokenSeconds: 0.001,
+                decodeSeconds: 0.001,
+                tokensPerSecond: 1_000,
+                peakMemoryBytes: nil,
+                runtimeOptions: request.runtimeOptions)))
+            continuation.finish()
+        }
+    }
+
+    func cancel() {}
 }

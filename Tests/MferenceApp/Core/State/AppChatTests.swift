@@ -217,6 +217,72 @@ import Testing
     }
 
     @MainActor
+    @Test func aSlowImportLandsInTheChatItStartedIn() {
+        let model = AppModel()
+        let originChatID = model.selectedChatID
+        let attachment = AppPromptAttachment(
+            fileName: "contract.pdf",
+            formatLabel: "PDF",
+            extractedText: "clause")
+
+        // Extraction takes seconds; the sidebar stays live, so the user can
+        // switch chats before it finishes.
+        let otherChatID = model.createChat()
+        model.addPromptAttachment(attachment, toChatID: originChatID)
+
+        #expect(model.selectedChatID == otherChatID)
+        #expect(model.promptAttachments.isEmpty)
+        #expect(model.error == nil)
+        model.selectChat(id: originChatID)
+        #expect(model.promptAttachments == [attachment])
+    }
+
+    @MainActor
+    @Test func anImportIntoADeletedChatIsReportedNotRehomed() {
+        let model = AppModel()
+        let survivingChatID = model.selectedChatID
+        let doomedChatID = model.createChat()
+        model.deleteChat(id: doomedChatID)
+
+        model.addPromptAttachment(
+            AppPromptAttachment(
+                fileName: "gone.pdf",
+                formatLabel: "PDF",
+                extractedText: "orphan"),
+            toChatID: doomedChatID)
+
+        #expect(model.selectedChatID == survivingChatID)
+        #expect(model.promptAttachments.isEmpty)
+        #expect(model.error?.userMessage.contains("gone.pdf") == true)
+    }
+
+    @MainActor
+    @Test func anImportFinishingDuringARunIsReportedNotDiscarded() async {
+        let client = SlowRequestPreparationClient()
+        let model = AppModel(client: client)
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.loadState = .ready(modelDirectory: directory, loadSeconds: 0)
+        model.promptText = "pending"
+        let chatID = model.selectedChatID
+
+        model.run()
+        #expect(model.isRunning)
+        model.addPromptAttachment(
+            AppPromptAttachment(
+                fileName: "late.pdf",
+                formatLabel: "PDF",
+                extractedText: "extracted while generating"),
+            toChatID: chatID)
+
+        #expect(model.promptAttachments.isEmpty)
+        #expect(model.error?.userMessage.contains("late.pdf") == true)
+
+        model.cancel()
+        await waitForIdle(model)
+    }
+
+    @MainActor
     @Test func examplesOnlyAppearInACompletelyEmptyChat() {
         let model = AppModel()
         #expect(model.showsPromptExamples)

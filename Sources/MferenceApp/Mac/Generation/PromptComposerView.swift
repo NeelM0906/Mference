@@ -208,6 +208,9 @@ struct PromptComposerView: View {
 
     private func importDocuments(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
+        // Only the attach button is disabled while extraction runs, so the
+        // selection can move on before it finishes.
+        let targetChatID = model.selectedChatID
         isExtractingDocuments = true
         documentImportError = nil
 
@@ -227,11 +230,13 @@ struct PromptComposerView: View {
             for outcome in outcomes {
                 switch outcome {
                 case .success(let document):
-                    model.addPromptAttachment(AppPromptAttachment(
-                        fileName: document.fileName,
-                        formatLabel: document.formatLabel,
-                        extractedText: document.text,
-                        wasTruncatedDuringExtraction: document.wasTruncated))
+                    model.addPromptAttachment(
+                        AppPromptAttachment(
+                            fileName: document.fileName,
+                            formatLabel: document.formatLabel,
+                            extractedText: document.text,
+                            wasTruncatedDuringExtraction: document.wasTruncated),
+                        toChatID: targetChatID)
                 case .failure(let fileName, let message):
                     failures.append("\(fileName): \(message)")
                 }

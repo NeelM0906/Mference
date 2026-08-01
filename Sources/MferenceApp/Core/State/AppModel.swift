@@ -839,7 +839,29 @@ public final class AppModel {
     }
 
     public func addPromptAttachment(_ attachment: AppPromptAttachment) {
-        guard !isRunning, let index = selectedChatIndex else { return }
+        addPromptAttachment(attachment, toChatID: selectedChatID)
+    }
+
+    /// Text extraction runs off this actor and can finish long after the user
+    /// has moved to another chat, so an attachment belongs to the chat its
+    /// import started in. Every way it can fail to land has to be visible: the
+    /// work is already done and would otherwise vanish.
+    public func addPromptAttachment(_ attachment: AppPromptAttachment,
+                                    toChatID chatID: AppChat.ID) {
+        guard !isRunning else {
+            error = .invalidRequest("""
+            \(attachment.fileName) was not attached because a response is \
+            still generating. Attach it again once the response finishes.
+            """)
+            return
+        }
+        guard let index = chats.firstIndex(where: { $0.id == chatID }) else {
+            error = .invalidRequest("""
+            \(attachment.fileName) was not attached because the chat it was \
+            added to no longer exists.
+            """)
+            return
+        }
         // Extracted document text is held in the draft — and written to the
         // chat archive — until the turn is sent. `AppPromptContext.compose`
         // can never emit more than the transport ceiling, so anything past it
@@ -1133,10 +1155,17 @@ public final class AppModel {
         if let summaryMessage {
             messages.append(summaryMessage)
         }
-        messages.append(contentsOf: context.messages[startIndex...].map {
-            AppGenerationMessage(
+        // Archives written before blank answers were rejected can still hold
+        // one; carrying it into the request would fail validation on every
+        // later turn, so it is left behind here instead.
+        messages.append(contentsOf: context.messages[startIndex...].compactMap {
+            let content = $0.contextContent
+            guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return AppGenerationMessage(
                 role: $0.role == .user ? .user : .assistant,
-                content: $0.contextContent)
+                content: content)
         })
         messages.append(pendingMessage)
 
@@ -1548,7 +1577,10 @@ public final class AppModel {
     }
 
     private func appendAssistantMessageIfNeeded() {
-        guard !outputText.isEmpty,
+        // A turn that is only whitespace carries nothing, and every request
+        // built afterwards has to include it, so committing one would make the
+        // chat permanently unsendable.
+        guard !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let activeRunChatID,
               let index = chats.firstIndex(where: { $0.id == activeRunChatID }) else {
             return
