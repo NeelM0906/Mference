@@ -253,9 +253,11 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         return 0
     }
 
-    /// Release any tail withheld as a potential DSML-open prefix. Call at
-    /// end of stream, before `finish()`: a reply that legitimately ends in
-    /// `<`, `</`, `<｜`, … would otherwise silently lose those characters.
+    /// Release any tail withheld as a potential DSML-open prefix: a reply
+    /// that legitimately ends in `<`, `</`, `<｜`, … would otherwise
+    /// silently lose those characters. `finish()` calls this itself, so
+    /// callers only need `drain()` directly when they want the released
+    /// text before deciding whether to finish.
     public func drain() -> [StructuredAssistantEvent] {
         guard !failed, dsmlText == nil, !heldText.isEmpty else { return [] }
         let visible = heldText
@@ -263,10 +265,16 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         return [.content(visible)]
     }
 
-    public func finish() throws {
+    /// End of stream: releases any withheld plain-text tail and validates
+    /// that no tool-call block was left unclosed. Emitting the returned
+    /// events is required for byte-faithful output — dropping them
+    /// truncates a reply that ends in a DSML-open prefix.
+    public func finish() throws -> [StructuredAssistantEvent] {
+        let released = drain()
         guard !failed, toolTokens == nil, dsmlText == nil else {
             throw ToolCallParserError.malformed
         }
+        return released
     }
 
     public var hasToolCalls: Bool { emittedCalls > 0 }

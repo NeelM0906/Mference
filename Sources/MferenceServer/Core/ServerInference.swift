@@ -432,7 +432,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         if let decodingError { throw decodingError }
         if let decoder {
-            for event in decoder.drain() {
+            for event in try decoder.finish() {
                 if case .content(let text) = event {
                     let visible = stopMatcher.push(text)
                     if !visible.isEmpty {
@@ -442,7 +442,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                 }
             }
         }
-        try decoder?.finish()
         if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
             throw GemmaToolCallParserError.malformed
         }
