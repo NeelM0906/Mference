@@ -5,7 +5,7 @@
 <h1 align="center">Mference</h1>
 
 <p align="center">
-  <strong>Big MoE models in ~1.5–2 GB of RAM</strong><br>
+  <strong>Big MoE models in "Small" GB of RAM</strong><br>
   A Swift + Metal inference engine for any Apple Silicon Mac, even the 8 GB ones.
 </p>
 
