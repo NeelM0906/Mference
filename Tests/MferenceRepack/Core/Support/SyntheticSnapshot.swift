@@ -425,6 +425,303 @@ enum SyntheticSnapshot {
         return Snapshot(shardPath: shardPath)
     }
 
+    // MARK: - DeepSeek-V4-Flash variant
+
+    /// Tiny deepseek_v4-shaped architecture: two sliding-window bootstrap
+    /// layers, one CSA layer (with lightning indexer), one HCA layer; eight
+    /// routed 2-bit experts (top-2, layer 0 hash-routed) plus a shared
+    /// expert; low-rank shared-KV MQA attention with sinks; two mHC mix
+    /// sites per layer plus the top-level HyperHead; untied lm_head. Plain
+    /// `model.` prefix (no `language_model.` — mlx-lm conversion naming).
+    struct DeepseekArch {
+        let hidden: Int = 128
+        let moeIntermediate: Int = 64
+        let sharedIntermediate: Int = 64
+        let numHeads: Int = 2
+        let numKVHeads: Int = 1
+        let headDim: Int = 64
+        let vocab: Int = 256
+        let numLayers: Int = 4
+        let numExperts: Int = 8
+        let topK: Int = 2
+        let groupSize: Int = 64
+        let qLoraRank: Int = 64
+        let oLoraRank: Int = 64
+        let oGroups: Int = 2
+        let indexNHeads: Int = 2
+        let indexHeadDim: Int = 64
+        let indexTopK: Int = 16
+        let slidingWindow: Int = 32
+        let csaCompressRate: Int = 4
+        let hcaCompressRate: Int = 128
+        let hcMult: Int = 2
+        let hcSinkhornIters: Int = 4
+        let numHashLayers: Int = 1
+        // layers 0-1 = sliding-window, layer 2 = CSA, layer 3 = HCA
+        let layerTypes: [String] = ["sliding_attention", "sliding_attention",
+                                    "compressed_sparse_attention",
+                                    "heavily_compressed_attention"]
+        /// mHC mix rows: (2 + mult) * mult.
+        var hcFnRows: Int { (2 + hcMult) * hcMult }
+    }
+
+    static func buildDeepseekV4(at dir: String,
+                                seed: UInt64 = 0xD5EE_C4F1_A5B0_0757) throws -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+
+        let arch = DeepseekArch()
+        var rng = SplitMix64(seed: seed)
+
+        var tensors: [(String, String, [Int], [UInt8])] = []
+        tensors.reserveCapacity(160)
+
+        // -- Embedding + untied lm_head (4-bit, group=64)
+        appendQuantizedWeight(name: "model.embed_tokens",
+                              outerShape: [arch.vocab],
+                              innerLogical: arch.hidden, bits: 4,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        appendQuantizedWeight(name: "lm_head",
+                              outerShape: [arch.vocab],
+                              innerLogical: arch.hidden, bits: 4,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+
+        for li in 0..<arch.numLayers {
+            let prefix = "model.layers.\(li)"
+            let layerType = arch.layerTypes[li]
+
+            // Low-rank shared-KV MQA attention path, every layer.
+            appendQuantizedWeight(name: prefix + ".attn.wq_a",
+                                  outerShape: [arch.qLoraRank],
+                                  innerLogical: arch.hidden, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + ".attn.q_norm.weight",
+                                  shape: [arch.qLoraRank], into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".attn.wq_b",
+                                  outerShape: [arch.numHeads * arch.headDim],
+                                  innerLogical: arch.qLoraRank, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".attn.wkv",
+                                  outerShape: [arch.headDim],
+                                  innerLogical: arch.hidden, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + ".attn.kv_norm.weight",
+                                  shape: [arch.headDim], into: &tensors, rng: &rng)
+            appendUnquantizedFP32(name: prefix + ".attn.attn_sink",
+                                  shape: [arch.numHeads], into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".attn.wo_a",
+                                  outerShape: [arch.oGroups * arch.oLoraRank],
+                                  innerLogical: arch.numHeads * arch.headDim / arch.oGroups,
+                                  bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".attn.wo_b",
+                                  outerShape: [arch.hidden],
+                                  innerLogical: arch.oGroups * arch.oLoraRank, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+
+            // CSA/HCA compressor branch. CSA pools two overlapping series
+            // (2 * headDim rows); HCA one non-overlapping series.
+            if layerType != "sliding_attention" {
+                let isCSA = layerType == "compressed_sparse_attention"
+                let rows = isCSA ? 2 * arch.headDim : arch.headDim
+                let rate = isCSA ? arch.csaCompressRate : arch.hcaCompressRate
+                appendQuantizedWeight(name: prefix + ".attn.compressor.wkv",
+                                      outerShape: [rows],
+                                      innerLogical: arch.hidden, bits: 4,
+                                      groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                appendQuantizedWeight(name: prefix + ".attn.compressor.wgate",
+                                      outerShape: [rows],
+                                      innerLogical: arch.hidden, bits: 4,
+                                      groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                appendUnquantizedBF16(name: prefix + ".attn.compressor.norm.weight",
+                                      shape: [arch.headDim], into: &tensors, rng: &rng)
+                appendUnquantizedBF16(name: prefix + ".attn.compressor.ape",
+                                      shape: [min(rate, 8)], into: &tensors, rng: &rng)
+                if isCSA {
+                    let ip = prefix + ".attn.indexer"
+                    appendQuantizedWeight(name: ip + ".compressor.wkv",
+                                          outerShape: [2 * arch.indexHeadDim],
+                                          innerLogical: arch.hidden, bits: 4,
+                                          groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                    appendQuantizedWeight(name: ip + ".compressor.wgate",
+                                          outerShape: [2 * arch.indexHeadDim],
+                                          innerLogical: arch.hidden, bits: 4,
+                                          groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                    appendUnquantizedBF16(name: ip + ".compressor.norm.weight",
+                                          shape: [arch.indexHeadDim], into: &tensors, rng: &rng)
+                    appendUnquantizedBF16(name: ip + ".compressor.ape",
+                                          shape: [arch.csaCompressRate], into: &tensors, rng: &rng)
+                    appendQuantizedWeight(name: ip + ".wq_b",
+                                          outerShape: [arch.indexNHeads * arch.indexHeadDim],
+                                          innerLogical: arch.qLoraRank, bits: 4,
+                                          groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                    appendQuantizedWeight(name: ip + ".weights_proj",
+                                          outerShape: [arch.indexNHeads],
+                                          innerLogical: arch.hidden, bits: 4,
+                                          groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                }
+            }
+
+            // Router — unquantized BF16 (the real conversion keeps the gate
+            // in BF16); hash layers carry the I64 tid2eid table, learned
+            // layers the selection correction bias.
+            appendUnquantizedBF16(name: prefix + ".ffn.gate.weight",
+                                  shape: [arch.numExperts, arch.hidden],
+                                  into: &tensors, rng: &rng)
+            if li < arch.numHashLayers {
+                appendUnquantizedI64(name: prefix + ".ffn.gate.tid2eid",
+                                     shape: [arch.vocab, arch.topK],
+                                     into: &tensors, rng: &rng)
+            } else {
+                appendUnquantizedFP32(name: prefix + ".ffn.gate.e_score_correction_bias",
+                                      shape: [arch.numExperts], into: &tensors, rng: &rng)
+            }
+
+            // Shared expert — 4-bit.
+            appendQuantizedWeight(name: prefix + ".ffn.shared_experts.gate_proj",
+                                  outerShape: [arch.sharedIntermediate], innerLogical: arch.hidden,
+                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".ffn.shared_experts.up_proj",
+                                  outerShape: [arch.sharedIntermediate], innerLogical: arch.hidden,
+                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".ffn.shared_experts.down_proj",
+                                  outerShape: [arch.hidden], innerLogical: arch.sharedIntermediate,
+                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+
+            // Routed experts — stacked expert-major, 2-bit (U32 packing
+            // factor 16). gate_proj mirrors the real checkpoint's mixed
+            // grouping: group 32 on every layer except the last (group 64).
+            let gateGroup = li == arch.numLayers - 1 ? arch.groupSize
+                                                     : arch.groupSize / 2
+            appendQuantizedWeight(name: prefix + ".ffn.switch_mlp.gate_proj",
+                                  outerShape: [arch.numExperts, arch.moeIntermediate],
+                                  innerLogical: arch.hidden, bits: 2,
+                                  groupSize: gateGroup, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".ffn.switch_mlp.up_proj",
+                                  outerShape: [arch.numExperts, arch.moeIntermediate],
+                                  innerLogical: arch.hidden, bits: 2,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".ffn.switch_mlp.down_proj",
+                                  outerShape: [arch.numExperts, arch.hidden],
+                                  innerLogical: arch.moeIntermediate, bits: 2,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+
+            // Plain pre-norm layer norms plus the two mHC mix sites.
+            appendUnquantizedBF16(name: prefix + ".attn_norm.weight",
+                                  shape: [arch.hidden], into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + ".ffn_norm.weight",
+                                  shape: [arch.hidden], into: &tensors, rng: &rng)
+            for site in ["attn_hc", "ffn_hc"] {
+                appendUnquantizedFP32(name: prefix + ".\(site).fn",
+                                      shape: [arch.hcFnRows, arch.hcMult * arch.hidden],
+                                      into: &tensors, rng: &rng)
+                appendUnquantizedFP32(name: prefix + ".\(site).base",
+                                      shape: [arch.hcFnRows], into: &tensors, rng: &rng)
+                appendUnquantizedFP32(name: prefix + ".\(site).scale",
+                                      shape: [3], into: &tensors, rng: &rng)
+            }
+        }
+        // HyperHead stream collapse + final norm.
+        appendUnquantizedFP32(name: "model.hc_head.fn",
+                              shape: [arch.hcFnRows, arch.hcMult * arch.hidden],
+                              into: &tensors, rng: &rng)
+        appendUnquantizedFP32(name: "model.hc_head.base",
+                              shape: [arch.hcFnRows], into: &tensors, rng: &rng)
+        appendUnquantizedFP32(name: "model.hc_head.scale",
+                              shape: [3], into: &tensors, rng: &rng)
+        appendUnquantizedBF16(name: "model.norm.weight",
+                              shape: [arch.hidden], into: &tensors, rng: &rng)
+
+        // -- Encode safetensors.
+        let shardName = "model-00001-of-00001.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+
+        // -- Write config.json: 4-bit base, 2-bit routed experts with the
+        // real checkpoint's mixed gate grouping (32 everywhere except the
+        // last layer's 64). The router gate is unquantized (no override).
+        var quant: [String: Any] = [
+            "bits": 4, "group_size": arch.groupSize, "mode": "affine"
+        ]
+        for li in 0..<arch.numLayers {
+            let prefix = "model.layers.\(li)"
+            let gateGroup = li == arch.numLayers - 1 ? arch.groupSize
+                                                     : arch.groupSize / 2
+            quant[prefix + ".ffn.switch_mlp.gate_proj"] =
+                ["bits": 2, "group_size": gateGroup]
+            for k in ["ffn.switch_mlp.up_proj", "ffn.switch_mlp.down_proj"] {
+                quant[prefix + "." + k] = ["bits": 2, "group_size": arch.groupSize]
+            }
+        }
+
+        var mlpLayerTypes = [String](repeating: "moe", count: arch.numLayers)
+        for li in 0..<arch.numHashLayers { mlpLayerTypes[li] = "hash_moe" }
+        // deepseek_v4 configs are flat: no `text_config` wrapper.
+        let config: [String: Any] = [
+            "architectures": ["DeepseekV4ForCausalLM"],
+            "model_type": "deepseek_v4",
+            "quantization": quant,
+            "hidden_size": arch.hidden,
+            "moe_intermediate_size": arch.moeIntermediate,
+            "intermediate_size": arch.sharedIntermediate,
+            "num_attention_heads": arch.numHeads,
+            "num_key_value_heads": arch.numKVHeads,
+            "head_dim": arch.headDim,
+            "vocab_size": arch.vocab,
+            "num_hidden_layers": arch.numLayers,
+            "n_routed_experts": arch.numExperts,
+            "n_shared_experts": 1,
+            "num_experts_per_tok": arch.topK,
+            "q_lora_rank": arch.qLoraRank,
+            "o_lora_rank": arch.oLoraRank,
+            "o_groups": arch.oGroups,
+            "index_n_heads": arch.indexNHeads,
+            "index_head_dim": arch.indexHeadDim,
+            "index_topk": arch.indexTopK,
+            "sliding_window": arch.slidingWindow,
+            "layer_types": arch.layerTypes,
+            "mlp_layer_types": mlpLayerTypes,
+            "compress_rates": [
+                "compressed_sparse_attention": arch.csaCompressRate,
+                "heavily_compressed_attention": arch.hcaCompressRate,
+            ],
+            "rope_theta": 10_000.0,
+            "compress_rope_theta": 160_000.0,
+            "rope_scaling": [
+                "type": "yarn",
+                "factor": 16.0,
+                "original_max_position_embeddings": 65_536,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+            ],
+            "partial_rotary_factor": 0.125,
+            "hc_mult": arch.hcMult,
+            "hc_sinkhorn_iters": arch.hcSinkhornIters,
+            "hc_eps": 1e-6,
+            "scoring_func": "sqrtsoftplus",
+            "routed_scaling_factor": 1.5,
+            "swiglu_limit": 10.0,
+            "tie_word_embeddings": false,
+            "rms_norm_eps": 1e-6,
+            "hidden_act": "silu"
+        ]
+        let configData = try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+        try configData.write(to: URL(fileURLWithPath: (dir as NSString).appendingPathComponent("config.json")))
+
+        // -- Write model.safetensors.index.json.
+        var weightMap: [String: String] = [:]
+        for (name, _, _, _) in tensors { weightMap[name] = shardName }
+        let indexObj: [String: Any] = [
+            "metadata": ["format": "mlx"],
+            "weight_map": weightMap
+        ]
+        let indexData = try JSONSerialization.data(withJSONObject: indexObj, options: [.sortedKeys])
+        let indexPath = (dir as NSString).appendingPathComponent("model.safetensors.index.json")
+        try indexData.write(to: URL(fileURLWithPath: indexPath))
+        return Snapshot(shardPath: shardPath)
+    }
+
     // MARK: - Tensor builders
 
     private static func appendQuantizedWeight(name: String,
@@ -462,6 +759,39 @@ enum SyntheticSnapshot {
         var bytes = [UInt8](repeating: 0, count: elements * 2)
         for i in 0..<bytes.count { bytes[i] = UInt8(rng.next() & 0xFF) }
         tensors.append((name, "BF16", shape, bytes))
+    }
+
+    private static func appendUnquantizedFP32(name: String, shape: [Int],
+                                              into tensors: inout [(String, String, [Int], [UInt8])],
+                                              rng: inout SplitMix64) {
+        let elements = shape.reduce(1, *)
+        var bytes = [UInt8](repeating: 0, count: elements * 4)
+        for i in 0..<bytes.count { bytes[i] = UInt8(rng.next() & 0xFF) }
+        tensors.append((name, "F32", shape, bytes))
+    }
+
+    /// Raw (unpacked) integer table riding as U32 — no `.weight` suffix, so
+    /// the planner takes the no-companion path.
+    private static func appendUnquantizedU32(name: String, shape: [Int],
+                                             into tensors: inout [(String, String, [Int], [UInt8])],
+                                             rng: inout SplitMix64) {
+        let elements = shape.reduce(1, *)
+        var bytes = [UInt8](repeating: 0, count: elements * 4)
+        for i in 0..<bytes.count { bytes[i] = UInt8(rng.next() & 0xFF) }
+        tensors.append((name, "U32", shape, bytes))
+    }
+
+    /// I64 lookup table (the real `tid2eid` dtype). Values are kept small
+    /// and positive so a U32/I64-agnostic reader sees valid expert ids.
+    private static func appendUnquantizedI64(name: String, shape: [Int],
+                                             into tensors: inout [(String, String, [Int], [UInt8])],
+                                             rng: inout SplitMix64) {
+        let elements = shape.reduce(1, *)
+        var bytes = [UInt8](repeating: 0, count: elements * 8)
+        for i in stride(from: 0, to: bytes.count, by: 8) {
+            bytes[i] = UInt8(rng.next() & 0x7)
+        }
+        tensors.append((name, "I64", shape, bytes))
     }
 
     // MARK: - Safetensors writer

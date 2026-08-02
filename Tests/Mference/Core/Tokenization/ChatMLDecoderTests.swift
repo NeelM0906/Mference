@@ -41,7 +41,7 @@ struct ChatMLDecoderTests {
         let d = decoder()
         let events = try feed("Hello there!", into: d)
         #expect(visibleText(events) == "Hello there!")
-        try d.finish()
+        _ = try d.finish()
         #expect(!d.hasToolCalls)
     }
 
@@ -52,7 +52,7 @@ struct ChatMLDecoderTests {
         let text = visibleText(events)
         #expect(!text.contains("hidden reasoning"))
         #expect(text.contains("visible answer"))
-        try d.finish()
+        _ = try d.finish()
     }
 
     @Test("Tool call spans buffer and emit a parsed call")
@@ -67,7 +67,7 @@ struct ChatMLDecoderTests {
             arguments: .object(["city": .string("Paris")]),
             argumentsJSON: #"{"city":"Paris"}"#))])
         #expect(d.hasToolCalls)
-        try d.finish()
+        _ = try d.finish()
     }
 
     @Test("Preamble text before the tool call stays visible")
@@ -78,7 +78,7 @@ struct ChatMLDecoderTests {
             into: d)
         #expect(visibleText(events) == "Checking the weather now.\n\n")
         #expect(d.hasToolCalls)
-        try d.finish()
+        _ = try d.finish()
     }
 
     @Test("Unknown tool inside a call fails closed")
@@ -113,7 +113,7 @@ struct ChatMLDecoderTests {
         let d = decoder()
         _ = try d.consume(tokenID: tok.toolCallStartID, delta: "")
         #expect(throws: ToolCallParserError.malformed) {
-            try d.finish()
+            _ = try d.finish()
         }
     }
 }

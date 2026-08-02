@@ -72,6 +72,33 @@ enum GTurboJSON {
             archDict["linearValueHeadDim"] = arch.linearValueHeadDim
             archDict["linearConvKernelSize"] = arch.linearConvKernelSize
         }
+        // DeepSeek-V4 extension fields. Gated on the family so existing Qwen
+        // manifests stay byte-identical; the reader treats absence as the
+        // zeroed/"softmax"/1.0/0.0 defaults these fields hold for Gemma and
+        // Qwen anyway.
+        if arch.family == .deepseekV4Flash {
+            archDict["caQLoraRank"] = arch.caQLoraRank
+            archDict["caOLoraRank"] = arch.caOLoraRank
+            archDict["caOGroups"] = arch.caOGroups
+            archDict["caRopeHeadDim"] = arch.caRopeHeadDim
+            archDict["caIndexNHeads"] = arch.caIndexNHeads
+            archDict["caIndexHeadDim"] = arch.caIndexHeadDim
+            archDict["caIndexTopK"] = arch.caIndexTopK
+            archDict["caCSACompressRate"] = arch.caCSACompressRate
+            archDict["caHCACompressRate"] = arch.caHCACompressRate
+            archDict["caCompressRopeTheta"] = arch.caCompressRopeTheta
+            archDict["caRopeScalingFactor"] = arch.caRopeScalingFactor
+            archDict["caRopeScalingOriginalMax"] = arch.caRopeScalingOriginalMax
+            archDict["caRopeScalingBetaFast"] = arch.caRopeScalingBetaFast
+            archDict["caRopeScalingBetaSlow"] = arch.caRopeScalingBetaSlow
+            archDict["hcMult"] = arch.hcMult
+            archDict["hcSinkhornIters"] = arch.hcSinkhornIters
+            archDict["hcEps"] = arch.hcEps
+            archDict["numHashRoutedLayers"] = arch.numHashRoutedLayers
+            archDict["routerScoringFunc"] = arch.routerScoringFunc
+            archDict["routedScalingFactor"] = arch.routedScalingFactor
+            archDict["swigluLimit"] = arch.swigluLimit
+        }
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,

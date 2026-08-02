@@ -40,8 +40,18 @@ enum RemoteSnapshotLoader {
 
         let metadata = try IndexLoader.load(snapshotDir: metadataDirectory)
         if requireKnownSource && SourceFingerprint.modelID(forIndexSha256: metadata.indexSha256Hex) == nil {
-            throw RepackError.sourceFingerprintRejected(path: metadata.indexPath,
-                                                        sha256: metadata.indexSha256Hex)
+            // A supported source without a pinned index hash installs
+            // trust-on-first-use: report the computed hash for pinning
+            // instead of rejecting. Pinned repos still hard-fail here.
+            if SourceFingerprint.trustOnFirstUseModelID(forRepoID: remote.repoID) != nil {
+                FileHandle.standardError.write(Data((
+                    "WARNING: unpinned source \(remote.repoID) — record this hash as "
+                    + "sourceIndexSHA256 to pin future installs: "
+                    + "\(metadata.indexSha256Hex)\n").utf8))
+            } else {
+                throw RepackError.sourceFingerprintRejected(path: metadata.indexPath,
+                                                            sha256: metadata.indexSha256Hex)
+            }
         }
         let arch = try ArchInfo.load(configPath: metadata.configPath)
 

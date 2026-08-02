@@ -43,6 +43,30 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let linearKeyHeadDim: Int?
     public let linearValueHeadDim: Int?
     public let linearConvKernelSize: Int?
+
+    // DeepSeek-V4 compressed-attention / mHC / router extensions. Optional
+    // for the same reason: absent values validate against zeroed defaults.
+    public let caQLoraRank: Int?
+    public let caOLoraRank: Int?
+    public let caOGroups: Int?
+    public let caRopeHeadDim: Int?
+    public let caIndexNHeads: Int?
+    public let caIndexHeadDim: Int?
+    public let caIndexTopK: Int?
+    public let caCSACompressRate: Int?
+    public let caHCACompressRate: Int?
+    public let caCompressRopeTheta: Double?
+    public let caRopeScalingFactor: Double?
+    public let caRopeScalingOriginalMax: Int?
+    public let caRopeScalingBetaFast: Double?
+    public let caRopeScalingBetaSlow: Double?
+    public let hcMult: Int?
+    public let hcSinkhornIters: Int?
+    public let hcEps: Double?
+    public let numHashRoutedLayers: Int?
+    public let routerScoringFunc: String?
+    public let routedScalingFactor: Double?
+    public let swigluLimit: Double?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -180,12 +204,15 @@ public enum ManifestReader {
     }
 
     private static func validateQuant(_ quant: ManifestQuant) throws {
+        // Routed experts additionally allow 2-bit: the DeepSeek-V4-Flash
+        // dynamic-quant checkpoint ships Q2 experts under a Q4 core, and the
+        // MoE runtime dispatches on `quant.routedExpert.weightBits`.
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
             ("embedding", quant.embedding, [4]),
             ("attention", quant.attention, [4]),
             ("router", quant.router, [8]),
             ("sharedExpert", quant.sharedExpert, [4, 8]),
-            ("routedExpert", quant.routedExpert, [4]),
+            ("routedExpert", quant.routedExpert, [2, 4]),
         ]
         for (name, slot, allowedBits) in slots {
             guard allowedBits.contains(slot.weightBits),
@@ -269,6 +296,49 @@ public enum ManifestReader {
                   a.linearValueHeadDim ?? 0, e.linearAttention.valueHeadDim)
         try check("linearConvKernelSize",
                   a.linearConvKernelSize ?? 0, e.linearAttention.convKernelSize)
+        try check("caQLoraRank",
+                  a.caQLoraRank ?? 0, e.compressedAttention.qLoraRank)
+        try check("caOLoraRank",
+                  a.caOLoraRank ?? 0, e.compressedAttention.oLoraRank)
+        try check("caOGroups",
+                  a.caOGroups ?? 0, e.compressedAttention.oGroups)
+        try check("caRopeHeadDim",
+                  a.caRopeHeadDim ?? 0, e.compressedAttention.ropeHeadDim)
+        try check("caIndexNHeads",
+                  a.caIndexNHeads ?? 0, e.compressedAttention.indexNHeads)
+        try check("caIndexHeadDim",
+                  a.caIndexHeadDim ?? 0, e.compressedAttention.indexHeadDim)
+        try check("caIndexTopK",
+                  a.caIndexTopK ?? 0, e.compressedAttention.indexTopK)
+        try check("caCSACompressRate",
+                  a.caCSACompressRate ?? 0, e.compressedAttention.csaCompressRate)
+        try check("caHCACompressRate",
+                  a.caHCACompressRate ?? 0, e.compressedAttention.hcaCompressRate)
+        try check("caCompressRopeTheta",
+                  a.caCompressRopeTheta ?? 0, e.compressedAttention.compressRopeTheta)
+        try check("caRopeScalingFactor",
+                  a.caRopeScalingFactor ?? 0, e.compressedAttention.ropeScalingFactor)
+        try check("caRopeScalingOriginalMax",
+                  a.caRopeScalingOriginalMax ?? 0,
+                  e.compressedAttention.ropeScalingOriginalMax)
+        try check("caRopeScalingBetaFast",
+                  a.caRopeScalingBetaFast ?? 0, e.compressedAttention.ropeScalingBetaFast)
+        try check("caRopeScalingBetaSlow",
+                  a.caRopeScalingBetaSlow ?? 0, e.compressedAttention.ropeScalingBetaSlow)
+        try check("hcMult",
+                  a.hcMult ?? 0, e.hyperConnections.mult)
+        try check("hcSinkhornIters",
+                  a.hcSinkhornIters ?? 0, e.hyperConnections.sinkhornIters)
+        try check("hcEps",
+                  a.hcEps ?? 0, e.hyperConnections.eps)
+        try check("numHashRoutedLayers",
+                  a.numHashRoutedLayers ?? 0, e.numHashRoutedLayers)
+        try check("routerScoringFunc",
+                  a.routerScoringFunc ?? "softmax", e.routerScoringFunc)
+        try check("routedScalingFactor",
+                  a.routedScalingFactor ?? 1.0, e.routedScalingFactor)
+        try check("swigluLimit",
+                  a.swigluLimit ?? 0.0, e.swigluLimit)
     }
 
     /// Decode just enough of `manifest.json` to identify the model family,

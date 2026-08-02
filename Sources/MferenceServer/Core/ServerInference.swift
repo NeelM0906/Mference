@@ -173,6 +173,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         switch modelFamily {
         case .gemma4: return "gemma-4-26b-a4b-it"
         case .qwen36: return "qwen3.6-35b-a3b"
+        case .deepseekV4Flash: return "deepseek-v4-flash-2bit-dq"
         }
     }
     private nonisolated let modelFamily: ModelFamily
@@ -196,10 +197,19 @@ public actor ServerModelSession: ServerInferenceBackend {
             throw MFTokenizerError.missingToolTemplate
         }
         let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
-        guard FileManager.default.fileExists(atPath: templateURL.path) else {
+        let tokenizer = try await MFTokenizer.load(from: tokenizerFolder)
+        // DeepSeek ships no chat_template.jinja — its chat framing is native
+        // Swift — so the prompt-cache identity hashes a pinned constant that
+        // changes only when that native render does. Every other dialect
+        // still requires the bundled template.
+        let templateData: Data
+        if FileManager.default.fileExists(atPath: templateURL.path) {
+            templateData = try Data(contentsOf: templateURL)
+        } else if tokenizer.dialect == .deepseek {
+            templateData = Data("native:deepseek:v1".utf8)
+        } else {
             throw MFTokenizerError.missingToolTemplate
         }
-        let tokenizer = try await MFTokenizer.load(from: tokenizerFolder)
         let context = try MetalContext()
         let runtime = RuntimeConfiguration(forceLogitsHead: true)
         let model = try Model.load(
@@ -214,7 +224,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                                            runtimeConfiguration: runtime)
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
-        let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
+        let templateDigest = SHA256.hash(data: templateData)
             .map { String(format: "%02x", $0) }
             .joined()
         let runtimeIdentity = [
@@ -391,10 +401,28 @@ public actor ServerModelSession: ServerInferenceBackend {
                             }
                         }
                     case .tail(let text):
-                        let visible = stopMatcher.push(text)
-                        if !visible.isEmpty {
-                            content += visible
-                            onEvent(.content(visible))
+                        // Flush text must pass through the decoder like any
+                        // delta: committing it directly would reorder it
+                        // ahead of a withheld DSML-prefix tail and skip
+                        // marker scanning.
+                        let events = if let decoder {
+                            try decoder.consumeFlushedText(text)
+                        } else {
+                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
+                        }
+                        for event in events {
+                            switch event {
+                            case .content(let flushed):
+                                let visible = stopMatcher.push(flushed)
+                                if !visible.isEmpty {
+                                    content += visible
+                                    onEvent(.content(visible))
+                                }
+                                if stopMatcher.isStopped { shouldStop = true }
+                            case .toolCall(let call):
+                                calls.append(call)
+                                onEvent(.toolCall(call))
+                            }
                         }
                     }
                 } catch {
@@ -403,7 +431,17 @@ public actor ServerModelSession: ServerInferenceBackend {
                 }
         }
         if let decodingError { throw decodingError }
-        try decoder?.finish()
+        if let decoder {
+            for event in try decoder.finish() {
+                if case .content(let text) = event {
+                    let visible = stopMatcher.push(text)
+                    if !visible.isEmpty {
+                        content += visible
+                        onEvent(.content(visible))
+                    }
+                }
+            }
+        }
         if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
             throw GemmaToolCallParserError.malformed
         }

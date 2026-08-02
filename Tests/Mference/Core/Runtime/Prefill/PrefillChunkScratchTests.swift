@@ -32,7 +32,22 @@ import Metal
 
     @Test func layoutClampsChunkSizeToRuntimeBounds() {
         #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 0).chunkTokens == 1)
-        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 512).chunkTokens == 128)
+        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 512).chunkTokens == 512)
+        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 8192).chunkTokens
+                == PrefillRuntimeConfig.maxChunkTokens)
+    }
+
+    @Test(arguments: [256, 512, 1024, 2048, 4096])
+    func layoutScalesWithLargerChunks(chunk: Int) {
+        let layout = PrefillChunkScratchLayout(config: .gemma4_26B_A4B,
+                                               chunkTokens: chunk)
+        #expect(layout.chunkTokens == chunk)
+        #expect(layout.hiddenElements == chunk * 2816)
+        #expect(layout.routeIDElements == chunk * 8)
+        // The arena stays bounded: linear in the chunk, no hidden square
+        // term. 128 tokens measured ~15.6 MiB; admit modest slack.
+        let perTokenBytes = 16.0 * 1_048_576.0 / 128.0
+        #expect(layout.totalPersistentBytes <= Int(Double(chunk) * perTokenBytes * 1.3))
     }
 
     @Test func allocationUsesPrivateScratchAndSharedRouteMetadata() throws {

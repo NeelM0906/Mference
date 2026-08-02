@@ -2,28 +2,49 @@ import Foundation
 
 /// A pinned upstream checkpoint the installer knows how to repack. Each value
 /// fixes the repo, revision and index fingerprint so installs are exactly
-/// reproducible.
+/// reproducible. `revision`/`sourceIndexSHA256` may be nil for a source that
+/// installs trust-on-first-use: the installer resolves HEAD's commit and
+/// reports the computed index hash for pinning instead of failing on it.
 public struct SupportedModelSource: Sendable, Equatable {
     /// CLI selector value (`--model <name>`).
     public let name: String
     public let displayName: String
     public let repoID: String
-    public let revision: String
-    public let sourceIndexSHA256: String
+    /// Pinned commit; nil resolves HEAD's `X-Repo-Commit` at install time.
+    public let revision: String?
+    /// Pinned `model.safetensors.index.json` SHA-256; nil accepts any index
+    /// and reports the computed hash for pinning.
+    public let sourceIndexSHA256: String?
     /// Value recorded as `manifest.modelID` when the source fingerprint matches.
     public let modelID: String
     public let approximateDownloadBytes: UInt64
     public let installedBytes: UInt64
     public let reserveBytes: UInt64
 
+    /// Both pins recorded; unpinned sources install trust-on-first-use.
+    public var isPinned: Bool { revision != nil && sourceIndexSHA256 != nil }
+
     public func installOptions(outputDirectory: URL,
                                overwrite: Bool,
                                token: String?,
-                               resume: Bool = false)
+                               resume: Bool = false,
+                               baseURL: URL? = nil)
         -> RemoteStreamingRepackOptions {
-        RemoteStreamingRepackOptions(
+        if let baseURL {
+            return RemoteStreamingRepackOptions(
+                repoID: repoID,
+                revision: revision ?? "main",
+                outputDir: outputDirectory.path,
+                token: token,
+                requireKnownSource: true,
+                minFreeReserveBytes: reserveBytes,
+                overwrite: overwrite,
+                resume: resume,
+                baseURL: baseURL)
+        }
+        return RemoteStreamingRepackOptions(
             repoID: repoID,
-            revision: revision,
+            revision: revision ?? "main",
             outputDir: outputDirectory.path,
             token: token,
             requireKnownSource: true,
@@ -61,10 +82,27 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 19_546_491_213,
         reserveBytes: 1_073_741_824)
 
+    /// Revision and index hash are not yet pinned (the upload has not been
+    /// fingerprinted); the installer resolves HEAD and prints the computed
+    /// index SHA-256 to record here. Byte estimates follow
+    /// docs/DEEPSEEK_V4_FLASH.md (~91 GB installed) with headroom for the
+    /// resident file and page rounding.
+    public static let deepseekV4Flash = SupportedModelSource(
+        name: "deepseekv4flash",
+        displayName: "DeepSeek-V4-Flash 284B-A13B 2-bit DQ",
+        repoID: "mlx-community/DeepSeek-V4-Flash-2bit-DQ",
+        revision: "722bf559b7de93575b2320973cf2002e05bfe6c9",
+        sourceIndexSHA256:
+            "d1c2d929ab0a35be32cf18026bb31d6f99dad58d6c93a5a2abbe43791f9d6c30",
+        modelID: "deepseek-v4-flash-2bit-dq",
+        approximateDownloadBytes: 97_000_000_000,
+        installedBytes: 97_500_000_000,
+        reserveBytes: 2_147_483_648)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
-    public static let all: [SupportedModelSource] = [gemma4, qwen36]
+    public static let all: [SupportedModelSource] = [gemma4, qwen36, deepseekV4Flash]
 
     public static func named(_ name: String) -> SupportedModelSource? {
         all.first { $0.name == name }

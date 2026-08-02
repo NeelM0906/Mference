@@ -237,7 +237,7 @@ import MferenceRepackCore
       if incompatible {
         try RemoteInstallCheckpoint(
           repoID: "other/model",
-          requestedRevision: descriptor.revision,
+          requestedRevision: descriptor.revision ?? "main",
           resolvedCommit: String(repeating: "a", count: 40),
           sourceIndexSHA256: String(repeating: "b", count: 64),
           planFingerprint: String(repeating: "c", count: 64),

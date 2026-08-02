@@ -15,6 +15,9 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     }
 
     public var fp16KVBytes: UInt64 {
+        // Sized against the Gemma 4 baseline; Qwen 3.6 and DeepSeek V4 have
+        // different (smaller-per-token) attention state, so the menu labels
+        // overstate their cost. The option is a UI estimate, not a budget.
         let architecture = ArchConfig.gemma4_26B_A4B
         let fullLayers = architecture.fullAttentionLayerMask.reduce(0) {
             $0 + ($1 == 0 ? 0 : 1)

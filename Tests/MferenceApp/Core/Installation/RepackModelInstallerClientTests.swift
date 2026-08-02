@@ -84,6 +84,7 @@ import Testing
 
     private func expectCorruptCheckpoint(destinationBytes: [UInt64]) throws {
         let descriptor = AppModelInstallDescriptor(
+            family: .gemma4,
             displayName: "Test",
             repoID: "owner/model",
             revision: "main",
@@ -109,9 +110,9 @@ import Testing
             withIntermediateDirectories: true)
         let checkpoint = RemoteInstallCheckpoint(
             repoID: descriptor.repoID,
-            requestedRevision: descriptor.revision,
+            requestedRevision: descriptor.revision ?? "main",
             resolvedCommit: String(repeating: "a", count: 40),
-            sourceIndexSHA256: descriptor.sourceIndexSHA256,
+            sourceIndexSHA256: descriptor.sourceIndexSHA256 ?? String(repeating: "b", count: 64),
             planFingerprint: String(repeating: "c", count: 64),
             totalSourceBytes: UInt64(destinationBytes.count),
             completedRanges: destinationBytes.enumerated().map { index, bytes in

@@ -27,7 +27,7 @@ func makeCompleteModelInstall(_ tag: String) throws -> URL {
         "versionMinor": 0,
         "flags": ["streamingPresent": true],
         "modelID": "test/gemma-4-26b-a4b",
-        "sourceSnapshotHash": "sha256:" + AppModelInstallDescriptor.default.sourceIndexSHA256,
+        "sourceSnapshotHash": "sha256:" + (AppModelInstallDescriptor.default.sourceIndexSHA256 ?? ""),
         "quant": [
             "embedding": quantSlot(4),
             "attention": quantSlot(4),

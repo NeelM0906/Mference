@@ -3,23 +3,29 @@ import Mference
 import MferenceRepackCore
 
 public struct AppModelInstallDescriptor: Equatable, Sendable {
+    public let family: ModelFamily
     public let displayName: String
     public let repoID: String
-    public let revision: String
-    public let sourceIndexSHA256: String
+    /// Pinned commit; nil resolves HEAD at install time (trust-on-first-use,
+    /// mirrors `SupportedModelSource`).
+    public let revision: String?
+    /// Pinned index SHA-256; nil skips the probe's checkpoint pin check.
+    public let sourceIndexSHA256: String?
     public let approximateDownloadBytes: UInt64
     public let installedBytes: UInt64
     public let rangeStagingBytes: UInt64
     public let reserveBytes: UInt64
 
-    public init(displayName: String,
+    public init(family: ModelFamily,
+                displayName: String,
                 repoID: String,
-                revision: String,
-                sourceIndexSHA256: String,
+                revision: String?,
+                sourceIndexSHA256: String?,
                 approximateDownloadBytes: UInt64,
                 installedBytes: UInt64,
                 rangeStagingBytes: UInt64,
                 reserveBytes: UInt64) {
+        self.family = family
         self.displayName = displayName
         self.repoID = repoID
         self.revision = revision
@@ -35,6 +41,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     }
 
     public static let `default` = AppModelInstallDescriptor(
+        family: .gemma4,
         displayName: "Gemma 4 26B-A4B IT 4-bit",
         repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
         revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
@@ -45,6 +52,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         reserveBytes: 1_073_741_824)
 
     public static let qwen36 = AppModelInstallDescriptor(
+        family: .qwen36,
         displayName: "Qwen3.6 35B-A3B 4-bit",
         repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
         revision: "38740b847e4cb78f352aba30aa41c76e08e6eb46",
@@ -54,29 +62,50 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 1_073_741_824)
 
+    /// Pinned after first-install verification (mirrors
+    /// `SupportedModelSource.deepseekV4Flash`).
+    public static let deepseekV4Flash = AppModelInstallDescriptor(
+        family: .deepseekV4Flash,
+        displayName: "DeepSeek-V4-Flash 284B-A13B 2-bit DQ",
+        repoID: "mlx-community/DeepSeek-V4-Flash-2bit-DQ",
+        revision: "722bf559b7de93575b2320973cf2002e05bfe6c9",
+        sourceIndexSHA256:
+            "d1c2d929ab0a35be32cf18026bb31d6f99dad58d6c93a5a2abbe43791f9d6c30",
+        approximateDownloadBytes: 97_000_000_000,
+        installedBytes: 97_500_000_000,
+        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+        reserveBytes: 2_147_483_648)
+
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
         switch family {
         case .gemma4: return .default
         case .qwen36: return .qwen36
+        case .deepseekV4Flash: return .deepseekV4Flash
         }
     }
 
     /// Basename of the installed `.gturbo` directory for this descriptor.
     public var installDirectoryName: String {
-        self == .qwen36 ? "qwen36.gturbo" : "gemma4.gturbo"
+        switch family {
+        case .gemma4: return "gemma4.gturbo"
+        case .qwen36: return "qwen36.gturbo"
+        case .deepseekV4Flash: return "deepseekv4flash.gturbo"
+        }
     }
 
     /// The descriptor the app products select at launch. Defaults to Gemma 4.
-    /// `MFERENCE_MODEL=qwen36` in the environment wins; otherwise the
-    /// persisted preference (`defaults write Mference model qwen36`)
-    /// applies, so GUI launches without an environment also select Qwen.
+    /// `MFERENCE_MODEL=qwen36` (or `deepseekv4flash`/`dsv4`) in the
+    /// environment wins; otherwise the persisted preference
+    /// (`defaults write Mference model qwen36`) applies, so GUI launches
+    /// without an environment also select the alternative model.
     public static var selected: AppModelInstallDescriptor {
         let environmentValue = ProcessInfo.processInfo.environment["MFERENCE_MODEL"]
         let preferenceValue = UserDefaults(suiteName: "Mference")?
             .string(forKey: "model")
         switch environmentValue ?? preferenceValue {
         case "qwen36": return .qwen36
+        case "deepseekv4flash", "dsv4": return .deepseekV4Flash
         default: return .default
         }
     }

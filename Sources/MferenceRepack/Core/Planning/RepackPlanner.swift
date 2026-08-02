@@ -106,7 +106,7 @@ enum RepackPlanner {
 
     static func classify(_ name: String, numLayers: Int,
                          family: RepackModelFamily) -> Bucket {
-        if name.hasPrefix("language_model.") {
+        if hasResidentPrefix(name, family: family) {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
                let layer = layerIndex(in: name),
@@ -121,12 +121,27 @@ enum RepackPlanner {
         return .unknown
     }
 
+    /// The LM prefix is a family contract: Gemma and Qwen ship multimodal
+    /// checkpoints whose text tower lives under `language_model.`; DeepSeek
+    /// V4 is text-only with a plain `model.` prefix and a top-level
+    /// `lm_head.` (mlx-lm conversion naming).
+    private static func hasResidentPrefix(_ name: String,
+                                          family: RepackModelFamily) -> Bool {
+        switch family {
+        case .gemma4, .qwen36:
+            return name.hasPrefix("language_model.")
+        case .deepseekV4Flash:
+            return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
+        }
+    }
+
     private static func routedExpertRole(in name: String,
                                          family: RepackModelFamily) -> String? {
         let routedContainer: String
         switch family {
-        case .gemma4: routedContainer = ".experts.switch_glu."
-        case .qwen36: routedContainer = ".mlp.switch_mlp."
+        case .gemma4:          routedContainer = ".experts.switch_glu."
+        case .qwen36:          routedContainer = ".mlp.switch_mlp."
+        case .deepseekV4Flash: routedContainer = ".ffn.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -219,6 +234,22 @@ enum RepackPlanner {
                                        gateName: gName, upName: uName, downName: dName,
                                        registry: registry, meta: meta, arch: arch)
             layerPlans.append(lp)
+        }
+
+        // The .gturbo format keeps one expertStride across every layer
+        // (manifest root + runtime streamers assume it). Mixed per-tensor
+        // quant group sizes make raw blob sizes differ per layer — DeepSeek
+        // V4's group-64 gate_proj on the last layer packs 0.5 MiB tighter
+        // than the group-32 layers — so pad every layer to the widest
+        // stride. Sub-tensor offsets are blob-relative and unaffected.
+        let maxStride = layerPlans.map(\.expertStride).max() ?? 0
+        layerPlans = layerPlans.map { lp in
+            guard lp.expertsPerLayer > 0, lp.expertStride != maxStride else { return lp }
+            return LayerFilePlan(layerIndex: lp.layerIndex,
+                                 path: lp.path,
+                                 expertsPerLayer: lp.expertsPerLayer,
+                                 expertStride: maxStride,
+                                 subTensors: lp.subTensors)
         }
 
         let matched = SourceFingerprint.modelID(forIndexSha256: meta.indexSha256Hex)
@@ -412,7 +443,7 @@ enum RepackPlanner {
     // MARK: - Helpers
 
     private static func ietnyDtype(_ d: SourceTensor.Dtype) -> UInt8 {
-        switch d { case .u32: 0; case .bf16: 1; case .fp16: 2; case .fp32: 3 }
+        switch d { case .u32: 0; case .bf16: 1; case .fp16: 2; case .fp32: 3; case .i64: 4 }
     }
 
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {
@@ -443,15 +474,25 @@ enum RepackPlanner {
     private static func lmResidentOrdering(family: RepackModelFamily)
         -> (String, String) -> Bool {
         // Compute a sort key per name; we order by (group rank, layer, slot rank, name).
+        // Group 2 holds top-level tensors between the layers and the final
+        // norm (DeepSeek V4's `model.hc_head.*` stream collapse lands there).
         func key(_ n: String) -> (Int, Int, Int, String) {
-            if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
-            if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
-            if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
+            switch family {
+            case .gemma4, .qwen36:
+                if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
+                if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
+                if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
+            case .deepseekV4Flash:
+                if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
+                if n == "model.norm.weight"          { return (3, 0, 0, n) }
+                if n == "lm_head.weight"             { return (4, 0, 0, n) }
+            }
             if let li = layerIndex(in: n) {
                 let slot: Int
                 switch family {
-                case .gemma4: slot = slotRank(in: n)
-                case .qwen36: slot = qwenSlotRank(in: n)
+                case .gemma4:          slot = slotRank(in: n)
+                case .qwen36:          slot = qwenSlotRank(in: n)
+                case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -492,6 +533,56 @@ enum RepackPlanner {
         if n.contains(".mlp.shared_expert.down_proj.weight") { return 19 }
         if n.hasSuffix(".input_layernorm.weight")        { return 20 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 21 }
+        return 100
+    }
+
+    /// Within-layer slot order for the DeepSeek-V4-Flash family: the low-rank
+    /// attention path in pipeline order, then the CSA/HCA compressor and its
+    /// indexer, then router (with hash table / correction bias), shared
+    /// expert, layer norms, and the two hyper-connection mix sites. Names
+    /// follow the mlx-community conversion (`attn.wq_a`, `attn.indexer.*`,
+    /// `ffn.gate`, `ffn.shared_experts`). Indexer patterns are matched
+    /// before the compressor's so the shared component names (`wkv`,
+    /// `wgate`, `norm`, `ape`) cannot cross-match. Unquantized tensors
+    /// (norms, sinks, position biases, hc mixes, e_score_correction_bias,
+    /// tid2eid) carry no `.scales`/`.biases` companions and flow through
+    /// the planner's non-U32/non-`.weight` branch.
+    private static func deepseekV4SlotRank(in n: String) -> Int {
+        if n.contains(".attn.wq_a.weight")                      { return 0 }
+        if n.contains(".attn.q_norm.weight")                    { return 1 }
+        if n.contains(".attn.wq_b.weight")                      { return 2 }
+        if n.contains(".attn.wkv.weight")                       { return 3 }
+        if n.contains(".attn.kv_norm.weight")                   { return 4 }
+        if n.hasSuffix(".attn.attn_sink")                       { return 5 }
+        if n.contains(".attn.wo_a.weight")                      { return 6 }
+        if n.contains(".attn.wo_b.weight")                      { return 7 }
+        if n.contains(".attn.indexer.compressor.wkv.weight")    { return 12 }
+        if n.contains(".attn.indexer.compressor.wgate.weight")  { return 13 }
+        if n.contains(".attn.indexer.compressor.norm.weight")   { return 14 }
+        if n.hasSuffix(".attn.indexer.compressor.ape")          { return 15 }
+        if n.contains(".attn.indexer.wq_b.weight")              { return 16 }
+        if n.contains(".attn.indexer.weights_proj.weight")      { return 17 }
+        if n.contains(".attn.compressor.wkv.weight")            { return 8 }
+        if n.contains(".attn.compressor.wgate.weight")          { return 9 }
+        if n.contains(".attn.compressor.norm.weight")           { return 10 }
+        if n.hasSuffix(".attn.compressor.ape")                  { return 11 }
+        if n.contains(".ffn.gate.weight")                       { return 18 }
+        if n.hasSuffix(".ffn.gate.e_score_correction_bias")     { return 19 }
+        // tid2eid is an I64 lookup table; it rides the resident file as raw
+        // I64 bytes (no `.weight` suffix, hence no quant companions) and the
+        // runtime's CPU-side hash lookup reads it dtype-aware.
+        if n.hasSuffix(".ffn.gate.tid2eid")                     { return 20 }
+        if n.contains(".ffn.shared_experts.gate_proj.weight")   { return 21 }
+        if n.contains(".ffn.shared_experts.up_proj.weight")     { return 22 }
+        if n.contains(".ffn.shared_experts.down_proj.weight")   { return 23 }
+        if n.hasSuffix(".attn_norm.weight")                     { return 24 }
+        if n.hasSuffix(".ffn_norm.weight")                      { return 25 }
+        if n.hasSuffix(".attn_hc.fn")                           { return 26 }
+        if n.hasSuffix(".attn_hc.base")                         { return 27 }
+        if n.hasSuffix(".attn_hc.scale")                        { return 28 }
+        if n.hasSuffix(".ffn_hc.fn")                            { return 29 }
+        if n.hasSuffix(".ffn_hc.base")                          { return 30 }
+        if n.hasSuffix(".ffn_hc.scale")                         { return 31 }
         return 100
     }
 

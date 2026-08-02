@@ -60,12 +60,15 @@ enum IndexLoader {
                 guard let entry = v as? [String: Any] else { continue }
                 let bits = (entry["bits"] as? Int) ?? baseBits
                 let g    = (entry["group_size"] as? Int) ?? baseGroup
-                guard g == baseGroup else {
+                // Resident-tensor kernels assume the base group size; only
+                // 2-bit streamed routed experts support a deviating group
+                // (DeepSeek V4 ships gate_proj at group 32).
+                guard g == baseGroup || (bits == 2 && (g == 32 || g == 64)) else {
                     throw RepackError.configJsonInvalid(
                         path: configPath,
                         detail: "quantization override \(k) group_size \(g) != base \(baseGroup)")
                 }
-                overrides[k] = QuantSpec(bits: bits)
+                overrides[k] = QuantSpec(bits: bits, groupSize: g)
             }
         } catch let e as RepackError {
             throw e
@@ -96,6 +99,6 @@ enum IndexLoader {
             ? String(name.dropLast(".weight".count))
             : name
         if let o = meta.bitsOverrides[stripped] { return o }
-        return QuantSpec(bits: meta.baseBits)
+        return QuantSpec(bits: meta.baseBits, groupSize: meta.baseGroupSize)
     }
 }

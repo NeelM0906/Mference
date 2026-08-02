@@ -380,3 +380,32 @@ private final class WhitespaceResponseClient: AppInferenceClient, @unchecked Sen
 
     func cancel() {}
 }
+
+extension AppModelTests {
+    @MainActor
+    @Test func deepseekRequestsCarryTheDefaultSystemAnchor() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.installedFamilyOverrideForTesting = .deepseekV4Flash
+        model.promptText = "hello"
+
+        let request = try model.makeRequest()
+        #expect(request.messages.first?.role == .system)
+        #expect(request.messages.first?.content
+            == AppModel.deepseekDefaultSystemPrompt)
+        #expect(request.messages.last?.role == .user)
+        #expect(request.messages.count == 2)
+    }
+
+    @MainActor
+    @Test func otherFamiliesGetNoDefaultSystemMessage() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.installedFamilyOverrideForTesting = .qwen36
+        model.promptText = "hello"
+
+        let request = try model.makeRequest()
+        #expect(request.messages.count == 1)
+        #expect(request.messages.first?.role == .user)
+    }
+}

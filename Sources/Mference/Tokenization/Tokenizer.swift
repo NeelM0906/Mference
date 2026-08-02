@@ -21,14 +21,17 @@ public enum MFTokenizerError: Error, CustomStringConvertible {
 
 /// Chat framing dialect, resolved from the loaded tokenizer's special tokens.
 ///
-/// `.chatml` is detected by the presence of the `<|im_end|>` special token
-/// (Qwen-style ChatML); everything else uses the Gemma 4 contract.
+/// `.deepseek` is detected by the presence of the `<｜User｜>` special token
+/// (DeepSeek-V4), `.chatml` by `<|im_end|>` (Qwen-style ChatML); everything
+/// else uses the Gemma 4 contract.
 public enum ChatDialect: String, Sendable {
     case gemma
     case chatml
+    case deepseek
 }
 
-/// Tokenizer wrapper for the supported model families (Gemma 4 and ChatML/Qwen).
+/// Tokenizer wrapper for the supported model families (Gemma 4, ChatML/Qwen,
+/// and DeepSeek-V4).
 ///
 /// Prefers tokenizer sidecars in a completed `.gturbo/tokenizer/` directory,
 /// then falls back to the IT variant's Hugging Face Hub tokenizer cache. Exposes
@@ -123,10 +126,18 @@ public struct MFTokenizer: @unchecked Sendable {
         self.tokenizer = tokenizer
 
         let dialect: ChatDialect =
-            Self.specialTokenID(tokenizer, Self.imEndMark) != nil ? .chatml : .gemma
-        let resolved = dialect == .chatml
-            ? try Self.resolveChatMLTokens(tokenizer)
-            : try Self.resolveGemmaTokens(tokenizer)
+            if Self.specialTokenID(tokenizer, Self.deepseekUserMark) != nil {
+                .deepseek
+            } else if Self.specialTokenID(tokenizer, Self.imEndMark) != nil {
+                .chatml
+            } else {
+                .gemma
+            }
+        let resolved = switch dialect {
+        case .gemma: try Self.resolveGemmaTokens(tokenizer)
+        case .chatml: try Self.resolveChatMLTokens(tokenizer)
+        case .deepseek: try Self.resolveDeepseekTokens(tokenizer)
+        }
 
         self.dialect = dialect
         self.bosID = resolved.bosID
@@ -255,6 +266,51 @@ public struct MFTokenizer: @unchecked Sendable {
             vocabSize: 248_320)
     }
 
+    /// Sentinel for token roles a dialect frames as plain text rather than a
+    /// single special token. Never a valid token ID, so comparisons against
+    /// generated tokens can never match.
+    private static let noSuchTokenID: Int32 = -1
+
+    private static func resolveDeepseekTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw MFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let bos = try id(Self.deepseekBOSMark)
+        let eos = try id(Self.deepseekEOSMark)
+        // The turn markers are required even though no stored property holds
+        // them; template rendering relies on the tokenizer recognizing their text.
+        _ = try id(Self.deepseekUserMark)
+        _ = try id(Self.deepseekAssistantMark)
+        let thinkStart = try id("<think>")
+        let thinkEnd = try id("</think>")
+        return ResolvedSpecialTokens(
+            bosID: bos,
+            bosPrefixID: bos,
+            eosID: eos,
+            padID: eos,
+            endOfTurnID: eos,
+            // DSML tool-call framing and `<tool_result>` wrappers are plain
+            // text in this dialect, not special tokens; the streaming decoder
+            // scans the delta text instead of matching these IDs.
+            toolCallStartID: noSuchTokenID,
+            toolCallEndID: noSuchTokenID,
+            toolResponseID: noSuchTokenID,
+            toolResponseEndID: noSuchTokenID,
+            channelStartID: thinkStart,
+            channelEndID: thinkEnd,
+            thinkStartID: thinkStart,
+            thinkEndID: thinkEnd,
+            stopTokenIDs: [eos],
+            // The model's padded embedding/lm_head row count — logits buffers
+            // use this, mirroring the other dialects.
+            vocabSize: 129_280)
+    }
+
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
     ///
     /// The library's `addSpecialTokens: true` flag is a no-op for the Gemma 4 IT
@@ -340,11 +396,24 @@ public struct MFTokenizer: @unchecked Sendable {
     /// `add_generation_prompt` + `enable_thinking=false` branch.
     private static let chatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    /// DeepSeek-V4 special-token text; note the fullwidth vertical bars
+    /// (U+FF5C) and the U+2581 fillers in the sentence markers.
+    private static let deepseekBOSMark       = "<｜begin▁of▁sentence｜>"
+    private static let deepseekEOSMark       = "<｜end▁of▁sentence｜>"
+    private static let deepseekUserMark      = "<｜User｜>"
+    private static let deepseekAssistantMark = "<｜Assistant｜>"
+    /// Generation prompt with thinking disabled: chat mode closes the think
+    /// block immediately, so decoding starts after `</think>`.
+    private static let deepseekGenerationSuffix = "<｜Assistant｜></think>"
+    /// The assistant branch's own think-close (the shipped Jinja emits one
+    /// from the user branch AND one from the assistant branch).
+    private static let deepseekThinkCloseMark = "</think>"
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
         switch dialect {
         case .gemma: return try gemmaChatTemplate(messages)
         case .chatml: return try chatMLChatTemplate(messages)
+        case .deepseek: return try deepseekChatTemplate(messages)
         }
     }
 
@@ -381,8 +450,51 @@ public struct MFTokenizer: @unchecked Sendable {
         return s
     }
 
+    /// Text-only, no-tool rendering of the DeepSeek-V4 non-thinking ("chat"
+    /// mode) encoding, byte-matched to the checkpoint's shipped
+    /// `chat_template.jinja`: a system message renders bare, EVERY user turn
+    /// is followed by `<｜Assistant｜></think>`, every assistant turn opens
+    /// with its own `</think>` (so a user→assistant pair carries
+    /// `</think></think>` between marker and content, exactly as the Jinja
+    /// renders it) and closes with EOS, content is never trimmed, and the
+    /// generation prompt is appended only when the last message is not a
+    /// user turn (the user branch already ends in the prompt).
+    private func deepseekChatTemplate(_ messages: [Message]) throws -> String {
+        var s = Self.deepseekBOSMark
+        for (index, message) in messages.enumerated() {
+            guard let content = message.content else {
+                throw MFTokenizerError.invalidChatTemplate("text-only messages require content")
+            }
+            if message.role == .system && index != 0 {
+                throw MFTokenizerError.invalidChatTemplate("system message must be first")
+            }
+            switch message.role {
+            case .system:
+                s += content
+            case .user, .developer:
+                // The reference encoder frames `developer` guidance with the
+                // same User marker it uses for user turns.
+                s += Self.deepseekUserMark + content + Self.deepseekGenerationSuffix
+            case .assistant:
+                s += Self.deepseekThinkCloseMark + content + Self.deepseekEOSMark
+            case .tool:
+                throw MFTokenizerError.invalidChatTemplate(
+                    "deepseek merges tool results into user turns; use the tool chat encoder")
+            }
+        }
+        if let last = messages.last,
+           !(last.role == .user || last.role == .developer) {
+            s += Self.deepseekGenerationSuffix
+        }
+        return s
+    }
+
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition]) throws -> [Int32] {
+        // DeepSeek ships no chat_template.jinja; its tool framing is native.
+        if dialect == .deepseek {
+            return try encodeDeepseekToolChat(messages: messages, tools: tools)
+        }
         guard tokenizer.hasChatTemplate else {
             throw MFTokenizerError.missingToolTemplate
         }
@@ -434,6 +546,156 @@ public struct MFTokenizer: @unchecked Sendable {
         ).map(Int32.init)
     }
 
+    // MARK: - DeepSeek native tool chat
+
+    /// Full DeepSeek-V4 tool-chat render, mirroring the reference encoder's
+    /// chat-mode output: tool schemas join the system message as a `## Tools`
+    /// section, `tool` results merge into `<｜User｜>` turns as
+    /// `<tool_result>` blocks, and historical tool calls render as DSML
+    /// `<｜DSML｜tool_calls>` blocks.
+    private func encodeDeepseekToolChat(messages: [Message],
+                                        tools: [FunctionDefinition]) throws -> [Int32] {
+        var s = Self.deepseekBOSMark
+        var remaining = messages[...]
+        // Tool schemas ride in the system message — always after a blank
+        // line, even onto empty content, matching the reference render; a
+        // conversation that opens without one synthesizes the empty message.
+        var systemText: String?
+        if let first = remaining.first, first.role == .system {
+            systemText = first.content ?? ""
+            remaining = remaining.dropFirst()
+        }
+        if !tools.isEmpty {
+            let section = try Self.deepseekToolsSection(tools)
+            systemText = (systemText ?? "") + "\n\n" + section
+        }
+        if let systemText { s += systemText }
+
+        // The dialect has no standalone tool role: a run of user text and
+        // tool results collapses into one `<｜User｜>` turn, its parts joined
+        // by blank lines, exactly as the reference merge step does.
+        var pendingUserParts: [String] = []
+        var lastTurnWasUser = false
+        func flushUserTurn() {
+            guard !pendingUserParts.isEmpty else { return }
+            s += Self.deepseekUserMark + pendingUserParts.joined(separator: "\n\n")
+            pendingUserParts = []
+            lastTurnWasUser = true
+        }
+        for message in remaining {
+            switch message.role {
+            case .system:
+                throw MFTokenizerError.invalidChatTemplate("system message must be first")
+            case .user:
+                pendingUserParts.append(message.content ?? "")
+            case .tool:
+                pendingUserParts.append("<tool_result>\(message.content ?? "")</tool_result>")
+            case .developer:
+                // Developer guidance keeps its own User-framed turn upstream;
+                // it never merges with adjacent tool results.
+                flushUserTurn()
+                s += Self.deepseekUserMark + (message.content ?? "")
+                lastTurnWasUser = true
+            case .assistant:
+                flushUserTurn()
+                // The reference closes the preceding user turn with the
+                // assistant transition before the reply's content.
+                if lastTurnWasUser { s += Self.deepseekGenerationSuffix }
+                var turn = message.content ?? ""
+                if !message.toolCalls.isEmpty {
+                    let invokes = try message.toolCalls
+                        .map(Self.deepseekInvoke)
+                        .joined(separator: "\n")
+                    turn += "\n\n" + DeepseekToolCallParser.toolCallsOpenMark + "\n"
+                        + invokes + "\n" + DeepseekToolCallParser.toolCallsCloseMark
+                }
+                s += turn + Self.deepseekEOSMark
+                lastTurnWasUser = false
+            }
+        }
+        flushUserTurn()
+        s += Self.deepseekGenerationSuffix
+        return encode(s, addBOS: false)
+    }
+
+    /// One historical tool call as a DSML invoke block. String arguments pass
+    /// through raw with `string="true"`; everything else serializes to JSON
+    /// with `string="false"`, matching the reference encoder. Keys render in
+    /// sorted order to keep the prompt deterministic.
+    ///
+    /// DSML has no escape syntax, so a name or value containing the
+    /// `｜DSML｜` mark cannot be framed unambiguously (the parser reads a
+    /// value up to the first close tag) — such calls are rejected rather
+    /// than silently corrupting the next turn's prompt framing.
+    private static func deepseekInvoke(_ call: HistoricalToolCall) throws -> String {
+        guard case .object(let arguments) = call.arguments else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "historical tool arguments must be a JSON object")
+        }
+        let dsml = DeepseekToolCallParser.dsmlMark
+        func guardFramable(_ text: String, what: String) throws {
+            guard !text.contains(dsml) else {
+                throw MFTokenizerError.invalidChatTemplate(
+                    "historical tool call \(what) contains the DSML marker and cannot be re-rendered unambiguously")
+            }
+        }
+        try guardFramable(call.name, what: "name")
+        let parameters = try arguments.keys.sorted().map { key -> String in
+            try guardFramable(key, what: "parameter name")
+            let value = arguments[key]!
+            if case .string(let raw) = value {
+                try guardFramable(raw, what: "argument \"\(key)\"")
+                return "<\(dsml)parameter name=\"\(key)\" string=\"true\">\(raw)</\(dsml)parameter>"
+            }
+            let encoded = try value.encoded()
+            try guardFramable(encoded, what: "argument \"\(key)\"")
+            return "<\(dsml)parameter name=\"\(key)\" string=\"false\">\(encoded)</\(dsml)parameter>"
+        }.joined(separator: "\n")
+        return "<\(dsml)invoke name=\"\(call.name)\">\n\(parameters)\n</\(dsml)invoke>"
+    }
+
+    /// The `## Tools` system-prompt section from the reference encoder,
+    /// carrying the DSML invoke syntax and the JSON tool schemas.
+    private static func deepseekToolsSection(_ tools: [FunctionDefinition]) throws -> String {
+        let dsml = DeepseekToolCallParser.dsmlMark
+        // Fixed key order mirrors the OpenAI-format function objects the
+        // reference serializes; schema keys sort for determinism.
+        let schemas = try tools.map { tool -> String in
+            let name = try JSONValue.string(tool.name).encoded(sortedKeys: false)
+            let description = try JSONValue.string(tool.description).encoded(sortedKeys: false)
+            let parameters = try tool.parameters.encoded()
+            return "{\"name\":\(name),\"description\":\(description),\"parameters\":\(parameters)}"
+        }.joined(separator: "\n")
+        return """
+        ## Tools
+
+        You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<\(dsml)tool_calls>" block like the following:
+
+        <\(dsml)tool_calls>
+        <\(dsml)invoke name="$TOOL_NAME">
+        <\(dsml)parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</\(dsml)parameter>
+        ...
+        </\(dsml)invoke>
+        <\(dsml)invoke name="$TOOL_NAME2">
+        ...
+        </\(dsml)invoke>
+        </\(dsml)tool_calls>
+
+        String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
+
+        If thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.
+
+        Otherwise, output directly after </think> with tool calls or final response.
+
+        ### Available Tool Schemas
+
+        \(schemas)
+
+        You MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.
+
+        """
+    }
+
     public func encodeTextContinuation(userContent: String) -> [Int32] {
         let content = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
         switch dialect {
@@ -447,6 +709,14 @@ public struct MFTokenizer: @unchecked Sendable {
                 "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
                     + Self.chatMLGenerationSuffix,
                 addBOS: false)
+        case .deepseek:
+            // The cached assistant turn stopped just before its EOS; the
+            // bridge supplies it, then opens the next user turn. Content is
+            // NOT trimmed — the full-render template never trims, and the
+            // continuation must produce the same bytes a fresh render would.
+            return [endOfTurnID] + encode(
+                Self.deepseekUserMark + userContent + Self.deepseekGenerationSuffix,
+                addBOS: false)
         }
     }
 
@@ -459,7 +729,9 @@ public struct MFTokenizer: @unchecked Sendable {
         // The ChatML template's `<think>` stripping depends on each assistant
         // turn's position relative to the last user query, so a re-rendered
         // prefix is not guaranteed to be a token prefix of the full render.
-        // Callers (ServerPromptCache) fall back to prefix matching.
+        // DeepSeek merges tool results into user turns rather than keying on
+        // special tokens, so the boundary search below has nothing to anchor
+        // on. Callers (ServerPromptCache) fall back to prefix matching.
         guard dialect == .gemma else {
             throw MFTokenizerError.unsupportedForDialect("tool-result KV continuation")
         }
