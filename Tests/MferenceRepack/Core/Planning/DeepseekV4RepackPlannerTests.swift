@@ -147,18 +147,20 @@ struct DeepseekV4RepackPlannerTests {
         }
     }
 
-    @Test func deepseekSourceIsTrustOnFirstUse() {
-        // Not yet pinned: the fingerprint table carries no entry, and the
-        // repo resolves through the trust-on-first-use lookup instead.
-        #expect(SourceFingerprint.knownFingerprints["deepseek-v4-flash-2bit-dq"] == nil)
-        #expect(SourceFingerprint.trustOnFirstUseModelID(
-            forRepoID: "mlx-community/DeepSeek-V4-Flash-2bit-DQ")
+    @Test func deepseekSourceIsPinned() {
+        // Pinned after first-install verification against
+        // 722bf559b7de93575b2320973cf2002e05bfe6c9: the fingerprint table
+        // resolves the index hash and the trust-on-first-use path is closed.
+        #expect(SourceFingerprint.knownFingerprints["deepseek-v4-flash-2bit-dq"]
+            == "d1c2d929ab0a35be32cf18026bb31d6f99dad58d6c93a5a2abbe43791f9d6c30")
+        #expect(SourceFingerprint.modelID(forIndexSha256:
+            "d1c2d929ab0a35be32cf18026bb31d6f99dad58d6c93a5a2abbe43791f9d6c30")
             == "deepseek-v4-flash-2bit-dq")
         // Pinned repos never resolve through the trust-on-first-use path.
         #expect(SourceFingerprint.trustOnFirstUseModelID(
-            forRepoID: "mlx-community/gemma-4-26b-a4b-it-4bit") == nil)
+            forRepoID: "mlx-community/DeepSeek-V4-Flash-2bit-DQ") == nil)
         #expect(SourceFingerprint.trustOnFirstUseModelID(
-            forRepoID: "mlx-community/Qwen3.6-35B-A3B-4bit") == nil)
+            forRepoID: "mlx-community/gemma-4-26b-a4b-it-4bit") == nil)
     }
 
     @Test func deepseekClassificationBucketsNames() {

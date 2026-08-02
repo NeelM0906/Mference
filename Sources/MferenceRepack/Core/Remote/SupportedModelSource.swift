@@ -91,8 +91,9 @@ public struct SupportedModelSource: Sendable, Equatable {
         name: "deepseekv4flash",
         displayName: "DeepSeek-V4-Flash 284B-A13B 2-bit DQ",
         repoID: "mlx-community/DeepSeek-V4-Flash-2bit-DQ",
-        revision: nil,
-        sourceIndexSHA256: nil,
+        revision: "722bf559b7de93575b2320973cf2002e05bfe6c9",
+        sourceIndexSHA256:
+            "d1c2d929ab0a35be32cf18026bb31d6f99dad58d6c93a5a2abbe43791f9d6c30",
         modelID: "deepseek-v4-flash-2bit-dq",
         approximateDownloadBytes: 97_000_000_000,
         installedBytes: 97_500_000_000,

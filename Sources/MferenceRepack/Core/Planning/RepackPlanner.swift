@@ -236,6 +236,22 @@ enum RepackPlanner {
             layerPlans.append(lp)
         }
 
+        // The .gturbo format keeps one expertStride across every layer
+        // (manifest root + runtime streamers assume it). Mixed per-tensor
+        // quant group sizes make raw blob sizes differ per layer — DeepSeek
+        // V4's group-64 gate_proj on the last layer packs 0.5 MiB tighter
+        // than the group-32 layers — so pad every layer to the widest
+        // stride. Sub-tensor offsets are blob-relative and unaffected.
+        let maxStride = layerPlans.map(\.expertStride).max() ?? 0
+        layerPlans = layerPlans.map { lp in
+            guard lp.expertsPerLayer > 0, lp.expertStride != maxStride else { return lp }
+            return LayerFilePlan(layerIndex: lp.layerIndex,
+                                 path: lp.path,
+                                 expertsPerLayer: lp.expertsPerLayer,
+                                 expertStride: maxStride,
+                                 subTensors: lp.subTensors)
+        }
+
         let matched = SourceFingerprint.modelID(forIndexSha256: meta.indexSha256Hex)
 
         return RepackPlan(arch: arch,
