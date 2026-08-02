@@ -162,3 +162,29 @@ struct DeepseekDecoderTests {
         }
     }
 }
+
+extension DeepseekDecoderTests {
+    @Test("Flushed tail text routes through DSML scanning in order")
+    func flushedTailKeepsOrderAndScanning() throws {
+        let d = decoder()
+        // A delta ending in a bare `<` is withheld as a potential DSML
+        // prefix; a detokenizer flush arriving afterwards must come out
+        // AFTER the held text, not before it.
+        var events = try feed("count: 1 <", into: d)
+        events += try d.consumeFlushedText("2")
+        events += d.drain()
+        #expect(visibleText(events) == "count: 1 <2")
+        try d.finish()
+    }
+
+    @Test("drain releases a reply that legitimately ends in a DSML prefix")
+    func drainReleasesHeldSuffix() throws {
+        let d = decoder()
+        var events = try feed("a < b, and x <｜", into: d)
+        // Before drain, the trailing run that could open a DSML block is
+        // withheld; drain at end of stream must release it verbatim.
+        events += d.drain()
+        #expect(visibleText(events) == "a < b, and x <｜")
+        try d.finish()
+    }
+}

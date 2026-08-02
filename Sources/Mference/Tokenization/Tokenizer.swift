@@ -405,6 +405,9 @@ public struct MFTokenizer: @unchecked Sendable {
     /// Generation prompt with thinking disabled: chat mode closes the think
     /// block immediately, so decoding starts after `</think>`.
     private static let deepseekGenerationSuffix = "<｜Assistant｜></think>"
+    /// The assistant branch's own think-close (the shipped Jinja emits one
+    /// from the user branch AND one from the assistant branch).
+    private static let deepseekThinkCloseMark = "</think>"
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
         switch dialect {
@@ -448,18 +451,20 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     /// Text-only, no-tool rendering of the DeepSeek-V4 non-thinking ("chat"
-    /// mode) encoding; the checkpoint ships no `chat_template.jinja`, so the
-    /// framing is native here. A system message renders with no role marker,
-    /// user turns follow `<｜User｜>`, assistant turns close with EOS, and the
-    /// generation prompt emits `</think>` so decoding starts outside the
-    /// think block.
+    /// mode) encoding, byte-matched to the checkpoint's shipped
+    /// `chat_template.jinja`: a system message renders bare, EVERY user turn
+    /// is followed by `<｜Assistant｜></think>`, every assistant turn opens
+    /// with its own `</think>` (so a user→assistant pair carries
+    /// `</think></think>` between marker and content, exactly as the Jinja
+    /// renders it) and closes with EOS, content is never trimmed, and the
+    /// generation prompt is appended only when the last message is not a
+    /// user turn (the user branch already ends in the prompt).
     private func deepseekChatTemplate(_ messages: [Message]) throws -> String {
         var s = Self.deepseekBOSMark
         for (index, message) in messages.enumerated() {
-            guard let rawContent = message.content else {
+            guard let content = message.content else {
                 throw MFTokenizerError.invalidChatTemplate("text-only messages require content")
             }
-            let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.role == .system && index != 0 {
                 throw MFTokenizerError.invalidChatTemplate("system message must be first")
             }
@@ -468,21 +473,19 @@ public struct MFTokenizer: @unchecked Sendable {
                 s += content
             case .user, .developer:
                 // The reference encoder frames `developer` guidance with the
-                // same User marker it uses for user turns, and appends the
-                // assistant transition to every turn whose reply follows; the
-                // final turn takes it after the loop.
-                s += Self.deepseekUserMark + content
-                if index + 1 < messages.count, messages[index + 1].role == .assistant {
-                    s += Self.deepseekGenerationSuffix
-                }
+                // same User marker it uses for user turns.
+                s += Self.deepseekUserMark + content + Self.deepseekGenerationSuffix
             case .assistant:
-                s += content + Self.deepseekEOSMark
+                s += Self.deepseekThinkCloseMark + content + Self.deepseekEOSMark
             case .tool:
                 throw MFTokenizerError.invalidChatTemplate(
                     "deepseek merges tool results into user turns; use the tool chat encoder")
             }
         }
-        s += Self.deepseekGenerationSuffix
+        if let last = messages.last,
+           !(last.role == .user || last.role == .developer) {
+            s += Self.deepseekGenerationSuffix
+        }
         return s
     }
 
@@ -619,18 +622,33 @@ public struct MFTokenizer: @unchecked Sendable {
     /// through raw with `string="true"`; everything else serializes to JSON
     /// with `string="false"`, matching the reference encoder. Keys render in
     /// sorted order to keep the prompt deterministic.
+    ///
+    /// DSML has no escape syntax, so a name or value containing the
+    /// `｜DSML｜` mark cannot be framed unambiguously (the parser reads a
+    /// value up to the first close tag) — such calls are rejected rather
+    /// than silently corrupting the next turn's prompt framing.
     private static func deepseekInvoke(_ call: HistoricalToolCall) throws -> String {
         guard case .object(let arguments) = call.arguments else {
             throw MFTokenizerError.invalidChatTemplate(
                 "historical tool arguments must be a JSON object")
         }
         let dsml = DeepseekToolCallParser.dsmlMark
+        func guardFramable(_ text: String, what: String) throws {
+            guard !text.contains(dsml) else {
+                throw MFTokenizerError.invalidChatTemplate(
+                    "historical tool call \(what) contains the DSML marker and cannot be re-rendered unambiguously")
+            }
+        }
+        try guardFramable(call.name, what: "name")
         let parameters = try arguments.keys.sorted().map { key -> String in
+            try guardFramable(key, what: "parameter name")
             let value = arguments[key]!
             if case .string(let raw) = value {
+                try guardFramable(raw, what: "argument \"\(key)\"")
                 return "<\(dsml)parameter name=\"\(key)\" string=\"true\">\(raw)</\(dsml)parameter>"
             }
             let encoded = try value.encoded()
+            try guardFramable(encoded, what: "argument \"\(key)\"")
             return "<\(dsml)parameter name=\"\(key)\" string=\"false\">\(encoded)</\(dsml)parameter>"
         }.joined(separator: "\n")
         return "<\(dsml)invoke name=\"\(call.name)\">\n\(parameters)\n</\(dsml)invoke>"
@@ -693,9 +711,11 @@ public struct MFTokenizer: @unchecked Sendable {
                 addBOS: false)
         case .deepseek:
             // The cached assistant turn stopped just before its EOS; the
-            // bridge supplies it, then opens the next user turn.
+            // bridge supplies it, then opens the next user turn. Content is
+            // NOT trimmed — the full-render template never trims, and the
+            // continuation must produce the same bytes a fresh render would.
             return [endOfTurnID] + encode(
-                Self.deepseekUserMark + content + Self.deepseekGenerationSuffix,
+                Self.deepseekUserMark + userContent + Self.deepseekGenerationSuffix,
                 addBOS: false)
         }
     }

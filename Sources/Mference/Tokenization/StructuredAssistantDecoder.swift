@@ -36,6 +36,15 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         self.idGenerator = idGenerator
     }
 
+    /// Route detokenizer flush text (no backing token, e.g. the end-of-stream
+    /// `.tail`) through the same dialect scanning as token deltas, so a flush
+    /// cannot bypass DSML marker withholding or land out of order relative
+    /// to a held tail. `-1` never matches a special-token ID.
+    public func consumeFlushedText(_ text: String) throws -> [StructuredAssistantEvent] {
+        guard !text.isEmpty else { return [] }
+        return try consume(tokenID: -1, delta: text)
+    }
+
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
         guard !failed else { throw ToolCallParserError.malformed }
         if tokenizer.dialect == .chatml {

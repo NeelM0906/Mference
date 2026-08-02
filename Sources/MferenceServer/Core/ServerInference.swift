@@ -401,10 +401,28 @@ public actor ServerModelSession: ServerInferenceBackend {
                             }
                         }
                     case .tail(let text):
-                        let visible = stopMatcher.push(text)
-                        if !visible.isEmpty {
-                            content += visible
-                            onEvent(.content(visible))
+                        // Flush text must pass through the decoder like any
+                        // delta: committing it directly would reorder it
+                        // ahead of a withheld DSML-prefix tail and skip
+                        // marker scanning.
+                        let events = if let decoder {
+                            try decoder.consumeFlushedText(text)
+                        } else {
+                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
+                        }
+                        for event in events {
+                            switch event {
+                            case .content(let flushed):
+                                let visible = stopMatcher.push(flushed)
+                                if !visible.isEmpty {
+                                    content += visible
+                                    onEvent(.content(visible))
+                                }
+                                if stopMatcher.isStopped { shouldStop = true }
+                            case .toolCall(let call):
+                                calls.append(call)
+                                onEvent(.toolCall(call))
+                            }
                         }
                     }
                 } catch {
