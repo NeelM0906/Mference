@@ -56,9 +56,22 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
+        let prefillChunkTokens: Int
+        switch args.prefillChunk {
+        case .fixed(let n):
+            prefillChunkTokens = n
+        case .auto:
+            // Smallest allowed chunk that covers the prompt: one chunk per
+            // prompt when it fits, which reads each layer's routed experts
+            // exactly once during prefill.
+            prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
+                .first(where: { $0 >= promptIds.count })
+                ?? RuntimeConfiguration.allowedPrefillChunkTokens.last!
+        }
         let runtime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
+            prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
@@ -152,9 +165,17 @@ private func runChat(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
+        // Interactive chat has no prompt at load time, so `auto` keeps the
+        // production default; a fixed size applies to every turn's prefill.
+        let prefillChunkTokens: Int
+        switch args.prefillChunk {
+        case .fixed(let n): prefillChunkTokens = n
+        case .auto: prefillChunkTokens = 128
+        }
         let runtime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
+            prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !baseConfig.isPureGreedy)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
