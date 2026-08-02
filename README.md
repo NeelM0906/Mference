@@ -25,8 +25,8 @@
   <a href="#acknowledgments">Acknowledgments</a>
 </p>
 
-Mixture-of-experts models activate only a few billion parameters per token.
-Mference exploits that: it keeps each model's shared core and KV cache in
+Mixture-of-experts models activate only a few billion (cough) parameters per token.
+Mference builds on that: it keeps each model's shared core and KV cache in
 memory, then streams just the experts chosen for each token from SSD. The
 model never has to fit in RAM — only its working set does.
 
