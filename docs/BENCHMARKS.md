@@ -17,6 +17,7 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | 24 GB M5 Pro, Mference | 31-35 tok/s | ~2.1 GB footprint |
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
 | M5, Mference, Qwen 3.6 35B-A3B | 18.8-23.1 tok/s | ~1.45 GB footprint |
+| M5, Mference, DeepSeek-V4-Flash 284B-A13B | 3.6-4.8 tok/s | 3.0-5.9 GB footprint (8-16 expert slots) |
 
 ## M2 measured decode
 
@@ -158,3 +159,25 @@ Read [System design](SYSTEM_DESIGN.md) for the runtime and resource split,
 [Experiments](OPTIMIZATION_JOURNEY.md) for the main wins and failures, and the
 [measurement lessons](experiments/summaries/09-validation-and-measurement-lessons.md)
 for the rules used to evaluate performance changes.
+
+## DeepSeek-V4-Flash measured decode
+
+Greedy decode of 128 new tokens at the 4K context option on a 24 GB M5
+(internal SSD, macOS 26); one-time per-process load (mmap plus full SHA-256
+of the 90 GiB install) is ~39-43 s and excluded. Decode is SSD-read-bound
+(~2.17 GB of expert reads per token at 0% cache hit), so the slot ladder
+saturates early; the full table and analysis live in
+[DEEPSEEK_V4_FLASH.md](DEEPSEEK_V4_FLASH.md).
+
+| Slots/layer | rdadvise | Decode rate | Peak footprint |
+| ---: | --- | ---: | ---: |
+| 8 | off | 3.62 tok/s | 3.0 GB |
+| 8 | adaptive | 4.17 tok/s | 3.0 GB |
+| 16 | off | 4.02 tok/s | 5.9 GB |
+| 16 | adaptive | 4.80 tok/s | 5.9 GB |
+| 32 | off | 4.05 tok/s | 11.7 GB |
+| 32 | adaptive | 4.10 tok/s | 11.7 GB |
+
+Sustained 512-token generation at 16 slots with adaptive read-ahead holds
+3.77 tok/s. Prefill runs the decode path token-by-token in this port, so
+long prompts pay roughly the decode rate during prefill.

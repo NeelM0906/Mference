@@ -1,8 +1,9 @@
 <h1 align="center">Mference</h1>
 
 <p align="center">
-  <strong>Big MoE models in ~1.5–2 GB of RAM</strong><br>
-  A Swift + Metal inference engine for any Apple Silicon Mac, even the 8 GB ones.
+  <strong>Big MoE models in a few GB of RAM</strong><br>
+  A Swift + Metal inference engine for any Apple Silicon Mac — 26–35B models
+  in ~1.5–2 GB, even on the 8 GB ones, and a 284B model on a 24 GB machine.
 </p>
 
 <p align="center">
@@ -17,7 +18,7 @@
   <a href="docs/OPENAI_SERVER.md">Local server</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
   <a href="docs/COMMUNITY_BENCHMARKS.md">Contribute results</a> ·
-  <a href="docs/SYSTEM_DESIGN.md">How it works</a> ·
+  <a href="docs/SYSTEM_DESIGN.md">System design</a> ·
   <a href="#acknowledgments">Acknowledgments</a>
 </p>
 
@@ -35,14 +36,15 @@ Mference currently runs three pinned instruction checkpoints:
   gated-DeltaNet linear-attention layers and 10 full-attention layers: the
   linear layers keep a fixed-size recurrent state instead of a KV cache, so
   only a quarter of the model grows with context.
-- **[DeepSeek-V4-Flash 284B-A13B](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ)**
-  *(experimental, unbenchmarked)* — 284B total, ~13B active per token, from
-  the 2-bit dynamic-quant checkpoint (2-bit experts, 4-bit core). 43 all-MoE
-  layers (256 experts, top-6, hash-routed first 3), shared-KV MQA attention
-  with compressed long-range KV (CSA/HCA) and 4-stream hyper-connection
-  residuals. Budget: ~6.8 GB peak at the 8-slot floor, ~91 GB on disk;
-  expected 1.5–3 tok/s there and 4–7 tok/s at ~9.4 GB — see
-  [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) before installing.
+- **[DeepSeek-V4-Flash 284B-A13B](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ)** —
+  284B total, ~13B active per token, from the 2-bit dynamic-quant checkpoint
+  (2-bit experts, 4-bit core), in ~3.0 GB of memory at the 8-slot floor.
+  43 all-MoE layers (256 experts, top-6, hash-routed first 3), shared-KV MQA
+  attention with compressed long-range KV (CSA/HCA), YaRN-scaled rope, and
+  4-stream hyper-connection residuals. Measured on a 24 GB M5: 3.6 tok/s at
+  ~3.0 GB up to 4.8 tok/s at ~5.9 GB (16 slots + adaptive read-ahead) —
+  see [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) before
+  installing the ~97.5 GB model.
 
 The runtime, streaming installer, CLI, native Mac app, and loopback
 OpenAI-compatible server are written in Swift and Metal. Mference is
@@ -63,15 +65,15 @@ When the app opens, choose **Download** and let Mference fetch and repack the
 pinned model — or choose **Choose Existing Model…** to point at a `.gturbo`
 directory already on disk. Once it is ready, choose **Load Model**, type your
 prompt, and press **Generate**. The app installs Gemma 4 by default; select
-Qwen 3.6 with `defaults write Mference model qwen36` (or `MFERENCE_MODEL=qwen36`
-in the environment) before launching.
+Qwen 3.6 or DeepSeek-V4-Flash with `defaults write Mference model qwen36`
+(or `deepseekv4flash`), or the `MFERENCE_MODEL` environment variable, before
+launching.
 
 Each chat keeps its own multi-turn history in a collapsible left sidebar
 (<kbd>Command</kbd>+<kbd>N</kbd> for a new chat,
 <kbd>Control</kbd>+<kbd>Command</kbd>+<kbd>S</kbd> to toggle the sidebar).
 History is written locally next to the model directory and rendered through the
-installed model's own chat template, so both Gemma 4 and Qwen 3.6 see their
-native dialect. The composer can extract text locally from PDF, DOCX, PPTX, and
+installed model's own chat template, so each model sees its native dialect. The composer can extract text locally from PDF, DOCX, PPTX, and
 XLSX files; nothing is uploaded. Extraction is bounded, so very long documents
 are trimmed and marked as truncated. The attachments on one prompt hold at most
 750,000 characters of extracted text in total — all a single request can carry —
@@ -102,14 +104,15 @@ swift run -c release MferenceCLI \
 
 | Metric | Value |
 | --- | --- |
-| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) |
-| Weights | MLX affine, group 64; 8-bit routers; 4-bit shared experts; 4-bit routed experts (2-bit for DeepSeek-V4-Flash) |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB (Qwen 3.6) · est. ~6.8 GB (DeepSeek-V4-Flash), including a 4K KV cache |
-| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) |
+| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (284B total, ~13B active) |
+| Weights | MLX affine, group 64; 8-bit routers; 4-bit shared experts; 4-bit routed experts (DeepSeek-V4-Flash: 2-bit routed experts with mixed 32/64 groups, BF16 router) |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB (Qwen 3.6) · measured 3.0–5.9 GB (DeepSeek-V4-Flash, 8–16 expert slots), including a 4K KV cache |
+| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~97.5 GB (DeepSeek-V4-Flash) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
 | Measured decode, Qwen 3.6 | 18.8–23.1 tok/s (M5) at a 1,447–1,464 MiB peak footprint |
+| Measured decode, DeepSeek-V4-Flash | 3.6 tok/s at ~3.0 GB (8 slots) · 4.0 tok/s at ~5.9 GB (16 slots) · 4.8 tok/s at ~5.9 GB (16 slots + `--rdadvise adaptive`), 24 GB M5 |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed
@@ -135,15 +138,16 @@ negative results.
 | `MferenceRepack` | Streaming model installer and install verifier |
 
 Only one model-owning product should run at a time. The server speaks each
-model's native dialect — Gemma's chat format and tool-call DSL, or Qwen's
-ChatML template with `<tool_call>` function calls — selected automatically
-from the installed model.
+model's native dialect — Gemma's chat format and tool-call DSL, Qwen's
+ChatML template with `<tool_call>` function calls, or DeepSeek's template
+with DSML tool-call blocks — selected automatically from the installed
+model.
 
 ### Requirements
 
 - An Apple Silicon Mac (arm64 only)
 - macOS 15 or later, with Metal 3; Xcode 16.3 and Swift 6.1 or newer
-- Free storage for the model install (~14.3 GB Gemma 4, ~19.6 GB Qwen 3.6)
+- Free storage for the model install (~14.3 GB Gemma 4, ~19.6 GB Qwen 3.6, ~97.5 GB DeepSeek-V4-Flash)
 - An internet connection for the first install
 
 The shader library is compiled from source at startup, and the choice of
@@ -151,34 +155,16 @@ shading-language version is made then, not at build time. A single binary
 therefore covers both worlds: *running* on macOS 26 with an Apple10 GPU
 compiles at MSL 4.0 and enables the Metal 4 tensor-ops prefill kernels, while
 every other supported configuration compiles at MSL 3.2 and selects the
-non-tensor kernels automatically. Both paths run the full Gemma 4 and Qwen 3.6
-feature set; they agree to within kernel tolerance rather than bit-exactly, so
+non-tensor kernels automatically. Both paths run the full feature set of all three
+families; they agree to within kernel tolerance rather than bit-exactly, so
 expect the same quality but not identical sampled tokens.
-
-## How it works
-
-The installer streams bounded byte ranges from the pinned Hugging Face
-revision and repacks them directly into an on-disk layout (`.gturbo`) built
-for per-expert reads: resident tensors in one mapped file, and each layer's
-routed experts as fixed-stride, page-aligned blobs. At generation time the
-runtime keeps the common weights mapped read-only, holds a small per-layer
-expert cache (16 slots, LFU), and `pread`s only the eight experts each
-layer's router selects for the current token.
-
-Qwen 3.6's linear-attention layers replace KV storage entirely: each keeps a
-2 MiB delta-rule state and a 3-row convolution tail, updated in place every
-token. The gated-DeltaNet kernels are validated against a CPU reference,
-including the guarantee that a chunked prefill of T rows matches T sequential
-decode steps through the same kernels.
-
-The full design, the memory budget, and the experiment record that shaped the
-engine are in [System design](docs/SYSTEM_DESIGN.md) and the
-[optimization journey](docs/OPTIMIZATION_JOURNEY.md).
 
 ## Roadmap
 
-- More architectures — the model layer is built for enumeration, and the
-  Qwen 3.6 port is the template for the next one
+- Chunked prefill for DeepSeek-V4-Flash (prefill currently runs the decode
+  path token-by-token; Gemma and Qwen already prefill in chunks up to 4,096
+  tokens via `--prefill-chunk`)
+- More architectures — the model layer is built for enumeration
 - Overlapping expert I/O with GPU work (decode is currently ~53% expert-read
   wait, serialized with compute)
 - Per-model quality validation (KLD against reference implementations)
@@ -195,5 +181,9 @@ portions are licensed under the [Apache License 2.0](LICENSE-APACHE); see
 code is [MIT-licensed](LICENSE).
 
 Model weights remain subject to their own terms: the
-[Gemma 4 license](https://ai.google.dev/gemma/apache_2) and the
-[Qwen license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE).
+[Gemma 4 license](https://ai.google.dev/gemma/apache_2), the
+[Qwen license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE),
+and the MIT-licensed
+[DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
+(the 2-bit conversion is published by
+[mlx-community](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ)).

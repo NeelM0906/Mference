@@ -1,6 +1,6 @@
 # Mference
 
-Swift and Metal inference for Gemma 4 26B-A4B on Apple Silicon.
+Swift and Metal inference for Gemma 4 26B-A4B, Qwen 3.6 35B-A3B, and DeepSeek-V4-Flash 284B-A13B on Apple Silicon.
 
 ## Scope
 
@@ -56,7 +56,8 @@ Report the commit, hardware and RAM, macOS, Swift version, exact command, exit c
 
 ## App controls
 
-The Mac app sends prompts through the pinned Gemma 4 IT chat format. It
+The Mac app renders prompts through the installed model's own chat dialect
+(Gemma IT, Qwen ChatML, or DeepSeek). It
 exposes context length, temperature, Top-K, Top-P, expert-cache slots, prefill,
 and RDADVISE. The defaults are temperature `0.2`, Top-K `64`, and Top-P `0.95`.
 Responses can use the context space left after formatting the prompt, and FP16

@@ -1,10 +1,11 @@
 # DeepSeek-V4-Flash on Mference
 
-Port design, memory budget, and expected throughput for running
+Port design, memory budget, and measured throughput for running
 [mlx-community/DeepSeek-V4-Flash-2bit-DQ](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ)
 (284B total, ~13B active) with SSD-streamed experts. This document is the
-architecture contract for the `deepseekV4Flash` family; the numbers below are
-budget *estimates* pending measurement on hardware.
+architecture contract for the `deepseekV4Flash` family, verified against the
+real checkpoint (revision `722bf559`); measured numbers are from a 24 GB M5
+with an internal SSD.
 
 ## Source checkpoint
 
@@ -92,26 +93,30 @@ Resident (mmap'd, hot at decode):
 Attention/compressed state at 4K (≈38 MiB) plus decode scratch (<100 MiB)
 add ~0.1 GB.
 
-Streamed experts: one expert blob = 25.17M params at 2-bit ≈ **7.87 MB**
-(16 KiB-padded). Per token, 43 layers × 6 experts = 258 blobs ⇒ **~2.03 GB
-of expert reads per token** at 0% cache hit.
+Streamed experts: one expert blob = 25.17M params at 2-bit with its BF16
+scales/biases (gate at group 32 on most layers) = **8.39 MB** — the global
+16 KiB-padded stride, sized by the group-32 layers. Per token, 43 layers ×
+6 experts = 258 blobs ⇒ **~2.17 GB of expert reads per token** at 0% cache
+hit.
 
 Expert-slot memory and the throughput ladder (per-layer slot pools, like
 Gemma/Qwen; the runtime's allowed slot counts are 8/16/24/32, and top-6
 routing needs at least 6 in-flight blobs per layer):
 
-| Slots/layer | Slot RAM | Peak footprint | Expected decode |
+| Slots/layer | Slot RAM | Measured peak footprint | Measured decode (M5 24 GB) |
 | ---: | ---: | ---: | --- |
-| 8 (runtime minimum) | 2.71 GB | **≈ 6.8 GB** | I/O-bound: ~2–3 tok/s on ~6–7 GB/s SSDs (M4/M5-class), ~1.2 tok/s on M2-Air-class |
-| 16 | 5.41 GB | ≈ 9.4 GB | ~4–7 tok/s if routing skew matches Qwen 3.6's measured hit rates |
-| 32 | 10.8 GB | ≈ 14.9 GB | ~6–10 tok/s; the only configuration with headroom to hold ≥7 tok/s |
+| 8 (runtime minimum) | 2.87 GB | **3.0 GB** | 3.62 tok/s (4.17 with `--rdadvise adaptive`) |
+| 16 | 5.75 GB | 5.9 GB | 4.02 tok/s (**4.80** with adaptive) |
+| 32 | 11.5 GB | 11.7 GB | 4.05 tok/s (4.10 with adaptive) |
 
-The floor is therefore **≈ 6.8 GB peak footprint** with the current
-per-layer 8-slot minimum — dominated by resident 4-bit attention weights
-plus in-flight expert slots. Two future-work levers lower it: a 6-slot
-(= top-k) per-layer mode saves ~0.7 GB, and a shared cross-layer slot pool
-(double-buffered 6+6 slots, ~100 MB total) would cut the floor to
-**≈ 4.1 GB** at the cost of all cross-token caching.
+Measured footprints run well under the pre-measurement budget (which
+assumed the ~3.9 GB mmap'd resident core would count against the peak):
+file-backed resident pages are read-only and reclaimable, so the peak
+footprint is dominated by the wired slot pools alone. The floor is
+therefore **≈ 3.0 GB** at the 8-slot minimum. Two future-work levers lower
+it further: a 6-slot (= top-k) per-layer mode, and a shared cross-layer
+slot pool (double-buffered 6+6 slots, ~100 MB total) at the cost of all
+cross-token caching.
 
 Unlike Gemma 4 (~2 GB) and Qwen 3.6 (~1.45 GB), this model cannot approach
 1.4 GB: those budgets work because their *active* cores are ~3–4B params in
@@ -121,17 +126,15 @@ is out of scope — the installer is a byte mover by design.
 
 ### Why >7 tok/s is SSD-limited
 
-7 tok/s × 2.03 GB/token = **14.2 GB/s** of sustained random 8 MB reads —
+7 tok/s × 2.17 GB/token = **15.2 GB/s** of sustained random 8 MB reads —
 beyond any current Apple SSD (~5–8 GB/s). Reaching ≥7 tok/s therefore
-requires ≥~60% of expert reads served from RAM. Qwen 3.6 measurements show
-LFU hit rates of that order *are* achievable with 16–32 slots when routing
-is skewed; whether V4-Flash's routing (especially with hash-routed layers
-0–2, which are perfectly prefetchable by token id) matches that skew is a
-measurement question. Honest expectation: **1.5–3 tok/s at the ~6.8 GB
-floor; 4–7 tok/s at ~9.4 GB (16 slots) on M4-Pro/M5-class hardware;
->7 tok/s only at 24–32 slots (≥12 GB) or after the roadmap's I/O–compute
-overlap work.** GPU compute alone (13B active, ~4.3× Qwen 3.6's) bounds
-even a fully-cached decode to roughly 8–12 tok/s on an M5-class part.
+requires ≥~60% of expert reads served from RAM. Measurement (table below)
+confirms the analysis: 32 slots buys nothing over 16 because V4-Flash's
+routing is not skewed enough for LFU hit-rate gains to keep up with the
+larger pool, and decode stays SSD-read-bound at **3.6–4.8 tok/s**.
+>7 tok/s needs the roadmap's I/O–compute overlap work. GPU compute alone
+(13B active, ~4.3× Qwen 3.6's) bounds even a fully-cached decode to
+roughly 8–12 tok/s on an M5-class part.
 
 Storage: ~97.5 GB installed (`layer_%02d.bin` = 256 × 8 MiB = 2 GiB × 43 —
 every layer padded to the widest expert stride so the format keeps one
