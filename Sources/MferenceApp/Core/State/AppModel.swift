@@ -1,4 +1,5 @@
 import Foundation
+import Mference
 import MferenceRepackCore
 import Observation
 
@@ -1128,11 +1129,19 @@ public final class AppModel {
         pendingMessage: AppGenerationMessage
     ) -> AppRequestContextBuild {
         let context = chatContextComponents()
-        let summaryMessage = context.summary.map {
-            AppGenerationMessage(
+        // One system turn at most: the family default (when the dialect
+        // needs a language anchor) and the rolling conversation memory
+        // merge into a single first message.
+        let systemParts: [String] = [
+            installedModelFamily == .deepseekV4Flash
+                ? Self.deepseekDefaultSystemPrompt : nil,
+            context.summary.map(conversationMemorySystemPrompt),
+        ].compactMap { $0 }
+        let summaryMessage = systemParts.isEmpty
+            ? nil
+            : AppGenerationMessage(
                 role: .system,
-                content: conversationMemorySystemPrompt($0))
-        }
+                content: systemParts.joined(separator: "\n\n"))
         var remainingBudget = max(
             0,
             transportCharacterBudget
@@ -1193,6 +1202,34 @@ public final class AppModel {
         }
         let nextIndex = chat.messages.index(after: boundaryIndex)
         return (summary, chat.messages[nextIndex...])
+    }
+
+    /// DeepSeek-V4 answers short prompts in Chinese when the conversation
+    /// carries no system anchor at all; every other shipped family behaves
+    /// with an empty system turn, so the default is scoped to this family.
+    static let deepseekDefaultSystemPrompt =
+        "You are a helpful assistant. Respond in the same language as the "
+        + "user's message unless they ask for another language."
+
+    private var familyCache: (path: String, family: ModelFamily?)?
+    /// Test seam: request building reads the family from the manifest on
+    /// disk, which unit tests don't materialize.
+    var installedFamilyOverrideForTesting: ModelFamily?
+
+    /// The family of the model at the current path, from the manifest —
+    /// not from the launch-selected descriptor, which can differ when the
+    /// user points the app at an existing install of another family.
+    private var installedModelFamily: ModelFamily? {
+        if let installedFamilyOverrideForTesting {
+            return installedFamilyOverrideForTesting
+        }
+        if let familyCache, familyCache.path == modelPathText {
+            return familyCache.family
+        }
+        let family = try? ManifestReader.peekFamily(
+            directoryURL: URL(fileURLWithPath: modelPathText))
+        familyCache = (modelPathText, family)
+        return family
     }
 
     private func conversationMemorySystemPrompt(_ summary: String) -> String {
