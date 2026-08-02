@@ -416,20 +416,61 @@ struct ArchInfo: Sendable, Equatable {
             }
             return n
         }
-        guard let layerTypes = tc["layer_types"] as? [String] else {
-            throw RepackError.configJsonInvalid(path: configPath, detail: "missing layer_types")
+        // Per-layer-type compression rates; legacy scalar keys fold in.
+        // Parsed before the layer mask so `compress_ratios` entries can be
+        // matched against them.
+        let rates = (tc["compress_rates"] as? [String: Any]) ?? [:]
+        func rate(_ key: String, legacy: String, fallback: Int) -> Int {
+            if let n = (rates[key] as? Int) ?? (rates[key] as? NSNumber)?.intValue { return n }
+            if let n = (tc[legacy] as? Int) ?? (tc[legacy] as? NSNumber)?.intValue { return n }
+            return fallback
         }
+        let csaRate = rate("compressed_sparse_attention",
+                           legacy: "compress_rate_csa", fallback: 4)
+        let hcaRate = rate("heavily_compressed_attention",
+                           legacy: "compress_rate_hca", fallback: 128)
+
         var mask: [UInt8] = []
-        mask.reserveCapacity(layerTypes.count)
-        for t in layerTypes {
-            switch t {
-            case "sliding_attention":            mask.append(0)
-            case "compressed_sparse_attention":  mask.append(3)
-            case "heavily_compressed_attention": mask.append(4)
-            default:
-                throw RepackError.configJsonInvalid(
-                    path: configPath, detail: "unknown layer_types entry \"\(t)\"")
+        if let layerTypes = tc["layer_types"] as? [String] {
+            mask.reserveCapacity(layerTypes.count)
+            for t in layerTypes {
+                switch t {
+                case "sliding_attention":            mask.append(0)
+                case "compressed_sparse_attention":  mask.append(3)
+                case "heavily_compressed_attention": mask.append(4)
+                default:
+                    throw RepackError.configJsonInvalid(
+                        path: configPath, detail: "unknown layer_types entry \"\(t)\"")
+                }
             }
+        } else if let allRatios = tc["compress_ratios"] as? [Any] {
+            // The published config encodes layer kinds as per-layer
+            // compression ratios: 0 = sliding-window, csaRate = CSA,
+            // hcaRate = HCA. It carries one extra trailing entry per
+            // `num_nextn_predict_layers` MTP layer, which the conversion
+            // does not export — keep only the decoder layers.
+            let numLayers = try i("num_hidden_layers")
+            let ratios = allRatios.prefix(numLayers)
+            mask.reserveCapacity(ratios.count)
+            for r in ratios {
+                guard let n = (r as? Int) ?? (r as? NSNumber)?.intValue else {
+                    throw RepackError.configJsonInvalid(
+                        path: configPath, detail: "non-integer compress_ratios entry")
+                }
+                switch n {
+                case 0:       mask.append(0)
+                case csaRate: mask.append(3)
+                case hcaRate: mask.append(4)
+                default:
+                    throw RepackError.configJsonInvalid(
+                        path: configPath,
+                        detail: "compress_ratios entry \(n) matches neither "
+                            + "the CSA rate \(csaRate) nor the HCA rate \(hcaRate)")
+                }
+            }
+        } else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing layer_types / compress_ratios")
         }
         // MoE schedule: the leading `hash_moe` run routes by the frozen
         // tid2eid table. `mlp_layer_types` wins; legacy configs ship
@@ -459,17 +500,6 @@ struct ArchInfo: Sendable, Equatable {
             numHashLayers = (tc["num_hash_layers"] as? Int)
                 ?? (tc["num_hash_layers"] as? NSNumber)?.intValue ?? 3
         }
-        // Per-layer-type compression rates; legacy scalar keys fold in.
-        let rates = (tc["compress_rates"] as? [String: Any]) ?? [:]
-        func rate(_ key: String, legacy: String, fallback: Int) -> Int {
-            if let n = (rates[key] as? Int) ?? (rates[key] as? NSNumber)?.intValue { return n }
-            if let n = (tc[legacy] as? Int) ?? (tc[legacy] as? NSNumber)?.intValue { return n }
-            return fallback
-        }
-        let csaRate = rate("compressed_sparse_attention",
-                           legacy: "compress_rate_csa", fallback: 4)
-        let hcaRate = rate("heavily_compressed_attention",
-                           legacy: "compress_rate_hca", fallback: 128)
         let headDim = try i("head_dim")
         // Rope head dim = partial_rotary_factor * head_dim; legacy configs
         // ship qk_rope_head_dim instead (upstream default 64/512).
