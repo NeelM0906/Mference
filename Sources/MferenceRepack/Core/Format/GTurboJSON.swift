@@ -87,6 +87,10 @@ enum GTurboJSON {
             archDict["caCSACompressRate"] = arch.caCSACompressRate
             archDict["caHCACompressRate"] = arch.caHCACompressRate
             archDict["caCompressRopeTheta"] = arch.caCompressRopeTheta
+            archDict["caRopeScalingFactor"] = arch.caRopeScalingFactor
+            archDict["caRopeScalingOriginalMax"] = arch.caRopeScalingOriginalMax
+            archDict["caRopeScalingBetaFast"] = arch.caRopeScalingBetaFast
+            archDict["caRopeScalingBetaSlow"] = arch.caRopeScalingBetaSlow
             archDict["hcMult"] = arch.hcMult
             archDict["hcSinkhornIters"] = arch.hcSinkhornIters
             archDict["hcEps"] = arch.hcEps

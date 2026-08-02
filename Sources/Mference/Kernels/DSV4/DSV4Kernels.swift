@@ -13,6 +13,14 @@ final class DSV4Kernels {
     /// Sentinel `selected_count` meaning "attend to every compressed entry".
     static let selectAll: UInt32 = 0xFFFF_FFFF
 
+    /// Which rope-parameter set a rotation uses: sliding-window layers rope
+    /// at the plain `main` frequencies; CSA/HCA layers, their compressors,
+    /// and the lightning indexer at the (YaRN-corrected) `compress` ones.
+    enum RopeKind {
+        case main
+        case compress
+    }
+
     private let ropePSO: MTLComputePipelineState
     /// Unspecialized rope PSO for non-attention head shapes (the 128-dim
     /// lightning-indexer keys/queries). The specialized `ropePSO` bakes
@@ -20,6 +28,8 @@ final class DSV4Kernels {
     /// heads regardless of the dispatch's `head_dim_in`.
     private let ropeGenericPSO: MTLComputePipelineState
     private let specializedHeadDim: Int
+    private let mainInvFreq: MTLBuffer
+    private let compressInvFreq: MTLBuffer
     private let attentionPSO: MTLComputePipelineState
     private let compressEmitPSO: MTLComputePipelineState
     private let indexerScorePSO: MTLComputePipelineState
@@ -46,6 +56,34 @@ final class DSV4Kernels {
         self.ropeGenericPSO = try context.pipeline(
             "dsv4_rope_interleaved_trailing", constants: [])
         self.specializedHeadDim = config.fullHeadDim
+
+        // Per-pair inverse-frequency tables. YaRN corrects the compress
+        // frequencies only; cos/sin are never rescaled (attention_factor 1).
+        let ca = config.compressedAttention
+        let ropeDim = max(ca.ropeHeadDim, 2)
+        let mainTable = DSV4RopeTables.plainInvFreq(
+            theta: config.ropeTheta, ropeDim: ropeDim)
+        let compressTable = ca.ropeScalingFactor > 0
+            ? DSV4RopeTables.yarnInvFreq(
+                theta: ca.compressRopeTheta, ropeDim: ropeDim,
+                factor: ca.ropeScalingFactor,
+                originalMaxPositions: ca.ropeScalingOriginalMax,
+                betaFast: ca.ropeScalingBetaFast,
+                betaSlow: ca.ropeScalingBetaSlow)
+            : DSV4RopeTables.plainInvFreq(
+                theta: max(ca.compressRopeTheta, 1), ropeDim: ropeDim)
+        guard let mainBuf = context.device.makeBuffer(
+                bytes: mainTable,
+                length: mainTable.count * MemoryLayout<Float>.stride,
+                options: .storageModeShared),
+              let compressBuf = context.device.makeBuffer(
+                bytes: compressTable,
+                length: compressTable.count * MemoryLayout<Float>.stride,
+                options: .storageModeShared) else {
+            throw MetalError.noDevice
+        }
+        self.mainInvFreq = mainBuf
+        self.compressInvFreq = compressBuf
         self.attentionPSO = try context.pipeline(
             "dsv4_attention_decode", constants: constants,
             maxTotalThreadsPerThreadgroup: 256)
@@ -69,7 +107,7 @@ final class DSV4Kernels {
     func encodeRope(commandBuffer: MTLCommandBuffer,
                     x: MTLBuffer, xOffset: Int = 0,
                     numHeads: Int, headDim: Int, ropeDim: Int,
-                    position: Int, theta: Float, direction: Float) {
+                    position: Int, rope: RopeKind, direction: Float) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(
             headDim == specializedHeadDim ? ropePSO : ropeGenericPSO)
@@ -77,12 +115,12 @@ final class DSV4Kernels {
         var hd = UInt32(headDim)
         var rd = UInt32(ropeDim)
         var pos = UInt32(position)
-        var th = theta
         var dir = direction
         enc.setBytes(&hd, length: MemoryLayout<UInt32>.size, index: 1)
         enc.setBytes(&rd, length: MemoryLayout<UInt32>.size, index: 2)
         enc.setBytes(&pos, length: MemoryLayout<UInt32>.size, index: 3)
-        enc.setBytes(&th, length: MemoryLayout<Float>.size, index: 4)
+        enc.setBuffer(rope == .compress ? compressInvFreq : mainInvFreq,
+                      offset: 0, index: 4)
         enc.setBytes(&dir, length: MemoryLayout<Float>.size, index: 5)
         let threads = max(32, ropeDim / 2)
         enc.dispatchThreadgroups(

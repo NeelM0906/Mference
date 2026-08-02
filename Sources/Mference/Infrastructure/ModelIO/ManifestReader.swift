@@ -56,6 +56,10 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let caCSACompressRate: Int?
     public let caHCACompressRate: Int?
     public let caCompressRopeTheta: Double?
+    public let caRopeScalingFactor: Double?
+    public let caRopeScalingOriginalMax: Int?
+    public let caRopeScalingBetaFast: Double?
+    public let caRopeScalingBetaSlow: Double?
     public let hcMult: Int?
     public let hcSinkhornIters: Int?
     public let hcEps: Double?
@@ -312,6 +316,15 @@ public enum ManifestReader {
                   a.caHCACompressRate ?? 0, e.compressedAttention.hcaCompressRate)
         try check("caCompressRopeTheta",
                   a.caCompressRopeTheta ?? 0, e.compressedAttention.compressRopeTheta)
+        try check("caRopeScalingFactor",
+                  a.caRopeScalingFactor ?? 0, e.compressedAttention.ropeScalingFactor)
+        try check("caRopeScalingOriginalMax",
+                  a.caRopeScalingOriginalMax ?? 0,
+                  e.compressedAttention.ropeScalingOriginalMax)
+        try check("caRopeScalingBetaFast",
+                  a.caRopeScalingBetaFast ?? 0, e.compressedAttention.ropeScalingBetaFast)
+        try check("caRopeScalingBetaSlow",
+                  a.caRopeScalingBetaSlow ?? 0, e.compressedAttention.ropeScalingBetaSlow)
         try check("hcMult",
                   a.hcMult ?? 0, e.hyperConnections.mult)
         try check("hcSinkhornIters",

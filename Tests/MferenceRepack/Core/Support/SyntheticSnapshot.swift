@@ -688,6 +688,13 @@ enum SyntheticSnapshot {
             ],
             "rope_theta": 10_000.0,
             "compress_rope_theta": 160_000.0,
+            "rope_scaling": [
+                "type": "yarn",
+                "factor": 16.0,
+                "original_max_position_embeddings": 65_536,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+            ],
             "partial_rotary_factor": 0.125,
             "hc_mult": arch.hcMult,
             "hc_sinkhorn_iters": arch.hcSinkhornIters,

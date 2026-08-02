@@ -2546,9 +2546,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let isCSA = cfg.layerIsCSA(L)
             let isHCA = cfg.layerIsHCA(L)
             let isCompressed = isCSA || isHCA
-            let theta = isCompressed
-                ? Float(ca.compressRopeTheta)
-                : Float(cfg.ropeTheta)
+            let ropeKind: DSV4Kernels.RopeKind = isCompressed ? .compress : .main
             var counters = dsv4State.counters[L]
 
             let inNorm = try model.inputNorm(layer: L)
@@ -2605,7 +2603,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             dsv4.encodeRope(commandBuffer: cb, x: qScratch,
                             numHeads: numHeads, headDim: headDim,
                             ropeDim: ca.ropeHeadDim,
-                            position: position, theta: theta, direction: 1)
+                            position: position, rope: ropeKind, direction: 1)
 
             // Shared K=V row straight into the window ring slot, then norm +
             // RoPE in place.
@@ -2622,7 +2620,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             dsv4.encodeRope(commandBuffer: cb, x: ring, xOffset: slotOffset,
                             numHeads: 1, headDim: headDim,
                             ropeDim: ca.ropeHeadDim,
-                            position: position, theta: theta, direction: 1)
+                            position: position, rope: ropeKind, direction: 1)
 
             // Compressor: project this token's kv/gate rows into the pending
             // window; emit one compressed entry when the window fills. The
@@ -2673,7 +2671,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     numHeads: 1, headDim: headDim,
                                     ropeDim: ca.ropeHeadDim,
                                     position: entry * rate,
-                                    theta: Float(ca.compressRopeTheta),
+                                    rope: .compress,
                                     direction: 1)
                 }
                 if isCSA {
@@ -2719,7 +2717,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                         numHeads: 1, headDim: idxDim,
                                         ropeDim: ca.ropeHeadDim,
                                         position: entry * idxRate,
-                                        theta: Float(ca.compressRopeTheta),
+                                        rope: .compress,
                                         direction: 1)
                     }
                 }
@@ -2745,7 +2743,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 headDim: ca.indexHeadDim,
                                 ropeDim: ca.ropeHeadDim,
                                 position: position,
-                                theta: Float(ca.compressRopeTheta),
+                                rope: .compress,
                                 direction: 1)
                 gemv(cb, idxWProj, x: normed, y: indexerW,
                      m: ca.indexNHeads, n: cfg.hiddenSize)
@@ -2792,7 +2790,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             dsv4.encodeRope(commandBuffer: cb, x: attnOut,
                             numHeads: numHeads, headDim: headDim,
                             ropeDim: ca.ropeHeadDim,
-                            position: position, theta: theta, direction: -1)
+                            position: position, rope: ropeKind, direction: -1)
 
             // Grouped low-rank output projection: one GEMV per head group,
             // then the mixing projection.

@@ -37,7 +37,7 @@ kernel void dsv4_rope_interleaved_trailing(
     constant uint& head_dim_in [[buffer(1)]],
     constant uint& rope_dim_in [[buffer(2)]],
     constant uint& position [[buffer(3)]],
-    constant float& theta [[buffer(4)]],
+    device const float* inv_freq [[buffer(4)]],   // [rope_dim / 2]
     constant float& direction [[buffer(5)]],
     uint head [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]]
@@ -47,8 +47,7 @@ kernel void dsv4_rope_interleaved_trailing(
     const uint half_dim = rope_dim / 2u;
     if (tid >= half_dim) return;
     const uint base = head * head_dim + (head_dim - rope_dim);
-    const float freq = float(position)
-        * pow(theta, -2.0f * float(tid) / float(rope_dim));
+    const float freq = float(position) * inv_freq[tid];
     const float c = cos(freq);
     const float s = sin(freq) * direction;
     const float x0 = float(x[base + 2u * tid]);

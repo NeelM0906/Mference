@@ -65,12 +65,24 @@ public struct CompressedAttentionConfig: Sendable, Equatable {
     public let csaCompressRate: Int
     public let hcaCompressRate: Int
     public let compressRopeTheta: Double
+    /// YaRN scaling on the compress rope only (the upstream reference
+    /// applies `rope_scaling` to the `compress` rope type and leaves the
+    /// sliding-window `main` rope unscaled, with attention_factor forced
+    /// to 1.0). `ropeScalingFactor == 0` disables scaling.
+    public let ropeScalingFactor: Double
+    public let ropeScalingOriginalMax: Int
+    public let ropeScalingBetaFast: Double
+    public let ropeScalingBetaSlow: Double
 
     public init(qLoraRank: Int, oLoraRank: Int, oGroups: Int,
                 ropeHeadDim: Int,
                 indexNHeads: Int, indexHeadDim: Int, indexTopK: Int,
                 csaCompressRate: Int, hcaCompressRate: Int,
-                compressRopeTheta: Double) {
+                compressRopeTheta: Double,
+                ropeScalingFactor: Double = 0,
+                ropeScalingOriginalMax: Int = 0,
+                ropeScalingBetaFast: Double = 0,
+                ropeScalingBetaSlow: Double = 0) {
         self.qLoraRank = qLoraRank
         self.oLoraRank = oLoraRank
         self.oGroups = oGroups
@@ -81,6 +93,10 @@ public struct CompressedAttentionConfig: Sendable, Equatable {
         self.csaCompressRate = csaCompressRate
         self.hcaCompressRate = hcaCompressRate
         self.compressRopeTheta = compressRopeTheta
+        self.ropeScalingFactor = ropeScalingFactor
+        self.ropeScalingOriginalMax = ropeScalingOriginalMax
+        self.ropeScalingBetaFast = ropeScalingBetaFast
+        self.ropeScalingBetaSlow = ropeScalingBetaSlow
     }
 
     public static let none = CompressedAttentionConfig(
@@ -398,7 +414,11 @@ public struct ArchConfig: Sendable, Equatable {
             ropeHeadDim: 64,
             indexNHeads: 64, indexHeadDim: 128, indexTopK: 512,
             csaCompressRate: 4, hcaCompressRate: 128,
-            compressRopeTheta: 160_000.0),
+            compressRopeTheta: 160_000.0,
+            ropeScalingFactor: 16.0,
+            ropeScalingOriginalMax: 65_536,
+            ropeScalingBetaFast: 32.0,
+            ropeScalingBetaSlow: 1.0),
         hyperConnections: HyperConnectionConfig(
             mult: 4, sinkhornIters: 20, eps: 1.0e-6),
         numHashRoutedLayers: 3,

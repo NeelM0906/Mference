@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--model <gemma4|qwen36|deepseekv4flash>] --output <model.gturbo> [--overwrite] [--resume]
+  MferenceRepack [--model <gemma4|qwen36|deepseekv4flash>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
   MferenceRepack --help
@@ -23,6 +23,7 @@ private struct Arguments {
     var discardPartial = false
     var verifyInstall = false
     var inputGTurbo: String?
+    var baseURL: URL?
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -54,6 +55,17 @@ private struct Arguments {
                         + SupportedModelSource.all.map(\.name).joined(separator: ", "))
                 }
                 parsed.model = source
+                index += 2
+            case "--base-url":
+                guard index + 1 < values.count else {
+                    throw ParseError.missingValue(flag)
+                }
+                guard let url = URL(string: values[index + 1]),
+                      url.scheme == "http" || url.scheme == "https" else {
+                    throw ParseError.invalidMode(
+                        "--base-url must be an http(s) URL")
+                }
+                parsed.baseURL = url
                 index += 2
             case "--output", "--input-gturbo":
                 guard index + 1 < values.count else {
@@ -165,7 +177,8 @@ private func run(_ values: [String]) async -> Int32 {
         outputDirectory: URL(fileURLWithPath: output),
         overwrite: arguments.overwrite,
         token: ProcessInfo.processInfo.environment["HF_TOKEN"],
-        resume: arguments.resume)
+        resume: arguments.resume,
+        baseURL: arguments.baseURL)
     do {
         let result = try await RemoteStreamingRepacker(options: options).run()
         print("Installed \(source.displayName)")

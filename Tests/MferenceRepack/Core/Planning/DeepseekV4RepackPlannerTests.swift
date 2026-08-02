@@ -84,9 +84,36 @@ struct DeepseekV4RepackPlannerTests {
         #expect(arch.caIndexHeadDim == 128)
         #expect(arch.caIndexTopK == 512)
         #expect(arch.numHashRoutedLayers == 3)
+        #expect(arch.caRopeScalingFactor == 16.0)
+        #expect(arch.caRopeScalingOriginalMax == 65_536)
+        #expect(arch.caRopeScalingBetaFast == 32.0)
+        #expect(arch.caRopeScalingBetaSlow == 1.0)
         #expect(arch.fullAttentionLayerMask.count == 43)
         #expect(arch.fullAttentionLayerMask[0] == 0)
         #expect(arch.fullAttentionLayerMask[1] == 0)
+        for i in 2..<43 {
+            #expect(arch.fullAttentionLayerMask[i] == (i.isMultiple(of: 2) ? 3 : 4))
+        }
+    }
+
+    /// The published config carries no `layer_types`; layer kinds ride
+    /// `compress_ratios` with one extra trailing entry for the unexported
+    /// MTP layer.
+    @Test func productionConfigCompressRatiosScheduleParses() throws {
+        let root = temporaryRoot("dsv4-prod-ratios")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let configPath = (root as NSString).appendingPathComponent("config.json")
+        try writeProductionConfig(to: configPath, mutate: { c in
+            c.removeValue(forKey: "layer_types")
+            var ratios: [Int] = [0, 0]
+            for i in 2..<43 { ratios.append(i.isMultiple(of: 2) ? 4 : 128) }
+            ratios.append(0)  // MTP trailing entry
+            c["compress_ratios"] = ratios
+            c["num_nextn_predict_layers"] = 1
+        })
+
+        let arch = try ArchInfo.load(configPath: configPath)
+        #expect(arch.fullAttentionLayerMask.count == 43)
         for i in 2..<43 {
             #expect(arch.fullAttentionLayerMask[i] == (i.isMultiple(of: 2) ? 3 : 4))
         }
@@ -352,6 +379,10 @@ struct DeepseekV4RepackPlannerTests {
         #expect(archDict["caCSACompressRate"] as? Int == 4)
         #expect(archDict["caHCACompressRate"] as? Int == 128)
         #expect(archDict["caCompressRopeTheta"] as? Double == 160_000.0)
+        #expect(archDict["caRopeScalingFactor"] as? Double == 16.0)
+        #expect(archDict["caRopeScalingOriginalMax"] as? Int == 65_536)
+        #expect(archDict["caRopeScalingBetaFast"] as? Double == 32.0)
+        #expect(archDict["caRopeScalingBetaSlow"] as? Double == 1.0)
         #expect(archDict["hcMult"] as? Int == 2)
         #expect(archDict["hcSinkhornIters"] as? Int == 4)
         #expect(archDict["hcEps"] as? Double == 1e-6)
@@ -445,6 +476,13 @@ struct DeepseekV4RepackPlannerTests {
             ],
             "rope_theta": 10_000.0,
             "compress_rope_theta": 160_000.0,
+            "rope_scaling": [
+                "type": "yarn",
+                "factor": 16.0,
+                "original_max_position_embeddings": 65_536,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+            ],
             "partial_rotary_factor": 0.125,
             "hc_mult": 4,
             "hc_sinkhorn_iters": 20,

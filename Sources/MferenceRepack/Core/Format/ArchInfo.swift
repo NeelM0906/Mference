@@ -69,6 +69,10 @@ struct ArchInfo: Sendable, Equatable {
     let caCSACompressRate: Int
     let caHCACompressRate: Int
     let caCompressRopeTheta: Double
+    let caRopeScalingFactor: Double
+    let caRopeScalingOriginalMax: Int
+    let caRopeScalingBetaFast: Double
+    let caRopeScalingBetaSlow: Double
     let hcMult: Int
     let hcSinkhornIters: Int
     let hcEps: Double
@@ -121,6 +125,10 @@ struct ArchInfo: Sendable, Equatable {
          caCSACompressRate: Int = 0,
          caHCACompressRate: Int = 0,
          caCompressRopeTheta: Double = 0,
+         caRopeScalingFactor: Double = 0,
+         caRopeScalingOriginalMax: Int = 0,
+         caRopeScalingBetaFast: Double = 0,
+         caRopeScalingBetaSlow: Double = 0,
          hcMult: Int = 0,
          hcSinkhornIters: Int = 0,
          hcEps: Double = 0,
@@ -172,6 +180,10 @@ struct ArchInfo: Sendable, Equatable {
         self.caCSACompressRate = caCSACompressRate
         self.caHCACompressRate = caHCACompressRate
         self.caCompressRopeTheta = caCompressRopeTheta
+        self.caRopeScalingFactor = caRopeScalingFactor
+        self.caRopeScalingOriginalMax = caRopeScalingOriginalMax
+        self.caRopeScalingBetaFast = caRopeScalingBetaFast
+        self.caRopeScalingBetaSlow = caRopeScalingBetaSlow
         self.hcMult = hcMult
         self.hcSinkhornIters = hcSinkhornIters
         self.hcEps = hcEps
@@ -524,6 +536,38 @@ struct ArchInfo: Sendable, Equatable {
         let act = (tc["hidden_act"] as? String) ?? "silu"
         let scoring = (tc["scoring_func"] as? String) ?? "sqrtsoftplus"
 
+        // YaRN applies to the compress rope only (upstream folds top-level
+        // `rope_scaling` into the `compress` rope-type parameters and keeps
+        // `main` unscaled; attention_factor is forced to 1.0).
+        var yarnFactor = 0.0
+        var yarnOriginalMax = 0
+        var yarnBetaFast = 0.0
+        var yarnBetaSlow = 0.0
+        if let scaling = tc["rope_scaling"] as? [String: Any] {
+            let kind = (scaling["rope_type"] as? String)
+                ?? (scaling["type"] as? String) ?? "default"
+            guard kind == "yarn" else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "unsupported rope_scaling type \"\(kind)\"")
+            }
+            guard let f = (scaling["factor"] as? Double)
+                    ?? (scaling["factor"] as? NSNumber)?.doubleValue,
+                  let om = (scaling["original_max_position_embeddings"] as? Int)
+                    ?? (scaling["original_max_position_embeddings"] as? NSNumber)?.intValue
+            else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "yarn rope_scaling missing factor / original_max_position_embeddings")
+            }
+            yarnFactor = f
+            yarnOriginalMax = om
+            yarnBetaFast = (scaling["beta_fast"] as? Double)
+                ?? (scaling["beta_fast"] as? NSNumber)?.doubleValue ?? 32.0
+            yarnBetaSlow = (scaling["beta_slow"] as? Double)
+                ?? (scaling["beta_slow"] as? NSNumber)?.doubleValue ?? 1.0
+        }
+
         let arch = ArchInfo(
             hiddenSize: try i("hidden_size"),
             intermediateSize: sharedIntermediate,
@@ -570,6 +614,10 @@ struct ArchInfo: Sendable, Equatable {
             caCSACompressRate: csaRate,
             caHCACompressRate: hcaRate,
             caCompressRopeTheta: try d("compress_rope_theta"),
+            caRopeScalingFactor: yarnFactor,
+            caRopeScalingOriginalMax: yarnOriginalMax,
+            caRopeScalingBetaFast: yarnBetaFast,
+            caRopeScalingBetaSlow: yarnBetaSlow,
             hcMult: try i("hc_mult"),
             hcSinkhornIters: try i("hc_sinkhorn_iters"),
             hcEps: try d("hc_eps"),
@@ -636,6 +684,10 @@ struct ArchInfo: Sendable, Equatable {
             caCSACompressRate: 4,
             caHCACompressRate: 128,
             caCompressRopeTheta: 160_000.0,
+            caRopeScalingFactor: 16.0,
+            caRopeScalingOriginalMax: 65_536,
+            caRopeScalingBetaFast: 32.0,
+            caRopeScalingBetaSlow: 1.0,
             hcMult: 4,
             hcSinkhornIters: 20,
             hcEps: 1.0e-6,

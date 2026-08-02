@@ -27,9 +27,22 @@ public struct SupportedModelSource: Sendable, Equatable {
     public func installOptions(outputDirectory: URL,
                                overwrite: Bool,
                                token: String?,
-                               resume: Bool = false)
+                               resume: Bool = false,
+                               baseURL: URL? = nil)
         -> RemoteStreamingRepackOptions {
-        RemoteStreamingRepackOptions(
+        if let baseURL {
+            return RemoteStreamingRepackOptions(
+                repoID: repoID,
+                revision: revision ?? "main",
+                outputDir: outputDirectory.path,
+                token: token,
+                requireKnownSource: true,
+                minFreeReserveBytes: reserveBytes,
+                overwrite: overwrite,
+                resume: resume,
+                baseURL: baseURL)
+        }
+        return RemoteStreamingRepackOptions(
             repoID: repoID,
             revision: revision ?? "main",
             outputDir: outputDirectory.path,
