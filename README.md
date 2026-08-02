@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Sources/MferenceApp/Mac/Resources/mference-app-icon.png" alt="Mference app icon" width="160">
+</p>
+
 <h1 align="center">Mference</h1>
 
 <p align="center">
