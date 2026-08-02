@@ -504,6 +504,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case indexCorrupt(detail: String)
     case posixFailed(call: String, errno: Int32)
     case trustedReceiptInvalid(detail: String)
+    case routedExpertPlanUnavailable(layer: Int)
 
     public var description: String {
         switch self {
@@ -535,6 +536,8 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "\(c) failed with errno \(e)"
         case .trustedReceiptInvalid(let detail):
             return "trusted install receipt invalid: \(detail)"
+        case .routedExpertPlanUnavailable(let layer):
+            return "routed expert fetch plan unavailable for layer \(layer)"
         }
     }
 }

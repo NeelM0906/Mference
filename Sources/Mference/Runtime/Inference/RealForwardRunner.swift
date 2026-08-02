@@ -2918,7 +2918,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
             let routedOffsets = model.routedExpertOffsets(layer: L)
-            let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
+            guard let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
+            else {
+                throw ModelError.routedExpertPlanUnavailable(layer: L)
+            }
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSlots: [UInt32] = []
             var phase1MissSlots: [UInt32] = []
