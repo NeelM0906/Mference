@@ -577,19 +577,20 @@ public final class RemoteStreamingRepacker {
                 bits.embedding = s.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight")
-                || e.name.hasSuffix(".self_attn.q_a_proj.weight")
+                || e.name.hasSuffix(".attn.wq_a.weight")
                 || e.name.hasSuffix(".linear_attn.in_proj_qkv.weight"),
                let s = e.quantSpec {
                 bits.attention = s.bits
             }
             if e.name.hasSuffix(".router.proj.weight")
-                || e.name.hasSuffix(".mlp.gate.weight"),
+                || e.name.hasSuffix(".mlp.gate.weight")
+                || e.name.hasSuffix(".ffn.gate.weight"),
                let s = e.quantSpec {
                 bits.router = s.bits
             }
             if e.name.hasSuffix(".mlp.gate_proj.weight")
                 || e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_experts.gate_proj.weight"),
+                || e.name.hasSuffix(".ffn.shared_experts.gate_proj.weight"),
                let s = e.quantSpec {
                 bits.sharedExpert = s.bits
             }

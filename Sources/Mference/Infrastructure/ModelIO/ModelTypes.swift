@@ -555,7 +555,8 @@ public struct TensorView: @unchecked Sendable {
     public let biasOffset: UInt64
     public let biasLength: UInt64
     public let shape: (UInt32, UInt32, UInt32, UInt32)
-    /// Dtype byte. 0 = U32, 1 = BF16, 2 = FP16, 3 = FP32.
+    /// Dtype byte. 0 = U32, 1 = BF16, 2 = FP16, 3 = FP32, 4 = I64
+    /// (integer lookup tables, read CPU-side only).
     public let dtype: UInt8
 
     public init(buffer: MTLBuffer,

@@ -2843,21 +2843,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let isHash = cfg.layerIsHashRouted(L)
             if isHash {
                 let table = try model.dsv4HashTable(layer: L)
-                // The table rides the resident file as U32 [vocab, topK];
-                // an I64 source table must be narrowed by the repacker.
-                let tPtr = table.buffer.contents()
-                    .advanced(by: Int(table.offset))
-                    .assumingMemoryBound(to: UInt32.self)
+                // The table rides the resident file in its source dtype:
+                // the real checkpoint ships I64 [vocab, topK]; synthetic
+                // fixtures may use U32. Read CPU-side, dtype-aware.
+                let base = table.buffer.contents().advanced(by: Int(table.offset))
                 let row = min(max(Int(token), 0), cfg.vocabSize - 1) * cfg.topKExperts
                 let idxPtr = outIndices.contents().assumingMemoryBound(to: UInt32.self)
-                for i in 0..<cfg.topKExperts {
-                    idxPtr[i] = min(tPtr[row + i], UInt32(cfg.numExperts - 1))
+                let expertCap = UInt32(cfg.numExperts - 1)
+                if table.dtype == 4 {
+                    let tPtr = base.assumingMemoryBound(to: Int64.self)
+                    for i in 0..<cfg.topKExperts {
+                        idxPtr[i] = min(UInt32(clamping: max(0, tPtr[row + i])), expertCap)
+                    }
+                } else {
+                    let tPtr = base.assumingMemoryBound(to: UInt32.self)
+                    for i in 0..<cfg.topKExperts {
+                        idxPtr[i] = min(tPtr[row + i], expertCap)
+                    }
                 }
                 moeDSV4.encodeRouterHashWeights(
                     commandBuffer: cb,
                     weights: routerW.buffer, weightsOffset: Int(routerW.offset),
-                    scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
-                    biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
                     hidden: routedX,
                     onesScale: effectiveScaleBuffers[L],
                     indices: outIndices,
@@ -2868,8 +2874,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 moeDSV4.encodeRouterTopK(
                     commandBuffer: cb,
                     weights: routerW.buffer, weightsOffset: Int(routerW.offset),
-                    scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
-                    biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
                     hidden: routedX,
                     onesScale: effectiveScaleBuffers[L],
                     correctionBias: bias.buffer, correctionBiasOffset: Int(bias.offset),
@@ -2918,6 +2922,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
             let routedOffsets = model.routedExpertOffsets(layer: L)
+            let gateGroupSize = UInt32(model.routedGateGroupSize(layer: L))
             guard let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
             else {
                 throw ModelError.routedExpertPlanUnavailable(layer: L)
@@ -2948,7 +2953,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     activeSlots: moeHitActiveSlots,
                     activeSlotIndices: phase1HitSlots,
                     activeCount: UInt32(phase1HitSlots.count),
-                    d: D, f: FmoE)
+                    d: D, f: FmoE,
+                    gateGroupSize: gateGroupSize)
                 phase1HitCB = hitCB
             }
 
@@ -3029,7 +3035,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     activeSlots: moeMissActiveSlots,
                     activeSlotIndices: phase1MissSlots,
                     activeCount: UInt32(phase1MissSlots.count),
-                    d: D, f: FmoE)
+                    d: D, f: FmoE,
+                    gateGroupSize: gateGroupSize)
             } else {
                 moeDSV4.encodeRoutedPhase1(
                     commandBuffer: routedCB,
@@ -3037,7 +3044,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     routedBlobs: routedBufs,
                     routedOffsets: routedOffsets,
                     x: routedX, acts: moeActs,
-                    d: D, f: FmoE)
+                    d: D, f: FmoE,
+                    gateGroupSize: gateGroupSize)
             }
             // Phase-2 seeds with the shared-expert output, so h2Buf holds
             // routed + shared — exactly the reference's `routed +

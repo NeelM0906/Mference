@@ -492,30 +492,30 @@ enum SyntheticSnapshot {
             let layerType = arch.layerTypes[li]
 
             // Low-rank shared-KV MQA attention path, every layer.
-            appendQuantizedWeight(name: prefix + ".self_attn.q_a_proj",
+            appendQuantizedWeight(name: prefix + ".attn.wq_a",
                                   outerShape: [arch.qLoraRank],
                                   innerLogical: arch.hidden, bits: 4,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendUnquantizedBF16(name: prefix + ".self_attn.q_a_norm.weight",
+            appendUnquantizedBF16(name: prefix + ".attn.q_norm.weight",
                                   shape: [arch.qLoraRank], into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".self_attn.q_b_proj",
+            appendQuantizedWeight(name: prefix + ".attn.wq_b",
                                   outerShape: [arch.numHeads * arch.headDim],
                                   innerLogical: arch.qLoraRank, bits: 4,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".self_attn.kv_proj",
+            appendQuantizedWeight(name: prefix + ".attn.wkv",
                                   outerShape: [arch.headDim],
                                   innerLogical: arch.hidden, bits: 4,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendUnquantizedBF16(name: prefix + ".self_attn.kv_norm.weight",
+            appendUnquantizedBF16(name: prefix + ".attn.kv_norm.weight",
                                   shape: [arch.headDim], into: &tensors, rng: &rng)
-            appendUnquantizedFP32(name: prefix + ".self_attn.sinks",
+            appendUnquantizedFP32(name: prefix + ".attn.attn_sink",
                                   shape: [arch.numHeads], into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".self_attn.o_a_proj",
+            appendQuantizedWeight(name: prefix + ".attn.wo_a",
                                   outerShape: [arch.oGroups * arch.oLoraRank],
                                   innerLogical: arch.numHeads * arch.headDim / arch.oGroups,
                                   bits: 4,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".self_attn.o_b_proj",
+            appendQuantizedWeight(name: prefix + ".attn.wo_b",
                                   outerShape: [arch.hidden],
                                   innerLogical: arch.oGroups * arch.oLoraRank, bits: 4,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
@@ -526,89 +526,94 @@ enum SyntheticSnapshot {
                 let isCSA = layerType == "compressed_sparse_attention"
                 let rows = isCSA ? 2 * arch.headDim : arch.headDim
                 let rate = isCSA ? arch.csaCompressRate : arch.hcaCompressRate
-                appendQuantizedWeight(name: prefix + ".self_attn.compressor.kv_proj",
+                appendQuantizedWeight(name: prefix + ".attn.compressor.wkv",
                                       outerShape: [rows],
                                       innerLogical: arch.hidden, bits: 4,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
-                appendQuantizedWeight(name: prefix + ".self_attn.compressor.gate_proj",
+                appendQuantizedWeight(name: prefix + ".attn.compressor.wgate",
                                       outerShape: [rows],
                                       innerLogical: arch.hidden, bits: 4,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
-                appendUnquantizedBF16(name: prefix + ".self_attn.compressor.kv_norm.weight",
+                appendUnquantizedBF16(name: prefix + ".attn.compressor.norm.weight",
                                       shape: [arch.headDim], into: &tensors, rng: &rng)
-                appendUnquantizedFP32(name: prefix + ".self_attn.compressor.position_bias",
+                appendUnquantizedBF16(name: prefix + ".attn.compressor.ape",
                                       shape: [min(rate, 8)], into: &tensors, rng: &rng)
                 if isCSA {
-                    let ip = prefix + ".self_attn.compressor.indexer"
-                    appendQuantizedWeight(name: ip + ".kv_proj",
+                    let ip = prefix + ".attn.indexer"
+                    appendQuantizedWeight(name: ip + ".compressor.wkv",
                                           outerShape: [2 * arch.indexHeadDim],
                                           innerLogical: arch.hidden, bits: 4,
                                           groupSize: arch.groupSize, into: &tensors, rng: &rng)
-                    appendQuantizedWeight(name: ip + ".gate_proj",
+                    appendQuantizedWeight(name: ip + ".compressor.wgate",
                                           outerShape: [2 * arch.indexHeadDim],
                                           innerLogical: arch.hidden, bits: 4,
                                           groupSize: arch.groupSize, into: &tensors, rng: &rng)
-                    appendUnquantizedBF16(name: ip + ".kv_norm.weight",
+                    appendUnquantizedBF16(name: ip + ".compressor.norm.weight",
                                           shape: [arch.indexHeadDim], into: &tensors, rng: &rng)
-                    appendUnquantizedFP32(name: ip + ".position_bias",
+                    appendUnquantizedBF16(name: ip + ".compressor.ape",
                                           shape: [arch.csaCompressRate], into: &tensors, rng: &rng)
-                    appendQuantizedWeight(name: ip + ".q_b_proj",
+                    appendQuantizedWeight(name: ip + ".wq_b",
                                           outerShape: [arch.indexNHeads * arch.indexHeadDim],
                                           innerLogical: arch.qLoraRank, bits: 4,
                                           groupSize: arch.groupSize, into: &tensors, rng: &rng)
-                    appendQuantizedWeight(name: ip + ".scorer.weights_proj",
+                    appendQuantizedWeight(name: ip + ".weights_proj",
                                           outerShape: [arch.indexNHeads],
                                           innerLogical: arch.hidden, bits: 4,
                                           groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 }
             }
 
-            // Router — 8-bit; hash layers carry the tid2eid table, learned
+            // Router — unquantized BF16 (the real conversion keeps the gate
+            // in BF16); hash layers carry the I64 tid2eid table, learned
             // layers the selection correction bias.
-            appendQuantizedWeight(name: prefix + ".mlp.gate",
-                                  outerShape: [arch.numExperts], innerLogical: arch.hidden,
-                                  bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + ".ffn.gate.weight",
+                                  shape: [arch.numExperts, arch.hidden],
+                                  into: &tensors, rng: &rng)
             if li < arch.numHashLayers {
-                appendUnquantizedU32(name: prefix + ".mlp.gate.tid2eid",
-                                     shape: [arch.vocab], into: &tensors, rng: &rng)
+                appendUnquantizedI64(name: prefix + ".ffn.gate.tid2eid",
+                                     shape: [arch.vocab, arch.topK],
+                                     into: &tensors, rng: &rng)
             } else {
-                appendUnquantizedFP32(name: prefix + ".mlp.gate.e_score_correction_bias",
+                appendUnquantizedFP32(name: prefix + ".ffn.gate.e_score_correction_bias",
                                       shape: [arch.numExperts], into: &tensors, rng: &rng)
             }
 
             // Shared expert — 4-bit.
-            appendQuantizedWeight(name: prefix + ".mlp.shared_experts.gate_proj",
+            appendQuantizedWeight(name: prefix + ".ffn.shared_experts.gate_proj",
                                   outerShape: [arch.sharedIntermediate], innerLogical: arch.hidden,
                                   bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".mlp.shared_experts.up_proj",
+            appendQuantizedWeight(name: prefix + ".ffn.shared_experts.up_proj",
                                   outerShape: [arch.sharedIntermediate], innerLogical: arch.hidden,
                                   bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".mlp.shared_experts.down_proj",
+            appendQuantizedWeight(name: prefix + ".ffn.shared_experts.down_proj",
                                   outerShape: [arch.hidden], innerLogical: arch.sharedIntermediate,
                                   bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
             // Routed experts — stacked expert-major, 2-bit (U32 packing
-            // factor 16).
-            appendQuantizedWeight(name: prefix + ".mlp.switch_mlp.gate_proj",
+            // factor 16). gate_proj mirrors the real checkpoint's mixed
+            // grouping: group 32 on every layer except the last (group 64).
+            let gateGroup = li == arch.numLayers - 1 ? arch.groupSize
+                                                     : arch.groupSize / 2
+            appendQuantizedWeight(name: prefix + ".ffn.switch_mlp.gate_proj",
+                                  outerShape: [arch.numExperts, arch.moeIntermediate],
+                                  innerLogical: arch.hidden, bits: 2,
+                                  groupSize: gateGroup, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".ffn.switch_mlp.up_proj",
                                   outerShape: [arch.numExperts, arch.moeIntermediate],
                                   innerLogical: arch.hidden, bits: 2,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".mlp.switch_mlp.up_proj",
-                                  outerShape: [arch.numExperts, arch.moeIntermediate],
-                                  innerLogical: arch.hidden, bits: 2,
-                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
-            appendQuantizedWeight(name: prefix + ".mlp.switch_mlp.down_proj",
+            appendQuantizedWeight(name: prefix + ".ffn.switch_mlp.down_proj",
                                   outerShape: [arch.numExperts, arch.hidden],
                                   innerLogical: arch.moeIntermediate, bits: 2,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
             // Plain pre-norm layer norms plus the two mHC mix sites.
-            appendUnquantizedBF16(name: prefix + ".input_layernorm.weight",
+            appendUnquantizedBF16(name: prefix + ".attn_norm.weight",
                                   shape: [arch.hidden], into: &tensors, rng: &rng)
-            appendUnquantizedBF16(name: prefix + ".post_attention_layernorm.weight",
+            appendUnquantizedBF16(name: prefix + ".ffn_norm.weight",
                                   shape: [arch.hidden], into: &tensors, rng: &rng)
             for site in ["attn_hc", "ffn_hc"] {
-                appendUnquantizedBF16(name: prefix + ".\(site).fn",
+                appendUnquantizedFP32(name: prefix + ".\(site).fn",
                                       shape: [arch.hcFnRows, arch.hcMult * arch.hidden],
                                       into: &tensors, rng: &rng)
                 appendUnquantizedFP32(name: prefix + ".\(site).base",
@@ -618,12 +623,12 @@ enum SyntheticSnapshot {
             }
         }
         // HyperHead stream collapse + final norm.
-        appendUnquantizedBF16(name: "model.hc_head.hc_fn",
+        appendUnquantizedFP32(name: "model.hc_head.fn",
                               shape: [arch.hcFnRows, arch.hcMult * arch.hidden],
                               into: &tensors, rng: &rng)
-        appendUnquantizedFP32(name: "model.hc_head.hc_base",
+        appendUnquantizedFP32(name: "model.hc_head.base",
                               shape: [arch.hcFnRows], into: &tensors, rng: &rng)
-        appendUnquantizedFP32(name: "model.hc_head.hc_scale",
+        appendUnquantizedFP32(name: "model.hc_head.scale",
                               shape: [3], into: &tensors, rng: &rng)
         appendUnquantizedBF16(name: "model.norm.weight",
                               shape: [arch.hidden], into: &tensors, rng: &rng)
@@ -633,15 +638,19 @@ enum SyntheticSnapshot {
         let shardPath = (dir as NSString).appendingPathComponent(shardName)
         try writeShard(path: shardPath, tensors: tensors)
 
-        // -- Write config.json: 4-bit base, 8-bit router, 2-bit routed experts.
+        // -- Write config.json: 4-bit base, 2-bit routed experts with the
+        // real checkpoint's mixed gate grouping (32 everywhere except the
+        // last layer's 64). The router gate is unquantized (no override).
         var quant: [String: Any] = [
             "bits": 4, "group_size": arch.groupSize, "mode": "affine"
         ]
         for li in 0..<arch.numLayers {
             let prefix = "model.layers.\(li)"
-            quant[prefix + ".mlp.gate"] = ["bits": 8, "group_size": arch.groupSize]
-            for k in ["mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj",
-                      "mlp.switch_mlp.down_proj"] {
+            let gateGroup = li == arch.numLayers - 1 ? arch.groupSize
+                                                     : arch.groupSize / 2
+            quant[prefix + ".ffn.switch_mlp.gate_proj"] =
+                ["bits": 2, "group_size": gateGroup]
+            for k in ["ffn.switch_mlp.up_proj", "ffn.switch_mlp.down_proj"] {
                 quant[prefix + "." + k] = ["bits": 2, "group_size": arch.groupSize]
             }
         }
@@ -763,6 +772,19 @@ enum SyntheticSnapshot {
         var bytes = [UInt8](repeating: 0, count: elements * 4)
         for i in 0..<bytes.count { bytes[i] = UInt8(rng.next() & 0xFF) }
         tensors.append((name, "U32", shape, bytes))
+    }
+
+    /// I64 lookup table (the real `tid2eid` dtype). Values are kept small
+    /// and positive so a U32/I64-agnostic reader sees valid expert ids.
+    private static func appendUnquantizedI64(name: String, shape: [Int],
+                                             into tensors: inout [(String, String, [Int], [UInt8])],
+                                             rng: inout SplitMix64) {
+        let elements = shape.reduce(1, *)
+        var bytes = [UInt8](repeating: 0, count: elements * 8)
+        for i in stride(from: 0, to: bytes.count, by: 8) {
+            bytes[i] = UInt8(rng.next() & 0x7)
+        }
+        tensors.append((name, "I64", shape, bytes))
     }
 
     // MARK: - Safetensors writer

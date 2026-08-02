@@ -6,8 +6,9 @@ import Metal
 ///
 /// Kept separate from `MoE` because that class's kernels and argument-buffer
 /// contract are validated against exactly 8 streamed experts and INT4 rows;
-/// this one is validated against exactly 6 and INT2. The router GEMV kernel
-/// is shared (`router_gemv_gemma4_r4` with a ones effective-scale buffer,
+/// this one is validated against exactly 6 and INT2. The router gate is
+/// unquantized BF16 in the mlx-community checkpoint, so the GEMV is the
+/// dedicated `router_gemv_bf16_r4` (with a ones effective-scale buffer,
 /// the Qwen precedent for unscaled routers).
 final class MoEDeepseekV4 {
     static let topK = 6
@@ -52,7 +53,7 @@ final class MoEDeepseekV4 {
             MetalFunctionConstant(index: 43, value: .bool(true)),
         ]
         self.routerGemvPSO = try context.pipeline(
-            "router_gemv_gemma4_r4",
+            "router_gemv_bf16_r4",
             constants: routerConstants,
             maxTotalThreadsPerThreadgroup: 512)
         self.routerSelectK6PSO = try context.pipeline(
@@ -88,8 +89,6 @@ final class MoEDeepseekV4 {
     /// sqrtsoftplus scores).
     func encodeRouterTopK(commandBuffer: MTLCommandBuffer,
                           weights: MTLBuffer, weightsOffset: Int,
-                          scales: MTLBuffer, scalesOffset: Int,
-                          biases: MTLBuffer, biasesOffset: Int,
                           hidden: MTLBuffer,
                           onesScale: MTLBuffer,
                           correctionBias: MTLBuffer, correctionBiasOffset: Int,
@@ -97,12 +96,9 @@ final class MoEDeepseekV4 {
                           outWeights: MTLBuffer,
                           numExperts: UInt32,
                           d: UInt32) {
-        precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
         precondition(numExperts <= 256)
         encodeRouterGemv(commandBuffer: commandBuffer,
                          weights: weights, weightsOffset: weightsOffset,
-                         scales: scales, scalesOffset: scalesOffset,
-                         biases: biases, biasesOffset: biasesOffset,
                          hidden: hidden, onesScale: onesScale,
                          numExperts: numExperts, d: d)
 
@@ -127,8 +123,6 @@ final class MoEDeepseekV4 {
     /// experts (written by the CPU before commit); the gate only weights them.
     func encodeRouterHashWeights(commandBuffer: MTLCommandBuffer,
                                  weights: MTLBuffer, weightsOffset: Int,
-                                 scales: MTLBuffer, scalesOffset: Int,
-                                 biases: MTLBuffer, biasesOffset: Int,
                                  hidden: MTLBuffer,
                                  onesScale: MTLBuffer,
                                  indices: MTLBuffer,
@@ -137,8 +131,6 @@ final class MoEDeepseekV4 {
                                  d: UInt32) {
         encodeRouterGemv(commandBuffer: commandBuffer,
                          weights: weights, weightsOffset: weightsOffset,
-                         scales: scales, scalesOffset: scalesOffset,
-                         biases: biases, biasesOffset: biasesOffset,
                          hidden: hidden, onesScale: onesScale,
                          numExperts: numExperts, d: d)
 
@@ -158,8 +150,6 @@ final class MoEDeepseekV4 {
 
     private func encodeRouterGemv(commandBuffer: MTLCommandBuffer,
                                   weights: MTLBuffer, weightsOffset: Int,
-                                  scales: MTLBuffer, scalesOffset: Int,
-                                  biases: MTLBuffer, biasesOffset: Int,
                                   hidden: MTLBuffer,
                                   onesScale: MTLBuffer,
                                   numExperts: UInt32,
@@ -169,13 +159,11 @@ final class MoEDeepseekV4 {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(routerGemvPSO)
         encoder.setBuffer(weights, offset: weightsOffset, index: 0)
-        encoder.setBuffer(scales, offset: scalesOffset, index: 1)
-        encoder.setBuffer(biases, offset: biasesOffset, index: 2)
-        encoder.setBuffer(hidden, offset: 0, index: 3)
-        encoder.setBuffer(onesScale, offset: 0, index: 4)
-        encoder.setBuffer(routerLogits, offset: 0, index: 5)
-        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
-        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.setBuffer(hidden, offset: 0, index: 1)
+        encoder.setBuffer(onesScale, offset: 0, index: 2)
+        encoder.setBuffer(routerLogits, offset: 0, index: 3)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(numExperts) + 3) / 4, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
@@ -205,11 +193,13 @@ final class MoEDeepseekV4 {
                             x: MTLBuffer,
                             acts: MTLBuffer,
                             d: UInt32,
-                            f: UInt32) {
+                            f: UInt32,
+                            gateGroupSize: UInt32) {
         validate(routedBlobs: routedBlobs)
         var dimension = d
         var intermediate = f
         var expertCount = UInt32(Self.topK)
+        var gateGroup = gateGroupSize
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(phase1Int2PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
@@ -221,6 +211,7 @@ final class MoEDeepseekV4 {
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&gateGroup, length: MemoryLayout<UInt32>.stride, index: 7)
         encoder.dispatchThreadgroups(
             MTLSize(width: (Self.topK * Int(f) + 7) / 8, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -237,7 +228,8 @@ final class MoEDeepseekV4 {
                                   activeSlotIndices: [UInt32],
                                   activeCount: UInt32,
                                   d: UInt32,
-                                  f: UInt32) {
+                                  f: UInt32,
+                                  gateGroupSize: UInt32) {
         guard activeCount > 0 else { return }
         validate(routedBlobs: routedBlobs)
         precondition(activeSlotIndices.count == Int(activeCount))
@@ -245,6 +237,7 @@ final class MoEDeepseekV4 {
         var intermediate = f
         var expertCount = UInt32(Self.topK)
         var active = activeCount
+        var gateGroup = gateGroupSize
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(phase1SubsetInt2PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
@@ -260,6 +253,7 @@ final class MoEDeepseekV4 {
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBuffer(activeSlots, offset: 0, index: 7)
         encoder.setBytes(&active, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.setBytes(&gateGroup, length: MemoryLayout<UInt32>.stride, index: 9)
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(activeCount) * Int(f) + 7) / 8, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))

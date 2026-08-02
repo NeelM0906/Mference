@@ -14,6 +14,12 @@ final class DSV4Kernels {
     static let selectAll: UInt32 = 0xFFFF_FFFF
 
     private let ropePSO: MTLComputePipelineState
+    /// Unspecialized rope PSO for non-attention head shapes (the 128-dim
+    /// lightning-indexer keys/queries). The specialized `ropePSO` bakes
+    /// `fullHeadDim` in via function constant and would address 512-wide
+    /// heads regardless of the dispatch's `head_dim_in`.
+    private let ropeGenericPSO: MTLComputePipelineState
+    private let specializedHeadDim: Int
     private let attentionPSO: MTLComputePipelineState
     private let compressEmitPSO: MTLComputePipelineState
     private let indexerScorePSO: MTLComputePipelineState
@@ -37,6 +43,9 @@ final class DSV4Kernels {
         ]
         self.ropePSO = try context.pipeline(
             "dsv4_rope_interleaved_trailing", constants: constants)
+        self.ropeGenericPSO = try context.pipeline(
+            "dsv4_rope_interleaved_trailing", constants: [])
+        self.specializedHeadDim = config.fullHeadDim
         self.attentionPSO = try context.pipeline(
             "dsv4_attention_decode", constants: constants,
             maxTotalThreadsPerThreadgroup: 256)
@@ -62,7 +71,8 @@ final class DSV4Kernels {
                     numHeads: Int, headDim: Int, ropeDim: Int,
                     position: Int, theta: Float, direction: Float) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(ropePSO)
+        enc.setComputePipelineState(
+            headDim == specializedHeadDim ? ropePSO : ropeGenericPSO)
         enc.setBuffer(x, offset: xOffset, index: 0)
         var hd = UInt32(headDim)
         var rd = UInt32(ropeDim)
@@ -95,7 +105,14 @@ final class DSV4Kernels {
                          windowCount: Int, windowStartPos: Int, ringCapacity: Int,
                          compressedCount: Int, selectedCount: UInt32,
                          scale: Float) {
-        precondition(compressedCount <= Self.maxCompressedEntries)
+        // The kernel materializes min(selected, compressed) entry logits, so
+        // bound what it actually loads: a CSA layer past 8K tokens has more
+        // than 2048 *emitted* entries but the indexer has already narrowed
+        // attention to its top-512 picks.
+        let attendedCompressed = selectedCount == Self.selectAll
+            ? compressedCount
+            : min(Int(selectedCount), compressedCount)
+        precondition(attendedCompressed <= Self.maxCompressedEntries)
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(attentionPSO)
         enc.setBuffer(q, offset: 0, index: 0)

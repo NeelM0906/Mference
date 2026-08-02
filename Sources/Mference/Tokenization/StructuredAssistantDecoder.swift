@@ -244,6 +244,16 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         return 0
     }
 
+    /// Release any tail withheld as a potential DSML-open prefix. Call at
+    /// end of stream, before `finish()`: a reply that legitimately ends in
+    /// `<`, `</`, `<｜`, … would otherwise silently lose those characters.
+    public func drain() -> [StructuredAssistantEvent] {
+        guard !failed, dsmlText == nil, !heldText.isEmpty else { return [] }
+        let visible = heldText
+        heldText = ""
+        return [.content(visible)]
+    }
+
     public func finish() throws {
         guard !failed, toolTokens == nil, dsmlText == nil else {
             throw ToolCallParserError.malformed

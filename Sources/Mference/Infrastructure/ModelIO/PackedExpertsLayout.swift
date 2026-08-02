@@ -2,6 +2,7 @@ import Foundation
 
 struct SubTensorEntry: Sendable, Equatable {
     let offset: UInt64    // relative to the expert blob's start
+    let size: UInt64      // bytes; scale slices encode the group count
 }
 
 struct ExpertEntry: Sendable {
@@ -101,7 +102,7 @@ enum PackedExpertsLayoutReader {
                 for (role, t) in tensorsObj {
                     guard
                         let toff = (t["offset"] as? NSNumber)?.uint64Value,
-                        t["size"] is NSNumber,
+                        let tsize = (t["size"] as? NSNumber)?.uint64Value,
                         t["dtype"] is String,
                         t["shape"] is [Int]
                     else {
@@ -110,7 +111,7 @@ enum PackedExpertsLayoutReader {
                     if let bits = t["bits"], !(bits is Int) {
                         throw ModelError.indexCorrupt(detail: "layout.json: malformed tensor bits \(role)")
                     }
-                    subTensors[role] = SubTensorEntry(offset: toff)
+                    subTensors[role] = SubTensorEntry(offset: toff, size: tsize)
                 }
                 let expertID = expertObj["expert"] as? Int ?? experts.compactMap { $0 }.count
                 guard expertID >= 0 && expertID < expertsPerLayer else {

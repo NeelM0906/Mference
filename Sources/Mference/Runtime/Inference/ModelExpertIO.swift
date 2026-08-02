@@ -80,6 +80,25 @@ extension Model {
         return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan)
     }
 
+    /// Per-layer gate_proj quant group size, derived from the manifest's
+    /// scale-slice byte size. DeepSeek V4's conversion ships gate_proj at
+    /// group 32 on most layers and 64 on the last; up/down stay at the
+    /// base group size.
+    public func routedGateGroupSize(layer: Int) -> Int {
+        let expert = packedExpertsLayout.expert(layer: layer, expert: 0)
+        guard let scales = expert.subTensors["gate_scales"] else {
+            return Quantization.groupSize
+        }
+        let rows = UInt64(config.moeIntermediateSize)
+        let cols = UInt64(config.hiddenSize)
+        guard rows > 0 else { return Quantization.groupSize }
+        let groups = scales.size / (2 * rows)
+        guard groups > 0, cols.isMultiple(of: groups) else {
+            return Quantization.groupSize
+        }
+        return Int(cols / groups)
+    }
+
     public func routedExpertCacheSlotCount(layer _: Int) -> Int? {
         guard case .pread(let slotCount) = streamingMode else { return nil }
         return slotCount

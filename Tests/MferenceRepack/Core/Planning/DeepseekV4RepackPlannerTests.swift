@@ -137,30 +137,30 @@ struct DeepseekV4RepackPlannerTests {
     @Test func deepseekClassificationBucketsNames() {
         let f = RepackModelFamily.deepseekV4Flash
         #expect(RepackPlanner.classify(
-            "model.layers.1.mlp.switch_mlp.gate_proj.weight",
+            "model.layers.1.ffn.switch_mlp.gate_proj.weight",
             numLayers: 4, family: f)
             == .routedExpert(role: "gate", layer: 1))
         #expect(RepackPlanner.classify(
-            "model.layers.2.mlp.switch_mlp.down_proj.weight",
+            "model.layers.2.ffn.switch_mlp.down_proj.weight",
             numLayers: 4, family: f)
             == .routedExpert(role: "down", layer: 2))
         // Shared experts, router sidecars and hc mixes stay resident.
         #expect(RepackPlanner.classify(
-            "model.layers.0.mlp.shared_experts.gate_proj.weight",
+            "model.layers.0.ffn.shared_experts.gate_proj.weight",
             numLayers: 4, family: f) == .lmResident)
         #expect(RepackPlanner.classify(
-            "model.layers.0.mlp.gate.tid2eid",
+            "model.layers.0.ffn.gate.tid2eid",
             numLayers: 4, family: f) == .lmResident)
         #expect(RepackPlanner.classify(
-            "model.layers.2.self_attn.compressor.indexer.kv_proj.weight",
+            "model.layers.2.attn.indexer.compressor.wkv.weight",
             numLayers: 4, family: f) == .lmResident)
         #expect(RepackPlanner.classify(
-            "model.hc_head.hc_fn", numLayers: 4, family: f) == .lmResident)
+            "model.hc_head.fn", numLayers: 4, family: f) == .lmResident)
         #expect(RepackPlanner.classify(
             "lm_head.weight", numLayers: 4, family: f) == .lmResident)
         // The Gemma/Qwen prefix is not this family's contract.
         #expect(RepackPlanner.classify(
-            "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight",
+            "language_model.model.layers.0.ffn.switch_mlp.gate_proj.weight",
             numLayers: 4, family: f) == .unknown)
         // And the plain prefix stays unknown for Qwen.
         #expect(RepackPlanner.classify(
@@ -194,43 +194,43 @@ struct DeepseekV4RepackPlannerTests {
         #expect(names.last == "lm_head.weight")
         #expect(names.dropLast().last == "model.norm.weight")
         let hcHead = names.filter { $0.hasPrefix("model.hc_head.") }
-        #expect(hcHead == ["model.hc_head.hc_base",
-                           "model.hc_head.hc_fn",
-                           "model.hc_head.hc_scale"])
+        #expect(hcHead == ["model.hc_head.base",
+                           "model.hc_head.fn",
+                           "model.hc_head.scale"])
         let lastLayerIndex = try #require(
             names.lastIndex { $0.contains(".layers.") })
-        let hcHeadIndex = try #require(names.firstIndex(of: "model.hc_head.hc_fn"))
+        let hcHeadIndex = try #require(names.firstIndex(of: "model.hc_head.fn"))
         #expect(hcHeadIndex > lastLayerIndex)
 
         // Layer 2 is the CSA layer: low-rank attention path, compressor,
         // indexer, router (+ correction bias), shared expert, layer norms,
         // then the two mHC mix sites.
         let expectedLayer2 = [
-            "self_attn.q_a_proj.weight",
-            "self_attn.q_a_norm.weight",
-            "self_attn.q_b_proj.weight",
-            "self_attn.kv_proj.weight",
-            "self_attn.kv_norm.weight",
-            "self_attn.sinks",
-            "self_attn.o_a_proj.weight",
-            "self_attn.o_b_proj.weight",
-            "self_attn.compressor.kv_proj.weight",
-            "self_attn.compressor.gate_proj.weight",
-            "self_attn.compressor.kv_norm.weight",
-            "self_attn.compressor.position_bias",
-            "self_attn.compressor.indexer.kv_proj.weight",
-            "self_attn.compressor.indexer.gate_proj.weight",
-            "self_attn.compressor.indexer.kv_norm.weight",
-            "self_attn.compressor.indexer.position_bias",
-            "self_attn.compressor.indexer.q_b_proj.weight",
-            "self_attn.compressor.indexer.scorer.weights_proj.weight",
-            "mlp.gate.weight",
-            "mlp.gate.e_score_correction_bias",
-            "mlp.shared_experts.gate_proj.weight",
-            "mlp.shared_experts.up_proj.weight",
-            "mlp.shared_experts.down_proj.weight",
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
+            "attn.wq_a.weight",
+            "attn.q_norm.weight",
+            "attn.wq_b.weight",
+            "attn.wkv.weight",
+            "attn.kv_norm.weight",
+            "attn.attn_sink",
+            "attn.wo_a.weight",
+            "attn.wo_b.weight",
+            "attn.compressor.wkv.weight",
+            "attn.compressor.wgate.weight",
+            "attn.compressor.norm.weight",
+            "attn.compressor.ape",
+            "attn.indexer.compressor.wkv.weight",
+            "attn.indexer.compressor.wgate.weight",
+            "attn.indexer.compressor.norm.weight",
+            "attn.indexer.compressor.ape",
+            "attn.indexer.wq_b.weight",
+            "attn.indexer.weights_proj.weight",
+            "ffn.gate.weight",
+            "ffn.gate.e_score_correction_bias",
+            "ffn.shared_experts.gate_proj.weight",
+            "ffn.shared_experts.up_proj.weight",
+            "ffn.shared_experts.down_proj.weight",
+            "attn_norm.weight",
+            "ffn_norm.weight",
             "attn_hc.fn",
             "attn_hc.base",
             "attn_hc.scale",
@@ -245,23 +245,24 @@ struct DeepseekV4RepackPlannerTests {
         // the router carries tid2eid instead of the correction bias.
         let layer0 = names.filter { $0.contains(".layers.0.") }
         #expect(!layer0.contains { $0.contains(".compressor.") })
-        #expect(layer0.contains("model.layers.0.mlp.gate.tid2eid"))
-        #expect(!layer0.contains("model.layers.0.mlp.gate.e_score_correction_bias"))
+        #expect(layer0.contains("model.layers.0.ffn.gate.tid2eid"))
+        #expect(!layer0.contains("model.layers.0.ffn.gate.e_score_correction_bias"))
 
         // Unquantized pass-through tensors carry no quant companions.
-        // sinks / position_bias / correction bias / hc base+scale are FP32,
-        // norms and hc fn are BF16, tid2eid rides as U32.
+        // sinks / correction bias / hc mixes are FP32, norms and the
+        // router gate are BF16, `ape` is BF16, tid2eid rides as raw I64.
         for (suffix, dtype) in [
-            ("model.layers.2.self_attn.sinks", UInt8(3)),
-            ("model.layers.2.self_attn.compressor.position_bias", UInt8(3)),
-            ("model.layers.2.self_attn.compressor.indexer.position_bias", UInt8(3)),
-            ("model.layers.2.mlp.gate.e_score_correction_bias", UInt8(3)),
-            ("model.layers.2.self_attn.q_a_norm.weight", UInt8(1)),
-            ("model.layers.2.attn_hc.fn", UInt8(1)),
+            ("model.layers.2.attn.attn_sink", UInt8(3)),
+            ("model.layers.2.attn.compressor.ape", UInt8(1)),
+            ("model.layers.2.attn.indexer.compressor.ape", UInt8(1)),
+            ("model.layers.2.ffn.gate.e_score_correction_bias", UInt8(3)),
+            ("model.layers.2.ffn.gate.weight", UInt8(1)),
+            ("model.layers.2.attn.q_norm.weight", UInt8(1)),
+            ("model.layers.2.attn_hc.fn", UInt8(3)),
             ("model.layers.2.attn_hc.base", UInt8(3)),
             ("model.layers.2.attn_hc.scale", UInt8(3)),
-            ("model.layers.0.mlp.gate.tid2eid", UInt8(0)),
-            ("model.hc_head.hc_fn", UInt8(1)),
+            ("model.layers.0.ffn.gate.tid2eid", UInt8(4)),
+            ("model.hc_head.fn", UInt8(3)),
         ] {
             let entry = try #require(plan.resident.entries.first { $0.name == suffix })
             #expect(entry.dtype == dtype)
@@ -271,7 +272,7 @@ struct DeepseekV4RepackPlannerTests {
         }
         // The low-rank attention projections are quantized U32 with companions.
         let qA = try #require(plan.resident.entries.first {
-            $0.name == "model.layers.2.self_attn.q_a_proj.weight"
+            $0.name == "model.layers.2.attn.wq_a.weight"
         })
         #expect(qA.dtype == 0)
         #expect(qA.quantSpec?.bits == 4)
@@ -300,6 +301,13 @@ struct DeepseekV4RepackPlannerTests {
             })
             #expect(gate.logicalShape == [64, 128])
             #expect(gate.sizeInExpertBlob == 2048)
+            // Mixed gate grouping: group 32 (4 groups/row) everywhere
+            // except the last layer's group 64 (2 groups/row).
+            let gateScales = try #require(lp.subTensors.first {
+                $0.role == "gate" && $0.component == "scales"
+            })
+            let expectedGroups = lp.layerIndex == 3 ? 2 : 4
+            #expect(gateScales.sizeInExpertBlob == UInt64(64 * expectedGroups * 2))
         }
 
         #expect(plan.excludedMultimodalTensorNames.isEmpty)

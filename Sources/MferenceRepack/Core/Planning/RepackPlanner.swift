@@ -141,7 +141,7 @@ enum RepackPlanner {
         switch family {
         case .gemma4:          routedContainer = ".experts.switch_glu."
         case .qwen36:          routedContainer = ".mlp.switch_mlp."
-        case .deepseekV4Flash: routedContainer = ".mlp.switch_mlp."
+        case .deepseekV4Flash: routedContainer = ".ffn.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -427,7 +427,7 @@ enum RepackPlanner {
     // MARK: - Helpers
 
     private static func ietnyDtype(_ d: SourceTensor.Dtype) -> UInt8 {
-        switch d { case .u32: 0; case .bf16: 1; case .fp16: 2; case .fp32: 3 }
+        switch d { case .u32: 0; case .bf16: 1; case .fp16: 2; case .fp32: 3; case .i64: 4 }
     }
 
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {
@@ -523,45 +523,44 @@ enum RepackPlanner {
     /// Within-layer slot order for the DeepSeek-V4-Flash family: the low-rank
     /// attention path in pipeline order, then the CSA/HCA compressor and its
     /// indexer, then router (with hash table / correction bias), shared
-    /// expert, layer norms, and the two hyper-connection mix sites. Indexer
-    /// patterns are matched before the compressor's so the shared suffixes
-    /// (`kv_proj`, `gate_proj`, `kv_norm`, `position_bias`) cannot
-    /// cross-match. Unquantized tensors (norms, sinks, position biases, hc
-    /// mixes, e_score_correction_bias, tid2eid) carry no `.scales`/`.biases`
-    /// companions and flow through the planner's non-U32/non-`.weight`
-    /// branch.
+    /// expert, layer norms, and the two hyper-connection mix sites. Names
+    /// follow the mlx-community conversion (`attn.wq_a`, `attn.indexer.*`,
+    /// `ffn.gate`, `ffn.shared_experts`). Indexer patterns are matched
+    /// before the compressor's so the shared component names (`wkv`,
+    /// `wgate`, `norm`, `ape`) cannot cross-match. Unquantized tensors
+    /// (norms, sinks, position biases, hc mixes, e_score_correction_bias,
+    /// tid2eid) carry no `.scales`/`.biases` companions and flow through
+    /// the planner's non-U32/non-`.weight` branch.
     private static func deepseekV4SlotRank(in n: String) -> Int {
-        if n.contains(".self_attn.q_a_proj.weight")             { return 0 }
-        if n.contains(".self_attn.q_a_norm.weight")             { return 1 }
-        if n.contains(".self_attn.q_b_proj.weight")             { return 2 }
-        if n.contains(".self_attn.kv_proj.weight")              { return 3 }
-        if n.contains(".self_attn.kv_norm.weight")              { return 4 }
-        if n.hasSuffix(".self_attn.sinks")                      { return 5 }
-        if n.contains(".self_attn.o_a_proj.weight")             { return 6 }
-        if n.contains(".self_attn.o_b_proj.weight")             { return 7 }
-        if n.contains(".compressor.indexer.kv_proj.weight")     { return 12 }
-        if n.contains(".compressor.indexer.gate_proj.weight")   { return 13 }
-        if n.contains(".compressor.indexer.kv_norm.weight")     { return 14 }
-        if n.hasSuffix(".compressor.indexer.position_bias")     { return 15 }
-        if n.contains(".compressor.indexer.q_b_proj.weight")    { return 16 }
-        if n.contains(".compressor.indexer.scorer.weights_proj.weight") { return 17 }
-        if n.contains(".compressor.kv_proj.weight")             { return 8 }
-        if n.contains(".compressor.gate_proj.weight")           { return 9 }
-        if n.contains(".compressor.kv_norm.weight")             { return 10 }
-        if n.hasSuffix(".compressor.position_bias")             { return 11 }
-        if n.contains(".mlp.gate.weight")                       { return 18 }
-        if n.hasSuffix(".mlp.gate.e_score_correction_bias")     { return 19 }
-        // NOTE: tid2eid is an integer lookup table; the safetensors reader
-        // only admits U32/BF16/F16/F32, so it rides as U32 (no `.weight`
-        // suffix, hence no quant companions). If the real checkpoint ships
-        // it as I64 the dtype table in Safetensors/TensorMetadata must be
-        // extended first.
-        if n.hasSuffix(".mlp.gate.tid2eid")                     { return 20 }
-        if n.contains(".mlp.shared_experts.gate_proj.weight")   { return 21 }
-        if n.contains(".mlp.shared_experts.up_proj.weight")     { return 22 }
-        if n.contains(".mlp.shared_experts.down_proj.weight")   { return 23 }
-        if n.hasSuffix(".input_layernorm.weight")               { return 24 }
-        if n.hasSuffix(".post_attention_layernorm.weight")      { return 25 }
+        if n.contains(".attn.wq_a.weight")                      { return 0 }
+        if n.contains(".attn.q_norm.weight")                    { return 1 }
+        if n.contains(".attn.wq_b.weight")                      { return 2 }
+        if n.contains(".attn.wkv.weight")                       { return 3 }
+        if n.contains(".attn.kv_norm.weight")                   { return 4 }
+        if n.hasSuffix(".attn.attn_sink")                       { return 5 }
+        if n.contains(".attn.wo_a.weight")                      { return 6 }
+        if n.contains(".attn.wo_b.weight")                      { return 7 }
+        if n.contains(".attn.indexer.compressor.wkv.weight")    { return 12 }
+        if n.contains(".attn.indexer.compressor.wgate.weight")  { return 13 }
+        if n.contains(".attn.indexer.compressor.norm.weight")   { return 14 }
+        if n.hasSuffix(".attn.indexer.compressor.ape")          { return 15 }
+        if n.contains(".attn.indexer.wq_b.weight")              { return 16 }
+        if n.contains(".attn.indexer.weights_proj.weight")      { return 17 }
+        if n.contains(".attn.compressor.wkv.weight")            { return 8 }
+        if n.contains(".attn.compressor.wgate.weight")          { return 9 }
+        if n.contains(".attn.compressor.norm.weight")           { return 10 }
+        if n.hasSuffix(".attn.compressor.ape")                  { return 11 }
+        if n.contains(".ffn.gate.weight")                       { return 18 }
+        if n.hasSuffix(".ffn.gate.e_score_correction_bias")     { return 19 }
+        // tid2eid is an I64 lookup table; it rides the resident file as raw
+        // I64 bytes (no `.weight` suffix, hence no quant companions) and the
+        // runtime's CPU-side hash lookup reads it dtype-aware.
+        if n.hasSuffix(".ffn.gate.tid2eid")                     { return 20 }
+        if n.contains(".ffn.shared_experts.gate_proj.weight")   { return 21 }
+        if n.contains(".ffn.shared_experts.up_proj.weight")     { return 22 }
+        if n.contains(".ffn.shared_experts.down_proj.weight")   { return 23 }
+        if n.hasSuffix(".attn_norm.weight")                     { return 24 }
+        if n.hasSuffix(".ffn_norm.weight")                      { return 25 }
         if n.hasSuffix(".attn_hc.fn")                           { return 26 }
         if n.hasSuffix(".attn_hc.base")                         { return 27 }
         if n.hasSuffix(".attn_hc.scale")                        { return 28 }
