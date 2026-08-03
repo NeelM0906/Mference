@@ -170,6 +170,32 @@ struct DSV4ChunkedPrefillTests {
         Self.expectIdentical(reference, chunked, label: "mixed spans")
     }
 
+    /// A single span that crosses the lightning-selection cutover (the
+    /// `--prefill-chunk auto` shape for long prompts) must batch its eligible
+    /// prefix and replay only the remainder token-by-token, splitting at the
+    /// cutover even mid compressor window — position 51 with the toy's
+    /// `indexTopK 12 × rate 4`.
+    @Test("span crossing the lightning cutover batches its eligible prefix")
+    func cutoverCrossingSpanBatchesPrefix() async throws {
+        let harness = try Self.makeHarness(chunkTokens: 64)
+        defer { try? FileManager.default.removeItem(at: harness.dir) }
+        let tokens = Self.prompt(60)
+        #expect(DSV4ChunkedPrefill.batchedTokenPrefix(config: .deepseekV4Toy(),
+                                                      startPosition: 0,
+                                                      tokenCount: 60,
+                                                      expertCacheSlots: 16) == 51)
+        #expect(!DSV4ChunkedPrefill.supports(config: .deepseekV4Toy(),
+                                             startPosition: 0, tokenCount: 60,
+                                             expertCacheSlots: 16))
+        let continuation: [Int32] = [17, 42]
+        let reference = try await Self.decodeReference(harness, tokens: tokens,
+                                                       continuation: continuation)
+        let chunked = try await Self.chunkedRun(harness, tokens: tokens,
+                                                continuation: continuation,
+                                                chunkTokens: 64)
+        Self.expectIdentical(reference, chunked, label: "cutover split")
+    }
+
     /// Two runs of the same chunked prefill must agree, so the scratch reuse
     /// across chunks and layers carries no state between calls.
     @Test("chunked prefill is reproducible across runs")

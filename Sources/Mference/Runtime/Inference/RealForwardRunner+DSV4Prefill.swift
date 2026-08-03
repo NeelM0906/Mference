@@ -300,30 +300,44 @@ final class DSV4ChunkedPrefill {
         return !(raw == "off" || raw == "0" || raw == "false")
     }
 
-    /// Whether a chunk starting at `startPosition` can run batched.
+    /// How many tokens from the start of a chunk can run batched.
     ///
     /// The lightning indexer selects a top-`indexTopK` subset of compressed
     /// entries once a CSA layer holds more than `indexTopK` of them, and the
     /// selection is a CPU top-k over a GPU readback taken *in the middle* of
     /// the layer. Batching a whole chunk into one command buffer cannot host a
-    /// per-token mid-layer readback, so chunks that reach that context length
-    /// fall back to the token-by-token path.
+    /// per-token mid-layer readback, so positions past that context length
+    /// fall back to the token-by-token path. A chunk that crosses the cutover
+    /// keeps its eligible prefix batched; only the remainder falls back.
+    static func batchedTokenPrefix(config: ArchConfig,
+                                   startPosition: Int,
+                                   tokenCount: Int,
+                                   expertCacheSlots: Int?) -> Int {
+        guard batchedPathEnabled else { return 0 }
+        guard config.routerScoringFunc == "sqrtsoftplus",
+              config.topKExperts == MoEDeepseekV4.topK else { return 0 }
+        if let expertCacheSlots, expertCacheSlots < 1 { return 0 }
+        let ca = config.compressedAttention
+        guard ca.csaCompressRate > 0 else { return 0 }
+        let hasCSA = (0..<config.numLayers).contains { config.layerIsCSA($0) }
+        guard hasCSA else { return tokenCount }
+        // A position is batchable while the compressed-entry count after it
+        // stays within the selection threshold:
+        //   (lastPosition + 1) / csaCompressRate <= indexTopK
+        // which holds for lastPosition + 1 <= (indexTopK + 1) * rate - 1.
+        let batchablePositions = (ca.indexTopK + 1) * ca.csaCompressRate - 1
+        return max(0, min(tokenCount, batchablePositions - startPosition))
+    }
+
+    /// Whether a whole chunk starting at `startPosition` can run batched.
     static func supports(config: ArchConfig,
                          startPosition: Int,
                          tokenCount: Int,
                          expertCacheSlots: Int?) -> Bool {
-        guard batchedPathEnabled else { return false }
-        guard config.routerScoringFunc == "sqrtsoftplus",
-              config.topKExperts == MoEDeepseekV4.topK else { return false }
-        if let expertCacheSlots, expertCacheSlots < 1 { return false }
-        let ca = config.compressedAttention
-        guard ca.csaCompressRate > 0 else { return false }
-        let hasCSA = (0..<config.numLayers).contains { config.layerIsCSA($0) }
-        guard hasCSA else { return true }
-        // Compressed entries after the last token of the chunk.
-        let lastPosition = startPosition + tokenCount - 1
-        let entries = (lastPosition + 1) / ca.csaCompressRate
-        return entries <= ca.indexTopK
+        batchedTokenPrefix(config: config,
+                           startPosition: startPosition,
+                           tokenCount: tokenCount,
+                           expertCacheSlots: expertCacheSlots) >= tokenCount
     }
 
     // MARK: - Entry point

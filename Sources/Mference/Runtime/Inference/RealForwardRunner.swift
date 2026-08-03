@@ -1050,15 +1050,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var pos = startPosition
             var done = 0
             for (spanIndex, span) in spans.enumerated() {
-                let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
-                let upper = tokens.index(lower, offsetBy: span.tokenCount)
                 let isLastSpan = spanIndex == spans.count - 1
-                let batched = DSV4ChunkedPrefill.supports(
+                // A span crossing the lightning-selection cutover keeps its
+                // eligible prefix batched; only the remainder replays
+                // token-by-token.
+                var batchedCount = DSV4ChunkedPrefill.batchedTokenPrefix(
                     config: cfg,
                     startPosition: span.startPosition,
                     tokenCount: span.tokenCount,
                     expertCacheSlots: expertSlots)
-                if batched, let dsv4, let moeDSV4, let dsv4State {
+                if dsv4 == nil || moeDSV4 == nil || dsv4State == nil {
+                    batchedCount = 0
+                }
+                if batchedCount > 0, let dsv4, let moeDSV4, let dsv4State {
                     let bindings = DSV4PrefillBindings(
                         model: model, ctx: ctx, cfg: cfg,
                         dsv4: dsv4, moeDSV4: moeDSV4, state: dsv4State,
@@ -1070,26 +1074,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         effectiveScales: effectiveScaleBuffers,
                         useFusedGreedyHead: useFusedGreedyHead)
                     let runner: DSV4ChunkedPrefill
-                    if let cached = dsv4Prefill, cached.chunkCapacity >= span.tokenCount {
+                    if let cached = dsv4Prefill, cached.chunkCapacity >= batchedCount {
                         runner = cached
                     } else {
                         runner = try DSV4ChunkedPrefill(
                             bindings: bindings,
-                            chunkTokens: max(config.chunkTokens, span.tokenCount))
+                            chunkTokens: max(config.chunkTokens, batchedCount))
                         dsv4Prefill = runner
                     }
+                    let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
+                    let upper = tokens.index(lower, offsetBy: batchedCount)
+                    // The batched runner advances DSV4 layer state as it
+                    // encodes; if it throws partway the layer state is ahead
+                    // of the KV cursor, so the runner must reject further use
+                    // until reset() — same discipline as executePrefillChunk.
+                    prefillChunkState.markDirty(startPosition: span.startPosition,
+                                                tokenCount: batchedCount)
                     let greedy = try await runner.run(tokens: tokens[lower..<upper],
                                                       startPosition: span.startPosition,
-                                                      emitHead: isLastSpan,
+                                                      emitHead: isLastSpan && batchedCount == span.tokenCount,
                                                       outputMode: outputMode,
                                                       logits: logits)
                     if let greedy { lastGreedyToken = greedy }
-                    for _ in 0..<span.tokenCount { kv?.advance() }
-                    pos += span.tokenCount
-                } else {
+                    for _ in 0..<batchedCount { kv?.advance() }
+                    pos += batchedCount
+                    prefillChunkState.markCommitted()
+                }
+                if batchedCount < span.tokenCount {
+                    let remainder = span.tokenCount - batchedCount
+                    let lower = tokens.index(tokens.startIndex,
+                                             offsetBy: span.tokenOffset + batchedCount)
+                    let upper = tokens.index(lower, offsetBy: remainder)
                     var index = 0
                     for t in tokens[lower..<upper] {
-                        let isLast = isLastSpan && index == span.tokenCount - 1
+                        let isLast = isLastSpan && index == remainder - 1
                         try await produceTokenDSV4(token: t, position: pos,
                                                    into: logits,
                                                    emitHead: isLast,
