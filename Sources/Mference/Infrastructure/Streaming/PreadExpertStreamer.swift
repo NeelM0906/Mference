@@ -72,6 +72,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var slotExpert: [Int]
     private var slotLastUse: [Int]
     private var expertUseCount: [Int]
+    /// Slots a speculative read is currently filling. Their contents are
+    /// undefined until the read lands, so they are neither matchable as hits
+    /// (`slotExpert` is cleared to -1) nor available as eviction victims.
+    private var speculativeInFlight: [Bool]
     private var useClock = 0
     private let cacheLock = NSLock()
 
@@ -140,6 +144,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotBuffers = buffers
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
+        self.speculativeInFlight = [Bool](repeating: false, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
     }
 
@@ -214,6 +219,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for slot in avoidingSlots where !reserved[slot] {
             reserved[slot] = true
         }
+        // A slot a speculative read is still filling must not be handed to the
+        // real plan: its buffer is being written from another thread. Callers
+        // join outstanding speculation before planning, so in practice this
+        // loop reserves nothing — it is the backstop that keeps a skipped join
+        // from turning into a data race.
+        for slot in 0..<slotCount where speculativeInFlight[slot] && !reserved[slot] {
+            reserved[slot] = true
+        }
 
         let misses = experts.indices.filter { assignedSlots[$0] == -1 }
         let evictable = (0..<slotCount)
@@ -283,6 +296,103 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return plan.assignedSlots.map { slot in
             (slotBuffers[slot], UInt64(0), layout.expertStride)
         }
+    }
+
+    /// Read-only residency probe: which of `experts` are *not* currently in a
+    /// slot, deduplicated and in request order. Unlike `planExpertsCached` this
+    /// touches neither the LFU counters nor the use clock nor slot assignment,
+    /// so a speculative caller cannot make a guessed expert look popular.
+    public func nonResidentExperts(_ experts: [Int]) -> [Int] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        var resident = Set<Int>()
+        for slot in 0..<slotCount where slotExpert[slot] >= 0 {
+            resident.insert(slotExpert[slot])
+        }
+        var seen = Set<Int>()
+        return experts.filter { expert in
+            expert >= 0 && !resident.contains(expert) && seen.insert(expert).inserted
+        }
+    }
+
+    /// Reserves slots for a speculative read of `experts` (which the caller has
+    /// already filtered through `nonResidentExperts`).
+    ///
+    /// Eviction protection, in order of importance:
+    /// * slots holding one of the predicted experts are never victims;
+    /// * slots another speculative read is filling are never victims;
+    /// * `keepEvictable` slots are left untouched so the real plan that follows
+    ///   always has room for its own misses — a wrong guess can slow the cache
+    ///   down but can never make the next plan unplaceable.
+    ///
+    /// Victims are picked with the normal eviction order but *no* LFU or clock
+    /// bookkeeping is written: an unconfirmed guess must not shift the policy.
+    /// Reserved slots are marked empty for the duration of the read.
+    public func reserveSpeculativeSlots(experts: [Int],
+                                        keepEvictable: Int) -> [(expert: Int, slot: Int)] {
+        guard !experts.isEmpty else { return [] }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        let wanted = Set(experts)
+        var reserved = [Bool](repeating: false, count: slotCount)
+        for slot in 0..<slotCount
+            where speculativeInFlight[slot] || wanted.contains(slotExpert[slot]) {
+            reserved[slot] = true
+        }
+        let evictable = (0..<slotCount)
+            .filter { !reserved[$0] }
+            .sorted { shouldEvictSlot($0, before: $1) }
+        let budget = min(experts.count, max(0, evictable.count - max(0, keepEvictable)))
+        guard budget > 0 else { return [] }
+
+        var reservation: [(expert: Int, slot: Int)] = []
+        reservation.reserveCapacity(budget)
+        for index in 0..<budget {
+            let slot = evictable[index]
+            speculativeInFlight[slot] = true
+            slotExpert[slot] = -1
+            reservation.append((experts[index], slot))
+        }
+        return reservation
+    }
+
+    /// Runs a reservation from `reserveSpeculativeSlots` and publishes the
+    /// results. Slots whose read failed stay empty rather than claiming to hold
+    /// an expert; the in-flight mark is always cleared. Returns the bytes read.
+    @discardableResult
+    public func executeSpeculativeReservation(
+        _ reservation: [(expert: Int, slot: Int)]
+    ) -> UInt64 {
+        guard !reservation.isEmpty else { return 0 }
+        let loadedLock = NSLock()
+        nonisolated(unsafe) var loaded: [Int] = []
+        DispatchQueue.concurrentPerform(iterations: reservation.count) { index in
+            let entry = reservation[index]
+            guard (try? self.loadExpert(layer: 0,
+                                        expert: entry.expert,
+                                        slot: entry.slot)) != nil else { return }
+            loadedLock.lock()
+            loaded.append(index)
+            loadedLock.unlock()
+        }
+
+        cacheLock.lock()
+        for index in loaded {
+            slotExpert[reservation[index].slot] = reservation[index].expert
+        }
+        for entry in reservation {
+            speculativeInFlight[entry.slot] = false
+        }
+        cacheLock.unlock()
+        return UInt64(loaded.count) * layout.expertStride
+    }
+
+    /// Test/diagnostic view of slot residency.
+    public func residentExpertsSnapshot() -> [Int] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return slotExpert
     }
 
     public func adviseExpertCachePlanMisses(_ plan: ExpertCachePlan) -> ExpertIOAdviceResult {

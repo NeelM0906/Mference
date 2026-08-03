@@ -15,6 +15,8 @@ constant uint FC_DSV4_ROPE_DIM [[function_constant(102)]];     // 64
 constant uint FC_DSV4_HC_MULT [[function_constant(103)]];      // 4
 constant uint FC_DSV4_HIDDEN [[function_constant(104)]];       // 4096
 constant bool FC_DSV4_USE_FC [[function_constant(105)]];
+constant uint FC_DSV4_O_RANK [[function_constant(106)]];       // 1024
+constant uint FC_DSV4_O_GROUP_IN [[function_constant(107)]];   // 4096
 
 static inline uint dsv4_head_dim(constant uint& v) {
     return (is_function_constant_defined(FC_DSV4_USE_FC) && FC_DSV4_USE_FC &&
@@ -23,6 +25,15 @@ static inline uint dsv4_head_dim(constant uint& v) {
 static inline uint dsv4_rope_dim(constant uint& v) {
     return (is_function_constant_defined(FC_DSV4_USE_FC) && FC_DSV4_USE_FC &&
             is_function_constant_defined(FC_DSV4_ROPE_DIM)) ? FC_DSV4_ROPE_DIM : v;
+}
+static inline uint dsv4_o_rank(constant uint& v) {
+    return (is_function_constant_defined(FC_DSV4_USE_FC) && FC_DSV4_USE_FC &&
+            is_function_constant_defined(FC_DSV4_O_RANK)) ? FC_DSV4_O_RANK : v;
+}
+static inline uint dsv4_o_group_in(constant uint& v) {
+    return (is_function_constant_defined(FC_DSV4_USE_FC) && FC_DSV4_USE_FC &&
+            is_function_constant_defined(FC_DSV4_O_GROUP_IN))
+        ? FC_DSV4_O_GROUP_IN : v;
 }
 
 // Interleaved partial RoPE on the trailing `rope_dim` channels of each of
@@ -56,20 +67,191 @@ kernel void dsv4_rope_interleaved_trailing(
     x[base + 2u * tid + 1u] = half(x1 * c + x0 * s);
 }
 
-// Softmax attention for one token: 64 query heads over one shared K=V head.
-// KV rows come from two regions: the sliding-window ring (`window_count`
-// valid rows of `ring_capacity`, slot = absolute_position % ring_capacity)
-// and the compressed-entry cache. `selected` restricts the compressed region
-// to `selected_count` entries (lightning-indexer output); `selected_count ==
-// 0xFFFFFFFF` means "all compressed entries". Every head folds its learnable
-// sink logit into the softmax denominator (the sink contributes no value).
+// Softmax attention for one token: `num_heads` query heads over one shared
+// K=V head. KV rows come from two regions: the sliding-window ring
+// (`window_count` valid rows of `ring_capacity`, slot = absolute_position %
+// ring_capacity) and the compressed-entry cache. `selected` restricts the
+// compressed region to `selected_count` entries (lightning-indexer output);
+// `selected_count == 0xFFFFFFFF` means "all compressed entries". Every head
+// folds its learnable sink logit into the softmax denominator (the sink
+// contributes no value).
 //
-// Grid: num_heads threadgroups x 256 threads. Threadgroup memory holds the
-// logits (window + compressed <= kDSV4MaxEntries).
-constant constexpr uint kDSV4MaxEntries = 2176;   // 128 window + 2048 compressed
-constant constexpr uint kDSV4Threads = 256;
+// One threadgroup services `kDSV4HeadsPerTG` heads, one simdgroup each, so a
+// KV row is fetched from device memory once per head group instead of once
+// per head (64 heads over one shared K=V row). Rows are staged into
+// threadgroup memory `kDSV4StageRows` at a time — the staging loop is fully
+// coalesced across the 256 threads, and every head then consumes the staged
+// row for both the QK dot and the value accumulation (K == V).
+//
+// The softmax runs online (running max, running denominator, output rescaled
+// in registers), so no per-entry logit array exists and the kernel imposes no
+// ceiling on window + compressed entries.
+//
+// Requires head_dim == 512 (the DeepSeek-V4 absorbed-MLA KV width): each lane
+// of a simdgroup owns exactly four half4 of a row. `DSV4Kernels` enforces it.
+//
+// Grid: ceil(num_heads / kDSV4HeadsPerTG) threadgroups x 256 threads.
+constant constexpr uint kDSV4HeadsPerTG = 8;
+constant constexpr uint kDSV4AttnHeadDim = 512;
+constant constexpr uint kDSV4RowVec4 = kDSV4AttnHeadDim / 4;    // 128 half4
+constant constexpr uint kDSV4StageRows = 16;                    // 16 KB shared
+constant constexpr uint kDSV4Threads = kDSV4HeadsPerTG * 32;    // 256
+
+// Accumulate one staged KV row into a head's online-softmax state. K == V, so
+// the same staged row drives both the logit dot and the value sum.
+static inline void dsv4_attend_shared_row(
+    threadgroup const half4* kv4,
+    half4 q0, half4 q1, half4 q2, half4 q3,
+    float scale, uint lane,
+    thread float& m, thread float& denom,
+    thread float4& o0, thread float4& o1,
+    thread float4& o2, thread float4& o3
+) {
+    const half4 k0 = kv4[lane +  0u];
+    const half4 k1 = kv4[lane + 32u];
+    const half4 k2 = kv4[lane + 64u];
+    const half4 k3 = kv4[lane + 96u];
+
+    float score = dot(float4(q0), float4(k0)) + dot(float4(q1), float4(k1))
+                + dot(float4(q2), float4(k2)) + dot(float4(q3), float4(k3));
+    score = simd_sum(score) * scale;
+
+    const float new_m = max(m, score);
+    const float rescale = fast::exp(m - new_m);
+    const float w = fast::exp(score - new_m);
+    denom = fma(denom, rescale, w);
+    o0 = fma(o0, rescale, float4(k0) * w);
+    o1 = fma(o1, rescale, float4(k1) * w);
+    o2 = fma(o2, rescale, float4(k2) * w);
+    o3 = fma(o3, rescale, float4(k3) * w);
+    m = new_m;
+}
+
+// Fold the head's learnable sink logit into the running denominator. The sink
+// contributes no value, so it only rescales the accumulator.
+static inline void dsv4_attend_sink(
+    float sink,
+    thread float& m, thread float& denom,
+    thread float4& o0, thread float4& o1,
+    thread float4& o2, thread float4& o3
+) {
+    const float new_m = max(m, sink);
+    const float rescale = fast::exp(m - new_m);
+    denom = fma(denom, rescale, fast::exp(sink - new_m));
+    o0 *= rescale;
+    o1 *= rescale;
+    o2 *= rescale;
+    o3 *= rescale;
+    m = new_m;
+}
 
 kernel void dsv4_attention_decode(
+    device const half* q [[buffer(0)]],                 // [H, head_dim], roped
+    device const half* window_kv [[buffer(1)]],         // ring [capacity, head_dim]
+    device const half* compressed_kv [[buffer(2)]],     // [T, head_dim]
+    device const uint* selected [[buffer(3)]],          // indexer picks
+    device const float* sinks [[buffer(4)]],            // [H]
+    device half* out [[buffer(5)]],                     // [H, head_dim]
+    constant uint& head_dim_in [[buffer(6)]],
+    constant uint& window_count [[buffer(7)]],
+    constant uint& window_start_pos [[buffer(8)]],      // abs pos of oldest row
+    constant uint& ring_capacity [[buffer(9)]],
+    constant uint& compressed_count [[buffer(10)]],
+    constant uint& selected_count [[buffer(11)]],
+    constant float& scale [[buffer(12)]],
+    constant uint& num_heads [[buffer(13)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]
+) {
+    threadgroup half4 kv_shared[kDSV4StageRows * kDSV4RowVec4];
+    const uint head_dim = dsv4_head_dim(head_dim_in);
+    const bool use_all = selected_count == 0xFFFFFFFFu;
+    const uint comp_used = use_all
+        ? compressed_count
+        : min(selected_count, compressed_count);
+
+    // A tail simdgroup with no head of its own still has to reach every
+    // barrier, so it rides along on the last head and drops its store.
+    const uint head = group * kDSV4HeadsPerTG + sg;
+    const bool active = head < num_heads;
+    const uint head_idx = active ? head : num_heads - 1u;
+
+    device const half4* q4 = (device const half4*)(q + head_idx * head_dim);
+    const half4 q0 = q4[lane +  0u];
+    const half4 q1 = q4[lane + 32u];
+    const half4 q2 = q4[lane + 64u];
+    const half4 q3 = q4[lane + 96u];
+
+    float m = -FLT_MAX / 2.0f;
+    float denom = 0.0f;
+    float4 o0 = 0.0f;
+    float4 o1 = 0.0f;
+    float4 o2 = 0.0f;
+    float4 o3 = 0.0f;
+
+    // Sliding-window ring rows, oldest first.
+    for (uint base = 0; base < window_count; base += kDSV4StageRows) {
+        const uint rows = min(kDSV4StageRows, window_count - base);
+        for (uint off = tid; off < rows * kDSV4RowVec4; off += kDSV4Threads) {
+            const uint r = off / kDSV4RowVec4;
+            const uint c = off % kDSV4RowVec4;
+            const uint slot = (window_start_pos + base + r) % ring_capacity;
+            kv_shared[off] =
+                ((device const half4*)(window_kv + slot * head_dim))[c];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint r = 0; r < rows; ++r) {
+            dsv4_attend_shared_row(kv_shared + r * kDSV4RowVec4,
+                                   q0, q1, q2, q3, scale, lane,
+                                   m, denom, o0, o1, o2, o3);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Compressed entries, indexer-selected subset or all of them.
+    for (uint base = 0; base < comp_used; base += kDSV4StageRows) {
+        const uint rows = min(kDSV4StageRows, comp_used - base);
+        for (uint off = tid; off < rows * kDSV4RowVec4; off += kDSV4Threads) {
+            const uint r = off / kDSV4RowVec4;
+            const uint c = off % kDSV4RowVec4;
+            const uint ci = base + r;
+            const uint entry = use_all ? ci : selected[ci];
+            const uint row = min(entry, compressed_count - 1u);
+            kv_shared[off] =
+                ((device const half4*)(compressed_kv + row * head_dim))[c];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint r = 0; r < rows; ++r) {
+            dsv4_attend_shared_row(kv_shared + r * kDSV4RowVec4,
+                                   q0, q1, q2, q3, scale, lane,
+                                   m, denom, o0, o1, o2, o3);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    dsv4_attend_sink(sinks[head_idx], m, denom, o0, o1, o2, o3);
+
+    if (!active) return;
+    const float inv_denom = denom == 0.0f ? 0.0f : 1.0f / denom;
+    device half4* dst4 = (device half4*)(out + head * head_dim);
+    dst4[lane +  0u] = half4(o0 * inv_denom);
+    dst4[lane + 32u] = half4(o1 * inv_denom);
+    dst4[lane + 64u] = half4(o2 * inv_denom);
+    dst4[lane + 96u] = half4(o3 * inv_denom);
+}
+
+// Pre-restructuring two-pass attention, kept as the parity reference for
+// `DSV4AttentionParityTests`. It materializes every logit in threadgroup
+// memory (hence the kDSV4MaxEntries ceiling the online-softmax kernel above
+// removes) and re-walks all rows from every thread. Not used at runtime — no
+// production pipeline is built for it.
+//
+// Grid: num_heads threadgroups x 256 threads.
+constant constexpr uint kDSV4MaxEntries = 2176;   // 128 window + 2048 compressed
+
+kernel void dsv4_attention_decode_reference(
     device const half* q [[buffer(0)]],                 // [H, head_dim], roped
     device const half* window_kv [[buffer(1)]],         // ring [capacity, head_dim]
     device const half* compressed_kv [[buffer(2)]],     // [T, head_dim]
@@ -164,6 +346,41 @@ kernel void dsv4_attention_decode(
         }
         out[head * head_dim + d] = half(acc * inv_denom);
     }
+}
+
+// Grouped low-rank output projection (o_a): all `groups` head-group GEMVs in
+// one dispatch. The groups share one INT4 weight tensor — group g owns rows
+// [g*rank, (g+1)*rank) and consumes the activation slice [g*group_in,
+// (g+1)*group_in) — so the output row index alone selects both the weight row
+// and the activation slice, and the per-group dispatches collapse into one
+// grid over `groups * rank` rows. The row math is
+// `dequant_int4_gemv_simd_body`'s verbatim, so results are bit-identical to
+// the per-group dispatches it replaces.
+//
+// Grid: ceil(groups*rank / 8) threadgroups x 256 threads (8 rows per group).
+kernel void dsv4_o_group_gemv_int4(
+    device const uint8_t* W [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const half* x [[buffer(3)]],
+    device half* y [[buffer(4)]],
+    constant uint& rank_in [[buffer(5)]],
+    constant uint& group_in_in [[buffer(6)]],
+    constant uint& groups [[buffer(7)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint rank = dsv4_o_rank(rank_in);
+    const uint group_in = dsv4_o_group_in(group_in_in);
+    const uint rows = groups * rank;
+    const uint row = tg_idx * rows_per_tg + sg_idx;
+    if (row >= rows) return;
+    dequant_int4_gemv_simd_body(W, scales, biases,
+                                x + (row / rank) * group_in, y,
+                                rows, group_in,
+                                rows_per_tg, tg_idx, sg_idx, lane);
 }
 
 // One compressor window emission (paper eqs. 20-23): per output channel c,
