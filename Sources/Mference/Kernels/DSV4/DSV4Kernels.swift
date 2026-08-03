@@ -3,13 +3,19 @@ import Metal
 
 /// Swift wrappers for the DeepSeek-V4 kernel family (`Metal/DSV4/dsv4.metal`):
 /// interleaved trailing partial RoPE, shared-KV MQA decode attention with
-/// per-head sinks over [window ring ‖ compressed entries], the CSA/HCA window
-/// compressor, the lightning-indexer scorer, mHC stream mixing, and the
-/// clamped-SwiGLU elementwise.
+/// per-head sinks over [window ring ‖ compressed entries], the grouped
+/// low-rank output projection, the CSA/HCA window compressor, the
+/// lightning-indexer scorer, mHC stream mixing, and the clamped-SwiGLU
+/// elementwise.
 final class DSV4Kernels {
-    /// Compressed-entry ceiling baked into the attention kernel's threadgroup
-    /// logits array (`kDSV4MaxEntries` = 128 window + 2048 compressed).
-    static let maxCompressedEntries = 2048
+    /// Query heads serviced by one attention threadgroup, one simdgroup each.
+    /// Must equal `kDSV4HeadsPerTG` in `dsv4.metal`.
+    static let attentionHeadsPerThreadgroup = 8
+    /// KV width the attention kernel is written for (`kDSV4AttnHeadDim`).
+    static let attentionHeadDim = 512
+    /// Output rows one `dsv4_o_group_gemv_int4` threadgroup covers, one
+    /// simdgroup each. Must equal its `rows_per_tg`.
+    private static let oGroupRowsPerThreadgroup = 8
     /// Sentinel `selected_count` meaning "attend to every compressed entry".
     static let selectAll: UInt32 = 0xFFFF_FFFF
 
@@ -31,6 +37,7 @@ final class DSV4Kernels {
     private let mainInvFreq: MTLBuffer
     private let compressInvFreq: MTLBuffer
     private let attentionPSO: MTLComputePipelineState
+    private let oGroupPSO: MTLComputePipelineState
     private let compressEmitPSO: MTLComputePipelineState
     private let indexerScorePSO: MTLComputePipelineState
     private let hcWeightsPSO: MTLComputePipelineState
@@ -50,6 +57,13 @@ final class DSV4Kernels {
                                   value: .uint32(UInt32(config.hyperConnections.mult))),
             MetalFunctionConstant(index: 104, value: .uint32(UInt32(config.hiddenSize))),
             MetalFunctionConstant(index: 105, value: .bool(true)),
+            MetalFunctionConstant(
+                index: 106,
+                value: .uint32(UInt32(config.compressedAttention.oLoraRank))),
+            MetalFunctionConstant(
+                index: 107,
+                value: .uint32(UInt32(config.numHeads * config.fullHeadDim
+                                      / max(config.compressedAttention.oGroups, 1)))),
         ]
         self.ropePSO = try context.pipeline(
             "dsv4_rope_interleaved_trailing", constants: constants)
@@ -86,6 +100,9 @@ final class DSV4Kernels {
         self.compressInvFreq = compressBuf
         self.attentionPSO = try context.pipeline(
             "dsv4_attention_decode", constants: constants,
+            maxTotalThreadsPerThreadgroup: 256)
+        self.oGroupPSO = try context.pipeline(
+            "dsv4_o_group_gemv_int4", constants: constants,
             maxTotalThreadsPerThreadgroup: 256)
         self.compressEmitPSO = try context.pipeline("dsv4_compress_emit")
         self.indexerScorePSO = try context.pipeline("dsv4_indexer_score")
@@ -133,32 +150,29 @@ final class DSV4Kernels {
     /// attends to every compressed entry (windowed layers pass
     /// `compressedCount == 0`).
     func encodeAttention(commandBuffer: MTLCommandBuffer,
-                         q: MTLBuffer,
+                         q: MTLBuffer, qOffset: Int = 0,
                          windowKV: MTLBuffer,
                          compressedKV: MTLBuffer,
                          selected: MTLBuffer,
                          sinks: MTLBuffer, sinksOffset: Int,
-                         out: MTLBuffer,
+                         out: MTLBuffer, outOffset: Int = 0,
                          headDim: Int, numHeads: Int,
                          windowCount: Int, windowStartPos: Int, ringCapacity: Int,
                          compressedCount: Int, selectedCount: UInt32,
                          scale: Float) {
-        // The kernel materializes min(selected, compressed) entry logits, so
-        // bound what it actually loads: a CSA layer past 8K tokens has more
-        // than 2048 *emitted* entries but the indexer has already narrowed
-        // attention to its top-512 picks.
-        let attendedCompressed = selectedCount == Self.selectAll
-            ? compressedCount
-            : min(Int(selectedCount), compressedCount)
-        precondition(attendedCompressed <= Self.maxCompressedEntries)
+        // The online-softmax kernel streams entries, so there is no ceiling on
+        // window + compressed rows. It does assume the absorbed-MLA KV width:
+        // one simdgroup lane owns four half4 of a row.
+        precondition(headDim == Self.attentionHeadDim,
+                     "dsv4_attention_decode is written for headDim \(Self.attentionHeadDim), got \(headDim)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(attentionPSO)
-        enc.setBuffer(q, offset: 0, index: 0)
+        enc.setBuffer(q, offset: qOffset, index: 0)
         enc.setBuffer(windowKV, offset: 0, index: 1)
         enc.setBuffer(compressedKV, offset: 0, index: 2)
         enc.setBuffer(selected, offset: 0, index: 3)
         enc.setBuffer(sinks, offset: sinksOffset, index: 4)
-        enc.setBuffer(out, offset: 0, index: 5)
+        enc.setBuffer(out, offset: outOffset, index: 5)
         var hd = UInt32(headDim)
         var wc = UInt32(windowCount)
         var ws = UInt32(windowStartPos)
@@ -166,6 +180,7 @@ final class DSV4Kernels {
         var cc = UInt32(compressedCount)
         var sc = selectedCount
         var sl = scale
+        var nh = UInt32(numHeads)
         enc.setBytes(&hd, length: MemoryLayout<UInt32>.size, index: 6)
         enc.setBytes(&wc, length: MemoryLayout<UInt32>.size, index: 7)
         enc.setBytes(&ws, length: MemoryLayout<UInt32>.size, index: 8)
@@ -173,9 +188,50 @@ final class DSV4Kernels {
         enc.setBytes(&cc, length: MemoryLayout<UInt32>.size, index: 10)
         enc.setBytes(&sc, length: MemoryLayout<UInt32>.size, index: 11)
         enc.setBytes(&sl, length: MemoryLayout<Float>.size, index: 12)
+        enc.setBytes(&nh, length: MemoryLayout<UInt32>.size, index: 13)
+        let headsPerGroup = Self.attentionHeadsPerThreadgroup
+        let groups = (numHeads + headsPerGroup - 1) / headsPerGroup
         enc.dispatchThreadgroups(
-            MTLSize(width: numHeads, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: headsPerGroup * 32,
+                                           height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// The grouped low-rank output projection in one dispatch: `groups`
+    /// contiguous INT4 weight blocks of `rank` rows each, group `g` reading
+    /// `x` at `g * groupIn`. Replaces one GEMV per group.
+    func encodeOGroupProjection(commandBuffer: MTLCommandBuffer,
+                                weights: MTLBuffer, weightsOffset: Int,
+                                scales: MTLBuffer, scalesOffset: Int,
+                                biases: MTLBuffer, biasesOffset: Int,
+                                x: MTLBuffer, xOffset: Int = 0,
+                                y: MTLBuffer, yOffset: Int = 0,
+                                rank: Int, groupIn: Int, groups: Int) {
+        precondition(groupIn % Quantization.groupSize == 0,
+                     "groupIn must be a multiple of \(Quantization.groupSize)")
+        precondition(weightsOffset % 2 == 0,
+                     "dsv4_o_group_gemv_int4 needs a 2-aligned weightsOffset, got \(weightsOffset)")
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(oGroupPSO)
+        enc.setBuffer(weights, offset: weightsOffset, index: 0)
+        enc.setBuffer(scales, offset: scalesOffset, index: 1)
+        enc.setBuffer(biases, offset: biasesOffset, index: 2)
+        enc.setBuffer(x, offset: xOffset, index: 3)
+        enc.setBuffer(y, offset: yOffset, index: 4)
+        var r = UInt32(rank)
+        var gi = UInt32(groupIn)
+        var g = UInt32(groups)
+        enc.setBytes(&r, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&gi, length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&g, length: MemoryLayout<UInt32>.size, index: 7)
+        let rowsPerGroup = Self.oGroupRowsPerThreadgroup
+        let rows = rank * groups
+        enc.dispatchThreadgroups(
+            MTLSize(width: (rows + rowsPerGroup - 1) / rowsPerGroup,
+                    height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: rowsPerGroup * 32,
+                                           height: 1, depth: 1))
         enc.endEncoding()
     }
 
@@ -251,24 +307,31 @@ final class DSV4Kernels {
     }
 
     /// mHC mixing weights for one sublayer site.
+    ///
+    /// `streamsOffset` selects one token's stream block inside a chunk-wide
+    /// `[tokens, hcMult * hidden]` buffer; chunked prefill uses it to replay
+    /// the decode dispatch per token without copying. Zero (the default) is
+    /// the decode path.
     func encodeHCWeights(commandBuffer: MTLCommandBuffer,
-                         streams: MTLBuffer,
+                         streams: MTLBuffer, streamsOffset: Int = 0,
                          fn: MTLBuffer, fnOffset: Int,
                          base: MTLBuffer, baseOffset: Int,
                          scale: MTLBuffer, scaleOffset: Int,
-                         outPre: MTLBuffer, outPost: MTLBuffer, outComb: MTLBuffer,
+                         outPre: MTLBuffer, outPreOffset: Int = 0,
+                         outPost: MTLBuffer, outPostOffset: Int = 0,
+                         outComb: MTLBuffer, outCombOffset: Int = 0,
                          hcMult: Int, hidden: Int, sinkhornIters: Int,
                          hcEps: Float, rmsEps: Float) {
         precondition(hcMult <= 4, "dsv4_hc_weights sizes its mix scratch for hc_mult <= 4")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(hcWeightsPSO)
-        enc.setBuffer(streams, offset: 0, index: 0)
+        enc.setBuffer(streams, offset: streamsOffset, index: 0)
         enc.setBuffer(fn, offset: fnOffset, index: 1)
         enc.setBuffer(base, offset: baseOffset, index: 2)
         enc.setBuffer(scale, offset: scaleOffset, index: 3)
-        enc.setBuffer(outPre, offset: 0, index: 4)
-        enc.setBuffer(outPost, offset: 0, index: 5)
-        enc.setBuffer(outComb, offset: 0, index: 6)
+        enc.setBuffer(outPre, offset: outPreOffset, index: 4)
+        enc.setBuffer(outPost, offset: outPostOffset, index: 5)
+        enc.setBuffer(outComb, offset: outCombOffset, index: 6)
         var mult = UInt32(hcMult)
         var hid = UInt32(hidden)
         var iters = UInt32(sinkhornIters)
@@ -286,13 +349,15 @@ final class DSV4Kernels {
     }
 
     func encodeHCCollapse(commandBuffer: MTLCommandBuffer,
-                          streams: MTLBuffer, pre: MTLBuffer, x: MTLBuffer,
+                          streams: MTLBuffer, streamsOffset: Int = 0,
+                          pre: MTLBuffer, preOffset: Int = 0,
+                          x: MTLBuffer, xOffset: Int = 0,
                           hcMult: Int, hidden: Int) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(hcCollapsePSO)
-        enc.setBuffer(streams, offset: 0, index: 0)
-        enc.setBuffer(pre, offset: 0, index: 1)
-        enc.setBuffer(x, offset: 0, index: 2)
+        enc.setBuffer(streams, offset: streamsOffset, index: 0)
+        enc.setBuffer(pre, offset: preOffset, index: 1)
+        enc.setBuffer(x, offset: xOffset, index: 2)
         var mult = UInt32(hcMult)
         var hid = UInt32(hidden)
         enc.setBytes(&mult, length: MemoryLayout<UInt32>.size, index: 3)
@@ -305,17 +370,19 @@ final class DSV4Kernels {
     /// `outStreams[k] = post[k] * sub + combᵀ @ streams` — reads `streams`,
     /// writes `outStreams` (caller ping-pongs).
     func encodeHCPlaceMix(commandBuffer: MTLCommandBuffer,
-                          streams: MTLBuffer, sub: MTLBuffer,
-                          post: MTLBuffer, comb: MTLBuffer,
-                          outStreams: MTLBuffer,
+                          streams: MTLBuffer, streamsOffset: Int = 0,
+                          sub: MTLBuffer, subOffset: Int = 0,
+                          post: MTLBuffer, postOffset: Int = 0,
+                          comb: MTLBuffer, combOffset: Int = 0,
+                          outStreams: MTLBuffer, outStreamsOffset: Int = 0,
                           hcMult: Int, hidden: Int) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(hcPlaceMixPSO)
-        enc.setBuffer(streams, offset: 0, index: 0)
-        enc.setBuffer(sub, offset: 0, index: 1)
-        enc.setBuffer(post, offset: 0, index: 2)
-        enc.setBuffer(comb, offset: 0, index: 3)
-        enc.setBuffer(outStreams, offset: 0, index: 4)
+        enc.setBuffer(streams, offset: streamsOffset, index: 0)
+        enc.setBuffer(sub, offset: subOffset, index: 1)
+        enc.setBuffer(post, offset: postOffset, index: 2)
+        enc.setBuffer(comb, offset: combOffset, index: 3)
+        enc.setBuffer(outStreams, offset: outStreamsOffset, index: 4)
         var mult = UInt32(hcMult)
         var hid = UInt32(hidden)
         enc.setBytes(&mult, length: MemoryLayout<UInt32>.size, index: 5)
@@ -326,7 +393,7 @@ final class DSV4Kernels {
     }
 
     func encodeHyperHead(commandBuffer: MTLCommandBuffer,
-                         streams: MTLBuffer,
+                         streams: MTLBuffer, streamsOffset: Int = 0,
                          fn: MTLBuffer, fnOffset: Int,
                          base: MTLBuffer, baseOffset: Int,
                          scale: MTLBuffer, scaleOffset: Int,
@@ -334,7 +401,7 @@ final class DSV4Kernels {
                          hcMult: Int, hidden: Int, hcEps: Float, rmsEps: Float) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(hyperHeadPSO)
-        enc.setBuffer(streams, offset: 0, index: 0)
+        enc.setBuffer(streams, offset: streamsOffset, index: 0)
         enc.setBuffer(fn, offset: fnOffset, index: 1)
         enc.setBuffer(base, offset: baseOffset, index: 2)
         enc.setBuffer(scale, offset: scaleOffset, index: 3)
@@ -354,13 +421,15 @@ final class DSV4Kernels {
     }
 
     func encodeSwigluClampMul(commandBuffer: MTLCommandBuffer,
-                              gate: MTLBuffer, up: MTLBuffer, out: MTLBuffer,
+                              gate: MTLBuffer, gateOffset: Int = 0,
+                              up: MTLBuffer, upOffset: Int = 0,
+                              out: MTLBuffer, outOffset: Int = 0,
                               n: Int, limit: Float) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(swigluClampPSO)
-        enc.setBuffer(gate, offset: 0, index: 0)
-        enc.setBuffer(up, offset: 0, index: 1)
-        enc.setBuffer(out, offset: 0, index: 2)
+        enc.setBuffer(gate, offset: gateOffset, index: 0)
+        enc.setBuffer(up, offset: upOffset, index: 1)
+        enc.setBuffer(out, offset: outOffset, index: 2)
         var count = UInt32(n)
         var lim = limit
         enc.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
@@ -371,12 +440,13 @@ final class DSV4Kernels {
     }
 
     func encodeBroadcastStreams(commandBuffer: MTLCommandBuffer,
-                                x: MTLBuffer, streams: MTLBuffer,
+                                x: MTLBuffer, xOffset: Int = 0,
+                                streams: MTLBuffer, streamsOffset: Int = 0,
                                 hcMult: Int, hidden: Int) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(broadcastPSO)
-        enc.setBuffer(x, offset: 0, index: 0)
-        enc.setBuffer(streams, offset: 0, index: 1)
+        enc.setBuffer(x, offset: xOffset, index: 0)
+        enc.setBuffer(streams, offset: streamsOffset, index: 1)
         var mult = UInt32(hcMult)
         var hid = UInt32(hidden)
         enc.setBytes(&mult, length: MemoryLayout<UInt32>.size, index: 2)

@@ -104,6 +104,14 @@ extension Model {
         return slotCount
     }
 
+    /// Direct handle on a layer's expert streamer. Used by the speculative
+    /// prefetch path, which reserves slots on the caller's thread and then
+    /// executes the reads on a background queue without re-resolving the layer.
+    public func routedExpertStreamer(layer: Int) throws -> PreadExpertStreamer {
+        try ensureLayerOpened(layer)
+        return streamersQueue.sync { streamersBox.streamers[layer]! }
+    }
+
     public func routedExpertBuffers(for plan: RoutedExpertFetchPlan) throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }

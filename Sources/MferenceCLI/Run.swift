@@ -119,7 +119,21 @@ public func run(args: Args,
             lines += String(format: "%.0f", total) + " ms]\n"
             lines += "  cb1 encode+commit: " + ms(runner.totalCb1Nanos) + " ms\n"
             lines += "  expert io await:   " + ms(runner.totalIoNanos) + " ms\n"
+            lines += "    io overlapped w/ GPU: "
+            lines += ms(runner.totalIoOverlappedNanos) + " ms\n"
+            lines += "    io exposed (GPU idle): "
+            lines += ms(runner.totalIoExposedNanos) + " ms\n"
             lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
+            let predicted = runner.totalSpecPrefetchPredicted
+            let recall = predicted > 0
+                ? Double(runner.totalSpecPrefetchConfirmed) / Double(predicted)
+                : 0
+            lines += "  spec prefetch: predicted \(predicted)"
+            lines += ", issued \(runner.totalSpecPrefetchIssued)"
+            lines += ", confirmed \(runner.totalSpecPrefetchConfirmed)"
+            lines += String(format: " (recall %.1f%%, %.1f MB)\n",
+                            recall * 100,
+                            Double(runner.totalSpecPrefetchBytes) / 1_048_576)
             lines += "  unaccounted (GPU waits): "
             lines += String(format: "%.1f", total - accounted) + " ms\n"
             stderr.write(Data(lines.utf8))

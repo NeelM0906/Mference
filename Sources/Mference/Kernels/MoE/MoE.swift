@@ -86,9 +86,11 @@ final class MoE {
             routerName,
             constants: routerConstants,
             maxTotalThreadsPerThreadgroup: 512)
-        self.routerSelectK8PSO = try context.pipeline("router_topk_select_k8")
+        // One-SIMD parallel selection; bit-identical to the serial
+        // `router_topk_select_k8` reference kernel (see RouterTopKParityTests).
+        self.routerSelectK8PSO = try context.pipeline("router_topk_select_k8_par")
         self.routerSelectK8SpecializedPSO = try context.pipeline(
-            "router_topk_select_k8",
+            "router_topk_select_k8_par",
             constants: routerConstants)
         self.phase1U16PSO = try context.pipeline(
             "moe_phase1_gate_up_act_u16load", constants: activationConstants)

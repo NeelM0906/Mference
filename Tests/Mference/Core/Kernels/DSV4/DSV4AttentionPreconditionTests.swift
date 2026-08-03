@@ -4,12 +4,12 @@ import Testing
 
 @testable import Mference
 
-/// Regression coverage for the compressed-entry ceiling: a CSA layer past
-/// 8K tokens has more than 2048 *emitted* entries, but the indexer narrows
-/// attention to its top-512 picks, so encoding must bound what the kernel
-/// actually loads — not the total cache count. The old precondition
-/// terminated the process on `compressedCount > 2048` even with selection
-/// active, which crashed every context option above 8K.
+/// Regression coverage for the compressed-entry ceiling. A precondition on
+/// the total cache count once terminated the process at `compressedCount >
+/// 2048`, crashing every context option above 8K even though the indexer had
+/// already narrowed attention to its top-512 picks. The online-softmax kernel
+/// streams entries instead of materializing logits, so no ceiling remains at
+/// all — encoding must stay trap-free at any entry count.
 @Suite struct DSV4AttentionPreconditionTests {
 
     private func makeKernels(_ ctx: MetalContext) throws -> DSV4Kernels {
@@ -41,6 +41,21 @@ import Testing
             headDim: 512, numHeads: 64,
             windowCount: 128, windowStartPos: 16_256, ringCapacity: 128,
             compressedCount: 4096, selectedCount: 512,
+            scale: 0.044)
+
+        // Well past the retired 2048-entry ceiling with no selection active:
+        // the kernel no longer caps the enumerated region.
+        kernels.encodeAttention(
+            commandBuffer: cb,
+            q: scratch,
+            windowKV: scratch,
+            compressedKV: scratch,
+            selected: scratch,
+            sinks: scratch, sinksOffset: 0,
+            out: scratch,
+            headDim: 512, numHeads: 64,
+            windowCount: 128, windowStartPos: 16_256, ringCapacity: 128,
+            compressedCount: 4096, selectedCount: DSV4Kernels.selectAll,
             scale: 0.044)
 
         // HCA at the 64K context ceiling: 512 dense entries, no selection.

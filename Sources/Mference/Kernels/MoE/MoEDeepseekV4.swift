@@ -56,10 +56,12 @@ final class MoEDeepseekV4 {
             "router_gemv_bf16_r4",
             constants: routerConstants,
             maxTotalThreadsPerThreadgroup: 512)
+        // One-SIMD parallel selection and weighting; bit-identical to the serial
+        // reference kernels (see RouterTopKParityTests).
         self.routerSelectK6PSO = try context.pipeline(
-            "router_topk_select_sqrtsoftplus_k6",
+            "router_topk_select_sqrtsoftplus_k6_par",
             constants: routerConstants)
-        self.hashWeightsK6PSO = try context.pipeline("router_hash_weights_k6")
+        self.hashWeightsK6PSO = try context.pipeline("router_hash_weights_k6_par")
         self.phase1Int2PSO = try context.pipeline(
             "moe_phase1_gate_up_act_int2", constants: moeConstants)
         self.phase1SubsetInt2PSO = try context.pipeline(

@@ -237,10 +237,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let dsv4HCPreF: MTLBuffer?           // [mult] FP32, FFN site
     private let dsv4HCPostF: MTLBuffer?          // [mult] FP32
     private let dsv4HCCombF: MTLBuffer?          // [mult * mult] FP32
-    private let dsv4CompKVRow: MTLBuffer?        // [2 * headDim] FP16
-    private let dsv4CompGateRow: MTLBuffer?      // [2 * headDim] FP16
-    private let dsv4IdxKVRow: MTLBuffer?         // [2 * indexHeadDim] FP16
-    private let dsv4IdxGateRow: MTLBuffer?       // [2 * indexHeadDim] FP16
     private let dsv4IndexerQ: MTLBuffer?         // [indexNHeads * indexHeadDim]
     private let dsv4IndexerW: MTLBuffer?         // [indexNHeads] FP16
     private let dsv4IndexerScores: MTLBuffer?    // [maxContext / csaRate] FP32
@@ -250,6 +246,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let onesPerExpertScale: MTLBuffer?
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
+    /// Lazily built layer-major DeepSeek-V4 prefill; see
+    /// `RealForwardRunner+DSV4Prefill.swift`.
+    private var dsv4Prefill: DSV4ChunkedPrefill?
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -278,11 +277,95 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var rdadviseAdaptiveState: RDAdviceAdaptivePolicyState
     private var rdadviseAdaptivePosition: Int = -1
     private var rdadviseAdaptivePositionBytes: UInt64 = 0
+
+    /// Router-readback synchronization. The layer's first command buffer
+    /// signals this event immediately after the router top-k has written
+    /// `outIndices`, and encodes the shared-expert FFN *after* the signal. The
+    /// CPU wakes on the signal, plans slots and starts the routed-expert pread
+    /// while that shared-expert work is still executing, so expert I/O overlaps
+    /// GPU work instead of following it. Nil when the device cannot vend a
+    /// shared event; the code then falls back to waiting on the whole buffer.
+    private let routerEvent: MTLSharedEvent?
+    private var routerEventValue: UInt64 = 0
+    private static let routerEventTimeoutMS: UInt64 = 60_000
+    /// Phase probes cost a completion handler per command buffer, so they are
+    /// only wired up when the phase report is going to be printed.
+    private static let phaseInstrumentationEnabled =
+        ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1"
+    private static let routerEventWaitDefault =
+        ProcessInfo.processInfo.environment["MFERENCE_ROUTER_EVENT"] != "0"
+    /// Escape hatch and test seam for the early router readback. When false the
+    /// CPU waits for the whole attention buffer instead of the mid-buffer
+    /// signal, which serializes the shared expert ahead of the pread again.
+    /// Both settings encode the same kernels in the same order, so decode
+    /// output is identical either way. `MFERENCE_ROUTER_EVENT=0` flips the
+    /// default for A/B benchmarking.
+    var routerEventWaitEnabled = RealForwardRunner.routerEventWaitDefault
+
+    /// Speculative cross-layer expert prefetch. The predictor is the *previous
+    /// token's* routing for the same layer — free (the indices are already on
+    /// the CPU), and unlike an LFU-top-k guess it predicts the experts that
+    /// actually miss: LFU is already the eviction policy, so the resident slots
+    /// are by construction the LFU favourites and a miss is by definition a
+    /// non-favourite.
+    enum SpeculativePrefetchMode: String {
+        /// No speculation at all (default).
+        case off
+        /// Real preads into the next layer's slots, driven by the previous
+        /// token's routing. Measured to be a no-op — see
+        /// `previousTokenExperts`.
+        case prefetch
+        /// F_RDADVISE only: warms the page cache, writes no slots, needs no
+        /// join. The low-risk fallback if the slot-write mode misbehaves.
+        case advise
+        /// PILOT: layer L+1's router run against layer L's post-attention
+        /// state inside layer L's command buffer, feeding real preads. The
+        /// only mode whose predictor knows anything about the current token.
+        case pilot
+
+        static func parse(_ raw: String?) -> SpeculativePrefetchMode {
+            switch raw?.lowercased() {
+            case "1", "on", "prefetch": return .prefetch
+            case "advise": return .advise
+            case "pilot": return .pilot
+            default: return .off
+            }
+        }
+    }
+    var speculativePrefetchMode = SpeculativePrefetchMode.parse(
+        ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"])
+    /// Last token's routed expert ids per layer; empty until a layer has been
+    /// routed at least once. This is the default predictor.
+    ///
+    /// NOTE (measured): on its own this predictor can never issue a read. Each
+    /// layer owns a private slot cache that only that layer's plans touch, so
+    /// between token t and token t+1 nothing evicts layer L's slots — last
+    /// token's experts are *always* still resident when we would predict them.
+    /// "Same experts as last token" is a statement about the cache hit rate the
+    /// LRU/LFU cache already delivers for free; a prefetch has to predict the
+    /// complement (the experts that changed), about which last token's routing
+    /// says nothing. Substituting a predictor with real information about the
+    /// *current* token (PILOT router-lookahead) is the only way this pays, and
+    /// `speculativeExpertPredictor` is where it plugs in.
+    private var previousTokenExperts: [[Int]] = []
+    private var pendingSpeculation: SpeculativeExpertPrefetch?
+    /// Overrides the predictor for a layer. The seam a real predictor plugs
+    /// into, and what lets tests drive the reserve/read/join/confirm machinery
+    /// without depending on a fixture whose routing happens to churn the cache.
+    var speculativeExpertPredictor: (@Sendable (Int) -> [Int])?
+    /// PILOT lookahead kernels, built on first use so `off` pays nothing and
+    /// the (concurrently edited) DSV4 init block stays untouched.
+    private var pilotRouter: SpeculativeRouterDSV4?
+    /// The prediction read out of `pilotRouter` (or the hash table) at the
+    /// current layer's router wake, consumed by `issueSpeculativePrefetch`.
+    private var pilotPrediction: (layer: Int, experts: [Int])?
+
     public init(model: Model, context: MetalContext, maxContext: Int,
                 runtimeConfiguration: RuntimeConfiguration = .production) throws {
         self.model = model
         self.ctx = context
         self.cfg = model.config
+        self.routerEvent = context.device.makeSharedEvent()
         self.maxContext = maxContext
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
@@ -466,10 +549,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.dsv4HCPreF = try buf(mult, MemoryLayout<Float>.size)
             self.dsv4HCPostF = try buf(mult, MemoryLayout<Float>.size)
             self.dsv4HCCombF = try buf(mult * mult, MemoryLayout<Float>.size)
-            self.dsv4CompKVRow = try buf(2 * cfg.fullHeadDim)
-            self.dsv4CompGateRow = try buf(2 * cfg.fullHeadDim)
-            self.dsv4IdxKVRow = try buf(2 * ca.indexHeadDim)
-            self.dsv4IdxGateRow = try buf(2 * ca.indexHeadDim)
             self.dsv4IndexerQ = try buf(ca.indexNHeads * ca.indexHeadDim)
             self.dsv4IndexerW = try buf(ca.indexNHeads)
             self.dsv4IndexerScores = try buf(
@@ -490,10 +569,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.dsv4HCPreF = nil
             self.dsv4HCPostF = nil
             self.dsv4HCCombF = nil
-            self.dsv4CompKVRow = nil
-            self.dsv4CompGateRow = nil
-            self.dsv4IdxKVRow = nil
-            self.dsv4IdxGateRow = nil
             self.dsv4IndexerQ = nil
             self.dsv4IndexerW = nil
             self.dsv4IndexerScores = nil
@@ -602,6 +677,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private func resetTransientState() {
+        joinPendingSpeculation()
+        previousTokenExperts = []
         prefillChunkState.reset()
         rdadviseSkipUntilPosition = -1
         rdadviseAdaptiveState.reset()
@@ -614,6 +691,245 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
     public private(set) var totalHeadFusedNanos: UInt64 = 0
+    /// Split of `totalIoNanos`: the part of each layer's expert pread that ran
+    /// while GPU work was still in flight versus the part that ran with an idle
+    /// GPU. Only populated when `MFERENCE_PHASES=1`.
+    public private(set) var totalIoOverlappedNanos: UInt64 = 0
+    public private(set) var totalIoExposedNanos: UInt64 = 0
+    /// Speculative prefetch accounting: experts speculatively read (or advised)
+    /// and how many of those the following real plan actually asked for. The
+    /// ratio is the predictor's recall and is what makes an A/B interpretable.
+    /// Experts named by the predictor. `confirmed / predicted` is realized
+    /// recall — the number that decides whether PILOT is worth its GEMV.
+    public private(set) var totalSpecPrefetchPredicted: UInt64 = 0
+    public private(set) var totalSpecPrefetchIssued: UInt64 = 0
+    public private(set) var totalSpecPrefetchConfirmed: UInt64 = 0
+    public private(set) var totalSpecPrefetchBytes: UInt64 = 0
+
+    /// Zeroes the per-phase counters. Prompt prefill runs through the same
+    /// per-token code paths (DeepSeek-V4 prefill *is* a decode loop), so
+    /// without a reset at the prefill/decode boundary the phase report prints
+    /// prompt-time nanoseconds against a decode-only wall clock and the
+    /// unaccounted remainder goes negative.
+    public func beginDecodePhaseWindow() {
+        totalIoNanos = 0
+        totalCb1Nanos = 0
+        totalCb2Nanos = 0
+        totalHeadNanos = 0
+        totalHeadFusedNanos = 0
+        totalIoOverlappedNanos = 0
+        totalIoExposedNanos = 0
+        totalSpecPrefetchPredicted = 0
+        totalSpecPrefetchIssued = 0
+        totalSpecPrefetchConfirmed = 0
+        totalSpecPrefetchBytes = 0
+    }
+
+    /// One outstanding speculative read set. The runner keeps at most one alive
+    /// (issued for layer L+1 while layer L finishes), and every real plan joins
+    /// whatever is pending before it plans, so a speculative write and a real
+    /// plan never touch the same streamer concurrently.
+    private final class SpeculativeExpertPrefetch: @unchecked Sendable {
+        let layer: Int
+        /// Everything the predictor named — the denominator of recall. A subset
+        /// of these is actually read (the non-resident ones).
+        let predicted: Set<Int>
+        private let finished = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var bytes: UInt64 = 0
+        private var joined = false
+
+        init(layer: Int, predicted: Set<Int>) {
+            self.layer = layer
+            self.predicted = predicted
+        }
+
+        func complete(bytes value: UInt64) {
+            lock.lock()
+            bytes = value
+            lock.unlock()
+            finished.signal()
+        }
+
+        /// Blocks until the background reads land. Idempotent.
+        @discardableResult
+        func join() -> UInt64 {
+            lock.lock()
+            let alreadyJoined = joined
+            joined = true
+            lock.unlock()
+            if !alreadyJoined { finished.wait() }
+            lock.lock()
+            defer { lock.unlock() }
+            return bytes
+        }
+    }
+
+    /// Drains any outstanding speculation. Called before every real plan (so no
+    /// slot is replanned while a background read is filling it) and on reset.
+    /// Returns the joined record so the caller can score its prediction.
+    @discardableResult
+    private func joinPendingSpeculation() -> (layer: Int, predicted: Set<Int>)? {
+        guard let pending = pendingSpeculation else { return nil }
+        pendingSpeculation = nil
+        totalSpecPrefetchBytes &+= pending.join()
+        return (pending.layer, pending.predicted)
+    }
+
+    /// Joins outstanding speculation and credits it against the experts the
+    /// real plan turned out to need.
+    private func settleSpeculation(layer: Int, actualExperts: [Int]) {
+        guard let joined = joinPendingSpeculation(), joined.layer == layer else { return }
+        var counted = Set<Int>()
+        for expert in actualExperts
+            where joined.predicted.contains(expert) && counted.insert(expert).inserted {
+            totalSpecPrefetchConfirmed &+= 1
+        }
+    }
+
+    /// Speculatively fetches the experts `layer` used on the previous token.
+    /// Issued after the current layer's routed command buffer is committed —
+    /// the window where the GPU is busy with routed work plus the next layer's
+    /// attention and the CPU has nothing to do — so it never competes with the
+    /// critical-path pread for SSD bandwidth.
+    private func issueSpeculativePrefetch(layer: Int) {
+        guard speculativePrefetchMode != .off,
+              pendingSpeculation == nil,
+              layer >= 0, layer < cfg.numLayers else { return }
+        let predicted = predictedExperts(for: layer)
+        guard !predicted.isEmpty else { return }
+
+        // The record is created even when nothing needs reading, so recall is
+        // still scored at full residency.
+        let record = SpeculativeExpertPrefetch(layer: layer, predicted: Set(predicted))
+        pendingSpeculation = record
+        totalSpecPrefetchPredicted &+= UInt64(record.predicted.count)
+
+        guard let streamer = try? model.routedExpertStreamer(layer: layer) else {
+            record.complete(bytes: 0)
+            return
+        }
+        let missing = streamer.nonResidentExperts(predicted)
+        guard !missing.isEmpty else {
+            record.complete(bytes: 0)
+            return
+        }
+
+        if speculativePrefetchMode == .advise {
+            // Page-cache warming only: no slot writes, nothing to join.
+            totalSpecPrefetchIssued &+= UInt64(missing.count)
+            DispatchQueue.global(qos: .utility).async {
+                record.complete(bytes: streamer.adviseExperts(experts: missing).bytes)
+            }
+            return
+        }
+
+        // Leave the next real plan room for a full top-k of its own misses, so
+        // a wrong guess can never make it unplaceable.
+        let reservation = streamer.reserveSpeculativeSlots(experts: missing,
+                                                           keepEvictable: cfg.topKExperts)
+        guard !reservation.isEmpty else {
+            record.complete(bytes: 0)
+            return
+        }
+        totalSpecPrefetchIssued &+= UInt64(reservation.count)
+        DispatchQueue.global(qos: .utility).async {
+            record.complete(bytes: streamer.executeSpeculativeReservation(reservation))
+        }
+    }
+
+    private func predictedExperts(for layer: Int) -> [Int] {
+        if let speculativeExpertPredictor { return speculativeExpertPredictor(layer) }
+        switch speculativePrefetchMode {
+        case .pilot:
+            guard let pilotPrediction, pilotPrediction.layer == layer else { return [] }
+            return pilotPrediction.experts
+        case .prefetch, .advise:
+            guard layer < previousTokenExperts.count else { return [] }
+            return previousTokenExperts[layer]
+        case .off:
+            return []
+        }
+    }
+
+    /// Hash-routed layers select experts as a pure function of the token id, so
+    /// the "prediction" for such a layer is exact and needs no GEMV at all.
+    private func hashRoutedExperts(layer: Int, token: Int32) -> [Int]? {
+        guard cfg.layerIsHashRouted(layer),
+              let table = try? model.dsv4HashTable(layer: layer) else { return nil }
+        let base = table.buffer.contents().advanced(by: Int(table.offset))
+        let row = min(max(Int(token), 0), cfg.vocabSize - 1) * cfg.topKExperts
+        let cap = cfg.numExperts - 1
+        if table.dtype == 4 {
+            let ptr = base.assumingMemoryBound(to: Int64.self)
+            return (0..<cfg.topKExperts).map { min(max(0, Int(ptr[row + $0])), cap) }
+        }
+        let ptr = base.assumingMemoryBound(to: UInt32.self)
+        return (0..<cfg.topKExperts).map { min(Int(ptr[row + $0]), cap) }
+    }
+
+    /// True when a lookahead GEMV should be encoded for `layer` — i.e. pilot is
+    /// on, the layer exists, and its expert set is not already exactly known
+    /// from the hash table.
+    private func shouldEncodePilotGemv(nextLayer: Int) -> Bool {
+        speculativePrefetchMode == .pilot
+            && speculativeExpertPredictor == nil
+            && nextLayer < cfg.numLayers
+            && !cfg.layerIsHashRouted(nextLayer)
+    }
+
+    /// Reads the lookahead result at the router wake. Hash-routed next layers
+    /// bypass the GEMV entirely (exact from the token id).
+    private func capturePilotPrediction(nextLayer: Int, token: Int32, gemvEncoded: Bool) {
+        pilotPrediction = nil
+        guard speculativePrefetchMode == .pilot, nextLayer < cfg.numLayers else { return }
+        if let hashed = hashRoutedExperts(layer: nextLayer, token: token) {
+            pilotPrediction = (nextLayer, hashed)
+            return
+        }
+        guard gemvEncoded, let buffer = pilotRouter?.predictedIndices else { return }
+        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
+        let cap = cfg.numExperts - 1
+        pilotPrediction = (nextLayer, (0..<cfg.topKExperts).map { min(Int(ptr[$0]), cap) })
+    }
+
+    private func ensurePilotRouter() -> SpeculativeRouterDSV4? {
+        if let pilotRouter { return pilotRouter }
+        pilotRouter = try? SpeculativeRouterDSV4(context: ctx,
+                                                 numExperts: UInt32(cfg.numExperts),
+                                                 d: UInt32(cfg.hiddenSize),
+                                                 topK: UInt32(cfg.topKExperts))
+        return pilotRouter
+    }
+
+    /// Records this layer's routing for the next token's predictor.
+    private func recordRoutedExperts(_ experts: [Int], layer: Int) {
+        if previousTokenExperts.count != cfg.numLayers {
+            previousTokenExperts = [[Int]](repeating: [], count: cfg.numLayers)
+        }
+        previousTokenExperts[layer] = experts
+    }
+
+    /// Attributes one layer's expert-I/O window against the GPU work that was
+    /// meant to hide it. `probe` tracks the command buffers committed before
+    /// the pread started; a nil completion time means they were still running
+    /// when the pread returned, i.e. the I/O was fully hidden.
+    private func recordExpertIOOverlap(probe: GPUOverlapProbe?,
+                                       startNanos: UInt64,
+                                       endNanos: UInt64) {
+        guard let probe, endNanos > startNanos else { return }
+        let span = endNanos - startNanos
+        guard let finished = probe.finishedNanos else {
+            totalIoOverlappedNanos &+= span
+            return
+        }
+        if finished <= startNanos {
+            totalIoExposedNanos &+= span
+        } else {
+            totalIoOverlappedNanos &+= min(finished, endNanos) - startNanos
+            totalIoExposedNanos &+= finished < endNanos ? endNanos - finished : 0
+        }
+    }
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
     public private(set) var totalRDAdviseNanos: UInt64 = 0
@@ -695,6 +1011,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        // Prompt prefill and decode share these counters; drop the prompt's
+        // contribution on the way out so the phase report describes decode.
+        defer { beginDecodePhaseWindow() }
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
                 "prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
@@ -717,20 +1036,69 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if cfg.hasCompressedAttentionLayers {
-            // DeepSeek-V4 v1 prefill runs the decode path token-by-token.
-            // The correctness contract is prefill(T) == T sequential decode
-            // steps (the Qwen port's chunked-prefill guarantee); the chunked
-            // implementation is follow-up work.
+            // DeepSeek-V4 prefill runs layer-major over each chunk (see
+            // `RealForwardRunner+DSV4Prefill.swift`), which amortizes the
+            // routed-expert reads over the chunk instead of paying them per
+            // token. Spans that the batched path cannot serve — currently only
+            // those long enough to trigger lightning-indexer selection — fall
+            // back to the token-by-token decode replay, which is the
+            // correctness reference for both.
+            let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
+                                                  startPosition: startPosition,
+                                                  config: config)
+            let expertSlots = model.routedExpertCacheSlotCount(layer: 0)
             var pos = startPosition
             var done = 0
-            for t in tokens {
-                let isLast = done == tokens.count - 1
-                try await produceTokenDSV4(token: t, position: pos,
-                                           into: logits,
-                                           emitHead: isLast,
-                                           outputMode: outputMode)
-                pos += 1
-                done += 1
+            for (spanIndex, span) in spans.enumerated() {
+                let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
+                let upper = tokens.index(lower, offsetBy: span.tokenCount)
+                let isLastSpan = spanIndex == spans.count - 1
+                let batched = DSV4ChunkedPrefill.supports(
+                    config: cfg,
+                    startPosition: span.startPosition,
+                    tokenCount: span.tokenCount,
+                    expertCacheSlots: expertSlots)
+                if batched, let dsv4, let moeDSV4, let dsv4State {
+                    let bindings = DSV4PrefillBindings(
+                        model: model, ctx: ctx, cfg: cfg,
+                        dsv4: dsv4, moeDSV4: moeDSV4, state: dsv4State,
+                        int4: int4, rms: rms, embed: embedInt4,
+                        fusionHead: fusionHead,
+                        sharedExperts: sharedExpertProjections.map {
+                            DSV4PrefillSharedExpert(gate: $0.gate, up: $0.up, down: $0.down)
+                        },
+                        effectiveScales: effectiveScaleBuffers,
+                        useFusedGreedyHead: useFusedGreedyHead)
+                    let runner: DSV4ChunkedPrefill
+                    if let cached = dsv4Prefill, cached.chunkCapacity >= span.tokenCount {
+                        runner = cached
+                    } else {
+                        runner = try DSV4ChunkedPrefill(
+                            bindings: bindings,
+                            chunkTokens: max(config.chunkTokens, span.tokenCount))
+                        dsv4Prefill = runner
+                    }
+                    let greedy = try await runner.run(tokens: tokens[lower..<upper],
+                                                      startPosition: span.startPosition,
+                                                      emitHead: isLastSpan,
+                                                      outputMode: outputMode,
+                                                      logits: logits)
+                    if let greedy { lastGreedyToken = greedy }
+                    for _ in 0..<span.tokenCount { kv?.advance() }
+                    pos += span.tokenCount
+                } else {
+                    var index = 0
+                    for t in tokens[lower..<upper] {
+                        let isLast = isLastSpan && index == span.tokenCount - 1
+                        try await produceTokenDSV4(token: t, position: pos,
+                                                   into: logits,
+                                                   emitHead: isLast,
+                                                   outputMode: outputMode)
+                        pos += 1
+                        index += 1
+                    }
+                }
+                done += span.tokenCount
                 onProgress(done)
             }
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
@@ -1754,7 +2122,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             : 1.0
         struct PendingRoutedCommand {
             let cb: MTLCommandBuffer
-            let sharedCB: MTLCommandBuffer?
+            /// The layer's attention+router+shared-expert buffer. Always
+            /// completed before `cb` (same queue, committed first); retained
+            /// only so its error surfaces.
+            let attentionCB: MTLCommandBuffer?
             let phase1HitCB: MTLCommandBuffer?
             let encodeAndCommitNanos: UInt64
         }
@@ -1766,8 +2137,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 func wait(_ cb: MTLCommandBuffer) {
                     waitForCompletion(cb)
                 }
-                if let sharedCB = pending.sharedCB {
-                    wait(sharedCB)
+                if let attentionCB = pending.attentionCB {
+                    wait(attentionCB)
                 }
                 if let phase1HitCB = pending.phase1HitCB {
                     wait(phase1HitCB)
@@ -1776,8 +2147,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             } else if let err = pending.cb.error {
                 print("CB error: \(err)")
             }
-            if let sharedCB = pending.sharedCB {
-                if let err = sharedCB.error {
+            if let attentionCB = pending.attentionCB {
+                if let err = attentionCB.error {
                     print("CB error: \(err)")
                 }
             }
@@ -1983,9 +2354,51 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 perExpertScaleOffset: perExpertScale.offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+
+            // The router indices are written at this point in the buffer, so
+            // signal the CPU here and keep encoding into the SAME buffer. The
+            // shared dense MLP depends only on the post-attention norm, never
+            // on the routed experts, so the GPU runs it while the CPU wakes,
+            // plans slots and preads the routed-expert blobs.
+            let routerSignal = encodeRouterSignal(cb)
+            try! shared.encode(commandBuffer: cb,
+                               x: cfg.ffnSandwichNorms ? denseX : routedX,
+                               gate: sharedProj.gate,
+                               up: sharedProj.up,
+                               down: sharedProj.down,
+                               y: h1Buf,
+                               scratchGate: denseScratchGate,
+                               scratchUp: denseScratchUp,
+                               scratchAct: denseScratchAct)
+            if cfg.ffnSandwichNorms {
+                let postF1 = sharedProj.postF1!
+                rms.encodeBF16W(commandBuffer: cb, x: h1Buf,
+                                weight: postF1.buffer,
+                                weightOffset: Int(postF1.offset),
+                                out: h1Buf, d: D, eps: eps)
+            } else if cfg.sharedExpertGated {
+                // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
+                let gateView = sharedProj.scalarGate!
+                int8ScalarGate!.encode(commandBuffer: cb,
+                                       weights: gateView.buffer,
+                                       weightsOffset: Int(gateView.offset),
+                                       scales: gateView.buffer,
+                                       scalesOffset: Int(gateView.scaleOffset),
+                                       biases: gateView.buffer,
+                                       biasesOffset: Int(gateView.biasOffset),
+                                       x: routedX,
+                                       y: sharedScalarGateBuf!,
+                                       m: 1, n: D)
+                elementwise!.encodeSigmoidScalarMul(commandBuffer: cb,
+                                                    y: h1Buf,
+                                                    gate: sharedScalarGateBuf!,
+                                                    count: cfg.hiddenSize)
+            }
+            let overlapProbe = Self.phaseInstrumentationEnabled ? GPUOverlapProbe() : nil
+            overlapProbe?.track(cb)
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            waitForCompletion(cb)
+            waitForRouterSignal(routerSignal, fallback: cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             if let pending = pendingRoutedCommand {
                 finishPendingRoutedCommand(pending, waitIfNeeded: false)
@@ -2000,6 +2413,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
+
+            // Join any speculative read aimed at this layer before planning —
+            // the plan must not evict a slot a background pread is filling —
+            // and score the prediction. Then this layer's routing becomes the
+            // next token's prediction for the same layer.
+            settleSpeculation(layer: L, actualExperts: experts)
+            recordRoutedExperts(experts, layer: L)
 
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let topK = UInt32(cfg.topKExperts)
@@ -2082,47 +2502,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
 
-            // The shared dense MLP depends only on its normed input, not on
-            // the routed experts. Commit it without waiting so its GPU work
-            // overlaps the routed-expert pread. The routed CB follows it on
-            // the same queue, so the combine sees h1Buf.
-            let sharedCB = ctx.queue.makeCommandBuffer()!
-            try! shared.encode(commandBuffer: sharedCB,
-                               x: cfg.ffnSandwichNorms ? denseX : routedX,
-                               gate: sharedProj.gate,
-                               up: sharedProj.up,
-                               down: sharedProj.down,
-                               y: h1Buf,
-                               scratchGate: denseScratchGate,
-                               scratchUp: denseScratchUp,
-                               scratchAct: denseScratchAct)
-            if cfg.ffnSandwichNorms {
-                let postF1 = sharedProj.postF1!
-                rms.encodeBF16W(commandBuffer: sharedCB, x: h1Buf,
-                                weight: postF1.buffer,
-                                weightOffset: Int(postF1.offset),
-                                out: h1Buf, d: D, eps: eps)
-            } else if cfg.sharedExpertGated {
-                // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
-                let gateView = sharedProj.scalarGate!
-                int8ScalarGate!.encode(commandBuffer: sharedCB,
-                                       weights: gateView.buffer,
-                                       weightsOffset: Int(gateView.offset),
-                                       scales: gateView.buffer,
-                                       scalesOffset: Int(gateView.scaleOffset),
-                                       biases: gateView.buffer,
-                                       biasesOffset: Int(gateView.biasOffset),
-                                       x: routedX,
-                                       y: sharedScalarGateBuf!,
-                                       m: 1, n: D)
-                elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
-                                                    y: h1Buf,
-                                                    gate: sharedScalarGateBuf!,
-                                                    count: cfg.hiddenSize)
-            }
-            sharedCB.commit()
-            if let cb = phase1HitCB {
-                cb.commit()
+            // Phase-1 for the resident (hit) experts needs no I/O, so it goes
+            // to the GPU immediately, extending the window the pread hides
+            // behind. It follows the shared MLP on the same queue.
+            if let hitCB = phase1HitCB {
+                overlapProbe?.track(hitCB)
+                hitCB.commit()
             }
             if rdadviseEnabled && rdadvisePolicyMode != .off {
                 let requestedMisses = plannedFetch?.misses.count ?? experts.count
@@ -2148,7 +2533,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
 
-            // Routed-expert pread — overlaps the shared MLP GPU work above.
+            // Routed-expert pread — overlaps the shared MLP still running in
+            // CB1 plus the phase-1 hit work committed above.
             let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let blobs: [TensorView]
             if let plannedFetch {
@@ -2156,8 +2542,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             } else {
                 blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
             }
-            let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            totalIoNanos &+= layerIo
+            let tIoEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            totalIoNanos &+= tIoEnd - tIoStart
+            recordExpertIOOverlap(probe: overlapProbe,
+                                  startNanos: tIoStart,
+                                  endNanos: tIoEnd)
             let routedBufs = blobs.map { $0.buffer }
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let gTail: (MTLCommandBuffer) -> Void
@@ -2226,11 +2615,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                    topK: topK)
             gTail(routedCB)
             routedCB.commit()
+            // GPU is busy with routed work and the next layer's attention, CPU
+            // is idle: the natural window for the speculative read.
+            issueSpeculativePrefetch(layer: L + 1)
             precondition(pendingRoutedCommand == nil,
                          "routed command-buffer pipeline drained before queuing the next layer")
             pendingRoutedCommand = PendingRoutedCommand(
                 cb: routedCB,
-                sharedCB: sharedCB,
+                attentionCB: cb,
                 phase1HitCB: phase1HitCB,
                 encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
             continue
@@ -2467,8 +2859,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
               let hcCombA = dsv4HCCombA,
               let hcPreF = dsv4HCPreF, let hcPostF = dsv4HCPostF,
               let hcCombF = dsv4HCCombF,
-              let compKVRow = dsv4CompKVRow, let compGateRow = dsv4CompGateRow,
-              let idxKVRow = dsv4IdxKVRow, let idxGateRow = dsv4IdxGateRow,
               let indexerQ = dsv4IndexerQ, let indexerW = dsv4IndexerW,
               let indexerScores = dsv4IndexerScores,
               let selected = dsv4Selected else {
@@ -2490,14 +2880,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         struct PendingRoutedCommand {
             let cb: MTLCommandBuffer
-            let sharedCB: MTLCommandBuffer?
+            /// The layer's attention+router+shared-expert buffer. Always
+            /// completed before `cb` (same queue, committed first); retained
+            /// only so its error surfaces.
+            let attentionCB: MTLCommandBuffer?
             let phase1HitCB: MTLCommandBuffer?
             let encodeAndCommitNanos: UInt64
         }
         var pendingRouted: PendingRoutedCommand?
         func finishPending(_ pending: PendingRoutedCommand, waitIfNeeded: Bool) {
             if waitIfNeeded {
-                if let sharedCB = pending.sharedCB { waitForCompletion(sharedCB) }
+                if let attentionCB = pending.attentionCB { waitForCompletion(attentionCB) }
                 if let hitCB = pending.phase1HitCB { waitForCompletion(hitCB) }
                 waitForCompletion(pending.cb)
             } else if let err = pending.cb.error {
@@ -2508,14 +2901,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
             let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
             for i in 0..<slots.count { ptr[i] = slots[i] }
-        }
-        func blitCopy(_ cb: MTLCommandBuffer,
-                      from src: MTLBuffer, srcOffset: Int,
-                      to dst: MTLBuffer, dstOffset: Int, bytes: Int) {
-            guard let blit = cb.makeBlitCommandEncoder() else { return }
-            blit.copy(from: src, sourceOffset: srcOffset,
-                      to: dst, destinationOffset: dstOffset, size: bytes)
-            blit.endEncoding()
         }
         func gemv(_ cb: MTLCommandBuffer, _ view: TensorView,
                   x: MTLBuffer, xOffset: Int = 0,
@@ -2639,17 +3024,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let compGate = try model.dsv4CompressorGateProj(layer: L)
                 let compNorm = try model.dsv4CompressorKVNorm(layer: L)
                 let compBias = try model.dsv4CompressorPositionBias(layer: L)
-                gemv(cb, compKV, x: normed, y: compKVRow,
-                     m: rowWidth, n: cfg.hiddenSize)
-                gemv(cb, compGate, x: normed, y: compGateRow,
-                     m: rowWidth, n: cfg.hiddenSize)
+                // The GEMVs land directly in the pending window at this
+                // token's row offset — no staging row, no blit.
                 let rowOffset = counters.pendingRows * rowWidth * fp16
-                blitCopy(cb, from: compKVRow, srcOffset: 0,
-                         to: dsv4State.pendingKV[L]!, dstOffset: rowOffset,
-                         bytes: rowWidth * fp16)
-                blitCopy(cb, from: compGateRow, srcOffset: 0,
-                         to: dsv4State.pendingGate[L]!, dstOffset: rowOffset,
-                         bytes: rowWidth * fp16)
+                gemv(cb, compKV, x: normed,
+                     y: dsv4State.pendingKV[L]!, yOffset: rowOffset,
+                     m: rowWidth, n: cfg.hiddenSize)
+                gemv(cb, compGate, x: normed,
+                     y: dsv4State.pendingGate[L]!, yOffset: rowOffset,
+                     m: rowWidth, n: cfg.hiddenSize)
                 willEmit = counters.pendingRows + 1 == rate
                 if willEmit {
                     let entry = counters.compressedEntries
@@ -2685,17 +3068,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     let idxGate = try model.dsv4IndexerGateProj(layer: L)
                     let idxNorm = try model.dsv4IndexerKVNorm(layer: L)
                     let idxBias = try model.dsv4IndexerPositionBias(layer: L)
-                    gemv(cb, idxKV, x: normed, y: idxKVRow,
-                         m: 2 * idxDim, n: cfg.hiddenSize)
-                    gemv(cb, idxGate, x: normed, y: idxGateRow,
-                         m: 2 * idxDim, n: cfg.hiddenSize)
                     let idxRowOffset = counters.indexerPendingRows * 2 * idxDim * fp16
-                    blitCopy(cb, from: idxKVRow, srcOffset: 0,
-                             to: dsv4State.indexerPendingKV[L]!,
-                             dstOffset: idxRowOffset, bytes: 2 * idxDim * fp16)
-                    blitCopy(cb, from: idxGateRow, srcOffset: 0,
-                             to: dsv4State.indexerPendingGate[L]!,
-                             dstOffset: idxRowOffset, bytes: 2 * idxDim * fp16)
+                    gemv(cb, idxKV, x: normed,
+                         y: dsv4State.indexerPendingKV[L]!, yOffset: idxRowOffset,
+                         m: 2 * idxDim, n: cfg.hiddenSize)
+                    gemv(cb, idxGate, x: normed,
+                         y: dsv4State.indexerPendingGate[L]!, yOffset: idxRowOffset,
+                         m: 2 * idxDim, n: cfg.hiddenSize)
                     willEmitIndexer = counters.indexerPendingRows + 1 == idxRate
                     if willEmitIndexer {
                         let entry = counters.indexerEntries
@@ -2796,24 +3175,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             ropeDim: ca.ropeHeadDim,
                             position: position, rope: ropeKind, direction: -1)
 
-            // Grouped low-rank output projection: one GEMV per head group,
-            // then the mixing projection.
-            let groupIn = numHeads * headDim / ca.oGroups
-            let oaRowBytes = groupIn / 2
-            let oaGroupsPerRow = groupIn / Quantization.groupSize
-            for g in 0..<ca.oGroups {
-                let rowBase = g * ca.oLoraRank
-                int4.encode(commandBuffer: cb,
-                            weights: oaView.buffer,
-                            weightsOffset: Int(oaView.offset) + rowBase * oaRowBytes,
-                            scales: oaView.buffer,
-                            scalesOffset: Int(oaView.scaleOffset) + rowBase * oaGroupsPerRow * 2,
-                            biases: oaView.buffer,
-                            biasesOffset: Int(oaView.biasOffset) + rowBase * oaGroupsPerRow * 2,
-                            x: attnOut, xOffset: g * groupIn * fp16,
-                            y: oGrouped, yOffset: g * ca.oLoraRank * fp16,
-                            m: UInt32(ca.oLoraRank), n: UInt32(groupIn))
-            }
+            // Grouped low-rank output projection: one dispatch covering every
+            // head group (the output row index selects both the weight block
+            // and the activation slice), then the mixing projection.
+            dsv4.encodeOGroupProjection(
+                commandBuffer: cb,
+                weights: oaView.buffer, weightsOffset: Int(oaView.offset),
+                scales: oaView.buffer, scalesOffset: Int(oaView.scaleOffset),
+                biases: oaView.buffer, biasesOffset: Int(oaView.biasOffset),
+                x: attnOut, y: oGrouped,
+                rank: ca.oLoraRank,
+                groupIn: numHeads * headDim / ca.oGroups,
+                groups: ca.oGroups)
             gemv(cb, obView, x: oGrouped, y: oOut,
                  m: cfg.hiddenSize, n: ca.oGroups * ca.oLoraRank)
 
@@ -2883,9 +3256,75 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     outWeights: outWeights,
                     numExperts: UInt32(cfg.numExperts), d: D)
             }
+
+            // PILOT lookahead: run layer L+1's router against *this* layer's
+            // post-attention state, into private buffers, before the signal.
+            // The CPU then reads the real L indices and the speculative L+1
+            // indices at one wake — no extra command buffer, no extra sync.
+            // The mHC streams mean L+1's true router input also carries this
+            // layer's FFN contribution, so this is an approximation whose
+            // recall the predicted/confirmed counters measure.
+            var pilotGemvEncoded = false
+            if shouldEncodePilotGemv(nextLayer: L + 1),
+               let pilot = ensurePilotRouter(),
+               let nextRouter = try? model.router(layer: L + 1),
+               let nextBias = try? model.dsv4RouterCorrectionBias(layer: L + 1) {
+                pilot.encodePrediction(
+                    commandBuffer: cb,
+                    weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
+                    hidden: routedX,
+                    onesScale: effectiveScaleBuffers[L + 1],
+                    correctionBias: nextBias.buffer,
+                    correctionBiasOffset: Int(nextBias.offset),
+                    numExperts: UInt32(cfg.numExperts), d: D,
+                    routeScale: Float(cfg.routedScalingFactor))
+                pilotGemvEncoded = true
+            }
+
+            // The router indices are written at this point in the buffer, so
+            // signal the CPU here and keep encoding into the SAME buffer: the
+            // shared expert (clamped SwiGLU) depends only on `routedX`, never
+            // on the routed experts, so the GPU runs it while the CPU wakes,
+            // plans slots and preads the routed-expert blobs.
+            let routerSignal = encodeRouterSignal(cb)
+            int4.encode(commandBuffer: cb,
+                        weights: sharedProj.gate.weights,
+                        weightsOffset: sharedProj.gate.weightsOffset,
+                        scales: sharedProj.gate.scales,
+                        scalesOffset: sharedProj.gate.scalesOffset,
+                        biases: sharedProj.gate.biases,
+                        biasesOffset: sharedProj.gate.biasesOffset,
+                        x: routedX, y: denseScratchGate,
+                        m: FShared, n: D)
+            int4.encode(commandBuffer: cb,
+                        weights: sharedProj.up.weights,
+                        weightsOffset: sharedProj.up.weightsOffset,
+                        scales: sharedProj.up.scales,
+                        scalesOffset: sharedProj.up.scalesOffset,
+                        biases: sharedProj.up.biases,
+                        biasesOffset: sharedProj.up.biasesOffset,
+                        x: routedX, y: denseScratchUp,
+                        m: FShared, n: D)
+            dsv4.encodeSwigluClampMul(commandBuffer: cb,
+                                      gate: denseScratchGate,
+                                      up: denseScratchUp,
+                                      out: denseScratchAct,
+                                      n: cfg.intermediateSize,
+                                      limit: Float(cfg.swigluLimit))
+            int4.encode(commandBuffer: cb,
+                        weights: sharedProj.down.weights,
+                        weightsOffset: sharedProj.down.weightsOffset,
+                        scales: sharedProj.down.scales,
+                        scalesOffset: sharedProj.down.scalesOffset,
+                        biases: sharedProj.down.biases,
+                        biasesOffset: sharedProj.down.biasesOffset,
+                        x: denseScratchAct, y: h1Buf,
+                        m: D, n: FShared)
+            let overlapProbe = Self.phaseInstrumentationEnabled ? GPUOverlapProbe() : nil
+            overlapProbe?.track(cb)
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            waitForCompletion(cb)
+            waitForRouterSignal(routerSignal, fallback: cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             if let pending = pendingRouted {
                 finishPending(pending, waitIfNeeded: false)
@@ -2923,6 +3362,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
+            // Join any speculative read aimed at this layer before planning —
+            // the plan must not evict a slot a background pread is filling —
+            // and score the prediction. Then this layer's routing becomes the
+            // next token's prediction for the same layer.
+            settleSpeculation(layer: L, actualExperts: experts)
+            recordRoutedExperts(experts, layer: L)
+            capturePilotPrediction(nextLayer: L + 1,
+                                   token: token,
+                                   gemvEncoded: pilotGemvEncoded)
+
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let gateGroupSize = UInt32(model.routedGateGroupSize(layer: L))
             guard let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
@@ -2960,44 +3409,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 phase1HitCB = hitCB
             }
 
-            // Shared expert (clamped SwiGLU) on its own CB so its GPU work
-            // overlaps the expert pread.
-            let sharedCB = ctx.queue.makeCommandBuffer()!
-            int4.encode(commandBuffer: sharedCB,
-                        weights: sharedProj.gate.weights,
-                        weightsOffset: sharedProj.gate.weightsOffset,
-                        scales: sharedProj.gate.scales,
-                        scalesOffset: sharedProj.gate.scalesOffset,
-                        biases: sharedProj.gate.biases,
-                        biasesOffset: sharedProj.gate.biasesOffset,
-                        x: routedX, y: denseScratchGate,
-                        m: FShared, n: D)
-            int4.encode(commandBuffer: sharedCB,
-                        weights: sharedProj.up.weights,
-                        weightsOffset: sharedProj.up.weightsOffset,
-                        scales: sharedProj.up.scales,
-                        scalesOffset: sharedProj.up.scalesOffset,
-                        biases: sharedProj.up.biases,
-                        biasesOffset: sharedProj.up.biasesOffset,
-                        x: routedX, y: denseScratchUp,
-                        m: FShared, n: D)
-            dsv4.encodeSwigluClampMul(commandBuffer: sharedCB,
-                                      gate: denseScratchGate,
-                                      up: denseScratchUp,
-                                      out: denseScratchAct,
-                                      n: cfg.intermediateSize,
-                                      limit: Float(cfg.swigluLimit))
-            int4.encode(commandBuffer: sharedCB,
-                        weights: sharedProj.down.weights,
-                        weightsOffset: sharedProj.down.weightsOffset,
-                        scales: sharedProj.down.scales,
-                        scalesOffset: sharedProj.down.scalesOffset,
-                        biases: sharedProj.down.biases,
-                        biasesOffset: sharedProj.down.biasesOffset,
-                        x: denseScratchAct, y: h1Buf,
-                        m: D, n: FShared)
-            sharedCB.commit()
-            if let hitCB = phase1HitCB { hitCB.commit() }
+            // Phase-1 for the resident (hit) experts needs no I/O, so it goes
+            // to the GPU immediately, extending the window the pread hides
+            // behind. It follows the shared expert on the same queue.
+            if let hitCB = phase1HitCB {
+                overlapProbe?.track(hitCB)
+                hitCB.commit()
+            }
 
             if rdadviseEnabled && rdadvisePolicyMode != .off {
                 let requestedMisses = plannedFetch.misses.count
@@ -3019,7 +3437,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
             let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
-            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
+            let tIoEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            totalIoNanos &+= tIoEnd - tIoStart
+            recordExpertIOOverlap(probe: overlapProbe,
+                                  startNanos: tIoStart,
+                                  endNanos: tIoEnd)
             let routedBufs = blobs.map { $0.buffer }
 
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -3068,11 +3490,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   outStreams: streams,
                                   hcMult: hc.mult, hidden: cfg.hiddenSize)
             routedCB.commit()
+            // GPU is busy with routed work and the next layer's attention, CPU
+            // is idle: the natural window for the speculative read.
+            issueSpeculativePrefetch(layer: L + 1)
             precondition(pendingRouted == nil,
                          "routed command-buffer pipeline drained before queuing the next layer")
             pendingRouted = PendingRoutedCommand(
                 cb: routedCB,
-                sharedCB: sharedCB,
+                attentionCB: cb,
                 phase1HitCB: phase1HitCB,
                 encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
         }
@@ -3148,6 +3573,69 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         cb.waitUntilCompleted()
         if let err = cb.error {
             print("CB error: \(err)")
+        }
+    }
+
+    /// Encodes the router-readback signal at the current point in `cb`. Must be
+    /// called with no encoder open and immediately after the kernel that writes
+    /// `outIndices`, so that the GPU write is complete when the CPU wakes.
+    /// Returns nil when no shared event exists (fall back to a full wait).
+    private func encodeRouterSignal(_ cb: MTLCommandBuffer) -> UInt64? {
+        guard let routerEvent else { return nil }
+        routerEventValue &+= 1
+        cb.encodeSignalEvent(routerEvent, value: routerEventValue)
+        return routerEventValue
+    }
+
+    /// Passive wait for the router signal, never a spin loop: a busy CPU steals
+    /// the shared SoC power budget and throttles the GPU on Apple silicon.
+    /// Because command buffers on one queue execute in commit order, reaching
+    /// this signal also proves every previously committed buffer has finished —
+    /// which is what makes it safe for the caller to pread into expert slots.
+    private func waitForRouterSignal(_ value: UInt64?, fallback cb: MTLCommandBuffer) {
+        guard routerEventWaitEnabled else {
+            waitForCompletion(cb)
+            return
+        }
+        guard let routerEvent, let value else {
+            waitForCompletion(cb)
+            return
+        }
+        if routerEvent.signaledValue >= value { return }
+        if !routerEvent.wait(untilSignaledValue: value,
+                             timeoutMS: Self.routerEventTimeoutMS) {
+            waitForCompletion(cb)
+        }
+    }
+
+    /// Tracks when the command buffers that are supposed to hide a pread
+    /// actually finished. Completion handlers run on a Metal thread, so the
+    /// bookkeeping is lock-guarded.
+    final class GPUOverlapProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var remaining = 0
+        private var lastNanos: UInt64 = 0
+
+        /// Register a command buffer; call before committing it.
+        func track(_ cb: MTLCommandBuffer) {
+            lock.lock()
+            remaining += 1
+            lock.unlock()
+            cb.addCompletedHandler { [self] _ in
+                let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                lock.lock()
+                remaining -= 1
+                lastNanos = max(lastNanos, now)
+                lock.unlock()
+            }
+        }
+
+        /// When every tracked buffer has finished, the time the last one
+        /// finished; nil while any is still running.
+        var finishedNanos: UInt64? {
+            lock.lock()
+            defer { lock.unlock() }
+            return remaining == 0 ? lastNanos : nil
         }
     }
 

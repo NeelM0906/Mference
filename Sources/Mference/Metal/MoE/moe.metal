@@ -184,6 +184,9 @@ kernel void router_gemv_bf16_r4(
     if (lane == 0) out_logits[e] = acc;
 }
 
+// Serial single-thread selection. Superseded in production by the one-SIMD
+// `_par` kernels below; kept because the parity tests compare the parallel
+// results against it bit for bit.
 kernel void router_topk_select_k8(
     device const float* logits [[buffer(0)]],
     device const bfloat* per_expert_scale [[buffer(1)]],
@@ -218,6 +221,111 @@ kernel void router_topk_select_k8(
         }
         top_idx[pos] = e;
         top_score[pos] = s;
+    }
+
+    const float max_s = top_score[0];
+    float sum_exp = 0.0f;
+    float exps[8];
+    for (uint i = 0; i < 8; ++i) {
+        const float ex = fast::exp(top_score[i] - max_s);
+        exps[i] = ex;
+        sum_exp += ex;
+    }
+    for (uint i = 0; i < 8; ++i) {
+        const uint expert_idx = top_idx[i];
+        const float weight = exps[i] / sum_exp;
+        out_indices[i] = expert_idx;
+        out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
+    }
+}
+
+// --- One-SIMD parallel top-k selection ------------------------------------
+//
+// The serial selects above walk all `num_experts` logits on a single thread of
+// a whole dispatch, on the per-layer critical path. These replacements keep the
+// same single 32-thread dispatch but spread the scan across the SIMD, and are
+// bit-identical to the serial result rather than merely equivalent.
+//
+// Ownership is blocked: lane L owns experts [L*per, L*per + per) with
+// per = ceil(NE/32) <= 8 for NE <= 256, and out-of-range slots carry a -INFINITY
+// sentinel so short or non-multiple-of-32 expert counts need no special case.
+// Each of the K steps takes a lane-local strict-`>` ascending max (lowest index
+// wins inside a lane, matching the serial ascending scan) and then a
+// shuffle-down argmax whose ties prefer the LOWER index. Together those
+// reproduce the serial "first strictly-greater score wins, equal score keeps the
+// earlier expert" order exactly. A per-lane taken bitmask retires winners.
+// The normalization tail stays serial on lane 0 with the same operations in the
+// same order, so the emitted weights match bit for bit.
+constant constexpr uint kRouterMaxPerLane = 8;   // num_experts <= 256
+constant constexpr uint kRouterNoWinner = 0xFFFFFFFFu;
+
+static inline uint router_select_next_one_simd(
+    thread const float* ch,
+    thread uint& taken,
+    uint per,
+    uint base
+) {
+    float bv = -INFINITY;
+    uint bi = kRouterNoWinner;
+    for (uint j = 0; j < per; ++j) {
+        if (!(taken & (1u << j)) && ch[j] > bv) {
+            bv = ch[j];
+            bi = base + j;
+        }
+    }
+    for (uint off = 16u; off > 0u; off >>= 1) {
+        const float ov = simd_shuffle_down(bv, off);
+        const uint oi = simd_shuffle_down(bi, off);
+        if (ov > bv || (ov == bv && oi < bi)) {
+            bv = ov;
+            bi = oi;
+        }
+    }
+    bi = simd_broadcast(bi, 0);
+    if (bi != kRouterNoWinner && bi >= base && bi < base + per) {
+        taken |= 1u << (bi - base);
+    }
+    return bi;
+}
+
+kernel void router_topk_select_k8_par(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint NE = router_fc_num_experts(num_experts);
+    // Out-of-contract dispatches are a visible no-op, never an OOB write.
+    if (sg_idx != 0u || NE > 32u * kRouterMaxPerLane) return;
+
+    const uint per = (NE + 31u) / 32u;
+    const uint base = lane * per;
+    float ch[kRouterMaxPerLane];
+    for (uint j = 0; j < per; ++j) {
+        const uint e = base + j;
+        ch[j] = (e < NE) ? logits[e] : -INFINITY;
+    }
+
+    uint taken = 0u;
+    uint top_idx[8];
+    for (uint k = 0; k < 8; ++k) {
+        top_idx[k] = router_select_next_one_simd(ch, taken, per, base);
+    }
+    if (lane != 0u) return;
+
+    // Fewer experts than K leaves trailing steps without a winner. The serial
+    // kernel leaves those slots at index 0 with score -INFINITY; mirror that.
+    float top_score[8];
+    for (uint i = 0; i < 8; ++i) {
+        if (top_idx[i] == kRouterNoWinner) {
+            top_idx[i] = 0u;
+            top_score[i] = -INFINITY;
+        } else {
+            top_score[i] = logits[top_idx[i]];
+        }
     }
 
     const float max_s = top_score[0];
@@ -507,6 +615,8 @@ static inline float sqrtsoftplus(float x) {
     return sqrt(sp);
 }
 
+// Serial single-thread selection, superseded in production by
+// `router_topk_select_sqrtsoftplus_k6_par`; kept as the parity reference.
 kernel void router_topk_select_sqrtsoftplus_k6(
     device const float* logits [[buffer(0)]],
     device const float* correction_bias [[buffer(1)]],
@@ -557,9 +667,63 @@ kernel void router_topk_select_sqrtsoftplus_k6(
     }
 }
 
+// One-SIMD replacement for `router_topk_select_sqrtsoftplus_k6`. Selection uses
+// the same blocked-ownership argmax reduction as `router_topk_select_k8_par`;
+// the score is sqrtsoftplus(logit) + correction bias, and the weight tail is
+// the serial code verbatim on lane 0, so the emitted indices and FP16 weights
+// are bit-identical.
+kernel void router_topk_select_sqrtsoftplus_k6_par(
+    device const float* logits [[buffer(0)]],
+    device const float* correction_bias [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant float& route_scale [[buffer(5)]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint NE = router_fc_num_experts(num_experts);
+    if (sg_idx != 0u || NE > 32u * kRouterMaxPerLane) return;
+
+    const uint per = (NE + 31u) / 32u;
+    const uint base = lane * per;
+    float ch[kRouterMaxPerLane];
+    for (uint j = 0; j < per; ++j) {
+        const uint e = base + j;
+        ch[j] = (e < NE) ? (sqrtsoftplus(logits[e]) + correction_bias[e])
+                         : -INFINITY;
+    }
+
+    uint taken = 0u;
+    uint top_idx[6];
+    for (uint k = 0; k < 6; ++k) {
+        top_idx[k] = router_select_next_one_simd(ch, taken, per, base);
+    }
+    if (lane != 0u) return;
+
+    // The serial kernel leaves unfilled slots at index 0; mirror that so the
+    // sqrtsoftplus(logits[0]) contribution below matches.
+    for (uint i = 0; i < 6; ++i) {
+        if (top_idx[i] == kRouterNoWinner) top_idx[i] = 0u;
+    }
+    float scores[6];
+    float sum = 0.0f;
+    for (uint i = 0; i < 6; ++i) {
+        scores[i] = sqrtsoftplus(logits[top_idx[i]]);
+        sum += scores[i];
+    }
+    const float inv = route_scale / (sum + 1e-20f);
+    for (uint i = 0; i < 6; ++i) {
+        out_indices[i] = top_idx[i];
+        out_weights[i] = half(scores[i] * inv);
+    }
+}
+
 // Hash-routed layers: expert indices are a frozen tid2eid[token] lookup done
 // on the CPU; only the weights come from the learned gate. Scores the 6
 // given experts, renormalizes, scales.
+//
+// Serial reference; production uses `router_hash_weights_k6_par`.
 kernel void router_hash_weights_k6(
     device const float* logits [[buffer(0)]],
     device const uint* indices [[buffer(1)]],
@@ -574,6 +738,32 @@ kernel void router_hash_weights_k6(
         scores[i] = sqrtsoftplus(logits[indices[i]]);
         sum += scores[i];
     }
+    const float inv = route_scale / (sum + 1e-20f);
+    for (uint i = 0; i < 6; ++i) {
+        out_weights[i] = half(scores[i] * inv);
+    }
+}
+
+// One-SIMD variant of `router_hash_weights_k6`: lanes 0..5 evaluate the six
+// sqrtsoftplus scores concurrently, then lane 0 runs the serial accumulation
+// and normalization in the original order. `simd_shuffle` moves exact bits, so
+// the result matches the serial kernel exactly.
+kernel void router_hash_weights_k6_par(
+    device const float* logits [[buffer(0)]],
+    device const uint* indices [[buffer(1)]],
+    device half* out_weights [[buffer(2)]],
+    constant float& route_scale [[buffer(3)]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    if (sg_idx != 0u) return;
+    const float own = (lane < 6u) ? sqrtsoftplus(logits[indices[lane]]) : 0.0f;
+    float scores[6];
+    for (uint i = 0; i < 6; ++i) scores[i] = simd_shuffle(own, i);
+    if (lane != 0u) return;
+
+    float sum = 0.0f;
+    for (uint i = 0; i < 6; ++i) sum += scores[i];
     const float inv = route_scale / (sum + 1e-20f);
     for (uint i = 0; i < 6; ++i) {
         out_weights[i] = half(scores[i] * inv);
@@ -915,4 +1105,142 @@ kernel void moe_phase2_down_reduce_k8(
         acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
         y[d] = half(acc);
     }
+}
+
+// ============================================================================
+// DeepSeek-V4 chunked-prefill routed MoE — pair-major (additive; Wave-2B).
+//
+// Decode runs one token at a time: six experts are streamed in, phase 1 fills
+// `acts[slot]`, and `moe_phase2_down_reduce_int2_k6` fuses the down projection
+// with the weighted reduce. Prefill cannot afford that: every token re-reads
+// its six 8 MB expert blobs, so a 629-token prompt reads ~1.3 TB.
+//
+// The prefill variants below are *pair-major*: the chunk's (token, rank)
+// routes are sorted by expert and processed one expert tile at a time, so an
+// expert blob is read once per chunk instead of once per token. The
+// arithmetic is unchanged — the same `moe_int2_*` helpers, the same clamp,
+// the same activation, the same `routing_w * value` product, the same
+// residual-first FP32 accumulation in rank order — so results are
+// bit-identical to the decode path. The only structural difference is that the
+// down projection writes an FP32 per-route partial (decode keeps it in
+// threadgroup memory), which carries strictly more precision than the
+// threadgroup float the fused kernel reduces.
+// ============================================================================
+
+struct DSV4PrefillRoute {
+    uint token;       // row of `x` / of the output
+    uint rank;        // routing slot 0..top_k-1 (selects the routing weight)
+    uint local_slot;  // index into the tile's RoutedBlobs
+    uint reserved;
+};
+
+// acts[(token * top_k + rank) * F + f], one simdgroup per (route, f) row.
+kernel void dsv4_prefill_moe_phase1_pairs_int2(
+    device const RoutedBlobs& routed [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half* x [[buffer(2)]],            // [tokens, D]
+    device half* acts [[buffer(3)]],               // [tokens * top_k, F]
+    constant uint& D [[buffer(4)]],
+    constant uint& F [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]],
+    constant uint& gate_group_size [[buffer(7)]],
+    device const DSV4PrefillRoute* routes [[buffer(8)]],
+    constant uint& route_start [[buffer(9)]],
+    constant uint& route_count [[buffer(10)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    const uint KK = moe_fc_top_k(top_k);
+    const uint rowg = tg_idx * rows_per_tg + sg_idx;
+    if (rowg >= route_count * FF) return;
+    const uint route_index = rowg / FF;
+    const uint f = rowg % FF;
+    const DSV4PrefillRoute r = routes[route_start + route_index];
+    if (r.local_slot >= kMaxStreamedExperts) return;
+
+    device const uint8_t* base = routed.blob[r.local_slot];
+    const ExpertOffsets re = routed_offsets;
+    const float2 gu = moe_int2_gate_up_rows_simd_dev_vec(
+        base + re.gate_W_off,
+        (device const bfloat*)(base + re.gate_s_off),
+        (device const bfloat*)(base + re.gate_b_off),
+        base + re.up_W_off,
+        (device const bfloat*)(base + re.up_s_off),
+        (device const bfloat*)(base + re.up_b_off),
+        x + uint(r.token) * DD, f, DD, gate_group_size, lane);
+    if (lane == 0) {
+        const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+        acts[(uint(r.token) * KK + uint(r.rank)) * FF + f] =
+            half(moe_hidden_activation(cgu.x) * cgu.y);
+    }
+}
+
+// partials[(token * top_k + rank) * D + d] = routing_w[...] * down_row(acts).
+// FP32 output so the reduce below matches the fused decode kernel exactly.
+kernel void dsv4_prefill_moe_down_pairs_int2(
+    device const RoutedBlobs& routed [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half* acts [[buffer(2)]],         // [tokens * top_k, F]
+    device const half* routing_w [[buffer(3)]],    // [tokens * top_k]
+    device float* partials [[buffer(4)]],          // [tokens * top_k, D]
+    constant uint& D [[buffer(5)]],
+    constant uint& F [[buffer(6)]],
+    constant uint& top_k [[buffer(7)]],
+    device const DSV4PrefillRoute* routes [[buffer(8)]],
+    constant uint& route_start [[buffer(9)]],
+    constant uint& route_count [[buffer(10)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    const uint KK = moe_fc_top_k(top_k);
+    const uint rowg = tg_idx * rows_per_tg + sg_idx;
+    if (rowg >= route_count * DD) return;
+    const uint route_index = rowg / DD;
+    const uint d = rowg % DD;
+    const DSV4PrefillRoute r = routes[route_start + route_index];
+    if (r.local_slot >= kMaxStreamedExperts) return;
+    const uint pair = uint(r.token) * KK + uint(r.rank);
+
+    device const uint8_t* base = routed.blob[r.local_slot];
+    const ExpertOffsets re = routed_offsets;
+    const float value = moe_int2_gemv_row_simd_dev_vec(
+        base + re.down_W_off,
+        (device const bfloat*)(base + re.down_s_off),
+        (device const bfloat*)(base + re.down_b_off),
+        acts + pair * FF, d, FF, lane);
+    if (lane == 0) {
+        partials[pair * DD + d] = float(routing_w[pair]) * value;
+    }
+}
+
+// y[token] = residual[token] + sum_{rank} partials[token, rank] — the same
+// residual-first, rank-ordered FP32 accumulation as
+// `moe_phase2_down_reduce_int2_k6`.
+kernel void dsv4_prefill_moe_reduce_pairs_k6(
+    device const float* partials [[buffer(0)]],    // [tokens * 6, D]
+    device const half* residual [[buffer(1)]],     // [tokens, D]
+    device half* y [[buffer(2)]],                  // [tokens, D]
+    constant uint& D [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint DD = moe_fc_d(D);
+    if (gid.x >= DD) return;
+    const uint row = gid.y * DD + gid.x;
+    const uint base = gid.y * 6u * DD + gid.x;
+    float acc = float(residual[row]);
+    acc += partials[base + 0u * DD];
+    acc += partials[base + 1u * DD];
+    acc += partials[base + 2u * DD];
+    acc += partials[base + 3u * DD];
+    acc += partials[base + 4u * DD];
+    acc += partials[base + 5u * DD];
+    y[row] = half(acc);
 }
