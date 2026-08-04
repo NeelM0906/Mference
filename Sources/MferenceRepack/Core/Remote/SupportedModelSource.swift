@@ -28,7 +28,8 @@ public struct SupportedModelSource: Sendable, Equatable {
                                overwrite: Bool,
                                token: String?,
                                resume: Bool = false,
-                               baseURL: URL? = nil)
+                               baseURL: URL? = nil,
+                               dryRunSpaceCheck: Bool = false)
         -> RemoteStreamingRepackOptions {
         if let baseURL {
             return RemoteStreamingRepackOptions(
@@ -40,6 +41,7 @@ public struct SupportedModelSource: Sendable, Equatable {
                 minFreeReserveBytes: reserveBytes,
                 overwrite: overwrite,
                 resume: resume,
+                dryRunSpaceCheck: dryRunSpaceCheck,
                 baseURL: baseURL)
         }
         return RemoteStreamingRepackOptions(
@@ -50,7 +52,8 @@ public struct SupportedModelSource: Sendable, Equatable {
             requireKnownSource: true,
             minFreeReserveBytes: reserveBytes,
             overwrite: overwrite,
-            resume: resume)
+            resume: resume,
+            dryRunSpaceCheck: dryRunSpaceCheck)
     }
 
     public static let gemma4 = SupportedModelSource(
@@ -99,10 +102,29 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 97_500_000_000,
         reserveBytes: 2_147_483_648)
 
+    /// Revision and index digest verified against the published repo. The
+    /// download estimate is the repo's own total (148.4 GB); the vision and
+    /// audio towers are excluded by the planner but they are only 18 tensors,
+    /// so the saving is immaterial. Installed bytes carry headroom for the
+    /// resident index and per-expert page rounding. See docs/INKLING_SMALL.md.
+    public static let inklingSmall = SupportedModelSource(
+        name: "inklingsmall",
+        displayName: "Inkling-Small 276B-A12B 4-bit",
+        repoID: "pipenetwork/Inkling-Small-MLX-4bit",
+        revision: "9d6e4720ab7002af25d6129c88ccea6cd9f19372",
+        sourceIndexSHA256:
+            "fe16aec3cef12438f1d0ff657f7e785781b61271528a66b3b7160fcf1aaca30c",
+        modelID: "inkling-small-4bit",
+        approximateDownloadBytes: 148_441_426_867,
+        installedBytes: 149_000_000_000,
+        reserveBytes: 2_147_483_648)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
-    public static let all: [SupportedModelSource] = [gemma4, qwen36, deepseekV4Flash]
+    public static let all: [SupportedModelSource] = [
+        gemma4, qwen36, deepseekV4Flash, inklingSmall,
+    ]
 
     public static func named(_ name: String) -> SupportedModelSource? {
         all.first { $0.name == name }

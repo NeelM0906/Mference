@@ -156,6 +156,16 @@ public enum VerifiedInstallTool {
             guard layer.layer >= 0 && layer.layer < layout.numLayers else {
                 throw RepackError.configurationInvalid(detail: "packed expert layer index out of range")
             }
+            // Leading dense-FFN layers carry no routed experts, so the writer
+            // emits an empty layout entry and no blob for them (Inkling's
+            // layers 0-1). There is nothing to size- or hash-check.
+            if layer.experts.isEmpty {
+                guard manifest.files["packed_experts/\(layer.file)"] == nil else {
+                    throw RepackError.configurationInvalid(
+                        detail: "packed_experts/\(layer.file) has no experts but is in the manifest")
+                }
+                continue
+            }
             guard layer.experts.count == layout.expertsPerLayer else {
                 throw RepackError.configurationInvalid(
                     detail: "packed_experts/\(layer.file) expert count mismatch")

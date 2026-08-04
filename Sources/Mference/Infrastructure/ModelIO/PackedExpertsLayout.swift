@@ -89,6 +89,12 @@ enum PackedExpertsLayoutReader {
             else {
                 throw ModelError.indexCorrupt(detail: "layout.json: malformed layer entry")
             }
+            // Leading dense-FFN layers carry no routed experts; the writer
+            // emits an empty entry and no blob file (Inkling's layers 0-1).
+            if expertsArr.isEmpty {
+                layers.append(LayerLayout(layer: layerIdx, file: file, experts: []))
+                continue
+            }
             var experts = [ExpertEntry?](repeating: nil, count: expertsPerLayer)
             for expertObj in expertsArr {
                 guard

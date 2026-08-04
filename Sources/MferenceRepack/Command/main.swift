@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--model <gemma4|qwen36|deepseekv4flash>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <gemma4|qwen36|deepseekv4flash|inklingsmall>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
   MferenceRepack --help
@@ -24,6 +24,7 @@ private struct Arguments {
     var verifyInstall = false
     var inputGTurbo: String?
     var baseURL: URL?
+    var dryRun = false
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -38,6 +39,9 @@ private struct Arguments {
                 index += 1
             case "--resume":
                 parsed.resume = true
+                index += 1
+            case "--dry-run":
+                parsed.dryRun = true
                 index += 1
             case "--discard-partial":
                 parsed.discardPartial = true
@@ -178,9 +182,22 @@ private func run(_ values: [String]) async -> Int32 {
         overwrite: arguments.overwrite,
         token: ProcessInfo.processInfo.environment["HF_TOKEN"],
         resume: arguments.resume,
-        baseURL: arguments.baseURL)
+        baseURL: arguments.baseURL,
+        dryRunSpaceCheck: arguments.dryRun)
     do {
         let result = try await RemoteStreamingRepacker(options: options).run()
+        if result.dryRun {
+            print("Dry run for \(source.displayName)")
+            print("Source revision: \(result.resolvedCommit)")
+            print("Range requests: \(result.rangeRequestCount)")
+            print("Source bytes to read: \(result.remoteBytesToDownload)")
+            print("Output bytes: \(result.outputBytes)")
+            print("Resident entries: \(result.residentEntryCount)")
+            print("Expert layers: \(result.expertLayerCount)")
+            print("Excluded multimodal tensors: "
+                + "\(result.excludedMultimodalTensorCount)")
+            return 0
+        }
         print("Installed \(source.displayName)")
         print("Source revision: \(result.resolvedCommit)")
         print("Model: \(result.outputDir)")

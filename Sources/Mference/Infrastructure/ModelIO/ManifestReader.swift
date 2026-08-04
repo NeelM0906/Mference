@@ -67,6 +67,26 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let routerScoringFunc: String?
     public let routedScalingFactor: Double?
     public let swigluLimit: Double?
+
+    // Inkling relative-position / short-conv / router extensions. Optional for
+    // the same reason: absent values validate against the defaults the other
+    // three families hold (one shared expert, unit logit scale, rest zeroed).
+    public let relDRel: Int?
+    public let relExtent: Int?
+    public let relProjDim: Int?
+    public let relLogScalingFloor: Int?
+    public let relLogScalingAlpha: Double?
+    public let sconvKernelSize: Int?
+    public let numSharedExperts: Int?
+    public let numDenseLayers: Int?
+    public let denseIntermediateSize: Int?
+    public let sharedExpertSink: Bool?
+    public let embedNormEnabled: Bool?
+    public let logitsWidthMultiplier: Double?
+    public let routerGateBias: Bool?
+    public let routerNormAfterTopK: Bool?
+    public let routerGlobalScale: Bool?
+    public let unpaddedVocabSize: Int?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -182,7 +202,11 @@ public enum ManifestReader {
         for f in requiredFiles {
             if m.files[f] == nil { throw ModelError.missingFile(name: f) }
         }
-        for L in 0..<m.numLayers {
+        // Leading dense-FFN layers carry no routed experts, so the writer
+        // emits no blob for them (Inkling's layers 0-1). `validateArch` has
+        // already confirmed the manifest agrees with the baseline on the
+        // count, so it is safe to skip exactly that many.
+        for L in expected.numDenseLayers..<m.numLayers {
             let padded = String(format: "packed_experts/layer_%02d.bin", L)
             let plain  = "packed_experts/layer_\(L).bin"
             if m.files[padded] == nil && m.files[plain] == nil {
@@ -339,6 +363,38 @@ public enum ManifestReader {
                   a.routedScalingFactor ?? 1.0, e.routedScalingFactor)
         try check("swigluLimit",
                   a.swigluLimit ?? 0.0, e.swigluLimit)
+        try check("relDRel",
+                  a.relDRel ?? 0, e.relativePosition.dRel)
+        try check("relExtent",
+                  a.relExtent ?? 0, e.relativePosition.extent)
+        try check("relProjDim",
+                  a.relProjDim ?? 0, e.relativePosition.projDim)
+        try check("relLogScalingFloor",
+                  a.relLogScalingFloor ?? 0, e.relativePosition.logScalingFloor)
+        try check("relLogScalingAlpha",
+                  a.relLogScalingAlpha ?? 0.0, e.relativePosition.logScalingAlpha)
+        try check("sconvKernelSize",
+                  a.sconvKernelSize ?? 0, e.sconvKernelSize)
+        try check("numSharedExperts",
+                  a.numSharedExperts ?? 1, e.numSharedExperts)
+        try check("numDenseLayers",
+                  a.numDenseLayers ?? 0, e.numDenseLayers)
+        try check("denseIntermediateSize",
+                  a.denseIntermediateSize ?? 0, e.denseIntermediateSize)
+        try check("sharedExpertSink",
+                  a.sharedExpertSink ?? false, e.sharedExpertSink)
+        try check("embedNormEnabled",
+                  a.embedNormEnabled ?? false, e.embedNormEnabled)
+        try check("logitsWidthMultiplier",
+                  a.logitsWidthMultiplier ?? 1.0, e.logitsWidthMultiplier)
+        try check("routerGateBias",
+                  a.routerGateBias ?? false, e.routerGateBias)
+        try check("routerNormAfterTopK",
+                  a.routerNormAfterTopK ?? false, e.routerNormAfterTopK)
+        try check("routerGlobalScale",
+                  a.routerGlobalScale ?? false, e.routerGlobalScale)
+        try check("unpaddedVocabSize",
+                  a.unpaddedVocabSize ?? 0, e.unpaddedVocabSize)
     }
 
     /// Decode just enough of `manifest.json` to identify the model family,

@@ -132,6 +132,11 @@ enum RepackPlanner {
             return name.hasPrefix("language_model.")
         case .deepseekV4Flash:
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
+        case .inklingSmall:
+            // Inkling is multimodal but names its towers as siblings, so the
+            // text tower is exactly `model.llm.`; `model.visual.` and
+            // `model.audio.` fall through to the multimodal exclusion.
+            return name.hasPrefix("model.llm.")
         }
     }
 
@@ -142,6 +147,9 @@ enum RepackPlanner {
         case .gemma4:          routedContainer = ".experts.switch_glu."
         case .qwen36:          routedContainer = ".mlp.switch_mlp."
         case .deepseekV4Flash: routedContainer = ".ffn.switch_mlp."
+        // `.mlp.experts.` does not match the shared experts, which sit under
+        // `.mlp.shared_experts.`.
+        case .inklingSmall:    routedContainer = ".mlp.experts."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -267,7 +275,9 @@ enum RepackPlanner {
     private static func isMultimodalTensorName(_ name: String) -> Bool {
         name.hasPrefix("vision_tower.") ||
             name.hasPrefix("embed_vision.") ||
-            name.hasPrefix("audio_tower.")
+            name.hasPrefix("audio_tower.") ||
+            name.hasPrefix("model.visual.") ||
+            name.hasPrefix("model.audio.")
     }
 
     // MARK: - Resident planning
@@ -486,6 +496,11 @@ enum RepackPlanner {
                 if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "lm_head.weight"             { return (4, 0, 0, n) }
+            case .inklingSmall:
+                if n == "model.llm.embed.weight"      { return (0, 0, 0, n) }
+                if n == "model.llm.embed_norm.weight" { return (0, 0, 1, n) }
+                if n == "model.llm.norm.weight"       { return (3, 0, 0, n) }
+                if n == "model.llm.unembed.weight"    { return (4, 0, 0, n) }
             }
             if let li = layerIndex(in: n) {
                 let slot: Int
@@ -493,6 +508,7 @@ enum RepackPlanner {
                 case .gemma4:          slot = slotRank(in: n)
                 case .qwen36:          slot = qwenSlotRank(in: n)
                 case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
+                case .inklingSmall:    slot = inklingSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -505,6 +521,42 @@ enum RepackPlanner {
             if ka.2 != kb.2 { return ka.2 < kb.2 }
             return ka.3 < kb.3
         }
+    }
+
+    /// Within-layer slot order for Inkling: the attention bundle (QKV/O, the
+    /// relative-position projection and its profile bank, the per-head norms,
+    /// and the K/V short convs), then the router, then the shared experts,
+    /// then the dense FFN carried by layers 0–1, then the block short convs
+    /// and the two layer norms.
+    ///
+    /// Ordered before `.mlp.gate_proj` so the dense-FFN checks cannot swallow
+    /// the shared-expert tensors, which share the `.mlp.` segment.
+    private static func inklingSlotRank(in n: String) -> Int {
+        if n.contains(".attn.wq_du.weight")                 { return 0 }
+        if n.contains(".attn.wk_dv.weight")                 { return 1 }
+        if n.contains(".attn.wv_dv.weight")                 { return 2 }
+        if n.contains(".attn.wo_ud.weight")                 { return 3 }
+        if n.contains(".attn.wr_du.weight")                 { return 4 }
+        if n.hasSuffix(".attn.rel_logits_proj.proj")        { return 5 }
+        if n.contains(".attn.q_norm.weight")                { return 6 }
+        if n.contains(".attn.k_norm.weight")                { return 7 }
+        if n.contains(".attn.k_sconv.weight")               { return 8 }
+        if n.contains(".attn.v_sconv.weight")               { return 9 }
+        if n.contains(".mlp.gate.weight")                   { return 10 }
+        if n.hasSuffix(".mlp.gate.bias")                    { return 11 }
+        if n.hasSuffix(".mlp.gate.global_scale")            { return 12 }
+        if n.contains(".mlp.shared_experts.gate_proj.weight") { return 13 }
+        if n.contains(".mlp.shared_experts.up_proj.weight")   { return 14 }
+        if n.contains(".mlp.shared_experts.down_proj.weight") { return 15 }
+        if n.contains(".mlp.gate_proj.weight")              { return 16 }
+        if n.contains(".mlp.up_proj.weight")                { return 17 }
+        if n.contains(".mlp.down_proj.weight")              { return 18 }
+        if n.hasSuffix(".mlp.global_scale")                 { return 19 }
+        if n.contains(".attn_sconv.weight")                 { return 20 }
+        if n.contains(".mlp_sconv.weight")                  { return 21 }
+        if n.hasSuffix(".attn_norm.weight")                 { return 22 }
+        if n.hasSuffix(".mlp_norm.weight")                  { return 23 }
+        return 99
     }
 
     /// Within-layer slot order for the Qwen 3.6 family: full-attention
