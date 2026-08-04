@@ -26,7 +26,7 @@ public enum ModelLibrary {
     public static let rootStorageKey = "Mference.libraryRoot"
 
     public static let shippedDescriptors: [AppModelInstallDescriptor] = [
-        .default, .qwen36, .deepseekV4Flash,
+        .default, .qwen36, .deepseekV4Flash, .inklingSmall,
     ]
 
     /// Where new downloads land: the first library root.

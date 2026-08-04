@@ -444,6 +444,7 @@ public final class AppModel {
         case .gemma4: "gemma4"
         case .qwen36: "qwen36"
         case .deepseekV4Flash: "deepseekv4flash"
+        case .inklingSmall: "inklingsmall"
         }
         UserDefaults(suiteName: "Mference")?.set(value, forKey: "model")
     }
