@@ -35,26 +35,13 @@ Mference currently runs four pinned instruction checkpoints:
 - **[Gemma 4 26B-A4B](https://ai.google.dev/gemma/docs/core/model_card_4)** —
   26B total, ~3.88B active per token, in ~2 GB of memory.
 - **[Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)** — 35B
-  total, ~3B active per token, in ~1.45 GB of memory. A hybrid of 30
-  gated-DeltaNet linear-attention layers and 10 full-attention layers: the
-  linear layers keep a fixed-size recurrent state instead of a KV cache, so
-  only a quarter of the model grows with context.
+  total, ~3B active per token, in ~1.45 GB of memory. 
 - **[DeepSeek-V4-Flash 284B-A13B](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ)**
   *(experimental)* — 284B total, ~13B active per token, from
-  the 2-bit dynamic-quant checkpoint (2-bit experts, 4-bit core). 43 all-MoE
-  layers (256 experts, top-6, hash-routed first 3), shared-KV MQA attention
-  with compressed long-range KV (CSA/HCA) and 4-stream hyper-connection
-  residuals. Budget: ~6.8 GB peak at the 8-slot floor, ~91 GB on disk;
-  measured 5.3–6.1 tok/s decode on a 256 GB M3 Ultra — see
-  [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) before installing.
+  the 2-bit dynamic-quant checkpoint (2-bit experts, 4-bit core). Budget: ~6.8 GB peak at the 8-slot floor, ~91 GB on  disk;
 - **[Inkling-Small 276B-A12B](https://huggingface.co/pipenetwork/Inkling-Small-MLX-4bit)** —
-  276B total, ~12B active per token, in ~9 GB of memory from the affine 4-bit
-  checkpoint (~148 GB on disk). 42 layers — 2 dense plus 40 MoE (256 routed
-  experts, top-6, 2 shared) — with sliding-window attention and every sixth
-  layer global; the checkpoint is natively multimodal and Mference runs its
-  text path. Measured 5.3–6.9 tok/s decode on an M3 Ultra — see
-  [docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) before installing.
-
+  276B total, ~12B active per token, in ~9 GB of memory.
+  
 The runtime, streaming installer, CLI, native Mac app, and loopback
 OpenAI-compatible server are written in Swift and Metal. Mference is
 model-specific rather than a wrapper around MLX or llama.cpp: each
