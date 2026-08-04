@@ -30,7 +30,7 @@ Mference builds on that: it keeps each model's shared core and KV cache in
 memory, then streams just the experts chosen for each token from SSD. The
 model never has to fit in RAM — only its working set does.
 
-Mference currently runs three pinned instruction checkpoints:
+Mference currently runs four pinned instruction checkpoints:
 
 - **[Gemma 4 26B-A4B](https://ai.google.dev/gemma/docs/core/model_card_4)** —
   26B total, ~3.88B active per token, in ~2 GB of memory.
@@ -47,6 +47,13 @@ Mference currently runs three pinned instruction checkpoints:
   residuals. Budget: ~6.8 GB peak at the 8-slot floor, ~91 GB on disk;
   expected 1.5–3 tok/s there and 4–7 tok/s at ~9.4 GB — see
   [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) before installing.
+- **[Inkling-Small 276B-A12B](https://huggingface.co/pipenetwork/Inkling-Small-MLX-4bit)** —
+  276B total, ~12B active per token, in ~9 GB of memory from the affine 4-bit
+  checkpoint (~148 GB on disk). 42 layers — 2 dense plus 40 MoE (256 routed
+  experts, top-6, 2 shared) — with sliding-window attention and every sixth
+  layer global; the checkpoint is natively multimodal and Mference runs its
+  text path. Measured 5.3–6.9 tok/s decode on an M3 Ultra — see
+  [docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) before installing.
 
 The runtime, streaming installer, CLI, native Mac app, and loopback
 OpenAI-compatible server are written in Swift and Metal. Mference is
@@ -106,10 +113,10 @@ swift run -c release MferenceCLI \
 
 | Metric | Value |
 | --- | --- |
-| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) |
+| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B (276B total, ~12B active) |
 | Weights | MLX affine, group 64; 8-bit routers; 4-bit shared experts; 4-bit routed experts (2-bit for DeepSeek-V4-Flash) |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB (Qwen 3.6) · est. ~6.8 GB (DeepSeek-V4-Flash), including a 4K KV cache |
-| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB (Qwen 3.6) · est. ~6.8 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache |
+| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
