@@ -106,9 +106,9 @@ struct OutputPaneView: View {
     private var emptyPlaceholderContent: some View {
         VStack(spacing: 8) {
             if !needsModelLoad {
-                Text("Choose a predefined example or write your own prompt.")
-                    .font(.headline)
-                Text("Describe the goal, relevant context, and any constraints.")
+                Text("Chat")
+                    .font(.title2.weight(.semibold))
+                Text("Send a message to get started")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

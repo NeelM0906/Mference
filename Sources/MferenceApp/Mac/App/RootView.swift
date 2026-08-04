@@ -6,44 +6,40 @@ import SwiftUI
 struct RootView: View {
     let model: AppModel
     @State private var conversationChromeHeight: CGFloat = 0
-    @AppStorage("Mference.chatSidebarVisible")
-    private var isChatSidebarVisible = true
     @AppStorage("Mference.inspectorVisible")
     private var isInspectorVisible = true
 
     var body: some View {
-        HStack(spacing: 0) {
-            if isChatSidebarVisible {
-                ChatSidebarView(model: model)
-                    .frame(width: CGFloat(AppChromeLayout.chatSidebarWidth))
-                    .frame(maxHeight: .infinity)
-                    .background(MferenceMacTheme.sidebarBackgroundColor)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-
-                Divider()
-            }
-
+        NavigationSplitView {
+            TemplateSidebarView(model: model)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+        } detail: {
             primaryContent
-                .frame(
-                    minWidth: CGFloat(AppChromeLayout.primaryMinimumWidth),
-                    maxWidth: .infinity,
-                    maxHeight: .infinity)
-
-            if isInspectorVisible {
-                Divider()
-
-                InspectorView(model: model)
-                    .frame(width: CGFloat(AppChromeLayout.inspectorWidth))
-                    .frame(maxHeight: .infinity)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
+                .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        ModelStatusMenu(model: model)
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("New Chat", systemImage: "square.and.pencil") {
+                            model.createChat()
+                        }
+                        .disabled(model.isRunning)
+                        .help("New chat (⌘N)")
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Inspector", systemImage: "sidebar.trailing") {
+                            isInspectorVisible.toggle()
+                        }
+                        .help(isInspectorVisible ? "Hide inspector" : "Show inspector")
+                    }
+                }
+                .inspector(isPresented: $isInspectorVisible) {
+                    InspectorView(model: model)
+                        .inspectorColumnWidth(CGFloat(AppChromeLayout.inspectorWidth))
+                }
         }
-        .frame(
-            minWidth: CGFloat(AppChromeLayout.minimumWindowWidth(
-                isChatSidebarVisible: isChatSidebarVisible,
-                isInspectorVisible: isInspectorVisible)),
-            minHeight: CGFloat(AppChromeLayout.minimumHeight))
+        .frame(minHeight: CGFloat(AppChromeLayout.minimumHeight))
         .containerBackground(for: .window) {
             LinearGradient(
                 colors: [
@@ -58,8 +54,6 @@ struct RootView: View {
         .tint(MferenceMacTheme.accentColor)
         .animation(.smooth(duration: 0.3), value: model.requiresModelInstallation)
         .animation(.smooth(duration: 0.25), value: model.error)
-        .animation(.smooth(duration: 0.22), value: isChatSidebarVisible)
-        .animation(.smooth(duration: 0.22), value: isInspectorVisible)
         .transaction { transaction in
             if model.isRunning {
                 transaction.animation = nil
@@ -80,14 +74,6 @@ struct RootView: View {
             } else {
                 conversationView
             }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            StatusHUDView(
-                model: model,
-                isChatSidebarVisible: isChatSidebarVisible,
-                isInspectorVisible: isInspectorVisible,
-                toggleChatSidebar: { isChatSidebarVisible.toggle() },
-                toggleInspector: { isInspectorVisible.toggle() })
         }
     }
 
@@ -129,16 +115,11 @@ struct RootView: View {
     private var conversationChrome: some View {
         VStack(spacing: 10) {
             ErrorBanner(model: model)
-            if model.showsPromptExamples {
-                PromptExamplesView { preset in
-                    model.promptText = preset.prompt
-                }
-            }
             PromptComposerView(model: model)
+                .frame(maxWidth: 760)
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 16)
-        .animation(.smooth(duration: 0.2), value: model.showsPromptExamples)
     }
 }
 
