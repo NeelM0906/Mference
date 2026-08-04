@@ -186,14 +186,19 @@ import Mference
         #expect(arguments.verification == .fullSha256)
     }
 
-    @Test(arguments: [("full-sha256", ModelIntegrityPolicy.fullSha256),
-                      ("trusted-receipt", ModelIntegrityPolicy.sizeCheckTrustedReceipt)])
-    func verifyAcceptsBothPolicies(value: String,
-                                   expected: ModelIntegrityPolicy) throws {
+    @Test func verifyAcceptsFullSha256() throws {
         let arguments = try Args.parse([
-            "--model", "m.gturbo", "--prompt", "hi", "--verify", value,
+            "--model", "m.gturbo", "--prompt", "hi", "--verify", "full-sha256",
         ])
-        #expect(arguments.verification == expected)
+        #expect(arguments.verification == .fullSha256)
+    }
+
+    @Test func verifyAcceptsTrustedReceipt() throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--verify", "trusted-receipt",
+        ])
+        #expect(arguments.verification == .sizeCheckTrustedReceipt)
     }
 
     @Test(arguments: ["", "none", "sha", "trusted", "full"])

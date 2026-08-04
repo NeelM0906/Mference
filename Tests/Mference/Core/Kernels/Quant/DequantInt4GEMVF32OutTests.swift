@@ -106,9 +106,11 @@ import MferenceValidationSupport
         let f = try Self.makeFixture(m: 256, n: 2816, key: "in-range")
         let (half, float) = try Self.runBoth(f)
         for i in 0..<f.m {
+            // One interpolated literal, not a `+` concatenation: `#expect`'s
+            // comment argument is a `Comment`, which is expressible by string
+            // literal and interpolation but not by a `String` expression.
             #expect(Float(Float16(float[i])) == half[i],
-                    "row \(i): f32=\(float[i]) narrows to \(Float16(float[i])) "
-                        + "but the f16 kernel wrote \(half[i])")
+                    "row \(i): f32=\(float[i]) narrows to \(Float16(float[i])) but the f16 kernel wrote \(half[i])")
         }
         let ref = DequantInt4GemvRef.apply(weightRows: f.rows, x: f.xRef, n: f.n)
         let rel = RelError.compute(actual: float, reference: ref)
@@ -124,11 +126,9 @@ import MferenceValidationSupport
                                      weightRange: (4, 8), xRange: (20, 40))
         let (half, float) = try Self.runBoth(f)
         #expect(half.allSatisfy { !$0.isFinite },
-                "fixture must overflow FP16 to be a regression test; f16 rows "
-                    + "were \(half.prefix(4)), f32 rows \(float.prefix(4))")
+                "fixture must overflow FP16 to be a regression test; f16 rows were \(half.prefix(4)), f32 rows \(float.prefix(4))")
         #expect(float.allSatisfy { $0.isFinite },
-                "FP32 output must not produce non-finite rows: "
-                    + "\(float.prefix(4))")
+                "FP32 output must not produce non-finite rows: \(float.prefix(4))")
         #expect(float.allSatisfy { $0 > 65_504 },
                 "rows should land above the FP16 ceiling: \(float.prefix(4))")
         let ref = DequantInt4GemvRef.apply(weightRows: f.rows, x: f.xRef, n: f.n)

@@ -90,8 +90,7 @@ import Metal
                 }
             }
         #expect(!text.contains("!!"),
-                "exclamation-mark burst in Inkling output — a logit row went "
-                    + "non-finite and the argmax fell back to token 0:\n\(text)")
+                "exclamation-mark burst in Inkling output — a logit row went non-finite and the argmax fell back to token 0:\n\(text)")
         // A burst replaced real text mid-word, so the completion also has to
         // look like prose: the failing run reached 15 words before the burst,
         // and every healthy run runs well past that.
