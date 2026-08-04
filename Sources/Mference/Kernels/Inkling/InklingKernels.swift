@@ -20,6 +20,8 @@ final class InklingKernels {
     private let gammaCombinePSO: MTLComputePipelineState
     private let scalePSO: MTLComputePipelineState
     private let headEpiloguePSO: MTLComputePipelineState
+    private let scaleAccumPSO: MTLComputePipelineState
+    private let f32ToF16PSO: MTLComputePipelineState
     private let f16ToF32PSO: MTLComputePipelineState
     private let sconvF32OutPSO: MTLComputePipelineState
     private let residualAddF32DPSO: MTLComputePipelineState
@@ -42,6 +44,8 @@ final class InklingKernels {
         self.scalePSO = try context.pipeline("inkling_scale_f16")
         self.headEpiloguePSO = try context.pipeline("inkling_head_epilogue")
         self.f16ToF32PSO = try context.pipeline("inkling_f16_to_f32")
+        self.scaleAccumPSO = try context.pipeline("inkling_scale_accum_f32")
+        self.f32ToF16PSO = try context.pipeline("inkling_f32_to_f16")
         self.sconvF32OutPSO = try context.pipeline("inkling_sconv_step_f32out")
         self.residualAddF32DPSO = try context.pipeline("inkling_residual_add_f32d")
         self.residualAddF32PSO = try context.pipeline("inkling_residual_add_f32")
@@ -158,12 +162,13 @@ final class InklingKernels {
     /// then selection + weighting. `onesScale` is a bf16 all-ones [d] buffer.
     func encodeRouter(commandBuffer cb: MTLCommandBuffer,
                       weights: MTLBuffer, weightsOffset: Int,
-                      hidden: MTLBuffer,
+                      hidden: MTLBuffer, hiddenOffset: Int = 0,
                       onesScale: MTLBuffer,
                       gateBias: MTLBuffer, gateBiasOffset: Int,
                       globalScale: MTLBuffer, globalScaleOffset: Int,
-                      outIndices: MTLBuffer,
-                      outWeights: MTLBuffer,
+                      outIndices: MTLBuffer, outIndicesOffset: Int = 0,
+                      outWeights: MTLBuffer, outWeightsOffset: Int = 0,
+                      gammasOut: MTLBuffer? = nil, gammasOffset: Int = 0,
                       numRouted: UInt32, numShared: UInt32,
                       topK: UInt32, routeScale: Float,
                       d: UInt32) {
@@ -172,7 +177,7 @@ final class InklingKernels {
         if let enc = cb.makeComputeCommandEncoder() {
             enc.setComputePipelineState(routerGemvPSO)
             enc.setBuffer(weights, offset: weightsOffset, index: 0)
-            enc.setBuffer(hidden, offset: 0, index: 1)
+            enc.setBuffer(hidden, offset: hiddenOffset, index: 1)
             enc.setBuffer(onesScale, offset: 0, index: 2)
             enc.setBuffer(routerLogits, offset: 0, index: 3)
             enc.setBytes(&total, length: 4, index: 4)
@@ -186,7 +191,11 @@ final class InklingKernels {
                                gateBias: gateBias, gateBiasOffset: gateBiasOffset,
                                globalScale: globalScale,
                                globalScaleOffset: globalScaleOffset,
-                               outIndices: outIndices, outWeights: outWeights,
+                               outIndices: outIndices,
+                               outIndicesOffset: outIndicesOffset,
+                               outWeights: outWeights,
+                               outWeightsOffset: outWeightsOffset,
+                               gammasOut: gammasOut, gammasOffset: gammasOffset,
                                numRouted: numRouted, numShared: numShared,
                                topK: topK, routeScale: routeScale)
     }
@@ -196,8 +205,9 @@ final class InklingKernels {
     func encodeRouterSelectOnly(commandBuffer cb: MTLCommandBuffer,
                                 gateBias: MTLBuffer, gateBiasOffset: Int,
                                 globalScale: MTLBuffer, globalScaleOffset: Int,
-                                outIndices: MTLBuffer,
-                                outWeights: MTLBuffer,
+                                outIndices: MTLBuffer, outIndicesOffset: Int = 0,
+                                outWeights: MTLBuffer, outWeightsOffset: Int = 0,
+                                gammasOut: MTLBuffer? = nil, gammasOffset: Int = 0,
                                 numRouted: UInt32, numShared: UInt32,
                                 topK: UInt32, routeScale: Float) {
         guard let enc = cb.makeComputeCommandEncoder() else { return }
@@ -206,9 +216,9 @@ final class InklingKernels {
         enc.setBuffer(routerLogits, offset: 0, index: 0)
         enc.setBuffer(gateBias, offset: gateBiasOffset, index: 1)
         enc.setBuffer(globalScale, offset: globalScaleOffset, index: 2)
-        enc.setBuffer(outIndices, offset: 0, index: 3)
-        enc.setBuffer(outWeights, offset: 0, index: 4)
-        enc.setBuffer(sharedGammas, offset: 0, index: 5)
+        enc.setBuffer(outIndices, offset: outIndicesOffset, index: 3)
+        enc.setBuffer(outWeights, offset: outWeightsOffset, index: 4)
+        enc.setBuffer(gammasOut ?? sharedGammas, offset: gammasOffset, index: 5)
         enc.setBytes(&nr, length: 4, index: 6)
         enc.setBytes(&ns, length: 4, index: 7)
         enc.setBytes(&tk, length: 4, index: 8)
@@ -231,6 +241,39 @@ final class InklingKernels {
         enc.setBuffer(sharedGammas, offset: 0, index: 2)
         enc.setBuffer(y, offset: 0, index: 3)
         enc.setBytes(&n, length: 4, index: 4)
+        enc.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// acc(f32, at offset) += w * x(f16).
+    func encodeScaleAccum(commandBuffer cb: MTLCommandBuffer,
+                          acc: MTLBuffer, accOffset: Int,
+                          x: MTLBuffer,
+                          weight: Float, count: UInt32) {
+        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        var w = weight
+        var n = count
+        enc.setComputePipelineState(scaleAccumPSO)
+        enc.setBuffer(acc, offset: accOffset, index: 0)
+        enc.setBuffer(x, offset: 0, index: 1)
+        enc.setBytes(&w, length: 4, index: 2)
+        enc.setBytes(&n, length: 4, index: 3)
+        enc.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// dst(f16) = src(f32 at offset), narrowing.
+    func encodeF32ToF16(commandBuffer cb: MTLCommandBuffer,
+                        src: MTLBuffer, srcOffset: Int,
+                        dst: MTLBuffer, count: UInt32) {
+        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        var n = count
+        enc.setComputePipelineState(f32ToF16PSO)
+        enc.setBuffer(src, offset: srcOffset, index: 0)
+        enc.setBuffer(dst, offset: 0, index: 1)
+        enc.setBytes(&n, length: 4, index: 2)
         enc.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         enc.endEncoding()
@@ -261,13 +304,14 @@ final class InklingKernels {
 
     /// hidden(f32) += scale * delta(f32).
     func encodeResidualAddF32Delta(commandBuffer cb: MTLCommandBuffer,
-                                   hidden: MTLBuffer, delta: MTLBuffer,
+                                   hidden: MTLBuffer, hiddenOffset: Int = 0,
+                                   delta: MTLBuffer,
                                    count: UInt32, scale: Float = 1.0) {
         guard let enc = cb.makeComputeCommandEncoder() else { return }
         var n = count
         var sc = scale
         enc.setComputePipelineState(residualAddF32DPSO)
-        enc.setBuffer(hidden, offset: 0, index: 0)
+        enc.setBuffer(hidden, offset: hiddenOffset, index: 0)
         enc.setBuffer(delta, offset: 0, index: 1)
         enc.setBytes(&n, length: 4, index: 2)
         enc.setBytes(&sc, length: 4, index: 3)
@@ -278,12 +322,13 @@ final class InklingKernels {
 
     /// hidden(f32) = f16 src widened; the embed seeds the FP32 stream once.
     func encodeF16ToF32(commandBuffer cb: MTLCommandBuffer,
-                        src: MTLBuffer, dst: MTLBuffer, count: UInt32) {
+                        src: MTLBuffer, dst: MTLBuffer, dstOffset: Int = 0,
+                        count: UInt32) {
         guard let enc = cb.makeComputeCommandEncoder() else { return }
         var n = count
         enc.setComputePipelineState(f16ToF32PSO)
         enc.setBuffer(src, offset: 0, index: 0)
-        enc.setBuffer(dst, offset: 0, index: 1)
+        enc.setBuffer(dst, offset: dstOffset, index: 1)
         enc.setBytes(&n, length: 4, index: 2)
         enc.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -306,14 +351,14 @@ final class InklingKernels {
 
     /// out(f16) = rmsnorm(x_f32) * weight(bf16).
     func encodeRMSF32(commandBuffer cb: MTLCommandBuffer,
-                      x: MTLBuffer,
+                      x: MTLBuffer, xOffset: Int = 0,
                       weight: MTLBuffer, weightOffset: Int,
                       out: MTLBuffer,
                       d: UInt32, eps: Float) {
         guard let enc = cb.makeComputeCommandEncoder() else { return }
         var dd = d, e = eps
         enc.setComputePipelineState(rmsF32PSO)
-        enc.setBuffer(x, offset: 0, index: 0)
+        enc.setBuffer(x, offset: xOffset, index: 0)
         enc.setBuffer(weight, offset: weightOffset, index: 1)
         enc.setBuffer(out, offset: 0, index: 2)
         enc.setBytes(&dd, length: 4, index: 3)

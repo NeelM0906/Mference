@@ -426,6 +426,34 @@ kernel void inkling_head_epilogue(
 }
 
 // ----------------------------------------------------------------------------
+// acc(f32) += w * x(f16) — expert-major prefill accumulation: each streamed
+// expert's GLU output is folded into the per-token FFN accumulator with its
+// routing weight.
+// ----------------------------------------------------------------------------
+kernel void inkling_scale_accum_f32(
+    device       float* acc   [[buffer(0)]],
+    device const half*  x     [[buffer(1)]],
+    constant     float& w     [[buffer(2)]],
+    constant     uint&  count [[buffer(3)]],
+    uint i [[thread_position_in_grid]]
+) {
+    if (i >= count) return;
+    acc[i] = fma(float(x[i]), w, acc[i]);
+}
+
+// f32 -> f16 narrowing copy (per-token staging of chunk vectors into the
+// fixed GEMV scratch).
+kernel void inkling_f32_to_f16(
+    device const float* src   [[buffer(0)]],
+    device       half*  dst   [[buffer(1)]],
+    constant     uint&  count [[buffer(2)]],
+    uint i [[thread_position_in_grid]]
+) {
+    if (i >= count) return;
+    dst[i] = half(src[i]);
+}
+
+// ----------------------------------------------------------------------------
 // In-place x *= c over half elements (muP logit scaling, dense global_scale).
 // ----------------------------------------------------------------------------
 kernel void inkling_scale_f16(

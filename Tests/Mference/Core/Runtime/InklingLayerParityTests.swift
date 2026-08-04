@@ -820,3 +820,39 @@ extension InklingLayerParityTests {
         print("[stage] dumped to \(outDir)")
     }
 }
+
+extension InklingLayerParityTests {
+    /// Teacher-forced logits dump for the KLD eval: feeds the token list in
+    /// MFERENCE_KLD_IDS through produce() and appends each position's logits
+    /// (unpadded vocab, f32) to MFERENCE_KLD_OUT.
+    @Test func teacherForcedLogitsDump() async throws {
+        guard let path = ProcessInfo.processInfo
+            .environment["MFERENCE_INKLING_GTURBO"],
+            let idsPath = ProcessInfo.processInfo.environment["MFERENCE_KLD_IDS"],
+            let outPath = ProcessInfo.processInfo.environment["MFERENCE_KLD_OUT"]
+        else { return }
+        let idsData = try Data(contentsOf: URL(fileURLWithPath: idsPath))
+        let ids = try JSONDecoder().decode([Int32].self, from: idsData)
+        let ctx = try MetalContext()
+        let cfg = try #require(ArchConfig.knownArchitectures[.inklingSmall])
+        let model = try Model.load(directoryURL: URL(fileURLWithPath: path),
+                                   device: ctx.device,
+                                   expecting: cfg)
+        let runner = try RealForwardRunner(model: model, context: ctx,
+                                           maxContext: 4096)
+        let logits = ctx.device.makeBuffer(
+            length: cfg.vocabSize * MemoryLayout<Float16>.stride,
+            options: .storageModeShared)!
+        let valid = cfg.unpaddedVocabSize
+        FileManager.default.createFile(atPath: outPath, contents: nil)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: outPath))
+        for (p, t) in ids.enumerated() {
+            try await runner.produce(token: t, position: p, into: logits)
+            let lp = logits.contents().bindMemory(to: Float16.self, capacity: valid)
+            let row = (0..<valid).map { Float(lp[$0]) }
+            row.withUnsafeBytes { handle.write(Data($0)) }
+        }
+        try handle.close()
+        print("[kld] wrote \(ids.count) x \(valid) logits to \(outPath)")
+    }
+}
