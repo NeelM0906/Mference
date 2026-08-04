@@ -40,12 +40,12 @@ Mference currently runs four pinned instruction checkpoints:
   linear layers keep a fixed-size recurrent state instead of a KV cache, so
   only a quarter of the model grows with context.
 - **[DeepSeek-V4-Flash 284B-A13B](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ)**
-  *(experimental, unbenchmarked)* — 284B total, ~13B active per token, from
+  *(experimental)* — 284B total, ~13B active per token, from
   the 2-bit dynamic-quant checkpoint (2-bit experts, 4-bit core). 43 all-MoE
   layers (256 experts, top-6, hash-routed first 3), shared-KV MQA attention
   with compressed long-range KV (CSA/HCA) and 4-stream hyper-connection
   residuals. Budget: ~6.8 GB peak at the 8-slot floor, ~91 GB on disk;
-  expected 1.5–3 tok/s there and 4–7 tok/s at ~9.4 GB — see
+  measured 5.3–6.1 tok/s decode on a 256 GB M3 Ultra — see
   [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) before installing.
 - **[Inkling-Small 276B-A12B](https://huggingface.co/pipenetwork/Inkling-Small-MLX-4bit)** —
   276B total, ~12B active per token, in ~9 GB of memory from the affine 4-bit
@@ -121,6 +121,8 @@ swift run -c release MferenceCLI \
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
 | Measured decode, Qwen 3.6 | 18.8–23.1 tok/s (M5) at a 1,447–1,464 MiB peak footprint |
+| Measured decode, DeepSeek-V4-Flash | 5.3–6.1 tok/s (256 GB M3 Ultra) at a 5,671–5,679 MiB peak footprint |
+| Measured decode, Inkling-Small | 5.3–6.9 tok/s (256 GB M3 Ultra) at a 8,936–8,939 MiB peak footprint |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed
