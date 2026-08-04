@@ -91,22 +91,41 @@ public struct Model {
 
     /// Tensor-name prefix for the language-model trunk. Gemma and Qwen ship
     /// inside a multimodal container (`language_model.model.`); DeepSeek V4
-    /// is text-only and uses the bare `model.` prefix.
+    /// is text-only and uses the bare `model.` prefix. Inkling is multimodal
+    /// but names its towers as siblings (`model.llm.`, `model.visual.`,
+    /// `model.audio.`).
     var trunkPrefix: String {
         switch config.family {
         case .gemma4, .qwen36: return "language_model.model."
         case .deepseekV4Flash: return "model."
+        case .inklingSmall: return "model.llm."
         }
     }
     private var lmHeadName: String {
         switch config.family {
         case .gemma4, .qwen36: return "language_model.lm_head.weight"
         case .deepseekV4Flash: return "lm_head.weight"
+        case .inklingSmall: return "model.llm.unembed.weight"
+        }
+    }
+    /// Inkling names the token embedding `embed`, not `embed_tokens`.
+    private var embeddingName: String {
+        switch config.family {
+        case .gemma4, .qwen36, .deepseekV4Flash:
+            return "\(trunkPrefix)embed_tokens.weight"
+        case .inklingSmall:
+            return "\(trunkPrefix)embed.weight"
         }
     }
 
     public var embedding: TensorView {
-        try! resident(name: "\(trunkPrefix)embed_tokens.weight")
+        try! resident(name: embeddingName)
+    }
+
+    /// RMS norm applied to the token embeddings before the first layer.
+    /// Inkling-only (`use_embed_norm`); absent elsewhere.
+    public var embedNorm: TensorView {
+        try! resident(name: "\(trunkPrefix)embed_norm.weight")
     }
 
     /// Gemma 4 ties lm_head to the embedding; Qwen 3.6 carries a separate
@@ -139,6 +158,8 @@ public struct Model {
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
         case .deepseekV4Flash:
             return try resident(name: "model.layers.\(L).ffn.gate.weight")
+        case .inklingSmall:
+            return try resident(name: "model.llm.layers.\(L).mlp.gate.weight")
         }
     }
     /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
@@ -161,6 +182,8 @@ public struct Model {
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
         case .deepseekV4Flash:
             return "model.layers.\(L).ffn.shared_experts.\(proj).weight"
+        case .inklingSmall:
+            return "model.llm.layers.\(L).mlp.shared_experts.\(proj).weight"
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
@@ -172,7 +195,7 @@ public struct Model {
         switch config.family {
         case .gemma4, .qwen36:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
-        case .deepseekV4Flash:
+        case .deepseekV4Flash, .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
         }
     }
@@ -182,6 +205,8 @@ public struct Model {
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
         case .deepseekV4Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).ffn_norm.weight")
+        case .inklingSmall:
+            return try resident(name: "\(trunkPrefix)layers.\(L).mlp_norm.weight")
         }
     }
     public var finalNorm: TensorView {
@@ -490,6 +515,8 @@ public struct Model {
         if streamersBox.streamers[L] != nil {
             return
         }
+        // Leading dense-FFN layers have no routed experts and no blob file.
+        if packedExpertsLayout.layers[L].experts.isEmpty { return }
         let basename = packedExpertsLayout.layers[L].file
         let url = directoryURL
             .appendingPathComponent("packed_experts")
@@ -721,6 +748,8 @@ extension Model {
             guard layer.layer >= 0 && layer.layer < manifest.numLayers else {
                 throw ModelError.trustedReceiptInvalid(detail: "layout layer out of range")
             }
+            // Dense-FFN layers ship no expert blob; nothing to size-check.
+            if layer.experts.isEmpty { continue }
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(detail: "manifest missing \(relativePath)")

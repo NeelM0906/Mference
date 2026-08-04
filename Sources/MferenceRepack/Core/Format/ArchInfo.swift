@@ -7,6 +7,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case deepseekV4Flash = "deepseekV4Flash"
+    case inklingSmall = "inklingSmall"
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
@@ -81,6 +82,28 @@ struct ArchInfo: Sendable, Equatable {
     let routedScalingFactor: Double
     let swigluLimit: Double
 
+    // Inkling extensions: learned relative-attention position encoding (no
+    // RoPE), depthwise short convolutions, multiple shared experts that sink
+    // their own router logits, and leading dense-FFN layers. Zeroed defaults
+    // (one shared expert, unit logit scale) keep the other three families'
+    // manifest output unchanged.
+    let relDRel: Int
+    let relExtent: Int
+    let relProjDim: Int
+    let relLogScalingFloor: Int
+    let relLogScalingAlpha: Double
+    let sconvKernelSize: Int
+    let numSharedExperts: Int
+    let numDenseLayers: Int
+    let denseIntermediateSize: Int
+    let sharedExpertSink: Bool
+    let embedNormEnabled: Bool
+    let logitsWidthMultiplier: Double
+    let routerGateBias: Bool
+    let routerNormAfterTopK: Bool
+    let routerGlobalScale: Bool
+    let unpaddedVocabSize: Int
+
     init(hiddenSize: Int,
          intermediateSize: Int,
          moeIntermediateSize: Int,
@@ -135,7 +158,23 @@ struct ArchInfo: Sendable, Equatable {
          numHashRoutedLayers: Int = 0,
          routerScoringFunc: String = "softmax",
          routedScalingFactor: Double = 1.0,
-         swigluLimit: Double = 0.0) {
+         swigluLimit: Double = 0.0,
+         relDRel: Int = 0,
+         relExtent: Int = 0,
+         relProjDim: Int = 0,
+         relLogScalingFloor: Int = 0,
+         relLogScalingAlpha: Double = 0,
+         sconvKernelSize: Int = 0,
+         numSharedExperts: Int = 1,
+         numDenseLayers: Int = 0,
+         denseIntermediateSize: Int = 0,
+         sharedExpertSink: Bool = false,
+         embedNormEnabled: Bool = false,
+         logitsWidthMultiplier: Double = 1.0,
+         routerGateBias: Bool = false,
+         routerNormAfterTopK: Bool = false,
+         routerGlobalScale: Bool = false,
+         unpaddedVocabSize: Int = 0) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.moeIntermediateSize = moeIntermediateSize
@@ -191,6 +230,22 @@ struct ArchInfo: Sendable, Equatable {
         self.routerScoringFunc = routerScoringFunc
         self.routedScalingFactor = routedScalingFactor
         self.swigluLimit = swigluLimit
+        self.relDRel = relDRel
+        self.relExtent = relExtent
+        self.relProjDim = relProjDim
+        self.relLogScalingFloor = relLogScalingFloor
+        self.relLogScalingAlpha = relLogScalingAlpha
+        self.sconvKernelSize = sconvKernelSize
+        self.numSharedExperts = numSharedExperts
+        self.numDenseLayers = numDenseLayers
+        self.denseIntermediateSize = denseIntermediateSize
+        self.sharedExpertSink = sharedExpertSink
+        self.embedNormEnabled = embedNormEnabled
+        self.logitsWidthMultiplier = logitsWidthMultiplier
+        self.routerGateBias = routerGateBias
+        self.routerNormAfterTopK = routerNormAfterTopK
+        self.routerGlobalScale = routerGlobalScale
+        self.unpaddedVocabSize = unpaddedVocabSize
     }
 
     static func load(configPath: String) throws -> ArchInfo {
@@ -209,7 +264,195 @@ struct ArchInfo: Sendable, Equatable {
         if (root["model_type"] as? String) == "qwen3_5_moe" {
             return try loadQwen36(configPath: configPath, tc: tc)
         }
+        if (root["model_type"] as? String) == "inkling_mm_model" {
+            return try loadInklingSmall(configPath: configPath, tc: tc)
+        }
         return try loadGemma4(configPath: configPath, tc: tc)
+    }
+
+    // MARK: - Inkling Small
+
+    /// Inkling carries no RoPE at all — position rides on a learned
+    /// relative-attention bias — so `ropeTheta` and `partialRotaryFactor` are
+    /// deliberately zero rather than parsed. Attention layers are named by
+    /// exclusion: `local_layer_ids` lists the sliding-window layers and every
+    /// other layer is full attention.
+    ///
+    /// `relExtent` is the *global*-layer bias width; sliding layers use
+    /// `sliding_window_size` instead (the reference picks
+    /// `sliding_window_size if is_sliding else rel_extent`), which is why the
+    /// checkpoint ships `rel_logits_proj.proj` as `[16, 512]` on local layers
+    /// and `[16, 1024]` on layers 5, 11, 17, 23, 29, 35 and 41. `relProjDim`
+    /// is `num_attention_heads * d_rel`, the output width of `attn.wr_du`.
+    private static func loadInklingSmall(configPath: String,
+                                         tc: [String: Any]) throws -> ArchInfo {
+        func i(_ k: String) throws -> Int {
+            guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        func d(_ k: String) throws -> Double {
+            guard let n = (tc[k] as? Double) ?? (tc[k] as? NSNumber)?.doubleValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        let numLayers = try i("num_hidden_layers")
+        guard let localIDs = tc["local_layer_ids"] as? [Int] else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing local_layer_ids")
+        }
+        let localSet = Set(localIDs)
+        if let bad = localSet.first(where: { $0 < 0 || $0 >= numLayers }) {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "local_layer_ids entry \(bad) out of range for \(numLayers) layers")
+        }
+        // 0 = sliding-window, 1 = full attention.
+        let mask: [UInt8] = (0..<numLayers).map { localSet.contains($0) ? 0 : 1 }
+
+        guard (tc["use_sconv"] as? Bool) == true else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "use_sconv must be true for Inkling")
+        }
+        guard let gateActivation = tc["gate_activation"] as? String else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing gate_activation")
+        }
+        guard gateActivation == "sigmoid" else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "unsupported gate_activation \"\(gateActivation)\"")
+        }
+        let headDim = try i("head_dim")
+        let swaHeadDim = try i("swa_head_dim")
+        guard swaHeadDim == headDim else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "swa_head_dim \(swaHeadDim) != head_dim \(headDim); "
+                    + "the runtime carries a single head dimension")
+        }
+
+        let arch = ArchInfo(
+            hiddenSize: try i("hidden_size"),
+            intermediateSize: try i("intermediate_size"),
+            moeIntermediateSize: try i("intermediate_size"),
+            numHeads: try i("num_attention_heads"),
+            numKVHeads: try i("num_key_value_heads"),
+            numFullKVHeads: try i("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: try i("sliding_window_size"),
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 0.0,
+            fullRopeTheta: 0.0,
+            partialRotaryFactor: 0.0,
+            numLayers: numLayers,
+            numExperts: try i("n_routed_experts"),
+            topKExperts: try i("num_experts_per_tok"),
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: mask,
+            hiddenActivation: "silu",
+            family: .inklingSmall,
+            attnOutputGate: false,
+            // Inkling RMS-normalizes q and k per head, so the reference uses
+            // `1 / head_dim`, NOT the usual `1 / sqrt(head_dim)`
+            // (`inkling_mlx/attention.py`: "q/k are per-head RMS-normalized,
+            // hence 1/d rather than 1/sqrt(d)").
+            attentionScale: 1.0 / Double(headDim),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: false,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            routerScoringFunc: gateActivation,
+            routedScalingFactor: try d("route_scale"),
+            relDRel: try i("d_rel"),
+            relExtent: try i("rel_extent"),
+            relProjDim: try i("num_attention_heads") * (try i("d_rel")),
+            relLogScalingFloor: try i("log_scaling_n_floor"),
+            relLogScalingAlpha: try d("log_scaling_alpha"),
+            sconvKernelSize: try i("sconv_kernel_size"),
+            numSharedExperts: try i("n_shared_experts"),
+            numDenseLayers: try i("dense_mlp_idx"),
+            denseIntermediateSize: try i("dense_intermediate_size"),
+            sharedExpertSink: (tc["shared_expert_sink"] as? Bool) ?? false,
+            embedNormEnabled: (tc["use_embed_norm"] as? Bool) ?? false,
+            logitsWidthMultiplier: try d("logits_mup_width_multiplier"),
+            routerGateBias: (tc["use_gate_bias"] as? Bool) ?? false,
+            routerNormAfterTopK: (tc["norm_after_topk"] as? Bool) ?? false,
+            routerGlobalScale: (tc["use_global_scale"] as? Bool) ?? false,
+            unpaddedVocabSize: (tc["unpadded_vocab_size"] as? Int)
+                ?? (tc["unpadded_vocab_size"] as? NSNumber)?.intValue ?? 0)
+        try crossCheckProductionInklingSmall(arch, configPath: configPath)
+        return arch
+    }
+
+    /// Production Inkling-Small 276B-A12B baseline (mirrors the runtime's
+    /// `ArchConfig.inklingSmall_276B_A12B`). A config matching the production
+    /// shape (hidden 4096, 42 layers, 256 experts) must agree on every field;
+    /// toy/synthetic configs are exempt.
+    private static func crossCheckProductionInklingSmall(
+        _ a: ArchInfo, configPath: String) throws {
+        guard a.hiddenSize == 4096, a.numLayers == 42, a.numExperts == 256 else {
+            return
+        }
+        let expectedMask: [UInt8] = (0..<42).map { $0 % 6 == 5 ? 1 : 0 }
+        func fail(_ field: String, _ actual: String, _ expected: String) -> RepackError {
+            .configJsonInvalid(
+                path: configPath,
+                detail: "production Inkling-Small \(field) is \(actual), expected \(expected)")
+        }
+        guard a.fullAttentionLayerMask == expectedMask else {
+            throw fail("local_layer_ids",
+                       a.fullAttentionLayerMask.description,
+                       expectedMask.description)
+        }
+        guard a.vocabSize == 201_024 else {
+            throw fail("vocabSize", "\(a.vocabSize)", "201024")
+        }
+        guard a.numHeads == 32, a.numKVHeads == 8, a.headDim == 128 else {
+            throw fail("attention shape",
+                       "\(a.numHeads)/\(a.numKVHeads)/\(a.headDim)", "32/8/128")
+        }
+        guard a.topKExperts == 6, a.numSharedExperts == 2 else {
+            throw fail("routing", "\(a.topKExperts)/\(a.numSharedExperts)", "6/2")
+        }
+        guard a.moeIntermediateSize == 2048, a.denseIntermediateSize == 16_384 else {
+            throw fail("FFN widths",
+                       "\(a.moeIntermediateSize)/\(a.denseIntermediateSize)",
+                       "2048/16384")
+        }
+        guard a.slidingWindow == 512 else {
+            throw fail("sliding_window_size", "\(a.slidingWindow)", "512")
+        }
+        guard a.numDenseLayers == 2 else {
+            throw fail("dense_mlp_idx", "\(a.numDenseLayers)", "2")
+        }
+        guard a.sconvKernelSize == 4 else {
+            throw fail("sconv_kernel_size", "\(a.sconvKernelSize)", "4")
+        }
+        guard a.relDRel == 16, a.relExtent == 1024 else {
+            throw fail("relative position", "\(a.relDRel)/\(a.relExtent)", "16/1024")
+        }
+        guard a.routedScalingFactor == 8.0 else {
+            throw fail("route_scale", "\(a.routedScalingFactor)", "8.0")
+        }
+        guard a.logitsWidthMultiplier == 16.0 else {
+            throw fail("logits_mup_width_multiplier",
+                       "\(a.logitsWidthMultiplier)", "16.0")
+        }
+        guard a.ropeTheta == 0, a.partialRotaryFactor == 0 else {
+            throw fail("rope", "non-zero", "zero (relative position only)")
+        }
     }
 
     // MARK: - Gemma 4
