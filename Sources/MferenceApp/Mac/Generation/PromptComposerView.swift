@@ -21,18 +21,16 @@ struct PromptComposerView: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            editor
-            footer
+            composerRow
         }
-        .padding(14)
-        .background {
-            RoundedRectangle(cornerRadius: 22)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22)
-                        .stroke(.separator.opacity(0.5), lineWidth: 0.5)
-                }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24)
+                .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
         }
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
         .fileImporter(
             isPresented: $isImportingDocuments,
             allowedContentTypes: DocumentTextExtractor.supportedContentTypes,
@@ -40,38 +38,27 @@ struct PromptComposerView: View {
             onCompletion: handleDocumentSelection)
     }
 
-    private var editor: some View {
-        TextEditor(text: $model.promptText)
-            .accessibilityLabel("Prompt")
-            .font(.body)
-            .scrollContentBackground(.hidden)
-            .focused($promptFocused)
-            .frame(height: editorHeight)
-            .overlay(alignment: .topLeading) {
-                if model.promptText.isEmpty {
-                    // Matches the NSTextView text origin: 5pt line fragment
-                    // padding, no vertical inset.
-                    Text("Prompt")
-                        .font(.body)
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 5)
-                        .allowsHitTesting(false)
-                }
-            }
-    }
-
-    private var editorHeight: CGFloat {
-        model.promptText.isEmpty ? 46 : 84
-    }
-
-    private var footer: some View {
-        HStack(spacing: 10) {
+    private var composerRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
             attachDocumentAction
             promptTips
-            Spacer()
+            editor
             clearAction
             GenerateControl(model: model)
         }
+    }
+
+    private var editor: some View {
+        TextField("Message", text: $model.promptText, axis: .vertical)
+            .textFieldStyle(.plain)
+            .accessibilityLabel("Prompt")
+            .font(.body)
+            .lineLimit(1...8)
+            .focused($promptFocused)
+            .onSubmit {
+                if model.canRun { model.run() }
+            }
+            .padding(.vertical, 7)
     }
 
     private var attachments: some View {

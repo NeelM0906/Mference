@@ -4,12 +4,18 @@ import SwiftUI
 /// One transcript row: user messages as right-aligned bubbles, assistant
 /// messages as plain markdown — with a shimmer placeholder before the first
 /// streamed token arrives.
-struct MessageView: View {
-    let message: ChatMessage
-    let isStreamingSlot: Bool
-    let streamingText: String
+public struct MessageView: View {
+    public let message: ChatMessage
+    public let isStreamingSlot: Bool
+    public let streamingText: String
 
-    var body: some View {
+    public init(message: ChatMessage, isStreamingSlot: Bool, streamingText: String) {
+        self.message = message
+        self.isStreamingSlot = isStreamingSlot
+        self.streamingText = streamingText
+    }
+
+    public var body: some View {
         switch message.role {
         case .user:
             HStack {
@@ -38,10 +44,12 @@ struct MessageView: View {
 
 /// Loading shimmer shown while waiting for the first token, mirroring the
 /// template's shimmer state.
-struct ShimmerPlaceholder: View {
+public struct ShimmerPlaceholder: View {
     @State private var phase: CGFloat = -1
 
-    var body: some View {
+    public init() {}
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             bar(width: 400)
             bar(width: 310)

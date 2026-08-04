@@ -93,7 +93,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "MferenceMac",
-            dependencies: ["MferenceAppCore", "MferenceMacPresentation"],
+            dependencies: [
+                "MferenceAppCore",
+                "MferenceMacPresentation",
+                "ChatTemplateCore",
+                "ChatTemplateUI",
+            ],
             path: "Sources/MferenceApp/Mac",
             resources: [
                 .copy("Resources/mference-app-icon.png"),
@@ -103,9 +108,14 @@ let package = Package(
             name: "ChatTemplateCore",
             path: "Sources/ChatTemplate/Core"
         ),
+        .target(
+            name: "ChatTemplateUI",
+            dependencies: ["ChatTemplateCore"],
+            path: "Sources/ChatTemplate/UI"
+        ),
         .executableTarget(
             name: "ChatTemplateMac",
-            dependencies: ["ChatTemplateCore"],
+            dependencies: ["ChatTemplateCore", "ChatTemplateUI"],
             path: "Sources/ChatTemplate/Mac"
         ),
         .testTarget(

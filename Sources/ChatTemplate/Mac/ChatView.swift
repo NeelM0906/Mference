@@ -1,4 +1,5 @@
 import ChatTemplateCore
+import ChatTemplateUI
 import SwiftUI
 
 /// The conversation pane: scrolling transcript (or empty state), a

@@ -1,4 +1,6 @@
 import AppKit
+import ChatTemplateCore
+import ChatTemplateUI
 import MferenceAppCore
 import MferenceMacPresentation
 import SwiftUI
@@ -59,17 +61,7 @@ struct OutputPaneView: View {
     }
 
     private var transcript: some View {
-        IncrementalTranscriptView(
-            messages: model.transcriptBaseMessages.map { message in
-                InstructionTranscriptMessage(
-                    role: message.role == .user ? .user : .assistant,
-                    content: message.content)
-            },
-            output: model.outputText,
-            mailbox: model.generationTranscriptMailbox,
-            isTerminal: !model.isRunning,
-            showsPrefillPlaceholder: model.isRunning
-                && model.outputResponsePlainText.isEmpty)
+        TemplateTranscriptView(model: model)
             .id(model.selectedChatID)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) {
@@ -79,7 +71,7 @@ struct OutputPaneView: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.vertical, 20)
+            .padding(.top, 20)
     }
 
     private var copyResponseButton: some View {
@@ -187,6 +179,111 @@ struct OutputPaneView: View {
     }
 }
 
+/// Chat-template conversation rendering over AppModel's transcript: user
+/// bubbles, assistant markdown blocks, shimmer before the first token, and
+/// a scroll-to-bottom button. Streaming text drains the generation mailbox
+/// on the same 0.1 s cadence the previous NSTextView transcript used.
+private struct TemplateTranscriptView: View {
+    let model: AppModel
+
+    @State private var streamedText = ""
+    @State private var distanceFromBottom: CGFloat = 0
+
+    /// While running, the mailbox is the live response; afterwards the
+    /// committed output text is authoritative (same resolution the
+    /// incremental transcript used).
+    private var response: String {
+        model.isRunning ? streamedText : model.outputText
+    }
+
+    private var baseMessages: [ChatMessage] {
+        model.transcriptBaseMessages.map { message in
+            ChatMessage(
+                id: message.id,
+                role: message.role == .user ? .user : .assistant,
+                content: message.content)
+        }
+    }
+
+    private var showsLiveResponseRow: Bool {
+        model.isRunning || !response.isEmpty
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    ForEach(baseMessages) { message in
+                        MessageView(
+                            message: message,
+                            isStreamingSlot: false,
+                            streamingText: "")
+                    }
+                    if showsLiveResponseRow {
+                        MessageView(
+                            message: ChatMessage(
+                                role: .assistant,
+                                content: model.isRunning ? "" : response),
+                            isStreamingSlot: model.isRunning,
+                            streamingText: response)
+                        .id("live-response")
+                    }
+                    Color.clear
+                        .frame(height: 8)
+                        .id("bottom")
+                }
+                .padding(.top, 4)
+                .padding(.bottom, 12)
+                .frame(maxWidth: 760)
+                .frame(maxWidth: .infinity)
+            }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentSize.height - geometry.visibleRect.maxY
+            } action: { _, distance in
+                distanceFromBottom = distance
+            }
+            .onChange(of: streamedText) {
+                if distanceFromBottom < 120 {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
+            .onChange(of: baseMessages.count) {
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            .overlay(alignment: .bottom) {
+                if distanceFromBottom > 200 {
+                    Button {
+                        withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 13, weight: .semibold))
+                            .padding(9)
+                            .background(.regularMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(.separator, lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 12)
+                    .transition(.opacity.combined(with: .scale))
+                }
+            }
+            .onAppear {
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+        }
+        .task(id: model.isRunning) {
+            guard model.isRunning else { return }
+            while !Task.isCancelled {
+                if let mailbox = model.generationTranscriptMailbox {
+                    let text = mailbox.completeText
+                    if text != streamedText { streamedText = text }
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        .accessibilityLabel("Conversation transcript")
+    }
+}
+
 private struct EmptyPlaceholderIcon: View {
     let systemName: String
 
@@ -259,280 +356,3 @@ private struct LoadingModelText: View {
         .accessibilityLabel("Loading Model")
     }
 }
-
-private struct IncrementalTranscriptView: NSViewRepresentable {
-    var messages: [InstructionTranscriptMessage]
-    var output: String
-    var mailbox: GenerationTranscriptMailbox?
-    var isTerminal: Bool
-    var showsPrefillPlaceholder: Bool
-
-    @MainActor
-    final class Coordinator: NSObject {
-        weak var scrollView: NSScrollView?
-        weak var textView: NSTextView?
-        var mailbox: GenerationTranscriptMailbox?
-        var messages: [InstructionTranscriptMessage] = []
-        var isTerminal = false
-        var showsPrefillPlaceholder = false
-        var timer: Timer?
-        var prefillAnimationTimer: Timer?
-        let documentController = InstructionTranscriptDocumentController()
-
-        func attach(scrollView: NSScrollView, textView: NSTextView) {
-            self.scrollView = scrollView
-            self.textView = textView
-            guard timer == nil else { return }
-            let timer = Timer(timeInterval: 0.1, target: self,
-                              selector: #selector(drainMailbox),
-                              userInfo: nil, repeats: true)
-            timer.tolerance = 0.02
-            RunLoop.main.add(timer, forMode: .common)
-            self.timer = timer
-        }
-
-        func synchronize(
-            messages: [InstructionTranscriptMessage],
-            output: String,
-            mailbox: GenerationTranscriptMailbox?,
-            isTerminal: Bool,
-            showsPrefillPlaceholder: Bool
-        ) {
-            let activeMailbox = isTerminal ? nil : mailbox
-            self.mailbox = activeMailbox
-            self.messages = messages
-            self.isTerminal = isTerminal
-            self.showsPrefillPlaceholder = showsPrefillPlaceholder
-            let response = InstructionTranscriptDocumentController
-                .resolvedResponse(
-                    output: output,
-                    streamedResponse: activeMailbox?.drain().completeText,
-                    isTerminal: isTerminal)
-            apply(
-                messages: messages,
-                response: response,
-                isTerminal: isTerminal,
-                showsPrefillPlaceholder: showsPrefillPlaceholder)
-        }
-
-        @objc private func drainMailbox() {
-            guard let mailbox else { return }
-            let snapshot = mailbox.drain()
-            guard !snapshot.pendingText.isEmpty
-                    || snapshot.completeText != documentController.response else {
-                return
-            }
-            apply(messages: messages,
-                  response: snapshot.completeText,
-                  isTerminal: isTerminal,
-                  showsPrefillPlaceholder: showsPrefillPlaceholder)
-        }
-
-        @objc private func animatePrefillPlaceholderIfNeeded() {
-            guard documentController.showsPrefillPlaceholder,
-                  let scrollView,
-                  let textView,
-                  let storage = textView.textStorage else { return }
-            let wasAtBottom = isAtBottom(scrollView)
-            let selection = textView.selectedRanges.map(\.rangeValue)
-
-            storage.beginEditing()
-            let changed = documentController.advancePrefillAnimation(storage: storage)
-            storage.endEditing()
-            guard changed else { return }
-
-            let restored = InstructionTranscriptDocumentController.clampedRanges(
-                selection,
-                toLength: storage.length)
-            if restored.isEmpty {
-                textView.setSelectedRange(NSRange(location: storage.length, length: 0))
-            } else {
-                textView.selectedRanges = restored.map(NSValue.init(range:))
-            }
-            if wasAtBottom { textView.scrollToEndOfDocument(nil) }
-        }
-
-        func invalidate() {
-            timer?.invalidate()
-            timer = nil
-            stopPrefillAnimationTimer()
-            mailbox = nil
-        }
-
-        private func updatePrefillAnimationTimer() {
-            if documentController.showsPrefillPlaceholder {
-                guard prefillAnimationTimer == nil else { return }
-                let timer = Timer(
-                    timeInterval: 0.25,
-                    target: self,
-                    selector: #selector(animatePrefillPlaceholderIfNeeded),
-                    userInfo: nil,
-                    repeats: true)
-                timer.tolerance = 0.025
-                RunLoop.main.add(timer, forMode: .common)
-                prefillAnimationTimer = timer
-            } else {
-                stopPrefillAnimationTimer()
-            }
-        }
-
-        private func stopPrefillAnimationTimer() {
-            prefillAnimationTimer?.invalidate()
-            prefillAnimationTimer = nil
-        }
-
-        private func apply(
-            messages: [InstructionTranscriptMessage],
-            response: String,
-            isTerminal: Bool,
-            showsPrefillPlaceholder: Bool
-        ) {
-            guard let scrollView, let textView, let storage = textView.textStorage else { return }
-            let wasAtBottom = isAtBottom(scrollView)
-            let selection = textView.selectedRanges.map(\.rangeValue)
-
-            storage.beginEditing()
-            let update = documentController.synchronize(
-                storage: storage,
-                history: messages,
-                response: response,
-                isTerminal: isTerminal,
-                showsPrefillPlaceholder: showsPrefillPlaceholder)
-            storage.endEditing()
-            updatePrefillAnimationTimer()
-
-            guard update.mutation != .none else { return }
-            let restored = InstructionTranscriptDocumentController.clampedRanges(
-                selection,
-                toLength: storage.length)
-            if restored.isEmpty {
-                textView.setSelectedRange(NSRange(location: storage.length, length: 0))
-            } else {
-                textView.selectedRanges = restored.map(NSValue.init(range:))
-            }
-            if InstructionTranscriptDocumentController.shouldScrollToBottom(
-                wasAtBottom: wasAtBottom,
-                mutation: update.mutation
-            ) {
-                if let textContainer = textView.textContainer {
-                    textView.layoutManager?.ensureLayout(for: textContainer)
-                }
-                textView.scrollToEndOfDocument(nil)
-            }
-        }
-
-        private func isAtBottom(_ scrollView: NSScrollView) -> Bool {
-            guard let document = scrollView.documentView else { return true }
-            let visible = scrollView.contentView.bounds
-            return visible.maxY >= document.bounds.maxY - 24
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
-
-        let textView = NSTextView()
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.isRichText = true
-        textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: 0, height: 4)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.lineFragmentPadding = 0
-        textView.isAutomaticLinkDetectionEnabled = false
-        textView.isAutomaticDataDetectionEnabled = false
-        textView.setAccessibilityLabel("Conversation transcript")
-        scrollView.documentView = textView
-        return scrollView
-    }
-
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
-        context.coordinator.attach(scrollView: scrollView, textView: textView)
-        context.coordinator.synchronize(
-            messages: messages,
-            output: output,
-            mailbox: mailbox,
-            isTerminal: isTerminal,
-            showsPrefillPlaceholder: showsPrefillPlaceholder)
-    }
-
-    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
-        coordinator.invalidate()
-    }
-}
-
-#if DEBUG
-private struct TranscriptPreview: View {
-    let response: String
-    let isTerminal: Bool
-    var showsPrefillPlaceholder = false
-
-    var body: some View {
-        IncrementalTranscriptView(
-            messages: [
-                InstructionTranscriptMessage(
-                    role: .user,
-                    content: "Explain this clearly."),
-            ],
-            output: response,
-            mailbox: nil,
-            isTerminal: isTerminal,
-            showsPrefillPlaceholder: showsPrefillPlaceholder)
-            .padding(24)
-            .frame(width: 720, height: 420)
-    }
-}
-
-#Preview("Empty") {
-    VStack(spacing: 8) {
-        Image(systemName: "cube.transparent")
-            .font(.title2)
-            .foregroundStyle(.quaternary)
-        Text("Choose a predefined example or write your own prompt.")
-            .font(.headline)
-        Text("Describe the goal, relevant context, and any constraints.")
-            .foregroundStyle(.secondary)
-    }
-    .frame(width: 720, height: 420)
-}
-
-#Preview("Streaming") {
-    TranscriptPreview(
-        response: "A response arriving one readable piece at a time...",
-        isTerminal: false)
-}
-
-#Preview("Prefilling") {
-    TranscriptPreview(
-        response: "",
-        isTerminal: false,
-        showsPrefillPlaceholder: true)
-}
-
-#Preview("Completed prose") {
-    TranscriptPreview(
-        response: "# A clear answer\n\nHere is a concise explanation with **useful emphasis**.\n\n- First point\n- Second point",
-        isTerminal: true)
-}
-
-#Preview("Completed code") {
-    TranscriptPreview(
-        response: "Use `fibonacci(7)`:\n\n```python\ndef fibonacci(n: int) -> list[int]:\n    return []\n```",
-        isTerminal: true)
-}
-
-#Preview("Incomplete Markdown fallback") {
-    TranscriptPreview(
-        response: "The partial answer remains readable.\n\n```python\nprint('unfinished')",
-        isTerminal: true)
-}
-#endif

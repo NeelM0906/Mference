@@ -1,13 +1,18 @@
+import AppKit
 import ChatTemplateCore
 import SwiftUI
 
 /// Renders assistant markdown: headings, paragraphs, lists, quotes,
 /// dividers, GFM tables, and fenced code blocks with a copy button —
 /// mirroring the template's custom markdown renderer.
-struct MarkdownView: View {
-    let text: String
+public struct MarkdownView: View {
+    public let text: String
 
-    var body: some View {
+    public init(text: String) {
+        self.text = text
+    }
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(MarkdownBlockParser.parse(text).enumerated()), id: \.offset) { _, block in
                 blockView(block)
@@ -21,11 +26,11 @@ struct MarkdownView: View {
     private func blockView(_ block: MarkdownBlock) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(inline(text))
+            Text(inlineMarkdown(text))
                 .font(headingFont(level))
                 .padding(.top, 4)
         case .paragraph(let text):
-            Text(inline(text))
+            Text(inlineMarkdown(text))
         case .codeBlock(let language, let code):
             CodeBlockView(language: language, code: code)
         case .bulletList(let items):
@@ -39,7 +44,7 @@ struct MarkdownView: View {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(.tertiary)
                     .frame(width: 3)
-                Text(inline(text))
+                Text(inlineMarkdown(text))
                     .foregroundStyle(.secondary)
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -59,7 +64,7 @@ struct MarkdownView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     marker(index)
                         .foregroundStyle(.secondary)
-                    Text(inline(item))
+                    Text(inlineMarkdown(item))
                 }
             }
         }
@@ -77,7 +82,7 @@ struct MarkdownView: View {
 
 /// Inline markdown (bold, italics, inline code, links) via Foundation's
 /// markdown-aware AttributedString.
-func inline(_ text: String) -> AttributedString {
+func inlineMarkdown(_ text: String) -> AttributedString {
     (try? AttributedString(
         markdown: text,
         options: AttributedString.MarkdownParsingOptions(
@@ -85,13 +90,18 @@ func inline(_ text: String) -> AttributedString {
         ?? AttributedString(text)
 }
 
-struct CodeBlockView: View {
-    let language: String?
-    let code: String
+public struct CodeBlockView: View {
+    public let language: String?
+    public let code: String
 
     @State private var copied = false
 
-    var body: some View {
+    public init(language: String?, code: String) {
+        self.language = language
+        self.code = code
+    }
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language ?? "code")
@@ -134,16 +144,21 @@ struct CodeBlockView: View {
     }
 }
 
-struct TableBlockView: View {
-    let header: [String]
-    let rows: [[String]]
+public struct TableBlockView: View {
+    public let header: [String]
+    public let rows: [[String]]
 
-    var body: some View {
+    public init(header: [String], rows: [[String]]) {
+        self.header = header
+        self.rows = rows
+    }
+
+    public var body: some View {
         ScrollView(.horizontal) {
             Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                        Text(inline(cell))
+                        Text(inlineMarkdown(cell))
                             .fontWeight(.semibold)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
@@ -155,7 +170,7 @@ struct TableBlockView: View {
                     Divider().gridCellUnsizedAxes(.horizontal)
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            Text(inline(cell))
+                            Text(inlineMarkdown(cell))
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
                                 .frame(maxWidth: .infinity, alignment: .leading)
