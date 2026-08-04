@@ -17,6 +17,7 @@ let package = Package(
         .executable(name: "MferenceMac", targets: ["MferenceMac"]),
         .executable(name: "MferenceDecodeService", targets: ["MferenceDecodeService"]),
         .executable(name: "MferenceServer", targets: ["MferenceServer"]),
+        .executable(name: "ChatTemplateMac", targets: ["ChatTemplateMac"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -97,6 +98,20 @@ let package = Package(
             resources: [
                 .copy("Resources/mference-app-icon.png"),
             ]
+        ),
+        .target(
+            name: "ChatTemplateCore",
+            path: "Sources/ChatTemplate/Core"
+        ),
+        .executableTarget(
+            name: "ChatTemplateMac",
+            dependencies: ["ChatTemplateCore"],
+            path: "Sources/ChatTemplate/Mac"
+        ),
+        .testTarget(
+            name: "ChatTemplateCoreTests",
+            dependencies: ["ChatTemplateCore"],
+            path: "Tests/ChatTemplate/Core"
         ),
         .target(
             name: "MferenceValidationSupport",
