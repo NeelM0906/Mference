@@ -1,10 +1,23 @@
 #!/bin/bash
-# Community benchmark protocol runner (docs/COMMUNITY_BENCHMARKS.md)
-# Extends the protocol with N measured repetitions per case so medians and
-# run-to-run spread can be reported. Each run is a fresh process.
+# Community benchmark protocol runner (docs/COMMUNITY_BENCHMARKS.md).
+#
+# Extends the published protocol with N measured repetitions per case so
+# medians and run-to-run spread can be reported. Each run is a fresh process.
+#
+# Aborts before invoking the CLI unless every precondition in AGENTS.md holds,
+# and aborts as soon as any run fails or does not reach a natural end of turn --
+# the protocol requires rejecting such a run, so it must never be summarized.
 #
 # usage: ./run-benchmark.sh <label> <gturbo-dir> [reps] [extra MferenceCLI args...]
+#
+# env: BENCH_CASES=a,b     restrict to these cases
+#      WARMUP_CASES=a,b    restrict which cases get a discarded warmup
+#      MIN_FREE_GB=5       minimum free disk required
+#      MIN_FREE_PCT=20     minimum system-wide free memory percentage required
 set -uo pipefail
+cd "$(dirname "$0")"
+
+fail() { echo "ABORT: $*" >&2; exit 1; }
 
 label="${1:?model label}"
 model_dir="${2:?gturbo dir}"
@@ -12,17 +25,74 @@ reps="${3:-3}"
 shift 3 2>/dev/null || shift 2
 extra=("$@")
 
-root="benchmark-results/${label}"
-mkdir -p "${root}/system" "${root}/warmup" "${root}/measured"
+case "${reps}" in
+  ''|*[!0-9]*) fail "reps must be a positive integer; got \"${reps}\"" ;;
+  0) fail "reps must be at least 1" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Preflight. AGENTS.md requires macOS 15+, Swift 6.1+, enough disk, acceptable
+# memory pressure, a completed model, and no other model process, before any
+# model run. Every one of these aborts rather than warns.
+# ---------------------------------------------------------------------------
+
+os_version=$(sw_vers -productVersion) || fail "could not read macOS version"
+[ "${os_version%%.*}" -ge 15 ] 2>/dev/null \
+  || fail "macOS 15 or later required; found ${os_version}"
+
+swift_version=$(swift --version 2>&1 |
+  sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)
+[ -n "${swift_version}" ] || fail "could not determine the Swift version"
+swift_major=${swift_version%%.*}
+swift_tail=${swift_version#*.}
+swift_minor=${swift_tail%%.*}
+[ "${swift_major}" -gt 6 ] 2>/dev/null ||
+  { [ "${swift_major}" -eq 6 ] && [ "${swift_minor}" -ge 1 ]; } 2>/dev/null ||
+  fail "Swift 6.1 or later required; found ${swift_version}"
+
+free_gb=$(df -g . | awk 'NR==2 { print $4 }')
+[ -n "${free_gb}" ] || fail "could not determine free disk space"
+[ "${free_gb}" -ge "${MIN_FREE_GB:-5}" ] \
+  || fail "need at least ${MIN_FREE_GB:-5} GiB free for run output; found ${free_gb} GiB"
+
+free_pct=$(memory_pressure -Q 2>/dev/null |
+  sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p' | head -1)
+[ -n "${free_pct}" ] || fail "could not read 'memory_pressure -Q'"
+[ "${free_pct}" -ge "${MIN_FREE_PCT:-20}" ] \
+  || fail "memory pressure too high: ${free_pct}% free, need ${MIN_FREE_PCT:-20}%"
+
+[ -x .build/release/MferenceCLI ] \
+  || fail "release CLI missing; run: swift build -c release --product MferenceCLI"
+
+[ -d "${model_dir}" ] || fail "model directory not found: ${model_dir}"
+for required in manifest.json verified-install.json; do
+  [ -f "${model_dir}/${required}" ] \
+    || fail "model install incomplete: ${model_dir}/${required} is missing (run --verify-install)"
+done
+# .partial and .resume.json mark an interrupted install (--resume /
+# --discard-partial). .install.lock is deliberately not checked: it survives a
+# successful install, so it says nothing about completeness.
+for leftover in "${model_dir}.partial" "${model_dir}.resume.json"; do
+  if [ -e "${leftover}" ]; then
+    fail "unfinished install present: ${leftover} (use --resume or --discard-partial)"
+  fi
+done
+
+for case_seed in short-explanation:x medium-review:x long-synthesis:x; do
+  prompt_file="docs/benchmark-prompts/real-generation-v1/${case_seed%%:*}.json"
+  [ -f "${prompt_file}" ] || fail "benchmark prompt missing: ${prompt_file}"
+done
 
 # Match only actual executables, not shells whose command line mentions them.
 live=$(pgrep -fl '(\.build/release/|/)(MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' \
   | grep -v -e 'run-benchmark.sh' -e '/bin/zsh' -e '/bin/bash' -e 'pgrep' || true)
-if [ -n "${live}" ]; then
-  echo "ABORT: model or installer process already running:" >&2
-  echo "${live}" >&2
-  exit 1
-fi
+[ -z "${live}" ] || fail "another model or installer process is running:
+${live}"
+
+# ---------------------------------------------------------------------------
+
+root="benchmark-results/${label}"
+mkdir -p "${root}/system" "${root}/warmup" "${root}/measured"
 
 {
   git status --short
@@ -40,7 +110,6 @@ fi
 cases=(short-explanation:20260721 medium-review:20260722 long-synthesis:20260723)
 
 # BENCH_CASES=short-explanation,medium-review restricts the run to those cases.
-# Used only where a case is not feasible on the current prefill path.
 if [ -n "${BENCH_CASES:-}" ]; then
   filtered=()
   for case_seed in "${cases[@]}"; do
@@ -49,13 +118,13 @@ if [ -n "${BENCH_CASES:-}" ]; then
     esac
   done
   cases=(${filtered[@]+"${filtered[@]}"})
-  [ "${#cases[@]}" -gt 0 ] || { echo "no cases matched BENCH_CASES=${BENCH_CASES}" >&2; exit 1; }
+  [ "${#cases[@]}" -gt 0 ] || fail "no cases matched BENCH_CASES=${BENCH_CASES}"
 fi
 
-# WARMUP_CASES restricts which cases get a discarded warmup (default: all).
 warmup_filter="${WARMUP_CASES:-all}"
 
-run_case() {  # run_case <case_id> <seed> <outfile-prefix>
+# run_case <case_id> <seed> <output-prefix> -- returns the CLI's exit status.
+run_case() {
   /usr/bin/time -l .build/release/MferenceCLI \
     --model "${model_dir}" \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${1}.json" \
@@ -69,7 +138,25 @@ run_case() {  # run_case <case_id> <seed> <outfile-prefix>
     > "${3}.stdout" 2> "${3}.stderr"
 }
 
-# One discarded warmup per case.
+# check_run <output-prefix> <description> -- abort unless the run is valid.
+check_run() {
+  local prefix="$1" what="$2" status="$3" footer
+  footer=$(grep -h '^\[stop=' "${prefix}.stderr" 2>/dev/null || true)
+  if [ "${status}" -ne 0 ]; then
+    fail "${what} exited ${status}; see ${prefix}.stderr
+${footer:-(no timing footer)}"
+  fi
+  if [ -z "${footer}" ]; then
+    fail "${what} produced no timing footer; see ${prefix}.stderr"
+  fi
+  case "${footer}" in
+    *stop=endOfTurn*) ;;
+    *) fail "${what} did not reach a natural end of turn, so the protocol rejects it:
+${footer}" ;;
+  esac
+  echo "${footer}" >&2
+}
+
 for case_seed in "${cases[@]}"; do
   case_id="${case_seed%%:*}"; seed="${case_seed##*:}"
   if [ "${warmup_filter}" != "all" ]; then
@@ -80,47 +167,21 @@ for case_seed in "${cases[@]}"; do
   fi
   echo "[${label}] warmup ${case_id} ..." >&2
   run_case "${case_id}" "${seed}" "${root}/warmup/${case_id}"
-  grep -h '^\[stop=' "${root}/warmup/${case_id}.stderr" >&2 || true
+  check_run "${root}/warmup/${case_id}" "warmup ${case_id}" "$?"
 done
 
-# Measured repetitions, each in a fresh process.
 for rep in $(seq 1 "${reps}"); do
   for case_seed in "${cases[@]}"; do
     case_id="${case_seed%%:*}"; seed="${case_seed##*:}"
     echo "[${label}] measured rep${rep} ${case_id} ..." >&2
     run_case "${case_id}" "${seed}" "${root}/measured/${case_id}.rep${rep}"
-    grep -h '^\[stop=' "${root}/measured/${case_id}.rep${rep}.stderr" >&2 || true
+    check_run "${root}/measured/${case_id}.rep${rep}" \
+      "measured rep${rep} ${case_id}" "$?"
   done
 done
 
-# Summarize: median tok/s across reps, plus min-max and peak RSS.
-{
-  printf '%-18s %8s %8s %10s %10s %10s %10s %8s\n' \
-    case prompt gen prefill_s median min max peakMiB
-  for case_seed in "${cases[@]}"; do
-    case_id="${case_seed%%:*}"
-    stats=$(for rep in $(seq 1 "${reps}"); do
-      err="${root}/measured/${case_id}.rep${rep}.stderr"
-      [ -f "${err}" ] || continue
-      grep -h '^\[stop=' "${err}" | sed -E 's/.*prefill=([0-9]+)tok\/([0-9.]+)s new=([0-9]+)tok.*tok\/s=([0-9.]+).*/\1 \2 \3 \4/'
-      awk '/maximum resident set size/ { printf "RSS %.0f\n", $1/1048576 }' "${err}"
-    done)
-    echo "${stats}" | awk -v c="${case_id}" '
-      $1=="RSS" { if ($2>rss) rss=$2; next }
-      NF==4 { p=$1; pf+=$2; g=$3; v[++n]=$4 }
-      END {
-        if (n==0) { printf "%-18s %8s\n", c, "NO DATA"; exit }
-        for (i=1; i<=n; i++) for (j=1; j<=n-i; j++) if (v[j]>v[j+1]) { t=v[j]; v[j]=v[j+1]; v[j+1]=t }
-        med = (n%2) ? v[(n+1)/2] : (v[n/2]+v[n/2+1])/2
-        printf "%-18s %8d %8d %10.2f %10.2f %10.2f %10.2f %8d\n", c, p, g, pf/n, med, v[1], v[n], rss
-      }'
-  done
-} 2>&1 | tee "${root}/summary.txt"
+# Single table generator, so the published statistic cannot drift from the doc.
+./summarize-benchmarks.sh "${label}" | tee "${root}/summary.txt" || \
+  fail "summary rejected the results for ${label}"
 
-# Reject any run that did not reach a natural end of turn.
-bad=$(grep -L 'stop=endOfTurn' "${root}"/measured/*.stderr || true)
-if [ -n "${bad}" ]; then
-  echo "WARNING: runs without stop=endOfTurn:" >&2
-  echo "${bad}" >&2
-fi
 echo "[${label}] complete" >&2
