@@ -63,6 +63,17 @@ public struct RemoteStreamingRepackResult: Sendable {
     public let reusedBytes: UInt64
     public let downloadedThisRunBytes: UInt64
     public let dryRun: Bool
+
+    /// Bytes the install writes: the resident file plus every packed-expert
+    /// layer blob. Sidecars (manifest, layout, tokenizer) are negligible.
+    public var outputBytes: UInt64 {
+        plan.resident.totalSize + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
+    }
+    public var residentEntryCount: Int { plan.resident.entries.count }
+    public var expertLayerCount: Int { plan.layers.count }
+    public var excludedMultimodalTensorCount: Int {
+        plan.excludedMultimodalTensorNames.count
+    }
 }
 
 public final class RemoteStreamingRepacker {
@@ -572,12 +583,14 @@ public final class RemoteStreamingRepacker {
             routedExpert: 4)
         for e in plan.resident.entries {
             if e.name == "language_model.model.embed_tokens.weight"
-                || e.name == "model.embed_tokens.weight",
+                || e.name == "model.embed_tokens.weight"
+                || e.name == "model.llm.embed.weight",
                let s = e.quantSpec {
                 bits.embedding = s.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight")
                 || e.name.hasSuffix(".attn.wq_a.weight")
+                || e.name.hasSuffix(".attn.wq_du.weight")
                 || e.name.hasSuffix(".linear_attn.in_proj_qkv.weight"),
                let s = e.quantSpec {
                 bits.attention = s.bits
@@ -588,9 +601,18 @@ public final class RemoteStreamingRepacker {
                let s = e.quantSpec {
                 bits.router = s.bits
             }
-            if e.name.hasSuffix(".mlp.gate_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
+            if e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
+                || e.name.hasSuffix(".mlp.shared_experts.gate_proj.weight")
                 || e.name.hasSuffix(".ffn.shared_experts.gate_proj.weight"),
+               let s = e.quantSpec {
+                bits.sharedExpert = s.bits
+            }
+            // Gemma folds the shared expert into the bare `.mlp.` names.
+            // Inkling uses those same names for its two dense-FFN layers, so
+            // trusting them everywhere would make the recorded shared-expert
+            // width depend on tensor iteration order.
+            if plan.arch.family == .gemma4,
+               e.name.hasSuffix(".mlp.gate_proj.weight"),
                let s = e.quantSpec {
                 bits.sharedExpert = s.bits
             }

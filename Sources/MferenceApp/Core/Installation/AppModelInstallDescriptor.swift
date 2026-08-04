@@ -76,12 +76,30 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 2_147_483_648)
 
+    /// Revision and index digest verified against the published repo; the byte
+    /// counts are the repo's own totals and remain estimates for the installed
+    /// `.gturbo` until a first install confirms them. Installing this family
+    /// still fails in the repacker until `ArchInfo` learns
+    /// `model_type: "inkling_mm_model"`. See `docs/INKLING_SMALL.md`.
+    public static let inklingSmall = AppModelInstallDescriptor(
+        family: .inklingSmall,
+        displayName: "Inkling-Small 276B-A12B 4-bit",
+        repoID: "pipenetwork/Inkling-Small-MLX-4bit",
+        revision: "9d6e4720ab7002af25d6129c88ccea6cd9f19372",
+        sourceIndexSHA256:
+            "fe16aec3cef12438f1d0ff657f7e785781b61271528a66b3b7160fcf1aaca30c",
+        approximateDownloadBytes: 148_441_426_867,
+        installedBytes: 149_000_000_000,
+        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+        reserveBytes: 2_147_483_648)
+
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
         switch family {
         case .gemma4: return .default
         case .qwen36: return .qwen36
         case .deepseekV4Flash: return .deepseekV4Flash
+        case .inklingSmall: return .inklingSmall
         }
     }
 
@@ -91,6 +109,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .gemma4: return "gemma4.gturbo"
         case .qwen36: return "qwen36.gturbo"
         case .deepseekV4Flash: return "deepseekv4flash.gturbo"
+        case .inklingSmall: return "inklingsmall.gturbo"
         }
     }
 
@@ -106,6 +125,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         switch environmentValue ?? preferenceValue {
         case "qwen36": return .qwen36
         case "deepseekv4flash", "dsv4": return .deepseekV4Flash
+        case "inklingsmall", "inkling": return .inklingSmall
         default: return .default
         }
     }

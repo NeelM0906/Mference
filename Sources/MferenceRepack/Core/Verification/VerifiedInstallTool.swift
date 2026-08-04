@@ -78,12 +78,17 @@ public enum VerifiedInstallTool {
         let sha256: String
     }
 
+    private struct ManifestArchSubset: Decodable {
+        let numDenseLayers: Int?
+    }
+
     private struct Manifest: Decodable {
         let files: [String: ManifestFileEntry]
         let expertsPerLayer: Int
         let numLayers: Int
         let expertStride: UInt64
         let sourceSnapshotHash: String?
+        let arch: ManifestArchSubset?
     }
 
     private struct PackedExpertsLayout: Decodable {
@@ -155,6 +160,25 @@ public enum VerifiedInstallTool {
         for layer in layout.layers {
             guard layer.layer >= 0 && layer.layer < layout.numLayers else {
                 throw RepackError.configurationInvalid(detail: "packed expert layer index out of range")
+            }
+            // Leading dense-FFN layers carry no routed experts, so the writer
+            // emits an empty layout entry and no blob for them (Inkling's
+            // layers 0-1). The exception is bounded by the manifest's declared
+            // dense-layer count: an empty ROUTED layer means a broken install
+            // that the runtime loader would reject, and verification must not
+            // certify it.
+            if layer.experts.isEmpty {
+                let denseLayers = manifest.arch?.numDenseLayers ?? 0
+                guard layer.layer < denseLayers else {
+                    throw RepackError.configurationInvalid(
+                        detail: "packed_experts/\(layer.file) has no experts but layer "
+                            + "\(layer.layer) is outside the declared \(denseLayers) dense layers")
+                }
+                guard manifest.files["packed_experts/\(layer.file)"] == nil else {
+                    throw RepackError.configurationInvalid(
+                        detail: "packed_experts/\(layer.file) has no experts but is in the manifest")
+                }
+                continue
             }
             guard layer.experts.count == layout.expertsPerLayer else {
                 throw RepackError.configurationInvalid(

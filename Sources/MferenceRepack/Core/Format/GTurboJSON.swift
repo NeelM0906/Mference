@@ -99,6 +99,29 @@ enum GTurboJSON {
             archDict["routedScalingFactor"] = arch.routedScalingFactor
             archDict["swigluLimit"] = arch.swigluLimit
         }
+        // Inkling extension fields, gated on the family for the same reason:
+        // the other three manifests stay byte-identical, and the reader treats
+        // absence as the defaults those families already hold.
+        if arch.family == .inklingSmall {
+            archDict["routerScoringFunc"] = arch.routerScoringFunc
+            archDict["routedScalingFactor"] = arch.routedScalingFactor
+            archDict["relDRel"] = arch.relDRel
+            archDict["relExtent"] = arch.relExtent
+            archDict["relProjDim"] = arch.relProjDim
+            archDict["relLogScalingFloor"] = arch.relLogScalingFloor
+            archDict["relLogScalingAlpha"] = arch.relLogScalingAlpha
+            archDict["sconvKernelSize"] = arch.sconvKernelSize
+            archDict["numSharedExperts"] = arch.numSharedExperts
+            archDict["numDenseLayers"] = arch.numDenseLayers
+            archDict["denseIntermediateSize"] = arch.denseIntermediateSize
+            archDict["sharedExpertSink"] = arch.sharedExpertSink
+            archDict["embedNormEnabled"] = arch.embedNormEnabled
+            archDict["logitsWidthMultiplier"] = arch.logitsWidthMultiplier
+            archDict["routerGateBias"] = arch.routerGateBias
+            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
+            archDict["routerGlobalScale"] = arch.routerGlobalScale
+            archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
+        }
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -191,7 +214,11 @@ enum GTurboJSON {
         let obj: [String: Any] = [
             "expertStride": expertStride,
             "numLayers": arch.numLayers,
-            "expertsPerLayer": plan.layers.first?.expertsPerLayer ?? 0,
+            // Skip leading dense-FFN layers, which carry no routed experts
+            // (Inkling's layers 0-1). Taking `layers.first` would publish 0
+            // here and contradict the manifest, which selects the same way.
+            "expertsPerLayer": plan.layers.first(where: { $0.expertsPerLayer > 0 })?
+                .expertsPerLayer ?? 0,
             "layers": layersArr
         ]
         return try JSONSerialization.data(withJSONObject: obj,

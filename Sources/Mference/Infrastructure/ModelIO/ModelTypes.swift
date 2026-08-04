@@ -9,6 +9,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case deepseekV4Flash = "deepseekV4Flash"
+    case inklingSmall = "inklingSmall"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -128,6 +129,40 @@ public struct HyperConnectionConfig: Sendable, Equatable {
     public static let none = HyperConnectionConfig(mult: 0, sinkhornIters: 0, eps: 0)
 }
 
+/// Learned relative-attention position encoding, used by architectures that
+/// carry no RoPE at all. Inkling projects the residual to `projDim`
+/// (`attn.wr_du`, width `numHeads * dRel`) and reshapes it to a per-head
+/// `dRel` relative-state vector, which mixes a bank of bias-vs-distance
+/// profiles (`attn.rel_logits_proj.proj`, `[dRel, extent]`) into one bias per
+/// backward distance. The bias is zero outside `0 ..< extent`.
+///
+/// `extent` here is the **full-attention** width. Sliding layers use
+/// `ArchConfig.slidingWindow` instead, so the two layer kinds ship differently
+/// shaped `proj` tensors (Inkling: `[16, 512]` local, `[16, 1024]` global).
+/// The `logScaling*` correction likewise applies only to full-attention
+/// layers. Zeroed for RoPE architectures.
+public struct RelativePositionConfig: Sendable, Equatable {
+    public let dRel: Int
+    /// Bias width on full-attention layers; sliding layers use the window.
+    public let extent: Int
+    /// Output width of `attn.wr_du`, i.e. `numHeads * dRel`.
+    public let projDim: Int
+    public let logScalingFloor: Int
+    public let logScalingAlpha: Double
+
+    public init(dRel: Int, extent: Int, projDim: Int,
+                logScalingFloor: Int, logScalingAlpha: Double) {
+        self.dRel = dRel
+        self.extent = extent
+        self.projDim = projDim
+        self.logScalingFloor = logScalingFloor
+        self.logScalingAlpha = logScalingAlpha
+    }
+
+    public static let none = RelativePositionConfig(
+        dRel: 0, extent: 0, projDim: 0, logScalingFloor: 0, logScalingAlpha: 0)
+}
+
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
 ///
@@ -202,6 +237,36 @@ public struct ArchConfig: Sendable, Equatable {
     public let routedScalingFactor: Double
     /// Clamp for expert gate (max) and up (±) pre-activations. 0 = no clamp.
     public let swigluLimit: Double
+    /// Learned relative-attention bias; `.none` for RoPE architectures.
+    public let relativePosition: RelativePositionConfig
+    /// Depthwise short-convolution width applied to the block inputs and to
+    /// the K/V streams. 0 disables the short-conv path entirely.
+    public let sconvKernelSize: Int
+    /// Shared experts active on every token (Gemma/Qwen/DeepSeek ship 1,
+    /// Inkling 2).
+    public let numSharedExperts: Int
+    /// Leading layers that use a plain dense FFN instead of the MoE block.
+    public let numDenseLayers: Int
+    /// FFN width of those dense layers; 0 when `numDenseLayers` is 0.
+    public let denseIntermediateSize: Int
+    /// Whether the shared experts occupy their own router logits as sinks, so
+    /// the gate emits `numExperts + numSharedExperts` scores.
+    public let sharedExpertSink: Bool
+    /// RMS norm applied to the token embeddings before the first layer.
+    public let embedNormEnabled: Bool
+    /// muP output scaling divided into the logits. 1.0 disables.
+    public let logitsWidthMultiplier: Double
+    /// Real vocabulary size when the embedding matrix is padded for alignment.
+    /// Logits beyond this are padding and must be dropped before sampling, or
+    /// the model can emit ids the tokenizer cannot decode. 0 means "no
+    /// padding": `vocabSize` is the real vocabulary.
+    public let unpaddedVocabSize: Int
+    /// Learned additive bias on the router logits, used for selection only.
+    public let routerGateBias: Bool
+    /// Renormalize the top-k router weights after selection rather than before.
+    public let routerNormAfterTopK: Bool
+    /// Per-layer learned scalar multiplying the router weights.
+    public let routerGlobalScale: Bool
 
     public init(
         hiddenSize: Int,
@@ -239,7 +304,19 @@ public struct ArchConfig: Sendable, Equatable {
         numHashRoutedLayers: Int = 0,
         routerScoringFunc: String = "softmax",
         routedScalingFactor: Double = 1.0,
-        swigluLimit: Double = 0.0
+        swigluLimit: Double = 0.0,
+        relativePosition: RelativePositionConfig = .none,
+        sconvKernelSize: Int = 0,
+        numSharedExperts: Int = 1,
+        numDenseLayers: Int = 0,
+        denseIntermediateSize: Int = 0,
+        sharedExpertSink: Bool = false,
+        embedNormEnabled: Bool = false,
+        logitsWidthMultiplier: Double = 1.0,
+        routerGateBias: Bool = false,
+        routerNormAfterTopK: Bool = false,
+        routerGlobalScale: Bool = false,
+        unpaddedVocabSize: Int = 0
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -277,6 +354,18 @@ public struct ArchConfig: Sendable, Equatable {
         self.routerScoringFunc = routerScoringFunc
         self.routedScalingFactor = routedScalingFactor
         self.swigluLimit = swigluLimit
+        self.relativePosition = relativePosition
+        self.sconvKernelSize = sconvKernelSize
+        self.numSharedExperts = numSharedExperts
+        self.numDenseLayers = numDenseLayers
+        self.denseIntermediateSize = denseIntermediateSize
+        self.sharedExpertSink = sharedExpertSink
+        self.embedNormEnabled = embedNormEnabled
+        self.logitsWidthMultiplier = logitsWidthMultiplier
+        self.routerGateBias = routerGateBias
+        self.routerNormAfterTopK = routerNormAfterTopK
+        self.routerGlobalScale = routerGlobalScale
+        self.unpaddedVocabSize = unpaddedVocabSize
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -436,11 +525,88 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Canonical Inkling-Small 276B-A12B baseline, checked against the
+    /// installed model manifest. Source checkpoint
+    /// `pipenetwork/Inkling-Small-MLX-4bit` revision `9d6e4720` (MLX affine
+    /// 4-bit, group 64, uniform across embeddings/attention/experts; the
+    /// router gate stays BF16). See `docs/INKLING_SMALL.md`.
+    ///
+    /// The distinguishing features versus the other three families: no RoPE at
+    /// all (a learned relative-attention bias carries position, so
+    /// `ropeTheta`/`partialRotaryFactor` are zero), depthwise short
+    /// convolutions on the block inputs and the K/V streams, two shared
+    /// experts that sink their own router logits, and two leading dense-FFN
+    /// layers at 8× the expert width.
+    ///
+    /// `intermediateSize` is the shared-expert FFN width, which equals the
+    /// routed width here (2048); `denseIntermediateSize` (16 384) applies only
+    /// to layers 0–1.
+    public static let inklingSmall_276B_A12B = ArchConfig(
+        hiddenSize: 4096,
+        intermediateSize: 2048,
+        moeIntermediateSize: 2048,
+        numHeads: 32,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 201_024,
+        slidingWindow: 512,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 0.0,
+        fullRopeTheta: 0.0,
+        partialRotaryFactor: 0.0,
+        numLayers: 42,
+        numExperts: 256,
+        topKExperts: 6,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.inklingSmallLayerMask(),
+        hiddenActivation: "silu",
+        family: .inklingSmall,
+        attnOutputGate: false,
+        // Inkling RMS-normalizes q and k per head, so attention scales by
+        // `1 / head_dim`, NOT `1 / sqrt(head_dim)` — see
+        // `inkling_mlx/attention.py`. Kept as the same expression the
+        // converter evaluates, since `validateArch` compares exactly.
+        attentionScale: 1.0 / Double(128),
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: false,
+        routerScoringFunc: "sigmoid",
+        routedScalingFactor: 8.0,              // route_scale
+        swigluLimit: 0.0,
+        relativePosition: RelativePositionConfig(
+            dRel: 16, extent: 1024, projDim: 512,
+            logScalingFloor: 128_000, logScalingAlpha: 0.1),
+        sconvKernelSize: 4,
+        numSharedExperts: 2,
+        numDenseLayers: 2,
+        denseIntermediateSize: 16_384,
+        sharedExpertSink: true,
+        embedNormEnabled: true,
+        logitsWidthMultiplier: 16.0,
+        routerGateBias: true,
+        routerNormAfterTopK: true,
+        routerGlobalScale: true,
+        unpaddedVocabSize: 200_058
+    )
+
+    private static func inklingSmallLayerMask() -> [UInt8] {
+        // `local_layer_ids` covers every layer except 5, 11, 17, 23, 29, 35
+        // and 41 — i.e. one global layer at the end of each group of six.
+        // 0 = sliding-window (512), 1 = full attention.
+        (0..<42).map { $0 % 6 == 5 ? 1 : 0 }
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
         .deepseekV4Flash: .deepseekV4Flash_284B_A13B,
+        .inklingSmall: .inklingSmall_276B_A12B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for

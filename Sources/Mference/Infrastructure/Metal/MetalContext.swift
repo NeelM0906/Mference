@@ -78,6 +78,7 @@ public final class MetalContext: @unchecked Sendable {
         "prefill",
         "gdn",
         "dsv4",
+        "inkling",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -88,6 +89,7 @@ public final class MetalContext: @unchecked Sendable {
         "dsv4": "Metal/DSV4",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
+        "inkling": "Metal/Inkling",
         "logit": "Metal/Sampling",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",

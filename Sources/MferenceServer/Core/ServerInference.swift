@@ -174,6 +174,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         case .gemma4: return "gemma-4-26b-a4b-it"
         case .qwen36: return "qwen3.6-35b-a3b"
         case .deepseekV4Flash: return "deepseek-v4-flash-2bit-dq"
+        case .inklingSmall: return "inkling-small-4bit"
         }
     }
     private nonisolated let modelFamily: ModelFamily
