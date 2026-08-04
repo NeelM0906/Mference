@@ -18,6 +18,10 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
 | M5, Mference, Qwen 3.6 35B-A3B | 18.8-23.1 tok/s | ~1.45 GB footprint |
 
+A separate report covers all four model families on a 256 GB M3 Ultra,
+including the first measured DeepSeek-V4-Flash and Inkling-Small rows:
+[M3 Ultra benchmarks](BENCHMARKS_M3_ULTRA.md).
+
 ## M2 measured decode
 
 These rows ran on a `Mac14,15` M2 MacBook Air with 8 GB of memory. No
