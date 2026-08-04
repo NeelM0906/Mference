@@ -6,9 +6,12 @@ Checkpoint selection, memory budget, and the architecture gap list for running
 document is the architecture contract for the `inklingSmall` family.
 
 Conversion has been run and verified against the real checkpoint (see
-**Status**). Throughput numbers remain *estimates* calibrated against measured
-DSV4-Flash performance on the same machine — no Inkling token has been
-generated yet, because the forward pass is not implemented.
+**Status**), and the forward pass has since shipped: measured decode is
+5.3–6.9 tok/s at an ~8.9 GiB peak footprint on an M3 Ultra
+([BENCHMARKS_M3_ULTRA.md](BENCHMARKS_M3_ULTRA.md)). Throughput figures
+elsewhere in this document that are labeled *estimates* predate those runs
+and are kept for the planning context they carried; the benchmark document
+is the measured record.
 
 ## Checkpoint selection
 
