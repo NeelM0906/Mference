@@ -856,3 +856,41 @@ extension InklingLayerParityTests {
         print("[kld] wrote \(ids.count) x \(valid) logits to \(outPath)")
     }
 }
+
+extension InklingLayerParityTests {
+    /// Conv-state lifecycle: `reset()` clears the short-conv history (it dies
+    /// with the KV cache), but `prepareForContinuation` must PRESERVE it —
+    /// the retained KV prefix and the conv history describe the same cached
+    /// tokens (PR #4 review, Codex P1).
+    @Test func convStateSurvivesContinuationButNotReset() throws {
+        guard let path = ProcessInfo.processInfo
+            .environment["MFERENCE_INKLING_GTURBO"] else { return }
+        let ctx = try MetalContext()
+        let cfg = try #require(ArchConfig.knownArchitectures[.inklingSmall])
+        let model = try Model.load(directoryURL: URL(fileURLWithPath: path),
+                                   device: ctx.device,
+                                   expecting: cfg)
+        let runner = try RealForwardRunner(model: model, context: ctx,
+                                           maxContext: 64)
+        func fillSentinel() {
+            for st in runner.inklingConvStates {
+                for b in [st.k, st.v, st.attn, st.mlp] {
+                    memset(b.contents(), 0x3C, b.length)
+                }
+            }
+        }
+        func firstWord() -> UInt32 {
+            runner.inklingConvStates[0].k.contents().load(as: UInt32.self)
+        }
+        // reset() zeroes.
+        fillSentinel()
+        runner.reset()
+        #expect(firstWord() == 0, "reset() must clear conv history")
+        // continuation preserves.
+        fillSentinel()
+        runner.inklingParityAdvanceKV()   // kv.position = 1
+        try runner.prepareForContinuation(expectedPosition: 1)
+        #expect(firstWord() == 0x3C3C_3C3C,
+                "prepareForContinuation must keep conv history")
+    }
+}

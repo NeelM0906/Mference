@@ -792,6 +792,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         kv?.reset()
         gdnState?.reset()
         dsv4State?.reset()
+        // Short-conv history dies with the KV cache, and ONLY with it:
+        // `prepareForContinuation` retains both, so a resumed conversation
+        // keeps the last K-1 conv inputs that match the cached prefix.
+        for state in inklingConvStates {
+            memset(state.k.contents(), 0, state.k.length)
+            memset(state.v.contents(), 0, state.v.length)
+            memset(state.attn.contents(), 0, state.attn.length)
+            memset(state.mlp.contents(), 0, state.mlp.length)
+        }
         resetTransientState()
     }
 
@@ -813,12 +822,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     private func resetTransientState() {
         joinPendingSpeculation()
-        for state in inklingConvStates {
-            memset(state.k.contents(), 0, state.k.length)
-            memset(state.v.contents(), 0, state.v.length)
-            memset(state.attn.contents(), 0, state.attn.length)
-            memset(state.mlp.contents(), 0, state.mlp.length)
-        }
         previousTokenExperts = []
         prefillChunkState.reset()
         rdadviseSkipUntilPosition = -1

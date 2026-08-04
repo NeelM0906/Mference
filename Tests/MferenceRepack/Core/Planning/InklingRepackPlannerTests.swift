@@ -233,3 +233,64 @@ struct InklingRepackPlannerTests {
         #expect(SupportedModelSource.all.contains { $0.name == "inklingsmall" })
     }
 }
+
+extension InklingRepackPlannerTests {
+    /// `--verify-install` accepts empty expert layouts ONLY inside the
+    /// manifest's declared dense-layer prefix; an empty ROUTED layer is a
+    /// broken install the runtime would reject, and verification must not
+    /// certify it (PR #4 review, Codex P2).
+    @Test func verifyRejectsEmptyLayoutOutsideDenseLayers() throws {
+        func makeInstall(numDenseLayers: Int, emptyLayer: Int) throws -> String {
+            let dir = NSTemporaryDirectory() + "vfy-\(UUID().uuidString)"
+            let pe = dir + "/packed_experts"
+            try FileManager.default.createDirectory(
+                atPath: pe, withIntermediateDirectories: true)
+            let stride: UInt64 = 16384
+            let numLayers = 3
+            var layers: [[String: Any]] = []
+            var files: [String: Any] = [
+                "packed_experts/layout.json": ["size": 1, "sha256": "00"],
+            ]
+            for L in 0..<numLayers {
+                let file = String(format: "layer_%02d.bin", L)
+                if L == emptyLayer || L < numDenseLayers {
+                    layers.append(["layer": L, "file": file, "experts": []])
+                    continue
+                }
+                layers.append(["layer": L, "file": file,
+                               "experts": [["expert": 0, "offset": 0,
+                                            "size": stride,
+                                            "tensors": [String: Any]()]]])
+                let data = Data(count: Int(stride))
+                try data.write(to: URL(fileURLWithPath: "\(pe)/\(file)"))
+                files["packed_experts/\(file)"] = ["size": stride, "sha256": "00"]
+            }
+            let layout: [String: Any] = [
+                "expertStride": stride, "numLayers": numLayers,
+                "expertsPerLayer": 1, "layers": layers,
+            ]
+            try JSONSerialization.data(withJSONObject: layout)
+                .write(to: URL(fileURLWithPath: "\(pe)/layout.json"))
+            let manifest: [String: Any] = [
+                "files": files, "expertsPerLayer": 1, "numLayers": numLayers,
+                "expertStride": stride,
+                "arch": ["numDenseLayers": numDenseLayers],
+            ]
+            try JSONSerialization.data(withJSONObject: manifest)
+                .write(to: URL(fileURLWithPath: "\(dir)/manifest.json"))
+            return dir
+        }
+
+        // Empty layout confined to the dense prefix: accepted.
+        let ok = try makeInstall(numDenseLayers: 2, emptyLayer: 1)
+        defer { try? FileManager.default.removeItem(atPath: ok) }
+        try VerifiedInstallTool.validatePackedExpertLayout(inputGTurbo: ok)
+
+        // Empty layout on a ROUTED layer: rejected.
+        let bad = try makeInstall(numDenseLayers: 1, emptyLayer: 2)
+        defer { try? FileManager.default.removeItem(atPath: bad) }
+        #expect(throws: RepackError.self) {
+            try VerifiedInstallTool.validatePackedExpertLayout(inputGTurbo: bad)
+        }
+    }
+}
