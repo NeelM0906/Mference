@@ -28,6 +28,7 @@ public enum ChatDialect: String, Sendable {
     case gemma
     case chatml
     case deepseek
+    case inkling
 }
 
 /// Tokenizer wrapper for the supported model families (Gemma 4, ChatML/Qwen,
@@ -126,7 +127,9 @@ public struct MFTokenizer: @unchecked Sendable {
         self.tokenizer = tokenizer
 
         let dialect: ChatDialect =
-            if Self.specialTokenID(tokenizer, Self.deepseekUserMark) != nil {
+            if Self.specialTokenID(tokenizer, Self.inklingUserMark) != nil {
+                .inkling
+            } else if Self.specialTokenID(tokenizer, Self.deepseekUserMark) != nil {
                 .deepseek
             } else if Self.specialTokenID(tokenizer, Self.imEndMark) != nil {
                 .chatml
@@ -137,6 +140,7 @@ public struct MFTokenizer: @unchecked Sendable {
         case .gemma: try Self.resolveGemmaTokens(tokenizer)
         case .chatml: try Self.resolveChatMLTokens(tokenizer)
         case .deepseek: try Self.resolveDeepseekTokens(tokenizer)
+        case .inkling: try Self.resolveInklingTokens(tokenizer)
         }
 
         self.dialect = dialect
@@ -409,12 +413,105 @@ public struct MFTokenizer: @unchecked Sendable {
     /// from the user branch AND one from the assistant branch).
     private static let deepseekThinkCloseMark = "</think>"
 
+    // Inkling message framing (see the checkpoint's chat_template.jinja):
+    // each turn is `<role token><|content_text|>CONTENT<|end_message|>`, an
+    // assistant turn additionally closes with `<|content_model_end_sampling|>`
+    // (the sampling stop), a thinking-effort system line precedes the first
+    // non-system message, and the generation prompt is a bare
+    // `<|message_model|>`. No BOS anywhere (the reference encodes prompts
+    // with add_special_tokens=False).
+    private static let inklingUserMark    = "<|message_user|>"
+    private static let inklingModelMark   = "<|message_model|>"
+    private static let inklingSystemMark  = "<|message_system|>"
+    private static let inklingContentText = "<|content_text|>"
+    private static let inklingEndMessage  = "<|end_message|>"
+    private static let inklingEndSampling = "<|content_model_end_sampling|>"
+    /// v1 pins reasoning effort to 0 ("none"): the decode path has no
+    /// thinking-block post-processing for this dialect yet, and 0 is a
+    /// first-class template value.
+    private static let inklingEffortLine =
+        inklingSystemMark + inklingContentText
+        + "Thinking effort level: 0" + inklingEndMessage
+
+    private static func resolveInklingTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw MFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let bos = try id("<|begin_of_text|>")
+        let eos = try id(Self.inklingEndSampling)
+        let thinkStart = try id("<|content_thinking|>")
+        let endMessage = try id(Self.inklingEndMessage)
+        _ = try id(Self.inklingUserMark)
+        _ = try id(Self.inklingModelMark)
+        return ResolvedSpecialTokens(
+            bosID: bos,
+            // The reference never prepends BOS; encode() stays bare.
+            bosPrefixID: nil,
+            eosID: eos,
+            padID: eos,
+            endOfTurnID: eos,
+            toolCallStartID: noSuchTokenID,
+            toolCallEndID: noSuchTokenID,
+            toolResponseID: noSuchTokenID,
+            toolResponseEndID: noSuchTokenID,
+            channelStartID: thinkStart,
+            channelEndID: endMessage,
+            thinkStartID: thinkStart,
+            thinkEndID: endMessage,
+            stopTokenIDs: [eos],
+            vocabSize: 201_024)
+    }
+
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
         switch dialect {
         case .gemma: return try gemmaChatTemplate(messages)
         case .chatml: return try chatMLChatTemplate(messages)
         case .deepseek: return try deepseekChatTemplate(messages)
+        case .inkling: return try inklingChatTemplate(messages)
         }
+    }
+
+    /// Text-only, no-tool rendering byte-matched to the shipped Jinja:
+    /// content is never trimmed, the effort line precedes the first
+    /// non-system message (or closes the render when every message is
+    /// system), and the generation prompt is always appended.
+    private func inklingChatTemplate(_ messages: [Message]) throws -> String {
+        var s = ""
+        var effortEmitted = false
+        for (index, message) in messages.enumerated() {
+            guard let content = message.content else {
+                throw MFTokenizerError.invalidChatTemplate("text-only messages require content")
+            }
+            if message.role == .system && index != 0 {
+                throw MFTokenizerError.invalidChatTemplate("system message must be first")
+            }
+            if !effortEmitted && message.role != .system {
+                s += Self.inklingEffortLine
+                effortEmitted = true
+            }
+            switch message.role {
+            case .system:
+                s += Self.inklingSystemMark + Self.inklingContentText
+                    + content + Self.inklingEndMessage
+            case .user, .developer:
+                s += Self.inklingUserMark + Self.inklingContentText
+                    + content + Self.inklingEndMessage
+            case .assistant:
+                s += Self.inklingModelMark + Self.inklingContentText
+                    + content + Self.inklingEndMessage + Self.inklingEndSampling
+            case .tool:
+                throw MFTokenizerError.invalidChatTemplate(
+                    "inkling tool turns are not supported by the text-only encoder")
+            }
+        }
+        if !effortEmitted { s += Self.inklingEffortLine }
+        s += Self.inklingModelMark
+        return s
     }
 
     private func gemmaChatTemplate(_ messages: [Message]) throws -> String {
@@ -716,6 +813,15 @@ public struct MFTokenizer: @unchecked Sendable {
             // continuation must produce the same bytes a fresh render would.
             return [endOfTurnID] + encode(
                 Self.deepseekUserMark + userContent + Self.deepseekGenerationSuffix,
+                addBOS: false)
+        case .inkling:
+            // The cached assistant turn stopped just before
+            // `<|content_model_end_sampling|>` (== endOfTurnID); supply it,
+            // then the next user turn and the generation prompt. Untrimmed,
+            // matching the full render.
+            return [endOfTurnID] + encode(
+                Self.inklingUserMark + Self.inklingContentText + userContent
+                    + Self.inklingEndMessage + Self.inklingModelMark,
                 addBOS: false)
         }
     }
