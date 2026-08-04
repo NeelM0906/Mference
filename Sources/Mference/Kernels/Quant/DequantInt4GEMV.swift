@@ -20,6 +20,9 @@ final class DequantInt4GEMV {
 
     private let pipeline: MTLComputePipelineState
     private let specializedPipelines: [Shape: MTLComputePipelineState]
+    /// FP32-output variant, unspecialized. Only the store type differs, so the
+    /// result is bit-identical to `pipeline` for rows inside FP16 range.
+    private let f32OutPipeline: MTLComputePipelineState
 
     /// `additionalShapes` compiles extra constant-folded variants for a
     /// non-Gemma model's decode shapes. Measured: an unspecialized
@@ -28,6 +31,10 @@ final class DequantInt4GEMV {
          additionalShapes: [(m: Int, n: Int)] = []) throws {
         self.pipeline = try context.pipeline(
             "dequant_int4_gemv_simd",
+            constants: [],
+            maxTotalThreadsPerThreadgroup: 512)
+        self.f32OutPipeline = try context.pipeline(
+            "dequant_int4_gemv_simd_f32out",
             constants: [],
             maxTotalThreadsPerThreadgroup: 512)
 
@@ -59,7 +66,8 @@ final class DequantInt4GEMV {
                 y: MTLBuffer,
                 yOffset: Int = 0,
                 m: UInt32,
-                n: UInt32) {
+                n: UInt32,
+                outputFloat32: Bool = false) {
         precondition(n % UInt32(Quantization.groupSize) == 0,
                      "N must be a multiple of \(Quantization.groupSize)")
         // The kernel reads packed weights through a `ushort*`; the repacker
@@ -68,7 +76,9 @@ final class DequantInt4GEMV {
                      "dequant_int4_gemv_simd needs a 2-aligned weightsOffset, got \(weightsOffset)")
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
-            specializedPipelines[Shape(m: m, n: n)] ?? pipeline)
+            outputFloat32
+                ? f32OutPipeline
+                : (specializedPipelines[Shape(m: m, n: n)] ?? pipeline))
         encoder.setBuffer(weights, offset: weightsOffset, index: 0)
         encoder.setBuffer(scales, offset: scalesOffset, index: 1)
         encoder.setBuffer(biases, offset: biasesOffset, index: 2)

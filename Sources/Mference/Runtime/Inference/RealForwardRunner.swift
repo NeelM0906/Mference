@@ -1,6 +1,25 @@
 import Foundation
 import Metal
 
+/// Faults detected at the Inkling output head. Both cases mean an
+/// intermediate went non-finite somewhere in the 42-layer stack; the head is
+/// simply the first place that can see it cheaply.
+public enum InklingHeadError: Error, CustomStringConvertible, Equatable {
+    case nonFiniteLogits(position: Int, count: Int)
+    case noFiniteLogit(position: Int)
+
+    public var description: String {
+        switch self {
+        case .nonFiniteLogits(let position, let count):
+            return "Inkling head produced \(count) non-finite logits at "
+                + "position \(position); an intermediate overflowed upstream"
+        case .noFiniteLogit(let position):
+            return "Inkling head produced no finite logit at position "
+                + "\(position); greedy argmax has no candidate"
+        }
+    }
+}
+
 public enum RDAdvicePolicyMode: String, Codable, Sendable, Equatable {
     case `default`
     case off
@@ -259,6 +278,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // shared expert (empty for the leading dense layers, which instead use
     // `inklingDenseProjections[L]`).
     let inkling: InklingKernels?
+    let inklingPrefillGLU: InklingPrefillExpertGLU?
     let inklingConvStates: [InklingLayerConvState]
     let inklingRelScratch: MTLBuffer?        // [numHeads * dRel] FP16
     /// FP32 residual stream: Inkling's hidden state overflows FP16 by layer
@@ -276,8 +296,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     let inklingGammaChunk: MTLBuffer?        // [chunk, 2] FP32
     let inklingAccChunk: MTLBuffer?          // [chunk, D] FP32
     let inklingChunkCapacity: Int
-    let inklingSharedY0: MTLBuffer?          // [D] FP16
-    let inklingSharedY1: MTLBuffer?          // [D] FP16
+    /// Raw shared-expert down-projection rows, FP32. These are pre-gamma, so
+    /// the 1/32 FFN prescale does not protect them and single channels run to
+    /// ~6e4 on the released checkpoint — an FP16 store clips to infinity.
+    let inklingSharedY0: MTLBuffer?          // [D] FP32
+    let inklingSharedY1: MTLBuffer?          // [D] FP32
+    /// Prefill counterpart: one expert's raw GLU output row, FP32.
+    let inklingExpertOutF32: MTLBuffer?      // [D] FP32
+    /// Batched prefill expert application: the chunk's (token, expert) pairs
+    /// grouped by expert, and one expert's activation tile.
+    let inklingPairTokens: MTLBuffer?        // [chunk * 8] UInt32
+    let inklingPairWeights: MTLBuffer?       // [chunk * 8] FP32
+    let inklingExpertActScratch: MTLBuffer?  // [chunk, F] FP16
     let inklingSharedProjections: [[LayerSharedExpertProjections]]
     let inklingDenseProjections: [LayerSharedExpertProjections?]
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
@@ -650,6 +680,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.sharedExpertProjections = sharedViews
 
         if cfg.family == .inklingSmall {
+            self.inklingPrefillGLU = try InklingPrefillExpertGLU(context: context)
             self.inkling = try InklingKernels(context: context,
                                               numRouted: cfg.numExperts,
                                               numShared: cfg.numSharedExperts)
@@ -657,7 +688,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.inklingRelScratch = try buf(dRelWidth)
             self.inklingHiddenF32 = try buf(D, MemoryLayout<Float>.size)
             self.inklingDeltaF32 = try buf(D, MemoryLayout<Float>.size)
-            let chunkCap = 128
+            // Sized from the configured prefill chunk, not pinned at 128.
+            // Routed-expert prefill I/O scales with the CHUNK COUNT: a chunk
+            // re-reads every expert its tokens route to, and by ~128 tokens a
+            // chunk already touches ~95% of all 256 experts per layer
+            // (256 * (1 - (1 - 6/256)^128)), so the bytes read are essentially
+            // `ceil(prompt / chunk) * 40 layers * 3.6 GB`. Doubling the chunk
+            // halves the reads; the scratch below is linear in the cap and
+            // costs ~1.3 MB per token of capacity (~168 MB at 4096).
+            let chunkCap = max(1, min(runtimeConfiguration.prefillChunkTokens,
+                                      RuntimeConfiguration.allowedPrefillChunkTokens.last!))
             self.inklingChunkCapacity = chunkCap
             self.inklingHiddenChunk = try buf(chunkCap * D, MemoryLayout<Float>.size)
             self.inklingRoutedXChunk = try buf(chunkCap * D)
@@ -665,8 +705,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.inklingWChunk = try buf(chunkCap * 8)
             self.inklingGammaChunk = try buf(chunkCap * 2, MemoryLayout<Float>.size)
             self.inklingAccChunk = try buf(chunkCap * D, MemoryLayout<Float>.size)
-            self.inklingSharedY0 = try buf(D)
-            self.inklingSharedY1 = try buf(D)
+            self.inklingSharedY0 = try buf(D, MemoryLayout<Float>.size)
+            self.inklingSharedY1 = try buf(D, MemoryLayout<Float>.size)
+            self.inklingExpertOutF32 = try buf(D, MemoryLayout<Float>.size)
+            // Pair lists cover top-6 routed + 2 shared per token.
+            self.inklingPairTokens = try buf(chunkCap * 8, MemoryLayout<UInt32>.size)
+            self.inklingPairWeights = try buf(chunkCap * 8, MemoryLayout<Float>.size)
+            self.inklingExpertActScratch = try buf(chunkCap * F)
             var convStates: [InklingLayerConvState] = []
             convStates.reserveCapacity(cfg.numLayers)
             let kvDim = cfg.numKVHeads * cfg.headDim
@@ -719,6 +764,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.inklingDenseProjections = densePerLayer
         } else {
             self.inkling = nil
+            self.inklingPrefillGLU = nil
             self.inklingConvStates = []
             self.inklingRelScratch = nil
             self.inklingHiddenF32 = nil
@@ -732,6 +778,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.inklingChunkCapacity = 0
             self.inklingSharedY0 = nil
             self.inklingSharedY1 = nil
+            self.inklingExpertOutF32 = nil
+            self.inklingPairTokens = nil
+            self.inklingPairWeights = nil
+            self.inklingExpertActScratch = nil
             self.inklingSharedProjections = []
             self.inklingDenseProjections = []
         }
@@ -2935,12 +2985,58 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
               + " nonfinite=\(bad)")
     }
 
+    /// Throws if the head epilogue counted any non-finite real-vocabulary
+    /// logit. A NaN or infinity in the logit row is always an engine fault
+    /// upstream (an overflowed intermediate, a poisoned cache entry), never a
+    /// model output — and left unchecked it does not look like a fault: the
+    /// argmax and the sampler both fall through to a low token id, which in
+    /// this vocabulary is `!`. Failing here turns silent mid-word corruption
+    /// into a report that names the position.
+    private func checkFiniteLogits(_ inkling: InklingKernels,
+                                   position: Int) throws {
+        let bad = inkling.nonFiniteLogits
+        guard bad == 0 else {
+            throw InklingHeadError.nonFiniteLogits(position: position, count: bad)
+        }
+    }
+
     /// FFN output pre-scale for the Inkling MoE path: router weights and
     /// shared-expert gammas are divided by this before the FP16 expert
     /// pipeline, and the residual add multiplies it back (linear, exact).
     /// Keeps BF16-magnitude outlier channels (observed > 65k at layer 41)
     /// inside half range through h1/h2 and the phase-2 reduce.
     static let inklingFFNPrescale: Float = 32.0
+
+    /// Splits Inkling prefill's routed-expert loop into fetch / encode / drain,
+    /// the prefill counterpart to `MFERENCE_PHASES` for decode. Off by default:
+    /// when disabled the loop skips the clock reads entirely.
+    ///
+    /// Worth keeping because the shape it revealed is counter-intuitive. On a
+    /// 2 785-token prompt the whole expert path — streaming *and* compute — is
+    /// ~15 % of prefill; the other ~85 % is the per-token attention / norm /
+    /// short-conv replay outside this loop, and it grows superlinearly with
+    /// context (13.3x for 6.6x the tokens) because 7 of 42 layers are global.
+    /// Optimize against a measurement from this, not against dispatch counts.
+    static let prefillBreakdownEnabled =
+        ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1"
+    nonisolated(unsafe) static var prefillFetchNanos: UInt64 = 0
+    nonisolated(unsafe) static var prefillEncodeNanos: UInt64 = 0
+    nonisolated(unsafe) static var prefillDrainNanos: UInt64 = 0
+    nonisolated(unsafe) static var prefillExpertCount: UInt64 = 0
+    public static func dumpPrefillBreakdown() {
+        let f = Double(prefillFetchNanos) / 1e9
+        let e = Double(prefillEncodeNanos) / 1e9
+        let d = Double(prefillDrainNanos) / 1e9
+        FileHandle.standardError.write(Data(
+            ("[prefill] experts=\(prefillExpertCount) fetch=\(String(format: "%.1f", f))s " +
+             "encode=\(String(format: "%.1f", e))s drain=\(String(format: "%.1f", d))s " +
+             "perExpert: fetch=\(String(format: "%.2f", f*1000/Double(max(1,prefillExpertCount))))ms " +
+             "drain=\(String(format: "%.2f", d*1000/Double(max(1,prefillExpertCount))))ms\n").utf8))
+    }
+
+    /// Non-finite real logits counted by the last head dispatch. Zero on every
+    /// healthy step; a regression test asserts that directly.
+    var inklingNonFiniteLogitCount: Int { inkling?.nonFiniteLogits ?? 0 }
 
     /// Parity-test helper: advance the KV cursor after a stop-layer run so a
     /// following produce() at the next position lands in the right slot.
@@ -3261,7 +3357,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                y: sharedY0,
                                scratchGate: denseScratchGate,
                                scratchUp: denseScratchUp,
-                               scratchAct: denseScratchAct)
+                               scratchAct: denseScratchAct,
+                               outputFloat32: true)
             try! shared.encode(commandBuffer: cb,
                                x: routedX,
                                gate: sharedProjs[1].gate,
@@ -3270,10 +3367,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                y: sharedY1,
                                scratchGate: denseScratchGate,
                                scratchUp: denseScratchUp,
-                               scratchAct: denseScratchAct)
+                               scratchAct: denseScratchAct,
+                               outputFloat32: true)
+            // Gammas carry the 1/32 prescale, so h1Buf is back in FP16 range.
             inkling.encodeGammaCombine(commandBuffer: cb,
                                        a: sharedY0, b: sharedY1,
-                                       y: h1Buf, count: D)
+                                       y: h1Buf, count: D,
+                                       inputsAreFloat32: true)
             cb.commit()
             waitForRouterSignal(routerSignal, fallback: cb)
             if let p = pending { finishPending(p, waitIfNeeded: false); pending = nil }
@@ -3392,6 +3492,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // only the vocab truncation matters. The final norm runs from
                 // the FP32 stream first; the fused chain then consumes the
                 // pre-normed row via unit gains (fNorm already applied).
+                inkling.resetNonFiniteLogitCount()
                 runSync { cb in
                     inkling.encodeRMSF32(commandBuffer: cb, x: hiddenF32,
                                          weight: fNorm.buffer,
@@ -3409,17 +3510,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                validVocab: validVocab,
                                                totalVocab: UInt32(self.cfg.vocabSize))
                 }
+                try checkFiniteLogits(inkling, position: position)
                 // Argmax on CPU over the truncated logits (bring-up path;
                 // the fused-head chain is FP16-hidden and not yet FP32-aware).
+                //
+                // `best` starts at index -1, not 0: a NaN fails every `>`
+                // comparison, so seeding at index 0 made an all-NaN row return
+                // token 0 ("!") as if it had won. The guard above already
+                // throws on that row; this keeps the invariant local.
                 let lp = logits.contents()
                     .bindMemory(to: Float16.self, capacity: Int(validVocab))
-                var best: (Int, Float) = (0, -.infinity)
+                var best: (Int, Float) = (-1, -.infinity)
                 for i in 0..<Int(validVocab) {
                     let v = Float(lp[i])
                     if v > best.1 { best = (i, v) }
                 }
+                guard best.0 >= 0 else {
+                    throw InklingHeadError.noFiniteLogit(position: position)
+                }
                 lastGreedyToken = UInt32(best.0)
             } else {
+                inkling.resetNonFiniteLogitCount()
                 runSync { cb in
                     inkling.encodeRMSF32(commandBuffer: cb, x: hiddenF32,
                                          weight: fNorm.buffer,
@@ -3437,6 +3548,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                validVocab: validVocab,
                                                totalVocab: UInt32(self.cfg.vocabSize))
                 }
+                try checkFiniteLogits(inkling, position: position)
                 if Self.inklingDebugEnabled {
                     inklingDebugStats("head normed", normed, count: cfg.hiddenSize)
                     let lp = logits.contents()
@@ -3478,9 +3590,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
               let wChunk = inklingWChunk,
               let gammaChunk = inklingGammaChunk,
               let accChunk = inklingAccChunk,
+              let expertOutF32 = inklingExpertOutF32,
+              let pairTokens = inklingPairTokens,
+              let pairWeights = inklingPairWeights,
+              let actScratch = inklingExpertActScratch,
+              let prefillGLU = inklingPrefillGLU,
               let kv else {
             preconditionFailure("Inkling prefill state missing")
         }
+        _ = expertOutF32
         let N = tokens.count
         precondition(N <= inklingChunkCapacity,
                      "chunk \(N) exceeds capacity \(inklingChunkCapacity)")
@@ -3721,74 +3839,134 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let F = UInt32(cfg.moeIntermediateSize)
-            func blobProjection(_ blob: TensorView, w: UInt32, sOff: UInt32,
-                                b: UInt32, rows: UInt32, cols: UInt32)
-                -> SharedExpertProjection {
-                SharedExpertProjection(weights: blob.buffer,
-                                       scales: blob.buffer,
-                                       biases: blob.buffer,
-                                       weightsOffset: Int(blob.offset) + Int(w),
-                                       scalesOffset: Int(blob.offset) + Int(sOff),
-                                       biasesOffset: Int(blob.offset) + Int(b),
-                                       rows: rows, cols: cols)
-            }
-            var pendingExpertCB: MTLCommandBuffer?
-            func encodeGLUGroup(gate: SharedExpertProjection,
-                                up: SharedExpertProjection,
-                                down: SharedExpertProjection,
-                                pairs: [(Int, Float)]) {
-                let cb = ctx.queue.makeCommandBuffer()!
-                for (i, w) in pairs {
-                    try! shared.encode(commandBuffer: cb,
-                                       x: routedXChunk, xOffset: xOff(i),
-                                       gate: gate, up: up, down: down,
-                                       y: h2Buf,
-                                       scratchGate: denseScratchGate,
-                                       scratchUp: denseScratchUp,
-                                       scratchAct: denseScratchAct)
-                    inkling.encodeScaleAccum(commandBuffer: cb,
-                                             acc: accChunk, accOffset: hOff(i),
-                                             x: h2Buf, weight: w, count: D)
-                }
-                cb.commit()
-                if let p = pendingExpertCB, let err = p.error {
-                    print("CB error: \(err)")
-                }
-                pendingExpertCB = cb
-            }
-            // Shared experts first (resident; gammas as weights).
+            // Flatten every (token, expert) pair into one expert-grouped list,
+            // uploaded once per chunk-layer. Each expert then costs two
+            // dispatches over its whole token set instead of three GEMVs per
+            // token: the v1 per-pair encoding spent ~250 us of dispatch
+            // overhead against ~17 us of bandwidth, and it dominated prefill.
+            //
+            // Shared experts come first, then routed experts in ascending id —
+            // the same accumulation order the per-pair path used, so the FP32
+            // sum per token is unchanged.
+            let tokPtr = pairTokens.contents().bindMemory(to: UInt32.self,
+                                                          capacity: N * 8)
+            let wgtPtr = pairWeights.contents().bindMemory(to: Float.self,
+                                                           capacity: N * 8)
+            struct ExpertPairRange { let expert: Int; let start: Int; let count: Int }
+            var sharedRanges: [ExpertPairRange] = []
+            var routedRanges: [ExpertPairRange] = []
+            var cursor = 0
             for s2 in 0..<cfg.numSharedExperts {
-                let projs = inklingSharedProjections[L][s2]
-                let pairs = (0..<N).map { ($0, gPtr[$0 * 2 + s2]) }
-                encodeGLUGroup(gate: projs.gate, up: projs.up, down: projs.down,
-                               pairs: pairs)
+                let start = cursor
+                for i in 0..<N {
+                    tokPtr[cursor] = UInt32(i)
+                    wgtPtr[cursor] = gPtr[i * 2 + s2]
+                    cursor += 1
+                }
+                sharedRanges.append(ExpertPairRange(expert: s2, start: start,
+                                                    count: N))
             }
-            // Routed experts, each streamed once for the whole chunk. The
-            // fetch of expert e+1 overlaps the GPU work of expert e.
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             for (e, pairs) in expertTokens.sorted(by: { $0.key < $1.key }) {
+                let start = cursor
+                for (i, w) in pairs {
+                    tokPtr[cursor] = UInt32(i)
+                    wgtPtr[cursor] = w
+                    cursor += 1
+                }
+                routedRanges.append(ExpertPairRange(expert: e, start: start,
+                                                    count: pairs.count))
+            }
+
+            func expertParams(_ range: ExpertPairRange,
+                              base: Int) -> InklingPrefillExpertGLU.Params {
+                InklingPrefillExpertGLU.Params(
+                    d: D, f: F,
+                    pairStart: UInt32(range.start),
+                    pairCount: UInt32(range.count),
+                    hiddenStride: D,
+                    gateWOff: UInt32(base) + routedOffsets.gateWOff,
+                    gateSOff: UInt32(base) + routedOffsets.gateSOff,
+                    gateBOff: UInt32(base) + routedOffsets.gateBOff,
+                    upWOff: UInt32(base) + routedOffsets.upWOff,
+                    upSOff: UInt32(base) + routedOffsets.upSOff,
+                    upBOff: UInt32(base) + routedOffsets.upBOff,
+                    downWOff: UInt32(base) + routedOffsets.downWOff,
+                    downSOff: UInt32(base) + routedOffsets.downSOff,
+                    downBOff: UInt32(base) + routedOffsets.downBOff)
+            }
+
+            // Shared experts (resident; per-token gammas as the pair weights).
+            // Their projections are separate tensors rather than one packed
+            // blob, so the byte offsets come from the views directly.
+            let sharedCB = ctx.queue.makeCommandBuffer()!
+            for range in sharedRanges {
+                let projs = inklingSharedProjections[L][range.expert]
+                var p = InklingPrefillExpertGLU.Params(
+                    d: D, f: F,
+                    pairStart: UInt32(range.start),
+                    pairCount: UInt32(range.count),
+                    hiddenStride: D,
+                    gateWOff: UInt32(projs.gate.weightsOffset),
+                    gateSOff: UInt32(projs.gate.scalesOffset),
+                    gateBOff: UInt32(projs.gate.biasesOffset),
+                    upWOff: UInt32(projs.up.weightsOffset),
+                    upSOff: UInt32(projs.up.scalesOffset),
+                    upBOff: UInt32(projs.up.biasesOffset),
+                    downWOff: UInt32(projs.down.weightsOffset),
+                    downSOff: UInt32(projs.down.scalesOffset),
+                    downBOff: UInt32(projs.down.biasesOffset))
+                p.pairStart = UInt32(range.start)
+                prefillGLU.encode(commandBuffer: sharedCB,
+                                  hidden: routedXChunk,
+                                  pairTokens: pairTokens,
+                                  pairWeights: pairWeights,
+                                  expertBuffer: projs.gate.weights,
+                                  expertOffset: 0,
+                                  act: actScratch,
+                                  acc: accChunk,
+                                  params: p)
+            }
+            sharedCB.commit()
+            waitForCompletion(sharedCB)
+
+            // Routed experts, each streamed once for the whole chunk.
+            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let breakdown = Self.prefillBreakdownEnabled
+            func now() -> UInt64 {
+                breakdown ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0
+            }
+            for range in routedRanges {
+                let t0 = now()
                 let blob = try await model.fetchRoutedExperts(layer: L,
-                                                              experts: [e])[0]
-                encodeGLUGroup(
-                    gate: blobProjection(blob, w: routedOffsets.gateWOff,
-                                         sOff: routedOffsets.gateSOff,
-                                         b: routedOffsets.gateBOff,
-                                         rows: F, cols: D),
-                    up: blobProjection(blob, w: routedOffsets.upWOff,
-                                       sOff: routedOffsets.upSOff,
-                                       b: routedOffsets.upBOff,
-                                       rows: F, cols: D),
-                    down: blobProjection(blob, w: routedOffsets.downWOff,
-                                         sOff: routedOffsets.downSOff,
-                                         b: routedOffsets.downBOff,
-                                         rows: D, cols: F),
-                    pairs: pairs)
-                // The next fetch may evict this expert's slot; drain first.
-                if let p = pendingExpertCB { waitForCompletion(p) }
-                pendingExpertCB = nil
+                                                              experts: [range.expert])[0]
+                let t1 = now()
+                let cb = ctx.queue.makeCommandBuffer()!
+                prefillGLU.encode(commandBuffer: cb,
+                                  hidden: routedXChunk,
+                                  pairTokens: pairTokens,
+                                  pairWeights: pairWeights,
+                                  expertBuffer: blob.buffer,
+                                  expertOffset: 0,
+                                  act: actScratch,
+                                  acc: accChunk,
+                                  params: expertParams(range, base: Int(blob.offset)))
+                cb.commit()
+                let t2 = now()
+                // The next fetch may evict this expert's slot, and the shared
+                // `act` tile is reused, so drain before moving on. This
+                // serialization is why fetch does not overlap GPU work; see
+                // PrefillRoutedTileScheduler for the pipelined alternative the
+                // other families use.
+                waitForCompletion(cb)
+                if breakdown {
+                    let t3 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                    Self.prefillFetchNanos &+= t1 - t0
+                    Self.prefillEncodeNanos &+= t2 - t1
+                    Self.prefillDrainNanos &+= t3 - t2
+                    Self.prefillExpertCount &+= 1
+                }
             }
             totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            if let p = pendingExpertCB { waitForCompletion(p); pendingExpertCB = nil }
 
             // Tail: per token IN ORDER (mlp conv state), acc -> sconv -> add.
             let cbC = ctx.queue.makeCommandBuffer()!
@@ -3819,6 +3997,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let validVocab = UInt32(cfg.unpaddedVocabSize > 0
                 ? cfg.unpaddedVocabSize : cfg.vocabSize)
             let muP = Float(1.0 / cfg.logitsWidthMultiplier)
+            inkling.resetNonFiniteLogitCount()
             runSync { cb in
                 inkling.encodeRMSF32(commandBuffer: cb,
                                      x: hiddenChunk, xOffset: hOff(N - 1),
@@ -3837,13 +4016,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                            validVocab: validVocab,
                                            totalVocab: UInt32(self.cfg.vocabSize))
             }
+            try checkFiniteLogits(inkling, position: startPosition + N - 1)
             if useFusedGreedyHead && outputMode == .greedyIfAvailable {
                 let lp = logits.contents()
                     .bindMemory(to: Float16.self, capacity: Int(validVocab))
-                var best: (Int, Float) = (0, -.infinity)
+                var best: (Int, Float) = (-1, -.infinity)
                 for i in 0..<Int(validVocab) {
                     let vl = Float(lp[i])
                     if vl > best.1 { best = (i, vl) }
+                }
+                guard best.0 >= 0 else {
+                    throw InklingHeadError.noFiniteLogit(
+                        position: startPosition + N - 1)
                 }
                 lastGreedyToken = UInt32(best.0)
             }

@@ -83,7 +83,7 @@ public func run(args: Args,
             device: context.device,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
+            integrityPolicy: args.verification)
         let runner = try RealForwardRunner(
             model: model,
             context: context,
@@ -110,6 +110,9 @@ public func run(args: Args,
                 }
             }
 
+        if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1" {
+            RealForwardRunner.dumpPrefillBreakdown()
+        }
         if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000
@@ -201,7 +204,7 @@ private func runChat(args: Args,
             device: context.device,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
+            integrityPolicy: args.verification)
         let runner = try RealForwardRunner(
             model: model,
             context: context,

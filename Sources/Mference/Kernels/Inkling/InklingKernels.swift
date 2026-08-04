@@ -18,9 +18,11 @@ final class InklingKernels {
     private let routerGemvPSO: MTLComputePipelineState
     private let routerSelectPSO: MTLComputePipelineState
     private let gammaCombinePSO: MTLComputePipelineState
+    private let gammaCombineF32InPSO: MTLComputePipelineState
     private let scalePSO: MTLComputePipelineState
     private let headEpiloguePSO: MTLComputePipelineState
     private let scaleAccumPSO: MTLComputePipelineState
+    private let scaleAccumF32InPSO: MTLComputePipelineState
     private let f32ToF16PSO: MTLComputePipelineState
     private let f16ToF32PSO: MTLComputePipelineState
     private let sconvF32OutPSO: MTLComputePipelineState
@@ -31,6 +33,9 @@ final class InklingKernels {
     let routerLogits: MTLBuffer
     /// fp32 gammas for the 2 shared experts, written by the select kernel.
     let sharedGammas: MTLBuffer
+    /// One `uint`: how many real-vocabulary logits the head epilogue found
+    /// non-finite. Reset before each head dispatch, read after it completes.
+    let nonFiniteLogitCount: MTLBuffer
 
     init(context: MetalContext,
          numRouted: Int,
@@ -41,10 +46,14 @@ final class InklingKernels {
         self.routerGemvPSO = try context.pipeline("router_gemv_bf16_r4")
         self.routerSelectPSO = try context.pipeline("inkling_router_select")
         self.gammaCombinePSO = try context.pipeline("inkling_gamma_combine")
+        self.gammaCombineF32InPSO =
+            try context.pipeline("inkling_gamma_combine_f32in")
         self.scalePSO = try context.pipeline("inkling_scale_f16")
         self.headEpiloguePSO = try context.pipeline("inkling_head_epilogue")
         self.f16ToF32PSO = try context.pipeline("inkling_f16_to_f32")
         self.scaleAccumPSO = try context.pipeline("inkling_scale_accum_f32")
+        self.scaleAccumF32InPSO =
+            try context.pipeline("inkling_scale_accum_f32_from_f32")
         self.f32ToF16PSO = try context.pipeline("inkling_f32_to_f16")
         self.sconvF32OutPSO = try context.pipeline("inkling_sconv_step_f32out")
         self.residualAddF32DPSO = try context.pipeline("inkling_residual_add_f32d")
@@ -64,6 +73,22 @@ final class InklingKernels {
         }
         gammas.label = "inkling.sharedGammas"
         self.sharedGammas = gammas
+        guard let guardBuf = context.device.makeBuffer(
+            length: MemoryLayout<UInt32>.size,
+            options: .storageModeShared) else {
+            throw MetalError.libraryCompileFailed("inkling logit guard buffer allocation failed")
+        }
+        guardBuf.label = "inkling.nonFiniteLogitCount"
+        guardBuf.contents().storeBytes(of: UInt32(0), as: UInt32.self)
+        self.nonFiniteLogitCount = guardBuf
+    }
+
+    func resetNonFiniteLogitCount() {
+        nonFiniteLogitCount.contents().storeBytes(of: UInt32(0), as: UInt32.self)
+    }
+
+    var nonFiniteLogits: Int {
+        Int(nonFiniteLogitCount.contents().load(as: UInt32.self))
     }
 
     /// One decode step of the depthwise causal conv: `out = conv(x) + x`,
@@ -232,10 +257,12 @@ final class InklingKernels {
     func encodeGammaCombine(commandBuffer cb: MTLCommandBuffer,
                             a: MTLBuffer, b: MTLBuffer,
                             y: MTLBuffer,
-                            count: UInt32) {
+                            count: UInt32,
+                            inputsAreFloat32: Bool = false) {
         guard let enc = cb.makeComputeCommandEncoder() else { return }
         var n = count
-        enc.setComputePipelineState(gammaCombinePSO)
+        enc.setComputePipelineState(
+            inputsAreFloat32 ? gammaCombineF32InPSO : gammaCombinePSO)
         enc.setBuffer(a, offset: 0, index: 0)
         enc.setBuffer(b, offset: 0, index: 1)
         enc.setBuffer(sharedGammas, offset: 0, index: 2)
@@ -246,15 +273,18 @@ final class InklingKernels {
         enc.endEncoding()
     }
 
-    /// acc(f32, at offset) += w * x(f16).
+    /// acc(f32, at offset) += w * x, with `x` FP16 or (for expert outputs whose
+    /// raw rows leave FP16 range) FP32.
     func encodeScaleAccum(commandBuffer cb: MTLCommandBuffer,
                           acc: MTLBuffer, accOffset: Int,
                           x: MTLBuffer,
-                          weight: Float, count: UInt32) {
+                          weight: Float, count: UInt32,
+                          xIsFloat32: Bool = false) {
         guard let enc = cb.makeComputeCommandEncoder() else { return }
         var w = weight
         var n = count
-        enc.setComputePipelineState(scaleAccumPSO)
+        enc.setComputePipelineState(
+            xIsFloat32 ? scaleAccumF32InPSO : scaleAccumPSO)
         enc.setBuffer(acc, offset: accOffset, index: 0)
         enc.setBuffer(x, offset: 0, index: 1)
         enc.setBytes(&w, length: 4, index: 2)
@@ -368,8 +398,11 @@ final class InklingKernels {
         enc.endEncoding()
     }
 
-    /// Logits epilogue: scale the real vocabulary by `c` and pin the padding
-    /// tail to -inf so it can never be sampled.
+    /// Logits epilogue: scale the real vocabulary by `c`, pin the padding tail
+    /// to -inf so it can never be sampled, and count any non-finite real logit
+    /// into `nonFiniteLogitCount`. Callers must reset that counter (see
+    /// `resetNonFiniteLogitCount()`) before encoding and read it after the
+    /// command buffer completes.
     func encodeHeadEpilogue(commandBuffer cb: MTLCommandBuffer,
                             logits: MTLBuffer,
                             scale c: Float,
@@ -384,6 +417,7 @@ final class InklingKernels {
         enc.setBytes(&scale, length: 4, index: 1)
         enc.setBytes(&valid, length: 4, index: 2)
         enc.setBytes(&total, length: 4, index: 3)
+        enc.setBuffer(nonFiniteLogitCount, offset: 0, index: 4)
         enc.dispatchThreads(MTLSize(width: Int(totalVocab), height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         enc.endEncoding()

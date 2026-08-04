@@ -27,6 +27,12 @@ public struct Args: Equatable, Sendable {
     public var expertCacheSlots: Int
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice
+    /// Model-integrity policy. `.fullSha256` re-hashes every routed-expert
+    /// file on first touch — 145 GB for Inkling-Small, ~59 s inside the first
+    /// prefill. `.sizeCheckTrustedReceipt` checks sizes against the receipt
+    /// written at install time instead. Mirrors the Mac app's existing
+    /// verification control.
+    public var verification: ModelIntegrityPolicy
 
     public init(model: String,
                 prompt: String? = nil,
@@ -44,7 +50,8 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 expertCacheSlots: Int = 16,
                 rdadvise: String = "off",
-                prefillChunk: PrefillChunkChoice = .fixed(128)) {
+                prefillChunk: PrefillChunkChoice = .fixed(128),
+                verification: ModelIntegrityPolicy = .fullSha256) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -59,6 +66,7 @@ public struct Args: Equatable, Sendable {
         self.expertCacheSlots = expertCacheSlots
         self.rdadvise = rdadvise
         self.prefillChunk = prefillChunk
+        self.verification = verification
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
@@ -121,6 +129,12 @@ extension Args {
                                 prompt processing; auto sizes the chunk to
                                 the prompt (--chat uses the default). Allowed:
                                 32, 64, 128, 256, 512, 1024, 2048, 4096.
+      --verify <mode>           Model integrity: full-sha256 (default)
+                                re-hashes every routed-expert file on first
+                                touch, which for a 145 GB expert pool costs
+                                ~59 s inside the first prefill;
+                                trusted-receipt checks file sizes against the
+                                receipt written at install time instead.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -143,6 +157,7 @@ extension Args {
         var expertCacheSlots = 16
         var rdadvise = "off"
         var prefillChunk = PrefillChunkChoice.fixed(128)
+        var verification = ModelIntegrityPolicy.fullSha256
 
         var index = 0
         while index < argv.count {
@@ -225,6 +240,13 @@ extension Args {
                 } else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+            case "--verify":
+                let value = try takeValue(argv, &index, flag: flag)
+                switch value {
+                case "full-sha256": verification = .fullSha256
+                case "trusted-receipt": verification = .sizeCheckTrustedReceipt
+                default: throw ArgsError.invalidValue(flag: flag, value: value)
+                }
             case "--rdadvise":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard ["off", "default", "bounded", "adaptive"].contains(value) else {
@@ -273,7 +295,8 @@ extension Args {
                     quiet: quiet,
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
-                    prefillChunk: prefillChunk)
+                    prefillChunk: prefillChunk,
+                    verification: verification)
     }
 
     private static func takeValue(_ argv: [String],

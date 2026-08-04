@@ -1,4 +1,5 @@
 import Testing
+import Mference
 @testable import MferenceCLICore
 
 @Suite struct CLIArgumentsTests {
@@ -66,7 +67,7 @@ import Testing
             "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--prefill-chunk", "--quiet", "--help",
-            "--rdadvise", "--expert-cache-slots",
+            "--rdadvise", "--expert-cache-slots", "--verify",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -174,6 +175,32 @@ import Testing
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi",
                 "--prefill-chunk", value,
+            ])
+        }
+    }
+
+    /// Verification defaults to the strict policy: skipping the per-expert
+    /// hashes is a deliberate opt-in, not something a caller inherits.
+    @Test func verificationDefaultsToFullSha256() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(arguments.verification == .fullSha256)
+    }
+
+    @Test(arguments: [("full-sha256", ModelIntegrityPolicy.fullSha256),
+                      ("trusted-receipt", ModelIntegrityPolicy.sizeCheckTrustedReceipt)])
+    func verifyAcceptsBothPolicies(value: String,
+                                   expected: ModelIntegrityPolicy) throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi", "--verify", value,
+        ])
+        #expect(arguments.verification == expected)
+    }
+
+    @Test(arguments: ["", "none", "sha", "trusted", "full"])
+    func verifyRejectsUnknownPolicies(value: String) {
+        #expect(throws: ArgsError.invalidValue(flag: "--verify", value: value)) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi", "--verify", value,
             ])
         }
     }
