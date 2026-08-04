@@ -36,7 +36,8 @@ public final class SharedExpertInt4 {
                        y: MTLBuffer, yOffset: Int = 0,
                        scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
                        scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
-                       scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
+                       scratchAct: MTLBuffer, scratchActOffset: Int = 0,
+                       outputFloat32: Bool = false) throws {
         guard gate.rows == up.rows, gate.cols == up.cols,
               down.rows == gate.cols, down.cols == gate.rows else {
             throw SharedExpertError.dimensionMismatch(
@@ -50,7 +51,8 @@ public final class SharedExpertInt4 {
             throw SharedExpertError.scratchTooSmall("need \(required) bytes per intermediate buffer")
         }
         let inputBytes = Int(gate.cols) * MemoryLayout<Float16>.stride
-        let outputBytes = Int(down.rows) * MemoryLayout<Float16>.stride
+        let outputBytes = Int(down.rows) * (outputFloat32
+            ? MemoryLayout<Float>.stride : MemoryLayout<Float16>.stride)
         guard xOffset >= 0, xOffset + inputBytes <= x.length else {
             throw SharedExpertError.scratchTooSmall("input range exceeds x buffer")
         }
@@ -91,7 +93,8 @@ public final class SharedExpertInt4 {
                     biases: down.biases, biasesOffset: down.biasesOffset,
                     x: scratchAct, xOffset: scratchActOffset,
                     y: y, yOffset: yOffset,
-                    m: down.rows, n: down.cols)
+                    m: down.rows, n: down.cols,
+                    outputFloat32: outputFloat32)
     }
 }
 
@@ -124,15 +127,21 @@ public final class SharedExpertRuntime {
                        y: MTLBuffer, yOffset: Int = 0,
                        scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
                        scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
-                       scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
+                       scratchAct: MTLBuffer, scratchActOffset: Int = 0,
+                       outputFloat32: Bool = false) throws {
         switch implementation {
         case .int4(let runtime):
             try runtime.encode(commandBuffer: commandBuffer, x: x, xOffset: xOffset,
                                gate: gate, up: up, down: down, y: y, yOffset: yOffset,
                                scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
                                scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
-                               scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+                               scratchAct: scratchAct, scratchActOffset: scratchActOffset,
+                               outputFloat32: outputFloat32)
         case .int8(let runtime):
+            guard !outputFloat32 else {
+                throw SharedExpertError.dimensionMismatch(
+                    "FP32 output is only implemented for the INT4 shared expert")
+            }
             try runtime.encode(commandBuffer: commandBuffer, x: x, xOffset: xOffset,
                                gate: gate, up: up, down: down, y: y, yOffset: yOffset,
                                scratchAct: scratchAct, scratchActOffset: scratchActOffset)

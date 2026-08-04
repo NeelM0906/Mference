@@ -71,16 +71,18 @@ benchmark protocol.
 | Prompt prefill | On, off | — | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 | Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | 128 | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers the whole prompt (interactive `--chat` keeps the default). Larger chunks use more prefill scratch memory, and on sliding-window models more KV ring memory. DeepSeek-V4 models prefill through the decode path and ignore the chunk size. |
+| Model verification | Full SHA-256, trusted receipt | `--verify` | Full SHA-256 | `full-sha256` re-hashes each routed-expert file on first touch, which for a 145 GB expert pool costs about 59 s inside the first prefill. `trusted-receipt` instead checks each file's size against the receipt written at install time; the receipt itself is still validated against the manifest hash, and `model_weights.bin` and `layout.json` are still hashed. It trades detection of size-preserving corruption for that time. The Mac app exposes the same choice. |
 
 The prefill chunk size is a CLI control; the Mac app uses the default.
 The CLI applies these settings when it loads the model, so each run uses the
 values passed on its command line. Setting `MFERENCE_PHASES=1` makes the
 CLI print the decode phase split (`cb1`, expert I/O await, `cb2`, and GPU
-waits) after the timing footer; it is a diagnostic and does not change
-behavior.
+waits) after the timing footer; `MFERENCE_PREFILL_BREAKDOWN=1` prints the
+Inkling prefill routed-expert split (fetch, encode, drain). Both are
+diagnostics and do not change behavior.
 
-Changing context length, expert-cache slots, RDADVISE, or the prefill chunk
-size requires a reload.
+Changing context length, expert-cache slots, RDADVISE, model verification, or
+the prefill chunk size requires a reload.
 Some sampling changes also require a reload because greedy and sampled
 generation use different output-head paths. Prompt-prefill settings apply to
 each request and do not require a reload.
