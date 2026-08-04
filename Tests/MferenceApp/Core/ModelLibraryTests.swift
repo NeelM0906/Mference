@@ -65,6 +65,24 @@ import Testing
         #expect(catalog.first { $0.descriptor.family == .gemma4 }?.installedURL == nil)
     }
 
+    @Test func scanResolvesSymlinkedLibraryEntriesToTheirRealLocation() throws {
+        let base = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ModelLibraryTests-\(UUID().uuidString)", isDirectory: true)
+        let realInstall = base.appendingPathComponent("real/model.gturbo", isDirectory: true)
+        let libraryRoot = base.appendingPathComponent("library", isDirectory: true)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: realInstall, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: base) }
+        try fileManager.createSymbolicLink(
+            at: libraryRoot.appendingPathComponent("model.gturbo", isDirectory: true),
+            withDestinationURL: realInstall)
+
+        let listed = ModelLibrary.gturboSubdirectories(of: libraryRoot)
+        #expect(listed.map(\.lastPathComponent) == ["model.gturbo"])
+        #expect(listed.first?.path == realInstall.resolvingSymlinksInPath().path)
+    }
+
     @Test func candidateRootsPutOverrideFirstRememberedParentLastAndDeduplicate() throws {
         let suiteName = "ModelLibraryTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))

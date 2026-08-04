@@ -134,7 +134,11 @@ public enum ModelLibrary {
         }
     }
 
-    private static func gturboSubdirectories(of root: URL) -> [URL] {
+    /// Symlinked entries resolve to their real location: install receipts
+    /// bind to the directory the model was verified at, so probing (and
+    /// later activating) the resolved path is what makes a symlinked
+    /// library entry count as installed.
+    static func gturboSubdirectories(of root: URL) -> [URL] {
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -142,5 +146,6 @@ public enum ModelLibrary {
         return contents
             .filter { $0.pathExtension == "gturbo" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { $0.resolvingSymlinksInPath() }
     }
 }
