@@ -305,6 +305,22 @@ kernel void inkling_gamma_combine(
     y[i] = half(gammas[0] * float(a[i]) + gammas[1] * float(b[i]));
 }
 
+// FP32-input gamma combine. The two shared-expert down projections write FP32
+// rows (their raw magnitudes leave FP16 range — see
+// `inkling_scale_accum_f32_from_f32`); the gammas carry the 1/32 FFN prescale,
+// so the combined output is back inside FP16 range with room to spare.
+kernel void inkling_gamma_combine_f32in(
+    device const float* a      [[buffer(0)]],
+    device const float* b      [[buffer(1)]],
+    device const float* gammas [[buffer(2)]],
+    device       half*  y      [[buffer(3)]],
+    constant     uint&  count  [[buffer(4)]],
+    uint i [[thread_position_in_grid]]
+) {
+    if (i >= count) return;
+    y[i] = half(gammas[0] * a[i] + gammas[1] * b[i]);
+}
+
 // ----------------------------------------------------------------------------
 // FP32 residual-stream helpers. Inkling's residual grows past 55 000 by layer
 // 22 (BF16-trained, muP-style outlier channels) and overflows an FP16 stream
@@ -414,15 +430,30 @@ void inkling_rms_f32in(
 // padding rows of the 201 024-wide unembed can never be sampled (the real
 // vocabulary is 200 058).
 // ----------------------------------------------------------------------------
+// `bad` counts non-finite real-vocabulary logits. A NaN or infinity here is
+// always an engine fault upstream, and it used to be *invisible*: the CPU
+// argmax seeds its running best at (index 0, -infinity), every `v > best`
+// comparison against NaN is false, so an all-NaN row silently returned token
+// id 0 — which decodes to "!". Counting them lets the caller fail loudly
+// instead of emitting a plausible-looking exclamation mark.
 kernel void inkling_head_epilogue(
-    device       half*  x     [[buffer(0)]],
-    constant     float& c     [[buffer(1)]],
-    constant     uint&  valid [[buffer(2)]],
-    constant     uint&  total [[buffer(3)]],
+    device       half*         x     [[buffer(0)]],
+    constant     float&        c     [[buffer(1)]],
+    constant     uint&         valid [[buffer(2)]],
+    constant     uint&         total [[buffer(3)]],
+    device       atomic_uint*  bad   [[buffer(4)]],
     uint i [[thread_position_in_grid]]
 ) {
     if (i >= total) return;
-    x[i] = (i < valid) ? half(float(x[i]) * c) : half(-INFINITY);
+    if (i < valid) {
+        const float v = float(x[i]) * c;
+        if (!isfinite(v)) {
+            atomic_fetch_add_explicit(bad, 1u, memory_order_relaxed);
+        }
+        x[i] = half(v);
+    } else {
+        x[i] = half(-INFINITY);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -439,6 +470,22 @@ kernel void inkling_scale_accum_f32(
 ) {
     if (i >= count) return;
     acc[i] = fma(float(x[i]), w, acc[i]);
+}
+
+// As above, but the expert output is already FP32. The GLU down projection
+// writes FP32 for this family because a single Inkling channel (layer 41,
+// channel 3895 on the released checkpoint) runs at 1e4-6e4 *before* its
+// routing weight or shared gamma is applied, so an FP16 store of the raw row
+// clips to infinity on the tokens that push it over 65 504.
+kernel void inkling_scale_accum_f32_from_f32(
+    device       float* acc   [[buffer(0)]],
+    device const float* x     [[buffer(1)]],
+    constant     float& w     [[buffer(2)]],
+    constant     uint&  count [[buffer(3)]],
+    uint i [[thread_position_in_grid]]
+) {
+    if (i >= count) return;
+    acc[i] = fma(x[i], w, acc[i]);
 }
 
 // f32 -> f16 narrowing copy (per-token staging of chunk vectors into the

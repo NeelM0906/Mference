@@ -605,6 +605,100 @@ kernel void prefill_moe_reduce_token_major(
     h2[t * D + d] = half(acc);
 }
 
+// ----------------------------------------------------------------------------
+// Inkling batched expert application.
+//
+// The v1 Inkling prefill applied one expert to one token per dispatch: three
+// GEMVs plus an accumulate, repeated for every (token, expert) pair. These two
+// kernels invert the loop: one dispatch pair per EXPERT covers every chunk
+// token routed to it, so an expert's weight rows are read once per expert
+// instead of once per pair and the grid's token dimension supplies the reuse
+// through the cache.
+//
+// Measured effect, 2 785-token prompt on an M3 Ultra: prefill 228.9 s -> 205.7 s
+// (1.11x). Do not read more into it than that. `MFERENCE_PREFILL_BREAKDOWN=1`
+// shows why the ceiling is low — the routed-expert loop is only ~15 % of
+// prefill (8 % streaming, 6.6 % this compute); the other ~85 % is the
+// per-token attention / norm / short-conv replay elsewhere in
+// `prefillInklingChunk`, which is where the remaining time actually is.
+//
+// The accumulate needs no atomics: within a single expert a token appears at
+// most once, so no two threads of one dispatch touch the same `acc` element.
+// `acc` is FP32 because a raw Inkling expert row reaches ~6e4 before its
+// routing weight is applied and clips an FP16 store (docs/INKLING_SMALL.md,
+// "FFN output range").
+//
+// The same pair applies a SHARED expert too: pass every chunk token with the
+// per-token shared gamma as the weight.
+// ----------------------------------------------------------------------------
+struct InklingPrefillExpertParamsMSL {
+    uint d;                 // hidden size
+    uint f;                 // expert intermediate width
+    uint pair_start;        // first pair index for this expert
+    uint pair_count;        // tokens routed to this expert
+    uint hidden_stride;     // elements between token rows of `hidden`
+    uint gate_W_off, gate_s_off, gate_b_off;
+    uint up_W_off,   up_s_off,   up_b_off;
+    uint down_W_off, down_s_off, down_b_off;
+};
+
+kernel void inkling_prefill_expert_act(
+    device const half*                          hidden      [[buffer(0)]],
+    device const uint*                          pair_tokens [[buffer(1)]],
+    device const uint8_t*                       expert      [[buffer(2)]],
+    device half*                                act         [[buffer(3)]],
+    constant InklingPrefillExpertParamsMSL&     p           [[buffer(4)]],
+    uint2                                       gid         [[thread_position_in_grid]]
+) {
+    const uint f = gid.x;
+    const uint t = gid.y;
+    if (f >= p.f || t >= p.pair_count) return;
+
+    device const half* x = hidden
+        + uint(pair_tokens[p.pair_start + t]) * p.hidden_stride;
+    const float gate = prefill_moe_int4_gemv_row_dev(
+        expert + p.gate_W_off,
+        reinterpret_cast<device const bfloat*>(expert + p.gate_s_off),
+        reinterpret_cast<device const bfloat*>(expert + p.gate_b_off),
+        x, f, p.d);
+    const float up = prefill_moe_int4_gemv_row_dev(
+        expert + p.up_W_off,
+        reinterpret_cast<device const bfloat*>(expert + p.up_s_off),
+        reinterpret_cast<device const bfloat*>(expert + p.up_b_off),
+        x, f, p.d);
+    // Round gate and up to FP16 *before* combining. The per-token path this
+    // replaces stored both GEMV results to FP16 scratch and `silu_mul_fp16`
+    // read them back, so keeping the same two roundings keeps prefill's
+    // activations consistent with the decode path rather than slightly more
+    // accurate than it.
+    const float g = float(half(gate));
+    const float u = float(half(up));
+    act[t * p.f + f] = half(prefill_hidden_activation(g) * u);
+}
+
+kernel void inkling_prefill_expert_down_accum(
+    device const half*                          act          [[buffer(0)]],
+    device const uint*                          pair_tokens  [[buffer(1)]],
+    device const float*                         pair_weights [[buffer(2)]],
+    device const uint8_t*                       expert       [[buffer(3)]],
+    device float*                               acc          [[buffer(4)]],
+    constant InklingPrefillExpertParamsMSL&     p            [[buffer(5)]],
+    uint2                                       gid          [[thread_position_in_grid]]
+) {
+    const uint d = gid.x;
+    const uint t = gid.y;
+    if (d >= p.d || t >= p.pair_count) return;
+
+    const float value = prefill_moe_int4_gemv_row_dev(
+        expert + p.down_W_off,
+        reinterpret_cast<device const bfloat*>(expert + p.down_s_off),
+        reinterpret_cast<device const bfloat*>(expert + p.down_b_off),
+        act + t * p.f, d, p.f);
+    const uint token = pair_tokens[p.pair_start + t];
+    const uint index = token * p.d + d;
+    acc[index] = fma(pair_weights[p.pair_start + t], value, acc[index]);
+}
+
 kernel void prefill_grouped_routed_moe_batched_phase1(
     device const half*                                   hidden               [[buffer(0)]],
     device const PrefillTokenExpertPairMSL*              sorted_pairs         [[buffer(1)]],

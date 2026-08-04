@@ -90,12 +90,19 @@ kernel void embed_lookup_int4(
 // Each threadgroup handles eight consecutive rows, one SIMD per row. The
 // larger work unit gives the scheduler enough independent rows while sharing
 // the L1-cached input-vector reads.
-static inline void dequant_int4_gemv_simd_body(
+//
+// `OutT` is the store type only — the dot product always accumulates in FP32.
+// `half` is the default everywhere; `float` exists for rows whose magnitude
+// can leave FP16 range before a downstream scale brings them back, which is
+// the case for Inkling's shared-expert down projection (see
+// docs/INKLING_SMALL.md, "FFN output range").
+template <typename OutT>
+static inline void dequant_int4_gemv_simd_body_t(
     device const uint8_t* W,
     device const bfloat*  scales,
     device const bfloat*  biases,
     device const half*    x,
-    device half*          y,
+    device OutT*          y,
     uint                  M,
     uint                  N,
     uint                  rows_per_tg,
@@ -167,8 +174,25 @@ static inline void dequant_int4_gemv_simd_body(
     }
     acc = simd_sum(acc);
     if (lane == 0) {
-        y[row] = half(acc);
+        y[row] = OutT(acc);
     }
+}
+
+static inline void dequant_int4_gemv_simd_body(
+    device const uint8_t* W,
+    device const bfloat*  scales,
+    device const bfloat*  biases,
+    device const half*    x,
+    device half*          y,
+    uint                  M,
+    uint                  N,
+    uint                  rows_per_tg,
+    uint                  tg_idx,
+    uint                  sg_idx,
+    uint                  lane
+) {
+    dequant_int4_gemv_simd_body_t<half>(W, scales, biases, x, y, M, N,
+                                        rows_per_tg, tg_idx, sg_idx, lane);
 }
 
 kernel void dequant_int4_gemv_simd(
@@ -188,6 +212,29 @@ kernel void dequant_int4_gemv_simd(
     const uint NN = int4_fc_n(N);
     dequant_int4_gemv_simd_body(W, scales, biases, x, y, MM, NN,
                                 rows_per_tg, tg_idx, sg_idx, lane);
+}
+
+// Same GEMV, FP32 output rows. Bit-identical arithmetic to
+// `dequant_int4_gemv_simd` — only the final store widens — so a caller can
+// swap it in wherever an output row can exceed FP16's 65 504 before the
+// scale that brings it back into range is applied downstream.
+kernel void dequant_int4_gemv_simd_f32out(
+    device const uint8_t* W      [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device const half*    x      [[buffer(3)]],
+    device float*         y      [[buffer(4)]],
+    constant uint&        M      [[buffer(5)]],
+    constant uint&        N      [[buffer(6)]],
+    uint                  tg_idx [[threadgroup_position_in_grid]],
+    uint                  sg_idx [[simdgroup_index_in_threadgroup]],
+    uint                  lane   [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint MM = int4_fc_m(M);
+    const uint NN = int4_fc_n(N);
+    dequant_int4_gemv_simd_body_t<float>(W, scales, biases, x, y, MM, NN,
+                                         rows_per_tg, tg_idx, sg_idx, lane);
 }
 
 

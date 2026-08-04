@@ -6,9 +6,12 @@ Checkpoint selection, memory budget, and the architecture gap list for running
 document is the architecture contract for the `inklingSmall` family.
 
 Conversion has been run and verified against the real checkpoint (see
-**Status**). Throughput numbers remain *estimates* calibrated against measured
-DSV4-Flash performance on the same machine — no Inkling token has been
-generated yet, because the forward pass is not implemented.
+**Status**), and the forward pass has since shipped: measured decode is
+5.3–6.9 tok/s at an ~8.9 GiB peak footprint on an M3 Ultra
+([BENCHMARKS_M3_ULTRA.md](BENCHMARKS_M3_ULTRA.md)). Throughput figures
+elsewhere in this document that are labeled *estimates* predate those runs
+and are kept for the planning context they carried; the benchmark document
+is the measured record.
 
 ## Checkpoint selection
 
@@ -336,7 +339,8 @@ the top perf follow-up).
 Post-first-light bug ledger (all found by CPU/oracle parity, in order):
 FP16 residual overflow at L23 (stream is now FP32); FP16 sconv-delta
 overflow (deltas now FP32); a single shared-expert channel clipping FP16 at
-L41 (fixed by an exact ÷32/×32 prescale through the FFN output path); and
+L41 (fixed by an exact ÷32/×32 prescale through the FFN output path — only
+partly, see **FFN output range** below); and
 the root cause of the garbage output — `mlp.global_scale` on the two dense
 layers is **BF16** while `mlp.gate.global_scale` is FP32, and the scalar
 reader assumed FP32, poisoning layers 0-1 with a garbage gain. The engine's
@@ -357,6 +361,116 @@ size/hash check passed — install verification hashes what the converter
 untrusted input; re-fetch the whole shard or verify against upstream LFS
 digests before converting. A clean streaming reinstall from Hugging Face is
 the fix.
+
+### FFN output range (2026-08-04)
+
+The ÷32/×32 prescale above was an incomplete fix, and the gap produced the
+first *plausible-looking* corruption this family has shipped: occasional long
+or rare words truncated mid-word and replaced by a burst of exclamation marks
+("salt marshes, mang**!!!!**" for "mangroves"; "cancellation / ded**!!!!**"
+for "deduplication"). Deterministic, reproducible under greedy decode, and
+absent from all three other families under the same harness.
+
+The prescale divides the router weights and the shared gammas, so it protects
+`h1`/`h2` — the *post*-gamma FFN output. It does nothing for the **raw
+shared-expert down-projection rows**, which are written before any gamma is
+applied. On the released checkpoint, layer 41 channel 3895 of that raw row
+runs at **1.5e4 – 6e4 on every token** — permanently within a factor of two
+of FP16's 65 504 ceiling. The token that pushed it to **69 307** clipped to
+`-inf`.
+
+The failure then laundered itself through four stages, which is why nothing
+caught it earlier:
+
+1. `-inf` reached the FP32 residual via the ×32 residual add. Layer 41 is the
+   last layer, so no KV entry was poisoned — only the layer's `mlp_sconv`
+   state, which holds the last `K-1 = 3` inputs. That is exactly the observed
+   **four-token** burst, self-clearing on the fifth.
+2. The head's RMS norm squared the `inf` into an `inf` sum-of-squares, so
+   `1/sqrt(ss)` was `0` and `-inf * 0` produced **NaN**, which the INT4 GEMV
+   then smeared across all 200 058 logits.
+3. The CPU greedy argmax seeds its running best at `(index 0, -infinity)`.
+   Every `v > best` comparison against NaN is false, so it returned **token
+   id 0** — and id 0 in this vocabulary is `!`. Both output-head paths emit the
+   same `!`, because the NaN row is produced upstream of the split: the greedy
+   fallback above is traced, and the sampled path's own degeneration on an
+   all-NaN distribution was not traced further once the shared cause was
+   established.
+4. Nothing in the manifest, install verification, or per-layer parity harness
+   inspects a mid-generation logit row, and a stray `!` reads as a model tic
+   rather than an engine fault.
+
+Fix: the shared-expert (and, in prefill, every streamed expert's) down
+projection writes **FP32** rows —
+`dequant_int4_gemv_simd_f32out`, consumed by `inkling_gamma_combine_f32in` in
+decode and `inkling_scale_accum_f32_from_f32` in prefill. Arithmetic is
+unchanged; only the store widens. Post-fix the same token's channel reads
+-69 307.5 and `h1` lands at -7 064, a 9× margin inside FP16, and the
+completion is "salt marshes, mangroves, and seagrass beds".
+
+Second fix, independent of the first: `inkling_head_epilogue` now counts
+non-finite real logits and the runner throws `InklingHeadError` on a non-zero
+count, with the argmax seed moved to index `-1`. Any future numeric blowup
+fails loudly at the position where it happens instead of rendering as `!`.
+
+Lesson recorded: a *scale applied after a narrowing store* protects nothing.
+When an outlier channel forces a prescale, the prescale has to sit upstream of
+every FP16 store on that path, or the store has to widen.
+
+Audit of the remaining FP16 stores on the FFN output path, for whoever hits
+the next one:
+
+| Store | Prescaled before it? | Measured headroom |
+|---|---|---|
+| routed down projection (decode, `moe_phase2_down_reduce_k8`) | yes — `routing_w` carries ÷32 and the reduce is FP32 | `h2` peaked at 4 764 of 65 504 |
+| shared down projection (decode + prefill) | **no** — gamma applies after | **overflowed**; now FP32 |
+| `h1` / `h2` after the gamma combine | yes | 7 064 of 65 504 at the worst observed token |
+| dense MLP down projection, layers 0-1 | **no** — `mlp.global_scale` applies after, same pattern | not overflowing: the L0/L1 residual peaks near 1e2, so ~500× margin. Left FP16 deliberately; widen it if those layers ever grow. |
+
+### Prefill cost profile (2026-08-04)
+
+Measured on an M3 Ultra / 256 GB with `MFERENCE_PREFILL_BREAKDOWN=1`, greedy,
+`--verify trusted-receipt --prefill-chunk auto`. Three changes landed together:
+receipt-based verification instead of re-hashing every expert file on first
+touch, a prefill chunk capacity that follows `--prefill-chunk` instead of a
+hardcoded 128, and per-expert batched GLUs replacing per-(token, expert)
+dispatches.
+
+| Prompt | Before | After | Gain |
+|---|---:|---:|---:|
+| short-explanation, 59 tok | 65.8 s | 9.6 s | 6.8x |
+| medium-review, 421 tok | 107.0 s | 28.2 s | 3.8x |
+| long-synthesis, 2 785 tok | 483.2 s | 205.7 s | 2.3x |
+
+Where the remaining 205.7 s of the long case goes:
+
+| Component | Time | Share |
+|---|---:|---:|
+| Routed-expert streaming (serialized, 1.89 ms x 8 651) | 16.4 s | 8.0 % |
+| Routed-expert compute (batched GLUs) | 13.5 s | 6.6 % |
+| Per-token attention / norm / short-conv / tail | 175.8 s | **85.5 %** |
+
+The last row is the one that matters, and it was not obvious: the whole expert
+path — streaming *and* compute — is ~15 % of prefill. It also grows
+superlinearly, 13.3x for 6.6x the tokens, because 7 of 42 layers are global
+while the other 35 are capped at window 512.
+
+Two consequences for whoever picks this up:
+
+1. **Batched prefill attention is the remaining work.** `PrefillAttention` /
+   `attention_prefill_causal_tiled` already exist and serve the other three
+   families; Inkling is the only one still replaying attention per token, and
+   that is why Gemma 4 prefills at 134 tok/s on this host and Inkling at 13.5.
+2. **Expert streaming is serialized.** `prefillInklingChunk` awaits a fetch,
+   encodes, then drains, so the fetch never overlaps GPU work.
+   `PrefillRoutedTileScheduler` implements the pipelined alternative.
+
+Method note, recorded because it cost real time: the first three attempts at
+this ranked the levers from dispatch counts and a per-pair cost fitted across
+prompt sizes. That fit was total prefill time divided by pair count, so it
+silently contained attention, the tail, and streaming — it looked constant
+because it measured everything, and every extrapolation from it was wrong by
+5-20x. Profile with `MFERENCE_PREFILL_BREAKDOWN=1` before optimizing.
 
 Bring-up config note: the fused QKV GEMV and the constant-folded INT4 GEMV
 variants are bypassed for this family (plain generic GEMVs) — they were
