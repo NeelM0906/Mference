@@ -483,31 +483,52 @@ its two physical KV spans, so QK/PV tiles never require a staging copy or cross
 the ring boundary.
 
 Targeted prefill A/B on an Apple M5 MacBook Pro (10 cores, 24 GB), macOS 26.5,
-Swift 6.3.3, with a clean release build of base commit `aae03d4` and the same
-warm local model/cache state:
+Swift 6.3.3, with a clean release build of base commit
+`aae03d4c59dc8167f8c1031c864e05afe9cc8b90` and the optimized source tree
+recorded as commit `7282abebd00c6ef312d2d40a3c4c9324644725c0`, using the same warm local
+model/cache state:
 
 | Prompt | Base | Batched kernels | Gain |
 |---|---:|---:|---:|
 | medium-review, 421 tok | 64.05 s | 56.52 s | 1.13x |
 | long-synthesis, 2 785 tok | 580.81 s | 412.09 s | **1.41x** |
 
-The long case saves 168.72 s (29.0%). Both commands exited 0. Complete timing
-footers were:
+The long case saves 168.72 s (29.0%). Every command below exited 0. Complete
+timing footers, in base/optimized order, were:
 
 ```text
+[stop=maxTokens prefill=421tok/64.05s new=1tok decode=0.00s tok/s=371.342]
+[stop=maxTokens prefill=421tok/56.52s new=1tok decode=0.00s tok/s=669.375]
 [stop=maxTokens prefill=2785tok/580.81s new=1tok decode=0.01s tok/s=100.969]
 [stop=maxTokens prefill=2785tok/412.09s new=1tok decode=0.00s tok/s=303.210]
 ```
 
-The command shape was:
+The exact medium commands were:
 
 ```bash
+# aae03d4c59dc8167f8c1031c864e05afe9cc8b90; exit 0
+benchmark-results/inkling-prefill-baseline/bin-base/MferenceCLI \
+  --model /Users/zidane/Downloads/inklingsmall.gturbo \
+  --messages-file docs/benchmark-prompts/real-generation-v1/medium-review.json \
+  --max-new 1 --max-context 4096 --temperature 0 \
+  --top-k 64 --top-p 0.95 --seed 20260722 \
+  --verify trusted-receipt
+
+# 7282abebd00c6ef312d2d40a3c4c9324644725c0; exit 0
 .build/release/MferenceCLI \
   --model /Users/zidane/Downloads/inklingsmall.gturbo \
-  --messages-file docs/benchmark-prompts/real-generation-v1/long-synthesis.json \
+  --messages-file docs/benchmark-prompts/real-generation-v1/medium-review.json \
   --max-new 1 --max-context 4096 --temperature 0 \
-  --top-k 64 --top-p 0.95 --seed 20260723 \
+  --top-k 64 --top-p 0.95 --seed 20260722 \
   --verify trusted-receipt
+```
+
+The exact long commands used the same two binaries and options, replacing the
+messages file and seed as follows:
+
+```bash
+--messages-file docs/benchmark-prompts/real-generation-v1/long-synthesis.json
+--seed 20260723
 ```
 
 This is an isolated-prefill measurement, not the public community generation
