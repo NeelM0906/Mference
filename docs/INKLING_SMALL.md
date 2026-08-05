@@ -427,7 +427,7 @@ the next one:
 | `h1` / `h2` after the gamma combine | yes | 7 064 of 65 504 at the worst observed token |
 | dense MLP down projection, layers 0-1 | **no** — `mlp.global_scale` applies after, same pattern | not overflowing: the L0/L1 residual peaks near 1e2, so ~500× margin. Left FP16 deliberately; widen it if those layers ever grow. |
 
-### Prefill cost profile (2026-08-04)
+### Historical prefill cost profile (2026-08-04)
 
 Measured on an M3 Ultra / 256 GB with `MFERENCE_PREFILL_BREAKDOWN=1`, greedy,
 `--verify trusted-receipt --prefill-chunk auto`. Three changes landed together:
@@ -455,12 +455,11 @@ path — streaming *and* compute — is ~15 % of prefill. It also grows
 superlinearly, 13.3x for 6.6x the tokens, because 7 of 42 layers are global
 while the other 35 are capped at window 512.
 
-Two consequences for whoever picks this up:
+Those measurements identified two follow-ups:
 
-1. **Batched prefill attention is the remaining work.** `PrefillAttention` /
-   `attention_prefill_causal_tiled` already exist and serve the other three
-   families; Inkling is the only one still replaying attention per token, and
-   that is why Gemma 4 prefills at 134 tok/s on this host and Inkling at 13.5.
+1. **Batched prefill attention was the main compute opportunity.** The
+   chunk-wide portable and Apple10 TensorOps paths described below now cover
+   Inkling's relative-position attention, including a wrapped sliding KV ring.
 2. **Expert streaming is serialized.** `prefillInklingChunk` awaits a fetch,
    encodes, then drains, so the fetch never overlaps GPU work.
    `PrefillRoutedTileScheduler` implements the pipelined alternative.
@@ -471,6 +470,50 @@ prompt sizes. That fit was total prefill time divided by pair count, so it
 silently contained attention, the tail, and streaming — it looked constant
 because it measured everything, and every extrapolation from it was wrong by
 5-20x. Profile with `MFERENCE_PREFILL_BREAKDOWN=1` before optimizing.
+
+### Batched prefill kernels (2026-08-05)
+
+Inkling prefill now operates on a whole chunk through dedicated FP32 RMSNorm,
+INT4 projection, fixed-K short-convolution, Q/K normalization, relative GQA
+attention, BF16 routing, and fused short-convolution/residual kernels. Below
+512 tokens, the portable relative-attention kernel avoids cooperative-tile
+setup cost. On Apple10, chunks starting at position 512 use an 8-query x 64-key
+TensorOps online-softmax kernel. A wrapped sliding-window range is split into
+its two physical KV spans, so QK/PV tiles never require a staging copy or cross
+the ring boundary.
+
+Targeted prefill A/B on an Apple M5 MacBook Pro (10 cores, 24 GB), macOS 26.5,
+Swift 6.3.3, with a clean release build of base commit `aae03d4` and the same
+warm local model/cache state:
+
+| Prompt | Base | Batched kernels | Gain |
+|---|---:|---:|---:|
+| medium-review, 421 tok | 64.05 s | 56.52 s | 1.13x |
+| long-synthesis, 2 785 tok | 580.81 s | 412.09 s | **1.41x** |
+
+The long case saves 168.72 s (29.0%). Both commands exited 0. Complete timing
+footers were:
+
+```text
+[stop=maxTokens prefill=2785tok/580.81s new=1tok decode=0.01s tok/s=100.969]
+[stop=maxTokens prefill=2785tok/412.09s new=1tok decode=0.00s tok/s=303.210]
+```
+
+The command shape was:
+
+```bash
+.build/release/MferenceCLI \
+  --model /Users/zidane/Downloads/inklingsmall.gturbo \
+  --messages-file docs/benchmark-prompts/real-generation-v1/long-synthesis.json \
+  --max-new 1 --max-context 4096 --temperature 0 \
+  --top-k 64 --top-p 0.95 --seed 20260723 \
+  --verify trusted-receipt
+```
+
+This is an isolated-prefill measurement, not the public community generation
+protocol: it uses one new token, trusted-receipt verification, one measured run
+per binary, and the production 128-token chunk default. Treat it as a local A/B
+measurement rather than a performance ceiling.
 
 Bring-up config note: the fused QKV GEMV and the constant-folded INT4 GEMV
 variants are bypassed for this family (plain generic GEMVs) — they were

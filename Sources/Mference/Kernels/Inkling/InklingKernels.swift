@@ -13,10 +13,17 @@ import Metal
 /// semantics (see docs/INKLING_SMALL.md "Forward-pass contract").
 final class InklingKernels {
     private let sconvPSO: MTLComputePipelineState
+    private let sconvPrefillF16PSO: MTLComputePipelineState
+    private let sconvPrefillResidualPSO: MTLComputePipelineState
     private let qkNormPSO: MTLComputePipelineState
+    private let qkNormPrefillPSO: MTLComputePipelineState
     private let attentionPSO: MTLComputePipelineState
+    private let attentionPrefillPSO: MTLComputePipelineState
+    private let attentionPrefillTensorOpsPSO: MTLComputePipelineState?
     private let routerGemvPSO: MTLComputePipelineState
     private let routerSelectPSO: MTLComputePipelineState
+    private let routerGemvPrefillPSO: MTLComputePipelineState
+    private let routerSelectPrefillPSO: MTLComputePipelineState
     private let gammaCombinePSO: MTLComputePipelineState
     private let gammaCombineF32InPSO: MTLComputePipelineState
     private let scalePSO: MTLComputePipelineState
@@ -29,6 +36,7 @@ final class InklingKernels {
     private let residualAddF32DPSO: MTLComputePipelineState
     private let residualAddF32PSO: MTLComputePipelineState
     private let rmsF32PSO: MTLComputePipelineState
+    private let rmsF32PrefillPSO: MTLComputePipelineState
     /// fp32 logits for the 256 routed + 2 shared sink scores.
     let routerLogits: MTLBuffer
     /// fp32 gammas for the 2 shared experts, written by the select kernel.
@@ -38,13 +46,30 @@ final class InklingKernels {
     let nonFiniteLogitCount: MTLBuffer
 
     init(context: MetalContext,
-         numRouted: Int,
+        numRouted: Int,
          numShared: Int) throws {
         self.sconvPSO = try context.pipeline("inkling_sconv_step")
+        self.sconvPrefillF16PSO = try context.pipeline("inkling_sconv_prefill_f16out")
+        self.sconvPrefillResidualPSO =
+            try context.pipeline("inkling_sconv_prefill_residual_f32")
         self.qkNormPSO = try context.pipeline("inkling_qk_norm")
+        self.qkNormPrefillPSO = try context.pipeline("inkling_qk_norm_prefill")
         self.attentionPSO = try context.pipeline("inkling_attention_decode")
+        self.attentionPrefillPSO = try context.pipeline("inkling_attention_prefill")
+        if context.device.supportsApple10TensorOps,
+           let library = try? MetalContext.moduleLibrary(
+               device: context.device, module: "tensorops"),
+           let function = library.makeFunction(
+               name: "inkling_attention_prefill_tensorops") {
+            self.attentionPrefillTensorOpsPSO =
+                try? context.device.makeComputePipelineState(function: function)
+        } else {
+            self.attentionPrefillTensorOpsPSO = nil
+        }
         self.routerGemvPSO = try context.pipeline("router_gemv_bf16_r4")
         self.routerSelectPSO = try context.pipeline("inkling_router_select")
+        self.routerGemvPrefillPSO = try context.pipeline("inkling_router_gemv_prefill")
+        self.routerSelectPrefillPSO = try context.pipeline("inkling_router_select_prefill")
         self.gammaCombinePSO = try context.pipeline("inkling_gamma_combine")
         self.gammaCombineF32InPSO =
             try context.pipeline("inkling_gamma_combine_f32in")
@@ -59,6 +84,7 @@ final class InklingKernels {
         self.residualAddF32DPSO = try context.pipeline("inkling_residual_add_f32d")
         self.residualAddF32PSO = try context.pipeline("inkling_residual_add_f32")
         self.rmsF32PSO = try context.pipeline("inkling_rms_f32in")
+        self.rmsF32PrefillPSO = try context.pipeline("inkling_rms_f32in_prefill")
         guard let logits = context.device.makeBuffer(
             length: (numRouted + numShared) * MemoryLayout<Float>.size,
             options: .storageModeShared) else {
@@ -91,6 +117,10 @@ final class InklingKernels {
         Int(nonFiniteLogitCount.contents().load(as: UInt32.self))
     }
 
+    var tensorOpsPrefillAttentionAvailable: Bool {
+        attentionPrefillTensorOpsPSO != nil
+    }
+
     /// One decode step of the depthwise causal conv: `out = conv(x) + x`,
     /// fp32 state (last K-1 inputs per channel) updated in place.
     func encodeSconvStep(commandBuffer cb: MTLCommandBuffer,
@@ -110,6 +140,57 @@ final class InklingKernels {
         enc.setBuffer(out, offset: outOffset, index: 3)
         enc.setBytes(&c, length: 4, index: 4)
         enc.setBytes(&k, length: 4, index: 5)
+        enc.dispatchThreads(MTLSize(width: Int(channels), height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Chunked K/V short convolution. Inkling fixes K=4, so one GPU thread
+    /// keeps a channel's three-value history in registers while walking rows.
+    func encodeSconvPrefill(commandBuffer cb: MTLCommandBuffer,
+                            x: MTLBuffer,
+                            state: MTLBuffer,
+                            weight: MTLBuffer, weightOffset: Int,
+                            out: MTLBuffer,
+                            channels: UInt32,
+                            rows: UInt32) {
+        guard rows > 0, let enc = cb.makeComputeCommandEncoder() else { return }
+        var c = channels
+        var t = rows
+        enc.setComputePipelineState(sconvPrefillF16PSO)
+        enc.setBuffer(x, offset: 0, index: 0)
+        enc.setBuffer(state, offset: 0, index: 1)
+        enc.setBuffer(weight, offset: weightOffset, index: 2)
+        enc.setBuffer(out, offset: 0, index: 3)
+        enc.setBytes(&c, length: 4, index: 4)
+        enc.setBytes(&t, length: 4, index: 5)
+        enc.dispatchThreads(MTLSize(width: Int(channels), height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Chunked attention/MLP short convolution fused with the FP32 residual
+    /// update. `scale` is one for attention and the FFN un-prescale for MLP.
+    func encodeSconvPrefillResidual(commandBuffer cb: MTLCommandBuffer,
+                                    x: MTLBuffer,
+                                    state: MTLBuffer,
+                                    weight: MTLBuffer, weightOffset: Int,
+                                    hidden: MTLBuffer,
+                                    channels: UInt32,
+                                    rows: UInt32,
+                                    scale: Float = 1.0) {
+        guard rows > 0, let enc = cb.makeComputeCommandEncoder() else { return }
+        var c = channels
+        var t = rows
+        var s = scale
+        enc.setComputePipelineState(sconvPrefillResidualPSO)
+        enc.setBuffer(x, offset: 0, index: 0)
+        enc.setBuffer(state, offset: 0, index: 1)
+        enc.setBuffer(weight, offset: weightOffset, index: 2)
+        enc.setBuffer(hidden, offset: 0, index: 3)
+        enc.setBytes(&c, length: 4, index: 4)
+        enc.setBytes(&t, length: 4, index: 5)
+        enc.setBytes(&s, length: 4, index: 6)
         enc.dispatchThreads(MTLSize(width: Int(channels), height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
         enc.endEncoding()
@@ -136,6 +217,39 @@ final class InklingKernels {
         enc.setBytes(&e, length: 4, index: 7)
         enc.dispatchThreadgroups(
             MTLSize(width: Int(numQHeads + numKVHeads), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Batched in-place Q/K RMS norm over `[rows, heads, headDim]`.
+    func encodeQKNormPrefill(commandBuffer cb: MTLCommandBuffer,
+                             q: MTLBuffer,
+                             k: MTLBuffer,
+                             qWeight: MTLBuffer, qWeightOffset: Int,
+                             kWeight: MTLBuffer, kWeightOffset: Int,
+                             headDim: UInt32,
+                             numQHeads: UInt32,
+                             numKVHeads: UInt32,
+                             rows: UInt32,
+                             eps: Float) {
+        guard rows > 0, let enc = cb.makeComputeCommandEncoder() else { return }
+        var hd = headDim
+        var nq = numQHeads
+        var nkv = numKVHeads
+        var t = rows
+        var e = eps
+        enc.setComputePipelineState(qkNormPrefillPSO)
+        enc.setBuffer(q, offset: 0, index: 0)
+        enc.setBuffer(k, offset: 0, index: 1)
+        enc.setBuffer(qWeight, offset: qWeightOffset, index: 2)
+        enc.setBuffer(kWeight, offset: kWeightOffset, index: 3)
+        enc.setBytes(&hd, length: 4, index: 4)
+        enc.setBytes(&nq, length: 4, index: 5)
+        enc.setBytes(&nkv, length: 4, index: 6)
+        enc.setBytes(&t, length: 4, index: 7)
+        enc.setBytes(&e, length: 4, index: 8)
+        enc.dispatchThreadgroups(
+            MTLSize(width: Int(numQHeads + numKVHeads), height: Int(rows), depth: 1),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
         enc.endEncoding()
     }
@@ -183,6 +297,81 @@ final class InklingKernels {
         enc.endEncoding()
     }
 
+    /// Chunked causal attention with relative-position bias. All query rows
+    /// are dispatched together after their K/V rows have been copied to cache.
+    func encodeAttentionPrefill(commandBuffer cb: MTLCommandBuffer,
+                                q: MTLBuffer,
+                                k: MTLBuffer,
+                                v: MTLBuffer,
+                                rel: MTLBuffer,
+                                proj: MTLBuffer, projOffset: Int,
+                                out: MTLBuffer,
+                                headDim: UInt32,
+                                numQHeads: UInt32,
+                                numKVHeads: UInt32,
+                                startPosition: UInt32,
+                                rows: UInt32,
+                                slidingWindow: UInt32,
+                                relExtent: UInt32,
+                                dRel: UInt32,
+                                ringCapacity: UInt32,
+                                logScalingFloor: UInt32,
+                                scale: Float,
+                                logScalingAlpha: Float,
+                                preferTensorOps: Bool = true) {
+        guard rows > 0, let enc = cb.makeComputeCommandEncoder() else { return }
+        var hd = headDim
+        var nq = numQHeads
+        var nkv = numKVHeads
+        var start = startPosition
+        var t = rows
+        var window = slidingWindow
+        var extent = relExtent
+        var dr = dRel
+        var ring = ringCapacity
+        var floor = logScalingFloor
+        var s = scale
+        var alpha = logScalingAlpha
+        // Below one sliding-window length, cooperative-tile setup loses to the
+        // portable batch kernel on the measured M5. At and beyond 512 tokens,
+        // QK/PV reuse wins for both global and wrapped-ring attention.
+        let tensorOpsShape = preferTensorOps
+            && startPosition >= 512
+            && rows >= 8
+            && headDim == 128
+            && numQHeads == 32
+            && numKVHeads == 8
+            && dRel == 16
+        let tensorOpsPSO = tensorOpsShape ? attentionPrefillTensorOpsPSO : nil
+        enc.setComputePipelineState(tensorOpsPSO ?? attentionPrefillPSO)
+        enc.setBuffer(q, offset: 0, index: 0)
+        enc.setBuffer(k, offset: 0, index: 1)
+        enc.setBuffer(v, offset: 0, index: 2)
+        enc.setBuffer(rel, offset: 0, index: 3)
+        enc.setBuffer(proj, offset: projOffset, index: 4)
+        enc.setBuffer(out, offset: 0, index: 5)
+        enc.setBytes(&hd, length: 4, index: 6)
+        enc.setBytes(&nq, length: 4, index: 7)
+        enc.setBytes(&nkv, length: 4, index: 8)
+        enc.setBytes(&start, length: 4, index: 9)
+        enc.setBytes(&t, length: 4, index: 10)
+        enc.setBytes(&window, length: 4, index: 11)
+        enc.setBytes(&extent, length: 4, index: 12)
+        enc.setBytes(&dr, length: 4, index: 13)
+        enc.setBytes(&ring, length: 4, index: 14)
+        enc.setBytes(&floor, length: 4, index: 15)
+        enc.setBytes(&s, length: 4, index: 16)
+        enc.setBytes(&alpha, length: 4, index: 17)
+        let groups = tensorOpsPSO != nil
+            ? MTLSize(width: (Int(rows) + 7) / 8,
+                      height: Int(numQHeads), depth: 1)
+            : MTLSize(width: Int(numQHeads), height: Int(rows), depth: 1)
+        enc.dispatchThreadgroups(groups,
+                                 threadsPerThreadgroup: MTLSize(
+                                    width: 128, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
     /// BF16 router GEMV over `numRouted + numShared` rows into `routerLogits`,
     /// then selection + weighting. `onesScale` is a bf16 all-ones [d] buffer.
     func encodeRouter(commandBuffer cb: MTLCommandBuffer,
@@ -223,6 +412,65 @@ final class InklingKernels {
                                gammasOut: gammasOut, gammasOffset: gammasOffset,
                                numRouted: numRouted, numShared: numShared,
                                topK: topK, routeScale: routeScale)
+    }
+
+    /// Batched BF16 router GEMV and Inkling sigmoid/shared-sink selection.
+    /// `logits` is FP32 `[rows, numRouted + numShared]` scratch owned by the
+    /// runner; route outputs use fixed strides 8 and `numShared` respectively.
+    func encodeRouterPrefill(commandBuffer cb: MTLCommandBuffer,
+                             weights: MTLBuffer, weightsOffset: Int,
+                             hidden: MTLBuffer,
+                             effectiveScale: MTLBuffer,
+                             logits: MTLBuffer,
+                             gateBias: MTLBuffer, gateBiasOffset: Int,
+                             globalScale: MTLBuffer, globalScaleOffset: Int,
+                             outIndices: MTLBuffer,
+                             outWeights: MTLBuffer,
+                             gammasOut: MTLBuffer,
+                             numRouted: UInt32,
+                             numShared: UInt32,
+                             topK: UInt32,
+                             routeScale: Float,
+                             d: UInt32,
+                             rows: UInt32) {
+        guard rows > 0 else { return }
+        var total = numRouted + numShared
+        var dim = d
+        var t = rows
+        if let enc = cb.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(routerGemvPrefillPSO)
+            enc.setBuffer(weights, offset: weightsOffset, index: 0)
+            enc.setBuffer(hidden, offset: 0, index: 1)
+            enc.setBuffer(effectiveScale, offset: 0, index: 2)
+            enc.setBuffer(logits, offset: 0, index: 3)
+            enc.setBytes(&total, length: 4, index: 4)
+            enc.setBytes(&dim, length: 4, index: 5)
+            enc.setBytes(&t, length: 4, index: 6)
+            enc.dispatchThreadgroups(
+                MTLSize(width: (Int(total) + 3) / 4, height: Int(rows), depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            enc.endEncoding()
+        }
+        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        var nr = numRouted
+        var ns = numShared
+        var tk = topK
+        var rs = routeScale
+        enc.setComputePipelineState(routerSelectPrefillPSO)
+        enc.setBuffer(logits, offset: 0, index: 0)
+        enc.setBuffer(gateBias, offset: gateBiasOffset, index: 1)
+        enc.setBuffer(globalScale, offset: globalScaleOffset, index: 2)
+        enc.setBuffer(outIndices, offset: 0, index: 3)
+        enc.setBuffer(outWeights, offset: 0, index: 4)
+        enc.setBuffer(gammasOut, offset: 0, index: 5)
+        enc.setBytes(&nr, length: 4, index: 6)
+        enc.setBytes(&ns, length: 4, index: 7)
+        enc.setBytes(&tk, length: 4, index: 8)
+        enc.setBytes(&rs, length: 4, index: 9)
+        enc.setBytes(&t, length: 4, index: 10)
+        enc.dispatchThreadgroups(MTLSize(width: Int(rows), height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     /// Selection + weighting over an already-populated `routerLogits`.
@@ -394,6 +642,30 @@ final class InklingKernels {
         enc.setBytes(&dd, length: 4, index: 3)
         enc.setBytes(&e, length: 4, index: 4)
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Batched FP32-residual RMSNorm into contiguous FP16 projection rows.
+    func encodeRMSF32Prefill(commandBuffer cb: MTLCommandBuffer,
+                             x: MTLBuffer,
+                             weight: MTLBuffer, weightOffset: Int,
+                             out: MTLBuffer,
+                             d: UInt32,
+                             rows: UInt32,
+                             eps: Float) {
+        guard rows > 0, let enc = cb.makeComputeCommandEncoder() else { return }
+        var dim = d
+        var t = rows
+        var e = eps
+        enc.setComputePipelineState(rmsF32PrefillPSO)
+        enc.setBuffer(x, offset: 0, index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out, offset: 0, index: 2)
+        enc.setBytes(&dim, length: 4, index: 3)
+        enc.setBytes(&t, length: 4, index: 4)
+        enc.setBytes(&e, length: 4, index: 5)
+        enc.dispatchThreadgroups(MTLSize(width: Int(rows), height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         enc.endEncoding()
     }
