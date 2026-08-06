@@ -10,8 +10,8 @@ public enum PrefillChunkChoice: Equatable, Sendable {
 }
 
 /// Routed-expert cache selection. Auto keeps the 16-slot memory-first default
-/// for every family except Qwen 3.6, whose 256 experts per layer measurably
-/// benefit from 32 slots.
+/// for every family except Qwen 3.6 on hosts with at least 16 GiB, whose 256
+/// experts per layer measurably benefit from 32 slots.
 public enum ExpertCacheSlotChoice: Equatable, Sendable {
     case fixed(Int)
     case auto
@@ -131,9 +131,9 @@ extension Args {
                                 bounded, or adaptive (default off).
       --expert-cache-slots <n|auto>
                                 Routed-expert cache slots per layer: 8, 16,
-                                24, 32, or auto (default auto: Qwen uses 32,
-                                other families 16). More slots raise the hit
-                                rate but use more memory.
+                                24, 32, or auto (default auto: Qwen uses 32 on
+                                hosts with at least 16 GiB; otherwise 16).
+                                More slots raise the hit rate but use more RAM.
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
                                 prompt processing; auto sizes the chunk to

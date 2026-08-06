@@ -1,3 +1,5 @@
+import Foundation
+
 public enum RuntimeHeadPath: String, Codable, Sendable {
     case fusedRows = "fused-rows"
     case logits
@@ -56,9 +58,13 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     }
 
     /// Qwen's 256 experts per layer need twice Gemma's cache coverage to avoid
-    /// repeated SSD reads. Keep the larger footprint family-specific.
-    public static func defaultExpertCacheSlots(for family: ModelFamily) -> Int {
-        family == .qwen36 ? 32 : 16
+    /// repeated SSD reads. Keep the larger footprint family- and RAM-specific.
+    public static func defaultExpertCacheSlots(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Int {
+        let sixteenGiB = UInt64(16) * 1024 * 1024 * 1024
+        return family == .qwen36 && physicalMemoryBytes >= sixteenGiB ? 32 : 16
     }
 
     public var fp16RingEnabled: Bool { true }

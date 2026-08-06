@@ -16,10 +16,18 @@ import Testing
     }
 
     @Test func automaticExpertCacheSlotsAreQwenSpecific() {
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .qwen36) == 32)
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .gemma4) == 16)
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .deepseekV4Flash) == 16)
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .inklingSmall) == 16)
+        let eightGiB = UInt64(8) * 1024 * 1024 * 1024
+        let twentyFourGiB = UInt64(24) * 1024 * 1024 * 1024
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
+            for: .qwen36, physicalMemoryBytes: twentyFourGiB) == 32)
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
+            for: .qwen36, physicalMemoryBytes: eightGiB) == 16)
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
+            for: .gemma4, physicalMemoryBytes: twentyFourGiB) == 16)
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
+            for: .deepseekV4Flash, physicalMemoryBytes: twentyFourGiB) == 16)
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
+            for: .inklingSmall, physicalMemoryBytes: twentyFourGiB) == 16)
     }
 
     @Test func retainedControlsReachTypedRuntime() {
