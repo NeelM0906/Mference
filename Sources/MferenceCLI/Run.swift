@@ -20,6 +20,8 @@ public func run(args: Args,
     }
     do {
         let modelURL = URL(fileURLWithPath: args.model)
+        let expertCacheSlots = try resolveExpertCacheSlots(args.expertCacheSlots,
+                                                           modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
         let promptIds: [Int32]
         if let rawPrompt = args.prompt {
@@ -69,7 +71,7 @@ public func run(args: Args,
                 ?? RuntimeConfiguration.allowedPrefillChunkTokens.last!
         }
         let runtime = RuntimeConfiguration(
-            expertCacheSlots: args.expertCacheSlots,
+            expertCacheSlots: expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy)
@@ -172,6 +174,8 @@ private func runChat(args: Args,
                      stderr: FileHandle) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
+        let expertCacheSlots = try resolveExpertCacheSlots(args.expertCacheSlots,
+                                                           modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
         let baseConfig = GenerationConfig(
             maxNewTokens: args.maxNew,
@@ -190,7 +194,7 @@ private func runChat(args: Args,
         case .auto: prefillChunkTokens = 128
         }
         let runtime = RuntimeConfiguration(
-            expertCacheSlots: args.expertCacheSlots,
+            expertCacheSlots: expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !baseConfig.isPureGreedy)
@@ -284,6 +288,17 @@ private func runChat(args: Args,
         return RunResult(exitCode: 130)
     } catch {
         return errored(stderr, "\(error)", 1)
+    }
+}
+
+private func resolveExpertCacheSlots(_ choice: ExpertCacheSlotChoice,
+                                     modelURL: URL) throws -> Int {
+    switch choice {
+    case .fixed(let slots):
+        return slots
+    case .auto:
+        let family = try ManifestReader.peekFamily(directoryURL: modelURL)
+        return RuntimeConfiguration.defaultExpertCacheSlots(for: family)
     }
 }
 

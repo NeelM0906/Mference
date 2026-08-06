@@ -55,6 +55,12 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         RuntimeConfiguration()
     }
 
+    /// Qwen's 256 experts per layer need twice Gemma's cache coverage to avoid
+    /// repeated SSD reads. Keep the larger footprint family-specific.
+    public static func defaultExpertCacheSlots(for family: ModelFamily) -> Int {
+        family == .qwen36 ? 32 : 16
+    }
+
     public var fp16RingEnabled: Bool { true }
     public var rdadviseEnabled: Bool { rdadvisePolicy != .off }
     public var prefillConfig: PrefillRuntimeConfig {

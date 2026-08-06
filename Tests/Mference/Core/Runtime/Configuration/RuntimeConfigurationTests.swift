@@ -15,6 +15,13 @@ import Testing
         #expect(runtime.headPath == .fusedRows)
     }
 
+    @Test func automaticExpertCacheSlotsAreQwenSpecific() {
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .qwen36) == 32)
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .gemma4) == 16)
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .deepseekV4Flash) == 16)
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(for: .inklingSmall) == 16)
+    }
+
     @Test func retainedControlsReachTypedRuntime() {
         let runtime = RuntimeConfiguration(
             expertCacheSlots: 32,

@@ -212,7 +212,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             throw MFTokenizerError.missingToolTemplate
         }
         let context = try MetalContext()
-        let runtime = RuntimeConfiguration(forceLogitsHead: true)
+        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+        let runtime = RuntimeConfiguration(
+            expertCacheSlots: RuntimeConfiguration.defaultExpertCacheSlots(for: family),
+            forceLogitsHead: true)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,

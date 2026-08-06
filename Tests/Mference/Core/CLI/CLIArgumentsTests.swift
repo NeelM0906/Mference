@@ -151,6 +151,24 @@ import Mference
         #expect(arguments.prefillChunk == .auto)
     }
 
+    @Test func expertCacheSlotsDefaultToModelAwareAuto() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(arguments.expertCacheSlots == .auto)
+    }
+
+    @Test func expertCacheSlotsAcceptAutoAndExplicitOverride() throws {
+        let automatic = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--expert-cache-slots", "auto",
+        ])
+        let constrained = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--expert-cache-slots", "16",
+        ])
+        #expect(automatic.expertCacheSlots == .auto)
+        #expect(constrained.expertCacheSlots == .fixed(16))
+    }
+
     @Test(arguments: [32, 64, 128, 256, 512, 1024, 2048, 4096])
     func prefillChunkAcceptsAllowedSizes(size: Int) throws {
         let arguments = try Args.parse([
