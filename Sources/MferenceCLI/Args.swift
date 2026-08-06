@@ -50,7 +50,7 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 expertCacheSlots: Int = 16,
                 rdadvise: String = "off",
-                prefillChunk: PrefillChunkChoice = .fixed(128),
+                prefillChunk: PrefillChunkChoice = .auto,
                 verification: ModelIntegrityPolicy = .fullSha256) {
         self.model = model
         self.prompt = prompt
@@ -124,10 +124,10 @@ extension Args {
       --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
                                 24, or 32 (default 16). More slots raise the
                                 hit rate but use more memory.
-      --prefill-chunk <n|auto>  Prefill chunk tokens (default 128). Larger
+      --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
                                 prompt processing; auto sizes the chunk to
-                                the prompt (--chat uses the default). Allowed:
+                                the prompt (--chat resolves auto to 128). Allowed:
                                 32, 64, 128, 256, 512, 1024, 2048, 4096.
       --verify <mode>           Model integrity: full-sha256 (default)
                                 re-hashes every routed-expert file on first
@@ -156,7 +156,7 @@ extension Args {
         var quiet = false
         var expertCacheSlots = 16
         var rdadvise = "off"
-        var prefillChunk = PrefillChunkChoice.fixed(128)
+        var prefillChunk = PrefillChunkChoice.auto
         var verification = ModelIntegrityPolicy.fullSha256
 
         var index = 0

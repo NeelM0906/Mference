@@ -34,7 +34,7 @@
 - Consumes: `PrefillChunkChoice.auto` and `RuntimeConfiguration.allowedPrefillChunkTokens`.
 - Produces: `Args.prefillChunk == .auto` for one-shot defaults; interactive chat resolves the implicit default to 128 tokens.
 
-- [ ] **Step 1: Change the default assertion before production code**
+- [x] **Step 1: Change the default assertion before production code**
 
 ```swift
 @Test func prefillChunkDefaultsToAuto() throws {
@@ -43,12 +43,12 @@
 }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run: `Scripts/test.sh --filter CLIArgumentsTests.prefillChunkDefaultsToAuto`
 Expected: FAIL because the parsed choice is `.fixed(128)`.
 
-- [ ] **Step 3: Change both initializer and parser defaults to `.auto`**
+- [x] **Step 3: Change both initializer and parser defaults to `.auto`**
 
 ```swift
 prefillChunk: PrefillChunkChoice = .auto
@@ -58,16 +58,16 @@ var prefillChunk = PrefillChunkChoice.auto
 
 Update usage text to say `default auto` and state that interactive chat uses 128 unless explicitly overridden.
 
-- [ ] **Step 4: Pin one-shot and chat resolution**
+- [x] **Step 4: Pin one-shot and chat resolution**
 
 Keep one-shot resolution as the smallest allowed size covering the formatted prompt, capped at 4,096. In `Run.swift`, resolve an implicit `.auto` to 128 inside the interactive loop while preserving explicit fixed values.
 
-- [ ] **Step 5: Run CLI tests**
+- [x] **Step 5: Run CLI tests**
 
 Run: `Scripts/test.sh --filter CLIArgumentsTests`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Sources/MferenceCLI/Args.swift Sources/MferenceCLI/Run.swift Tests/Mference/Core/CLI/CLIArgumentsTests.swift docs/RUNTIME_CONTROLS.md
