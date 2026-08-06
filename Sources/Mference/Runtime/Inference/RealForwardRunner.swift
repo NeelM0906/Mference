@@ -3422,6 +3422,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                !plan.misses.isEmpty {
                 splitRoutedBufs = try model.routedExpertBuffers(for: plan)
                     .map(\.buffer)
+                // Router readback is a same-queue fence for the prior layer,
+                // so MoE's preallocated argument storage is no longer in use.
                 splitArgBuf = moe.makeRoutedArgumentBuffer(
                     routedBlobs: splitRoutedBufs, topK: topK)
                 if let argBuf = splitArgBuf {

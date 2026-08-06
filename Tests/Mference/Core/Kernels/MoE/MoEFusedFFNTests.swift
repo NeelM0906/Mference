@@ -13,6 +13,22 @@ import MferenceValidationSupport
         let offsets: MoEExpertOffsets
     }
 
+    @Test func routedArgumentBufferReusesPreallocatedStorage() throws {
+        let context = try MetalContext()
+        let kernel = try MoE(context: context, specializedTopK: 6)
+        let routedBuffers = (0..<6).compactMap { _ in
+            context.device.makeBuffer(length: 1, options: .storageModeShared)
+        }
+        #expect(routedBuffers.count == 6)
+
+        let first = try #require(kernel.makeRoutedArgumentBuffer(
+            routedBlobs: routedBuffers, topK: 6))
+        let second = try #require(kernel.makeRoutedArgumentBuffer(
+            routedBlobs: routedBuffers, topK: 6))
+
+        #expect(first === second)
+    }
+
     @Test func productionTop8PipelineAndHitSplitMatchReference() throws {
         try Self.checkPipeline(topK: 8,
                                splitSlots: [[0, 1, 2, 3], [4, 5, 6, 7]],

@@ -189,13 +189,9 @@ final class MoE {
     func makeRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
                                          topK: UInt32) -> MTLBuffer? {
         validate(routedBlobs: routedBlobs, topK: topK)
-        guard let buffer = routedBlobs.first?.device.makeBuffer(
-            length: routedArgEncoder.encodedLength,
-            options: .storageModeShared) else {
-            return nil
-        }
-        encodeRoutedArgumentBuffer(buffer, routedBlobs: routedBlobs)
-        return buffer
+        encodeRoutedArgumentBuffer(reusableRoutedArgBuffer,
+                                   routedBlobs: routedBlobs)
+        return reusableRoutedArgBuffer
     }
 
     func makeReusedRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
