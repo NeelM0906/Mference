@@ -144,6 +144,54 @@ This is emulated pressure on M5 hardware, not a measurement on a physical 8 GB
 Mac; a real 8 GB machine has a slower SSD and GPU and should be expected to
 decode more slowly, as the M2 rows above show for Gemma 4.
 
+## Inkling-Small 276B-A12B measured decode
+
+The native top-6 decode path was measured on 2026-08-06 on the same 24 GB M5
+MacBook Pro (`Mac17,2`), with macOS 26.5 and Swift 6.3.3. The untouched base
+was `6bf428f`; the optimized implementation was `485df08`. Both used release
+builds, the production automatic 16-slot cache, strict full-SHA verification,
+and the frozen community prompts and sampling settings. One discarded warmup
+preceded one measured fresh process per case; every process exited 0 and
+reported `stop=endOfTurn`.
+
+| Case | Prompt / generated tokens | Base decode | Native top-6 decode | Gain |
+| --- | --- | ---: | ---: | ---: |
+| short-explanation | 59 / 469 | 2.909 tok/s | 3.434 tok/s | 18.0% |
+| medium-review | 421 / 576 | 2.961 tok/s | 3.670 tok/s | 23.9% |
+| long-synthesis | 2,785 / 372 | 2.819 tok/s | 3.038 tok/s | 7.8% |
+
+The geometric-mean decode gain is **16.4%**. Each optimized output is
+byte-identical to its base output, so the table compares the same generated
+tokens and expert-routing workload. Complete measured timing footers, in
+base/optimized order, were:
+
+```text
+[stop=endOfTurn prefill=59tok/64.89s new=469tok decode=161.22s tok/s=2.909]
+[stop=endOfTurn prefill=59tok/64.25s new=469tok decode=136.57s tok/s=3.434]
+[stop=endOfTurn prefill=421tok/79.61s new=576tok decode=194.53s tok/s=2.961]
+[stop=endOfTurn prefill=421tok/76.41s new=576tok decode=156.95s tok/s=3.670]
+[stop=endOfTurn prefill=2785tok/169.39s new=372tok decode=131.94s tok/s=2.819]
+[stop=endOfTurn prefill=2785tok/180.48s new=372tok decode=122.46s tok/s=3.038]
+```
+
+Inkling routes six experts, but the old runtime padded them to the shared
+top-8 INT4 contract with two duplicate buffers and zero weights. The optimized
+path dispatches a dedicated six-SIMD-group down/reduce Metal kernel, runs only
+six phase-1 expert slots, and submits resident phase-1 work while the CPU reads
+cache misses. It preserves the FP32 shared-sink/residual path.
+
+A production 24-slot warmup was also tried with the same short workload. It
+produced byte-identical output but decoded at 0.710 tok/s while free-memory
+pressure fell to 24%, versus 3.374 tok/s for the optimized 16-slot warmup.
+Because the first larger cache already exceeded the useful memory envelope,
+32 slots were not run and Inkling's automatic default remains 16.
+
+The exact measured command was:
+
+```text
+.build/release/MferenceCLI --model scratch/inklingsmall.gturbo --messages-file docs/benchmark-prompts/real-generation-v1/<case>.json --max-new 1024 --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95 --seed <seed>
+```
+
 ## Same-host MLX comparison
 
 The same M5 Pro ran MLX 0.32.0 and mlx-lm 0.31.3 against the same checkpoint,
