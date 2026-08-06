@@ -7,15 +7,28 @@ import MferenceValidationSupport
 @Suite struct MoEFusedFFNTests {
     private static let dimension = 128
     private static let intermediate = 64
-    private static let topK = 8
 
     private struct RoutedBlob {
         let bytes: [UInt8]
         let offsets: MoEExpertOffsets
     }
 
-    @Test func productionRoutedPipelineAndHitSplitMatchReference() throws {
-        var rng = SeedTree(0x2D3).key("production-routed-moe")
+    @Test func productionTop8PipelineAndHitSplitMatchReference() throws {
+        try Self.checkPipeline(topK: 8,
+                               splitSlots: [[0, 1, 2, 3], [4, 5, 6, 7]],
+                               seedKey: "production-routed-moe-top8")
+    }
+
+    @Test func inklingTop6PipelineAndHitSplitMatchReference() throws {
+        try Self.checkPipeline(topK: 6,
+                               splitSlots: [[0, 2, 4], [1, 3, 5]],
+                               seedKey: "inkling-routed-moe-top6")
+    }
+
+    private static func checkPipeline(topK: Int,
+                                      splitSlots: [[UInt32]],
+                                      seedKey: String) throws {
+        var rng = SeedTree(0x2D3).key(seedKey)
         func matrix(rows: Int, columns: Int) -> [[Float]] {
             (0..<rows).map { _ in
                 (0..<columns).map { _ in rng.uniform(-0.4, 0.4) }
@@ -25,7 +38,7 @@ import MferenceValidationSupport
         var gates = [[[Float]]]()
         var ups = [[[Float]]]()
         var downs = [[[Float]]]()
-        for _ in 0..<Self.topK {
+        for _ in 0..<topK {
             gates.append(matrix(rows: Self.intermediate, columns: Self.dimension))
             ups.append(matrix(rows: Self.intermediate, columns: Self.dimension))
             downs.append(matrix(rows: Self.dimension, columns: Self.intermediate))
@@ -36,7 +49,7 @@ import MferenceValidationSupport
         let residual = (0..<Self.dimension).map { _ in
             Float(Float16(rng.uniform(-0.5, 0.5)))
         }
-        let routingWeights = (0..<Self.topK).map {
+        let routingWeights = (0..<topK).map {
             Float(Float16(0.04 + Float($0) * 0.015))
         }
         let expected = MoeRef.applyStreamedRouted(
@@ -51,42 +64,45 @@ import MferenceValidationSupport
             routedDown: downs.map { rows in
                 rows.map { Quantization.quantizeInt4Affine($0) }
             },
-            indices: Array(0..<Self.topK),
+            indices: Array(0..<topK),
             routingWeights: routingWeights,
             d: Self.dimension,
             f: Self.intermediate)
-        let blobs = (0..<Self.topK).map {
+        let blobs = (0..<topK).map {
             Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0])
         }
 
         let context = try MetalContext()
-        let kernel = try MoE(context: context)
+        let kernel = try MoE(context: context,
+                             specializedD: UInt32(Self.dimension),
+                             specializedF: UInt32(Self.intermediate),
+                             specializedNumExperts: 128,
+                             specializedTopK: UInt32(topK))
         let routedBuffers = blobs.compactMap {
             context.device.makeBuffer(bytes: $0.bytes,
                                       length: $0.bytes.count,
                                       options: .storageModeShared)
         }
-        guard routedBuffers.count == Self.topK,
+        let activeBuffers = splitSlots.compactMap { slots in
+            context.device.makeBuffer(
+                bytes: slots,
+                length: slots.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared)
+        }
+        guard routedBuffers.count == topK,
+              activeBuffers.count == splitSlots.count,
               let xBuffer = Fp16Buffer.make(context.device, values: x),
               let residualBuffer = Fp16Buffer.make(context.device, values: residual),
               let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
               let fullActs = Fp16Buffer.make(
-                context.device, count: Self.topK * Self.intermediate),
+                context.device, count: topK * Self.intermediate),
               let splitActs = Fp16Buffer.make(
-                context.device, count: Self.topK * Self.intermediate),
+                context.device, count: topK * Self.intermediate),
               let fullOutput = Fp16Buffer.make(context.device, count: Self.dimension),
               let splitOutput = Fp16Buffer.make(context.device, count: Self.dimension),
-              let lowSlots = context.device.makeBuffer(
-                bytes: [UInt32](0...3),
-                length: 4 * MemoryLayout<UInt32>.stride,
-                options: .storageModeShared),
-              let highSlots = context.device.makeBuffer(
-                bytes: [UInt32](4...7),
-                length: 4 * MemoryLayout<UInt32>.stride,
-                options: .storageModeShared),
               let argumentBuffer = kernel.makeRoutedArgumentBuffer(
                 routedBlobs: routedBuffers,
-                topK: UInt32(Self.topK)) else {
+                topK: UInt32(topK)) else {
             Issue.record("buffer allocation failed")
             return
         }
@@ -101,7 +117,7 @@ import MferenceValidationSupport
             acts: fullActs,
             d: UInt32(Self.dimension),
             f: UInt32(Self.intermediate),
-            topK: UInt32(Self.topK))
+            topK: UInt32(topK))
         kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: fullCommand,
             routedArgBuffer: argumentBuffer,
@@ -113,14 +129,13 @@ import MferenceValidationSupport
             y: fullOutput,
             d: UInt32(Self.dimension),
             f: UInt32(Self.intermediate),
-            topK: UInt32(Self.topK))
+            topK: UInt32(topK))
         fullCommand.commit()
         fullCommand.waitUntilCompleted()
         #expect(fullCommand.error == nil)
 
         let splitCommand = context.queue.makeCommandBuffer()!
-        for (slots, activeSlots) in [([UInt32](0...3), lowSlots),
-                                     ([UInt32](4...7), highSlots)] {
+        for (slots, activeSlots) in zip(splitSlots, activeBuffers) {
             kernel.encodeRoutedPersistentPhase1SubsetU16Load(
                 commandBuffer: splitCommand,
                 routedArgBuffer: argumentBuffer,
@@ -133,7 +148,7 @@ import MferenceValidationSupport
                 activeCount: UInt32(slots.count),
                 d: UInt32(Self.dimension),
                 f: UInt32(Self.intermediate),
-                topK: UInt32(Self.topK))
+                topK: UInt32(topK))
         }
         kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: splitCommand,
@@ -146,7 +161,7 @@ import MferenceValidationSupport
             y: splitOutput,
             d: UInt32(Self.dimension),
             f: UInt32(Self.intermediate),
-            topK: UInt32(Self.topK))
+            topK: UInt32(topK))
         splitCommand.commit()
         splitCommand.waitUntilCompleted()
         #expect(splitCommand.error == nil)

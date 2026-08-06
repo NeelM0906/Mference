@@ -477,7 +477,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  siluActivation: silu,
                                  specializedD: UInt32(cfg.hiddenSize),
                                  specializedF: UInt32(cfg.moeIntermediateSize),
-                                 specializedNumExperts: UInt32(cfg.numExperts))
+                                 specializedNumExperts: UInt32(cfg.numExperts),
+                                 specializedTopK: UInt32(cfg.topKExperts))
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
                                               maxVocab: cfg.vocabSize)
@@ -3102,22 +3103,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let kvDim = UInt32(cfg.numKVHeads * cfg.headDim)
         let seqLen = UInt32(position + 1)
         let sconvK = UInt32(cfg.sconvKernelSize)
-        let paddedK = MoE.maxStreamedExperts
         let rel = cfg.relativePosition
 
         struct PendingInkling {
             let cb: MTLCommandBuffer
             let attentionCB: MTLCommandBuffer
+            let phase1HitCB: MTLCommandBuffer?
         }
         var pending: PendingInkling?
         func finishPending(_ p: PendingInkling, waitIfNeeded: Bool) {
             if waitIfNeeded {
                 waitForCompletion(p.attentionCB)
+                if let hitCB = p.phase1HitCB { waitForCompletion(hitCB) }
                 waitForCompletion(p.cb)
             } else {
                 if let err = p.cb.error { print("CB error: \(err)") }
                 if let err = p.attentionCB.error { print("CB error: \(err)") }
+                if let err = p.phase1HitCB?.error { print("CB error: \(err)") }
             }
+        }
+        func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
+            let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
+            for i in 0..<slots.count { ptr[i] = slots[i] }
         }
 
         // Embed lookup, then the family's embed norm (in place).
@@ -3389,33 +3396,95 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             waitForRouterSignal(routerSignal, fallback: cb)
             if let p = pending { finishPending(p, waitIfNeeded: false); pending = nil }
 
-            // CPU readback of the 6 routed experts; the streamed list pads to
-            // the MoE contract's 8 slots with duplicates whose weight slots
-            // were pinned to zero at init.
+            // CPU readback of the six routed experts. A mixed cache plan sends
+            // the resident subset to Metal immediately, then preads only the
+            // misses while the shared branch and resident phase 1 execute.
             let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
                                                           capacity: cfg.topKExperts)
             var experts = [Int](repeating: 0, count: cfg.topKExperts)
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
-            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            var routedBufs = blobs.map { $0.buffer }
-            while routedBufs.count < paddedK { routedBufs.append(routedBufs[0]) }
-
+            let topK = UInt32(cfg.topKExperts)
             let routedOffsets = model.routedExpertOffsets(layer: L)
+            let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
+            let missSet = Set(plannedFetch?.misses ?? [])
+            let phase1HitSlots = (0..<cfg.topKExperts)
+                .filter { !missSet.contains($0) }
+                .map { UInt32($0) }
+            let phase1MissSlots = (plannedFetch?.misses ?? []).map { UInt32($0) }
+            var phase1HitCB: MTLCommandBuffer?
+            var splitArgBuf: MTLBuffer?
+            var splitRoutedBufs: [MTLBuffer] = []
+
+            if let plan = plannedFetch,
+               plan.hits > 0,
+               !plan.misses.isEmpty {
+                splitRoutedBufs = try model.routedExpertBuffers(for: plan)
+                    .map(\.buffer)
+                splitArgBuf = moe.makeRoutedArgumentBuffer(
+                    routedBlobs: splitRoutedBufs, topK: topK)
+                if let argBuf = splitArgBuf {
+                    writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
+                    let hitCB = ctx.queue.makeCommandBuffer()!
+                    moe.encodeRoutedPersistentPhase1SubsetU16Load(
+                        commandBuffer: hitCB,
+                        routedArgBuffer: argBuf,
+                        routedBlobs: splitRoutedBufs,
+                        routedOffsets: routedOffsets,
+                        x: routedX,
+                        acts: moeActs,
+                        activeSlots: moeHitActiveSlots,
+                        activeSlotIndices: phase1HitSlots,
+                        activeCount: UInt32(phase1HitSlots.count),
+                        d: D,
+                        f: FmoE,
+                        topK: topK)
+                    hitCB.commit()
+                    phase1HitCB = hitCB
+                }
+            }
+
+            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let blobs: [TensorView]
+            if let plannedFetch {
+                blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+            } else {
+                blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+            }
+            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
+            let routedBufs = blobs.map(\.buffer)
+
             let routedCB = ctx.queue.makeCommandBuffer()!
-            let argBuf = moe.makeReusedRoutedArgumentBuffer(
-                routedBlobs: routedBufs, topK: UInt32(paddedK))
-            moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: routedCB,
-                                                    routedArgBuffer: argBuf,
-                                                    routedBlobs: routedBufs,
-                                                    routedOffsets: routedOffsets,
-                                                    x: routedX,
-                                                    acts: moeActs,
-                                                    d: D, f: FmoE,
-                                                    topK: UInt32(paddedK))
+            let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
+                routedBlobs: routedBufs, topK: topK)
+            if splitArgBuf != nil {
+                writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
+                moe.encodeRoutedPersistentPhase1SubsetU16Load(
+                    commandBuffer: routedCB,
+                    routedArgBuffer: argBuf,
+                    routedBlobs: routedBufs,
+                    routedOffsets: routedOffsets,
+                    x: routedX,
+                    acts: moeActs,
+                    activeSlots: moeMissActiveSlots,
+                    activeSlotIndices: phase1MissSlots,
+                    activeCount: UInt32(phase1MissSlots.count),
+                    d: D,
+                    f: FmoE,
+                    topK: topK)
+            } else {
+                moe.encodeRoutedPersistentPhase1U16Load(
+                    commandBuffer: routedCB,
+                    routedArgBuffer: argBuf,
+                    routedBlobs: routedBufs,
+                    routedOffsets: routedOffsets,
+                    x: routedX,
+                    acts: moeActs,
+                    d: D,
+                    f: FmoE,
+                    topK: topK)
+            }
             // Phase 2 seeds y with the shared-expert branch, so the sum is
             // routed + shared exactly as the reference computes it.
             moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
@@ -3427,7 +3496,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                    residual: h1Buf,
                                                    y: h2Buf,
                                                    d: D, f: FmoE,
-                                                   topK: UInt32(paddedK))
+                                                   topK: topK)
             inkling.encodeSconvStepF32Out(commandBuffer: routedCB,
                                           x: h2Buf, state: conv.mlp,
                                           weight: mlpSconvW.buffer,
@@ -3479,7 +3548,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                       "w=\((0..<8).map { Float(w[$0]) }) " +
                       "idx=\((0..<6).map { idx[$0] })")
             }
-            pending = PendingInkling(cb: routedCB, attentionCB: cb)
+            pending = PendingInkling(cb: routedCB,
+                                     attentionCB: cb,
+                                     phase1HitCB: phase1HitCB)
             if Self.inklingSyncMode {
                 finishPending(pending!, waitIfNeeded: true)
                 pending = nil
