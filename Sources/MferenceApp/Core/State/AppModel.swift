@@ -55,7 +55,9 @@ public final class AppModel {
     public private(set) var isCancellationPending: Bool = false
 
     private let client: any AppInferenceClient
-    private let installer: any AppModelInstallerClient
+    private var installer: any AppModelInstallerClient
+    private let installerFactory: @Sendable (AppModelInstallDescriptor) -> any AppModelInstallerClient
+    public private(set) var modelCatalog: [ModelCatalogEntry] = []
     private var runTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
@@ -79,9 +81,30 @@ public final class AppModel {
     public init(modelDirectory: URL? = nil,
                 client: any AppInferenceClient = RealInferenceClient(),
                 installer: any AppModelInstallerClient = RepackModelInstallerClient(descriptor: .selected),
+                installerFactory: @escaping @Sendable (AppModelInstallDescriptor)
+                    -> any AppModelInstallerClient = { RepackModelInstallerClient(descriptor: $0) },
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 settingsPersistenceEnabled: Bool = false) {
-        let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
+        var directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
+        var installer = installer
+        var catalog: [ModelCatalogEntry] = []
+        // The persisted app (not tests) auto-detects installed models: when
+        // the remembered directory holds no complete install, adopt one from
+        // the model library instead of demanding a folder choice.
+        if settingsPersistenceEnabled {
+            catalog = ModelLibrary.catalog(rememberedDirectory: directory)
+            if AppModelInstallationProbe.status(at: directory) != .complete {
+                let fallback = catalog.first {
+                    $0.isInstalled && $0.descriptor.family == installer.descriptor.family
+                } ?? catalog.first(where: \.isInstalled)
+                if let fallback, let installedURL = fallback.installedURL {
+                    directory = installedURL
+                    installer = installerFactory(fallback.descriptor)
+                    AppModelLocation.remember(installedURL)
+                    Self.rememberSelectedFamily(fallback.descriptor.family)
+                }
+            }
+        }
         let installETAClock = SuspendingClock()
         let settings = settingsPersistenceEnabled
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
@@ -104,6 +127,8 @@ public final class AppModel {
         self.installationStatus = AppModelInstallationProbe.status(at: directory)
         self.client = client
         self.installer = installer
+        self.installerFactory = installerFactory
+        self.modelCatalog = catalog
         self.memorySampler = memorySampler
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
         self.installETAClock = installETAClock
@@ -373,6 +398,7 @@ public final class AppModel {
         loadChats(
             forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
         installationStatus = AppModelInstallationProbe.status(at: URL(fileURLWithPath: path))
+        refreshModelCatalog()
         refreshInstallReadiness()
 
         if let lifecycle = client as? AppModelLifecycleClient {
@@ -384,6 +410,43 @@ public final class AppModel {
             }
             unloadTask = task
         }
+    }
+
+    /// Switches to a shipped model. Installed models activate at their
+    /// detected library location; missing ones route to the install screen
+    /// targeted at the library's download root — no folder choice involved.
+    public func selectModel(family: ModelFamily) {
+        guard !isRunning, !isInstallingModel,
+              let descriptor = AppModelInstallDescriptor.descriptor(for: family) else {
+            return
+        }
+        refreshModelCatalog()
+        installer.cancel()
+        installer = installerFactory(descriptor)
+        Self.rememberSelectedFamily(family)
+        let remembered = URL(fileURLWithPath: modelPathText, isDirectory: true)
+        let target = modelCatalog.first { $0.descriptor.family == family }?.installedURL
+            ?? ModelLibrary.defaultInstallURL(
+                for: descriptor,
+                rememberedDirectory: remembered)
+        AppModelLocation.remember(target)
+        setModelURL(target)
+        refreshInstallReadiness()
+    }
+
+    public func refreshModelCatalog() {
+        modelCatalog = ModelLibrary.catalog(
+            rememberedDirectory: URL(fileURLWithPath: modelPathText, isDirectory: true))
+    }
+
+    static func rememberSelectedFamily(_ family: ModelFamily) {
+        let value = switch family {
+        case .gemma4: "gemma4"
+        case .qwen36: "qwen36"
+        case .deepseekV4Flash: "deepseekv4flash"
+        case .inklingSmall: "inklingsmall"
+        }
+        UserDefaults(suiteName: "Mference")?.set(value, forKey: "model")
     }
 
     public func loadModel() {
@@ -625,6 +688,7 @@ public final class AppModel {
             installState = .installed(modelDirectory: directory)
             installTask = nil
             modelPathText = directory.path
+            refreshModelCatalog()
             loadState = .notLoaded
         }
     }

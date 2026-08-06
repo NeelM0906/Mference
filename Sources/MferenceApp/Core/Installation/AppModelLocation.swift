@@ -74,8 +74,8 @@ public enum AppModelLocation {
         return base.appendingPathComponent(url.path, isDirectory: true).standardizedFileURL
     }
 
-    private static func packageRoot(startingAt start: URL,
-                                    fileExists: (String) -> Bool) -> URL? {
+    static func packageRoot(startingAt start: URL,
+                            fileExists: (String) -> Bool) -> URL? {
         var candidatePath = start.standardizedFileURL.path
         while true {
             let candidate = URL(fileURLWithPath: candidatePath, isDirectory: true)

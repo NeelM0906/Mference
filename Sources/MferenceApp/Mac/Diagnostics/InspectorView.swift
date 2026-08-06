@@ -20,36 +20,16 @@ struct InspectorView: View {
 
     private var modelSection: some View {
         Section("Model") {
-            LabeledContent("Path") {
-                HStack(spacing: 6) {
-                    Text(model.modelPathText)
-                        .font(.caption)
-                        .truncationMode(.middle)
-                        .lineLimit(1)
-                        .foregroundStyle(.secondary)
-                        .help(model.modelPathText)
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(model.modelPathText, forType: .string)
-                    } label: {
-                        Label("Copy model path", systemImage: "doc.on.doc")
-                            .labelStyle(.iconOnly)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Copy model path")
+            // Realtime metrics strip (previously the status HUD): live token
+            // rate and count while decoding, last-run values when idle, and
+            // inference memory sampled every second.
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                HStack(spacing: 12) {
+                    HUDMetricView(value: rateText, label: "tok/s", animated: model.isRunning)
+                    HUDMetricView(value: tokensText, label: "tokens", animated: model.isRunning)
+                    HUDMetricView(value: memoryText, label: "memory", animated: model.isRunning)
                 }
-            }
-            Button("Choose Model Folder…") {
-                ModelLocationPicker.choose(for: model)
-            }
-            .disabled(model.loadState.isLoading)
-            if model.canUnloadModel {
-                Button("Unload Model", action: model.unloadModel)
-            }
-            LabeledContent("State") {
-                Text(model.presentation.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
             }
             if model.requiresModelInstallation {
                 LabeledContent("Download") {
@@ -71,7 +51,22 @@ struct InspectorView: View {
                 }
             }
         }
-        .disabled(model.isRunning || model.isInstallingModel)
+    }
+
+    private var rateText: String {
+        if model.phase == .decode { return MetricFormat.rate(model.liveTokensPerSecond) }
+        if let diagnostics = model.diagnostics { return MetricFormat.rate(diagnostics.tokensPerSecond) }
+        return "\u{2014}"
+    }
+
+    private var tokensText: String {
+        if model.isRunning { return "\(model.liveTokenCount)" }
+        if let diagnostics = model.diagnostics { return "\(diagnostics.generatedTokens)" }
+        return "\u{2014}"
+    }
+
+    private var memoryText: String {
+        MetricFormat.memory(model.currentProcessMemoryBytes)
     }
 
     private var memorySection: some View {
