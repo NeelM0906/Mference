@@ -90,6 +90,103 @@ import MferenceValidationSupport
         }
     }
 
+    @Test func sconvPrefillMatchesDecodeStepsAndFusedResidual() throws {
+        let context = try MetalContext()
+        let kernels = try Self.makeKernels(context)
+        var rng = SplitMix64(seed: 0x11C_BA7C)
+        let C = 96, T = 7, K = 4
+        let x = Self.randomHalf(T * C, &rng, scale: 2)
+        let w: [UInt16] = (0..<C * K).map { _ in
+            Self.bf16(rng.uniform(0, 1) - 0.5)
+        }
+        let xBuf = Self.buffer(context.device, x)
+        let wBuf = Self.buffer(context.device, w)
+        func state() -> MTLBuffer {
+            let result = context.device.makeBuffer(
+                length: C * (K - 1) * MemoryLayout<Float>.size,
+                options: .storageModeShared)!
+            memset(result.contents(), 0, result.length)
+            return result
+        }
+
+        let scalarState = state()
+        let scalarOut = context.device.makeBuffer(
+            length: T * C * MemoryLayout<Float16>.size,
+            options: .storageModeShared)!
+        Self.run(context) { cb in
+            for t in 0..<T {
+                kernels.encodeSconvStep(
+                    commandBuffer: cb,
+                    x: xBuf, xOffset: t * C * 2,
+                    state: scalarState,
+                    weight: wBuf, weightOffset: 0,
+                    out: scalarOut, outOffset: t * C * 2,
+                    channels: UInt32(C), kernelSize: UInt32(K))
+            }
+        }
+
+        let batchState = state()
+        let batchOut = context.device.makeBuffer(
+            length: scalarOut.length, options: .storageModeShared)!
+        Self.run(context) { cb in
+            kernels.encodeSconvPrefill(
+                commandBuffer: cb,
+                x: xBuf, state: batchState,
+                weight: wBuf, weightOffset: 0,
+                out: batchOut,
+                channels: UInt32(C), rows: UInt32(T))
+        }
+        let scalar = scalarOut.contents().bindMemory(
+            to: Float16.self, capacity: T * C)
+        let batch = batchOut.contents().bindMemory(
+            to: Float16.self, capacity: T * C)
+        for i in 0..<T * C { #expect(batch[i] == scalar[i], "f16 output \(i)") }
+        #expect(memcmp(batchState.contents(), scalarState.contents(), batchState.length) == 0)
+
+        let initialHidden: [Float] = (0..<T * C).map { _ in
+            rng.uniform(0, 1) * 10 - 5
+        }
+        let scalarHidden = Self.buffer(context.device, initialHidden)
+        let batchHidden = Self.buffer(context.device, initialHidden)
+        let scalarResidualState = state()
+        let batchResidualState = state()
+        let delta = context.device.makeBuffer(
+            length: C * MemoryLayout<Float>.size,
+            options: .storageModeShared)!
+        let rowBuffers = (0..<T).map { t in
+            Self.buffer(context.device, Array(x[(t * C)..<((t + 1) * C)]))
+        }
+        Self.run(context) { cb in
+            for t in 0..<T {
+                kernels.encodeSconvStepF32Out(
+                    commandBuffer: cb,
+                    x: rowBuffers[t], state: scalarResidualState,
+                    weight: wBuf, weightOffset: 0,
+                    out: delta,
+                    channels: UInt32(C), kernelSize: UInt32(K))
+                kernels.encodeResidualAddF32Delta(
+                    commandBuffer: cb,
+                    hidden: scalarHidden,
+                    hiddenOffset: t * C * MemoryLayout<Float>.size,
+                    delta: delta,
+                    count: UInt32(C), scale: 32)
+            }
+        }
+        Self.run(context) { cb in
+            kernels.encodeSconvPrefillResidual(
+                commandBuffer: cb,
+                x: xBuf, state: batchResidualState,
+                weight: wBuf, weightOffset: 0,
+                hidden: batchHidden,
+                channels: UInt32(C), rows: UInt32(T), scale: 32)
+        }
+        let scalarF32 = scalarHidden.contents().bindMemory(to: Float.self, capacity: T * C)
+        let batchF32 = batchHidden.contents().bindMemory(to: Float.self, capacity: T * C)
+        for i in 0..<T * C { #expect(batchF32[i] == scalarF32[i], "f32 residual \(i)") }
+        #expect(memcmp(batchResidualState.contents(), scalarResidualState.contents(),
+                       batchResidualState.length) == 0)
+    }
+
     // MARK: - Q/K per-head RMS norm
 
     @Test func qkNormMatchesReference() throws {
@@ -133,6 +230,61 @@ import MferenceValidationSupport
         }
         check(qBuf, q, qw, heads: NQ, label: "q")
         check(kBuf, k, kw, heads: NKV, label: "k")
+    }
+
+    @Test func qkNormPrefillMatchesDecodeRows() throws {
+        let context = try MetalContext()
+        let kernels = try Self.makeKernels(context)
+        var rng = SplitMix64(seed: 0xBEEF_BA7C)
+        let T = 5, HD = 128, NQ = 4, NKV = 2
+        let q = Self.randomHalf(T * NQ * HD, &rng, scale: 2)
+        let k = Self.randomHalf(T * NKV * HD, &rng, scale: 2)
+        let qw = Self.buffer(context.device, (0..<HD).map { _ in
+            Self.bf16(rng.uniform(0, 1) + 0.5)
+        })
+        let kw = Self.buffer(context.device, (0..<HD).map { _ in
+            Self.bf16(rng.uniform(0, 1) + 0.5)
+        })
+        let batchQ = Self.buffer(context.device, q)
+        let batchK = Self.buffer(context.device, k)
+        let scalarQ = (0..<T).map { t in
+            Self.buffer(context.device,
+                        Array(q[(t * NQ * HD)..<((t + 1) * NQ * HD)]))
+        }
+        let scalarK = (0..<T).map { t in
+            Self.buffer(context.device,
+                        Array(k[(t * NKV * HD)..<((t + 1) * NKV * HD)]))
+        }
+        Self.run(context) { cb in
+            for t in 0..<T {
+                kernels.encodeQKNorm(
+                    commandBuffer: cb,
+                    q: scalarQ[t], k: scalarK[t], kOffset: 0,
+                    qWeight: qw, qWeightOffset: 0,
+                    kWeight: kw, kWeightOffset: 0,
+                    headDim: UInt32(HD), numQHeads: UInt32(NQ),
+                    numKVHeads: UInt32(NKV), eps: 1e-6)
+            }
+        }
+        Self.run(context) { cb in
+            kernels.encodeQKNormPrefill(
+                commandBuffer: cb,
+                q: batchQ, k: batchK,
+                qWeight: qw, qWeightOffset: 0,
+                kWeight: kw, kWeightOffset: 0,
+                headDim: UInt32(HD), numQHeads: UInt32(NQ),
+                numKVHeads: UInt32(NKV), rows: UInt32(T), eps: 1e-6)
+        }
+        let gotQ = batchQ.contents().bindMemory(to: Float16.self, capacity: q.count)
+        let gotK = batchK.contents().bindMemory(to: Float16.self, capacity: k.count)
+        for t in 0..<T {
+            let wantQ = scalarQ[t].contents().bindMemory(to: Float16.self,
+                                                        capacity: NQ * HD)
+            let wantK = scalarK[t].contents().bindMemory(to: Float16.self,
+                                                        capacity: NKV * HD)
+            for i in 0..<NQ * HD { #expect(gotQ[t * NQ * HD + i] == wantQ[i]) }
+            for i in 0..<NKV * HD { #expect(gotK[t * NKV * HD + i] == wantK[i]) }
+        }
     }
 
     // MARK: - Attention with relative-position bias
@@ -233,6 +385,219 @@ import MferenceValidationSupport
         }
     }
 
+    @Test(arguments: [
+        (3, 5, 0, 0, 5, Float(0.1)),
+        (7, 5, 6, 11, 0, Float(0)),
+    ] as [(Int, Int, Int, Int, Int, Float)])
+    func attentionPrefillMatchesDecodeRows(
+        _ arg: (start: Int, rows: Int, window: Int, ring: Int,
+                logFloor: Int, logAlpha: Float)
+    ) throws {
+        let context = try MetalContext()
+        let kernels = try Self.makeKernels(context)
+        var rng = SplitMix64(seed: 0xA77E_BA7C &+ UInt64(arg.start))
+        let HD = 64, NQ = 4, NKV = 2, dRel = 16
+        let end = arg.start + arg.rows
+        let slots = arg.ring > 0 ? arg.ring : end
+        let extent = arg.window > 0 ? arg.window : 16
+        let q = Self.randomHalf(arg.rows * NQ * HD, &rng)
+        let rel = Self.randomHalf(arg.rows * NQ * dRel, &rng)
+        let logicalK = Self.randomHalf(end * NKV * HD, &rng)
+        let logicalV = Self.randomHalf(end * NKV * HD, &rng)
+        var physicalK = [Float16](repeating: 0, count: slots * NKV * HD)
+        var physicalV = [Float16](repeating: 0, count: slots * NKV * HD)
+        let rowWidth = NKV * HD
+        for p in 0..<end {
+            let slot = arg.ring > 0 ? p % arg.ring : p
+            physicalK.replaceSubrange((slot * rowWidth)..<((slot + 1) * rowWidth),
+                                      with: logicalK[(p * rowWidth)..<((p + 1) * rowWidth)])
+            physicalV.replaceSubrange((slot * rowWidth)..<((slot + 1) * rowWidth),
+                                      with: logicalV[(p * rowWidth)..<((p + 1) * rowWidth)])
+        }
+        let qBuf = Self.buffer(context.device, q)
+        let kBuf = Self.buffer(context.device, physicalK)
+        let vBuf = Self.buffer(context.device, physicalV)
+        let relBuf = Self.buffer(context.device, rel)
+        let proj = Self.buffer(context.device, (0..<dRel * extent).map { _ in
+            Self.bf16(rng.uniform(0, 1) - 0.5)
+        })
+        let batchOut = context.device.makeBuffer(
+            length: arg.rows * NQ * HD * MemoryLayout<Float16>.size,
+            options: .storageModeShared)!
+        Self.run(context) { cb in
+            kernels.encodeAttentionPrefill(
+                commandBuffer: cb,
+                q: qBuf, k: kBuf, v: vBuf, rel: relBuf,
+                proj: proj, projOffset: 0, out: batchOut,
+                headDim: UInt32(HD), numQHeads: UInt32(NQ),
+                numKVHeads: UInt32(NKV),
+                startPosition: UInt32(arg.start), rows: UInt32(arg.rows),
+                slidingWindow: UInt32(arg.window), relExtent: UInt32(extent),
+                dRel: UInt32(dRel), ringCapacity: UInt32(arg.ring),
+                logScalingFloor: UInt32(arg.logFloor),
+                scale: 1 / Float(HD), logScalingAlpha: arg.logAlpha,
+                preferTensorOps: false)
+        }
+
+        let got = batchOut.contents().bindMemory(
+            to: Float16.self, capacity: arg.rows * NQ * HD)
+        for t in 0..<arg.rows {
+            let qRow = Self.buffer(context.device,
+                Array(q[(t * NQ * HD)..<((t + 1) * NQ * HD)]))
+            let relRow = Self.buffer(context.device,
+                Array(rel[(t * NQ * dRel)..<((t + 1) * NQ * dRel)]))
+            let scalarOut = context.device.makeBuffer(
+                length: NQ * HD * MemoryLayout<Float16>.size,
+                options: .storageModeShared)!
+            let seqLen = arg.start + t + 1
+            let kvStart = arg.window > 0 ? max(0, seqLen - arg.window) : 0
+            let activeRing = arg.ring > 0 && seqLen > arg.ring ? arg.ring : 0
+            let tau: Float = arg.logFloor > 0 && seqLen > arg.logFloor
+                ? 1 + arg.logAlpha * log(Float(seqLen) / Float(arg.logFloor)) : 1
+            Self.run(context) { cb in
+                kernels.encodeAttentionDecode(
+                    commandBuffer: cb,
+                    q: qRow, k: kBuf, v: vBuf, rel: relRow,
+                    proj: proj, projOffset: 0, out: scalarOut,
+                    headDim: UInt32(HD), numQHeads: UInt32(NQ),
+                    numKVHeads: UInt32(NKV), seqLen: UInt32(seqLen),
+                    kvStart: UInt32(kvStart), relExtent: UInt32(extent),
+                    dRel: UInt32(dRel), ringCapacity: UInt32(activeRing),
+                    scale: 1 / Float(HD), tau: tau)
+            }
+            let want = scalarOut.contents().bindMemory(to: Float16.self,
+                                                       capacity: NQ * HD)
+            for i in 0..<NQ * HD {
+                #expect(got[t * NQ * HD + i] == want[i], "token \(t) elem \(i)")
+            }
+        }
+    }
+
+    @Test func attentionTensorOpsMatchesPortableInklingShape() throws {
+        let context = try MetalContext()
+        let kernels = try Self.makeKernels(context)
+        guard kernels.tensorOpsPrefillAttentionAvailable else { return }
+        var rng = SplitMix64(seed: 0xA77E_7E05)
+        let HD = 128, NQ = 32, NKV = 8, dRel = 16
+        let start = 513, rows = 13, end = start + rows, extent = 64
+        let q = Self.buffer(context.device,
+                            Self.randomHalf(rows * NQ * HD, &rng))
+        let k = Self.buffer(context.device,
+                            Self.randomHalf(end * NKV * HD, &rng))
+        let v = Self.buffer(context.device,
+                            Self.randomHalf(end * NKV * HD, &rng))
+        let rel = Self.buffer(context.device,
+                              Self.randomHalf(rows * NQ * dRel, &rng))
+        let proj = Self.buffer(context.device, (0..<dRel * extent).map { _ in
+            Self.bf16(rng.uniform(0, 1) - 0.5)
+        })
+        let byteCount = rows * NQ * HD * MemoryLayout<Float16>.size
+        let portable = context.device.makeBuffer(
+            length: byteCount, options: .storageModeShared)!
+        let tensorOps = context.device.makeBuffer(
+            length: byteCount, options: .storageModeShared)!
+
+        func encode(_ output: MTLBuffer, preferTensorOps: Bool) {
+            Self.run(context) { cb in
+                kernels.encodeAttentionPrefill(
+                    commandBuffer: cb,
+                    q: q, k: k, v: v, rel: rel,
+                    proj: proj, projOffset: 0, out: output,
+                    headDim: UInt32(HD), numQHeads: UInt32(NQ),
+                    numKVHeads: UInt32(NKV),
+                    startPosition: UInt32(start), rows: UInt32(rows),
+                    slidingWindow: 0, relExtent: UInt32(extent),
+                    dRel: UInt32(dRel), ringCapacity: 0,
+                    logScalingFloor: 8,
+                    scale: 1 / Float(HD), logScalingAlpha: 0.1,
+                    preferTensorOps: preferTensorOps)
+            }
+        }
+        encode(portable, preferTensorOps: false)
+        encode(tensorOps, preferTensorOps: true)
+
+        let expected = portable.contents().bindMemory(
+            to: Float16.self, capacity: rows * NQ * HD)
+        let actual = tensorOps.contents().bindMemory(
+            to: Float16.self, capacity: rows * NQ * HD)
+        var maxDifference: Float = 0
+        for i in 0..<rows * NQ * HD {
+            maxDifference = max(
+                maxDifference, abs(Float(actual[i]) - Float(expected[i])))
+        }
+        #expect(maxDifference <= 0.04,
+                "TensorOps relative attention max difference \(maxDifference)")
+    }
+
+    @Test func attentionTensorOpsMatchesPortableAcrossRingWrap() throws {
+        let context = try MetalContext()
+        let kernels = try Self.makeKernels(context)
+        guard kernels.tensorOpsPrefillAttentionAvailable else { return }
+        var rng = SplitMix64(seed: 0xA77E_7106)
+        let HD = 128, NQ = 32, NKV = 8, dRel = 16
+        let start = 700, rows = 13, end = start + rows
+        let window = 512, ring = 640, extent = window
+        let q = Self.buffer(context.device,
+                            Self.randomHalf(rows * NQ * HD, &rng))
+        let relative = Self.buffer(context.device,
+                                   Self.randomHalf(rows * NQ * dRel, &rng))
+        let rowWidth = NKV * HD
+        let logicalK = Self.randomHalf(end * rowWidth, &rng)
+        let logicalV = Self.randomHalf(end * rowWidth, &rng)
+        var physicalK = [Float16](repeating: 0, count: ring * rowWidth)
+        var physicalV = [Float16](repeating: 0, count: ring * rowWidth)
+        for position in 0..<end {
+            let slot = position % ring
+            physicalK.replaceSubrange(
+                (slot * rowWidth)..<((slot + 1) * rowWidth),
+                with: logicalK[(position * rowWidth)..<((position + 1) * rowWidth)])
+            physicalV.replaceSubrange(
+                (slot * rowWidth)..<((slot + 1) * rowWidth),
+                with: logicalV[(position * rowWidth)..<((position + 1) * rowWidth)])
+        }
+        let k = Self.buffer(context.device, physicalK)
+        let v = Self.buffer(context.device, physicalV)
+        let proj = Self.buffer(context.device, (0..<dRel * extent).map { _ in
+            Self.bf16(rng.uniform(0, 1) - 0.5)
+        })
+        let byteCount = rows * NQ * HD * MemoryLayout<Float16>.size
+        let portable = context.device.makeBuffer(
+            length: byteCount, options: .storageModeShared)!
+        let tensorOps = context.device.makeBuffer(
+            length: byteCount, options: .storageModeShared)!
+
+        func encode(_ output: MTLBuffer, preferTensorOps: Bool) {
+            Self.run(context) { cb in
+                kernels.encodeAttentionPrefill(
+                    commandBuffer: cb,
+                    q: q, k: k, v: v, rel: relative,
+                    proj: proj, projOffset: 0, out: output,
+                    headDim: UInt32(HD), numQHeads: UInt32(NQ),
+                    numKVHeads: UInt32(NKV),
+                    startPosition: UInt32(start), rows: UInt32(rows),
+                    slidingWindow: UInt32(window), relExtent: UInt32(extent),
+                    dRel: UInt32(dRel), ringCapacity: UInt32(ring),
+                    logScalingFloor: 128_000,
+                    scale: 1 / Float(HD), logScalingAlpha: 0.1,
+                    preferTensorOps: preferTensorOps)
+            }
+        }
+        encode(portable, preferTensorOps: false)
+        encode(tensorOps, preferTensorOps: true)
+
+        let expected = portable.contents().bindMemory(
+            to: Float16.self, capacity: rows * NQ * HD)
+        let actual = tensorOps.contents().bindMemory(
+            to: Float16.self, capacity: rows * NQ * HD)
+        var maxDifference: Float = 0
+        for i in 0..<rows * NQ * HD {
+            maxDifference = max(
+                maxDifference, abs(Float(actual[i]) - Float(expected[i])))
+        }
+        #expect(maxDifference <= 0.04,
+                "ring TensorOps relative attention max difference \(maxDifference)")
+    }
+
     // MARK: - Sigmoid router
 
     @Test func routerSelectMatchesReference() throws {
@@ -301,6 +666,77 @@ import MferenceValidationSupport
                 #expect(abs(gotGammas[s] - refWeights[topK + s]) < 1e-3,
                         "trial \(trial) gamma \(s)")
             }
+        }
+    }
+
+    @Test func routerPrefillMatchesDecodeRows() throws {
+        let context = try MetalContext()
+        let kernels = try Self.makeKernels(context)
+        var rng = SplitMix64(seed: 0x60D_BA7C)
+        let T = 5, D = 64, routed = 32, shared = 2, topK = 6
+        let weights = Self.buffer(context.device, (0..<(routed + shared) * D).map { _ in
+            Self.bf16(rng.uniform(0, 1) - 0.5)
+        })
+        let hidden = Self.buffer(context.device, Self.randomHalf(T * D, &rng, scale: 2))
+        let ones = Self.buffer(context.device, [UInt16](repeating: 0x3F80, count: D))
+        let bias = Self.buffer(context.device, (0..<routed).map { _ in
+            rng.uniform(0, 1) * 0.5 - 0.25
+        })
+        let global = Self.buffer(context.device, [Float(1.25)])
+        let scalarIdx = context.device.makeBuffer(length: T * 8 * 4,
+                                                   options: .storageModeShared)!
+        let scalarW = context.device.makeBuffer(length: T * 8 * 2,
+                                                 options: .storageModeShared)!
+        let scalarGamma = context.device.makeBuffer(length: T * shared * 4,
+                                                     options: .storageModeShared)!
+        Self.run(context) { cb in
+            for t in 0..<T {
+                kernels.encodeRouter(
+                    commandBuffer: cb,
+                    weights: weights, weightsOffset: 0,
+                    hidden: hidden, hiddenOffset: t * D * 2,
+                    onesScale: ones,
+                    gateBias: bias, gateBiasOffset: 0,
+                    globalScale: global, globalScaleOffset: 0,
+                    outIndices: scalarIdx, outIndicesOffset: t * 8 * 4,
+                    outWeights: scalarW, outWeightsOffset: t * 8 * 2,
+                    gammasOut: scalarGamma, gammasOffset: t * shared * 4,
+                    numRouted: UInt32(routed), numShared: UInt32(shared),
+                    topK: UInt32(topK), routeScale: 8, d: UInt32(D))
+            }
+        }
+        let batchIdx = context.device.makeBuffer(length: T * 8 * 4,
+                                                  options: .storageModeShared)!
+        let batchW = context.device.makeBuffer(length: T * 8 * 2,
+                                                options: .storageModeShared)!
+        let batchGamma = context.device.makeBuffer(length: T * shared * 4,
+                                                    options: .storageModeShared)!
+        let logits = context.device.makeBuffer(length: T * (routed + shared) * 4,
+                                                options: .storageModeShared)!
+        Self.run(context) { cb in
+            kernels.encodeRouterPrefill(
+                commandBuffer: cb,
+                weights: weights, weightsOffset: 0,
+                hidden: hidden, effectiveScale: ones, logits: logits,
+                gateBias: bias, gateBiasOffset: 0,
+                globalScale: global, globalScaleOffset: 0,
+                outIndices: batchIdx, outWeights: batchW, gammasOut: batchGamma,
+                numRouted: UInt32(routed), numShared: UInt32(shared),
+                topK: UInt32(topK), routeScale: 8,
+                d: UInt32(D), rows: UInt32(T))
+        }
+        let sIdx = scalarIdx.contents().bindMemory(to: UInt32.self, capacity: T * 8)
+        let bIdx = batchIdx.contents().bindMemory(to: UInt32.self, capacity: T * 8)
+        let sW = scalarW.contents().bindMemory(to: Float16.self, capacity: T * 8)
+        let bW = batchW.contents().bindMemory(to: Float16.self, capacity: T * 8)
+        let sG = scalarGamma.contents().bindMemory(to: Float.self, capacity: T * shared)
+        let bG = batchGamma.contents().bindMemory(to: Float.self, capacity: T * shared)
+        for t in 0..<T {
+            for i in 0..<topK {
+                #expect(bIdx[t * 8 + i] == sIdx[t * 8 + i])
+                #expect(bW[t * 8 + i] == sW[t * 8 + i])
+            }
+            for i in 0..<shared { #expect(bG[t * shared + i] == sG[t * shared + i]) }
         }
     }
 }
