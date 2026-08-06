@@ -2,13 +2,25 @@ import Foundation
 import Metal
 
 final class PrefillSharedExpert {
+    enum BlockPath: Sendable, Equatable {
+        case repeatedRows
+        case tensorOpsInt4
+    }
+
     private let shared: SharedExpertRuntime
+    private let weightBits: Int
+    private let tensorOpsInt4: MPPPrefillInt4QMM
+    private let blockActivationPSO: MTLComputePipelineState
     private let qwenScalarGatePSO: MTLComputePipelineState
 
     init(context: MetalContext, weightBits: Int = 8, siluActivation: Bool = false) throws {
+        self.weightBits = weightBits
         self.shared = try SharedExpertRuntime(context: context,
                                               weightBits: weightBits,
                                               siluActivation: siluActivation)
+        self.tensorOpsInt4 = MPPPrefillInt4QMM(context: context)
+        self.blockActivationPSO = try context.pipeline(
+            siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
         self.qwenScalarGatePSO = try context.pipeline("prefill_qwen_shared_scalar_gate")
     }
 
@@ -65,6 +77,7 @@ final class PrefillSharedExpert {
         encoder.endEncoding()
     }
 
+    @discardableResult
     func encodeBlock(commandBuffer cb: MTLCommandBuffer,
                             x: MTLBuffer,
                             xOffset: Int = 0,
@@ -83,7 +96,7 @@ final class PrefillSharedExpert {
                             d: Int,
                             intermediate: Int,
                             xStrideElements: Int,
-                            yStrideElements: Int) throws {
+                            yStrideElements: Int) throws -> BlockPath {
         precondition(queryCount >= 0, "queryCount must be non-negative")
         precondition(d > 0, "d must be positive")
         precondition(intermediate > 0, "intermediate must be positive")
@@ -97,6 +110,67 @@ final class PrefillSharedExpert {
         }
 
         let halfBytes = MemoryLayout<Float16>.stride
+        let batchIntermediateBytes = queryCount * intermediate * halfBytes
+        let canBatchInt4 = weightBits == 4
+            && queryCount >= MPPPrefillInt4QMM.tileN
+            && tensorOpsInt4.isAvailable
+            && xStrideElements == d
+            && yStrideElements == d
+            && scratchGateOffset >= 0
+            && scratchGateOffset + batchIntermediateBytes <= scratchGate.length
+            && scratchUpOffset >= 0
+            && scratchUpOffset + batchIntermediateBytes <= scratchUp.length
+            && scratchActOffset >= 0
+            && scratchActOffset + batchIntermediateBytes <= scratchAct.length
+        if canBatchInt4 {
+            let gatePath = tensorOpsInt4.encode(
+                commandBuffer: cb,
+                weights: gate.weights, weightsOffset: gate.weightsOffset,
+                scales: gate.scales, scalesOffset: gate.scalesOffset,
+                biases: gate.biases, biasesOffset: gate.biasesOffset,
+                x: x, xOffset: xOffset,
+                y: scratchGate, yOffset: scratchGateOffset,
+                m: queryCount, n: intermediate, k: d)
+            let upPath = tensorOpsInt4.encode(
+                commandBuffer: cb,
+                weights: up.weights, weightsOffset: up.weightsOffset,
+                scales: up.scales, scalesOffset: up.scalesOffset,
+                biases: up.biases, biasesOffset: up.biasesOffset,
+                x: x, xOffset: xOffset,
+                y: scratchUp, yOffset: scratchUpOffset,
+                m: queryCount, n: intermediate, k: d)
+            precondition(gatePath == .affineThreadgroupF16
+                            && upPath == .affineThreadgroupF16,
+                         "validated TensorOps shared-expert projection became unavailable")
+
+            guard let activation = cb.makeComputeCommandEncoder() else {
+                throw SharedExpertInt8Error.dimensionMismatch("encoder allocation failed")
+            }
+            activation.setComputePipelineState(blockActivationPSO)
+            activation.setBuffer(scratchGate, offset: scratchGateOffset, index: 0)
+            activation.setBuffer(scratchUp, offset: scratchUpOffset, index: 1)
+            activation.setBuffer(scratchAct, offset: scratchActOffset, index: 2)
+            var count = UInt32(queryCount * intermediate)
+            activation.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
+            let width = min(blockActivationPSO.maxTotalThreadsPerThreadgroup, 256)
+            activation.dispatchThreads(
+                MTLSize(width: Int(count), height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+            activation.endEncoding()
+
+            let downPath = tensorOpsInt4.encode(
+                commandBuffer: cb,
+                weights: down.weights, weightsOffset: down.weightsOffset,
+                scales: down.scales, scalesOffset: down.scalesOffset,
+                biases: down.biases, biasesOffset: down.biasesOffset,
+                x: scratchAct, xOffset: scratchActOffset,
+                y: y, yOffset: yOffset,
+                m: queryCount, n: d, k: intermediate)
+            precondition(downPath == .affineThreadgroupF16,
+                         "validated TensorOps shared-expert down projection became unavailable")
+            return .tensorOpsInt4
+        }
+
         for row in 0..<queryCount {
             try shared.encode(commandBuffer: cb,
                               x: x,
@@ -113,5 +187,6 @@ final class PrefillSharedExpert {
                               scratchAct: scratchAct,
                               scratchActOffset: scratchActOffset)
         }
+        return .repeatedRows
     }
 }

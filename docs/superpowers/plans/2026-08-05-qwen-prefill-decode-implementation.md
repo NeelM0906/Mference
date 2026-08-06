@@ -120,6 +120,17 @@ git commit -m "Batch Qwen prefill scalar gating"
 
 ### Task 3: Add the Qwen chunkwise GDN TensorOps path
 
+> **Execution outcome (supersedes the proposed steps below):** An exact
+> one-SIMD/four-value-row Qwen GDN specialization was implemented and tested,
+> but rejected after its measured 17.72 s prefill regressed the accepted
+> scalar-gate build's 17.28 s. The larger measured bottleneck was the INT4
+> shared expert's per-token dispatch loop. Its replacement batches gate, up,
+> activation, and down across the chunk with Apple TensorOps, overlaps the
+> shared branch with CPU route grouping/SSD binding, and retains the scalar
+> fallback. Focused parity, scratch-layout, and Qwen runner tests pass. The
+> accepted measured long prefill is 15.25 s versus the 19.14 s auto baseline
+> (20.3% faster) and the 52.09 s fixed-128 baseline (3.42x faster).
+
 **Files:**
 - Create: `Sources/Mference/Metal/GDN/gdn_chunkwise.metal`
 - Create: `Sources/Mference/Kernels/GDN/QwenChunkwiseGDN.swift`

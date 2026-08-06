@@ -182,6 +182,7 @@ import Metal
         #expect(qwen.gdnValueDim == 128)
         #expect(qwen.gdnVHeads == 4)
         #expect(qwen.sharedScalarGateElements == 1)
+        #expect(qwen.sharedExpertScratchElements == 32 * qwen.sharedIntermediate)
         #expect(qwen.qElements == 32 * 256)
         #expect(qwen.attentionOutputElements == 32 * 4 * 32)
 

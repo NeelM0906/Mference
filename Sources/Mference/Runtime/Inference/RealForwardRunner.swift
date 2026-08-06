@@ -2019,6 +2019,63 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         throw error
                     }
 
+                    // The shared branch depends only on routedX, which the
+                    // completed attention/router command has already
+                    // produced. Submit it before CPU route grouping and SSD
+                    // binding so those tasks overlap its batched projections.
+                    guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+                        throw ModelError.residentBufferWrapFailed
+                    }
+                    let sharedProj = sharedExpertProjections[L]
+                    try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                                                        x: cfg.ffnSandwichNorms
+                                                            ? scratch.denseX
+                                                            : scratch.routedX,
+                                                        y: scratch.h1,
+                                                        gate: sharedProj.gate,
+                                                        up: sharedProj.up,
+                                                        down: sharedProj.down,
+                                                        scratchGate: scratch.sharedGateScratch,
+                                                        scratchUp: scratch.sharedUpScratch,
+                                                        scratchAct: scratch.sharedActScratch,
+                                                        queryCount: t,
+                                                        d: D,
+                                                        intermediate: cfg.intermediateSize,
+                                                        xStrideElements: D,
+                                                        yStrideElements: D)
+                    if cfg.ffnSandwichNorms {
+                        let postF1 = sharedProj.postF1!
+                        prefillRMS.encodeBF16W(commandBuffer: sharedCB,
+                                               x: scratch.h1,
+                                               weight: postF1.buffer,
+                                               weightOffset: Int(postF1.offset),
+                                               out: scratch.h1,
+                                               t: UInt32(t),
+                                               d: UInt32(D),
+                                               eps: eps)
+                    } else if cfg.sharedExpertGated {
+                        let gateView = sharedProj.scalarGate!
+                        let scalarGate = SharedExpertInt8Proj(
+                            weights: gateView.buffer,
+                            scales: gateView.buffer,
+                            biases: gateView.buffer,
+                            weightsOffset: Int(gateView.offset),
+                            scalesOffset: Int(gateView.scaleOffset),
+                            biasesOffset: Int(gateView.biasOffset),
+                            rows: 1,
+                            cols: UInt32(D))
+                        try prefillSharedExpert.encodeQwenScalarGate(
+                            commandBuffer: sharedCB,
+                            x: scratch.routedX,
+                            gate: scalarGate,
+                            y: scratch.h1,
+                            queryCount: t,
+                            d: D,
+                            xStrideElements: D,
+                            yStrideElements: D)
+                    }
+                    sharedCB.commit()
+
                     let routeCount = t * cfg.topKExperts
                     let idPtr = scratch.routeIDs.contents()
                         .bindMemory(to: UInt32.self, capacity: routeCount)
@@ -2054,65 +2111,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         numExperts: cfg.numExperts,
                         tileExpertCount: routeTileExpertCount,
                         expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
-
-                    guard let sharedCB = ctx.queue.makeCommandBuffer() else {
-                        throw ModelError.residentBufferWrapFailed
-                    }
-                    let sharedProj = sharedExpertProjections[L]
-                    try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
-                                                        x: cfg.ffnSandwichNorms
-                                                            ? scratch.denseX
-                                                            : scratch.routedX,
-                                                        y: scratch.h1,
-                                                        gate: sharedProj.gate,
-                                                        up: sharedProj.up,
-                                                        down: sharedProj.down,
-                                                        scratchGate: scratch.sharedGateScratch,
-                                                        scratchUp: scratch.sharedUpScratch,
-                                                        scratchAct: scratch.sharedActScratch,
-                                                        queryCount: t,
-                                                        d: D,
-                                                        intermediate: cfg.intermediateSize,
-                                                        xStrideElements: D,
-                                                        yStrideElements: D)
-                    if cfg.ffnSandwichNorms {
-                        let postF1 = sharedProj.postF1!
-                        prefillRMS.encodeBF16W(commandBuffer: sharedCB,
-                                               x: scratch.h1,
-                                               weight: postF1.buffer,
-                                               weightOffset: Int(postF1.offset),
-                                               out: scratch.h1,
-                                               t: UInt32(t),
-                                               d: UInt32(D),
-                                               eps: eps)
-                    } else if cfg.sharedExpertGated {
-                        // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX),
-                        // in one block dispatch.
-                        let gateView = sharedProj.scalarGate!
-                        let scalarGate = SharedExpertInt8Proj(
-                            weights: gateView.buffer,
-                            scales: gateView.buffer,
-                            biases: gateView.buffer,
-                            weightsOffset: Int(gateView.offset),
-                            scalesOffset: Int(gateView.scaleOffset),
-                            biasesOffset: Int(gateView.biasOffset),
-                            rows: 1,
-                            cols: UInt32(D))
-                        try prefillSharedExpert.encodeQwenScalarGate(
-                            commandBuffer: sharedCB,
-                            x: scratch.routedX,
-                            gate: scalarGate,
-                            y: scratch.h1,
-                            queryCount: t,
-                            d: D,
-                            xStrideElements: D,
-                            yStrideElements: D)
-                    }
-                    sharedCB.commit()
-                    waitForCompletion(sharedCB)
-                    if let error = sharedCB.error {
-                        throw error
-                    }
 
                     let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
                         device: ctx.device,
@@ -2301,6 +2299,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         waitForCompletion(tailCB)
                     }
                     if let error = tailCB.error {
+                        throw error
+                    }
+                    if let error = sharedCB.error {
                         throw error
                     }
                     if L + 1 < cfg.numLayers {
