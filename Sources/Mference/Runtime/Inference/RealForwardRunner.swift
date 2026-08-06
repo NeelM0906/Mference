@@ -470,7 +470,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.attention = try Attention(context: context)
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
-                                                  siluActivation: silu)
+                                                  siluActivation: silu,
+                                                  specializedD: cfg.hiddenSize,
+                                                  specializedF: cfg.intermediateSize)
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
                                  specializedD: UInt32(cfg.hiddenSize),
@@ -2019,6 +2021,63 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         throw error
                     }
 
+                    // The shared branch depends only on routedX, which the
+                    // completed attention/router command has already
+                    // produced. Submit it before CPU route grouping and SSD
+                    // binding so those tasks overlap its batched projections.
+                    guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+                        throw ModelError.residentBufferWrapFailed
+                    }
+                    let sharedProj = sharedExpertProjections[L]
+                    try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                                                        x: cfg.ffnSandwichNorms
+                                                            ? scratch.denseX
+                                                            : scratch.routedX,
+                                                        y: scratch.h1,
+                                                        gate: sharedProj.gate,
+                                                        up: sharedProj.up,
+                                                        down: sharedProj.down,
+                                                        scratchGate: scratch.sharedGateScratch,
+                                                        scratchUp: scratch.sharedUpScratch,
+                                                        scratchAct: scratch.sharedActScratch,
+                                                        queryCount: t,
+                                                        d: D,
+                                                        intermediate: cfg.intermediateSize,
+                                                        xStrideElements: D,
+                                                        yStrideElements: D)
+                    if cfg.ffnSandwichNorms {
+                        let postF1 = sharedProj.postF1!
+                        prefillRMS.encodeBF16W(commandBuffer: sharedCB,
+                                               x: scratch.h1,
+                                               weight: postF1.buffer,
+                                               weightOffset: Int(postF1.offset),
+                                               out: scratch.h1,
+                                               t: UInt32(t),
+                                               d: UInt32(D),
+                                               eps: eps)
+                    } else if cfg.sharedExpertGated {
+                        let gateView = sharedProj.scalarGate!
+                        let scalarGate = SharedExpertInt8Proj(
+                            weights: gateView.buffer,
+                            scales: gateView.buffer,
+                            biases: gateView.buffer,
+                            weightsOffset: Int(gateView.offset),
+                            scalesOffset: Int(gateView.scaleOffset),
+                            biasesOffset: Int(gateView.biasOffset),
+                            rows: 1,
+                            cols: UInt32(D))
+                        try prefillSharedExpert.encodeQwenScalarGate(
+                            commandBuffer: sharedCB,
+                            x: scratch.routedX,
+                            gate: scalarGate,
+                            y: scratch.h1,
+                            queryCount: t,
+                            d: D,
+                            xStrideElements: D,
+                            yStrideElements: D)
+                    }
+                    sharedCB.commit()
+
                     let routeCount = t * cfg.topKExperts
                     let idPtr = scratch.routeIDs.contents()
                         .bindMemory(to: UInt32.self, capacity: routeCount)
@@ -2054,72 +2113,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         numExperts: cfg.numExperts,
                         tileExpertCount: routeTileExpertCount,
                         expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
-
-                    guard let sharedCB = ctx.queue.makeCommandBuffer() else {
-                        throw ModelError.residentBufferWrapFailed
-                    }
-                    let sharedProj = sharedExpertProjections[L]
-                    try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
-                                                        x: cfg.ffnSandwichNorms
-                                                            ? scratch.denseX
-                                                            : scratch.routedX,
-                                                        y: scratch.h1,
-                                                        gate: sharedProj.gate,
-                                                        up: sharedProj.up,
-                                                        down: sharedProj.down,
-                                                        scratchGate: scratch.sharedGateScratch,
-                                                        scratchUp: scratch.sharedUpScratch,
-                                                        scratchAct: scratch.sharedActScratch,
-                                                        queryCount: t,
-                                                        d: D,
-                                                        intermediate: cfg.intermediateSize,
-                                                        xStrideElements: D,
-                                                        yStrideElements: D)
-                    if cfg.ffnSandwichNorms {
-                        let postF1 = sharedProj.postF1!
-                        prefillRMS.encodeBF16W(commandBuffer: sharedCB,
-                                               x: scratch.h1,
-                                               weight: postF1.buffer,
-                                               weightOffset: Int(postF1.offset),
-                                               out: scratch.h1,
-                                               t: UInt32(t),
-                                               d: UInt32(D),
-                                               eps: eps)
-                    } else if cfg.sharedExpertGated {
-                        // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX),
-                        // per chunk row.
-                        let gateView = sharedProj.scalarGate!
-                        let halfBytes = MemoryLayout<Float16>.stride
-                        for row in 0..<t {
-                            int8ScalarGate!.encode(
-                                commandBuffer: sharedCB,
-                                weights: gateView.buffer,
-                                weightsOffset: Int(gateView.offset),
-                                scales: gateView.buffer,
-                                scalesOffset: Int(gateView.scaleOffset),
-                                biases: gateView.buffer,
-                                biasesOffset: Int(gateView.biasOffset),
-                                x: scratch.routedX,
-                                xOffset: row * D * halfBytes,
-                                y: scratch.sharedScalarGate,
-                                yOffset: row * halfBytes,
-                                m: 1, n: UInt32(D))
-                        }
-                        for row in 0..<t {
-                            elementwise!.encodeSigmoidScalarMul(
-                                commandBuffer: sharedCB,
-                                y: scratch.h1,
-                                yOffset: row * D * halfBytes,
-                                gate: scratch.sharedScalarGate,
-                                gateOffset: row * halfBytes,
-                                count: D)
-                        }
-                    }
-                    sharedCB.commit()
-                    waitForCompletion(sharedCB)
-                    if let error = sharedCB.error {
-                        throw error
-                    }
 
                     let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
                         device: ctx.device,
@@ -2308,6 +2301,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         waitForCompletion(tailCB)
                     }
                     if let error = tailCB.error {
+                        throw error
+                    }
+                    if let error = sharedCB.error {
                         throw error
                     }
                     if L + 1 < cfg.numLayers {
@@ -2719,7 +2715,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var phase1HitSplitRoutedBufs: [MTLBuffer] = []
             var phase1HitSlots: [UInt32] = []
             var phase1MissSlots: [UInt32] = []
-
             if let plan = plannedFetch {
                 let missSet = Set(plan.misses)
                 phase1HitSlots = (0..<cfg.topKExperts)
@@ -4123,20 +4118,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              convWeightOffset: Int(convW.offset),
                              out: gdnConvOut)
         gdn.encodeQKNorm(commandBuffer: cb, convOut: gdnConvOut)
-        gdn.encodeDeltaStepDecode(commandBuffer: cb,
-                                  convOut: gdnConvOut,
-                                  aProj: gdnA,
-                                  bProj: gdnB,
-                                  aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
-                                  dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
-                                  state: gdnState.stateBuffer(layer: L),
-                                  y: gdnY)
-        gdn.encodeGatedNorm(commandBuffer: cb,
-                            y: gdnY,
-                            z: gdnZ,
-                            weight: gatedNormW.buffer,
-                            weightOffset: Int(gatedNormW.offset),
-                            out: gdnOut)
+        let usedFusedDeltaNorm = gdn.encodeDeltaGatedDecode(
+            commandBuffer: cb,
+            convOut: gdnConvOut,
+            aProj: gdnA,
+            bProj: gdnB,
+            aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+            dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+            state: gdnState.stateBuffer(layer: L),
+            z: gdnZ,
+            weight: gatedNormW.buffer, weightOffset: Int(gatedNormW.offset),
+            out: gdnOut)
+        if !usedFusedDeltaNorm {
+            gdn.encodeDeltaStepDecode(commandBuffer: cb,
+                                      convOut: gdnConvOut,
+                                      aProj: gdnA,
+                                      bProj: gdnB,
+                                      aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+                                      dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+                                      state: gdnState.stateBuffer(layer: L),
+                                      y: gdnY)
+            gdn.encodeGatedNorm(commandBuffer: cb,
+                                y: gdnY,
+                                z: gdnZ,
+                                weight: gatedNormW.buffer,
+                                weightOffset: Int(gatedNormW.offset),
+                                out: gdnOut)
+        }
         int4.encode(commandBuffer: cb,
                     weights: outW.buffer, weightsOffset: Int(outW.offset),
                     scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),

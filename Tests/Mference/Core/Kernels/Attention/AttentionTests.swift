@@ -370,6 +370,11 @@ import MferenceValidationSupport
                                seqLen: 128, mode: .full, seed: 0x175)
     }
 
+    @Test func attentionFull_qwenRealShape() throws {
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
+                               seqLen: 128, mode: .full, seed: 0x36_0175)
+    }
+
 
 
     /// Generic aliasing coverage. Gemma 4 runtime uses distinct post-norm K/V.

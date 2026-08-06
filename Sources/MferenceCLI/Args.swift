@@ -9,6 +9,14 @@ public enum PrefillChunkChoice: Equatable, Sendable {
     case auto
 }
 
+/// Routed-expert cache selection. Auto keeps the 16-slot memory-first default
+/// for every family except Qwen 3.6 on hosts with at least 16 GiB, whose 256
+/// experts per layer measurably benefit from 32 slots.
+public enum ExpertCacheSlotChoice: Equatable, Sendable {
+    case fixed(Int)
+    case auto
+}
+
 public struct Args: Equatable, Sendable {
     public var model: String
     public var prompt: String?
@@ -24,7 +32,7 @@ public struct Args: Equatable, Sendable {
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
-    public var expertCacheSlots: Int
+    public var expertCacheSlots: ExpertCacheSlotChoice
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice
     /// Model-integrity policy. `.fullSha256` re-hashes every routed-expert
@@ -48,9 +56,9 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
-                expertCacheSlots: Int = 16,
+                expertCacheSlots: ExpertCacheSlotChoice = .auto,
                 rdadvise: String = "off",
-                prefillChunk: PrefillChunkChoice = .fixed(128),
+                prefillChunk: PrefillChunkChoice = .auto,
                 verification: ModelIntegrityPolicy = .fullSha256) {
         self.model = model
         self.prompt = prompt
@@ -121,13 +129,15 @@ extension Args {
       --stop <string>           Stop substring (repeatable).
       --rdadvise <mode>         Expert read-ahead advice: off, default,
                                 bounded, or adaptive (default off).
-      --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
-                                24, or 32 (default 16). More slots raise the
-                                hit rate but use more memory.
-      --prefill-chunk <n|auto>  Prefill chunk tokens (default 128). Larger
+      --expert-cache-slots <n|auto>
+                                Routed-expert cache slots per layer: 8, 16,
+                                24, 32, or auto (default auto: Qwen uses 32 on
+                                hosts with at least 16 GiB; otherwise 16).
+                                More slots raise the hit rate but use more RAM.
+      --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
                                 prompt processing; auto sizes the chunk to
-                                the prompt (--chat uses the default). Allowed:
+                                the prompt (--chat resolves auto to 128). Allowed:
                                 32, 64, 128, 256, 512, 1024, 2048, 4096.
       --verify <mode>           Model integrity: full-sha256 (default)
                                 re-hashes every routed-expert file on first
@@ -154,9 +164,9 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
-        var expertCacheSlots = 16
+        var expertCacheSlots = ExpertCacheSlotChoice.auto
         var rdadvise = "off"
-        var prefillChunk = PrefillChunkChoice.fixed(128)
+        var prefillChunk = PrefillChunkChoice.auto
         var verification = ModelIntegrityPolicy.fullSha256
 
         var index = 0
@@ -224,11 +234,14 @@ extension Args {
                 seed = parsed
             case "--expert-cache-slots":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value),
-                      [8, 16, 24, 32].contains(parsed) else {
+                if value == "auto" {
+                    expertCacheSlots = .auto
+                } else if let parsed = Int(value),
+                          RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) {
+                    expertCacheSlots = .fixed(parsed)
+                } else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
-                expertCacheSlots = parsed
             case "--prefill-chunk":
                 let value = try takeValue(argv, &index, flag: flag)
                 if value == "auto" {

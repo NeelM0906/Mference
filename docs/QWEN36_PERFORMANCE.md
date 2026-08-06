@@ -12,6 +12,43 @@ These are measurements from one host, not performance ceilings. Decode rate is
 sensitive to OS page-cache state; see [Warming the page cache backfires]
 (#warming-the-page-cache-backfires).
 
+## Production acceleration (2026-08-06)
+
+The production CLI and server now resolve their expert-cache default by model
+family and physical memory: Qwen uses 32 slots per layer on hosts with at least
+16 GiB and 16 slots on smaller hosts. An explicit `--expert-cache-slots 16`
+keeps the lower-memory path. The Mac app retains its explicit 16-slot setting
+and offers 32 in the inspector.
+
+On the M5/24 GB host, the exact community protocol at commit `3d6996b` produced:
+
+| Case | Prompt / generated | Prefill | Decode |
+| --- | ---: | ---: | ---: |
+| short-explanation | 62 / 538 | 7.57 s | 29.293 tok/s |
+| medium-review | 426 / 704 | 8.48 s | 27.460 tok/s |
+| long-synthesis | 2,940 / 695 | 26.54 s | 23.470 tok/s |
+
+Every case ended with `stop=endOfTurn`. The generated files are byte-identical
+to the accepted 16-slot controls at the same source state. Those controls ran
+at 21.487, 24.828, and 21.490 tok/s respectively, so the production decode
+gain is 36.3%, 10.6%, and 9.2% (18.1% geometric mean) without changing the
+routing workload. The larger cache is responsible for the last step; it stacks
+with the dedicated decode kernels described below.
+
+Against the original community run's prefill times, the same final protocol is
+1.00x, 1.42x, and 2.20x faster for short, medium, and long prompts. Generated
+token counts changed after the batched TensorOps prefill arithmetic landed, so
+the original and final *decode* rows are not token-for-token comparable. Their
+raw decode rates are 15.5–18.3% higher, but the byte-identical 16-vs-32 rows
+above are the defensible decode A/B.
+
+The accepted compute work comprises a prompt-block Qwen scalar-gate kernel, a
+TensorOps INT4 shared-expert prefill path, fused Qwen shared-expert gate/up/
+activation decode, fixed-shape GDN input/delta/gated-normalization kernels, and
+Qwen full-attention specialization. Candidate pilot routing, staged projection/
+convolution, conv/QK normalization, and packed-Q epilogue fusions were removed
+after production runs failed to beat the accepted path.
+
 ## Memory: the 8 GB envelope
 
 The whole point of the runtime is a 26B-class MoE on an 8 GB Mac in about
@@ -93,20 +130,22 @@ Each of these was measured before being ruled out.
 - **Metal encoder overhead.** Creating one encoder per kernel costs ~1.3 us
   versus ~1.0 us for a shared encoder. Across ~900 dispatches that is a
   0.25 ms/token difference — not worth restructuring for.
-- **Expert cache hit rate.** Raising slots from 16 to 24 to 32 moved decode
-  from 19.0 to 19.6 to 19.8 tok/s. With 256 experts per layer the hit rate is
-  low at any slot count the memory budget allows, and prior work already
-  found LFU within ~8 percentage points of Belady's optimal. Slot counts
-  above 32 are not offered: the 2 GB footprint is a product requirement.
+- **Expert cache policy.** The July workload moved from 19.0 to 19.8 tok/s when
+  raising slots from 16 to 32, but the frozen August same-output cases gained
+  9.2–36.3%. LFU remains the replacement policy and slot counts above 32 are
+  not offered. Auto uses 32 only for Qwen on hosts with at least 16 GiB; the
+  8 GB path and every other family retain 16.
 - **RDADVISE read-ahead.** `--rdadvise default` cut the I/O await from 3474 to
   2931 ms, but the synchronous advice calls cost what the reads saved; total
   decode was unchanged (19.3 vs 19.3 tok/s). It stays off by default.
 
 ## Why Qwen 3.6 decodes slower than Gemma 4 here
 
-The repository's published M5 Pro rows put Gemma 4 at 31-35 tok/s; Qwen 3.6
-measures 18.8-23.1 tok/s on this M5. Two facts about that gap are measured
-here, and the explanation for it is not.
+The repository's published M5 Pro rows put Gemma 4 at 31-35 tok/s; the current
+Qwen 3.6 production cases measure 23.5-29.3 tok/s on this M5. The workloads and
+M5 variants differ, so this is a project-level range comparison rather than a
+token-for-token model A/B. Two facts about the remaining gap are measured here,
+and the explanation for it is not.
 
 Measured:
 
@@ -120,7 +159,8 @@ Measured:
   3.36 MiB). So the gap is not read volume.
 - With the same 16 slots, Qwen caches at most 6.2% of a layer's 256 experts
   against Gemma's 12.5% of 128, so it misses more often. Raising Qwen to 32
-  slots recovers Gemma-equivalent coverage and is worth about 4%.
+  slots recovers Gemma-equivalent coverage; the frozen byte-identical A/B gains
+  9.2-36.3% by case, or 18.1% by geometric mean.
 
 Not measured, and stated here as a hypothesis rather than a finding: that
 Gemma is faster mainly because its 12.9 GB expert pool largely stays in the OS
@@ -132,9 +172,9 @@ Gemma 4 under the same protocol on this host, and only Qwen is installed here.
 The actual per-run cache hit rate was also not instrumented, so no
 bytes-per-second figure is quoted for either model.
 
-Whatever the split between those effects, both follow from the checkpoint's
-shape against the host's memory rather than from the runtime, and neither is
-addressable inside the 2 GB process budget.
+The dedicated Qwen compute paths and larger-host cache default narrow this gap.
+Whatever remains follows from the checkpoint's shape against the host's memory;
+the 16-slot path remains available for the original memory budget.
 
 ## Round-trip latency
 

@@ -29,13 +29,17 @@ final class Attention {
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
     private let psoPartialSWA: MTLComputePipelineState
+    private let psoPartialQwenFull: MTLComputePipelineState
     private let psoPartialFull: MTLComputePipelineState
     private let psoGQAPartialSWA: MTLComputePipelineState
     private let psoGQAPartialSWAChunks16: MTLComputePipelineState
+    private let psoPartialQwenFullChunks16: MTLComputePipelineState
     private let psoPartialFullChunks16: MTLComputePipelineState
     private let psoCombineSWA: MTLComputePipelineState
+    private let psoCombineQwenFull: MTLComputePipelineState
     private let psoCombineFull: MTLComputePipelineState
     private let psoCombineSWAChunks16: MTLComputePipelineState
+    private let psoCombineQwenFullChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
 
     /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
@@ -70,6 +74,11 @@ final class Attention {
                                                           headDim: 256,
                                                           numQHeads: 16,
                                                           numKVHeads: 8)
+        self.psoPartialQwenFull = try Self.specializedPipeline(context,
+                                                               "attention_decode_partial",
+                                                               headDim: 256,
+                                                               numQHeads: 16,
+                                                               numKVHeads: 2)
         self.psoPartialFull = try Self.specializedPipeline(context,
                                                            "attention_decode_partial",
                                                            headDim: 512,
@@ -86,6 +95,12 @@ final class Attention {
                                                                      numQHeads: 16,
                                                                      numKVHeads: 8,
                                                                      numChunks: 16)
+        self.psoPartialQwenFullChunks16 = try Self.specializedPipeline(context,
+                                                                       "attention_decode_partial",
+                                                                       headDim: 256,
+                                                                       numQHeads: 16,
+                                                                       numKVHeads: 2,
+                                                                       numChunks: 16)
         self.psoPartialFullChunks16 = try Self.specializedPipeline(context,
                                                                    "attention_decode_partial",
                                                                    headDim: 512,
@@ -97,6 +112,11 @@ final class Attention {
                                                           headDim: 256,
                                                           numQHeads: 16,
                                                           numKVHeads: 8)
+        self.psoCombineQwenFull = try Self.specializedPipeline(context,
+                                                               "attention_decode_combine",
+                                                               headDim: 256,
+                                                               numQHeads: 16,
+                                                               numKVHeads: 2)
         self.psoCombineFull = try Self.specializedPipeline(context,
                                                            "attention_decode_combine",
                                                            headDim: 512,
@@ -108,6 +128,12 @@ final class Attention {
                                                                   numQHeads: 16,
                                                                   numKVHeads: 8,
                                                                   numChunks: 16)
+        self.psoCombineQwenFullChunks16 = try Self.specializedPipeline(context,
+                                                                       "attention_decode_combine",
+                                                                       headDim: 256,
+                                                                       numQHeads: 16,
+                                                                       numKVHeads: 2,
+                                                                       numChunks: 16)
         self.psoCombineFullChunks16 = try Self.specializedPipeline(context,
                                                                    "attention_decode_combine",
                                                                    headDim: 512,
@@ -358,6 +384,9 @@ final class Attention {
         if !useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 8 {
             return psoPartialSWA
         }
+        if !useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 2 {
+            return numChunks == 16 ? psoPartialQwenFullChunks16 : psoPartialQwenFull
+        }
         if !useGQAPartial && headDim == 512 && numQHeads == 16 && numKVHeads == 2 {
             if numChunks == 16 {
                 return psoPartialFullChunks16
@@ -373,6 +402,9 @@ final class Attention {
                                  numChunks: Int) -> MTLComputePipelineState {
         if headDim == 256 && numQHeads == 16 && numKVHeads == 8 {
             return numChunks == 16 ? psoCombineSWAChunks16 : psoCombineSWA
+        }
+        if headDim == 256 && numQHeads == 16 && numKVHeads == 2 {
+            return numChunks == 16 ? psoCombineQwenFullChunks16 : psoCombineQwenFull
         }
         if headDim == 512 && numQHeads == 16 && numKVHeads == 2 {
             return numChunks == 16 ? psoCombineFullChunks16 : psoCombineFull

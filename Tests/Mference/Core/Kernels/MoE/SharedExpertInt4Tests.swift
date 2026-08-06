@@ -52,6 +52,68 @@ import MferenceValidationSupport
         #expect(error < Tolerance.quantInt4 * 4, "shared-expert int4 rel=\(error)")
     }
 
+    @Test func fusedGateUpActivationMatchesThreeDispatchReference() throws {
+        var rng = SeedTree(0x604).key("shared-expert-int4-fused")
+        let x = (0..<Self.d).map { _ in rng.uniform(-0.3, 0.3) }
+        let gate = Self.pack((0..<Self.f).map { _ in
+            (0..<Self.d).map { _ in rng.uniform(-0.3, 0.3) }
+        })
+        let up = Self.pack((0..<Self.f).map { _ in
+            (0..<Self.d).map { _ in rng.uniform(-0.3, 0.3) }
+        })
+        let down = Self.pack((0..<Self.d).map { _ in
+            (0..<Self.f).map { _ in rng.uniform(-0.3, 0.3) }
+        })
+        let context = try MetalContext()
+        let reference = try SharedExpertInt4(context: context,
+                                             siluActivation: true,
+                                             useFusedGateUp: false)
+        let fused = try SharedExpertInt4(context: context,
+                                         siluActivation: true,
+                                         useFusedGateUp: true,
+                                         specializedD: Self.d,
+                                         specializedF: Self.f)
+        let shapeMismatchedFused = try SharedExpertInt4(
+            context: context,
+            siluActivation: true,
+            useFusedGateUp: true,
+            specializedD: Self.d,
+            specializedF: Self.f / 2)
+        let input = try #require(Fp16Buffer.make(context.device, values: x))
+        let expected = try #require(Fp16Buffer.make(context.device, count: Self.d))
+        let actual = try #require(Fp16Buffer.make(context.device, count: Self.d))
+        let fallbackActual = try #require(Fp16Buffer.make(context.device, count: Self.d))
+        let gateProjection = Self.projection(context, gate, rows: Self.f, cols: Self.d)
+        let upProjection = Self.projection(context, up, rows: Self.f, cols: Self.d)
+        let downProjection = Self.projection(context, down, rows: Self.d, cols: Self.f)
+
+        func run(_ runtime: SharedExpertInt4, y: MTLBuffer) throws {
+            let gateScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+            let upScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+            let actScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+            let commandBuffer = try #require(context.queue.makeCommandBuffer())
+            try runtime.encode(commandBuffer: commandBuffer,
+                               x: input,
+                               gate: gateProjection,
+                               up: upProjection,
+                               down: downProjection,
+                               y: y,
+                               scratchGate: gateScratch,
+                               scratchUp: upScratch,
+                               scratchAct: actScratch)
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            #expect(commandBuffer.error == nil)
+        }
+        try run(reference, y: expected)
+        try run(fused, y: actual)
+        try run(shapeMismatchedFused, y: fallbackActual)
+        #expect(Fp16Buffer.readHalf(actual, count: Self.d)
+                == Fp16Buffer.readHalf(expected, count: Self.d))
+        #expect(Fp16Buffer.readHalf(fallbackActual, count: Self.d)
+                == Fp16Buffer.readHalf(expected, count: Self.d))
+    }
+
     private static func pack(_ values: [[Float]]) ->
         (rows: [Quantization.Int4AffineRow], packed: [UInt8], scales: [UInt16], biases: [UInt16]) {
         let rows = values.map(Quantization.quantizeInt4Affine)
@@ -79,4 +141,5 @@ import MferenceValidationSupport
                                                options: .storageModeShared)!,
             rows: UInt32(rows), cols: UInt32(cols))
     }
+
 }

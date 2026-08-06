@@ -74,7 +74,12 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var routePartialElements: Int { chunkTokens * topK * hiddenSize }
     var routeIDElements: Int { chunkTokens * topK }
     var routeWeightElements: Int { routeIDElements }
-    var sharedExpertScratchElements: Int { sharedIntermediate }
+    /// Qwen batch-dispatches its INT4 shared expert over the complete chunk,
+    /// so each intermediate must retain one row per token. Other families
+    /// keep the scalar-row scratch footprint.
+    var sharedExpertScratchElements: Int {
+        (sharedScalarGateElements > 0 ? chunkTokens : 1) * sharedIntermediate
+    }
     var routedGateUpActElements: Int { 3 * routedPairMicrobatchRows * routedIntermediate }
     var routedDownOutputElements: Int { routedPairMicrobatchRows * hiddenSize }
 

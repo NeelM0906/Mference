@@ -534,6 +534,177 @@ import MferenceValidationSupport
             seed: 0x1D_0003)
     }
 
+    @Test func qwenDecodeDeltaMatchesGenericAcrossStatefulSteps() throws {
+        let cfg = LinearAttentionConfig(
+            numKHeads: 16, numVHeads: 32,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4)
+        let ctx = try MetalContext()
+        let generic = try GDN(context: ctx, config: cfg,
+                              useQwenDecodeSpecialization: false)
+        let specialized = try GDN(context: ctx, config: cfg,
+                                  useQwenDecodeSpecialization: true)
+        var rng = SplitMix64(seed: 0x6D_3601)
+        let stateCount = cfg.numVHeads * cfg.valueHeadDim * cfg.keyHeadDim
+        let initialState = (0..<stateCount).map { _ in rng.uniform(-0.02, 0.02) }
+        let aLogValues = (0..<cfg.numVHeads).map { _ in
+            Self.bf16Value(rng.uniform(-1.0, 1.0))
+        }
+        let dtBiasValues = (0..<cfg.numVHeads).map { _ in
+            Self.bf16Value(rng.uniform(-0.5, 0.5))
+        }
+        guard let stateGeneric = ctx.device.makeBuffer(
+                  bytes: initialState,
+                  length: initialState.count * MemoryLayout<Float>.stride,
+                  options: .storageModeShared),
+              let stateSpecialized = ctx.device.makeBuffer(
+                  bytes: initialState,
+                  length: initialState.count * MemoryLayout<Float>.stride,
+                  options: .storageModeShared),
+              let aLog = Self.makeBF16Buffer(ctx.device, values: aLogValues),
+              let dtBias = Self.makeBF16Buffer(ctx.device, values: dtBiasValues),
+              let yGeneric = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let ySpecialized = Fp16Buffer.make(ctx.device, count: cfg.valueDim) else {
+            Issue.record("Failed to allocate Qwen delta buffers"); return
+        }
+
+        for _ in 0..<32 {
+            let conv = (0..<cfg.qkvDim).map { _ in
+                Float16(rng.uniform(-0.08, 0.08))
+            }
+            let a = (0..<cfg.numVHeads).map { _ in
+                Float16(rng.uniform(-0.5, 0.5))
+            }
+            let b = (0..<cfg.numVHeads).map { _ in
+                Float16(rng.uniform(-0.5, 0.5))
+            }
+            guard let convBuffer = Fp16Buffer.make(ctx.device, halves: conv),
+                  let aBuffer = Fp16Buffer.make(ctx.device, halves: a),
+                  let bBuffer = Fp16Buffer.make(ctx.device, halves: b),
+                  let cb = ctx.queue.makeCommandBuffer() else {
+                Issue.record("Failed to allocate Qwen delta inputs"); return
+            }
+            generic.encodeDeltaStepDecode(
+                commandBuffer: cb, convOut: convBuffer,
+                aProj: aBuffer, bProj: bBuffer,
+                aLog: aLog, aLogOffset: 0,
+                dtBias: dtBias, dtBiasOffset: 0,
+                state: stateGeneric, y: yGeneric)
+            specialized.encodeDeltaStepDecode(
+                commandBuffer: cb, convOut: convBuffer,
+                aProj: aBuffer, bProj: bBuffer,
+                aLog: aLog, aLogOffset: 0,
+                dtBias: dtBias, dtBiasOffset: 0,
+                state: stateSpecialized, y: ySpecialized)
+            cb.commit()
+            cb.waitUntilCompleted()
+            #expect(cb.error == nil)
+            #expect(Fp16Buffer.readHalf(yGeneric, count: cfg.valueDim)
+                    == Fp16Buffer.readHalf(ySpecialized, count: cfg.valueDim))
+        }
+
+        let genericState = stateGeneric.contents()
+            .bindMemory(to: Float.self, capacity: stateCount)
+        let specializedState = stateSpecialized.contents()
+            .bindMemory(to: Float.self, capacity: stateCount)
+        for index in 0..<stateCount {
+            #expect(genericState[index].bitPattern == specializedState[index].bitPattern,
+                    "state differs at \(index)")
+        }
+    }
+
+    @Test func qwenFusedDeltaGatedNormMatchesSeparateDispatches() throws {
+        let cfg = LinearAttentionConfig(
+            numKHeads: 16, numVHeads: 32,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4)
+        let ctx = try MetalContext()
+        let reference = try GDN(context: ctx, config: cfg,
+                                useQwenDecodeSpecialization: false)
+        let fused = try GDN(context: ctx, config: cfg,
+                            useQwenDecodeSpecialization: true)
+        var rng = SplitMix64(seed: 0x6D_3602)
+        let stateCount = cfg.numVHeads * cfg.valueHeadDim * cfg.keyHeadDim
+        let initialState = (0..<stateCount).map { _ in rng.uniform(-0.02, 0.02) }
+        let aLogValues = (0..<cfg.numVHeads).map { _ in
+            Self.bf16Value(rng.uniform(-1.0, 1.0))
+        }
+        let dtBiasValues = (0..<cfg.numVHeads).map { _ in
+            Self.bf16Value(rng.uniform(-0.5, 0.5))
+        }
+        let normWeights = (0..<cfg.valueHeadDim).map { _ in
+            Self.bf16Value(rng.uniform(0.5, 1.5))
+        }
+        guard let stateReference = ctx.device.makeBuffer(
+                  bytes: initialState,
+                  length: initialState.count * MemoryLayout<Float>.stride,
+                  options: .storageModeShared),
+              let stateFused = ctx.device.makeBuffer(
+                  bytes: initialState,
+                  length: initialState.count * MemoryLayout<Float>.stride,
+                  options: .storageModeShared),
+              let aLog = Self.makeBF16Buffer(ctx.device, values: aLogValues),
+              let dtBias = Self.makeBF16Buffer(ctx.device, values: dtBiasValues),
+              let normWeight = Self.makeBF16Buffer(ctx.device, values: normWeights),
+              let yReference = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let outReference = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let outFused = Fp16Buffer.make(ctx.device, count: cfg.valueDim) else {
+            Issue.record("Failed to allocate Qwen fused delta/norm buffers"); return
+        }
+
+        for _ in 0..<16 {
+            let conv = (0..<cfg.qkvDim).map { _ in
+                Float16(rng.uniform(-0.08, 0.08))
+            }
+            let a = (0..<cfg.numVHeads).map { _ in
+                Float16(rng.uniform(-0.5, 0.5))
+            }
+            let b = (0..<cfg.numVHeads).map { _ in
+                Float16(rng.uniform(-0.5, 0.5))
+            }
+            let z = (0..<cfg.valueDim).map { _ in
+                Float16(rng.uniform(-0.25, 0.25))
+            }
+            guard let convBuffer = Fp16Buffer.make(ctx.device, halves: conv),
+                  let aBuffer = Fp16Buffer.make(ctx.device, halves: a),
+                  let bBuffer = Fp16Buffer.make(ctx.device, halves: b),
+                  let zBuffer = Fp16Buffer.make(ctx.device, halves: z),
+                  let cb = ctx.queue.makeCommandBuffer() else {
+                Issue.record("Failed to allocate Qwen fused delta/norm inputs"); return
+            }
+            reference.encodeDeltaStepDecode(
+                commandBuffer: cb, convOut: convBuffer,
+                aProj: aBuffer, bProj: bBuffer,
+                aLog: aLog, aLogOffset: 0,
+                dtBias: dtBias, dtBiasOffset: 0,
+                state: stateReference, y: yReference)
+            reference.encodeGatedNorm(
+                commandBuffer: cb, y: yReference, z: zBuffer,
+                weight: normWeight, weightOffset: 0, out: outReference)
+            #expect(fused.encodeDeltaGatedDecode(
+                commandBuffer: cb, convOut: convBuffer,
+                aProj: aBuffer, bProj: bBuffer,
+                aLog: aLog, aLogOffset: 0,
+                dtBias: dtBias, dtBiasOffset: 0,
+                state: stateFused, z: zBuffer,
+                weight: normWeight, weightOffset: 0, out: outFused))
+            cb.commit()
+            cb.waitUntilCompleted()
+            #expect(cb.error == nil)
+            #expect(Fp16Buffer.readHalf(outReference, count: cfg.valueDim)
+                    == Fp16Buffer.readHalf(outFused, count: cfg.valueDim))
+        }
+
+        let referenceState = stateReference.contents()
+            .bindMemory(to: Float.self, capacity: stateCount)
+        let fusedState = stateFused.contents()
+            .bindMemory(to: Float.self, capacity: stateCount)
+        for index in 0..<stateCount {
+            #expect(referenceState[index].bitPattern == fusedState[index].bitPattern,
+                    "state differs at \(index)")
+        }
+    }
+
     @Test func shortChunkTailCarry() throws {
         // T < convKernelSize - 1 exercises the ordered-shift path in
         // gdn_conv_tail_update: feed 2 single-row chunks then compare the tail
