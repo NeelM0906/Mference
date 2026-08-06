@@ -16,6 +16,79 @@ import MferenceValidationSupport
         try Self.runBlockSharedExpertMatchesRepeatedScalarRows()
     }
 
+    /// Catches either restoring the per-row dispatch loop or changing the
+    /// scalar-gate FP16 rounding boundary. The fused block dispatch must match
+    /// the exact GEMV-then-sigmoid reference and leave row padding untouched.
+    @Test func qwenScalarGateBlockMatchesRepeatedRows() throws {
+        var rng = SeedTree(0xC0FFEE).key("qwen-prefill-scalar-gate")
+        let ctx = try MetalContext()
+        let scalar = try DequantInt8GEMV(context: ctx,
+                                         additionalShapes: [(m: 1, n: Self.d)])
+        let elementwise = try Elementwise(context: ctx)
+        let prefill = try PrefillSharedExpert(context: ctx)
+        let x = Self.makeInputBlock(rng: &rng)
+        let gate = Self.makeWeights(rows: 1, cols: Self.d, rng: &rng)
+        var initialY = Array(repeating: Self.sentinel, count: Self.rows * Self.yStride)
+        for row in 0..<Self.rows {
+            for col in 0..<Self.d {
+                initialY[row * Self.yStride + col] = Float16(rng.uniform(-0.5, 0.5))
+            }
+        }
+
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: x),
+              let yRef = Fp16Buffer.make(ctx.device, halves: initialY),
+              let yGot = Fp16Buffer.make(ctx.device, halves: initialY),
+              let gateScratch = Fp16Buffer.make(ctx.device, count: Self.rows) else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+        let projection = Self.makeProjection(ctx: ctx, packed: gate,
+                                             rows: 1, cols: Self.d)
+        let halfBytes = MemoryLayout<Float16>.stride
+
+        let refCB = ctx.queue.makeCommandBuffer()!
+        for row in 0..<Self.rows {
+            scalar.encode(commandBuffer: refCB,
+                          weights: projection.weights,
+                          scales: projection.scales,
+                          biases: projection.biases,
+                          x: xBuf,
+                          xOffset: row * Self.xStride * halfBytes,
+                          y: gateScratch,
+                          yOffset: row * halfBytes,
+                          m: 1, n: UInt32(Self.d))
+            elementwise.encodeSigmoidScalarMul(
+                commandBuffer: refCB,
+                y: yRef,
+                yOffset: row * Self.yStride * halfBytes,
+                gate: gateScratch,
+                gateOffset: row * halfBytes,
+                count: Self.d)
+        }
+        refCB.commit()
+        refCB.waitUntilCompleted()
+        #expect(refCB.error == nil)
+
+        let gotCB = ctx.queue.makeCommandBuffer()!
+        try prefill.encodeQwenScalarGate(
+            commandBuffer: gotCB,
+            x: xBuf,
+            gate: projection,
+            y: yGot,
+            queryCount: Self.rows,
+            d: Self.d,
+            xStrideElements: Self.xStride,
+            yStrideElements: Self.yStride)
+        gotCB.commit()
+        gotCB.waitUntilCompleted()
+        #expect(gotCB.error == nil)
+
+        let expected = Fp16Buffer.readHalf(yRef, count: Self.rows * Self.yStride)
+        let actual = Fp16Buffer.readHalf(yGot, count: Self.rows * Self.yStride)
+        #expect(actual == expected)
+        Self.assertPaddingUnchanged(actual)
+    }
+
     @Test func sharedExpertPhaseSplitMatchesCurrentPrefillBlock() throws {
         var rng = SeedTree(0xC0FFEE).key("prefill-shared-expert-phase-split")
         let ctx = try MetalContext()

@@ -86,24 +86,24 @@ git commit -m "Default one-shot prefill to adaptive chunks"
 - Consumes: Qwen INT8 scalar projection (`SharedExpertInt8Proj`), FP16 normalized inputs, and FP16 shared-expert outputs.
 - Produces: `PrefillSharedExpert.encodeQwenScalarGate(commandBuffer:x:xOffset:gate:y:yOffset:queryCount:d:xStrideElements:yStrideElements:) throws`.
 
-- [ ] **Step 1: Add a row-stride parity test**
+- [x] **Step 1: Add a row-stride parity test**
 
 Create four padded rows, compute the reference with `DequantInt8GEMV.encode` plus `Elementwise.encodeSigmoidScalarMul`, invoke the new block API once, and assert exact FP16 equality plus untouched padding.
 
-- [ ] **Step 2: Run the focused test and confirm the API is missing**
+- [x] **Step 2: Run the focused test and confirm the API is missing**
 
 Run: `Scripts/test.sh --filter PrefillSharedExpertTests.qwenScalarGateBlockMatchesRepeatedRows`
 Expected: compilation FAIL because `encodeQwenScalarGate` is absent.
 
-- [ ] **Step 3: Add `prefill_qwen_scalar_gate`**
+- [x] **Step 3: Add `prefill_qwen_scalar_gate`**
 
 Use one 256-thread threadgroup per token. Each thread accumulates its strided INT8 dot-product elements with the tensor's per-32-element BF16 scale and bias, reduce the scalar in FP32 through `simd_sum` plus an eight-entry threadgroup array, compute sigmoid once, then multiply that row of `y` in place. Bind explicit row counts and input/output strides so padding tests exercise the contract.
 
-- [ ] **Step 4: Add the Swift encoder and replace row loops**
+- [x] **Step 4: Add the Swift encoder and replace row loops**
 
 Build the pipeline in `PrefillSharedExpert.init`, validate `gate.rows == 1` and `gate.cols == d`, bind the projection's weight/scale/bias offsets, and issue exactly one dispatch. Replace the Qwen prefill loop that currently emits one scalar GEMV and one sigmoid multiply per row.
 
-- [ ] **Step 5: Run gate and Qwen runner tests**
+- [x] **Step 5: Run gate and Qwen runner tests**
 
 Run: `Scripts/test.sh --filter PrefillSharedExpertTests`
 Expected: PASS.
@@ -111,7 +111,7 @@ Expected: PASS.
 Run: `Scripts/test.sh --filter QwenRunnerTests`
 Expected: PASS with prefill/decode equivalence intact.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Sources/Mference/Metal/Prefill/prefill.metal Sources/Mference/Kernels/Prefill/MoE/PrefillSharedExpert.swift Sources/Mference/Runtime/Inference/RealForwardRunner.swift Tests/Mference/Core/Kernels/Prefill/PrefillSharedExpertTests.swift

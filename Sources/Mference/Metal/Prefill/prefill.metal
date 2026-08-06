@@ -33,6 +33,52 @@ static inline float prefill_hidden_activation(float x) {
     }
     return prefill_gelu_pytorch_tanh(x);
 }
+
+// Qwen shared-expert scalar gate for an entire prompt block. One SIMD owns a
+// token row and reproduces the scalar INT8 GEMV's accumulation order. The
+// accumulated gate is rounded through FP16 before sigmoid, matching the old
+// GEMV-output buffer boundary exactly, then the same SIMD gates the row in
+// place. Eight rows share a 256-thread threadgroup.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void prefill_qwen_shared_scalar_gate(
+    device const uint8_t* W      [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device const half*    x      [[buffer(3)]],
+    device half*          y      [[buffer(4)]],
+    constant uint&        rows   [[buffer(5)]],
+    constant uint&        D      [[buffer(6)]],
+    constant uint&        xStride [[buffer(7)]],
+    constant uint&        yStride [[buffer(8)]],
+    uint                  tg_idx [[threadgroup_position_in_grid]],
+    uint                  sg_idx [[simdgroup_index_in_threadgroup]],
+    uint                  lane   [[thread_index_in_simdgroup]]
+) {
+    const uint row = tg_idx * 8u + sg_idx;
+    if (row >= rows) return;
+
+    device const half* xRow = x + row * xStride;
+    device half* yRow = y + row * yStride;
+    const uint groups = D / kPrefillGroupSize;
+    float acc = 0.0f;
+    for (uint group = 0; group < groups; ++group) {
+        const uint i0 = group * kPrefillGroupSize + lane * 2u;
+        const uint i1 = i0 + 1u;
+        const float x0 = float(xRow[i0]);
+        const float x1 = float(xRow[i1]);
+        const float s = float(scales[group]);
+        const float b = float(biases[group]);
+        acc = fma(s, float(uint(W[i0])) * x0 + float(uint(W[i1])) * x1, acc);
+        acc = fma(b, x0 + x1, acc);
+    }
+    acc = simd_sum(acc);
+    const float roundedGate = float(half(simd_broadcast(acc, 0u)));
+    const float multiplier = 1.0f / (1.0f + exp(-roundedGate));
+    for (uint col = lane; col < D; col += 32u) {
+        yRow[col] = half(float(yRow[col]) * multiplier);
+    }
+}
+
 kernel void prefill_embed_lookup_int4_block(
     device const uint8_t* table     [[buffer(0)]],
     device const bfloat*  scales    [[buffer(1)]],

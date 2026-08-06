@@ -3,11 +3,66 @@ import Metal
 
 final class PrefillSharedExpert {
     private let shared: SharedExpertRuntime
+    private let qwenScalarGatePSO: MTLComputePipelineState
 
     init(context: MetalContext, weightBits: Int = 8, siluActivation: Bool = false) throws {
         self.shared = try SharedExpertRuntime(context: context,
                                               weightBits: weightBits,
                                               siluActivation: siluActivation)
+        self.qwenScalarGatePSO = try context.pipeline("prefill_qwen_shared_scalar_gate")
+    }
+
+    func encodeQwenScalarGate(commandBuffer cb: MTLCommandBuffer,
+                              x: MTLBuffer,
+                              xOffset: Int = 0,
+                              gate: SharedExpertInt8Proj,
+                              y: MTLBuffer,
+                              yOffset: Int = 0,
+                              queryCount: Int,
+                              d: Int,
+                              xStrideElements: Int,
+                              yStrideElements: Int) throws {
+        precondition(queryCount >= 0, "queryCount must be non-negative")
+        precondition(d > 0 && d.isMultiple(of: Quantization.groupSize),
+                     "d must be a positive INT8 group multiple")
+        precondition(xStrideElements >= d, "x stride is too small")
+        precondition(yStrideElements >= d, "y stride is too small")
+        guard gate.rows == 1, gate.cols == UInt32(d) else {
+            throw SharedExpertInt8Error.dimensionMismatch(
+                "expected scalar gate=(1,\(d)), got (\(gate.rows),\(gate.cols))")
+        }
+        guard queryCount > 0 else { return }
+
+        let halfBytes = MemoryLayout<Float16>.stride
+        let xEnd = xOffset + ((queryCount - 1) * xStrideElements + d) * halfBytes
+        let yEnd = yOffset + ((queryCount - 1) * yStrideElements + d) * halfBytes
+        guard xOffset >= 0, xEnd <= x.length else {
+            throw SharedExpertInt8Error.scratchTooSmall(
+                "scalar gate x range ends at \(xEnd), buffer length \(x.length)")
+        }
+        guard yOffset >= 0, yEnd <= y.length else {
+            throw SharedExpertInt8Error.scratchTooSmall(
+                "scalar gate y range ends at \(yEnd), buffer length \(y.length)")
+        }
+        guard let encoder = cb.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(qwenScalarGatePSO)
+        encoder.setBuffer(gate.weights, offset: gate.weightsOffset, index: 0)
+        encoder.setBuffer(gate.scales, offset: gate.scalesOffset, index: 1)
+        encoder.setBuffer(gate.biases, offset: gate.biasesOffset, index: 2)
+        encoder.setBuffer(x, offset: xOffset, index: 3)
+        encoder.setBuffer(y, offset: yOffset, index: 4)
+        var rows = UInt32(queryCount)
+        var dimension = UInt32(d)
+        var xStride = UInt32(xStrideElements)
+        var yStride = UInt32(yStrideElements)
+        encoder.setBytes(&rows, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&xStride, length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&yStride, length: MemoryLayout<UInt32>.size, index: 8)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (queryCount + 7) / 8, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     func encodeBlock(commandBuffer cb: MTLCommandBuffer,

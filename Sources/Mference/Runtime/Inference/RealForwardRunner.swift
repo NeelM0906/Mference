@@ -2087,33 +2087,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                eps: eps)
                     } else if cfg.sharedExpertGated {
                         // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX),
-                        // per chunk row.
+                        // in one block dispatch.
                         let gateView = sharedProj.scalarGate!
-                        let halfBytes = MemoryLayout<Float16>.stride
-                        for row in 0..<t {
-                            int8ScalarGate!.encode(
-                                commandBuffer: sharedCB,
-                                weights: gateView.buffer,
-                                weightsOffset: Int(gateView.offset),
-                                scales: gateView.buffer,
-                                scalesOffset: Int(gateView.scaleOffset),
-                                biases: gateView.buffer,
-                                biasesOffset: Int(gateView.biasOffset),
-                                x: scratch.routedX,
-                                xOffset: row * D * halfBytes,
-                                y: scratch.sharedScalarGate,
-                                yOffset: row * halfBytes,
-                                m: 1, n: UInt32(D))
-                        }
-                        for row in 0..<t {
-                            elementwise!.encodeSigmoidScalarMul(
-                                commandBuffer: sharedCB,
-                                y: scratch.h1,
-                                yOffset: row * D * halfBytes,
-                                gate: scratch.sharedScalarGate,
-                                gateOffset: row * halfBytes,
-                                count: D)
-                        }
+                        let scalarGate = SharedExpertInt8Proj(
+                            weights: gateView.buffer,
+                            scales: gateView.buffer,
+                            biases: gateView.buffer,
+                            weightsOffset: Int(gateView.offset),
+                            scalesOffset: Int(gateView.scaleOffset),
+                            biasesOffset: Int(gateView.biasOffset),
+                            rows: 1,
+                            cols: UInt32(D))
+                        try prefillSharedExpert.encodeQwenScalarGate(
+                            commandBuffer: sharedCB,
+                            x: scratch.routedX,
+                            gate: scalarGate,
+                            y: scratch.h1,
+                            queryCount: t,
+                            d: D,
+                            xStrideElements: D,
+                            yStrideElements: D)
                     }
                     sharedCB.commit()
                     waitForCompletion(sharedCB)
