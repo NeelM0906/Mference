@@ -1,7 +1,7 @@
 # Qwen 3.6 Prefill and Decode Acceleration Design
 
 Date: 2026-08-05
-Status: revised for user review
+Status: approved for implementation
 
 ## Objective
 
