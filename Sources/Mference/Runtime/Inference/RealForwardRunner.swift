@@ -470,7 +470,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.attention = try Attention(context: context)
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
-                                                  siluActivation: silu)
+                                                  siluActivation: silu,
+                                                  specializedD: cfg.hiddenSize,
+                                                  specializedF: cfg.intermediateSize)
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
                                  specializedD: UInt32(cfg.hiddenSize),
@@ -2713,7 +2715,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var phase1HitSplitRoutedBufs: [MTLBuffer] = []
             var phase1HitSlots: [UInt32] = []
             var phase1MissSlots: [UInt32] = []
-
             if let plan = plannedFetch {
                 let missSet = Set(plan.misses)
                 phase1HitSlots = (0..<cfg.topKExperts)
@@ -4117,20 +4118,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              convWeightOffset: Int(convW.offset),
                              out: gdnConvOut)
         gdn.encodeQKNorm(commandBuffer: cb, convOut: gdnConvOut)
-        gdn.encodeDeltaStepDecode(commandBuffer: cb,
-                                  convOut: gdnConvOut,
-                                  aProj: gdnA,
-                                  bProj: gdnB,
-                                  aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
-                                  dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
-                                  state: gdnState.stateBuffer(layer: L),
-                                  y: gdnY)
-        gdn.encodeGatedNorm(commandBuffer: cb,
-                            y: gdnY,
-                            z: gdnZ,
-                            weight: gatedNormW.buffer,
-                            weightOffset: Int(gatedNormW.offset),
-                            out: gdnOut)
+        let usedFusedDeltaNorm = gdn.encodeDeltaGatedDecode(
+            commandBuffer: cb,
+            convOut: gdnConvOut,
+            aProj: gdnA,
+            bProj: gdnB,
+            aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+            dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+            state: gdnState.stateBuffer(layer: L),
+            z: gdnZ,
+            weight: gatedNormW.buffer, weightOffset: Int(gatedNormW.offset),
+            out: gdnOut)
+        if !usedFusedDeltaNorm {
+            gdn.encodeDeltaStepDecode(commandBuffer: cb,
+                                      convOut: gdnConvOut,
+                                      aProj: gdnA,
+                                      bProj: gdnB,
+                                      aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+                                      dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+                                      state: gdnState.stateBuffer(layer: L),
+                                      y: gdnY)
+            gdn.encodeGatedNorm(commandBuffer: cb,
+                                y: gdnY,
+                                z: gdnZ,
+                                weight: gatedNormW.buffer,
+                                weightOffset: Int(gatedNormW.offset),
+                                out: gdnOut)
+        }
         int4.encode(commandBuffer: cb,
                     weights: outW.buffer, weightsOffset: Int(outW.offset),
                     scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),

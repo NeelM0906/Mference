@@ -25,6 +25,7 @@ constant uint FC_INT4_QKV_MQ [[function_constant(23)]];
 constant uint FC_INT4_QKV_MKV [[function_constant(24)]];
 constant uint FC_INT4_QKV_N [[function_constant(25)]];
 constant bool FC_INT4_QKV_USE_FC [[function_constant(26)]];
+constant bool FC_SHARED_INT4_ACT_SILU [[function_constant(27)]];
 
 static inline uint int4_fc_m(constant uint& M) {
     return (is_function_constant_defined(FC_INT4_USE_FC) &&
@@ -97,7 +98,7 @@ kernel void embed_lookup_int4(
 // the case for Inkling's shared-expert down projection (see
 // docs/INKLING_SMALL.md, "FFN output range").
 template <typename OutT>
-static inline void dequant_int4_gemv_simd_body_t(
+static inline float dequant_int4_gemv_simd_body_t(
     device const uint8_t* W,
     device const bfloat*  scales,
     device const bfloat*  biases,
@@ -108,10 +109,11 @@ static inline void dequant_int4_gemv_simd_body_t(
     uint                  rows_per_tg,
     uint                  tg_idx,
     uint                  sg_idx,
-    uint                  lane
+    uint                  lane,
+    bool                  store_output
 ) {
     const uint row = tg_idx * rows_per_tg + sg_idx;
-    if (row >= M) return;
+    if (row >= M) return 0.0f;
     const uint n_groups  = N / kGroupSize;
     const uint row_bytes = N / 2;
     device const uint8_t* W_row = W      + uint(row) * row_bytes;
@@ -173,9 +175,10 @@ static inline void dequant_int4_gemv_simd_body_t(
         acc = fma(b, sum, acc);
     }
     acc = simd_sum(acc);
-    if (lane == 0) {
+    if (store_output && lane == 0) {
         y[row] = OutT(acc);
     }
+    return acc;
 }
 
 static inline void dequant_int4_gemv_simd_body(
@@ -192,7 +195,54 @@ static inline void dequant_int4_gemv_simd_body(
     uint                  lane
 ) {
     dequant_int4_gemv_simd_body_t<half>(W, scales, biases, x, y, M, N,
-                                        rows_per_tg, tg_idx, sg_idx, lane);
+                                        rows_per_tg, tg_idx, sg_idx, lane, true);
+}
+
+static inline float shared_int4_activation(float x) {
+    if (is_function_constant_defined(FC_SHARED_INT4_ACT_SILU)
+        && FC_SHARED_INT4_ACT_SILU) {
+        return x / (1.0f + exp(-x));
+    }
+    const float x3 = x * x * x;
+    float inner = 0.7978845608028654f * (x + 0.044715f * x3);
+    inner = clamp(inner, -20.0f, 20.0f);
+    return 0.5f * x * (1.0f + tanh(inner));
+}
+
+/// Shared INT4 gate/up/activation in one encoder. The two GEMV bodies are the
+/// production body above. The FP32 results round through local half values
+/// before activation, preserving the exact three-dispatch numerical boundary
+/// without writing and rereading the gate/up scratch vectors.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void shared_int4_gate_up_act_simd(
+    device const uint8_t* gateW      [[buffer(0)]],
+    device const bfloat* gateScales  [[buffer(1)]],
+    device const bfloat* gateBiases  [[buffer(2)]],
+    device const uint8_t* upW        [[buffer(3)]],
+    device const bfloat* upScales    [[buffer(4)]],
+    device const bfloat* upBiases    [[buffer(5)]],
+    device const half* x             [[buffer(6)]],
+    device half* act                 [[buffer(7)]],
+    constant uint& M                 [[buffer(8)]],
+    constant uint& N                 [[buffer(9)]],
+    uint tg_idx                      [[threadgroup_position_in_grid]],
+    uint sg_idx                      [[simdgroup_index_in_threadgroup]],
+    uint lane                        [[thread_index_in_simdgroup]]) {
+    const uint MM = int4_fc_m(M);
+    const uint NN = int4_fc_n(N);
+    const float gateValue = dequant_int4_gemv_simd_body_t<half>(
+        gateW, gateScales, gateBiases, x, act,
+        MM, NN, 8u, tg_idx, sg_idx, lane, false);
+    const float upValue = dequant_int4_gemv_simd_body_t<half>(
+        upW, upScales, upBiases, x, act,
+        MM, NN, 8u, tg_idx, sg_idx, lane, false);
+    const uint row = tg_idx * 8u + sg_idx;
+    if (lane == 0u && row < MM) {
+        const half roundedGate = half(gateValue);
+        const half roundedUp = half(upValue);
+        act[row] = half(shared_int4_activation(float(roundedGate))
+                        * float(roundedUp));
+    }
 }
 
 kernel void dequant_int4_gemv_simd(
@@ -234,7 +284,7 @@ kernel void dequant_int4_gemv_simd_f32out(
     const uint MM = int4_fc_m(M);
     const uint NN = int4_fc_n(N);
     dequant_int4_gemv_simd_body_t<float>(W, scales, biases, x, y, MM, NN,
-                                         rows_per_tg, tg_idx, sg_idx, lane);
+                                         rows_per_tg, tg_idx, sg_idx, lane, true);
 }
 
 
