@@ -16,7 +16,7 @@
 - Exact routing remains authoritative; speculation changes residency only.
 - Final performance runs use production defaults, one model process, no profiling, and the exact community protocol.
 - Before each model run check disk, `memory_pressure -Q`, the complete model, and the required `pgrep` process list.
-- Use `/Users/zidane/Mference/scratch/qwen36.gturbo` in local commands; never duplicate or reinstall it.
+- Use the existing `scratch/qwen36.gturbo` installation in local commands; never duplicate or reinstall it.
 
 ---
 

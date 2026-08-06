@@ -23,8 +23,7 @@ The implementation must do all of the following:
 
 ## Evidence and baseline
 
-The local verified model is
-`/Users/zidane/Mference/scratch/qwen36.gturbo` (18 GB installed). It has 40
+The local verified model is `scratch/qwen36.gturbo` (18 GB installed). It has 40
 layers: 30 GDN linear-attention layers and 10 full-attention layers. The GDN
 shape is fixed at 16 key heads, 32 value heads, and 128-dimensional key and
 value heads.

@@ -508,7 +508,7 @@ The exact medium commands were:
 ```bash
 # aae03d4c59dc8167f8c1031c864e05afe9cc8b90; exit 0
 benchmark-results/inkling-prefill-baseline/bin-base/MferenceCLI \
-  --model /Users/zidane/Downloads/inklingsmall.gturbo \
+  --model scratch/inklingsmall.gturbo \
   --messages-file docs/benchmark-prompts/real-generation-v1/medium-review.json \
   --max-new 1 --max-context 4096 --temperature 0 \
   --top-k 64 --top-p 0.95 --seed 20260722 \
@@ -516,7 +516,7 @@ benchmark-results/inkling-prefill-baseline/bin-base/MferenceCLI \
 
 # 7282abebd00c6ef312d2d40a3c4c9324644725c0; exit 0
 .build/release/MferenceCLI \
-  --model /Users/zidane/Downloads/inklingsmall.gturbo \
+  --model scratch/inklingsmall.gturbo \
   --messages-file docs/benchmark-prompts/real-generation-v1/medium-review.json \
   --max-new 1 --max-context 4096 --temperature 0 \
   --top-k 64 --top-p 0.95 --seed 20260722 \
