@@ -22,6 +22,9 @@ public final class SharedExpertInt4 {
     private let int4: DequantInt4GEMV
     private let geluMulPSO: MTLComputePipelineState
     private let fusedGateUpActPSO: MTLComputePipelineState?
+    private let specializedFusedGateUpActPSO: MTLComputePipelineState?
+    private let specializedD: UInt32?
+    private let specializedF: UInt32?
 
     public init(context: MetalContext,
                 siluActivation: Bool = false,
@@ -38,21 +41,30 @@ public final class SharedExpertInt4 {
                                         additionalShapes: specializedShapes)
         self.geluMulPSO = try context.pipeline(
             siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
-        var constants = [
+        let activationConstants = [
             MetalFunctionConstant(index: 27, value: .bool(siluActivation)),
         ]
-        if let d = specializedD, let f = specializedF {
-            constants += [
-                MetalFunctionConstant(index: 20, value: .uint32(UInt32(f))),
-                MetalFunctionConstant(index: 21, value: .uint32(UInt32(d))),
-                MetalFunctionConstant(index: 22, value: .bool(true)),
-            ]
-        }
         self.fusedGateUpActPSO = useFusedGateUp
             ? try context.pipeline("shared_int4_gate_up_act_simd",
-                                   constants: constants,
+                                   constants: activationConstants,
                                    maxTotalThreadsPerThreadgroup: 256)
             : nil
+        if useFusedGateUp, let d = specializedD, let f = specializedF {
+            self.specializedFusedGateUpActPSO = try context.pipeline(
+                "shared_int4_gate_up_act_simd",
+                constants: activationConstants + [
+                    MetalFunctionConstant(index: 20, value: .uint32(UInt32(f))),
+                    MetalFunctionConstant(index: 21, value: .uint32(UInt32(d))),
+                    MetalFunctionConstant(index: 22, value: .bool(true)),
+                ],
+                maxTotalThreadsPerThreadgroup: 256)
+            self.specializedD = UInt32(d)
+            self.specializedF = UInt32(f)
+        } else {
+            self.specializedFusedGateUpActPSO = nil
+            self.specializedD = nil
+            self.specializedF = nil
+        }
     }
 
     public func encode(commandBuffer cb: MTLCommandBuffer,
@@ -87,9 +99,16 @@ public final class SharedExpertInt4 {
             throw SharedExpertError.scratchTooSmall("output range exceeds y buffer")
         }
 
-        if let fusedGateUpActPSO {
+        let selectedFusedGateUpActPSO: MTLComputePipelineState?
+        if gate.rows == specializedF, gate.cols == specializedD {
+            selectedFusedGateUpActPSO = specializedFusedGateUpActPSO
+                ?? fusedGateUpActPSO
+        } else {
+            selectedFusedGateUpActPSO = fusedGateUpActPSO
+        }
+        if let selectedFusedGateUpActPSO {
             guard let encoder = cb.makeComputeCommandEncoder() else { return }
-            encoder.setComputePipelineState(fusedGateUpActPSO)
+            encoder.setComputePipelineState(selectedFusedGateUpActPSO)
             encoder.setBuffer(gate.weights, offset: gate.weightsOffset, index: 0)
             encoder.setBuffer(gate.scales, offset: gate.scalesOffset, index: 1)
             encoder.setBuffer(gate.biases, offset: gate.biasesOffset, index: 2)

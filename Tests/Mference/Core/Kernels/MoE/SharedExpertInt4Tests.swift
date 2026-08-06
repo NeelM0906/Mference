@@ -70,18 +70,27 @@ import MferenceValidationSupport
                                              useFusedGateUp: false)
         let fused = try SharedExpertInt4(context: context,
                                          siluActivation: true,
-                                         useFusedGateUp: true)
+                                         useFusedGateUp: true,
+                                         specializedD: Self.d,
+                                         specializedF: Self.f)
+        let shapeMismatchedFused = try SharedExpertInt4(
+            context: context,
+            siluActivation: true,
+            useFusedGateUp: true,
+            specializedD: Self.d,
+            specializedF: Self.f / 2)
         let input = try #require(Fp16Buffer.make(context.device, values: x))
         let expected = try #require(Fp16Buffer.make(context.device, count: Self.d))
         let actual = try #require(Fp16Buffer.make(context.device, count: Self.d))
-        let gateScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
-        let upScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
-        let actScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+        let fallbackActual = try #require(Fp16Buffer.make(context.device, count: Self.d))
         let gateProjection = Self.projection(context, gate, rows: Self.f, cols: Self.d)
         let upProjection = Self.projection(context, up, rows: Self.f, cols: Self.d)
         let downProjection = Self.projection(context, down, rows: Self.d, cols: Self.f)
 
         func run(_ runtime: SharedExpertInt4, y: MTLBuffer) throws {
+            let gateScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+            let upScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
+            let actScratch = try #require(Fp16Buffer.make(context.device, count: Self.f))
             let commandBuffer = try #require(context.queue.makeCommandBuffer())
             try runtime.encode(commandBuffer: commandBuffer,
                                x: input,
@@ -98,7 +107,10 @@ import MferenceValidationSupport
         }
         try run(reference, y: expected)
         try run(fused, y: actual)
+        try run(shapeMismatchedFused, y: fallbackActual)
         #expect(Fp16Buffer.readHalf(actual, count: Self.d)
+                == Fp16Buffer.readHalf(expected, count: Self.d))
+        #expect(Fp16Buffer.readHalf(fallbackActual, count: Self.d)
                 == Fp16Buffer.readHalf(expected, count: Self.d))
     }
 
