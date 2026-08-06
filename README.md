@@ -25,6 +25,10 @@
   <a href="#acknowledgments">Acknowledgments</a>
 </p>
 
+<p align="center">
+  <strong>Qwen 3.6 on a 24 GB M5: 23.5–29.3 tok/s decode · 2.20× faster long-prompt prefill</strong>
+</p>
+
 Mixture-of-experts models activate only a few billion (cough) parameters per token.
 Mference builds on that: it keeps each model's shared core and KV cache in
 memory, then streams just the experts chosen for each token from SSD. The
@@ -35,7 +39,7 @@ Mference currently runs four pinned instruction checkpoints:
 - **[Gemma 4 26B-A4B](https://ai.google.dev/gemma/docs/core/model_card_4)** —
   26B total, ~3.88B active per token, in ~2 GB of memory.
 - **[Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)** — 35B
-  total, ~3B active per token, in ~1.45 GB of memory. 
+  total, ~3B active per token, from ~1.45 GB of memory with the 16-slot profile.
 - **[DeepSeek-V4-Flash 284B-A13B](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ)**
   *(experimental)* — 284B total, ~13B active per token, from
   the 2-bit dynamic-quant checkpoint (2-bit experts, 4-bit core). Budget: ~6.8 GB peak at the 8-slot floor, ~91 GB on  disk;
@@ -102,26 +106,26 @@ swift run -c release MferenceCLI \
 | --- | --- |
 | Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B (276B total, ~12B active) |
 | Weights | MLX affine, group 64; 8-bit routers; 4-bit shared experts; 4-bit routed experts (2-bit for DeepSeek-V4-Flash) |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB (Qwen 3.6) · est. ~6.8 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; larger-host CLI/server auto uses 32) · est. ~6.8 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache |
 | Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
-| Measured decode, Qwen 3.6 | 18.8–23.1 tok/s (M5) at a 1,447–1,464 MiB peak footprint |
+| Measured decode, Qwen 3.6 | 23.5–29.3 tok/s (24 GB M5, automatic 32-slot profile) |
 | Measured decode, DeepSeek-V4-Flash | 5.3–6.1 tok/s (256 GB M3 Ultra) at a 5,671–5,679 MiB peak footprint |
 | Measured decode, Inkling-Small | 5.3–6.9 tok/s (256 GB M3 Ultra) at a 8,936–8,939 MiB peak footprint |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed
-prompts, fixed seeds, one discarded warmup, measured runs in fresh processes,
-every run reaching a natural end of turn. Rerunning all three cases with the
-host constrained to an ~8 GB working set changed neither throughput
-(22.95 / 21.35 / 18.62 tok/s) nor output — every generation was
-byte-identical — because the expert pool streams from SSD either way. That
-constrained result is emulated memory pressure on M5 hardware, not a physical
-8 GB Mac; see [Benchmarks](docs/BENCHMARKS.md) and the
-[Qwen 3.6 performance notes](docs/QWEN36_PERFORMANCE.md), including the
-negative results.
+prompts and seeds, one discarded warmup, measured runs in fresh processes, and
+every run reaching a natural end of turn. The optimized short, medium, and long
+cases decode at 29.293, 27.460, and 23.470 tok/s. Their outputs are byte-identical
+to matching 16-slot controls, making the model-aware 32-slot default worth an
+18.1% geometric-mean decode gain. Long-prompt prefill fell from 58.45 to 26.54
+seconds, a 2.20× speedup. Hosts below 16 GiB and the Mac app retain the 16-slot
+memory-first path. See [Benchmarks](docs/BENCHMARKS.md) and the
+[Qwen 3.6 performance notes](docs/QWEN36_PERFORMANCE.md) for exact commands,
+token counts, memory behavior, and rejected experiments.
 
 ## Products
 
@@ -161,9 +165,11 @@ The installer streams bounded byte ranges from the pinned Hugging Face
 revision and repacks them directly into an on-disk layout (`.gturbo`) built
 for per-expert reads: resident tensors in one mapped file, and each layer's
 routed experts as fixed-stride, page-aligned blobs. At generation time the
-runtime keeps the common weights mapped read-only, holds a small per-layer
-expert cache (16 slots, LFU), and `pread`s only the eight experts each
-layer's router selects for the current token.
+runtime keeps the common weights mapped read-only, holds a small per-layer LFU
+expert cache, and `pread`s only the eight experts each layer's router selects
+for the current token. The memory-first path uses 16 slots; CLI and server auto
+select 32 for Qwen on hosts with at least 16 GiB because its 256 experts per
+layer benefit measurably from the added coverage.
 
 Qwen 3.6's linear-attention layers replace KV storage entirely: each keeps a
 2 MiB delta-rule state and a 3-row convolution tail, updated in place every

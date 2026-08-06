@@ -141,9 +141,11 @@ Each of these was measured before being ruled out.
 
 ## Why Qwen 3.6 decodes slower than Gemma 4 here
 
-The repository's published M5 Pro rows put Gemma 4 at 31-35 tok/s; Qwen 3.6
-measures 18.8-23.1 tok/s on this M5. Two facts about that gap are measured
-here, and the explanation for it is not.
+The repository's published M5 Pro rows put Gemma 4 at 31-35 tok/s; the current
+Qwen 3.6 production cases measure 23.5-29.3 tok/s on this M5. The workloads and
+M5 variants differ, so this is a project-level range comparison rather than a
+token-for-token model A/B. Two facts about the remaining gap are measured here,
+and the explanation for it is not.
 
 Measured:
 
@@ -157,7 +159,8 @@ Measured:
   3.36 MiB). So the gap is not read volume.
 - With the same 16 slots, Qwen caches at most 6.2% of a layer's 256 experts
   against Gemma's 12.5% of 128, so it misses more often. Raising Qwen to 32
-  slots recovers Gemma-equivalent coverage and is worth about 4%.
+  slots recovers Gemma-equivalent coverage; the frozen byte-identical A/B gains
+  9.2-36.3% by case, or 18.1% by geometric mean.
 
 Not measured, and stated here as a hypothesis rather than a finding: that
 Gemma is faster mainly because its 12.9 GB expert pool largely stays in the OS
@@ -169,9 +172,9 @@ Gemma 4 under the same protocol on this host, and only Qwen is installed here.
 The actual per-run cache hit rate was also not instrumented, so no
 bytes-per-second figure is quoted for either model.
 
-Whatever the split between those effects, both follow from the checkpoint's
-shape against the host's memory rather than from the runtime, and neither is
-addressable inside the 2 GB process budget.
+The dedicated Qwen compute paths and larger-host cache default narrow this gap.
+Whatever remains follows from the checkpoint's shape against the host's memory;
+the 16-slot path remains available for the original memory budget.
 
 ## Round-trip latency
 
