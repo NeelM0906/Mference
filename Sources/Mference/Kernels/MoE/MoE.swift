@@ -33,7 +33,7 @@ final class MoE {
 
     private let realDecodeD: UInt32
     private let realDecodeF: UInt32
-    private static let realDecodeTopK: UInt32 = 8
+    private let realDecodeTopK: UInt32
     private let realDecodeNumExperts: UInt32
 
     private let routerGemvPSO: MTLComputePipelineState
@@ -47,6 +47,8 @@ final class MoE {
     private let phase1SubsetU16SpecializedPSO: MTLComputePipelineState
     private let phase2ReduceK8PSO: MTLComputePipelineState
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
+    private let phase2ReduceK6PSO: MTLComputePipelineState
+    private let phase2ReduceK6SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
 
@@ -58,9 +60,13 @@ final class MoE {
          siluActivation: Bool = false,
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
-         specializedNumExperts: UInt32 = 128) throws {
+         specializedNumExperts: UInt32 = 128,
+         specializedTopK: UInt32 = 8) throws {
+        precondition(specializedTopK == 6 || specializedTopK == 8,
+                     "routed INT4 decode supports top-k 6 or 8")
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
+        self.realDecodeTopK = specializedTopK
         self.realDecodeNumExperts = specializedNumExperts
         let activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
@@ -68,13 +74,13 @@ final class MoE {
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),
-            MetalFunctionConstant(index: 2, value: .uint32(Self.realDecodeTopK)),
+            MetalFunctionConstant(index: 2, value: .uint32(specializedTopK)),
             MetalFunctionConstant(index: 3, value: .bool(true)),
         ] + activationConstants
         let routerConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 40, value: .uint32(specializedNumExperts)),
             MetalFunctionConstant(index: 41, value: .uint32(specializedD)),
-            MetalFunctionConstant(index: 42, value: .uint32(Self.realDecodeTopK)),
+            MetalFunctionConstant(index: 42, value: .uint32(specializedTopK)),
             MetalFunctionConstant(index: 43, value: .bool(true)),
         ]
         let routerName = "router_gemv_gemma4_r4"
@@ -105,6 +111,10 @@ final class MoE {
         self.phase2ReduceK8PSO = try context.pipeline("moe_phase2_down_reduce_k8")
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_k8",
+            constants: moeConstants)
+        self.phase2ReduceK6PSO = try context.pipeline("moe_phase2_down_reduce_k6")
+        self.phase2ReduceK6SpecializedPSO = try context.pipeline(
+            "moe_phase2_down_reduce_k6",
             constants: moeConstants)
 
         guard let logits = context.device.makeBuffer(
@@ -179,13 +189,9 @@ final class MoE {
     func makeRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
                                          topK: UInt32) -> MTLBuffer? {
         validate(routedBlobs: routedBlobs, topK: topK)
-        guard let buffer = routedBlobs.first?.device.makeBuffer(
-            length: routedArgEncoder.encodedLength,
-            options: .storageModeShared) else {
-            return nil
-        }
-        encodeRoutedArgumentBuffer(buffer, routedBlobs: routedBlobs)
-        return buffer
+        encodeRoutedArgumentBuffer(reusableRoutedArgBuffer,
+                                   routedBlobs: routedBlobs)
+        return reusableRoutedArgBuffer
     }
 
     func makeReusedRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
@@ -212,7 +218,7 @@ final class MoE {
         var expertCount = topK
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
+            useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase1U16SpecializedPSO
                 : phase1U16PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
@@ -253,7 +259,7 @@ final class MoE {
         var active = activeCount
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
+            useRealDecodeConstants(d: d, f: f, topK: topK)
                 ? phase1SubsetU16SpecializedPSO
                 : phase1SubsetU16PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
@@ -292,10 +298,14 @@ final class MoE {
         var dimension = d
         var intermediate = f
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
-                ? phase2ReduceK8SpecializedPSO
-                : phase2ReduceK8PSO)
+        let specialized = useRealDecodeConstants(d: d, f: f, topK: topK)
+        if topK == 6 {
+            encoder.setComputePipelineState(
+                specialized ? phase2ReduceK6SpecializedPSO : phase2ReduceK6PSO)
+        } else {
+            encoder.setComputePipelineState(
+                specialized ? phase2ReduceK8SpecializedPSO : phase2ReduceK8PSO)
+        }
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets
@@ -308,12 +318,14 @@ final class MoE {
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            threadsPerThreadgroup: MTLSize(
+                width: Int(topK) * 32, height: 1, depth: 1))
         encoder.endEncoding()
     }
 
     private func validate(routedBlobs: [MTLBuffer], topK: UInt32) {
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(topK == 6 || topK == 8,
+                     "routed INT4 decode supports top-k 6 or 8")
         precondition(routedBlobs.count == Int(topK))
     }
 
@@ -325,7 +337,9 @@ final class MoE {
         }
     }
 
-    private func useRealDecodeConstants(d: UInt32, f: UInt32) -> Bool {
-        d == realDecodeD && f == realDecodeF
+    private func useRealDecodeConstants(d: UInt32,
+                                        f: UInt32,
+                                        topK: UInt32) -> Bool {
+        d == realDecodeD && f == realDecodeF && topK == realDecodeTopK
     }
 }

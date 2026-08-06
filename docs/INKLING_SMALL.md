@@ -6,9 +6,10 @@ Checkpoint selection, memory budget, and the architecture gap list for running
 document is the architecture contract for the `inklingSmall` family.
 
 Conversion has been run and verified against the real checkpoint (see
-**Status**), and the forward pass has since shipped: measured decode is
-5.3–6.9 tok/s at an ~8.9 GiB peak footprint on an M3 Ultra
-([BENCHMARKS_M3_ULTRA.md](BENCHMARKS_M3_ULTRA.md)). Throughput figures
+**Status**), and the forward pass has since shipped. The current native top-6
+path measures 3.0–3.7 tok/s on a 24 GB M5, a 16.4% geometric-mean gain over
+the prior engine. A 256 GB M3 Ultra measures 5.3–6.9 tok/s at an ~8.9 GiB peak
+footprint ([BENCHMARKS_M3_ULTRA.md](BENCHMARKS_M3_ULTRA.md)). Throughput figures
 elsewhere in this document that are labeled *estimates* predate those runs
 and are kept for the planning context they carried; the benchmark document
 is the measured record.
@@ -320,9 +321,10 @@ The decode path is implemented end to end: `produceTokenInkling` in
 with no V norm, single-token GQA attention with the relative-position bias
 computed inline plus ring/window/log-`tau` handling, and the sigmoid router
 select with shared-expert sinks), each parity-tested against a CPU reference
-on random data (`InklingKernelTests`). Routed experts reuse the existing INT4
-MoE phase kernels by padding top-6 to the contract's 8 slots with weight-0
-duplicates (cache hits, no extra I/O). Prefill v1 replays the decode path
+on random data (`InklingKernelTests`). The first implementation reused the
+existing INT4 MoE phase kernels by padding top-6 to eight slots with
+weight-zero duplicates; the native top-6 path described below removed that
+compute waste. Prefill v1 replays the decode path
 token by token — the DSV4-v1 pattern; conv state makes batched prefill a
 follow-up, not a correctness need. The `.inkling` chat dialect implements the
 shipped Jinja's framing (role tokens + `<|content_text|>` + `<|end_message|>`,
@@ -422,7 +424,7 @@ the next one:
 
 | Store | Prescaled before it? | Measured headroom |
 |---|---|---|
-| routed down projection (decode, `moe_phase2_down_reduce_k8`) | yes — `routing_w` carries ÷32 and the reduce is FP32 | `h2` peaked at 4 764 of 65 504 |
+| routed down projection (decode, `moe_phase2_down_reduce_k6`) | yes — `routing_w` carries ÷32 and the reduce is FP32 | `h2` peaked at 4 764 of 65 504 |
 | shared down projection (decode + prefill) | **no** — gamma applies after | **overflowed**; now FP32 |
 | `h1` / `h2` after the gamma combine | yes | 7 064 of 65 504 at the worst observed token |
 | dense MLP down projection, layers 0-1 | **no** — `mlp.global_scale` applies after, same pattern | not overflowing: the L0/L1 residual peaks near 1e2, so ~500× margin. Left FP16 deliberately; widen it if those layers ever grow. |
@@ -535,6 +537,43 @@ This is an isolated-prefill measurement, not the public community generation
 protocol: it uses one new token, trusted-receipt verification, one measured run
 per binary, and the production 128-token chunk default. Treat it as a local A/B
 measurement rather than a performance ceiling.
+
+### Native top-6 decode (2026-08-06)
+
+Inkling now has a dedicated top-6 INT4 MoE decode path. The old implementation
+padded six selected experts to the shared top-8 contract: duplicate buffers
+cost no extra SSD reads, but phase 1 still evaluated eight gate/up rows and
+phase 2 still evaluated eight down projections. `moe_phase2_down_reduce_k6`
+launches six SIMD groups per output row and reduces the six routed values in
+router order. Phase 1 specializes its existing function-constant top-k to six.
+
+The runtime also plans the six cache slots before reading. On a mixed hit/miss
+layer, it submits resident phase 1 immediately, reads only the misses, and then
+submits the missing subset before the native top-6 reduction. The shared sinks
+and FP32 residual path retain their original ordering and arithmetic.
+
+Release A/B at base `6bf428f` and optimized commit `485df08` followed the full
+[community protocol](COMMUNITY_BENCHMARKS.md) on a 24 GB M5 (`Mac17,2`),
+macOS 26.5, and Swift 6.3.3. Runs used strict verification, production defaults,
+one discarded warmup, and one measured fresh process per case. Every command
+exited 0 and ended naturally.
+
+| Case | Prompt / generated | Base | Native top-6 | Gain |
+|---|---|---:|---:|---:|
+| short-explanation | 59 / 469 | 2.909 tok/s | 3.434 tok/s | 18.0% |
+| medium-review | 421 / 576 | 2.961 tok/s | 3.670 tok/s | 23.9% |
+| long-synthesis | 2,785 / 372 | 2.819 tok/s | 3.038 tok/s | 7.8% |
+
+The geometric-mean gain is **16.4%**, and every optimized stdout file is
+byte-identical to its base counterpart. Full timing footers and the generic
+reproduction command are recorded in
+[BENCHMARKS.md](BENCHMARKS.md#inkling-small-276b-a12b-measured-decode).
+
+A 24-slot short warmup was rejected: it fell to 0.710 tok/s and pushed
+free-memory pressure to 24%, while the optimized 16-slot warmup reached 3.374
+tok/s with identical output. Since 24 slots already crossed the useful memory
+envelope on this host, 32 was not run; Inkling remains on the 16-slot automatic
+default.
 
 Bring-up config note: the fused QKV GEMV and the constant-folded INT4 GEMV
 variants are bypassed for this family (plain generic GEMVs) — they were

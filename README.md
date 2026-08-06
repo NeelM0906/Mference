@@ -26,7 +26,8 @@
 </p>
 
 <p align="center">
-  <strong>Qwen 3.6 on a 24 GB M5: 23.5–29.3 tok/s decode · 2.20× faster long-prompt prefill</strong>
+  <strong>Qwen 3.6 on a 24 GB M5: 23.5–29.3 tok/s decode · 2.20× faster long-prompt prefill</strong><br>
+  <strong>Inkling-Small on the same host: 3.0–3.7 tok/s decode · 16.4% faster with native top-6 Metal</strong>
 </p>
 
 Mixture-of-experts models activate only a few billion (cough) parameters per token.
@@ -113,7 +114,7 @@ swift run -c release MferenceCLI \
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
 | Measured decode, Qwen 3.6 | 23.5–29.3 tok/s (24 GB M5, automatic 32-slot profile) |
 | Measured decode, DeepSeek-V4-Flash | 5.3–6.1 tok/s (256 GB M3 Ultra) at a 5,671–5,679 MiB peak footprint |
-| Measured decode, Inkling-Small | 5.3–6.9 tok/s (256 GB M3 Ultra) at a 8,936–8,939 MiB peak footprint |
+| Measured decode, Inkling-Small | 3.0–3.7 tok/s (24 GB M5, optimized native top-6 path) · 5.3–6.9 tok/s (256 GB M3 Ultra) at an 8,936–8,939 MiB peak footprint |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed
@@ -126,6 +127,13 @@ seconds, a 2.20× speedup. Hosts below 16 GiB and the Mac app retain the 16-slot
 memory-first path. See [Benchmarks](docs/BENCHMARKS.md) and the
 [Qwen 3.6 performance notes](docs/QWEN36_PERFORMANCE.md) for exact commands,
 token counts, memory behavior, and rejected experiments.
+
+Inkling-Small uses its own six-expert INT4 Metal pipeline rather than padding
+the router result to eight experts. Resident-expert phase 1 runs while cache
+misses stream from SSD; across the same frozen short, medium, and long cases,
+decode improved from 2.909/2.961/2.819 to 3.434/3.670/3.038 tok/s. That is a
+16.4% geometric-mean gain, with byte-identical generated output in every A/B.
+See the [Inkling performance notes](docs/INKLING_SMALL.md#native-top-6-decode-2026-08-06).
 
 ## Products
 
@@ -166,10 +174,12 @@ revision and repacks them directly into an on-disk layout (`.gturbo`) built
 for per-expert reads: resident tensors in one mapped file, and each layer's
 routed experts as fixed-stride, page-aligned blobs. At generation time the
 runtime keeps the common weights mapped read-only, holds a small per-layer LFU
-expert cache, and `pread`s only the eight experts each layer's router selects
-for the current token. The memory-first path uses 16 slots; CLI and server auto
-select 32 for Qwen on hosts with at least 16 GiB because its 256 experts per
-layer benefit measurably from the added coverage.
+expert cache, and `pread`s only the experts each layer's router selects for the
+current token. Inkling dispatches six experts; Gemma and Qwen dispatch eight.
+The memory-first path uses 16 slots; CLI and server auto select 32 for Qwen on
+hosts with at least 16 GiB because its 256 experts per layer benefit measurably
+from the added coverage. Inkling remains at 16 because a 24-slot control
+warmup on the 24 GB M5 entered memory pressure and regressed sharply.
 
 Qwen 3.6's linear-attention layers replace KV storage entirely: each keeps a
 2 MiB delta-rule state and a 3-row convolution tail, updated in place every
@@ -185,8 +195,7 @@ engine are in [System design](docs/SYSTEM_DESIGN.md) and the
 
 - More architectures — the model layer is built for enumeration, and the
   Qwen 3.6 port is the template for the next one
-- Overlapping expert I/O with GPU work (decode is currently ~53% expert-read
-  wait, serialized with compute)
+- Extend resident-expert compute/I/O overlap to every model family and prefill
 - Per-model quality validation (KLD against reference implementations)
 - Longer contexts, vision towers, and a hardware benchmark matrix
 
