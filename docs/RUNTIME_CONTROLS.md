@@ -67,13 +67,16 @@ benchmark protocol.
 
 | Control | Values | CLI flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
-| Expert-cache slots | 8, 16, 24, 32 | `--expert-cache-slots` | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM. |
+| Expert-cache slots | 8, 16, 24, 32; CLI also accepts auto | `--expert-cache-slots` | App: 16; CLI/server auto | Auto selects 32 for Qwen on hosts with at least 16 GiB and 16 otherwise. Other families stay at 16. More slots retain more routed experts and reduce later reads at the cost of RAM. |
 | Prompt prefill | On, off | — | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 | Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Larger chunks use more prefill scratch memory, and on sliding-window models more KV ring memory. DeepSeek-V4 models prefill through the decode path and ignore the chunk size. |
 | Model verification | Full SHA-256, trusted receipt | `--verify` | Full SHA-256 | `full-sha256` re-hashes each routed-expert file on first touch, which for a 145 GB expert pool costs about 59 s inside the first prefill. `trusted-receipt` instead checks each file's size against the receipt written at install time; the receipt itself is still validated against the manifest hash, and `model_weights.bin` and `layout.json` are still hashed. It trades detection of size-preserving corruption for that time. The Mac app exposes the same choice. |
 
-The prefill chunk size is a CLI control; the Mac app uses the default.
+The prefill chunk size is a CLI control; the Mac app uses the default. The Mac
+app also keeps its explicit 16-slot default so an existing memory preference is
+never silently enlarged; Qwen users on larger Macs can select 32 in the
+inspector.
 The CLI applies these settings when it loads the model, so each run uses the
 values passed on its command line. Setting `MFERENCE_PHASES=1` makes the
 CLI print the decode phase split (`cb1`, expert I/O await, `cb2`, and GPU
@@ -95,7 +98,7 @@ separate summary. The current user turn is never silently discarded.
 
 ## Run an experiment
 
-1. Start from 4K context, 16 expert-cache slots, prefill on, and RDADVISE off.
+1. Start from 4K context, the automatic expert-cache choice, prefill on, and RDADVISE off.
 2. Keep the prompt and generation controls fixed.
 3. Record a baseline after a warmup.
 4. Change one runtime control and reload the model.

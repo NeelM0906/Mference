@@ -16,7 +16,7 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | 8 GB M2, Mference | 5.10-6.30 tok/s | ~1.9-2.1 GB footprint |
 | 24 GB M5 Pro, Mference | 31-35 tok/s | ~2.1 GB footprint |
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
-| M5, Mference, Qwen 3.6 35B-A3B | 18.8-23.1 tok/s | ~1.45 GB footprint |
+| M5, Mference, Qwen 3.6 35B-A3B | 23.5-29.3 tok/s | 32-slot Qwen auto profile |
 
 A separate report covers all four model families on a 256 GB M3 Ultra,
 including the first measured DeepSeek-V4-Flash and Inkling-Small rows:
@@ -78,6 +78,27 @@ loop.
 | 3,015 / 256 | 23,038 / 23,610 ms | 31.01 tok/s | 1,835 / 2,126 MiB |
 
 ## Qwen 3.6 35B-A3B measured decode
+
+The current optimized production run was recorded on 2026-08-06 on an M5
+MacBook Pro (`Mac17,2`) with 24 GB, macOS 26.5, and Swift 6.3.3. The CLI's
+automatic profile selected 32 Qwen expert-cache slots; no experimental flag or
+profiler was active. One discarded warmup preceded one fresh-process measured
+run per frozen community case, and every output ended normally.
+
+| Case | Prompt / generated tokens | Prefill | Decode |
+| --- | --- | ---: | ---: |
+| short-explanation | 62 / 538 | 7.57 s | 29.293 tok/s |
+| medium-review | 426 / 704 | 8.48 s | 27.460 tok/s |
+| long-synthesis | 2,940 / 695 | 26.54 s | 23.470 tok/s |
+
+The corresponding byte-identical 16-slot controls decoded at 21.487, 24.828,
+and 21.490 tok/s. That is an 18.1% geometric-mean decode gain from the
+model-aware default, on top of the custom Qwen decode kernels. Long-prompt
+prefill is 2.20x faster than the original 58.45 s baseline. The original and
+current generated token counts differ, so only the same-output controls are
+used for the decode speedup claim.
+
+### Historical 16-slot run
 
 These rows ran on 2026-07-31 on an M5 with 24 GB of memory, macOS 26.5, and
 Swift 6.2, against the experimental

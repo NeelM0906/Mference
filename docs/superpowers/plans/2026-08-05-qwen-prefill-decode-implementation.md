@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Build and test on macOS 15+ with Swift 6.1+.
-- Keep the process-memory target near 2 GB; do not increase expert-cache slots or retain prompt-length FP32 state history.
+- Keep the 8 GB path at 16 expert-cache slots and do not retain prompt-length FP32 state history. A larger-host Qwen default may use 32 only if an exact-output production A/B proves the decode gain.
 - Preserve FP32 recurrent-state layout `[Hv, Dv, Dk]` and all existing portable fallbacks.
 - Exact routing remains authoritative; speculation changes residency only.
 - Final performance runs use production defaults, one model process, no profiling, and the exact community protocol.
@@ -191,6 +191,17 @@ git commit -m "Add TensorOps Qwen GDN prefill"
 ---
 
 ## Track B: Decode
+
+> **Execution outcome:** Current-token pilot routing was implemented with
+> cache-safe reservations and exact-output tests, then removed after it slowed
+> medium decode to 16.117 tok/s through SSD contention. Accepted dedicated work
+> instead fuses the Qwen shared expert, specializes the GDN input/delta/gated
+> norm and full-attention paths, and removes redundant dispatches without a
+> state-layout change. A byte-identical 16-vs-32 cache A/B then proved that the
+> larger Qwen working set is worthwhile on this 24 GB host: final decode is
+> 29.293/27.460/23.470 tok/s, an 18.1% geometric gain over the same-output
+> 16-slot controls. Auto therefore selects 32 for Qwen only on hosts with at
+> least 16 GiB; smaller hosts and other families retain 16.
 
 ### Task 4: Add a private Qwen pilot router
 
