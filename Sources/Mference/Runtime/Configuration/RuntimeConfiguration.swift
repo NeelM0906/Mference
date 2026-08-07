@@ -67,6 +67,33 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         return family == .qwen36 && physicalMemoryBytes >= sixteenGiB ? 32 : 16
     }
 
+    /// Fixed reserve the resident rung leaves for the KV cache, scratch, the
+    /// process, and the OS. Clean file-backed expert pages degrade toward
+    /// page-cache streaming under pressure, so the rung only needs the nominal
+    /// working set to fit.
+    static let residentHeadroomBytes = UInt64(4) * 1024 * 1024 * 1024
+
+    /// The auto profile's ladder: `.resident` when the whole expert pool plus
+    /// core weights and headroom fit physical memory, otherwise the existing
+    /// slot-count rule. Phase 1 gates the resident rung to Qwen; other
+    /// families take it only via an explicit `resident` flag until they have
+    /// their own accepted A/B.
+    public static func defaultExpertStreamingMode(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        expertPoolBytes: UInt64,
+        coreWeightsBytes: UInt64
+    ) -> ExpertStreamingMode {
+        if family == .qwen36,
+           physicalMemoryBytes >= expertPoolBytes + coreWeightsBytes
+               + Self.residentHeadroomBytes {
+            return .resident
+        }
+        return .pread(slotCount: defaultExpertCacheSlots(
+            for: family,
+            physicalMemoryBytes: physicalMemoryBytes))
+    }
+
     public var fp16RingEnabled: Bool { true }
     public var rdadviseEnabled: Bool { rdadvisePolicy != .off }
     public var prefillConfig: PrefillRuntimeConfig {

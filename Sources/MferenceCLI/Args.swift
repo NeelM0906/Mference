@@ -14,6 +14,7 @@ public enum PrefillChunkChoice: Equatable, Sendable {
 /// experts per layer measurably benefit from 32 slots.
 public enum ExpertCacheSlotChoice: Equatable, Sendable {
     case fixed(Int)
+    case resident
     case auto
 }
 
@@ -129,10 +130,15 @@ extension Args {
       --stop <string>           Stop substring (repeatable).
       --rdadvise <mode>         Expert read-ahead advice: off, default,
                                 bounded, or adaptive (default off).
-      --expert-cache-slots <n|auto>
+      --expert-cache-slots <n|resident|auto>
                                 Routed-expert cache slots per layer: 8, 16,
-                                24, 32, or auto (default auto: Qwen uses 32 on
-                                hosts with at least 16 GiB; otherwise 16).
+                                24, 32, resident, or auto. resident maps every
+                                layer file once and skips the slot cache
+                                entirely. auto picks resident when the whole
+                                expert pool plus core weights and 4 GiB
+                                headroom fit physical memory (Qwen only),
+                                else Qwen uses 32 slots on hosts with at
+                                least 16 GiB and 16 otherwise.
                                 More slots raise the hit rate but use more RAM.
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
@@ -236,6 +242,8 @@ extension Args {
                 let value = try takeValue(argv, &index, flag: flag)
                 if value == "auto" {
                     expertCacheSlots = .auto
+                } else if value == "resident" {
+                    expertCacheSlots = .resident
                 } else if let parsed = Int(value),
                           RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) {
                     expertCacheSlots = .fixed(parsed)
