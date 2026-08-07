@@ -451,6 +451,44 @@ Each candidate below follows the same six-step protocol; a candidate that fails 
 
 - [ ] **Exit check:** after each accepted candidate, re-run Task 8's profile and the mlx-lm comparison. The program ends when Mference ≥ mlx-lm on the three-case median, or when the remaining candidates are exhausted (then re-plan with the new profile).
 
+### Task 14 (streaming workstream): make the SSD path latency-hiding, not latency-bound
+
+Owner-added scope (2026-08-07): meaningfully improve expert streaming itself.
+Evidence base: the 8 GB M2 spent 83 ms/token (51%) on expert reads; DSV4
+(91 GB pool) and Inkling (145 GB pool) are streaming-bound on every host; and
+the achieved read rate during streaming-bound decode (~360 MB/s) is far below
+the SSD's 5–7 GB/s — the path is **latency-bound and serialized**, not
+bandwidth-bound. Testbed: DeepSeek-V4-Flash on the M5/24 GB (pool ≫ RAM, so
+the page cache cannot hide it, unlike Qwen).
+
+Candidates, each run under the same iteration protocol as Tasks 9–12
+(profile → flag → parity → alternating A/B → accept/revert):
+
+- [ ] **14a: I/O attribution on DSV4.** Split a decode step into read
+  latency, queue depth achieved, hit rate, and stall time; measure achieved
+  MB/s vs the SSD ceiling. This ranks 14b–14f.
+- [ ] **14b: Queue-depth saturation.** Issue all of a layer's expert-miss
+  `pread`s concurrently (and misses across the in-flight layer window), so
+  the NVMe queue sees 8–16 outstanding requests instead of ~1. Latency per
+  expert is hidden behind its siblings.
+- [ ] **14c: Cross-layer prefetch overlap.** While the GPU computes layer L,
+  fetch layer L+1's predicted experts (extend the existing
+  `SpeculativeExpertPrefetch`; measure its recall first). Router-driven
+  perfection is impossible (L+1 routing needs L's output), so this trades
+  recall for overlap — accept only on end-to-end gain.
+- [ ] **14d: n-gram speculation as an I/O amplifier** (shared with Task 12b):
+  k-token batched verification reads each layer's expert union once per k
+  tokens — on streaming-bound models this divides read count by up to k.
+  Prioritize its A/B on DSV4/Inkling, not just Qwen.
+- [ ] **14e: Read coalescing.** When a fetch plan's missed experts are
+  adjacent on disk, merge them into one larger `pread`. (The earlier
+  co-activation *layout* experiment failed at long context — coalescing
+  changes read issue, not file layout, so it dodges that failure mode.)
+- [ ] **14f: DSV4 chunked prefill** (carried from the standing perf plan):
+  DSV4 currently prefills through the decode path, re-reading experts per
+  token; routing it through the chunked-prefill machinery is the single
+  largest known streaming win for that family.
+
 ### Task 13: Documentation and the public claim
 
 **Files:**
