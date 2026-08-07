@@ -59,8 +59,9 @@ import Testing
                                   count: Int(p.length))
                 #expect(rBytes == pBytes)
             }
-            // Resident views of one layer alias one shared mapped buffer.
-            #expect(residentViews[0].buffer === residentViews[1].buffer)
+            // One buffer per expert: residency demands stay at the routed
+            // working set instead of the whole layer file.
+            #expect(residentViews[0].buffer !== residentViews[1].buffer)
         }
     }
 

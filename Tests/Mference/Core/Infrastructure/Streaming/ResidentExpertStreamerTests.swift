@@ -65,8 +65,8 @@ import Metal
         }
     }
 
-    @Test("All expert views alias one shared buffer")
-    func viewsShareOneBuffer() throws {
+    @Test("Each expert gets its own page-aligned buffer over the mapping")
+    func expertsGetDedicatedBuffers() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let url = try Self.writeSyntheticLayer()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -75,8 +75,13 @@ import Metal
             layout: Self.makeLayout(path: url.path), device: device)
         let first = try streamer.expertBuffer(layer: 0, expert: 0)
         let last = try streamer.expertBuffer(layer: 0, expert: Self.numExperts - 1)
-        #expect(first.buffer === last.buffer)
-        #expect(last.offset == UInt64((Self.numExperts - 1) * Self.expertStride))
+        // One buffer per expert keeps Metal residency demands at the routed
+        // working set instead of the whole layer file.
+        #expect(first.buffer !== last.buffer)
+        // Page-aligned expert strides start each buffer exactly at its blob.
+        #expect(first.offset == 0)
+        #expect(last.offset == 0)
+        #expect(first.buffer.length >= Int(Self.expertStride))
     }
 
     @Test("Out-of-range experts are rejected")
