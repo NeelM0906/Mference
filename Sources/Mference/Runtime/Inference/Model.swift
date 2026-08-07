@@ -6,13 +6,18 @@ public struct ModelLoadStats: Sendable {
     public var manifestSha256Nanos: UInt64
     public var receiptValidationNanos: UInt64
     public var eagerSha256Nanos: UInt64
+    /// Resident mode only: opening every routed layer and touching its
+    /// mapping at load, so page-in cost is not billed to decode.
+    public var residentWarmupNanos: UInt64
 
     public init(manifestSha256Nanos: UInt64 = 0,
                 receiptValidationNanos: UInt64 = 0,
-                eagerSha256Nanos: UInt64 = 0) {
+                eagerSha256Nanos: UInt64 = 0,
+                residentWarmupNanos: UInt64 = 0) {
         self.manifestSha256Nanos = manifestSha256Nanos
         self.receiptValidationNanos = receiptValidationNanos
         self.eagerSha256Nanos = eagerSha256Nanos
+        self.residentWarmupNanos = residentWarmupNanos
     }
 }
 
@@ -20,6 +25,25 @@ public struct ModelLoadStats: Sendable {
 public enum ExpertStreamingMode: Sendable {
     /// Read each expert into one of `slotCount` 2 MB-aligned cache slots.
     case pread(slotCount: Int)
+    /// Map every layer file once and serve experts as subregion views.
+    /// No slots, no bookkeeping, no reads on the hot path.
+    case resident
+}
+
+/// Per-layer routed-expert backend selected by `ExpertStreamingMode`.
+enum ExpertBackend {
+    case pread(PreadExpertStreamer)
+    case resident(ResidentExpertStreamer)
+
+    func loadExpert(layer: Int, expert: Int) throws
+        -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
+        switch self {
+        case .pread(let streamer):
+            return try streamer.loadExpert(layer: layer, expert: expert)
+        case .resident(let streamer):
+            return try streamer.expertBuffer(layer: layer, expert: expert)
+        }
+    }
 }
 
 /// Loaded `.gturbo/` model. Resident weights live behind one mmap'd
@@ -55,7 +79,7 @@ public struct Model {
     let convertedBox = ConvertedTensorBox()
 
     final class StreamersBox: @unchecked Sendable {
-        var streamers: [PreadExpertStreamer?]
+        var streamers: [ExpertBackend?]
         var layerVerified: [Bool]
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
@@ -549,16 +573,32 @@ public struct Model {
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
             expertStride: packedExpertsLayout.expertStride,
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
-        let slotCount: Int
         switch streamingMode {
-        case .pread(let configuredSlotCount):
-            slotCount = configuredSlotCount
+        case .pread(let slotCount):
+            streamersBox.streamers[L] = .pread(try PreadExpertStreamer(
+                layout: layout,
+                device: device,
+                slotCount: slotCount,
+                cachePolicy: expertCachePolicy))
+        case .resident:
+            streamersBox.streamers[L] = .resident(try ResidentExpertStreamer(
+                layout: layout,
+                device: device))
         }
-        streamersBox.streamers[L] = try PreadExpertStreamer(
-            layout: layout,
-            device: device,
-            slotCount: slotCount,
-            cachePolicy: expertCachePolicy)
+    }
+
+    /// Resident mode: open every routed layer and touch its mapping so page-in
+    /// cost lands in model load, not the first prefill or decode step.
+    func warmUpResidentBackends() throws {
+        guard case .resident = streamingMode else { return }
+        for L in 0..<packedExpertsLayout.numLayers {
+            if packedExpertsLayout.layers[L].experts.isEmpty { continue }
+            try ensureLayerOpened(L)
+            let backend = streamersQueue.sync { streamersBox.streamers[L]! }
+            if case .resident(let streamer) = backend {
+                streamer.warmUp()
+            }
+        }
     }
 
     /// Test hook: how many layer files have been opened so far.
@@ -690,7 +730,7 @@ extension Model {
             stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
         }
 
-        return Model(
+        let model = Model(
             device: device,
             config: expecting,
             streamingMode: streamingMode,
@@ -701,6 +741,13 @@ extension Model {
             packedExpertsLayout: layout,
             manifest: manifest,
             directoryURL: directoryURL)
+        if case .resident = streamingMode {
+            let warmupStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            try model.warmUpResidentBackends()
+            stats.residentWarmupNanos =
+                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - warmupStart
+        }
+        return model
     }
 
     private static func verifyTrustedReceiptFileSize(url: URL,

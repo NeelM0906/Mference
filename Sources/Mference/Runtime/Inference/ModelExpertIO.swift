@@ -38,30 +38,59 @@ extension Model {
         packedExpertsLayout.layers[layer].experts.map(\.offset)
     }
 
+    /// The opened backend for `layer`. Callers must `ensureLayerOpened` first.
+    private func expertBackend(_ layer: Int) -> ExpertBackend {
+        streamersQueue.sync { streamersBox.streamers[layer]! }
+    }
+
+    /// Resident mode never misses: every expert is a hit against the mapped
+    /// layer file and no slot is assigned.
+    private static func residentCachePlan(experts: [Int]) -> ExpertCachePlan {
+        ExpertCachePlan(experts: experts,
+                        assignedSlots: [],
+                        misses: [],
+                        hits: experts.count)
+    }
+
     public func adviseRoutedExperts(layer: Int,
                                     experts: [Int]) throws -> ExpertIOAdviceResult {
         try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        return streamer.adviseExpertMisses(experts: experts)
+        switch expertBackend(layer) {
+        case .pread(let streamer):
+            return streamer.adviseExpertMisses(experts: experts)
+        case .resident:
+            return .skipped(requested: experts.count)
+        }
     }
 
     public func routedExpertAdviceByteEstimate(layer: Int,
                                                missCount: Int) throws -> UInt64 {
         guard missCount > 0 else { return 0 }
         try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        return UInt64(missCount) * streamer.layout.expertStride
+        switch expertBackend(layer) {
+        case .pread(let streamer):
+            return UInt64(missCount) * streamer.layout.expertStride
+        case .resident:
+            return 0
+        }
     }
 
     public func planRoutedExperts(layer: Int,
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = []) throws -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
-        return RoutedExpertFetchPlan(
-            layer: layer,
-            cachePlan: streamer.planExpertsCached(experts: experts, avoidingSlots: validSlots))
+        switch expertBackend(layer) {
+        case .pread(let streamer):
+            let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
+            return RoutedExpertFetchPlan(
+                layer: layer,
+                cachePlan: streamer.planExpertsCached(experts: experts,
+                                                      avoidingSlots: validSlots))
+        case .resident:
+            return RoutedExpertFetchPlan(
+                layer: layer,
+                cachePlan: Self.residentCachePlan(experts: experts))
+        }
     }
 
     public func planRoutedExpertsIfPossible(layer: Int,
@@ -69,15 +98,21 @@ extension Model {
                                             avoidingSlots: Set<Int> = []) throws
         -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
-        guard let cachePlan = streamer.planExpertsCachedIfPossible(
-            experts: experts,
-            avoidingSlots: validSlots)
-        else {
-            return nil
+        switch expertBackend(layer) {
+        case .pread(let streamer):
+            let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
+            guard let cachePlan = streamer.planExpertsCachedIfPossible(
+                experts: experts,
+                avoidingSlots: validSlots)
+            else {
+                return nil
+            }
+            return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan)
+        case .resident:
+            return RoutedExpertFetchPlan(
+                layer: layer,
+                cachePlan: Self.residentCachePlan(experts: experts))
         }
-        return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan)
     }
 
     /// Per-layer gate_proj quant group size, derived from the manifest's
@@ -109,57 +144,95 @@ extension Model {
     /// executes the reads on a background queue without re-resolving the layer.
     public func routedExpertStreamer(layer: Int) throws -> PreadExpertStreamer {
         try ensureLayerOpened(layer)
-        return streamersQueue.sync { streamersBox.streamers[layer]! }
+        switch expertBackend(layer) {
+        case .pread(let streamer):
+            return streamer
+        case .resident:
+            throw StreamerError.noSlotCache
+        }
+    }
+
+    /// Resident-only: views for `experts` served directly from the mapped
+    /// layer file. Per-layer files address experts under layer index 0.
+    private func residentExpertViews(_ streamer: ResidentExpertStreamer,
+                                     layer: Int,
+                                     experts: [Int]) throws -> [TensorView] {
+        let buffers = try experts.map {
+            try streamer.expertBuffer(layer: 0, expert: $0)
+        }
+        return Self.makeExpertViews(buffers, layer: layer, experts: experts)
     }
 
     public func routedExpertBuffers(for plan: RoutedExpertFetchPlan) throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        return Self.makeExpertViews(
-            streamer.expertCachePlanBuffers(plan.cachePlan),
-            layer: plan.layer,
-            experts: plan.experts)
+        switch expertBackend(plan.layer) {
+        case .pread(let streamer):
+            return Self.makeExpertViews(
+                streamer.expertCachePlanBuffers(plan.cachePlan),
+                layer: plan.layer,
+                experts: plan.experts)
+        case .resident(let streamer):
+            return try residentExpertViews(streamer,
+                                           layer: plan.layer,
+                                           experts: plan.experts)
+        }
     }
 
     public func adviseRoutedExperts(plan: RoutedExpertFetchPlan) throws -> ExpertIOAdviceResult {
         try ensureLayerOpened(plan.layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        return streamer.adviseExpertCachePlanMisses(plan.cachePlan)
+        switch expertBackend(plan.layer) {
+        case .pread(let streamer):
+            return streamer.adviseExpertCachePlanMisses(plan.cachePlan)
+        case .resident:
+            return .skipped(requested: plan.experts.count)
+        }
     }
 
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let buffers = try streamer.executeExpertCachePlan(plan.cachePlan)
-                    continuation.resume(returning: Self.makeExpertViews(
-                        buffers,
-                        layer: plan.layer,
-                        experts: plan.experts))
-                } catch {
-                    continuation.resume(throwing: error)
+        switch expertBackend(plan.layer) {
+        case .pread(let streamer):
+            return try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        let buffers = try streamer.executeExpertCachePlan(plan.cachePlan)
+                        continuation.resume(returning: Self.makeExpertViews(
+                            buffers,
+                            layer: plan.layer,
+                            experts: plan.experts))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
+        case .resident(let streamer):
+            return try residentExpertViews(streamer,
+                                           layer: plan.layer,
+                                           experts: plan.experts)
         }
     }
 
     public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
         try ensureLayerOpened(layer)
-        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let buffers = try streamer.loadExpertsCached(experts: experts)
-                    continuation.resume(returning: Self.makeExpertViews(
-                        buffers,
-                        layer: layer,
-                        experts: experts))
-                } catch {
-                    continuation.resume(throwing: error)
+        switch expertBackend(layer) {
+        case .pread(let streamer):
+            return try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        let buffers = try streamer.loadExpertsCached(experts: experts)
+                        continuation.resume(returning: Self.makeExpertViews(
+                            buffers,
+                            layer: layer,
+                            experts: experts))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
+        case .resident(let streamer):
+            return try residentExpertViews(streamer,
+                                           layer: layer,
+                                           experts: experts)
         }
     }
 
