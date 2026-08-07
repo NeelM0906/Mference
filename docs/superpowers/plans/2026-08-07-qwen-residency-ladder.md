@@ -104,9 +104,13 @@ Expected: three passing cases with medians near the recorded 29.3/27.5/23.5 tok/
 
 Use the same diagnostic approach as the existing phase breakdown in `docs/QWEN36_PERFORMANCE.md` (greedy 128-token decode from a 10-token prompt). Instrument with signposts or the existing diagnostics used for that table (search `Sources/MferenceCLI` and `Sources/Mference/Runtime/Generation` for the timing hooks that produced it) and report ms/token for: expert misses + cache bookkeeping, GPU command-buffer time, CPU orchestration, sampling/other.
 
-- [ ] **Step 3: Write the attribution note and commit**
+- [ ] **Step 3: Compute the bandwidth roofline**
 
-The note states: measured gap vs mlx-lm (from Task 2), and how much of the step residency can remove (I/O + bookkeeping share) vs what kernels must earn (GPU + orchestration share).
+State the physics ceiling alongside the measurements: active bytes per decoded token (shared core + attention + 8 routed experts + head at their manifest quantizations, computed from `packed_experts/layout.json` strides and the manifest tensor sizes) divided by the host's measured memory bandwidth (`sysctl` reports the part; use a simple Metal copy microbenchmark or published M5 figures, stated as such). Report Mference and mlx-lm as percentages of that ceiling, per the roofline method in the RunInfra B200 write-up.
+
+- [ ] **Step 4: Write the attribution note and commit**
+
+The note states: measured gap vs mlx-lm (from Task 2), the roofline percentage for both engines, and how much of the step residency can remove (I/O + bookkeeping share) vs what kernels must earn (GPU + orchestration share).
 
 ```bash
 git add benchmark-results/qwen36-decode-attribution.md
@@ -442,6 +446,8 @@ Each candidate below follows the same six-step protocol; a candidate that fails 
 - [ ] **Task 11: Command-buffer consolidation.** Encode the full token step (all 40 layers) into one command buffer where hazards allow, cutting per-layer encode/commit overhead. Caution: a prior argument-buffer reuse experiment lost 9% on prefill — decode-only first, A/B gated. Exact transform → byte-identical gate.
 
 - [ ] **Task 12: M5 Neural Accelerator (MPP tensor_ops) decode paths.** Where group-64 affine INT4 shapes allow, route the hot GEMVs through `mpp::tensor_ops::matmul2d` (the staged affine MPP prefill path is precedent — see `docs/IMPLEMENTATION_REFERENCES.md` Apple platform contracts). If MPP cannot consume the affine format without a dequant stage that eats the gain, record the failure and stop this line. Float-reordering: quality gate.
+
+- [ ] **Task 12b: N-gram speculative decoding with batched MoE verification.** Draft tokens from an n-gram trie over the already-generated text (no draft model); verify k drafted tokens in one batched forward pass, reusing the chunked-prefill execution shape. The batched pass reads the shared core once per k tokens and the union of the k tokens' routed experts — this amortizes expert I/O on slot rungs exactly like prefill chunking, and cuts bytes/token at the resident rung. Exactness: greedy verification is exact by construction; the production sampled path (temp 0.2/Top-K/Top-P) must use standard speculative rejection sampling to keep the output distribution exact, and the A/B compares token ids with an explicit length check (never `zip`-style truncation). Tune trie depth / draft breadth as a measured knob — the B200 write-up showed a sharp peak, so sweep it. Files: new `Sources/Mference/Runtime/Generation/NgramSpeculator.swift`, decode-loop integration in `Sources/Mference/Runtime/Generation/`, batched verify via the existing prefill chunk path. Gates per the iteration protocol; expected to help every rung, so also A/B at 16 slots before accepting as a default.
 
 - [ ] **Exit check:** after each accepted candidate, re-run Task 8's profile and the mlx-lm comparison. The program ends when Mference ≥ mlx-lm on the three-case median, or when the remaining candidates are exhausted (then re-plan with the new profile).
 
