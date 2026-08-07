@@ -22,7 +22,9 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 }
 
 public struct RuntimeConfiguration: Sendable, Equatable {
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32]
+    /// 96 and 128 are the near-resident rungs: large wired LFU sets for hosts
+    /// with RAM to spare but not enough to cache the whole expert pool.
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 96, 128]
     public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024, 2048, 4096]
 
     public let expertCacheSlots: Int
@@ -73,22 +75,21 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// working set to fit.
     static let residentHeadroomBytes = UInt64(4) * 1024 * 1024 * 1024
 
-    /// The auto profile's ladder: `.resident` when the whole expert pool plus
-    /// core weights and headroom fit physical memory, otherwise the existing
-    /// slot-count rule. Phase 1 gates the resident rung to Qwen; other
-    /// families take it only via an explicit `resident` flag until they have
-    /// their own accepted A/B.
+    /// The auto profile's streaming mode. Measured on the 24 GB M5
+    /// (2026-08-07): `.resident` lost the community A/B on every case
+    /// (short −2%, long −56% from page-cache thrash), and 128 near-resident
+    /// slots beat nothing, because at 32 slots the page cache already holds
+    /// the whole Qwen expert pool. Auto therefore stays on the slot rule;
+    /// `resident`, 96, and 128 remain explicit flags for hosts where the
+    /// arithmetic differs. `expertPoolBytes`/`coreWeightsBytes` stay in the
+    /// signature so a future measured rung can use them without replumbing
+    /// callers.
     public static func defaultExpertStreamingMode(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
-        expertPoolBytes: UInt64,
-        coreWeightsBytes: UInt64
+        expertPoolBytes _: UInt64,
+        coreWeightsBytes _: UInt64
     ) -> ExpertStreamingMode {
-        if family == .qwen36,
-           physicalMemoryBytes >= expertPoolBytes + coreWeightsBytes
-               + Self.residentHeadroomBytes {
-            return .resident
-        }
         return .pread(slotCount: defaultExpertCacheSlots(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes))

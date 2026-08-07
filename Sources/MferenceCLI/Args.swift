@@ -132,8 +132,8 @@ extension Args {
                                 bounded, or adaptive (default off).
       --expert-cache-slots <n|resident|auto>
                                 Routed-expert cache slots per layer: 8, 16,
-                                24, 32, resident, or auto. resident maps every
-                                layer file once and skips the slot cache
+                                24, 32, 96, 128, resident, or auto. resident maps
+                                every layer file once and skips the slot cache
                                 entirely. auto picks resident when the whole
                                 expert pool plus core weights and 4 GiB
                                 headroom fit physical memory (Qwen only),
