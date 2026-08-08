@@ -2,10 +2,12 @@
 
 This is the repository-level map for users and agents. It describes the
 shipping four-model codebase on the `main` baseline and shows where the clean
-Maple port will join it. Maple is **planned** until the items in
-[PROGRESS.md](PROGRESS.md) are complete; reference-branch behavior is not
-present-tense product evidence. The frozen Maple contract is
-[docs/MAPLE.md](docs/MAPLE.md).
+Maple port will join it. Maple's installer, schema, kernels, tokenizer, and
+standalone runtime are implemented on the clean integration lineage; product
+entry-point wiring and final parity evidence remain open in
+[PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as shipping product
+support. Reference-branch behavior is not present-tense product evidence. The
+frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
 
 ## What Mference is
 
@@ -70,7 +72,7 @@ convention; detection uses the directory's manifest.
 | Qwen 3.6 35B-A3B | 40 layers; 30 Gated-DeltaNet recurrent layers plus 10 gated full-attention layers; 256 experts, top 8; sigmoid-gated shared expert; untied head. | `qwen36.gturbo` |
 | DeepSeek-V4-Flash 284B-A13B | 43 MoE layers; sliding attention plus CSA/HCA compressed long-range state; four-stream mHC residual; top 6 routing, including three hash-routed layers; 2-bit routed experts. | `deepseekv4flash.gturbo` |
 | Inkling-Small 276B-A12B | 42 layers; learned relative-position attention and short convolutions; 256 experts, top 6; two leading dense layers and two shared experts; padded vocabulary truncated before sampling. | `inklingsmall.gturbo` |
-| Maple Preview (planned) | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
+| Maple Preview (core runtime implemented; product integration pending) | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
 
 At load, `ManifestReader` decodes the model family, resolves the corresponding
 known `ArchConfig`, and rejects field, file, layout, or quantization mismatches.
@@ -137,10 +139,12 @@ approximate FlashHead tensors are excluded.
 
 ## Runtime and one-token pipeline
 
-`Model.load` validates metadata and creates a resident mapping. A
-`RealForwardRunner` compiles the relevant Metal modules, allocates reusable
-scratch, creates family-specific attention/state managers, and opens expert
-streamers lazily. A raw generation request then:
+`Model.load` validates metadata and creates a resident mapping.
+`ForwardRunnerFactory` keeps the four shipping families on
+`RealForwardRunner` and selects the standalone `MapleForwardRunner` for Maple.
+Each runner compiles its Metal modules, allocates reusable scratch, creates the
+required attention/state managers, and opens expert streamers lazily. A raw
+generation request then:
 
 1. embeds the next token into the residual stream;
 2. applies each layer's family-specific norm and attention/recurrent path;
@@ -182,9 +186,9 @@ interface:
   sliding layers in physical 512-row cache order and full layers as a linear
   prefix. Routed experts preserve source-group-128 arithmetic over duplicated
   group-64 companions and support disjoint cache-hit/miss phases without
-  changing rank reduction. The planned runtime must preserve those layouts
-  while owning cache writes, streamed expert I/O, reset, and continuation;
-  physical iteration and rank-reduction order are part of exact parity.
+  changing rank reduction. The standalone runtime owns cache writes, streamed
+  expert I/O, reset, and continuation while preserving those layouts; physical
+  iteration and rank-reduction order are part of exact parity.
 
 Supported context choices are 4K, 8K, 16K, 32K, and 64K. Reset drops logical
 positions and advises unused state pages back to the OS. The server may retain
@@ -204,11 +208,12 @@ tensor operations where supported. Inkling has its own batched relative-
 attention and routed-expert kernels. DeepSeek uses its correctness-first
 family path. Chunked Qwen state is tested against sequential decode semantics.
 
-Maple's acceptance baseline is deliberately sequential: prefill must replay
-the exact one-token native-BF16 path and emit the full head only for the final
-prompt token. The research-only `MFERENCE_MAPLE_PREFILL=batch` path is not part
-of the port because its batch primitives were never brought to the same parity
-standard.
+Maple's standalone runtime deliberately implements sequential prefill: it
+replays the exact one-token native-BF16 path and emits the full head only for
+the final prompt token. The research-only `MFERENCE_MAPLE_PREFILL=batch` path
+is not part of the port because its batch primitives were never brought to the
+same parity standard. CLI, app, and server selection of this runtime belongs to
+the product-integration branch.
 
 ## Tokenization, chat templates, and generation
 

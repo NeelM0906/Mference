@@ -147,7 +147,18 @@ system map is [WIKI.md](WIKI.md).
   native BF16 activations/KV, exact sequential prefill, streamed top-8 experts,
   and the complete non-approximate vocabulary head; reset/continuation/context
   behavior is tested; a representative real trace reaches both a 512-token
-  sliding-cache wrap and a longer full-attention prefix. **Status:** planned.
+  sliding-cache wrap and a longer full-attention prefix. **Status:** the clean
+  runtime implementation is complete in `61d6a1d`, `a87ed5c`, and `e89a7fb`.
+  A standalone `MapleForwardRunner` validates the exact resident/expert layout,
+  owns native-BF16 KV and scratch, overlaps cached expert work with positional
+  reads, replays prefill token by token, and always computes the full head.
+  Synthetic 24-layer coverage exercises all-miss then all-hit execution,
+  reset, continuation, forced full logits, malformed metadata, and non-Maple
+  factory behavior; focused KV coverage crosses the 512-row sliding wrap while
+  a full layer remains linear. The full package run passed 968 tests in 156
+  suites (114.589 seconds). Product entry-point wiring belongs to the next
+  branch. The representative real-checkpoint wrap/long-prefix trace remains a
+  parity-harness gate, so this checkbox stays open until that evidence exists.
 
 - [ ] **`feature/maple-product-integration`** — Acceptance: `maple` installs,
   auto-detects, and runs through Repack, CLI, Mac app/decode service, and server;

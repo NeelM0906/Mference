@@ -112,6 +112,31 @@ import Metal
         #expect(kv.vSlot(layer: 5, position: 35).offset == 35 * 2048)
     }
 
+    @Test func mapleRing_wrapsSlidingLayersButKeepsFullLayersLinear() throws {
+        let context = try MetalContext()
+        let maple = ArchConfig.maplePreview
+        let kv = try KVCacheManager(device: context.device,
+                                    config: maple,
+                                    maxContext: 513,
+                                    fp16RingEnabled: true,
+                                    slidingWindow: maple.slidingWindow,
+                                    maxPrefillChunkTokens: 1,
+                                    fp16RingCapacityOverride: 512)
+
+        #expect(kv.layerKind(0) == .swa)
+        #expect(kv.layerKind(3) == .full)
+        #expect(kv.ringCapacity(layer: 0) == 512)
+        #expect(kv.ringCapacity(layer: 3) == 0)
+        #expect(kv.kSlot(layer: 0, position: 511).offset == 511 * 1024)
+        #expect(kv.kSlot(layer: 0, position: 512).offset == 0)
+        #expect(kv.vSlot(layer: 0, position: 512).offset == 0)
+        #expect(kv.kSlot(layer: 3, position: 511).offset == 511 * 1024)
+        #expect(kv.kSlot(layer: 3, position: 512).offset == 512 * 1024)
+        #expect(kv.keyView(layer: 0, validTokenCount: 513).startSlot == 1)
+        #expect(kv.valueView(layer: 0, validTokenCount: 513).startSlot == 1)
+        #expect(kv.keyView(layer: 3, validTokenCount: 513).startSlot == 0)
+    }
+
     @Test func fp16Ring_rangesMustNotWrap() throws {
         let (_, kv) = try makeManager(maxContext: 128,
                                       fp16RingEnabled: true,
