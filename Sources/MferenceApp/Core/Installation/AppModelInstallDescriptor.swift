@@ -93,6 +93,18 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 2_147_483_648)
 
+    public static let maple = AppModelInstallDescriptor(
+        family: .maple,
+        displayName: "Maple Preview 2-bit MLX",
+        repoID: "deepgrove/maple-preview-2bit-mlx",
+        revision: "361db5da5e74ff6fcdd852d478e1f266ce11013a",
+        sourceIndexSHA256:
+            "56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95",
+        approximateDownloadBytes: 5_330_000_000,
+        installedBytes: 6_650_000_000,
+        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+        reserveBytes: 1_073_741_824)
+
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
         switch family {
@@ -100,8 +112,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .qwen36: return .qwen36
         case .deepseekV4Flash: return .deepseekV4Flash
         case .inklingSmall: return .inklingSmall
-        // Maple is not offered by the app until its runtime is integrated.
-        case .maple: return nil
+        case .maple: return .maple
         }
     }
 
@@ -117,10 +128,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     }
 
     /// The descriptor the app products select at launch. Defaults to Gemma 4.
-    /// `MFERENCE_MODEL=qwen36` (or `deepseekv4flash`/`dsv4`) in the
-    /// environment wins; otherwise the persisted preference
-    /// (`defaults write Mference model qwen36`) applies, so GUI launches
-    /// without an environment also select the alternative model.
+    /// `MFERENCE_MODEL` in the environment wins; otherwise the persisted
+    /// `Mference model` preference applies, so GUI launches without an
+    /// environment can select another supported family.
     public static var selected: AppModelInstallDescriptor {
         let environmentValue = ProcessInfo.processInfo.environment["MFERENCE_MODEL"]
         let preferenceValue = UserDefaults(suiteName: "Mference")?
@@ -129,6 +139,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case "qwen36": return .qwen36
         case "deepseekv4flash", "dsv4": return .deepseekV4Flash
         case "inklingsmall", "inkling": return .inklingSmall
+        case "maple": return .maple
         default: return .default
         }
     }
