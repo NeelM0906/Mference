@@ -96,3 +96,23 @@ throughput evidence either way.
 Verdict: deprioritized behind copy-free cache hits (attacks Qwen's measured
 23% exposed-memcpy share directly) and the GPU-compute kernel program
 (~52% share). Revisit MTP if those lanes exhaust.
+
+## Copy-free miss serving (2026-08-08, rejected — mechanism identified)
+
+Qwen's ~23% exposed I/O is page-cache memcpys into slots, so misses were
+served as zero-copy mapped views (per-expert MTLBuffers over the layer
+mapping) with background slot promotion keeping the LFU learning. Byte
+gate passed; unit tests passed; decode fell 26.2 → 17.0 tok/s. The phase
+breakdown isolates why: expert io await collapsed 2,370 → 69 ms, but GPU
+waits exploded 2,741 → 6,199 ms — the driver wires the file-backed pages
+on the command-buffer timeline, and wiring ~140 mapped buffers per token
+costs more than copying the same bytes into already-wired slots.
+
+Combined with the resident-rung long-context collapse and the DSV4
+32-slot regression, the platform rule is now established three ways:
+**on macOS/Metal, hot-loop GPU access wants wired scratch and explicit
+copies, not mapped file-backed pages.** The copying slot cache is
+load-bearing, not legacy. Qwen's remaining exposed-copy share is
+addressable only by fewer misses (the shipped 64-slot default) or by
+hiding copies behind more GPU overlap — a command-buffer pipelining
+question, not a memory-mapping one.
