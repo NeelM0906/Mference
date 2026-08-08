@@ -210,11 +210,11 @@ family path. Chunked Qwen state is tested against sequential decode semantics.
 
 Maple's standalone runtime deliberately implements sequential prefill: it
 replays the exact one-token native-BF16 path and emits the full head only for
-the final prompt token. The research-only `MFERENCE_MAPLE_PREFILL=batch` path
-is not part of the port because its batch primitives were never brought to the
-same parity standard. The family-aware runner factory enforces this path for
-the CLI, Mac app/decode service, and server and reports sequential execution
-with model-native BF16 KV.
+the final uncached prompt token. The research-only
+`MFERENCE_MAPLE_PREFILL=batch` path is not part of the port because its batch
+primitives were never brought to the same parity standard. The family-aware
+runner factory enforces this path for the CLI, Mac app/decode service, and
+server and reports sequential execution with model-native BF16 KV.
 
 ## Tokenization, chat templates, and generation
 

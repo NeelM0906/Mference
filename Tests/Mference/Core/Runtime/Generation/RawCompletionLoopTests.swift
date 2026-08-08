@@ -67,6 +67,61 @@ import MferenceValidationSupport
 
     }
 
+    final class HeadlessContinuationProducer: ContinuableLogitProducer,
+        HeadlessSequentialPrefillRunner, @unchecked Sendable
+    {
+        let vocabSize: Int
+        private let terminalToken: Int32
+        private(set) var continuationPosition: Int
+        private(set) var resetCalls = 0
+        private(set) var prepareCalls: [Int] = []
+        private(set) var headlessPositions: [Int] = []
+        private(set) var producePositions: [Int] = []
+
+        init(vocabSize: Int, terminalToken: Int32, position: Int = 0) {
+            self.vocabSize = vocabSize
+            self.terminalToken = terminalToken
+            self.continuationPosition = position
+        }
+
+        func reset() {
+            resetCalls += 1
+            continuationPosition = 0
+            headlessPositions = []
+            producePositions = []
+        }
+
+        func prepareForContinuation(expectedPosition: Int) throws {
+            guard continuationPosition == expectedPosition else {
+                throw PrefillError.prefillCursorMismatch("test cursor mismatch")
+            }
+            prepareCalls.append(expectedPosition)
+        }
+
+        func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
+            try advance(position: position, into: logits)
+            producePositions.append(position)
+        }
+
+        func produceWithoutLogits(token: Int32, position: Int) async throws {
+            guard continuationPosition == position else {
+                throw PrefillError.prefillCursorMismatch("test scalar cursor mismatch")
+            }
+            headlessPositions.append(position)
+            continuationPosition += 1
+        }
+
+        private func advance(position: Int, into logits: MTLBuffer) throws {
+            guard continuationPosition == position else {
+                throw PrefillError.prefillCursorMismatch("test scalar cursor mismatch")
+            }
+            continuationPosition += 1
+            let pointer = logits.contents().bindMemory(to: Float16.self, capacity: vocabSize)
+            for index in 0..<vocabSize { pointer[index] = -30 }
+            pointer[Int(terminalToken)] = 30
+        }
+    }
+
     final class ChunkedTestProducer: LogitProducer, ChunkedPrefillRunner, @unchecked Sendable {
         let vocabSize: Int
         private let firstToken: Int32
