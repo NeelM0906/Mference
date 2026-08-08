@@ -113,11 +113,19 @@ system map is [WIKI.md](WIKI.md).
   passed 957 tests in 152 suites (200.560 seconds); runtime wiring remains in
   the later ordered branches.
 
-- [ ] **`feature/maple-attention`** — Acceptance: per-head Q/K norm, sliding
+- [x] **`feature/maple-attention`** — Acceptance: per-head Q/K norm, sliding
   partial NeoX RoPE, full-layer NoPE, grouped-query attention, BF16 KV, the
   512-row rotating-cache wrap, and full-prefix attention match the pinned MLX
   reference in focused tests and representative layer traces. **Status:**
-  planned.
+  complete at the isolated decode-primitive boundary. A dedicated safe-math
+  module implements fixed-shape native-BF16 Q/K RMSNorm, 64-dimension NeoX
+  RoPE on sliding layers, NoPE on full layers, and MLX-shaped one-/two-pass
+  vector SDPA with explicit physical-ring and linear-prefix APIs. Tests cover
+  production head shapes, GQA mapping, offsets and sentinels, BF16-only values,
+  a mid-cycle 512-row ring, prefix growth, nonuniform CPU goldens, and the real
+  GPU-family dispatch threshold. The full package run passed 962 tests in 154
+  suites (186.353 seconds). Runtime/KV ownership and end-to-end layer traces
+  remain in the later runtime and parity branches.
 
 - [ ] **`feature/maple-routed-moe`** — Acceptance: raw BF16 router/FP32
   accumulation, stable top-8 selection, post-top-k normalization, INT2
