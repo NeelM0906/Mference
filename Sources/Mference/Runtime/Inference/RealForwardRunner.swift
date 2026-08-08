@@ -442,8 +442,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// via the slot map, skipping the per-layer CPU round-trip. Instance
     /// state so tests can flip it; the env variable sets the process
     /// default.
+    /// Accepted Qwen production default (community A/B 2026-08-08: short
+    /// +3.5%, medium +3.3%, long +1.6% median over four alternating blocks,
+    /// byte-identical). `MFERENCE_SLOT_MAP=0` is the kill-switch.
     static let slotMapEnabledDefault =
-        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP"] == "1"
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP"] != "0"
     var slotMapEnabled = RealForwardRunner.slotMapEnabledDefault
     /// Debug discriminator: encode the whole slot-map chain but feed the
     /// lookup an all-empty table, so the guarded kernels always no-op and
