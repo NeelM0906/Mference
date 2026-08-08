@@ -186,7 +186,7 @@ final class MoE {
         }
     }
 
-    func makeRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
+    func makeRoutedArgumentBuffer(routedBlobs: [(buffer: MTLBuffer, offset: Int)],
                                          topK: UInt32) -> MTLBuffer? {
         validate(routedBlobs: routedBlobs, topK: topK)
         encodeRoutedArgumentBuffer(reusableRoutedArgBuffer,
@@ -194,7 +194,7 @@ final class MoE {
         return reusableRoutedArgBuffer
     }
 
-    func makeReusedRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
+    func makeReusedRoutedArgumentBuffer(routedBlobs: [(buffer: MTLBuffer, offset: Int)],
                                                topK: UInt32) -> MTLBuffer {
         validate(routedBlobs: routedBlobs, topK: topK)
         encodeRoutedArgumentBuffer(reusableRoutedArgBuffer, routedBlobs: routedBlobs)
@@ -204,7 +204,7 @@ final class MoE {
     func encodeRoutedPersistentPhase1U16Load(
         commandBuffer: MTLCommandBuffer,
         routedArgBuffer: MTLBuffer,
-        routedBlobs: [MTLBuffer],
+        routedBlobs: [(buffer: MTLBuffer, offset: Int)],
         routedOffsets: MoEExpertOffsets,
         x: MTLBuffer,
         acts: MTLBuffer,
@@ -222,7 +222,7 @@ final class MoE {
                 ? phase1U16SpecializedPSO
                 : phase1U16PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
-        for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
+        for blob in routedBlobs { encoder.useResource(blob.buffer, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(x, offset: 0, index: 2)
@@ -239,7 +239,7 @@ final class MoE {
     func encodeRoutedPersistentPhase1SubsetU16Load(
         commandBuffer: MTLCommandBuffer,
         routedArgBuffer: MTLBuffer,
-        routedBlobs: [MTLBuffer],
+        routedBlobs: [(buffer: MTLBuffer, offset: Int)],
         routedOffsets: MoEExpertOffsets,
         x: MTLBuffer,
         acts: MTLBuffer,
@@ -264,7 +264,7 @@ final class MoE {
                 : phase1SubsetU16PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for slot in activeSlotIndices {
-            encoder.useResource(routedBlobs[Int(slot)], usage: .read)
+            encoder.useResource(routedBlobs[Int(slot)].buffer, usage: .read)
         }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
@@ -284,7 +284,7 @@ final class MoE {
     func encodeRoutedPersistentPhase2Reduce(
         commandBuffer: MTLCommandBuffer,
         routedArgBuffer: MTLBuffer,
-        routedBlobs: [MTLBuffer],
+        routedBlobs: [(buffer: MTLBuffer, offset: Int)],
         routedOffsets: MoEExpertOffsets,
         acts: MTLBuffer,
         routingWeights: MTLBuffer,
@@ -307,7 +307,7 @@ final class MoE {
                 specialized ? phase2ReduceK8SpecializedPSO : phase2ReduceK8PSO)
         }
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
-        for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
+        for blob in routedBlobs { encoder.useResource(blob.buffer, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(acts, offset: 0, index: 2)
@@ -323,17 +323,17 @@ final class MoE {
         encoder.endEncoding()
     }
 
-    private func validate(routedBlobs: [MTLBuffer], topK: UInt32) {
+    private func validate(routedBlobs: [(buffer: MTLBuffer, offset: Int)], topK: UInt32) {
         precondition(topK == 6 || topK == 8,
                      "routed INT4 decode supports top-k 6 or 8")
         precondition(routedBlobs.count == Int(topK))
     }
 
     private func encodeRoutedArgumentBuffer(_ buffer: MTLBuffer,
-                                            routedBlobs: [MTLBuffer]) {
+                                            routedBlobs: [(buffer: MTLBuffer, offset: Int)]) {
         routedArgEncoder.setArgumentBuffer(buffer, offset: 0)
         for (index, blob) in routedBlobs.enumerated() {
-            routedArgEncoder.setBuffer(blob, offset: 0, index: index)
+            routedArgEncoder.setBuffer(blob.buffer, offset: blob.offset, index: index)
         }
     }
 

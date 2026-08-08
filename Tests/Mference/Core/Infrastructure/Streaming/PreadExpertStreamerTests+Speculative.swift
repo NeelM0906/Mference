@@ -66,7 +66,7 @@ extension PreadExpertStreamerTests {
         #expect(plan.hits == 2)
         let buffers = try streamer.executeExpertCachePlan(plan)
         for (index, expert) in [2, 3].enumerated() {
-            let got = Self.bytes(of: buffers[index].buffer, offset: 0, count: Self.expertStride)
+            let got = Self.bytes(of: buffers[index].buffer, offset: buffers[index].offset, count: Self.expertStride)
             #expect(got.allSatisfy { $0 == Self.tagByte(expert) })
         }
     }
@@ -87,7 +87,7 @@ extension PreadExpertStreamerTests {
         let plan = streamer.planExpertsCached(experts: [0, 1])
         let buffers = try streamer.executeExpertCachePlan(plan)
         for (index, expert) in [0, 1].enumerated() {
-            let got = Self.bytes(of: buffers[index].buffer, offset: 0, count: Self.expertStride)
+            let got = Self.bytes(of: buffers[index].buffer, offset: buffers[index].offset, count: Self.expertStride)
             #expect(got.allSatisfy { $0 == Self.tagByte(expert) })
         }
         #expect(!streamer.residentExpertsSnapshot().contains(3))

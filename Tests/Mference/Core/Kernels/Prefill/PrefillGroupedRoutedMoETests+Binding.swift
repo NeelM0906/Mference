@@ -179,7 +179,9 @@ extension PrefillGroupedRoutedMoETests {
     #expect(second.plannedMissIndices.isEmpty)
     #expect(second.plannedMissSlots.isEmpty)
     for result in [first, second] {
-      #expect(result.binding.views.allSatisfy { $0.offset == 0 })
+      // Slab slots carry non-zero offsets; each view must stay stride-aligned
+      // within the slab.
+      #expect(result.binding.views.allSatisfy { $0.offset % 4096 == 0 })
       try result.binding.validateCoversPairs(
         routes.sortedPairs,
         pairStart: 0,

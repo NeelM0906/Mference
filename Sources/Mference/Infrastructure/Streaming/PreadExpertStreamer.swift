@@ -64,7 +64,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     private let fd: Int32
     private let slotPointers: [UnsafeMutableRawPointer]
-    private let slotBuffers: [MTLBuffer]
+    /// One contiguous wired allocation holding every slot; slot `n` lives at
+    /// byte offset `n * slotAllocationSize`. A single buffer lets the GPU
+    /// address slots by offset arithmetic — the substrate the GPU-resident
+    /// slot map needs — and halves per-slot bookkeeping.
+    private let slotSlabBuffer: MTLBuffer
+    private let slotAllocationSize: Int
 
     private var nextSlot = 0
     private let cursorLock = NSLock()
@@ -107,41 +112,30 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
-        var pointers: [UnsafeMutableRawPointer] = []
-        var buffers: [MTLBuffer] = []
-        pointers.reserveCapacity(slotCount)
-        buffers.reserveCapacity(slotCount)
-
-        func unwind() {
-            for index in buffers.count..<pointers.count {
-                free(pointers[index])
-            }
+        var slabRaw: UnsafeMutableRawPointer?
+        let allocResult = posix_memalign(&slabRaw, Self.scratchAlignment,
+                                         allocationSize * slotCount)
+        guard allocResult == 0, let slab = slabRaw else {
             close(openedFD)
+            throw StreamerError.allocFailed(errno: allocResult)
+        }
+        nonisolated(unsafe) let capturedSlab = slab
+        guard let slabBuffer = device.makeBuffer(
+            bytesNoCopy: slab,
+            length: allocationSize * slotCount,
+            options: .storageModeShared,
+            deallocator: { _, _ in free(capturedSlab) })
+        else {
+            free(slab)
+            close(openedFD)
+            throw StreamerError.bufferWrapFailed
         }
 
-        for _ in 0..<slotCount {
-            var raw: UnsafeMutableRawPointer?
-            let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
-            guard result == 0, let pointer = raw else {
-                unwind()
-                throw StreamerError.allocFailed(errno: result)
-            }
-            pointers.append(pointer)
-            nonisolated(unsafe) let capturedPointer = pointer
-            guard let buffer = device.makeBuffer(
-                bytesNoCopy: pointer,
-                length: allocationSize,
-                options: .storageModeShared,
-                deallocator: { _, _ in free(capturedPointer) })
-            else {
-                unwind()
-                throw StreamerError.bufferWrapFailed
-            }
-            buffers.append(buffer)
+        self.slotPointers = (0..<slotCount).map {
+            slab.advanced(by: $0 * allocationSize)
         }
-
-        self.slotPointers = pointers
-        self.slotBuffers = buffers
+        self.slotSlabBuffer = slabBuffer
+        self.slotAllocationSize = allocationSize
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.speculativeInFlight = [Bool](repeating: false, count: slotCount)
@@ -174,7 +168,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             into: slotPointers[slot],
             fileOffset: layout.streamOffset + regionOffset,
             count: Int(layout.expertStride))
-        return (slotBuffers[slot], 0, layout.expertStride)
+        return (slotSlabBuffer, UInt64(slot * slotAllocationSize),
+                layout.expertStride)
     }
 
     public func loadExpertsCached(experts: [Int]) throws
@@ -294,7 +289,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
         return plan.assignedSlots.map { slot in
-            (slotBuffers[slot], UInt64(0), layout.expertStride)
+            (slotSlabBuffer, UInt64(slot * slotAllocationSize),
+             layout.expertStride)
         }
     }
 

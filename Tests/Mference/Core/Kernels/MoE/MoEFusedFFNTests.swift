@@ -22,9 +22,9 @@ import MferenceValidationSupport
         #expect(routedBuffers.count == 6)
 
         let first = try #require(kernel.makeRoutedArgumentBuffer(
-            routedBlobs: routedBuffers, topK: 6))
+            routedBlobs: routedBuffers.map { (buffer: $0, offset: 0) }, topK: 6))
         let second = try #require(kernel.makeRoutedArgumentBuffer(
-            routedBlobs: routedBuffers, topK: 6))
+            routedBlobs: routedBuffers.map { (buffer: $0, offset: 0) }, topK: 6))
 
         #expect(first === second)
     }
@@ -117,7 +117,7 @@ import MferenceValidationSupport
               let fullOutput = Fp16Buffer.make(context.device, count: Self.dimension),
               let splitOutput = Fp16Buffer.make(context.device, count: Self.dimension),
               let argumentBuffer = kernel.makeRoutedArgumentBuffer(
-                routedBlobs: routedBuffers,
+                routedBlobs: routedBuffers.map { (buffer: $0, offset: 0) },
                 topK: UInt32(topK)) else {
             Issue.record("buffer allocation failed")
             return
@@ -127,7 +127,7 @@ import MferenceValidationSupport
         kernel.encodeRoutedPersistentPhase1U16Load(
             commandBuffer: fullCommand,
             routedArgBuffer: argumentBuffer,
-            routedBlobs: routedBuffers,
+            routedBlobs: routedBuffers.map { (buffer: $0, offset: 0) },
             routedOffsets: blobs[0].offsets,
             x: xBuffer,
             acts: fullActs,
@@ -137,7 +137,7 @@ import MferenceValidationSupport
         kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: fullCommand,
             routedArgBuffer: argumentBuffer,
-            routedBlobs: routedBuffers,
+            routedBlobs: routedBuffers.map { (buffer: $0, offset: 0) },
             routedOffsets: blobs[0].offsets,
             acts: fullActs,
             routingWeights: routingBuffer,
@@ -155,7 +155,7 @@ import MferenceValidationSupport
             kernel.encodeRoutedPersistentPhase1SubsetU16Load(
                 commandBuffer: splitCommand,
                 routedArgBuffer: argumentBuffer,
-                routedBlobs: routedBuffers,
+                routedBlobs: routedBuffers.map { (buffer: $0, offset: 0) },
                 routedOffsets: blobs[0].offsets,
                 x: xBuffer,
                 acts: splitActs,
@@ -169,7 +169,7 @@ import MferenceValidationSupport
         kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: splitCommand,
             routedArgBuffer: argumentBuffer,
-            routedBlobs: routedBuffers,
+            routedBlobs: routedBuffers.map { (buffer: $0, offset: 0) },
             routedOffsets: blobs[0].offsets,
             acts: splitActs,
             routingWeights: routingBuffer,

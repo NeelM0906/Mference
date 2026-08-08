@@ -2866,7 +2866,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 : nil
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSplitArgBuf: MTLBuffer?
-            var phase1HitSplitRoutedBufs: [MTLBuffer] = []
+            var phase1HitSplitRoutedBufs: [(buffer: MTLBuffer, offset: Int)] = []
             var phase1HitSlots: [UInt32] = []
             var phase1MissSlots: [UInt32] = []
             if let plan = plannedFetch {
@@ -2879,7 +2879,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             func encodeRoutedPhase1Full(
                 _ cb: MTLCommandBuffer,
                 argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer]
+                routedBufs: [(buffer: MTLBuffer, offset: Int)]
             ) {
                 moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: cb,
                                                         routedArgBuffer: argBuf,
@@ -2895,7 +2895,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             func encodeRoutedPhase1Subset(
                 _ cb: MTLCommandBuffer,
                 argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer],
+                routedBufs: [(buffer: MTLBuffer, offset: Int)],
                 activeSlots: MTLBuffer,
                 activeSlotIndices: [UInt32],
                 activeCount: UInt32
@@ -2919,7 +2919,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                plan.hits > 0,
                !plan.misses.isEmpty {
                 let plannedBlobs = try model.routedExpertBuffers(for: plan)
-                phase1HitSplitRoutedBufs = plannedBlobs.map { $0.buffer }
+                phase1HitSplitRoutedBufs = plannedBlobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
                 phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
                     routedBlobs: phase1HitSplitRoutedBufs,
                     topK: topK)
@@ -2983,7 +2983,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             recordExpertIOOverlap(probe: overlapProbe,
                                   startNanos: tIoStart,
                                   endNanos: tIoEnd)
-            let routedBufs = blobs.map { $0.buffer }
+            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let gTail: (MTLCommandBuffer) -> Void
             if cfg.ffnSandwichNorms {
@@ -3571,13 +3571,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let phase1MissSlots = (plannedFetch?.misses ?? []).map { UInt32($0) }
             var phase1HitCB: MTLCommandBuffer?
             var splitArgBuf: MTLBuffer?
-            var splitRoutedBufs: [MTLBuffer] = []
+            var splitRoutedBufs: [(buffer: MTLBuffer, offset: Int)] = []
 
             if let plan = plannedFetch,
                plan.hits > 0,
                !plan.misses.isEmpty {
                 splitRoutedBufs = try model.routedExpertBuffers(for: plan)
-                    .map(\.buffer)
+                    .map { (buffer: $0.buffer, offset: Int($0.offset)) }
                 // Router readback is a same-queue fence for the prior layer,
                 // so MoE's preallocated argument storage is no longer in use.
                 splitArgBuf = moe.makeRoutedArgumentBuffer(
@@ -3611,7 +3611,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
             }
             totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            let routedBufs = blobs.map(\.buffer)
+            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
 
             let routedCB = ctx.queue.makeCommandBuffer()!
             let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
@@ -5034,7 +5034,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
             if plannedFetch.hits > 0, !plannedFetch.misses.isEmpty {
                 let plannedBlobs = try model.routedExpertBuffers(for: plannedFetch)
-                let bufs = plannedBlobs.map { $0.buffer }
+                let bufs = plannedBlobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
                 writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
                 let hitCB = ctx.queue.makeCommandBuffer()!
                 let argBuf = moeDSV4.makeReusedRoutedArgumentBuffer(routedBlobs: bufs)
@@ -5086,7 +5086,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             recordExpertIOOverlap(probe: overlapProbe,
                                   startNanos: tIoStart,
                                   endNanos: tIoEnd)
-            let routedBufs = blobs.map { $0.buffer }
+            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
 
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let routedCB = ctx.queue.makeCommandBuffer()!
