@@ -4,10 +4,11 @@ This is the repository-level map for users and agents. It describes the
 shipping four-model codebase on the `main` baseline and shows where the clean
 Maple port will join it. Maple's installer, schema, kernels, tokenizer,
 standalone runtime, and product entry-point wiring are implemented on the clean
-integration lineage. Real-model product smoke tests and final parity evidence
-remain open in [PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as
-shipping product support. Reference-branch behavior is not present-tense
-product evidence. The frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
+integration lineage. The maintained SwiftPM parity harness is implemented, but
+real-model product smoke tests and final parity evidence remain open in
+[PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as shipping product
+support. Reference-branch behavior is not present-tense product evidence. The
+frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
 
 ## What Mference is
 
@@ -48,6 +49,7 @@ The product graph is declared in [Package.swift](Package.swift).
 | `MferenceAppCore` | UI-independent app state, installation, inference, context fitting, chat persistence, attachments, and diagnostics. |
 | `MferenceMacPresentation` | AppKit/SwiftUI transcript, document extraction, Markdown rendering, theme, and chrome. |
 | `MferenceValidationSupport` | CPU references, deterministic fixtures/PRNGs, and numerical tolerances shared by tests. |
+| `MferenceMapleParity` / `MferenceMapleParityCore` | Maintained strict Maple teacher-forcing trace export, preflight, and comparison product; see [docs/MAPLE_PARITY.md](docs/MAPLE_PARITY.md). |
 
 Source ownership follows the package graph:
 
@@ -122,11 +124,12 @@ revalidates and reuses intact ranges, while `--discard-partial` is the explicit
 destructive path. Final metadata and payloads are verified before the partial
 directory is atomically promoted.
 
-The strict runtime policy hashes common files at load and expert files on first
-touch. `trusted-receipt` still validates the manifest binding, file set, sizes,
-and common hashes, but trusts receipt-bound sizes for the large expert files;
-it therefore trades detection of size-preserving expert corruption for faster
-first touch. The upstreaming plan also closes a verifier provenance gap:
+The strict `full-sha256` runtime policy hashes common files at load and expert
+files on first touch. `trusted-receipt` still validates the manifest binding,
+file set, sizes, and common hashes, but trusts receipt-bound sizes for the
+large expert files; it therefore trades detection of size-preserving expert
+corruption for faster first touch. The upstreaming plan also closes a verifier
+provenance gap:
 source origin must come from a receipt already bound to the same directory,
 manifest, and complete file set—not from a manifest assertion alone.
 
@@ -350,4 +353,5 @@ not ceilings. Maple parity has its stricter, frozen protocol in
 | [docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) | Inkling source, architecture, validation, memory, and performance notes. Read before touching that model. |
 | [docs/IMPLEMENTATION_REFERENCES.md](docs/IMPLEMENTATION_REFERENCES.md) | Pinned external model, kernel, I/O, and attention references. |
 | [docs/MAPLE.md](docs/MAPLE.md) | Maple behavioral contract, reference pins, exclusions, and required validation. |
+| [docs/MAPLE_PARITY.md](docs/MAPLE_PARITY.md) | Maintained local-only Maple oracle/candidate parity protocol, trace schema, and acceptance boundary. |
 | [PROGRESS.md](PROGRESS.md) | Ordered branch ledger and observable acceptance criteria for the clean Maple port. |
