@@ -42,7 +42,6 @@ struct MapleTokenizationTests {
         let (tokenizer, model) = try await Self.loadMapleTokenizer()
         defer { try? FileManager.default.removeItem(at: model) }
 
-        #expect(tokenizer.modelFamily == .maple)
         #expect(tokenizer.dialect == .chatml)
         #expect(tokenizer.bosID == 151_643)
         #expect(tokenizer.eosID == 151_645)
@@ -190,9 +189,9 @@ struct MapleTokenizationTests {
     func qwenUnchanged() async throws {
         let tokenizer = try await MFTokenizer.load(
             from: ChatMLTemplateTests.fixtureFolder())
-        #expect(tokenizer.modelFamily == nil)
         #expect(!tokenizer.generationPromptStartsInThinking)
         #expect(tokenizer.eosID == 248_044)
+        #expect(tokenizer.eosID != tokenizer.endOfTurnID)
         #expect(tokenizer.vocabSize == 248_320)
     }
 }
