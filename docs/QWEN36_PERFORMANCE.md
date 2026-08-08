@@ -69,31 +69,31 @@ smaller.
 
 ### Measured under an emulated 8 GB machine
 
-16 GB of this 24 GB host was pinned resident by a separate process, leaving
-about 8 GB for the OS, the page cache, and the model process. Greedy decode of
-128 tokens, 4K context, 16 slots:
+**Correction (2026-08-08):** the original version of this section reported
+decode unchanged within noise under an emulated 8 GB working set
+(22.95 / 21.35 / 18.62 tok/s). That experiment's memory pin did not hold —
+the ballast was reclaimable, so the expert pool stayed in the page cache
+and the run measured a 24 GB machine twice. The claim also fails
+arithmetic: 16-slot decode above 20 tok/s would need 5–9 GB/s of
+sustained random SSD reads. The numbers below use a verified ballast
+(15.2 GiB `mlock`ed of 16 GiB held, free memory observed near zero), and
+the pre/post-optimization spread was cross-checked by rerunning with the
+2026-08-08 features disabled (12.3 / 12.4 tok/s short/long — same regime,
+so the correction is about the pin, not the code).
 
-Running all three community benchmark cases (fixed seeds, app sampling
-defaults, 4K context) both ways:
+Community protocol, 16 slots, one measured rep under pressure:
 
-| Case | Decode, 24 GB | Decode, ~8 GB | Footprint, 24 GB | Footprint, ~8 GB |
-| --- | ---: | ---: | ---: | ---: |
-| short-explanation | 23.05 tok/s | 22.95 tok/s | 1,447 MiB | 1,464 MiB |
-| medium-review | 21.20 tok/s | 21.35 tok/s | 1,448 MiB | 1,448 MiB |
-| long-synthesis | 18.84 tok/s | 18.62 tok/s | 1,464 MiB | 1,388 MiB |
+| Case | Decode, 24 GB unconstrained | Decode, ~8 GB verified ballast |
+| --- | ---: | ---: |
+| short-explanation | 26.45 tok/s | 14.35 tok/s |
+| medium-review | 24.99 tok/s | 12.75 tok/s |
+| long-synthesis | 21.96 tok/s | 10.81 tok/s |
 
-All three still reported `stop=endOfTurn`, and every generated file matched its
-unconstrained counterpart byte for byte.
-
-Throughput and footprint are unchanged within noise. That is the expected
-result: the 18.1 GB expert pool never fits the page cache on either
-configuration, so decode is already streaming from SSD, and shrinking
-available memory does not change what the runtime reads.
-
-This is emulated pressure on M5 hardware, not a physical 8 GB Mac. A real
-8 GB machine has a slower SSD and GPU, so expect lower absolute throughput
-there — compare the 8 GB M2 and 24 GB M5 Gemma 4 rows in
-[Benchmarks](BENCHMARKS.md).
+All runs reached `stop=endOfTurn`; process footprint stayed ~1.1 GB. With
+the pool unable to cache, decode is SSD-latency-bound: the honest 8 GB
+story is 11–14 tok/s on M5-class hardware, and less on older 8 GB
+machines with slower SSDs and GPUs — compare the 8 GB M2 and 24 GB M5
+Gemma 4 rows in [Benchmarks](BENCHMARKS.md).
 
 The practical 8 GB requirement is therefore disk, not memory: the install
 needs about 19.6 GB free, against Gemma's 14.3 GB.
