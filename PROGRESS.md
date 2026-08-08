@@ -49,7 +49,9 @@ system map is [WIKI.md](WIKI.md).
   bounded, deterministic identity/INT2-to-INT4/BF16-repeat transforms; source
   and destination byte counts, transform identity, plan fingerprints, digests,
   cancellation, and resume are covered by synthetic tests; identity-only
-  checkpoints retain compatible fingerprints. **Status:** planned.
+  checkpoints retain compatible fingerprints. **Status:** implementation in
+  progress; copy plans now carry checked transforms and preserve identity-only
+  v1 fingerprints, with bounded execution and post-merge tests still pending.
 
 - [ ] **`bugfix/verified-install-provenance`** — Acceptance: `--verify-install`
   never invents repository/revision provenance from `manifest.json`; it
