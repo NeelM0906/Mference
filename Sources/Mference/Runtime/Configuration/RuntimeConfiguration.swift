@@ -24,7 +24,7 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 public struct RuntimeConfiguration: Sendable, Equatable {
     /// 96 and 128 are the near-resident rungs: large wired LFU sets for hosts
     /// with RAM to spare but not enough to cache the whole expert pool.
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 96, 128]
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
     public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024, 2048, 4096]
 
     public let expertCacheSlots: Int
