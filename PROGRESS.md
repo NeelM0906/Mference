@@ -146,7 +146,7 @@ system map is [WIKI.md](WIKI.md).
   Runtime ownership, cache policy, and SSD orchestration remain in
   `feature/maple-runtime`.
 
-- [ ] **`feature/maple-runtime`** — Acceptance: the 24-layer forward pass uses
+- [x] **`feature/maple-runtime`** — Acceptance: the 24-layer forward pass uses
   native BF16 activations/KV, exact sequential prefill, streamed top-8 experts,
   and the complete non-approximate vocabulary head; reset/continuation/context
   behavior is tested; a representative real trace reaches both a 512-token
@@ -166,8 +166,9 @@ system map is [WIKI.md](WIKI.md).
   seeds decode, and non-Maple producers retain scalar replay. The full package
   run at `169cef4` passed 977 tests in 157 suites (117.982 seconds). Product
   entry-point wiring is implemented by the following product branch. The
-  representative real-checkpoint wrap/long-prefix trace remains a
-  parity-harness gate, so this checkbox stays open until that evidence exists.
+  clean full-checkpoint trace at `84d7b62` covers 1,639 positions, crosses the
+  512-token wrap, grows the full-attention prefix, and matches the pinned MLX
+  oracle exactly at every ordered top-10 logit.
 
 - [ ] **`feature/maple-product-integration`** — Acceptance: `maple` installs,
   auto-detects, and runs through Repack, CLI, Mac app/decode service, and server;
@@ -188,17 +189,20 @@ system map is [WIKI.md](WIKI.md).
   Maple CLI, app/decode-service, and server smoke workflows run with the parity
   evidence.
 
-- [ ] **`feature/maple-parity-harness`** — Acceptance: a maintained harness
+- [x] **`feature/maple-parity-harness`** — Acceptance: a maintained harness
   pins and verifies checkpoint/runtime/corpus inputs, exports the complete
   1,639-position full-vocabulary teacher-forcing traces from clean builds,
   compares all ordered top-10 IDs and retained logits at zero tolerance, fails
   on metadata/environment/dirty-tree mismatch, and records reproducible
   metadata without copyrighted or bulky artifacts. It must use a supported
   Swift target/script interface, not brittle manual object-list linking.
-  **Status:** the SwiftPM product and 12 model-free tests/static script
-  validations are implemented. This acceptance checkbox remains open pending a
-  clean 32-position diagnostic smoke, a clean full 1,639-position comparison,
-  and product smoke workflows.
+  **Status:** complete at clean commit `84d7b62`. The SwiftPM product, 12
+  model-free tests, and static script checks pass. A 32-position diagnostic
+  produced 32/32 ordered matches and was correctly rejected as ineligible. The
+  full-SHA acceptance run produced 1,639/1,639 top-1 and ordered-top-10 matches
+  with zero retained-logit difference and comparator exit 0. Full traces stay
+  ignored; compact environment, command, hash, timing, and result metadata is
+  recorded in [the parity evidence](docs/evidence/maple-parity-2026-08-09.json).
 
 - [ ] **`feature/maple-documentation`** — Acceptance: user-facing README,
   implementation references, licenses/notices, install/run instructions,
