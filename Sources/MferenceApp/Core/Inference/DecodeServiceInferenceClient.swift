@@ -11,11 +11,12 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         var input: FileHandle?
         var output: FileHandle?
         var loadedDirectory: URL?
-        var launchLabel: String?
-        var socketPath: String?
+        var process: Process?
     }
 
     private let connection = Mutex(Connection())
+    private let commandWrites = Mutex(())
+    private let processCreation = Mutex(())
     private let serviceURL: URL
     private let inferenceMemory = Mutex<UInt64?>(nil)
     public let generationTranscriptMailbox = GenerationTranscriptMailbox()
@@ -41,8 +42,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             modelPath: modelDirectory.path, maxContextTokens: maxContextTokens,
             runtimeOptions: Self.decodeRuntimeOptions(options),
             forceLogitsHead: forceLogitsHead)
-        try handles.input.write(contentsOf: DecodeFrameCodec.encode(
-            DecodeServiceCommand.load(request)))
+        try write(DecodeServiceCommand.load(request), to: handles.input)
         let event = try await readEvent(from: handles.output)
         guard event.generationID == request.requestID, event.kind == .ready else {
             throw AppInferenceError.modelLoadFailed(
@@ -51,6 +51,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         do {
             _ = try await localTokenizer
         } catch {
+            shutdown()
             throw AppInferenceError.tokenizerUnavailable("\(error)")
         }
         inferenceMemory.withLock { $0 = event.currentMemoryBytes }
@@ -61,8 +62,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     public func unload() async {
         guard let handles = currentHandles() else { return }
         let requestID = UUID()
-        try? handles.input.write(contentsOf: DecodeFrameCodec.encode(
-            DecodeServiceCommand.unload(requestID)))
+        try? write(DecodeServiceCommand.unload(requestID), to: handles.input)
         _ = try? await readEvent(from: handles.output)
         connection.withLock { $0.loadedDirectory = nil }
         inferenceMemory.withLock { $0 = nil }
@@ -89,8 +89,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         repetitionPenalty: request.repetitionPenalty,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
                         generationID: generationID)
-                    try handles.input.write(contentsOf: DecodeFrameCodec.encode(
-                        DecodeServiceCommand.generate(command)))
+                    try write(DecodeServiceCommand.generate(command), to: handles.input)
 
                     var expectedSequence: UInt64 = 1
                     var lastMetricYield = Date.distantPast
@@ -174,23 +173,29 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
 
     public func cancel() {
         guard let input = currentHandles()?.input else { return }
-        try? input.write(contentsOf: DecodeFrameCodec.encode(
-            DecodeServiceCommand.cancel))
+        try? write(DecodeServiceCommand.cancel, to: input)
     }
 
     public func shutdown() {
-        let state = connection.withLock { value -> Connection in
-            defer { value = Connection() }
-            return value
+        processCreation.withLock { _ in
+            let state = connection.withLock { value -> Connection in
+                defer { value = Connection() }
+                return value
+            }
+            if let input = state.input {
+                try? input.close()
+            }
+            if let output = state.output { try? output.close() }
+            if let process = state.process, process.isRunning {
+                if !Self.waitForExit(process, milliseconds: 250), process.isRunning {
+                    process.terminate()
+                    if !Self.waitForExit(process, milliseconds: 250), process.isRunning {
+                        _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                        _ = Self.waitForExit(process, milliseconds: 250)
+                    }
+                }
+            }
         }
-        if let input = state.input {
-            try? input.write(contentsOf: DecodeFrameCodec.encode(
-                DecodeServiceCommand.shutdown))
-            try? input.close()
-        }
-        if let output = state.output { try? output.close() }
-        if let label = state.launchLabel { Self.removeLaunchJob(label: label) }
-        if let socketPath = state.socketPath { unlink(socketPath) }
         inferenceMemory.withLock { $0 = nil }
     }
 
@@ -199,8 +204,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     }
 
     private func ensureProcess() throws -> (input: FileHandle, output: FileHandle) {
-        if let handles = currentHandles() { return handles }
-        return try launchIndependentService()
+        try processCreation.withLock { _ in
+            if let handles = currentHandles() { return handles }
+            return try launchIndependentService()
+        }
     }
 
     private func launchIndependentService() throws
@@ -209,87 +216,83 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             throw AppInferenceError.modelLoadFailed(
                 "decode service executable is missing at \(serviceURL.path); run swift build -c release before launching the app")
         }
-        let identifier = "\(getuid()).\(getpid()).\(UUID().uuidString.lowercased())"
-        let label = "com.mference.decode.\(identifier)"
-        let socketPath = "/private/tmp/mference-decode-\(identifier).sock"
-        let propertyListURL = URL(
-            fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("\(label).plist")
-        let propertyList: [String: Any] = [
-            "Label": label,
-            "ProgramArguments": [
-                serviceURL.path,
-                "--socket", socketPath,
-                "--launch-label", label,
-            ],
-            "RunAtLoad": true,
-            "KeepAlive": false,
-            "ProcessType": "Interactive",
-        ]
-        let propertyListData = try PropertyListSerialization.data(
-            fromPropertyList: propertyList, format: .xml, options: 0)
-        try propertyListData.write(to: propertyListURL, options: .atomic)
-        defer { try? FileManager.default.removeItem(at: propertyListURL) }
-
-        let launcher = Process()
-        let errors = Pipe()
-        launcher.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        launcher.arguments = [
-            "bootstrap", "gui/\(getuid())", propertyListURL.path,
-        ]
-        launcher.standardOutput = FileHandle.nullDevice
-        launcher.standardError = errors
-        try launcher.run()
-        launcher.waitUntilExit()
-        guard launcher.terminationStatus == 0 else {
-            let data = try? errors.fileHandleForReading.readToEnd()
-            let detail = data.flatMap { String(data: $0, encoding: .utf8) }?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let message = detail.flatMap { $0.isEmpty ? nil : $0 }
-                ?? "launchd could not start the decode service"
-            throw AppInferenceError.modelLoadFailed(message)
+        let input = Pipe()
+        let output = Pipe()
+        let process = Process()
+        process.executableURL = serviceURL
+        process.standardInput = input.fileHandleForReading
+        process.standardOutput = output.fileHandleForWriting
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let handles = (input.fileHandleForWriting, output.fileHandleForReading)
+        connection.withLock {
+            $0.input = handles.0
+            $0.output = handles.1
+            $0.process = process
         }
-
-        var lastError: Error?
-        for _ in 0..<200 {
-            do {
-                let handles = try DecodeUnixSocket.connect(path: socketPath)
-                connection.withLock {
-                    $0.input = handles.input
-                    $0.output = handles.output
-                    $0.launchLabel = label
-                    $0.socketPath = socketPath
-                }
-                return handles
-            } catch {
-                lastError = error
-                usleep(10_000)
-            }
-        }
-        Self.removeLaunchJob(label: label)
-        throw AppInferenceError.modelLoadFailed(
-            "decode service socket did not become ready: \(lastError.map(String.init(describing:)) ?? "unknown error")")
+        return handles
     }
 
     private func currentHandles() -> (input: FileHandle, output: FileHandle)? {
-        connection.withLock { state in
-            guard let input = state.input, let output = state.output else {
-                return nil
+        let result: (
+            handles: (input: FileHandle, output: FileHandle)?,
+            stale: Connection?
+        ) = connection.withLock { state in
+            guard state.process?.isRunning == true,
+                  let input = state.input, let output = state.output else {
+                let stale = state
+                state = Connection()
+                return (handles: nil, stale: stale)
             }
-            return (input, output)
+            return (handles: (input, output), stale: nil)
         }
+        clearStaleConnection(result.stale)
+        return result.handles
     }
 
     private func handles(forLoadedDirectory directory: URL)
         -> (input: FileHandle, output: FileHandle)? {
-        connection.withLock { state in
+        let result: (
+            handles: (input: FileHandle, output: FileHandle)?,
+            stale: Connection?
+        ) = connection.withLock { state in
+            guard state.process?.isRunning == true else {
+                let stale = state
+                state = Connection()
+                return (handles: nil, stale: stale)
+            }
             guard Self.matchesLoadedModelDirectory(
                 directory, loadedDirectory: state.loadedDirectory),
                 let input = state.input, let output = state.output else {
-                return nil
+                return (handles: nil, stale: nil)
             }
-            return (input, output)
+            return (handles: (input, output), stale: nil)
         }
+        clearStaleConnection(result.stale)
+        return result.handles
+    }
+
+    private func write(_ command: DecodeServiceCommand, to input: FileHandle) throws {
+        try commandWrites.withLock { _ in
+            try input.write(contentsOf: DecodeFrameCodec.encode(command))
+        }
+    }
+
+    private func clearStaleConnection(_ stale: Connection?) {
+        guard let stale else { return }
+        try? stale.input?.close()
+        try? stale.output?.close()
+        if connection.withLock({ $0.process == nil }) {
+            inferenceMemory.withLock { $0 = nil }
+        }
+    }
+
+    private static func waitForExit(_ process: Process, milliseconds: UInt64) -> Bool {
+        let deadline = Date().addingTimeInterval(Double(milliseconds) / 1_000)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return !process.isRunning
     }
 
     static func matchesLoadedModelDirectory(
@@ -375,16 +378,6 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         case .assistant: .assistant
         }
         return DecodeGenerationMessage(role: role, content: message.content)
-    }
-
-    private static func removeLaunchJob(label: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["bootout", "gui/\(getuid())/\(label)"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
     }
 
     private static func defaultServiceURL() -> URL {
