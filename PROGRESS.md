@@ -37,12 +37,13 @@ system map is [WIKI.md](WIKI.md).
   this branch; repository rules are merged, all local Markdown links resolve,
   and the whitespace check passes.
 
-- [ ] **`refactor/model-tensor-paths`** — Acceptance: family-specific resident
+- [x] **`refactor/model-tensor-paths`** — Acceptance: family-specific resident
   tensor paths/accessors are isolated behind one small model abstraction;
   existing four-family behavior and tests remain unchanged; Maple names can be
-  added without widening unrelated runtime switches. **Status:** implementation
-  in progress; the generic attention accessors now use the existing family
-  trunk prefix, with focused post-merge coverage still required.
+  added without widening unrelated runtime switches. **Status:** complete;
+  the generic attention accessors use the existing family trunk prefix, the
+  full 907-test suite passed before merge, and focused post-merge model-loader
+  coverage resolves all six accessors from the Gemma fixture.
 
 - [ ] **`feature/range-copy-transforms`** — Acceptance: the installer supports
   bounded, deterministic identity/INT2-to-INT4/BF16-repeat transforms; source
