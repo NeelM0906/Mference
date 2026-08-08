@@ -137,7 +137,7 @@ import Testing
     }
 
     @Test func mapleManifestRequiresEveryBehaviorBearingExtension() throws {
-        for field in Self.mapleArchExtensions().keys {
+        for field in Self.mapleArchExtensions().keys where field != "numDenseLayers" {
             var arch = Self.mapleArchExtensions()
             arch.removeValue(forKey: field)
             let dir = try Self.writeMapleManifest(archOverrides: arch)
@@ -152,6 +152,17 @@ import Testing
                 return actualField == field
             }
         }
+    }
+
+    @Test func mapleManifestWithoutNumDenseLayersUsesZeroSemantics() throws {
+        var arch = Self.mapleArchExtensions()
+        arch.removeValue(forKey: "numDenseLayers")
+        let dir = try Self.writeMapleManifest(archOverrides: arch)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: Self.maple)
+        #expect(manifest.arch.family == ModelFamily.maple.rawValue)
+        #expect((manifest.arch.numDenseLayers ?? 0) == Self.maple.numDenseLayers)
     }
 
     @Test func outOfRangeMapleAttentionMasksThrowWithoutTrapping() throws {
