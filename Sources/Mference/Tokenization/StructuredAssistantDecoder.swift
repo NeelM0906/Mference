@@ -182,13 +182,13 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     private var chatMLToolCallMaximumBytes: Int {
-        tokenizer.modelFamily == .maple
+        tokenizer.generationPromptStartsInThinking
             ? MapleToolCallParser.maximumBytes
             : QwenToolCallParser.maximumBytes
     }
 
     private func parseChatMLToolCall(_ text: String) throws -> ParsedToolCall {
-        if tokenizer.modelFamily == .maple {
+        if tokenizer.generationPromptStartsInThinking {
             return try MapleToolCallParser().parse(
                 text, allowedTools: allowedTools, id: idGenerator())
         }
