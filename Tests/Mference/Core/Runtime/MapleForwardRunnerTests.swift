@@ -214,7 +214,7 @@ import Testing
                                   count: Self.vocab))
     }
 
-    @Test func mapleFactory_forcesSequentialFullLogitsAndReplaysExactly() async throws {
+    @Test func mapleFactory_replaysExactlyThroughMixedCacheRefills() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let requested = RuntimeConfiguration(prefillEnabled: true, forceLogitsHead: false)
@@ -242,6 +242,15 @@ import Testing
             #expect(try model.planRoutedExperts(layer: layer, experts: Array(0..<8))?.misses.isEmpty == true)
         }
 
+        let displacedExperts = Array(0..<4) + Array(8..<12)
+        for layer in 0..<Self.layers {
+            let planned = try model.planRoutedExperts(layer: layer, experts: displacedExperts)
+            let plan = try #require(planned)
+            #expect(plan.hits == 4)
+            #expect(plan.misses == Array(4..<8))
+            _ = try await model.fetchRoutedExperts(plan: plan)
+        }
+
         try runner.prepareForContinuation(expectedPosition: 1)
         #expect(throws: PrefillError.self) {
             try runner.prepareForContinuation(expectedPosition: 2)
@@ -249,6 +258,9 @@ import Testing
         try await runner.produce(token: 0, position: 1, into: logits)
         #expect(bits(logits) == first)
         #expect(runner.continuationPosition == 2)
+        for layer in 0..<Self.layers {
+            #expect(try model.planRoutedExperts(layer: layer, experts: Array(0..<8))?.misses.isEmpty == true)
+        }
 
         runner.reset()
         #expect(runner.continuationPosition == 0)
