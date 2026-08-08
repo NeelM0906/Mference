@@ -79,7 +79,9 @@ system map is [WIKI.md](WIKI.md).
   losslessly represented in the existing INT4/group-64 layout, routed experts
   remain INT2/group-64, row-alpha companions are exact, FlashHead tensors are
   excluded, resume avoids redownloading verified transformed ranges, and
-  strict install verification passes. **Status:** planned.
+  strict install verification passes. **Status:** planner implementation is
+  complete; transformed-transfer, synthetic, and pinned-install validation
+  remain planned.
 
 - [ ] **`feature/maple-tokenization`** — Acceptance: model-family metadata—not
   vocabulary size or hard-coded identifying token IDs—selects Maple ChatML;
