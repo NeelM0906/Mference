@@ -338,7 +338,6 @@ public enum ManifestReader {
                 ("routedScalingFactor", a.routedScalingFactor != nil),
                 ("swigluLimit", a.swigluLimit != nil),
                 ("numSharedExperts", a.numSharedExperts != nil),
-                ("numDenseLayers", a.numDenseLayers != nil),
                 ("routerNormAfterTopK", a.routerNormAfterTopK != nil),
             ]
             if let missing = requiredExtensions.first(where: { !$0.1 }) {
