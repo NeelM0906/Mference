@@ -257,6 +257,34 @@ import Testing
         #expect(bits(logits) == first)
     }
 
+    @Test func mapleHeadlessPrefillAdvancesExpertsWithoutWritingLogits() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let model = fixture.model()
+        let runtime = try ForwardRunnerFactory.make(
+            model: model, context: fixture.context, maxContext: 4,
+            runtimeConfiguration: RuntimeConfiguration(prefillEnabled: false, forceLogitsHead: true))
+        let runner = try #require(runtime.producer as? MapleForwardRunner)
+        let headless = try #require(runner as? any HeadlessSequentialPrefillRunner)
+        let logits = try makeLogits(fixture.context)
+        fillSentinel(logits)
+
+        try await headless.produceWithoutLogits(token: 0, position: 0)
+
+        #expect(bits(logits).allSatisfy { $0 == 0x7BFF })
+        #expect(runner.continuationPosition == 1)
+        #expect(model.openLayerFileCount() == Self.layers)
+        for layer in 0..<Self.layers {
+            #expect(try model.planRoutedExperts(layer: layer,
+                                                 experts: Array(0..<8))?.misses.isEmpty == true)
+        }
+
+        try await runner.produce(token: 0, position: 1, into: logits)
+
+        #expect(bits(logits).allSatisfy { $0 == 0 })
+        #expect(runner.continuationPosition == 2)
+    }
+
     @Test func mapleInit_rejectsMalformedResidentAndExpertLayoutMetadata() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
