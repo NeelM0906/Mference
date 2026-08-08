@@ -73,3 +73,26 @@ knob, 16 simdgroups per threadgroup (`_r16`), was ported behind an env flag
 and measured byte-identical but 2.5–3% slower on the M5 across two
 alternating pairs (24.76/25.16 vs 25.54/25.81 tok/s). Rejected and removed;
 r8 with 256-thread threadgroups stays the default.
+
+## MTP speculative-decoding scoping (2026-08-08, deprioritized on evidence)
+
+The original `Qwen/Qwen3.6-35B-A3B` ships a complete 19-tensor MTP draft
+module (fc + one full attention+MoE block + norms); the mlx-community 4-bit
+conversion strips it, and our repacker has no bf16→int4 quantizer, so
+carrying it requires a new quantization encoder, a second-repo fetch, format
+plumbing, a draft block runtime with its own KV stream, and a verify loop —
+a multi-session build.
+
+Before building, the ceiling was measured: batched verification economics.
+Qwen prefill at chunk 32 runs 33.2 tok/token-s vs ~29 tok/s decode — only
+~1.15x cheaper per token, versus the ~2x dense engines see. Cause: routed
+expert reads scale with the *union* of the batch's experts (only the shared
+core amortizes), so k-token verification on a streaming MoE saves far less
+than on dense weights. Projected MTP gain at k=2 drafting with ~80%
+acceptance: roughly +15–25%, against a large engineering cost. The NVMAI
+fork's MTP benchmarks (2-token capability completions) contain no valid
+throughput evidence either way.
+
+Verdict: deprioritized behind copy-free cache hits (attacks Qwen's measured
+23% exposed-memcpy share directly) and the GPU-compute kernel program
+(~52% share). Revisit MTP if those lanes exhaust.
