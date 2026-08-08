@@ -3,6 +3,10 @@ import Mference
 @testable import MferenceCLICore
 
 @Suite struct CLIArgumentsTests {
+    @Test func usageListsMaple() {
+        #expect(Args.usage.contains("Maple"))
+    }
+
     @Test func defaultsUseProductionGenerationValues() throws {
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(arguments.model == "m.gturbo")
