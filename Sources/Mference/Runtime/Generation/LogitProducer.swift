@@ -15,6 +15,11 @@ public protocol ContinuableLogitProducer: LogitProducer {
     func prepareForContinuation(expectedPosition: Int) throws
 }
 
+protocol FusedHeadLogitProducer: LogitProducer {
+    var usesFusedGreedyHead: Bool { get }
+    var lastGreedyToken: UInt32 { get }
+}
+
 protocol ContextWindowReporting: Sendable {
     var maxContext: Int { get }
 }

@@ -467,6 +467,12 @@ public struct Model {
             throw ModelError.tensorNotFound(name: name)
         }
         let residentFileOffset = residentIndex.header.indexSize
+        guard entry.fileOffset >= residentFileOffset,
+              entry.scaleSize == 0 || entry.scaleOffset >= residentFileOffset,
+              entry.biasSize == 0 || entry.biasOffset >= residentFileOffset else {
+            throw ModelError.indexCorrupt(
+                detail: "resident tensor \(name) has an offset before the resident region")
+        }
         let relativeOffset = entry.fileOffset - residentFileOffset
         let scaleRel: UInt64 = entry.scaleSize > 0
             ? entry.scaleOffset - residentFileOffset : 0
