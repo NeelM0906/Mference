@@ -291,6 +291,7 @@ enum SyntheticSnapshot {
             "num_key_value_heads": 4,
             "head_dim": 128,
             "vocab_size": 151_936,
+            "max_position_embeddings": 128_000,
             "sliding_window": 512,
             "rope_theta": 10_000.0,
             "partial_rotary_factor": 0.5,
