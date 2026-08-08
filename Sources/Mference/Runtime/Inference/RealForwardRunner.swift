@@ -2854,6 +2854,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      topK: UInt32(cfg.topKExperts))
             }
 
+            // S3 guarded routed FFN in its own command buffer, committed
+            // right behind cb1 (tracked hazards order it after the lookup,
+            // shared expert, and gate writes). Completes all-hit layers
+            // entirely on-GPU; no-ops otherwise.
+            var slotMapGuardCB: MTLCommandBuffer?
+            if slotMapArmed, let binding = slotMapBinding {
+                let debug = Self.slotMapDebugCompare
+                let guardCB = ctx.queue.makeCommandBuffer()!
+                moe.encodeSlotMapGuardedFFN(commandBuffer: guardCB,
+                    slab: binding.slab,
+                    slotOffsets: slotMapOffsets,
+                    allHit: slotMapAllHit,
+                    routedOffsets: model.routedExpertOffsets(layer: L),
+                    x: routedX,
+                    acts: debug ? slotMapDebugActs! : moeActs,
+                    routingWeights: outWeights,
+                    residual: h1Buf,
+                    y: debug ? slotMapDebugOut! : h2Buf,
+                    hidden: debug ? slotMapDebugHidden! : hidden,
+                    d: D, f: FmoE, topK: UInt32(cfg.topKExperts))
+                slotMapGuardCB = guardCB
+            }
+
             // The router indices are written at this point in the buffer, so
             // signal the CPU here and keep encoding into the SAME buffer. The
             // shared dense MLP depends only on the post-attention norm, never
@@ -2897,6 +2920,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             overlapProbe?.track(cb)
             trackGpuInterval(cb)
             cb.commit()
+            if let guardCB = slotMapGuardCB {
+                trackGpuInterval(guardCB)
+                guardCB.commit()
+            }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForRouterSignal(routerSignal, fallback: cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait

@@ -351,7 +351,9 @@ final class MoE {
         var k = topK
         let specialized = useRealDecodeConstants(d: d, f: f, topK: topK)
 
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            preconditionFailure("slot-map guarded FFN: no compute encoder")
+        }
         encoder.useResource(slab, usage: .read)
         encoder.setComputePipelineState(
             specialized ? phase1SlotmapSpecializedPSO : phase1SlotmapPSO)
