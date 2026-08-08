@@ -65,13 +65,14 @@ system map is [WIKI.md](WIKI.md).
   cover repeated verification plus missing, stale, moved, partial, malformed,
   oversized, unknown-tool, and file-mismatched receipts.
 
-- [ ] **`feature/maple-model-schema`** — Acceptance: explicit `.maple` family,
+- [x] **`feature/maple-model-schema`** — Acceptance: explicit `.maple` family,
   pinned architecture, manifest fields, quantization contract, source selector,
   and compile-time cross-check load a valid synthetic install and reject every
-  material mismatch. **Status:** implementation complete; the combined Swift
-  build and existing 81-test repacker suite pass. Focused post-merge schema,
-  mutation, I32, tensor-name, manifest, and selector coverage is still
-  required.
+  material mismatch. **Status:** complete; both Swift targets built and all 919
+  pre-merge package tests passed. Post-merge schema coverage validates the
+  complete pinned config mutation boundary, exact five-slot quant contract,
+  required manifest fields, I32 FlashHead exclusion, source fingerprint, and
+  Maple tensor paths. The final 932-test package suite passed in 148 suites.
 
 - [ ] **`feature/maple-ternary-repack`** — Acceptance: a synthetic and then real
   pinned Maple snapshot streams into `.gturbo`; resident ternary matrices are
