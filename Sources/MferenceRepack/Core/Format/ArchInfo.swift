@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 /// Model family discriminator, mirrored into `manifest.json -> arch.family`
@@ -279,8 +280,12 @@ struct ArchInfo: Sendable, Equatable {
     private static func loadMaple(configPath: String,
                                   tc: [String: Any]) throws -> ArchInfo {
         func integer(_ key: String) throws -> Int {
-            guard let value = (tc[key] as? Int) ?? (tc[key] as? NSNumber)?.intValue else {
-                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(key)")
+            guard let number = tc[key] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  NSNumber(value: number.int64Value).compare(number) == .orderedSame,
+                  let value = Int(exactly: number.int64Value) else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "\(key) must be an exact integer")
             }
             return value
         }

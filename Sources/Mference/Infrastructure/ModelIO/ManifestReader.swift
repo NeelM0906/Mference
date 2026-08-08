@@ -314,7 +314,13 @@ public enum ManifestReader {
         try check("tieWordEmbeddings",   a.tieWordEmbeddings,   e.tieWordEmbeddings)
         try check("attentionKEqV",       a.attentionKEqV,       e.attentionKEqV)
         try check("hiddenActivation",    a.hiddenActivation,    e.hiddenActivation)
-        let actualMask = a.fullAttentionLayerMask.map { UInt8($0) }
+        guard a.fullAttentionLayerMask.allSatisfy({ UInt8(exactly: $0) != nil }) else {
+            throw ModelError.archMismatch(
+                field: "fullAttentionLayerMask",
+                expected: e.fullAttentionLayerMask.description,
+                actual: a.fullAttentionLayerMask.description)
+        }
+        let actualMask = a.fullAttentionLayerMask.compactMap { UInt8(exactly: $0) }
         try check("fullAttentionLayerMask",
                   actualMask.description,
                   e.fullAttentionLayerMask.description)

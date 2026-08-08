@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 /// Parses `model.safetensors.index.json` and `config.json -> quantization`.
@@ -55,8 +56,8 @@ enum IndexLoader {
             }
             let isMaple = (root["model_type"] as? String) == "maple"
             if isMaple {
-                guard (quant["bits"] as? NSNumber)?.intValue == 2,
-                      (quant["group_size"] as? NSNumber)?.intValue == 128,
+                guard exactInteger(quant["bits"]) == 2,
+                      exactInteger(quant["group_size"]) == 128,
                       quant["mode"] as? String == "affine" else {
                     throw RepackError.configJsonInvalid(
                         path: configPath,
@@ -71,34 +72,38 @@ enum IndexLoader {
                 }
                 for key in expectedOverrideKeys {
                     guard let override = quant[key] as? [String: Any],
-                          (override["bits"] as? NSNumber)?.intValue == 4,
-                          (override["group_size"] as? NSNumber)?.intValue == 64,
+                          exactInteger(override["bits"]) == 4,
+                          exactInteger(override["group_size"]) == 64,
                           override.keys.allSatisfy({ $0 == "bits" || $0 == "group_size" }) else {
                         throw RepackError.configJsonInvalid(
                             path: configPath,
                             detail: "Maple requires \(key) INT4/group-64 quantization")
                     }
                 }
-            }
-            if let b = quant["bits"] as? Int      { baseBits  = b }
-            if let g = quant["group_size"] as? Int { baseGroup = g }
-            if let m = quant["mode"] as? String   { baseMode  = m }
-            for (k, v) in quant where !(k == "bits" || k == "group_size" || k == "mode") {
-                guard let entry = v as? [String: Any] else { continue }
-                let bits = (entry["bits"] as? Int) ?? baseBits
-                let g    = (entry["group_size"] as? Int) ?? baseGroup
-                // Resident-tensor kernels assume the base group size; only
-                // 2-bit streamed routed experts support a deviating group
-                // (DeepSeek V4 ships gate_proj at group 32).
-                guard g == baseGroup
-                    || (bits == 2 && (g == 32 || g == 64))
-                    || (isMaple && bits == 4 && g == 64
-                        && (k == "lm_head" || k == "model.word_embeddings")) else {
-                    throw RepackError.configJsonInvalid(
-                        path: configPath,
-                        detail: "quantization override \(k) group_size \(g) != base \(baseGroup)")
+                baseBits = 2
+                baseGroup = 128
+                baseMode = "affine"
+                overrides = Dictionary(uniqueKeysWithValues: expectedOverrideKeys.map {
+                    ($0, QuantSpec(bits: 4, groupSize: 64))
+                })
+            } else {
+                if let b = quant["bits"] as? Int      { baseBits  = b }
+                if let g = quant["group_size"] as? Int { baseGroup = g }
+                if let m = quant["mode"] as? String   { baseMode  = m }
+                for (k, v) in quant where !(k == "bits" || k == "group_size" || k == "mode") {
+                    guard let entry = v as? [String: Any] else { continue }
+                    let bits = (entry["bits"] as? Int) ?? baseBits
+                    let g    = (entry["group_size"] as? Int) ?? baseGroup
+                    // Resident-tensor kernels assume the base group size;
+                    // only 2-bit streamed routed experts support a deviating
+                    // group (DeepSeek V4 ships gate_proj at group 32).
+                    guard g == baseGroup || (bits == 2 && (g == 32 || g == 64)) else {
+                        throw RepackError.configJsonInvalid(
+                            path: configPath,
+                            detail: "quantization override \(k) group_size \(g) != base \(baseGroup)")
+                    }
+                    overrides[k] = QuantSpec(bits: bits, groupSize: g)
                 }
-                overrides[k] = QuantSpec(bits: bits, groupSize: g)
             }
         } catch let e as RepackError {
             throw e
@@ -130,5 +135,14 @@ enum IndexLoader {
             : name
         if let o = meta.bitsOverrides[stripped] { return o }
         return QuantSpec(bits: meta.baseBits, groupSize: meta.baseGroupSize)
+    }
+
+    private static func exactInteger(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              NSNumber(value: number.int64Value).compare(number) == .orderedSame else {
+            return nil
+        }
+        return Int(exactly: number.int64Value)
     }
 }
