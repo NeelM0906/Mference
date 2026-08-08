@@ -395,16 +395,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// state inside layer L's command buffer, feeding real preads. The
         /// only mode whose predictor knows anything about the current token.
         case pilot
+        /// SHADOW: pilot's predictor with a non-blocking transport. Real
+        /// plans never wait for an in-flight speculative read (the slot
+        /// reservation system already keeps them safe to plan around), and
+        /// each layer issues at most `shadowIssueBudget` of its top-ranked
+        /// missing predictions, so speculation cannot flood the SSD or evict
+        /// more than it earns. Response to the measured pilot failure: 73%
+        /// recall but slower end-to-end from joins and unthrottled reads.
+        case shadow
 
         static func parse(_ raw: String?) -> SpeculativePrefetchMode {
             switch raw?.lowercased() {
             case "1", "on", "prefetch": return .prefetch
             case "advise": return .advise
             case "pilot": return .pilot
+            case "shadow": return .shadow
             default: return .off
             }
         }
     }
+
+    /// Shadow mode: speculative reads issued per layer, taken from the front
+    /// of the pilot's weight-ranked prediction list. Env-tunable while the
+    /// knob is being characterized; the measured best becomes the constant.
+    private static let shadowIssueBudget: Int = {
+        if let raw = ProcessInfo.processInfo.environment["MFERENCE_SHADOW_BUDGET"],
+           let parsed = Int(raw), parsed > 0 {
+            return parsed
+        }
+        return 2
+    }()
     var speculativePrefetchMode = SpeculativePrefetchMode.parse(
         ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"])
     /// Last token's routed expert ids per layer; empty until a layer has been
@@ -890,6 +910,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private func resetTransientState() {
+        // Reset must drain fully even in shadow mode: a background read may
+        // not write into slots after this point.
+        if let pending = pendingSpeculation {
+            pendingSpeculation = nil
+            totalSpecPrefetchBytes &+= pending.join()
+        }
         joinPendingSpeculation()
         previousTokenExperts = []
         prefillChunkState.reset()
@@ -976,14 +1002,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             defer { lock.unlock() }
             return bytes
         }
+
+        /// Non-blocking join: nil while the reads are still in flight.
+        func tryJoin() -> UInt64? {
+            lock.lock()
+            if joined {
+                defer { lock.unlock() }
+                return bytes
+            }
+            lock.unlock()
+            guard finished.wait(timeout: .now()) == .success else { return nil }
+            lock.lock()
+            defer { lock.unlock() }
+            joined = true
+            return bytes
+        }
     }
 
     /// Drains any outstanding speculation. Called before every real plan (so no
     /// slot is replanned while a background read is filling it) and on reset.
     /// Returns the joined record so the caller can score its prediction.
+    ///
+    /// Shadow mode never blocks here: an unfinished read stays pending — the
+    /// streamer's `speculativeInFlight` reservations already exclude its slots
+    /// from hits and eviction, so planning around it is safe — and it is
+    /// reaped by a later call once it has landed.
     @discardableResult
     private func joinPendingSpeculation() -> (layer: Int, predicted: Set<Int>)? {
         guard let pending = pendingSpeculation else { return nil }
+        if speculativePrefetchMode == .shadow {
+            guard let bytes = pending.tryJoin() else { return nil }
+            pendingSpeculation = nil
+            totalSpecPrefetchBytes &+= bytes
+            return (pending.layer, pending.predicted)
+        }
         pendingSpeculation = nil
         totalSpecPrefetchBytes &+= pending.join()
         return (pending.layer, pending.predicted)
@@ -991,7 +1043,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// Joins outstanding speculation and credits it against the experts the
     /// real plan turned out to need.
+    ///
+    /// Shadow mode joins **only when it pays**: if a predicted expert for
+    /// this layer is actually needed, the in-flight read is nearly done and
+    /// joining is cheaper than re-reading it on the demand path; otherwise
+    /// the record is reaped lazily and the plan never waits.
     private func settleSpeculation(layer: Int, actualExperts: [Int]) {
+        if speculativePrefetchMode == .shadow,
+           let pending = pendingSpeculation,
+           pending.layer == layer,
+           actualExperts.contains(where: pending.predicted.contains) {
+            pendingSpeculation = nil
+            totalSpecPrefetchBytes &+= pending.join()
+            var counted = Set<Int>()
+            for expert in actualExperts
+                where pending.predicted.contains(expert)
+                    && counted.insert(expert).inserted {
+                totalSpecPrefetchConfirmed &+= 1
+            }
+            return
+        }
         guard let joined = joinPendingSpeculation(), joined.layer == layer else { return }
         var counted = Set<Int>()
         for expert in actualExperts
@@ -1022,7 +1093,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             record.complete(bytes: 0)
             return
         }
-        let missing = streamer.nonResidentExperts(predicted)
+        var missing = streamer.nonResidentExperts(predicted)
+        if speculativePrefetchMode == .shadow {
+            // The prediction list is weight-ranked; a strict per-layer issue
+            // budget keeps speculation from flooding the SSD or evicting
+            // more slots than a right guess earns back.
+            missing = Array(missing.prefix(Self.shadowIssueBudget))
+        }
         guard !missing.isEmpty else {
             record.complete(bytes: 0)
             return
@@ -1046,7 +1123,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return
         }
         totalSpecPrefetchIssued &+= UInt64(reservation.count)
-        DispatchQueue.global(qos: .utility).async {
+        // Shadow joins these reads on the critical path the moment a
+        // prediction is confirmed, so they must not run at utility I/O
+        // priority; utility stays correct for the fire-and-forget modes.
+        let readQoS: DispatchQoS.QoSClass =
+            speculativePrefetchMode == .shadow ? .userInitiated : .utility
+        DispatchQueue.global(qos: readQoS).async {
             record.complete(bytes: streamer.executeSpeculativeReservation(reservation))
         }
     }
@@ -1054,7 +1136,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func predictedExperts(for layer: Int) -> [Int] {
         if let speculativeExpertPredictor { return speculativeExpertPredictor(layer) }
         switch speculativePrefetchMode {
-        case .pilot:
+        case .pilot, .shadow:
             guard let pilotPrediction, pilotPrediction.layer == layer else { return [] }
             return pilotPrediction.experts
         case .prefetch, .advise:
@@ -1085,7 +1167,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// on, the layer exists, and its expert set is not already exactly known
     /// from the hash table.
     private func shouldEncodePilotGemv(nextLayer: Int) -> Bool {
-        speculativePrefetchMode == .pilot
+        (speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow)
             && speculativeExpertPredictor == nil
             && nextLayer < cfg.numLayers
             && !cfg.layerIsHashRouted(nextLayer)
@@ -1095,7 +1177,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// bypass the GEMV entirely (exact from the token id).
     private func capturePilotPrediction(nextLayer: Int, token: Int32, gemvEncoded: Bool) {
         pilotPrediction = nil
-        guard speculativePrefetchMode == .pilot, nextLayer < cfg.numLayers else { return }
+        guard speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow, nextLayer < cfg.numLayers else { return }
         if let hashed = hashRoutedExperts(layer: nextLayer, token: token) {
             pilotPrediction = (nextLayer, hashed)
             return
