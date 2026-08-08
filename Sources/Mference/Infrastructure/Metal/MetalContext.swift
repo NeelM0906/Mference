@@ -91,6 +91,7 @@ public final class MetalContext: @unchecked Sendable {
         "gdn": "Metal/GDN",
         "inkling": "Metal/Inkling",
         "logit": "Metal/Sampling",
+        "maple_add_rmsnorm": "Metal/Primitives",
         "maple_ternary": "Metal/Quant",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
