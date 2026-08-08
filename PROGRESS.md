@@ -72,7 +72,10 @@ system map is [WIKI.md](WIKI.md).
   pre-merge package tests passed. Post-merge schema coverage validates the
   complete pinned config mutation boundary, exact five-slot quant contract,
   required manifest fields, I32 FlashHead exclusion, source fingerprint, and
-  Maple tensor paths. The final 932-test package suite passed in 148 suites.
+  Maple tensor paths. Current writers publish `numDenseLayers: 0`; the reader
+  also preserves verified research-era manifests where that redundant zero was
+  omitted, without relaxing nonzero-value or routed-layout checks. The final
+  932-test package suite passed in 148 suites.
 
 - [x] **`feature/maple-ternary-repack`** — Acceptance: a synthetic and then real
   pinned Maple snapshot streams into `.gturbo`; resident ternary matrices are
