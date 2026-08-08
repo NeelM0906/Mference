@@ -91,6 +91,7 @@ public final class MetalContext: @unchecked Sendable {
         "gdn": "Metal/GDN",
         "inkling": "Metal/Inkling",
         "logit": "Metal/Sampling",
+        "maple_ternary": "Metal/Quant",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
         "rmsnorm": "Metal/Primitives",
@@ -142,13 +143,18 @@ public final class MetalContext: @unchecked Sendable {
     }
 
     /// Compile a shader module separately from the shared runtime library.
-    public static func moduleLibrary(device: MTLDevice, module: String) throws -> MTLLibrary {
+    public static func moduleLibrary(device: MTLDevice,
+                                     module: String,
+                                     safeMath: Bool = false) throws -> MTLLibrary {
         guard let url = shaderURL(module: module) else {
             throw MetalError.missingShaderResource(module)
         }
         let src = try String(contentsOf: url, encoding: .utf8)
         let opts = MTLCompileOptions()
         opts.languageVersion = shaderLanguageVersion
+        if safeMath {
+            opts.mathMode = .safe
+        }
         do {
             return try device.makeLibrary(source: src, options: opts)
         } catch {
