@@ -10,6 +10,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
+    case maple = "maple"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -453,6 +454,50 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Canonical Maple Preview baseline: 24 plain pre-norm MoE layers with
+    /// 256 routed experts (top-8) and no shared expert. Three sliding layers
+    /// are followed by one global NoPE layer.
+    public static let maplePreview = ArchConfig(
+        hiddenSize: 2048,
+        intermediateSize: 512,
+        moeIntermediateSize: 512,
+        numHeads: 16,
+        numKVHeads: 4,
+        numFullKVHeads: 4,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 151_936,
+        slidingWindow: 512,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000.0,
+        fullRopeTheta: 0.0,
+        partialRotaryFactor: 0.5,
+        numLayers: 24,
+        numExperts: 256,
+        topKExperts: 8,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.mapleLayerMask(),
+        hiddenActivation: "silu",
+        family: .maple,
+        attnOutputGate: false,
+        attentionScale: 1.0 / Double(128).squareRoot(),
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        routerScoringFunc: "softmax",
+        routedScalingFactor: 1.0,
+        swigluLimit: 7.0,
+        numSharedExperts: 0,
+        routerNormAfterTopK: true
+    )
+
+    private static func mapleLayerMask() -> [UInt8] {
+        (0..<24).map { $0 % 4 == 3 ? 1 : 0 }
+    }
+
     /// Canonical DeepSeek-V4-Flash 284B-A13B baseline: 43 all-MoE layers
     /// (1 shared + 256 routed experts of width 2048, top-6; layers 0–2 route
     /// by frozen `tid2eid` hash), shared-KV MQA attention (64 query heads over
@@ -607,6 +652,7 @@ public struct ArchConfig: Sendable, Equatable {
         .qwen36: .qwen36_35B_A3B,
         .deepseekV4Flash: .deepseekV4Flash_284B_A13B,
         .inklingSmall: .inklingSmall_276B_A12B,
+        .maple: .maplePreview,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -643,15 +689,18 @@ public struct ArchConfig: Sendable, Equatable {
             shapes.append((m: la.valueDim, n: hiddenSize))
             shapes.append((m: hiddenSize, n: la.valueDim))
         }
-        shapes.append((m: intermediateSize, n: hiddenSize))
-        shapes.append((m: hiddenSize, n: intermediateSize))
+        if numSharedExperts > 0 {
+            shapes.append((m: intermediateSize, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: intermediateSize))
+        }
         return shapes
     }
 
     /// Resident INT8 GEMV shapes issued during decode (router and, when the
     /// architecture has one, the shared-expert scalar gate).
     public var decodeInt8GEMVShapes: [(m: Int, n: Int)] {
-        var shapes: [(m: Int, n: Int)] = [(m: numExperts, n: hiddenSize)]
+        var shapes: [(m: Int, n: Int)] = family == .maple
+            ? [] : [(m: numExperts, n: hiddenSize)]
         if sharedExpertGated { shapes.append((m: 1, n: hiddenSize)) }
         return shapes
     }

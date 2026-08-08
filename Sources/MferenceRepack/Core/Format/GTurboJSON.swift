@@ -122,6 +122,14 @@ enum GTurboJSON {
             archDict["routerGlobalScale"] = arch.routerGlobalScale
             archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
         }
+        if arch.family == .maple {
+            archDict["routerScoringFunc"] = arch.routerScoringFunc
+            archDict["routedScalingFactor"] = arch.routedScalingFactor
+            archDict["swigluLimit"] = arch.swigluLimit
+            archDict["numSharedExperts"] = arch.numSharedExperts
+            archDict["numDenseLayers"] = arch.numDenseLayers
+            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
+        }
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -137,6 +145,38 @@ enum GTurboJSON {
                 "scaleType": "BF16",
                 "biasType": "BF16",
                 "groupSize": plan.baseGroupSize
+            ]
+        }
+        if arch.family == .maple {
+            let affineInt4: [String: Any] = [
+                "weightBits": 4,
+                "scheme": "affine",
+                "scaleType": "BF16",
+                "biasType": "BF16",
+                "groupSize": 64,
+            ]
+            quantDict["embedding"] = affineInt4
+            quantDict["attention"] = affineInt4
+            quantDict["router"] = [
+                "weightBits": 16,
+                "scheme": "unquantized",
+                "scaleType": "none",
+                "biasType": "none",
+                "groupSize": 0,
+            ]
+            quantDict["sharedExpert"] = [
+                "weightBits": 0,
+                "scheme": "none",
+                "scaleType": "none",
+                "biasType": "none",
+                "groupSize": 0,
+            ]
+            quantDict["routedExpert"] = [
+                "weightBits": 2,
+                "scheme": "affine",
+                "scaleType": "BF16",
+                "biasType": "BF16",
+                "groupSize": 64,
             ]
         }
 

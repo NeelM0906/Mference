@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 /// Model family discriminator, mirrored into `manifest.json -> arch.family`
@@ -8,6 +9,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
+    case maple = "maple"
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
@@ -253,10 +255,13 @@ struct ArchInfo: Sendable, Equatable {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
         }
-        // DeepSeek V4 is text-only; its config is flat (no `text_config`
-        // wrapper), so dispatch on model_type before the wrapper guard.
+        // DeepSeek V4 and Maple are text-only; their configs are flat (no
+        // `text_config` wrapper), so dispatch before the wrapper guard.
         if (root["model_type"] as? String) == "deepseek_v4" {
             return try loadDeepseekV4Flash(configPath: configPath, tc: root)
+        }
+        if (root["model_type"] as? String) == "maple" {
+            return try loadMaple(configPath: configPath, tc: root)
         }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
@@ -268,6 +273,149 @@ struct ArchInfo: Sendable, Equatable {
             return try loadInklingSmall(configPath: configPath, tc: tc)
         }
         return try loadGemma4(configPath: configPath, tc: tc)
+    }
+
+    // MARK: - Maple
+
+    private static func loadMaple(configPath: String,
+                                  tc: [String: Any]) throws -> ArchInfo {
+        func integer(_ key: String) throws -> Int {
+            guard let number = tc[key] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  NSNumber(value: number.int64Value).compare(number) == .orderedSame,
+                  let value = Int(exactly: number.int64Value) else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "\(key) must be an exact integer")
+            }
+            return value
+        }
+        func decimal(_ key: String) throws -> Double {
+            guard let value = (tc[key] as? Double) ?? (tc[key] as? NSNumber)?.doubleValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(key)")
+            }
+            return value
+        }
+        func require(_ key: String, equals expected: Bool) throws {
+            guard tc[key] as? Bool == expected else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "Maple requires \(key)=\(expected)")
+            }
+        }
+
+        let expectedMask: [UInt8] = (0..<24).map { $0 % 4 == 3 ? 1 : 0 }
+        let expectedLayerTypes = (0..<24).map { $0 % 4 == 3 ? "full_attention" : "sliding_attention" }
+        guard let layerTypes = tc["layer_types"] as? [String], layerTypes == expectedLayerTypes else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "Maple requires the pinned 3-sliding/1-full layer schedule")
+        }
+        try require("use_qk_norm", equals: true)
+        try require("norm_topk_prob", equals: true)
+        try require("tie_word_embeddings", equals: false)
+        try require("use_rmsnorm", equals: true)
+        try require("use_bias", equals: false)
+        guard tc["router_dtype"] as? String == "fp32" else {
+            throw RepackError.configJsonInvalid(path: configPath, detail: "Maple requires router_dtype=fp32")
+        }
+        guard tc["hidden_act"] as? String == "silu" else {
+            throw RepackError.configJsonInvalid(path: configPath, detail: "Maple requires hidden_act=silu")
+        }
+
+        let arch = ArchInfo(
+            hiddenSize: try integer("hidden_size"),
+            intermediateSize: try integer("moe_shared_expert_intermediate_size"),
+            moeIntermediateSize: try integer("moe_intermediate_size"),
+            numHeads: try integer("num_attention_heads"),
+            numKVHeads: try integer("num_key_value_heads"),
+            numFullKVHeads: try integer("num_key_value_heads"),
+            headDim: try integer("head_dim"),
+            fullHeadDim: try integer("head_dim"),
+            vocabSize: try integer("vocab_size"),
+            slidingWindow: try integer("sliding_window"),
+            finalLogitSoftcap: 0.0,
+            ropeTheta: try decimal("rope_theta"),
+            // Maple's full layers are NoPE. Do not derive this from the
+            // checkpoint's unrelated `nope_on_global_attention` flag.
+            fullRopeTheta: 0.0,
+            partialRotaryFactor: try decimal("partial_rotary_factor"),
+            numLayers: try integer("num_hidden_layers"),
+            numExperts: try integer("num_experts"),
+            topKExperts: try integer("num_experts_per_tok"),
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: expectedMask,
+            hiddenActivation: "silu",
+            family: .maple,
+            attnOutputGate: false,
+            attentionScale: 1.0 / Double(128).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            routerScoringFunc: "softmax",
+            routedScalingFactor: 1.0,
+            swigluLimit: 7.0,
+            numSharedExperts: try integer("num_shared_experts"),
+            numDenseLayers: try integer("first_k_dense_replace"),
+            routerNormAfterTopK: true)
+        try crossCheckMaple(arch, configPath: configPath, rmsNormEpsilon: try decimal("rms_norm_eps"))
+        return arch
+    }
+
+    private static func crossCheckMaple(_ actual: ArchInfo,
+                                        configPath: String,
+                                        rmsNormEpsilon: Double) throws {
+        let expected = ArchInfo(
+            hiddenSize: 2_048,
+            intermediateSize: 512,
+            moeIntermediateSize: 512,
+            numHeads: 16,
+            numKVHeads: 4,
+            numFullKVHeads: 4,
+            headDim: 128,
+            fullHeadDim: 128,
+            vocabSize: 151_936,
+            slidingWindow: 512,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 10_000.0,
+            fullRopeTheta: 0.0,
+            partialRotaryFactor: 0.5,
+            numLayers: 24,
+            numExperts: 256,
+            topKExperts: 8,
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: (0..<24).map { $0 % 4 == 3 ? 1 : 0 },
+            hiddenActivation: "silu",
+            family: .maple,
+            attnOutputGate: false,
+            attentionScale: 1.0 / Double(128).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            routerScoringFunc: "softmax",
+            routedScalingFactor: 1.0,
+            swigluLimit: 7.0,
+            numSharedExperts: 0,
+            numDenseLayers: 0,
+            routerNormAfterTopK: true)
+        guard actual == expected, rmsNormEpsilon == 0.000_001 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "maple config does not match the pinned Maple Preview architecture baseline")
+        }
     }
 
     // MARK: - Inkling Small
