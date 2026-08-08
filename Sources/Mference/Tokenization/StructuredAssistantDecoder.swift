@@ -28,11 +28,13 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     public init(tokenizer: MFTokenizer,
                 allowedTools: Set<String>,
+                startsInThought: Bool = false,
                 idGenerator: @escaping @Sendable () -> String = {
                     "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
                 }) {
         self.tokenizer = tokenizer
         self.allowedTools = allowedTools
+        self.channel = startsInThought ? .thought : .visible
         self.idGenerator = idGenerator
     }
 
@@ -124,8 +126,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
-    /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser. Everything
-    /// else streams as visible content.
+    /// `<tool_call>`…`</tool_call>` buffer the dialect's tool payload.
     private func consumeChatML(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
@@ -143,8 +144,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = nil
             let text = tokenizer.decode(tokens, skipSpecialTokens: false)
             do {
-                let call = try QwenToolCallParser().parse(
-                    text, allowedTools: allowedTools, id: idGenerator())
+                let call = try parseChatMLToolCall(text)
                 emittedCalls += 1
                 return [.toolCall(call)]
             } catch {
@@ -154,7 +154,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
         if var tokens = toolTokens {
             tokens.append(tokenID)
-            guard tokens.count * MemoryLayout<Int32>.size <= QwenToolCallParser.maximumBytes else {
+            guard tokens.count * MemoryLayout<Int32>.size <= chatMLToolCallMaximumBytes else {
                 failed = true
                 throw ToolCallParserError.oversized
             }
@@ -171,6 +171,21 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
         guard channel != .thought else { return [] }
         return delta.isEmpty ? [] : [.content(delta)]
+    }
+
+    private var chatMLToolCallMaximumBytes: Int {
+        tokenizer.modelFamily == .maple
+            ? MapleToolCallParser.maximumBytes
+            : QwenToolCallParser.maximumBytes
+    }
+
+    private func parseChatMLToolCall(_ text: String) throws -> ParsedToolCall {
+        if tokenizer.modelFamily == .maple {
+            return try MapleToolCallParser().parse(
+                text, allowedTools: allowedTools, id: idGenerator())
+        }
+        return try QwenToolCallParser().parse(
+            text, allowedTools: allowedTools, id: idGenerator())
     }
 
     /// DeepSeek transitions: `<think>`…`</think>` suppress thought text like
