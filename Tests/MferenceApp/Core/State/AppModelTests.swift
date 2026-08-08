@@ -109,7 +109,7 @@ import Testing
     }
 
     @MainActor
-    @Test func requestTimePrefillChangeDoesNotMarkReadySessionStale() {
+    @Test func prefillChangeMarksReadySessionStale() {
         let model = AppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
@@ -117,7 +117,7 @@ import Testing
 
         model.runtimeOptions.prefillEnabled = false
 
-        #expect(!model.hasStaleLoadedRuntime)
+        #expect(model.hasStaleLoadedRuntime)
     }
 
     @MainActor
