@@ -244,60 +244,23 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
     }
 
     private func encodeExperts(plan: RoutedExpertFetchPlan, offsets: MoEExpertOffsets) async throws {
-        let missRanks = plan.misses.map(UInt32.init)
-        let missSet = Set(missRanks)
-        let hitRanks = (0..<Self.topK).map(UInt32.init).filter { !missSet.contains($0) }
         let plannedViews = try model.routedExpertBuffers(for: plan)
         let blobs = try expertBlobs(plannedViews)
-        let argument = moe.makeRoutedArgumentBuffer(routedBlobs: blobs, offsets: offsets)
 
-        if missRanks.isEmpty {
-            let hitCB = try commandBuffer()
-            moe.encodePhase1(commandBuffer: hitCB,
-                             routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
-                             x: routedInput, acts: moeActs)
-            moe.encodePhase2(commandBuffer: hitCB,
-                             routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
-                             acts: moeActs, routingWeights: routerWeights, output: moeDelta)
-            try finish(hitCB)
-            return
-        }
-
-        if !hitRanks.isEmpty {
-            let hitCB = try commandBuffer()
-            let fetch = Task { try await model.fetchRoutedExperts(plan: plan) }
-            moe.encodePhase1Subset(commandBuffer: hitCB,
-                                   routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
-                                   x: routedInput, acts: moeActs, activeSlotIndices: hitRanks)
-            hitCB.commit()
-            do {
-                let loadedViews = try await fetch.value
-                try requireSameExpertBuffers(loadedViews, blobs)
-            } catch {
-                await hitCB.completed()
-                throw error
-            }
-            try requireCompletion(hitCB)
-        } else {
-            let fetch = Task { try await model.fetchRoutedExperts(plan: plan) }
-            let loadedViews = try await fetch.value
+        if !plan.misses.isEmpty {
+            let loadedViews = try await model.fetchRoutedExperts(plan: plan)
             try requireSameExpertBuffers(loadedViews, blobs)
         }
 
-        let missCB = try commandBuffer()
-        if missRanks.count == Self.topK {
-            moe.encodePhase1(commandBuffer: missCB,
-                             routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
-                             x: routedInput, acts: moeActs)
-        } else {
-            moe.encodePhase1Subset(commandBuffer: missCB,
-                                   routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
-                                   x: routedInput, acts: moeActs, activeSlotIndices: missRanks)
-        }
-        moe.encodePhase2(commandBuffer: missCB,
+        let argument = moe.makeRoutedArgumentBuffer(routedBlobs: blobs, offsets: offsets)
+        let commandBuffer = try commandBuffer()
+        moe.encodePhase1(commandBuffer: commandBuffer,
+                         routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
+                         x: routedInput, acts: moeActs)
+        moe.encodePhase2(commandBuffer: commandBuffer,
                          routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
                          acts: moeActs, routingWeights: routerWeights, output: moeDelta)
-        try finish(missCB)
+        try finish(commandBuffer)
     }
 
     private func routedRanks() throws -> [Int] {
