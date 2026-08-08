@@ -177,12 +177,14 @@ interface:
   dedicated manager rather than the generic KV arrays.
 - Inkling combines FP16 local/full KV with relative-position and depthwise
   short-convolution state.
-- Maple's implemented projection, normalization, Q/K, and decode-attention
-  primitives store native BF16 bit patterns in the same two-byte buffer budget.
-  The attention primitive consumes sliding layers in physical 512-row cache
-  order and full layers as a linear prefix. The planned runtime must preserve
-  those layouts while owning cache writes, reset, and continuation; physical
-  iteration order is part of exact parity.
+- Maple's implemented projection, normalization, Q/K, decode-attention, router,
+  and ternary-expert primitives keep native BF16 boundaries. Attention consumes
+  sliding layers in physical 512-row cache order and full layers as a linear
+  prefix. Routed experts preserve source-group-128 arithmetic over duplicated
+  group-64 companions and support disjoint cache-hit/miss phases without
+  changing rank reduction. The planned runtime must preserve those layouts
+  while owning cache writes, streamed expert I/O, reset, and continuation;
+  physical iteration and rank-reduction order are part of exact parity.
 
 Supported context choices are 4K, 8K, 16K, 32K, and 64K. Reset drops logical
 positions and advises unused state pages back to the OS. The server may retain
