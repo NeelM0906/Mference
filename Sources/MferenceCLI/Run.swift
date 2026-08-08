@@ -129,6 +129,13 @@ public func run(args: Args,
             lines += "    io exposed (GPU idle): "
             lines += ms(runner.totalIoExposedNanos) + " ms\n"
             lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
+            if runner.totalRoutedLayerSteps > 0 {
+                let rate = 100.0 * Double(runner.totalAllHitLayerSteps)
+                    / Double(runner.totalRoutedLayerSteps)
+                lines += "  all-hit layer steps: \(runner.totalAllHitLayerSteps)"
+                lines += "/\(runner.totalRoutedLayerSteps) ("
+                lines += String(format: "%.1f", rate) + "%)\n"
+            }
             let gpuBusy = runner.totalGpuBusyNanos
             let gpuSpan = runner.totalGpuSpanNanos
             lines += "  gpu busy: " + ms(gpuBusy) + " ms, span: "

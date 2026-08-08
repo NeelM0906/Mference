@@ -951,6 +951,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// while GPU work was still in flight versus the part that ran with an idle
     /// GPU. Only populated when `MFERENCE_PHASES=1`.
     public private(set) var totalIoOverlappedNanos: UInt64 = 0
+    /// S2 decision metric for the GPU-resident slot map: how many routed
+    /// layer-steps needed no miss at all — those are the steps S3 can run
+    /// entirely GPU-side.
+    public private(set) var totalRoutedLayerSteps: UInt64 = 0
+    public private(set) var totalAllHitLayerSteps: UInt64 = 0
     let gpuTimeLock = NSLock()
     public private(set) var totalGpuBusyNanos: UInt64 = 0
     var gpuSpanFirstStart: Double = .infinity
@@ -978,6 +983,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalHeadNanos = 0
         totalHeadFusedNanos = 0
         totalIoOverlappedNanos = 0
+        totalRoutedLayerSteps = 0
+        totalAllHitLayerSteps = 0
         gpuTimeLock.lock()
         totalGpuBusyNanos = 0
         gpuSpanFirstStart = .infinity
@@ -2864,6 +2871,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let plannedFetch = canPlanPhase1HitSplit
                 ? try model.planRoutedExperts(layer: L, experts: experts)
                 : nil
+            if Self.phaseInstrumentationEnabled {
+                totalRoutedLayerSteps &+= 1
+                if let plannedFetch, plannedFetch.misses.isEmpty {
+                    totalAllHitLayerSteps &+= 1
+                }
+            }
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSplitArgBuf: MTLBuffer?
             var phase1HitSplitRoutedBufs: [(buffer: MTLBuffer, offset: Int)] = []
