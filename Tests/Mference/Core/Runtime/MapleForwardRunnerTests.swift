@@ -225,6 +225,8 @@ import Testing
         #expect(model.integrityPolicy == .sizeCheckTrustedReceipt)
         #expect(model.routedExpertCacheSlotCount(layer: 0) == 8)
         #expect(runtime.prefillConfig == .off)
+        #expect(runtime.executedPrefillMode == .sequential)
+        #expect(runtime.kvStorageMode == .bf16)
         #expect(!(runtime.producer is any ChunkedPrefillRunner))
         #expect(!(runtime.producer is any FusedHeadLogitProducer))
 
@@ -323,6 +325,8 @@ import Testing
         #expect(runtime.producer is RealForwardRunner)
         #expect(runtime.producer is any ChunkedPrefillRunner)
         #expect(runtime.prefillConfig == requested.prefillConfig)
+        #expect(runtime.executedPrefillMode == .chunked)
+        #expect(runtime.kvStorageMode == .fp16)
         #expect((runtime.producer as? any FusedHeadLogitProducer)?.usesFusedGreedyHead == true)
     }
 }

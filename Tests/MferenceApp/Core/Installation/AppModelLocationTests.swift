@@ -47,6 +47,18 @@ import Testing
         #expect(result.path == "/repo/scratch/gemma4.gturbo")
     }
 
+    @Test func mapleUsesItsConventionalInstallDirectory() {
+        let files: Set<String> = ["/repo/Package.swift", "/repo/Sources/MferenceApp/Mac"]
+        let result = AppModelLocation.resolve(
+            explicitURL: nil,
+            executableURL: nil,
+            currentDirectoryURL: URL(fileURLWithPath: "/repo"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: files.contains,
+            installDirectoryName: AppModelInstallDescriptor.maple.installDirectoryName)
+        #expect(result.path == "/repo/scratch/maple.gturbo")
+    }
+
     @Test func standaloneAppFallsBackToApplicationSupport() {
         let result = AppModelLocation.resolve(
             explicitURL: nil,
