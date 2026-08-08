@@ -439,6 +439,30 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
     }
 
+    /// Eager decode path: mark the plan's miss slots in-flight and fill them
+    /// on a background queue, invoking `completion` when every read has
+    /// landed and been published. The caller encodes GPU work against the
+    /// slots immediately and gates it on an event its completion signals;
+    /// the in-flight marks keep concurrent plans away exactly as the
+    /// speculative path does.
+    public func beginAsyncFill(_ plan: ExpertCachePlan,
+                               qos: DispatchQoS.QoSClass = .userInitiated,
+                               completion: @escaping @Sendable () -> Void) {
+        let pairs = plan.misses.map { (expert: plan.experts[$0],
+                                       slot: plan.assignedSlots[$0]) }
+        guard !pairs.isEmpty else {
+            completion()
+            return
+        }
+        cacheLock.lock()
+        for pair in pairs { speculativeInFlight[pair.slot] = true }
+        cacheLock.unlock()
+        DispatchQueue.global(qos: qos).async { [self] in
+            executeSpeculativeReservation(pairs)
+            completion()
+        }
+    }
+
     /// Test/diagnostic view of slot residency.
     public func residentExpertsSnapshot() -> [Int] {
         cacheLock.lock()

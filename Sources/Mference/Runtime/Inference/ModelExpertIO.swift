@@ -142,6 +142,20 @@ extension Model {
     /// Direct handle on a layer's expert streamer. Used by the speculative
     /// prefetch path, which reserves slots on the caller's thread and then
     /// executes the reads on a background queue without re-resolving the layer.
+    /// Eager decode path: fill the plan's miss slots asynchronously.
+    /// `completion` fires when the slots hold their experts; resident mode
+    /// completes immediately (nothing to fill).
+    public func fillRoutedExpertsAsync(plan: RoutedExpertFetchPlan,
+                                       completion: @escaping @Sendable () -> Void) throws {
+        try ensureLayerOpened(plan.layer)
+        switch expertBackend(plan.layer) {
+        case .pread(let streamer):
+            streamer.beginAsyncFill(plan.cachePlan, completion: completion)
+        case .resident:
+            completion()
+        }
+    }
+
     /// GPU bindings for the slot-map decode path; nil for backends without a
     /// slot cache (resident mode).
     public func routedSlotMapBinding(layer: Int) throws

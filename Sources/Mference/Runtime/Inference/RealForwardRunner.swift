@@ -370,6 +370,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// GPU work instead of following it. Nil when the device cannot vend a
     /// shared event; the code then falls back to waiting on the whole buffer.
     private let routerEvent: MTLSharedEvent?
+    /// Eager routed decode: the routed command buffer is committed before
+    /// its expert fills land, gated on this event. Fill completions advance
+    /// it in contiguous issue order, so an out-of-order completion can never
+    /// unblock an earlier layer's command buffer.
+    private let eagerFetchEvent: MTLSharedEvent?
+    private var eagerFetchIssued: UInt64 = 0
+    private var eagerFetchDone = Set<UInt64>()
+    private var eagerFetchSignaled: UInt64 = 0
+    private let eagerFetchLock = NSLock()
+    static let eagerRoutedDefault =
+        ProcessInfo.processInfo.environment["MFERENCE_EAGER_ROUTED"] == "1"
+    var eagerRoutedEnabled = RealForwardRunner.eagerRoutedDefault
     private var routerEventValue: UInt64 = 0
     private static let routerEventTimeoutMS: UInt64 = 60_000
     /// Phase probes cost a completion handler per command buffer, so they are
@@ -507,6 +519,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.ctx = context
         self.cfg = model.config
         self.routerEvent = context.device.makeSharedEvent()
+        self.eagerFetchEvent = context.device.makeSharedEvent()
         self.maxContext = maxContext
         // Shadow prefetch is the accepted DSV4 production default
         // (community A/B 2026-08-07: short +18%, long +13%, byte-identical;
@@ -3097,21 +3110,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
 
-            // Routed-expert pread — overlaps the shared MLP still running in
-            // CB1 plus the phase-1 hit work committed above.
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let blobs: [TensorView]
-            if let plannedFetch {
-                blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+            // Routed-expert fills. Eager mode encodes the routed command
+            // buffer against the plan's slot views (slab offsets need no
+            // I/O), gates it on the fill event, and runs the preads in the
+            // background — the fetch leaves the CPU critical path entirely.
+            // The awaited path remains the fallback.
+            let routedBufs: [(buffer: MTLBuffer, offset: Int)]
+            var eagerSeq: UInt64?
+            if eagerRoutedEnabled, let plannedFetch, eagerFetchEvent != nil {
+                routedBufs = try model.routedExpertBuffers(for: plannedFetch)
+                    .map { (buffer: $0.buffer, offset: Int($0.offset)) }
+                eagerFetchIssued &+= 1
+                eagerSeq = eagerFetchIssued
             } else {
-                blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+                let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let blobs: [TensorView]
+                if let plannedFetch {
+                    blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+                } else {
+                    blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+                }
+                let tIoEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                totalIoNanos &+= tIoEnd - tIoStart
+                recordExpertIOOverlap(probe: overlapProbe,
+                                      startNanos: tIoStart,
+                                      endNanos: tIoEnd)
+                routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
             }
-            let tIoEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            totalIoNanos &+= tIoEnd - tIoStart
-            recordExpertIOOverlap(probe: overlapProbe,
-                                  startNanos: tIoStart,
-                                  endNanos: tIoEnd)
-            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let gTail: (MTLCommandBuffer) -> Void
             if cfg.ffnSandwichNorms {
@@ -3146,6 +3171,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
             let routedCB = ctx.queue.makeCommandBuffer()!
+            if let seq = eagerSeq, let event = eagerFetchEvent {
+                routedCB.encodeWaitForEvent(event, value: seq)
+            }
             let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
                 ? phase1HitSplitArgBuf
                 : nil
@@ -3180,6 +3208,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             gTail(routedCB)
             trackGpuInterval(routedCB)
             routedCB.commit()
+            if let seq = eagerSeq, let plannedFetch {
+                try model.fillRoutedExpertsAsync(plan: plannedFetch) { [weak self] in
+                    self?.eagerFetchCompleted(seq)
+                }
+            }
             if Self.slotMapDebugCompare, slotMapArmed,
                slotMapAllHit.contents().load(as: UInt32.self) == 1 {
                 while routedCB.status != .completed { usleep(200) }
@@ -5401,6 +5434,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Tracks when the command buffers that are supposed to hide a pread
     /// actually finished. Completion handlers run on a Metal thread, so the
     /// bookkeeping is lock-guarded.
+    private func eagerFetchCompleted(_ seq: UInt64) {
+        eagerFetchLock.lock()
+        eagerFetchDone.insert(seq)
+        while eagerFetchDone.contains(eagerFetchSignaled + 1) {
+            eagerFetchDone.remove(eagerFetchSignaled + 1)
+            eagerFetchSignaled += 1
+        }
+        // Signal inside the lock: two completions racing outside it could
+        // write the event backwards.
+        if let event = eagerFetchEvent, event.signaledValue < eagerFetchSignaled {
+            event.signaledValue = eagerFetchSignaled
+        }
+        eagerFetchLock.unlock()
+    }
+
     /// GPU-timeline attribution (`MFERENCE_PHASES=1`): busy time summed over
     /// tracked decode command buffers, plus the wall span they cover. The
     /// difference is scheduling gap — the target of command-buffer
