@@ -242,6 +242,35 @@ import MferenceDecodeProtocol
             loaded, loadedDirectory: nil))
     }
 
+    @Test func decodeServiceClientMissingExecutableHasSafeIdleTeardown() async {
+        let serviceURL = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("mference-missing-service-\(UUID())")
+        let client = DecodeServiceInferenceClient(serviceURL: serviceURL)
+        do {
+            try await client.ensureLoaded(
+                modelDirectory: URL(fileURLWithPath: "/tmp/model.gturbo"),
+                maxContextTokens: 4_096,
+                options: AppRuntimeOptions(),
+                forceLogitsHead: false,
+                onState: { _ in })
+            Issue.record("Missing decode service unexpectedly loaded a model")
+        } catch let error as AppInferenceError {
+            switch error {
+            case .modelLoadFailed:
+                break
+            default:
+                Issue.record("Expected modelLoadFailed, received \(error)")
+            }
+        } catch {
+            Issue.record("Expected AppInferenceError, received \(error)")
+        }
+
+        client.shutdown()
+        client.shutdown()
+        await client.unload()
+        #expect(client.currentInferenceMemoryBytes == nil)
+    }
+
     @Test func decoderAcceptsAFrameSplitAcrossSingleByteWrites() throws {
         let event = DecodeServiceEvent(
             kind: .snapshot,
