@@ -94,6 +94,7 @@ public final class MetalContext: @unchecked Sendable {
         "maple_add_rmsnorm": "Metal/Primitives",
         "maple_attention": "Metal/Attention",
         "maple_ternary": "Metal/Quant",
+        "maple_moe": "Metal/MoE",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
         "rmsnorm": "Metal/Primitives",
