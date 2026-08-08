@@ -22,6 +22,22 @@ extension ModelLoaderTests {
     #expect(model.lmHead.length == model.embedding.length)
   }
 
+  @Test func genericAttentionAccessorsUseTheFamilyTrunk() throws {
+    let dir = try Self.writeToySynthetic()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let device = try #require(MTLCreateSystemDefaultDevice())
+    let model = try Model.load(
+      directoryURL: dir, device: device,
+      expecting: .gemma4Toy())
+
+    _ = try model.qProj(layer: 0)
+    _ = try model.kProj(layer: 0)
+    _ = try model.vProj(layer: 0)
+    _ = try model.oProj(layer: 0)
+    _ = try model.qNorm(layer: 0)
+    _ = try model.kNorm(layer: 0)
+  }
+
   @Test func residentBytesAreReadableFromBuffer() throws {
     let dir = try Self.writeToySynthetic()
     defer { try? FileManager.default.removeItem(at: dir) }
