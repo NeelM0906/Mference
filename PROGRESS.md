@@ -55,13 +55,15 @@ system map is [WIKI.md](WIKI.md).
   Repack suite passed 80/80 with exact byte, scratch, digest, cancellation, and
   resume coverage.
 
-- [ ] **`bugfix/verified-install-provenance`** — Acceptance: `--verify-install`
+- [x] **`bugfix/verified-install-provenance`** — Acceptance: `--verify-install`
   never invents repository/revision provenance from `manifest.json`; it
   preserves origin only from an existing receipt bound to the exact directory,
   manifest, and complete file set; forged/stale/missing receipts have tests.
-  **Status:** implementation in progress; verification now retains provenance
-  only from an exactly bound existing receipt, with post-merge synthetic tests
-  still required.
+  **Status:** complete; verification retains provenance only from an exactly
+  bound existing receipt, never from the manifest snapshot hash. The full
+  918-test package suite passed before merge, and post-merge synthetic tests
+  cover repeated verification plus missing, stale, moved, partial, malformed,
+  oversized, unknown-tool, and file-mismatched receipts.
 
 - [ ] **`feature/maple-model-schema`** — Acceptance: explicit `.maple` family,
   pinned architecture, manifest fields, quantization contract, source selector,
