@@ -319,6 +319,10 @@ struct ArchInfo: Sendable, Equatable {
         guard tc["hidden_act"] as? String == "silu" else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "Maple requires hidden_act=silu")
         }
+        guard try integer("max_position_embeddings") == 128_000 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "Maple requires max_position_embeddings=128000")
+        }
 
         let arch = ArchInfo(
             hiddenSize: try integer("hidden_size"),
