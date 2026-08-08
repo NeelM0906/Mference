@@ -5,6 +5,121 @@ import Testing
 
 @Suite
 struct RangeCopyPlannerTests {
+    @Test func identityFingerprintRetainsLegacyV1Serialization() throws {
+        let root = temporaryRoot("fingerprint-v1")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let output = (root as NSString).appendingPathComponent("weights.bin")
+        let copy = CoalescedRangeCopy(
+            id: "range-00000000",
+            shardID: "source.bin",
+            sourceOffset: 4,
+            size: 8,
+            destinations: [RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: 4,
+                size: 8,
+                destinationPath: output,
+                destinationOffset: 12)])
+
+        let fingerprint = try RangeCopyPlanner.canonicalFingerprint(
+            copies: [copy],
+            outputRoot: root,
+            rangeChunkBytes: 4096,
+            layoutMode: "identity",
+            layoutOrderSha256: nil,
+            residentIndexSha256: String(repeating: "a", count: 64),
+            expectedOutputs: [
+                RemoteExpectedOutput(relativePath: "weights.bin", size: 32),
+            ])
+
+        #expect(fingerprint
+            == "fa14918215869b02f0fae5b0de6b05112c505b2c3f2734f8924a8a7adb926581")
+    }
+
+    @Test func transformedCopiesSplitOnInputUnitsAndAdvanceExpandedOffsets() throws {
+        let root = temporaryRoot("transform-split")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let output = (root as NSString).appendingPathComponent("weights.bin")
+        let copy = RangeCopy(
+            shardID: "source.bin",
+            sourceOffset: 10,
+            size: 12,
+            destinationPath: output,
+            destinationOffset: 100,
+            transform: .unpackInt2ToInt4)
+
+        let coalesced = try RangeCopyPlanner.coalesce(
+            copies: [copy],
+            rangeChunkBytes: 5)
+        let pieces = coalesced.flatMap(\.destinations)
+
+        #expect(coalesced.map(\.sourceOffset) == [10, 14, 18])
+        #expect(coalesced.map(\.size) == [4, 4, 4])
+        #expect(pieces.map(\.destinationOffset) == [100, 108, 116])
+        #expect(pieces.allSatisfy { $0.transform == .unpackInt2ToInt4 })
+    }
+
+    @Test func invalidTransformRangesAreRejected() throws {
+        let root = temporaryRoot("transform-invalid")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let output = (root as NSString).appendingPathComponent("weights.bin")
+        let invalidCopies = [
+            RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: 0,
+                size: 0,
+                destinationPath: output,
+                destinationOffset: 0),
+            RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: 0,
+                size: 6,
+                destinationPath: output,
+                destinationOffset: 0,
+                transform: .unpackInt2ToInt4),
+            RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: 0,
+                size: 2,
+                destinationPath: output,
+                destinationOffset: 0,
+                transform: .repeatBF16(count: 0, negated: false)),
+            RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: 0,
+                size: UInt64.max / 2 + 1,
+                destinationPath: output,
+                destinationOffset: 0,
+                transform: .repeatBF16(count: 2, negated: false)),
+            RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: UInt64.max,
+                size: 1,
+                destinationPath: output,
+                destinationOffset: 0),
+        ]
+
+        for copy in invalidCopies {
+            #expect(throws: RepackError.self) {
+                _ = try RangeCopyPlanner.coalesce(
+                    copies: [copy],
+                    rangeChunkBytes: 8)
+            }
+        }
+
+        #expect(throws: RepackError.self) {
+            try RangeCopyPlanner.validateDestinationIntervals(
+                [RangeCopy(
+                    shardID: "source.bin",
+                    sourceOffset: 0,
+                    size: 4,
+                    destinationPath: output,
+                    destinationOffset: UInt64.max - 3,
+                    transform: .unpackInt2ToInt4)],
+                outputRoot: root)
+        }
+    }
+
     @Test func canonicalFingerprintDoesNotDependOnAbsoluteOutputRoot() throws {
         let snapshotDirectory = temporaryRoot("snapshot")
         let firstOutput = temporaryRoot("first")
