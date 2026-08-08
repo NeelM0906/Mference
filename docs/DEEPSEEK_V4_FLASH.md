@@ -218,3 +218,25 @@ Sustained 512-token generation at 16 slots + adaptive: 3.77 tok/s.
 over 16 (decode is SSD-read-bound and LFU hit-rate gains saturate), so the
 budget table's ≥7 tok/s tier remains out of reach without the roadmap's
 I/O–compute overlap work — consistent with the analysis above.
+
+### Shadow speculative prefetch (accepted default, 2026-08-07)
+
+The first slice of that overlap work shipped: the pilot lookahead router
+(layer L+1's routing computed from layer L's state) now feeds an
+asynchronous prefetcher that joins the critical path only when a predicted
+expert is actually routed, reads at user-initiated I/O priority, and issues
+at most two weight-ranked predictions per layer. Output is byte-identical;
+the mode is the DSV4 production default (`MFERENCE_SPEC_PREFETCH` still
+overrides). Community-protocol A/B on the two naturally-terminating cases,
+16 slots + adaptive:
+
+| Case | Decode before | Decode after | Gain |
+| --- | ---: | ---: | ---: |
+| short-explanation | 4.41–4.46 tok/s | 5.10–5.29 tok/s | +17.8% |
+| long-synthesis | 3.75–3.82 tok/s | 4.26–4.32 tok/s | +13.7% |
+
+Long-prompt prefill improved ~7% as a side effect. Details and the
+rejected variants (blocking pilot, unthrottled issue, utility-QoS reads,
+32-slot scaling) are recorded in
+[experiments/summaries/13](experiments/summaries/13-dsv4-streaming-iterations.md)
+and [14](experiments/summaries/14-dsv4-shadow-prefetch.md).

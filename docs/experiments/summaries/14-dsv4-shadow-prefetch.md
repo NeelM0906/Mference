@@ -1,0 +1,46 @@
+# DSV4 shadow speculative prefetch — accepted, M5/24 GB, 2026-08-07
+
+Follow-up to [13-dsv4-streaming-iterations.md](13-dsv4-streaming-iterations.md):
+pilot's predictor kept, its transport replaced. Three measured changes, each
+byte-identical to the no-speculation control:
+
+1. **Join-if-useful.** A real plan waits for an in-flight speculative read
+   only when a predicted expert for that layer is actually routed — the wait
+   then always replaces a larger demand re-read. Mispredictions never block;
+   late records are reaped lazily. (Pilot joined always; a never-join
+   variant re-read in-flight experts on the demand path and won nothing.)
+2. **`userInitiated` read QoS.** The speculative reads were running at
+   `.utility`, which Darwin throttles to low I/O priority — a hidden tax on
+   exactly the reads the critical path may join.
+3. **Issue budget 2 per layer**, taken from the front of the weight-ranked
+   prediction list. Swept 1/2/3/4/6 → 5.50/5.64/5.51/5.38/5.31 tok/s on the
+   64-token diagnostic; the peak is sharp, matching the eviction/SSD-
+   contention model of pilot's 48 GB flood.
+
+## Community-protocol A/B (alternating blocks, fresh processes)
+
+`--rdadvise adaptive --verify trusted-receipt`, cases restricted to the two
+that reach a natural end of turn. medium-review is excluded for *any*
+config: DSV4 runs it to the 1,024-token cap by model behavior and the
+protocol rejects capped runs.
+
+| Case | baseline decode (3 runs) | shadow decode (3 runs) | gain |
+| --- | --- | --- | ---: |
+| short-explanation | 4.455 / 4.413 / 4.423 | 5.098 / 5.285 / 5.186 | +17.8% |
+| long-synthesis | 3.746 / 3.753 / 3.820 | 4.305 / 4.322 / 4.272 | +13.7% |
+
+Long-prompt prefill (through the decode path) improved as a side effect:
+388–401 s vs 416–436 s (~7%).
+
+## Decision
+
+`MFERENCE_SPEC_PREFETCH=shadow` becomes the DSV4 production default
+(env overrides in either direction). Other families keep `off`: Qwen's
+decode loop has no pilot GEMV wiring yet — porting it is the next
+streaming-lane item, targeting Qwen's measured 23% exposed I/O.
+
+Remaining headroom on DSV4: exposed I/O fell from 5.26 s to 2.71 s per 64
+diagnostic tokens — roughly half the original stall survives (join waits and
+sub-window read latency). Deeper fixes if wanted later: issue at L−2 via a
+two-layer lookahead router, or per-expert join granularity instead of
+per-record.

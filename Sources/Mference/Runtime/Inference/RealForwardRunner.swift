@@ -460,6 +460,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.cfg = model.config
         self.routerEvent = context.device.makeSharedEvent()
         self.maxContext = maxContext
+        // Shadow prefetch is the accepted DSV4 production default
+        // (community A/B 2026-08-07: short +18%, long +13%, byte-identical;
+        // docs/experiments/summaries/14-dsv4-shadow-prefetch.md). The env
+        // variable still overrides in either direction; other families keep
+        // `off` until they have their own accepted A/B.
+        if ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"] == nil,
+           model.config.family == .deepseekV4Flash {
+            self.speculativePrefetchMode = .shadow
+        }
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
