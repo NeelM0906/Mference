@@ -237,6 +237,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let zeroResidual: MTLBuffer  // [D] FP16 zeros — for routed branch base
     let outIndices: MTLBuffer    // [topK] UInt32
     let outWeights: MTLBuffer    // [topK] FP16
+    /// Lookahead router output: layer L+1's routing computed against layer
+    /// L's pre-FFN normed state, read at the same router wake as
+    /// `outIndices`. Feeds the speculative prefetcher; never bound by the
+    /// real routed path.
+    let pilotIndices: MTLBuffer  // [topK] UInt32
+    let pilotWeights: MTLBuffer  // [topK] FP16
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     let moeActs: MTLBuffer       // [topK * FmoE] FP16
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
@@ -596,6 +602,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let paddedTopK = max(cfg.topKExperts, MoE.maxStreamedExperts)
         self.outIndices    = try buf(paddedTopK, MemoryLayout<UInt32>.size)
         self.outWeights    = try buf(paddedTopK)
+        self.pilotIndices  = try buf(paddedTopK, MemoryLayout<UInt32>.size)
+        self.pilotWeights  = try buf(paddedTopK)
         self.moeActs       = try buf(paddedTopK * cfg.moeIntermediateSize)
         // Families that route fewer than 8 experts (Inkling: 6) pad the
         // streamed-expert list with duplicates carrying weight 0; zeroing the
@@ -2729,6 +2737,38 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
 
+            // Lookahead: layer L+1's router against layer L's pre-FFN normed
+            // state, in the same CB so the result is ready at the router
+            // wake below — no extra synchronization. Approximate by
+            // construction; scored as recall by the phase diagnostics and
+            // consumed only by the speculative prefetcher.
+            if speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow,
+               speculativeExpertPredictor == nil,
+               L + 1 < cfg.numLayers,
+               let nextRouterW = try? model.router(layer: L + 1) {
+                let nextPerExpertScale: (buffer: MTLBuffer, offset: Int)
+                if cfg.routerScaled,
+                   let view = try? model.routerPerExpertScale(layer: L + 1) {
+                    nextPerExpertScale = (view.buffer, Int(view.offset))
+                } else {
+                    nextPerExpertScale = (onesPerExpertScale!, 0)
+                }
+                moe.encodeRouterGemma4(commandBuffer: cb,
+                    weights: nextRouterW.buffer,
+                    weightsOffset: Int(nextRouterW.offset),
+                    scales:  nextRouterW.buffer,
+                    scalesOffset:  Int(nextRouterW.scaleOffset),
+                    biases:  nextRouterW.buffer,
+                    biasesOffset:  Int(nextRouterW.biasOffset),
+                    hidden: cfg.ffnSandwichNorms ? routerInput : routedX,
+                    effectiveScale: effectiveScaleBuffers[L + 1],
+                    perExpertScale: nextPerExpertScale.buffer,
+                    perExpertScaleOffset: nextPerExpertScale.offset,
+                    outIndices: pilotIndices, outWeights: pilotWeights,
+                    numExperts: UInt32(cfg.numExperts), d: D,
+                    topK: UInt32(cfg.topKExperts))
+            }
+
             // The router indices are written at this point in the buffer, so
             // signal the CPU here and keep encoding into the SAME buffer. The
             // shared dense MLP depends only on the post-attention norm, never
@@ -2786,6 +2826,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var experts = [Int](repeating: 0, count: cfg.topKExperts)
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
+            }
+
+            // The lookahead router result is complete at this wake; it feeds
+            // the L+1 prefetch issued after this layer's routed CB commits.
+            if speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow,
+               speculativeExpertPredictor == nil,
+               L + 1 < cfg.numLayers {
+                let pilotPtr = pilotIndices.contents().bindMemory(
+                    to: UInt32.self, capacity: cfg.topKExperts)
+                pilotPrediction = (L + 1, (0..<cfg.topKExperts).map {
+                    min(Int(pilotPtr[$0]), cfg.numExperts - 1)
+                })
             }
 
             // Join any speculative read aimed at this layer before planning —

@@ -44,3 +44,21 @@ diagnostic tokens — roughly half the original stall survives (join waits and
 sub-window read latency). Deeper fixes if wanted later: issue at L−2 via a
 two-layer lookahead router, or per-expert join granularity instead of
 per-record.
+
+## Qwen port attempt (2026-08-07, rejected)
+
+The same lookahead was wired into the Qwen/Gemma decode loop — layer L+1's
+router encoded against layer L's pre-FFN normed state in the same command
+buffer, read at the existing router wake (no new synchronization). Greedy
+128-token diagnostic at 32 slots, byte-identical output:
+
+- Recall 81.9%; exposed I/O 1,215 → 521 ms (−57%).
+- Decode 24.57 → 21.60 tok/s (−12%). **Rejected.**
+
+The economics invert on a host whose page cache holds the whole Qwen pool:
+a demand miss is a ~page-cache memcpy, so join waits plus 14 GB of extra
+speculative copies cost more than the misses they avoid. Shadow stays
+DSV4-only (family-gated default); the Qwen pilot wiring remains in the
+code, inert unless `MFERENCE_SPEC_PREFETCH` requests it, as the substrate
+for future copy-free-hit experiments. Qwen's 23% exposed I/O wants a
+different fix: serving page-cache-resident hits without the slot copy.
