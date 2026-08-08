@@ -195,7 +195,7 @@ system map is [WIKI.md](WIKI.md).
   on metadata/environment/dirty-tree mismatch, and records reproducible
   metadata without copyrighted or bulky artifacts. It must use a supported
   Swift target/script interface, not brittle manual object-list linking.
-  **Status:** the SwiftPM product and 11 model-free tests/static script
+  **Status:** the SwiftPM product and 12 model-free tests/static script
   validations are implemented. This acceptance checkbox remains open pending a
   clean 32-position diagnostic smoke, a clean full 1,639-position comparison,
   and product smoke workflows.
