@@ -89,11 +89,18 @@ system map is [WIKI.md](WIKI.md).
   duplicating an installed model just for tests. The final 938-test package
   suite passed in 148 suites after malformed resident dtype hardening.
 
-- [ ] **`feature/maple-tokenization`** — Acceptance: model-family metadata—not
+- [x] **`feature/maple-tokenization`** — Acceptance: model-family metadata—not
   vocabulary size or hard-coded identifying token IDs—selects Maple ChatML;
   golden tests cover verbatim message whitespace, the live `<think>` generation
   suffix, EOS/end-of-turn/stop tokens, continuation framing, hidden-thought
-  suppression, and fail-closed tool behavior. **Status:** planned.
+  suppression, and fail-closed tool behavior. **Status:** complete. The pinned
+  compact sidecar drives exact prompt and token-ID fixtures; CLI, Mac app, and
+  server hide prompt-opened reasoning, while the server alone accepts bounded,
+  duplicate-key-safe Maple JSON tool calls. Existing Qwen ChatML behavior is
+  unchanged. The tokenizer wrapper also retains its pre-Maple stored layout and
+  callable overloads, preventing stale Swift incremental objects from crashing
+  without deleting build caches. The final package run passed 952 tests in 150
+  suites (202.276 seconds).
 
 - [ ] **`feature/maple-bf16-primitives`** — Acceptance: focused Metal/CPU tests
   cover native-BF16 embedding, ternary projection, residual-add/RMSNorm, final
