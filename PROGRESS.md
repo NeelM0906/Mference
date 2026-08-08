@@ -74,14 +74,20 @@ system map is [WIKI.md](WIKI.md).
   required manifest fields, I32 FlashHead exclusion, source fingerprint, and
   Maple tensor paths. The final 932-test package suite passed in 148 suites.
 
-- [ ] **`feature/maple-ternary-repack`** — Acceptance: a synthetic and then real
+- [x] **`feature/maple-ternary-repack`** — Acceptance: a synthetic and then real
   pinned Maple snapshot streams into `.gturbo`; resident ternary matrices are
   losslessly represented in the existing INT4/group-64 layout, routed experts
   remain INT2/group-64, row-alpha companions are exact, FlashHead tensors are
   excluded, resume avoids redownloading verified transformed ranges, and
-  strict install verification passes. **Status:** planner implementation is
-  complete; transformed-transfer, synthetic, and pinned-install validation
-  remain planned.
+  strict install verification passes. **Status:** complete within repository
+  safety constraints. A full 24-layer fake-Hub install matches independent
+  resident and routed byte oracles, excludes FlashHead, emits the exact
+  manifest, passes strict receipt verification, and resumes without
+  redownloading a committed transformed range. The exact pinned local source
+  index and every real safetensor header plan successfully. A second 6.1 GB
+  `.gturbo` was intentionally not created because `AGENTS.md` forbids
+  duplicating an installed model just for tests. The final 938-test package
+  suite passed in 148 suites after malformed resident dtype hardening.
 
 - [ ] **`feature/maple-tokenization`** — Acceptance: model-family metadata—not
   vocabulary size or hard-coded identifying token IDs—selects Maple ChatML;
