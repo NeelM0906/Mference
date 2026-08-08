@@ -183,7 +183,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let context: MetalContext
     private let model: Model
     private let tokenizer: MFTokenizer
-    private let runner: RealForwardRunner
+    private let runner: any ContinuableLogitProducer
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
     private let maxContext: Int
@@ -223,10 +223,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
-        let runner = try RealForwardRunner(model: model,
-                                           context: context,
-                                           maxContext: maxContext,
-                                           runtimeConfiguration: runtime)
+        let forwardRuntime = try ForwardRunnerFactory.make(model: model,
+                                                            context: context,
+                                                            maxContext: maxContext,
+                                                            runtimeConfiguration: runtime)
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: templateData)
@@ -236,8 +236,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             String(runtime.expertCacheSlots),
             runtime.expertCachePolicy.rawValue,
             runtime.rdadvisePolicy.rawValue,
-            runtime.prefillPolicy.rawValue,
-            String(runtime.prefillChunkTokens),
+            forwardRuntime.prefillConfig.mode.rawValue,
+            String(forwardRuntime.prefillConfig.chunkTokens),
             runtime.headPath.rawValue,
         ].joined(separator: ":")
         let runtimeDigest = SHA256.hash(data: Data(runtimeIdentity.utf8))
@@ -248,15 +248,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             sourceSnapshotHash: model.sourceSnapshotHash,
             runtimeProfileHash: runtimeDigest,
             maximumContext: maxContext,
-            kvStorage: PrefillKVStorageMode.fp16.rawValue,
+            kvStorage: forwardRuntime.kvStorageMode.rawValue,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
         return ServerModelSession(context: context,
                                   model: model,
                                   tokenizer: tokenizer,
-                                  runner: runner,
+                                  runner: forwardRuntime.producer,
                                   scratch: scratch,
-                                  prefillConfig: runtime.prefillConfig,
+                                  prefillConfig: forwardRuntime.prefillConfig,
                                   maxContext: maxContext,
                                   promptCacheMode: promptCacheMode,
                                   promptCacheDomain: promptCacheDomain)
@@ -265,7 +265,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private init(context: MetalContext,
                  model: Model,
                  tokenizer: MFTokenizer,
-                 runner: RealForwardRunner,
+                 runner: any ContinuableLogitProducer,
                  scratch: RawCompletionScratch,
                  prefillConfig: PrefillRuntimeConfig,
                  maxContext: Int,

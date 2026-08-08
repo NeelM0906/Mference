@@ -118,11 +118,13 @@ enum PrefillChunkPlanner {
 
 public enum PrefillKVStorageMode: String, Sendable, Equatable {
     case fp16
+    case bf16
 }
 
 public enum PrefillExecutedMode: String, Sendable, Equatable {
     case off
     case chunked
+    case sequential
     case unsupported
 }
 

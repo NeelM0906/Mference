@@ -3,10 +3,17 @@ import Metal
 public struct ForwardRuntime: Sendable {
     public let producer: any ContinuableLogitProducer
     public let prefillConfig: PrefillRuntimeConfig
+    public let executedPrefillMode: PrefillExecutedMode
+    public let kvStorageMode: PrefillKVStorageMode
 
-    init(producer: any ContinuableLogitProducer, prefillConfig: PrefillRuntimeConfig) {
+    init(producer: any ContinuableLogitProducer,
+         prefillConfig: PrefillRuntimeConfig,
+         executedPrefillMode: PrefillExecutedMode,
+         kvStorageMode: PrefillKVStorageMode) {
         self.producer = producer
         self.prefillConfig = prefillConfig
+        self.executedPrefillMode = executedPrefillMode
+        self.kvStorageMode = kvStorageMode
     }
 }
 
@@ -17,13 +24,19 @@ public enum ForwardRunnerFactory {
                             runtimeConfiguration: RuntimeConfiguration = .production) throws -> ForwardRuntime {
         if model.config.family == .maple {
             return ForwardRuntime(producer: try MapleForwardRunner(
-                model: model, context: context, maxContext: maxContext), prefillConfig: .off)
+                model: model, context: context, maxContext: maxContext),
+                                  prefillConfig: .off,
+                                  executedPrefillMode: .sequential,
+                                  kvStorageMode: .bf16)
         }
         return ForwardRuntime(producer: try RealForwardRunner(
             model: model,
             context: context,
             maxContext: maxContext,
             runtimeConfiguration: runtimeConfiguration),
-            prefillConfig: runtimeConfiguration.prefillConfig)
+            prefillConfig: runtimeConfiguration.prefillConfig,
+            executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
+                ? .chunked : .off,
+            kvStorageMode: .fp16)
     }
 }

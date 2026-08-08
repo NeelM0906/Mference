@@ -86,11 +86,12 @@ public func run(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
-        let runner = try RealForwardRunner(
+        let forwardRuntime = try ForwardRunnerFactory.make(
             model: model,
             context: context,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
+        let runner = forwardRuntime.producer
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
@@ -111,7 +112,7 @@ public func run(args: Args,
             config: completionConfig,
             context: context,
             scratch: scratch,
-            prefillConfig: runtime.prefillConfig,
+            prefillConfig: forwardRuntime.prefillConfig,
             shouldStop: { shouldStop }) { progress in
                 guard decodingError == nil else { return }
                 do {
@@ -142,10 +143,12 @@ public func run(args: Args,
             if !emitted.isEmpty { stdout.write(Data(emitted.utf8)) }
         }
 
-        if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1" {
+        if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1",
+           runner is RealForwardRunner {
             RealForwardRunner.dumpPrefillBreakdown()
         }
-        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1" {
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let runner = runner as? RealForwardRunner {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000
             let accounted = Double(runner.totalCb1Nanos + runner.totalIoNanos
@@ -263,11 +266,12 @@ private func runChat(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
-        let runner = try RealForwardRunner(
+        let forwardRuntime = try ForwardRunnerFactory.make(
             model: model,
             context: context,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
+        let runner = forwardRuntime.producer
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
@@ -329,7 +333,7 @@ private func runChat(args: Args,
                                                  runner: runner,
                                                  context: context,
                                                  scratch: scratch,
-                                                 runtime: runtime,
+                                                 prefillConfig: forwardRuntime.prefillConfig,
                                                  quiet: args.quiet,
                                                  stdout: stdout,
                                                  stderr: stderr)
@@ -361,10 +365,10 @@ private func resolveExpertCacheSlots(_ choice: ExpertCacheSlotChoice,
 private func streamChatTurn(promptIds: [Int32],
                             config: GenerationConfig,
                             tokenizer: MFTokenizer,
-                            runner: RealForwardRunner,
+                            runner: any ContinuableLogitProducer,
                             context: MetalContext,
                             scratch: RawCompletionScratch,
-                            runtime: RuntimeConfiguration,
+                            prefillConfig: PrefillRuntimeConfig,
                             quiet: Bool,
                             stdout: FileHandle,
                             stderr: FileHandle) async throws -> String {
@@ -386,7 +390,7 @@ private func streamChatTurn(promptIds: [Int32],
         config: completionConfig,
         context: context,
         scratch: scratch,
-        prefillConfig: runtime.prefillConfig,
+        prefillConfig: prefillConfig,
         shouldStop: { shouldStop }) { progress in
             guard decodingError == nil else { return }
             do {
