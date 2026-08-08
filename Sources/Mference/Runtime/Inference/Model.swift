@@ -97,14 +97,14 @@ public struct Model {
     var trunkPrefix: String {
         switch config.family {
         case .gemma4, .qwen36: return "language_model.model."
-        case .deepseekV4Flash: return "model."
+        case .deepseekV4Flash, .maple: return "model."
         case .inklingSmall: return "model.llm."
         }
     }
     private var lmHeadName: String {
         switch config.family {
         case .gemma4, .qwen36: return "language_model.lm_head.weight"
-        case .deepseekV4Flash: return "lm_head.weight"
+        case .deepseekV4Flash, .maple: return "lm_head.weight"
         case .inklingSmall: return "model.llm.unembed.weight"
         }
     }
@@ -113,6 +113,8 @@ public struct Model {
         switch config.family {
         case .gemma4, .qwen36, .deepseekV4Flash:
             return "\(trunkPrefix)embed_tokens.weight"
+        case .maple:
+            return "\(trunkPrefix)word_embeddings.weight"
         case .inklingSmall:
             return "\(trunkPrefix)embed.weight"
         }
@@ -160,6 +162,8 @@ public struct Model {
             return try resident(name: "model.layers.\(L).ffn.gate.weight")
         case .inklingSmall:
             return try resident(name: "model.llm.layers.\(L).mlp.gate.weight")
+        case .maple:
+            return try resident(name: "model.layers.\(L).mlp.gate.weight")
         }
     }
     /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
@@ -184,6 +188,8 @@ public struct Model {
             return "model.layers.\(L).ffn.shared_experts.\(proj).weight"
         case .inklingSmall:
             return "model.llm.layers.\(L).mlp.shared_experts.\(proj).weight"
+        case .maple:
+            return "model.layers.\(L).mlp.shared_expert.\(proj).weight"
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
@@ -193,7 +199,7 @@ public struct Model {
     }
     public func inputNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36:
+        case .gemma4, .qwen36, .maple:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
         case .deepseekV4Flash, .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
@@ -201,7 +207,7 @@ public struct Model {
     }
     public func postAttnNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36:
+        case .gemma4, .qwen36, .maple:
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
         case .deepseekV4Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).ffn_norm.weight")

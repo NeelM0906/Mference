@@ -53,6 +53,33 @@ enum IndexLoader {
             guard let quant = root["quantization"] as? [String: Any] else {
                 throw RepackError.configJsonInvalid(path: configPath, detail: "no quantization slot")
             }
+            let isMaple = (root["model_type"] as? String) == "maple"
+            if isMaple {
+                guard (quant["bits"] as? NSNumber)?.intValue == 2,
+                      (quant["group_size"] as? NSNumber)?.intValue == 128,
+                      quant["mode"] as? String == "affine" else {
+                    throw RepackError.configJsonInvalid(
+                        path: configPath,
+                        detail: "Maple requires INT2/group-128 affine base quantization")
+                }
+                let overrideKeys = Set(quant.keys).subtracting(["bits", "group_size", "mode"])
+                let expectedOverrideKeys: Set<String> = ["model.word_embeddings", "lm_head"]
+                guard overrideKeys == expectedOverrideKeys else {
+                    throw RepackError.configJsonInvalid(
+                        path: configPath,
+                        detail: "Maple requires only model.word_embeddings and lm_head quantization overrides")
+                }
+                for key in expectedOverrideKeys {
+                    guard let override = quant[key] as? [String: Any],
+                          (override["bits"] as? NSNumber)?.intValue == 4,
+                          (override["group_size"] as? NSNumber)?.intValue == 64,
+                          override.keys.allSatisfy({ $0 == "bits" || $0 == "group_size" }) else {
+                        throw RepackError.configJsonInvalid(
+                            path: configPath,
+                            detail: "Maple requires \(key) INT4/group-64 quantization")
+                    }
+                }
+            }
             if let b = quant["bits"] as? Int      { baseBits  = b }
             if let g = quant["group_size"] as? Int { baseGroup = g }
             if let m = quant["mode"] as? String   { baseMode  = m }
@@ -63,7 +90,10 @@ enum IndexLoader {
                 // Resident-tensor kernels assume the base group size; only
                 // 2-bit streamed routed experts support a deviating group
                 // (DeepSeek V4 ships gate_proj at group 32).
-                guard g == baseGroup || (bits == 2 && (g == 32 || g == 64)) else {
+                guard g == baseGroup
+                    || (bits == 2 && (g == 32 || g == 64))
+                    || (isMaple && bits == 4 && g == 64
+                        && (k == "lm_head" || k == "model.word_embeddings")) else {
                     throw RepackError.configJsonInvalid(
                         path: configPath,
                         detail: "quantization override \(k) group_size \(g) != base \(baseGroup)")

@@ -68,7 +68,10 @@ system map is [WIKI.md](WIKI.md).
 - [ ] **`feature/maple-model-schema`** — Acceptance: explicit `.maple` family,
   pinned architecture, manifest fields, quantization contract, source selector,
   and compile-time cross-check load a valid synthetic install and reject every
-  material mismatch. **Status:** planned.
+  material mismatch. **Status:** implementation complete; the combined Swift
+  build and existing 81-test repacker suite pass. Focused post-merge schema,
+  mutation, I32, tensor-name, manifest, and selector coverage is still
+  required.
 
 - [ ] **`feature/maple-ternary-repack`** — Acceptance: a synthetic and then real
   pinned Maple snapshot streams into `.gturbo`; resident ternary matrices are
