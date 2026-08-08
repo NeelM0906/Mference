@@ -102,10 +102,16 @@ system map is [WIKI.md](WIKI.md).
   without deleting build caches. The final package run passed 952 tests in 150
   suites (202.276 seconds).
 
-- [ ] **`feature/maple-bf16-primitives`** — Acceptance: focused Metal/CPU tests
+- [x] **`feature/maple-bf16-primitives`** — Acceptance: focused Metal/CPU tests
   cover native-BF16 embedding, ternary projection, residual-add/RMSNorm, final
   norm, and full logits, including values representable in BF16 but not FP16;
-  no unused FP16-to-BF16 bridge is added. **Status:** planned.
+  no unused FP16-to-BF16 bridge is added. **Status:** complete. Safe-math Metal
+  modules implement native-BF16 embedding, source-group-128 ternary reduction,
+  exact INT4/group-64 full-head arithmetic, and residual-carry/final RMSNorm.
+  Tests cover odd byte-aligned packed weights, group/code order, nine-row tails,
+  offsets and sentinels, and values that underflow FP16. The full package run
+  passed 957 tests in 152 suites (200.560 seconds); runtime wiring remains in
+  the later ordered branches.
 
 - [ ] **`feature/maple-attention`** — Acceptance: per-head Q/K norm, sliding
   partial NeoX RoPE, full-layer NoPE, grouped-query attention, BF16 KV, the
