@@ -164,9 +164,14 @@ public func runRawCompletion(producer: any LogitProducer,
         throw PrefillError.chunkedUnsupported(
             PrefillError.chunkedRequiresChunkedRunnerReason)
     case .off:
-        for t in prefillTokens {
+        let headless = producer as? any HeadlessSequentialPrefillRunner
+        for (offset, t) in prefillTokens.enumerated() {
             try Task.checkCancellation()
-            try await producer.produce(token: t, position: position, into: scratch.logits)
+            if offset + 1 < prefillTokens.count, let headless {
+                try await headless.produceWithoutLogits(token: t, position: position)
+            } else {
+                try await producer.produce(token: t, position: position, into: scratch.logits)
+            }
             position += 1
             history.append(t)
             onProgress(.prefill(done: position, total: promptIds.count))

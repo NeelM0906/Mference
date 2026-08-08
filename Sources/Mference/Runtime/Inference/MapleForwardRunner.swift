@@ -14,7 +14,8 @@ public enum MapleForwardRunnerError: Error, CustomStringConvertible {
 }
 
 /// Exact sequential Maple decode. One instance owns mutable BF16/KV/expert scratch and is serial.
-public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowReporting, @unchecked Sendable {
+public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowReporting,
+    HeadlessSequentialPrefillRunner, @unchecked Sendable {
     private static let hiddenSize = 2_048
     private static let vocabularySize = 151_936
     private static let layerCount = 24
@@ -130,6 +131,14 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
     }
 
     public func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
+        try await produce(token: token, position: position, logits: logits)
+    }
+
+    func produceWithoutLogits(token: Int32, position: Int) async throws {
+        try await produce(token: token, position: position, logits: nil)
+    }
+
+    private func produce(token: Int32, position: Int, logits: MTLBuffer?) async throws {
         try Task.checkCancellation()
         guard position == kv.position, position >= 0, position < maxContext else {
             throw MapleForwardRunnerError.invalidInput("Maple position does not match its KV cursor")
@@ -137,7 +146,7 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
         guard token >= 0, token < Int32(Self.vocabularySize) else {
             throw MapleForwardRunnerError.invalidInput("Maple token is outside the vocabulary")
         }
-        guard logits.length >= Self.vocabularySize * MemoryLayout<Float16>.stride else {
+        if let logits, logits.length < Self.vocabularySize * MemoryLayout<Float16>.stride {
             throw MapleForwardRunnerError.invalidInput("Maple logits buffer is too small")
         }
 
@@ -213,22 +222,24 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
             try Task.checkCancellation()
         }
 
-        let head = try commandBuffer()
-        addRMSNorm.encode(commandBuffer: head,
-                          hidden: hidden,
-                          delta: moeDelta,
-                          weight: finalNorm.buffer,
-                          weightOffset: Int(finalNorm.offset),
-                          normed: finalNormed,
-                          eps: Self.epsilon)
-        ternary.encodeInt4(commandBuffer: head,
-                           weights: lmHead.buffer, weightsOffset: Int(lmHead.offset),
-                           scales: lmHead.buffer, scalesOffset: Int(lmHead.scaleOffset),
-                           biases: lmHead.buffer, biasesOffset: Int(lmHead.biasOffset),
-                           x: finalNormed,
-                           y: logits,
-                           rows: UInt32(Self.vocabularySize))
-        try finish(head)
+        if let logits {
+            let head = try commandBuffer()
+            addRMSNorm.encode(commandBuffer: head,
+                              hidden: hidden,
+                              delta: moeDelta,
+                              weight: finalNorm.buffer,
+                              weightOffset: Int(finalNorm.offset),
+                              normed: finalNormed,
+                              eps: Self.epsilon)
+            ternary.encodeInt4(commandBuffer: head,
+                               weights: lmHead.buffer, weightsOffset: Int(lmHead.offset),
+                               scales: lmHead.buffer, scalesOffset: Int(lmHead.scaleOffset),
+                               biases: lmHead.buffer, biasesOffset: Int(lmHead.biasOffset),
+                               x: finalNormed,
+                               y: logits,
+                               rows: UInt32(Self.vocabularySize))
+            try finish(head)
+        }
         kv.advance()
     }
 

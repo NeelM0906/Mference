@@ -53,3 +53,8 @@ protocol ChunkedPrefillRunner: LogitProducer {
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult
 }
+
+protocol HeadlessSequentialPrefillRunner: LogitProducer {
+    /// Advance one prompt token without producing vocabulary logits.
+    func produceWithoutLogits(token: Int32, position: Int) async throws
+}
