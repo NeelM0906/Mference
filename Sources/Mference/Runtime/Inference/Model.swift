@@ -137,16 +137,16 @@ public struct Model {
     }
 
     public func qProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.q_proj.weight")
     }
     public func kProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.k_proj.weight")
     }
     public func vProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.v_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.v_proj.weight")
     }
     public func oProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.o_proj.weight")
     }
     /// Gemma's writer emits `.router.proj.weight` (no `.mlp.` segment);
     /// Qwen's router is the source-named `.mlp.gate.weight`.
@@ -221,10 +221,10 @@ public struct Model {
     // explicit no-scale variant rather than consuming a unit-weight buffer.
 
     public func qNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_norm.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.q_norm.weight")
     }
     public func kNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_norm.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.k_norm.weight")
     }
 
     // MARK: - Feed-forward norms
