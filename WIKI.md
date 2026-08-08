@@ -1,14 +1,11 @@
 # Mference executive wiki
 
-This is the repository-level map for users and agents. It describes the
-shipping four-model codebase on the `main` baseline and shows where the clean
-Maple port will join it. Maple's installer, schema, kernels, tokenizer,
-standalone runtime, and product entry-point wiring are implemented on the clean
-integration lineage. The maintained SwiftPM parity harness has passed the full
-1,639-position exact oracle comparison; real-model product smoke tests remain
-open in [PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as shipping
-product support. Reference-branch behavior is not present-tense product
-evidence. The frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
+This is the repository-level map for users and agents. The clean integration
+lineage supports five model families, including Maple's installer, schema,
+kernels, tokenizer, standalone runtime, and product wiring. The maintained
+SwiftPM parity harness passed the full 1,639-position exact oracle comparison;
+the real-model CLI, app/decode-service, and server smoke workflows also passed.
+The frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
 
 ## What Mference is
 
@@ -65,7 +62,7 @@ Source ownership follows the package graph:
 
 ## Models, architecture contracts, and the library
 
-The current baseline recognizes four families. Directory names are a
+The current integration recognizes five families. Directory names are a
 convention; detection uses the directory's manifest.
 
 | Family | High-level execution contract | Installed directory |
@@ -74,7 +71,7 @@ convention; detection uses the directory's manifest.
 | Qwen 3.6 35B-A3B | 40 layers; 30 Gated-DeltaNet recurrent layers plus 10 gated full-attention layers; 256 experts, top 8; sigmoid-gated shared expert; untied head. | `qwen36.gturbo` |
 | DeepSeek-V4-Flash 284B-A13B | 43 MoE layers; sliding attention plus CSA/HCA compressed long-range state; four-stream mHC residual; top 6 routing, including three hash-routed layers; 2-bit routed experts. | `deepseekv4flash.gturbo` |
 | Inkling-Small 276B-A12B | 42 layers; learned relative-position attention and short convolutions; 256 experts, top 6; two leading dense layers and two shared experts; padded vocabulary truncated before sampling. | `inklingsmall.gturbo` |
-| Maple Preview (parity passed; product smoke pending) | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
+| Maple Preview | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
 
 At load, `ManifestReader` decodes the model family, resolves the corresponding
 known `ArchConfig`, and rejects field, file, layout, or quantization mismatches.
@@ -143,7 +140,7 @@ approximate FlashHead tensors are excluded.
 ## Runtime and one-token pipeline
 
 `Model.load` validates metadata and creates a resident mapping.
-`ForwardRunnerFactory` keeps the four shipping families on
+`ForwardRunnerFactory` keeps the non-Maple families on
 `RealForwardRunner` and selects the standalone `MapleForwardRunner` for Maple.
 Each runner compiles its Metal modules, allocates reusable scratch, creates the
 required attention/state managers, and opens expert streamers lazily. A raw
@@ -252,11 +249,12 @@ resume boundaries so products observe the same generation semantics.
 
 ## Native Mac app
 
-The app is a chat shell over a separately launched decode service. Its toolbar
-discovers installed families and offers download rows for missing ones. Chats
-are stored locally, grouped by recency, can be created/renamed/deleted, and
-retain their visible transcript. Each model renders history through its own
-template.
+The app is a chat shell over an owned sibling decode-service process connected
+through standard input/output. A descriptor chosen at launch supplies the
+family and conventional install location, and the user can choose another
+valid model directory. Chats are stored locally, grouped by recency, can be
+created/renamed/deleted, and retain their visible transcript. Each model
+renders history through its own template.
 
 The composer accepts locally extracted PDF, DOCX, PPTX, and XLSX text. Draft
 attachments are bounded to 750,000 extracted characters in total and visibly
@@ -290,7 +288,7 @@ current user message.
 Raw CLI, chat CLI, and server sessions all construct their producer through the
 same family-aware factory. Maple therefore uses sequential prefill, the exact
 full head, and BF16 KV without adding family conditionals to the existing
-four-model runner; existing families retain their requested chunked/off modes
+non-Maple runner; existing families retain their requested chunked/off modes
 and FP16 KV diagnostics.
 
 The server provides `GET /health`, `GET /v1/models`, and

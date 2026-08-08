@@ -1,9 +1,9 @@
 # Mference
 
 Swift and Metal inference for pinned mixture-of-experts checkpoints on Apple
-Silicon: Gemma 4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, and
-Inkling-Small 276B-A12B. The shared core and KV cache stay resident; routed
-experts stream from SSD per token.
+Silicon: Gemma 4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B,
+Inkling-Small 276B-A12B, and Maple Preview. The shared core and KV cache stay
+resident; routed experts stream from SSD per token.
 
 ## Scope
 
@@ -116,7 +116,7 @@ swift run -c release MferenceCLI \
 ```
 
 The installer streams each pinned checkpoint without staging the full source.
-Set `HF_TOKEN` only if requested. Downloads range from ~15 GB (Gemma 4) to
+Set `HF_TOKEN` only if requested. Downloads range from ~6.6 GB (Maple) to
 ~148 GB (Inkling-Small); check disk before installing, and read
 [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) or
 [docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) before touching those two.
@@ -126,14 +126,13 @@ remove them with `--discard-partial`.
 ## Models and the library
 
 Install directories are named `gemma4.gturbo`, `qwen36.gturbo`,
-`deepseekv4flash.gturbo`, and `inklingsmall.gturbo`, but detection goes by
-each directory's own manifest, not its name. The Mac app scans its library
-roots — the `Mference.libraryRoot` default if set, the package checkout's
-`scratch/`, and `~/Library/Application Support/Mference` — and auto-adopts
-installed models; its toolbar picker switches between families and offers
-downloads for missing ones. The CLI and server take an explicit `--model`
-path. Non-app selection persists via `defaults write Mference model qwen36`
-(or `MFERENCE_MODEL` in the environment). `MferenceCLI --verify
+`deepseekv4flash.gturbo`, `inklingsmall.gturbo`, and `maple.gturbo`, but
+detection goes by each directory's own manifest, not its name. The Mac app
+resolves the selected family's conventional location in the checkout or
+Application Support and remembers an explicitly chosen model folder. Family
+selection persists via `defaults write Mference model qwen36` (or
+`MFERENCE_MODEL` in the environment). The CLI and server take an explicit
+`--model` path. `MferenceCLI --verify
 trusted-receipt` skips the first-touch SHA-256 of the expert pool in favor of
 the install receipt's size checks; the strict `full-sha256` mode is the
 default.
@@ -167,8 +166,9 @@ Run only one app, CLI, or model-using test at a time.
 
 For performance results, build release once and follow the [community
 benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable
-experimental controls or profiling. Measured baselines for all four families
-are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+experimental controls or profiling. Measured baselines are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md); Maple has exact parity evidence, not
+a published benchmark.
 
 Do not download a full checkpoint, duplicate a `.gturbo` model, create a
 worktree, or purge caches just to run tests.
@@ -187,6 +187,7 @@ document attachments. The inspector shows realtime tok/s, token count, and
 inference memory, and exposes context length, expert-cache slots, temperature,
 Top-K, Top-P, prefill, and RDADVISE. The defaults are temperature `0.2`,
 Top-K `64`, and Top-P `0.95`. Responses can use the context space left after
-formatting the prompt, and FP16 is the runtime KV format. Build the app with
-its sibling `MferenceDecodeService`; it never loads a second in-process model.
-See [README](README.md) and [Runtime controls](docs/RUNTIME_CONTROLS.md).
+formatting the prompt. Existing families use FP16 KV; Maple uses native BF16
+KV and sequential prefill. Build the app with its sibling
+`MferenceDecodeService`; it never loads a second in-process model. See
+[README](README.md) and [Runtime controls](docs/RUNTIME_CONTROLS.md).

@@ -1,10 +1,8 @@
 # Maple behavioral parity contract
 
-This document is the frozen contract for reimplementing Maple on the clean
-Mference integration branch. It records what the reference inputs and research
-branch say should happen; it does **not** certify that the clean port currently
-does it. Only a new clean run of the validation matrix below can become
-acceptance evidence. Implementation status lives in [PROGRESS.md](../PROGRESS.md).
+This document is the frozen contract for Maple on the clean Mference
+integration branch. The validation matrix records the accepted clean evidence;
+implementation status lives in [PROGRESS.md](../PROGRESS.md).
 
 ## Reference pins
 
@@ -185,27 +183,26 @@ new implementation passed.
 
 | Gate | Observable clean acceptance | Reference inventory | Clean status |
 | --- | --- | --- | --- |
-| Toolchain/package baseline | [Scripts/test.sh](../Scripts/test.sh) exits 0 serially under the active supported toolchain. | Command Line Tools blocker was fixed before Maple work. | Required rerun after every branch. |
-| Existing-family regression | Full package suite and relevant product builds pass with no Gemma/Qwen/DeepSeek/Inkling behavior changes. | Research port was a broad two-commit diff. | Required. |
-| Schema/manifest | Synthetic valid Maple install loads; one-field architecture and quantization mutations fail. | Planner/manifest tests exist on the reference branch. | Required clean tests. |
-| Range transforms | Byte-exact widening/repeat, bounded scratch, interval validation, fingerprint/digest, cancel, and resume tests pass. | Synthetic transformed-install tests exist. | Required clean tests. |
-| Provenance | Forged, stale, partial, moved, or absent receipts cannot mint source origin. | Reference diff exposed the issue and a candidate fix. | Required clean tests. |
-| Real install | Pinned source streams without snapshot staging; `--verify-install` and strict runtime verification pass; manifest/layout/file hashes are recorded. | Reference branch reports an install. | Required new install verification; do not reinstall only to satisfy a unit gate. |
-| BF16 primitives | Tiny BF16-only values, offsets, residual/norm boundaries, ternary projections, and full head match CPU fixtures. | Focused reference tests exist. | Required clean tests. |
-| Attention/KV | Sliding partial-RoPE, full NoPE, GQA, 512-row wrap, full-prefix growth, reset, and continuation match reference fixtures. | Focused reference tests exist. | Required clean tests plus real trace. |
-| Router/MoE | Stable top-8 IDs/weights, clipped activation, INT2 experts, FP32 reduce, cache hits/misses, and router-order streaming match fixtures. | Focused reference tests exist. | Required clean tests plus real trace. |
-| Tokenization | Golden prompt/continuation bytes, stop IDs, open-thought suppression, and tool behavior pass using explicit family plumbing. | Reference tests used vocabulary/token-ID inference. | Required with that accidental mechanism removed. |
+| Toolchain/package baseline | [Scripts/test.sh](../Scripts/test.sh) exits 0 serially under the active supported toolchain. | Command Line Tools blocker was fixed before Maple work. | Passed; see [PROGRESS.md](../PROGRESS.md). |
+| Existing-family regression | Full package suite and relevant product builds pass with no Gemma/Qwen/DeepSeek/Inkling behavior changes. | Research port was a broad two-commit diff. | Passed; see [PROGRESS.md](../PROGRESS.md). |
+| Schema/manifest | Synthetic valid Maple install loads; one-field architecture and quantization mutations fail. | Planner/manifest tests exist on the reference branch. | Passed focused clean tests. |
+| Range transforms | Byte-exact widening/repeat, bounded scratch, interval validation, fingerprint/digest, cancel, and resume tests pass. | Synthetic transformed-install tests exist. | Passed focused clean tests. |
+| Provenance | Forged, stale, partial, moved, or absent receipts cannot mint source origin. | Reference diff exposed the issue and a candidate fix. | Passed focused clean tests. |
+| Real install | Pinned source streams without snapshot staging; `--verify-install` and strict runtime verification pass; manifest/layout/file hashes are recorded. | Reference branch reports an install. | Passed strict verification. |
+| BF16 primitives | Tiny BF16-only values, offsets, residual/norm boundaries, ternary projections, and full head match CPU fixtures. | Focused reference tests exist. | Passed focused clean tests. |
+| Attention/KV | Sliding partial-RoPE, full NoPE, GQA, 512-row wrap, full-prefix growth, reset, and continuation match reference fixtures. | Focused reference tests exist. | Passed focused tests and full trace. |
+| Router/MoE | Stable top-8 IDs/weights, clipped activation, INT2 experts, FP32 reduce, cache hits/misses, and router-order streaming match fixtures. | Focused reference tests exist. | Passed focused tests and full trace. |
+| Tokenization | Golden prompt/continuation bytes, stop IDs, open-thought suppression, and tool behavior pass using explicit family plumbing. | Reference tests used vocabulary/token-ID inference. | Passed focused clean tests. |
 | Full teacher forcing | Clean pinned engines produce 1,639/1,639 ordered top-10 matches with retained-logit absolute difference 0. | Reference metadata records such a result for commit `997b5ad`. | Passed at clean commit `84d7b62`; see [compact evidence](evidence/maple-parity-2026-08-09.json). |
-| Product smoke | Repack, CLI raw/chat, Mac/decode service, and loopback server install/detect/load/generate/stop/reset correctly, one model process at a time. | Reference branch wired each product. | Required clean workflows. |
-| Release build | `MferenceRepack`, `MferenceCLI`, `MferenceServer`, `MferenceDecodeService`, and `MferenceMac` build in release. | Historical binaries were recorded. | Required clean builds; old hashes are irrelevant. |
+| Product smoke | Repack, CLI raw/chat, Mac/decode service, and loopback server install/detect/load/generate/stop/reset correctly, one model process at a time. | Reference branch wired each product. | Passed clean workflows. |
+| Release build | `MferenceRepack`, `MferenceCLI`, `MferenceServer`, `MferenceDecodeService`, `MferenceMac`, and `MferenceMapleParity` build in release. | Historical binaries were recorded. | Passed clean release build. |
 | Benchmark (optional) | Fresh-process protocol records complete environment, commands, timing footers, outputs, and deviations without overstating warm-cache results. | A dirty-worktree, one-run-per-engine Raven benchmark exists. | Excluded unless rerun cleanly. |
 
 ## Historical evidence boundary
 
-The reference branch's final metadata says its clean research implementation
-matched the pinned oracle for all 1,639 ordered top-10 positions at zero retained
-logit tolerance. That single fact justifies the strict acceptance target; it
-does not mark any checkbox in [PROGRESS.md](../PROGRESS.md).
+The clean implementation matched the pinned oracle for all 1,639 ordered
+top-10 positions at zero retained-logit tolerance. The committed compact
+evidence, not the research branch, is the acceptance record.
 
 Do not import its dated evidence JSON, full traces, binary hashes, raw outputs,
 or benchmark claims as results for the clean port. In particular, its Raven
