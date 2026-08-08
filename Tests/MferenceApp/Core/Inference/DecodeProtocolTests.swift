@@ -91,6 +91,29 @@ import MferenceDecodeProtocol
         #expect(decoded.prefillTotal == 514)
     }
 
+    @Test func terminalEventRoundTripPreservesSequentialBF16PrefillDiagnostics() throws {
+        let prefill = DecodePrefillDiagnostics(
+            requestedMode: "chunked",
+            executedMode: "sequential",
+            kvStorageMode: "bf16",
+            chunkCompleteness: "complete",
+            unsupportedReason: nil)
+        let event = DecodeServiceEvent(
+            kind: .finished,
+            generationID: UUID(),
+            prefill: prefill)
+        let pipe = Pipe()
+        try pipe.fileHandleForWriting.write(
+            contentsOf: DecodeFrameCodec.encode(event))
+        try pipe.fileHandleForWriting.close()
+
+        let decoded = try DecodeFrameCodec.read(
+            DecodeServiceEvent.self,
+            from: pipe.fileHandleForReading)
+
+        #expect(decoded.prefill == prefill)
+    }
+
     @Test func generationRequestRoundTripPreservesChatRoles() throws {
         let generationID = UUID()
         let runtimeOptions = DecodeRuntimeOptions(
