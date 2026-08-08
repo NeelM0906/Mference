@@ -177,16 +177,15 @@ public enum MapleParityPreflight {
 
     private static let processPattern = "MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferenceMapleParity|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm|maple_mlx_teacher_forcing"
 
-    private static func regularFiles(in root: URL) throws -> Set<String> {
-        guard let enumerator = FileManager.default.enumerator(at: root,
-                                                               includingPropertiesForKeys: [.isRegularFileKey],
-                                                               options: [.skipsHiddenFiles]) else {
+    static func regularFiles(in root: URL) throws -> Set<String> {
+        guard let enumerator = FileManager.default.enumerator(atPath: root.path) else {
             throw MapleParityError.io("unable to enumerate \(root.path)")
         }
         var files: Set<String> = []
-        for case let url as URL in enumerator {
+        for case let relativePath as String in enumerator {
+            let url = root.appendingPathComponent(relativePath)
             if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
-                files.insert(url.path.replacingOccurrences(of: root.path + "/", with: ""))
+                files.insert(relativePath)
             }
         }
         return files
