@@ -379,8 +379,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var eagerFetchDone = Set<UInt64>()
     private var eagerFetchSignaled: UInt64 = 0
     private let eagerFetchLock = NSLock()
+    /// Accepted default (A/B 2026-08-08: +1.5–3.3% median on every case,
+    /// byte-identical): the routed CB commits before its fills land, gated
+    /// on the fill event. `MFERENCE_EAGER_ROUTED=0` disables.
     static let eagerRoutedDefault =
-        ProcessInfo.processInfo.environment["MFERENCE_EAGER_ROUTED"] == "1"
+        ProcessInfo.processInfo.environment["MFERENCE_EAGER_ROUTED"] != "0"
     var eagerRoutedEnabled = RealForwardRunner.eagerRoutedDefault
     private var routerEventValue: UInt64 = 0
     private static let routerEventTimeoutMS: UInt64 = 60_000

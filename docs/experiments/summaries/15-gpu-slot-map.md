@@ -40,3 +40,29 @@ the debug comparator (`MFERENCE_SLOT_MAP_DEBUG=1`) exposed it. The gain
 lands below the +10–15% projection because the router-wake event wait
 itself remains on every layer; removing that wait on all-hit layers needs
 S4 encode-ahead, which stays deferred with its known ordering hazard.
+
+## Round 2: 96 slots + eager routed commit (accepted 2026-08-08)
+
+The slot map changed the slot-count economics: at 96 slots the all-hit
+layer rate doubles to **50.7%** (from 29.9% at 64), and the pre-slot-map
+96-slot regression no longer reproduces. Separately, the remaining gap was
+dominated by miss-layer servicing, whose fetch sat on the CPU critical
+path; the **eager routed commit** encodes the routed command buffer
+against the plan's slab views (no I/O needed), commits it gated on a
+shared fill event, and runs the preads in the background — fill
+completions advance the event only in contiguous issue order so an
+out-of-order completion can never unblock an earlier layer. Phases now
+report `expert io await: 0.0 ms`.
+
+Production A/B (candidate 96 slots + eager vs the shipped 64-slot slot-map
+default; three alternating blocks, every pairwise block won by the
+candidate):
+
+| Case | control median | candidate median | gain |
+| --- | ---: | ---: | ---: |
+| short-explanation | 34.18 | 34.85 | +2.0% |
+| medium-review | 32.90 | 33.97 | +3.3% |
+| long-synthesis | 27.85 | 28.27 | +1.5% |
+
+Both are now defaults on ≥24 GiB hosts (`MFERENCE_EAGER_ROUTED=0` and
+`--expert-cache-slots` remain the overrides); outputs byte-identical.
