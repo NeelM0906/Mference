@@ -1,27 +1,12 @@
-import Darwin
 import Foundation
 import MferenceAppCore
 import MferenceDecodeProtocol
 
 @main enum MferenceDecodeServiceMain {
     static func main() async {
-        let socketPath = argument(after: "--socket")
-        let launchLabel = argument(after: "--launch-label")
-        let handles: (input: FileHandle, output: FileHandle)
-        do {
-            handles = if let socketPath {
-                try DecodeUnixSocket.listenAndAccept(path: socketPath)
-            } else {
-                (.standardInput, .standardOutput)
-            }
-        } catch {
-            FileHandle.standardError.write(Data("Decode service transport failed: \(error)\n".utf8))
-            Foundation.exit(1)
-        }
-        defer {
-            if let socketPath { unlink(socketPath) }
-            if let launchLabel { retireLaunchJob(launchLabel) }
-        }
+        let handles = (
+            input: FileHandle.standardInput,
+            output: FileHandle.standardOutput)
 
         let client = RealInferenceClient()
         let commands = DecodeCommandQueue()
@@ -188,19 +173,4 @@ import MferenceDecodeProtocol
         return AppGenerationMessage(role: role, content: message.content)
     }
 
-    private static func argument(after name: String) -> String? {
-        let arguments = CommandLine.arguments
-        guard let index = arguments.firstIndex(of: name),
-              arguments.indices.contains(index + 1) else { return nil }
-        return arguments[index + 1]
-    }
-
-    private static func retireLaunchJob(_ label: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["bootout", "gui/\(getuid())/\(label)"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-    }
 }
