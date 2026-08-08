@@ -103,6 +103,8 @@ import MferenceDecodeProtocol
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,
+                        topK: request.topK,
+                        topP: request.topP,
                         repetitionPenalty: request.repetitionPenalty,
                         runtimeOptions: options)
                     for try await event in client.generate(generation) {

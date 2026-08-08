@@ -84,11 +84,10 @@ waits) after the timing footer; `MFERENCE_PREFILL_BREAKDOWN=1` prints the
 Inkling prefill routed-expert split (fetch, encode, drain). Both are
 diagnostics and do not change behavior.
 
-Changing context length, expert-cache slots, RDADVISE, model verification, or
-the prefill chunk size requires a reload.
+Changing context length, expert-cache slots, RDADVISE, model verification,
+prompt-prefill enablement, or the prefill chunk size requires a reload.
 Some sampling changes also require a reload because greedy and sampled
-generation use different output-head paths. Prompt-prefill settings apply to
-each request and do not require a reload.
+generation use different output-head paths.
 
 Multi-turn chat history is fitted with the model tokenizer before generation.
 When older complete turns no longer fit, the app runs a bounded local

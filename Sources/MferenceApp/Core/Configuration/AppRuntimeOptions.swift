@@ -122,6 +122,8 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var maxContextTokens: Int
     public var expertCacheSlots: Int
     public var expertCachePolicy: AppExpertCachePolicy
+    public var prefillEnabled: Bool
+    public var prefillChunkTokens: Int
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var forceLogitsHead: Bool
@@ -134,6 +136,8 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.maxContextTokens = maxContextTokens
         self.expertCacheSlots = options.expertCacheSlots
         self.expertCachePolicy = options.expertCachePolicy
+        self.prefillEnabled = options.prefillEnabled
+        self.prefillChunkTokens = options.prefillChunkTokens
         self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
         self.forceLogitsHead = forceLogitsHead
