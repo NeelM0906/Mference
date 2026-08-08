@@ -261,8 +261,11 @@ struct MapleRepackPlannerTests {
             ("wrong alpha shape", [.replaceShape(routed + ".row_alpha", [256, 1])]),
             ("wrong resident alpha dtype", [.replaceDtype(q + ".row_alpha", "F32")]),
             ("wrong resident alpha shape", [.replaceShape(q + ".row_alpha", [1])]),
+            ("wrong resident BF16 weight", [.replaceDtype(q + ".weight", "BF16")]),
+            ("wrong resident F32 weight", [.replaceDtype(q + ".weight", "F32")]),
             ("packed input alignment", [.replaceShape(q + ".weight", [2, 7])]),
             ("missing alpha", [.remove(routed + ".row_alpha")]),
+            ("missing resident alpha", [.remove(q + ".row_alpha")]),
             ("conflicting affine companions", [.addAffineCompanions(q)]),
         ]
 
