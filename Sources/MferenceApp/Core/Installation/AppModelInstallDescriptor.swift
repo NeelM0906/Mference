@@ -100,6 +100,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .qwen36: return .qwen36
         case .deepseekV4Flash: return .deepseekV4Flash
         case .inklingSmall: return .inklingSmall
+        // Maple is not offered by the app until its runtime is integrated.
+        case .maple: return nil
         }
     }
 
@@ -110,6 +112,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .qwen36: return "qwen36.gturbo"
         case .deepseekV4Flash: return "deepseekv4flash.gturbo"
         case .inklingSmall: return "inklingsmall.gturbo"
+        case .maple: return "maple.gturbo"
         }
     }
 
