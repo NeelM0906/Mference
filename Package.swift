@@ -146,5 +146,11 @@ let package = Package(
             path: "Tests/MferenceServer",
             resources: [.copy("Fixtures")]
         ),
+        .testTarget(
+            name: "MferenceMapleParityTests",
+            dependencies: ["MferenceMapleParityCore"],
+            path: "Tests/MferenceMapleParity",
+            resources: [.copy("Fixtures")]
+        ),
     ]
 )
