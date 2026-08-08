@@ -66,3 +66,29 @@ candidate):
 
 Both are now defaults on ≥24 GiB hosts (`MFERENCE_EAGER_ROUTED=0` and
 `--expert-cache-slots` remain the overrides); outputs byte-identical.
+
+## Simulated low-RAM ladder (2026-08-08, final defaults)
+
+Two-layer simulation on the 24 GB M5: the low-RAM auto-profile *config*
+(16/32 slots) run unconstrained, then the same config under an
+incompressible, mostly-mlocked ballast that removes RAM for real (16 GiB
+held → ~8 GB effective; 8 GiB held → ~16 GB effective). Community
+protocol, one measured rep under ballast; slot map + eager routed commit
+active everywhere. Caveat: a real 8/16 GB Mac has a slower chip and SSD
+than a throttled M5, so ballast rows are optimistic bounds for older
+hardware and fair for same-generation parts.
+
+| Host (simulated) | Slots | short | medium | long | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 24 GB native | 96 | 34.85 | 33.97 | 28.27 | ~5.9 GB |
+| 16 GB (8 GiB ballast) | 32 | 26.67 | 24.95 | 20.69 | ~2.3 GB |
+| 8 GB (16 GiB ballast, 15.2 GiB mlocked) | 16 | 14.35 | 12.75 | 10.81 | ~1.1 GB |
+| 16 GB config, unconstrained (upper bound) | 32 | 29.92 | 28.67 | 24.53 | ~2.4 GB |
+| 8 GB config, unconstrained (upper bound) | 16 | 26.45 | 24.99 | 21.96 | ~1.3 GB |
+
+Reading: at 16 GB the page cache still holds most of the 18 GB pool, so
+decode stays orchestration-bound and the new defaults carry over almost
+fully. At 8 GB the pool cannot cache and decode becomes SSD-latency-bound
+— the eager routed commit (fills off the critical path) is what keeps it
+at 11–14 tok/s. All runs ended `stop=endOfTurn`; the mlock ballast pushed
+free memory to ~57 MB and the system stayed stable throughout.
