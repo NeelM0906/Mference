@@ -127,11 +127,21 @@ system map is [WIKI.md](WIKI.md).
   suites (186.353 seconds). Runtime/KV ownership and end-to-end layer traces
   remain in the later runtime and parity branches.
 
-- [ ] **`feature/maple-routed-moe`** — Acceptance: raw BF16 router/FP32
+- [x] **`feature/maple-routed-moe`** — Acceptance: raw BF16 router/FP32
   accumulation, stable top-8 selection, post-top-k normalization, INT2
   gate/up/down, clipped SwiGLU, FP32 weighted reduction, cache-hit/miss split,
   and SSD-streamed expert order match CPU/reference fixtures. **Status:**
-  planned.
+  complete at the isolated router/expert-kernel boundary. A dedicated
+  safe-math module implements the fixed 256-way BF16 router, all-expert FP32
+  softmax, stable top-8 and renormalization, source-group-128 ternary expert
+  arithmetic over the expanded group-64 companions, exact clamp/BF16
+  boundaries, and FP32 rank-order reduction. Tests cover production geometry,
+  cross-SIMD ties, BF16-only values, all four packed codes, odd byte offsets,
+  full versus disjoint hit/miss phases, rank-pair permutation, and reusable
+  command-buffer lifetimes; they caught and fixed a shared subset-rank buffer
+  race. The full package run passed 964 tests in 155 suites (114.443 seconds).
+  Runtime ownership, cache policy, and SSD orchestration remain in
+  `feature/maple-runtime`.
 
 - [ ] **`feature/maple-runtime`** — Acceptance: the 24-layer forward pass uses
   native BF16 activations/KV, exact sequential prefill, streamed top-8 experts,
