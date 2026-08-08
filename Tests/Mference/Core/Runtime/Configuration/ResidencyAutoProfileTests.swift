@@ -13,15 +13,15 @@ import Testing
     static let qwenPool = UInt64(18_100_000_000)
     static let qwenCore = UInt64(1_450_000_000)
 
-    @Test("24 GiB host with Qwen keeps the measured 32-slot default")
+    @Test("24 GiB host with Qwen picks the measured 64-slot default")
     func qwenOn24GiBKeepsSlots() {
         let mode = RuntimeConfiguration.defaultExpertStreamingMode(
             for: .qwen36,
             physicalMemoryBytes: 24 * Self.gib,
             expertPoolBytes: Self.qwenPool,
             coreWeightsBytes: Self.qwenCore)
-        guard case .pread(let slots) = mode, slots == 32 else {
-            Issue.record("expected 32-slot default, got \(mode)")
+        guard case .pread(let slots) = mode, slots == 64 else {
+            Issue.record("expected 64-slot default, got \(mode)")
             return
         }
     }

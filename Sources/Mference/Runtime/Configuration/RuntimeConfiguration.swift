@@ -61,12 +61,18 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     /// Qwen's 256 experts per layer need twice Gemma's cache coverage to avoid
     /// repeated SSD reads. Keep the larger footprint family- and RAM-specific.
+    /// 64 slots (~4.5 GB wired) beat 32 by 4.6–5.9% across all community
+    /// cases on the 24 GB M5 (2026-08-08 A/B, byte-identical), while 96/128
+    /// crowd the GPU working set — so 64 is gated to hosts with ≥24 GiB.
     public static func defaultExpertCacheSlots(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) -> Int {
-        let sixteenGiB = UInt64(16) * 1024 * 1024 * 1024
-        return family == .qwen36 && physicalMemoryBytes >= sixteenGiB ? 32 : 16
+        guard family == .qwen36 else { return 16 }
+        let gib = UInt64(1) << 30
+        if physicalMemoryBytes >= 24 * gib { return 64 }
+        if physicalMemoryBytes >= 16 * gib { return 32 }
+        return 16
     }
 
     /// Fixed reserve the resident rung leaves for the KV cache, scratch, the

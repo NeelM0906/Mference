@@ -19,7 +19,10 @@ import Testing
         let eightGiB = UInt64(8) * 1024 * 1024 * 1024
         let twentyFourGiB = UInt64(24) * 1024 * 1024 * 1024
         #expect(RuntimeConfiguration.defaultExpertCacheSlots(
-            for: .qwen36, physicalMemoryBytes: twentyFourGiB) == 32)
+            for: .qwen36, physicalMemoryBytes: twentyFourGiB) == 64)
+        let sixteenGiB = UInt64(16) * 1024 * 1024 * 1024
+        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
+            for: .qwen36, physicalMemoryBytes: sixteenGiB) == 32)
         #expect(RuntimeConfiguration.defaultExpertCacheSlots(
             for: .qwen36, physicalMemoryBytes: eightGiB) == 16)
         #expect(RuntimeConfiguration.defaultExpertCacheSlots(
