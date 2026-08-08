@@ -170,11 +170,11 @@ system map is [WIKI.md](WIKI.md).
   512-token wrap, grows the full-attention prefix, and matches the pinned MLX
   oracle exactly at every ordered top-10 logit.
 
-- [ ] **`feature/maple-product-integration`** — Acceptance: `maple` installs,
+- [x] **`feature/maple-product-integration`** — Acceptance: `maple` installs,
   auto-detects, and runs through Repack, CLI, Mac app/decode service, and server;
-  model IDs, directory convention, library rows, native-KV diagnostics, hidden
-  thought, stop reasons, streaming, and tool-call surfaces behave observably as
-  specified without regressing existing families. **Status:** clean product
+  model IDs, directory convention, descriptor selection, native-KV diagnostics,
+  hidden thought, stop reasons, streaming, and tool-call surfaces behave
+  observably as specified without regressing existing families. **Status:** clean product
   integration is complete in `6e55a75`, `7c06dd0`, and `24d9f30`. The app
   catalog publishes the exact pinned Maple descriptor and `maple.gturbo`
   convention; Repack accepts the selector; and raw/chat CLI, app/decode service,
@@ -185,9 +185,10 @@ system map is [WIKI.md](WIKI.md).
   diagnostics, and protocol tests pass; the full package run passed 973 tests
   in 157 suites (113.923 seconds). The baseline and research branch expose
   descriptor-backed app selection, not a separate richer download-row picker,
-  so none was invented. This checkbox remains open until the env-gated real
-  Maple CLI, app/decode-service, and server smoke workflows run with the parity
-  evidence.
+  so none was invented. Strict install verification, raw and interactive CLI
+  generation, the app-core/decode-service route, and the loopback server then
+  completed against the installed Maple model. The app owns its sibling decode
+  service through standard input/output.
 
 - [x] **`feature/maple-parity-harness`** — Acceptance: a maintained harness
   pins and verifies checkpoint/runtime/corpus inputs, exports the complete
@@ -204,12 +205,15 @@ system map is [WIKI.md](WIKI.md).
   ignored; compact environment, command, hash, timing, and result metadata is
   recorded in [the parity evidence](docs/evidence/maple-parity-2026-08-09.json).
 
-- [ ] **`feature/maple-documentation`** — Acceptance: user-facing README,
+- [x] **`feature/maple-documentation`** — Acceptance: user-facing README,
   implementation references, licenses/notices, install/run instructions,
   product support, limitations, and accepted validation results describe only
   the clean implementation; [WIKI.md](WIKI.md), this ledger, and
   [docs/MAPLE.md](docs/MAPLE.md) reflect final code and all links resolve.
-  **Status:** planned.
+  **Status:** complete. User-facing model, storage, BF16-KV, prefill, product,
+  reference, and licensing documentation now reflects the clean integration;
+  Maple's only published acceptance result is the exact parity record, not a
+  performance benchmark.
 
 ## Intentional exclusions and deviations from the research branch
 

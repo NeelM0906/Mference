@@ -10,21 +10,29 @@ Mference's runtime, installer, and application code are derived from
 Mikhaylov and contributors, licensed under the
 [Apache License 2.0](LICENSE-APACHE). The derived portions remain governed by
 that license. Significant changes from the original include: the Mference
-rebrand throughout; support for a second model architecture (Qwen 3.6
-35B-A3B) spanning the architecture configuration, streaming installer, Metal
-kernels (gated-DeltaNet linear attention), forward runner, tokenizer (ChatML
-dialect and Qwen tool-call parsing), and products; model-derived kernel
-specialization; and expanded benchmarks and performance documentation.
+rebrand throughout; support for Qwen 3.6, DeepSeek-V4-Flash, Inkling-Small, and
+Maple across architecture configuration, streaming installation, Metal
+kernels, forward runners, tokenization, and products; model-derived kernel
+specialization; and expanded validation and performance documentation.
 
-This file records the dependency review performed on 2026-07-15. It is an
+This file records the dependency review performed on 2026-08-09. It is an
 attribution aid, not legal advice. Anyone distributing a compiled product must
 also preserve the license and NOTICE material required by the exact dependency
 versions included in that product.
 
+## Apple MLX and DeepGrove MLX-LM
+
+Maple's shape-specific Metal arithmetic, including vector SDPA, was adapted
+from Apple MLX 0.32.0 and the Maple model implementation in
+[`deepgrove-ai/mlx-lm-deepgrove`](https://github.com/deepgrove-ai/mlx-lm-deepgrove)
+at revision `eba96c16158f032821b0bf374ea1421cfddef0a9`. Both upstream trees
+carry the MIT license. The applicable Apple and DeepGrove copyright notices
+are preserved in [`LICENSE-MLX`](LICENSE-MLX).
+
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a
-pinned revision of one of two checkpoints and repacks it locally.
+pinned revision of one of five checkpoints and repacks it locally.
 
 Gemma 4: revision `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` of
 [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit).
@@ -39,6 +47,22 @@ a quantization of Alibaba's
 [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) checkpoint, whose
 [license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE)
 governs those weights.
+
+DeepSeek-V4-Flash: revision `722bf559b7de93575b2320973cf2002e05bfe6c9` of
+[`mlx-community/DeepSeek-V4-Flash-2bit-DQ`](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-2bit-DQ).
+
+Inkling-Small: revision `9d6e4720ab7002af25d6129c88ccea6cd9f19372` of
+[`pipenetwork/Inkling-Small-MLX-4bit`](https://huggingface.co/pipenetwork/Inkling-Small-MLX-4bit).
+
+Maple Preview: revision `361db5da5e74ff6fcdd852d478e1f266ce11013a` of
+[`deepgrove/maple-preview-2bit-mlx`](https://huggingface.co/deepgrove/maple-preview-2bit-mlx).
+The installer verifies its source-index SHA-256
+`56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95`.
+That pinned repository revision does not declare a license for the checkpoint
+weights in a model card, LICENSE file, or Hub license tag. Downloading, using,
+or redistributing those weights therefore requires separately establishing
+that the necessary rights have been obtained; Mference makes no grant of
+rights to them.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.

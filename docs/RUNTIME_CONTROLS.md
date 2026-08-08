@@ -2,9 +2,9 @@
 
 The Mac app exposes generation and runtime controls in its collapsible right
 settings pane. Use the right-sidebar button in the status bar or
-<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> to hide or restore it. FP16 is
-the fixed KV format. Generation settings apply to the next request; load-time
-settings require a reload.
+<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> to hide or restore it.
+Existing families use FP16 KV; Maple uses native BF16 KV. Generation settings
+apply to the next request; load-time settings require a reload.
 
 Chat navigation lives separately in the collapsible left sidebar. Use its
 **New chat** button or <kbd>Command</kbd>+<kbd>N</kbd> to create an independent
@@ -52,7 +52,7 @@ The Mac app and CLI expose these generation controls:
 | Control | Mac values | CLI flag | Default | Effect |
 | --- | --- | --- | --- | --- |
 | Maximum response | Automatic | `--max-new` | App: remaining context; CLI: 1,024 tokens | The app can use the context space left after formatting the prompt. The CLI uses its explicit or default `--max-new` limit. |
-| Maximum context | 4K, 8K, 16K, 32K, 64K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the FP16 KV-memory delta. |
+| Maximum context | 4K, 8K, 16K, 32K, 64K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the selected model's KV-memory delta. |
 | Temperature | 0...2 in 0.05 steps | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
 | Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
@@ -68,9 +68,9 @@ benchmark protocol.
 | Control | Values | CLI flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
 | Expert-cache slots | 8, 16, 24, 32; CLI also accepts auto | `--expert-cache-slots` | App: 16; CLI/server auto | Auto selects 32 for Qwen on hosts with at least 16 GiB and 16 otherwise. Other families stay at 16. More slots retain more routed experts and reduce later reads at the cost of RAM. |
-| Prompt prefill | On, off | — | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
+| Prompt prefill | On, off | — | On | On requests the family prefill path. Maple always replays prompt tokens sequentially; other families use chunked prefill where supported. Off selects correctness-first scalar replay rather than skipping prompt processing. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
-| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Larger chunks use more prefill scratch memory, and on sliding-window models more KV ring memory. DeepSeek-V4 models prefill through the decode path and ignore the chunk size. |
+| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Larger chunks use more prefill scratch memory, and on sliding-window models more KV ring memory. DeepSeek-V4 models prefill through the decode path and ignore the chunk size; Maple uses sequential prefill. |
 | Model verification | Full SHA-256, trusted receipt | `--verify` | Full SHA-256 | `full-sha256` re-hashes each routed-expert file on first touch, which for a 145 GB expert pool costs about 59 s inside the first prefill. `trusted-receipt` instead checks each file's size against the receipt written at install time; the receipt itself is still validated against the manifest hash, and `model_weights.bin` and `layout.json` are still hashed. It trades detection of size-preserving corruption for that time. The Mac app exposes the same choice. |
 
 The prefill chunk size is a CLI control; the Mac app uses the default. The Mac

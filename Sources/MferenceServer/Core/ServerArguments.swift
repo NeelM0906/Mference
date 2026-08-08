@@ -5,7 +5,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let port: Int
     public let bindMode: ServerBindMode
     /// Explicit --model-id value; nil defers to the loaded model's family
-    /// default (gemma-4-26b-a4b-it or qwen3.6-35b-a3b).
+    /// default for the loaded model family.
     public let modelIDOverride: String?
     public var modelID: String { modelIDOverride ?? "gemma-4-26b-a4b-it" }
     public let maxContext: Int
@@ -21,8 +21,9 @@ public struct ServerArguments: Equatable, Sendable {
                              binds only the machine's Tailscale IPv4 address
                              and fails when Tailscale is unavailable.
       --model-id <id>        API model identifier (default derived from the
-                             installed model: gemma-4-26b-a4b-it or
-                             qwen3.6-35b-a3b).
+                             installed model: gemma-4-26b-a4b-it,
+                             qwen3.6-35b-a3b, deepseek-v4-flash-2bit-dq,
+                             inkling-small-4bit, or maple-preview-2bit-mlx).
       --max-context <tokens> 4096, 8192, 16384, 32768, or 65536 (default 16384).
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
