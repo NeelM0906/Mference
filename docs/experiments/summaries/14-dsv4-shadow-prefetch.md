@@ -62,3 +62,14 @@ DSV4-only (family-gated default); the Qwen pilot wiring remains in the
 code, inert unless `MFERENCE_SPEC_PREFETCH` requests it, as the substrate
 for future copy-free-hit experiments. Qwen's 23% exposed I/O wants a
 different fix: serving page-cache-resident hits without the slot copy.
+
+## NVMAI phase-1 kernel diff (2026-08-08, no action)
+
+The sibling fork's "routed MoE phase-1 rewrite (−36% routedCB)" was diffed
+against our tree: identical shared body, identical function-constant
+specialization — our production kernel *is* their rewrite (r8 variant);
+their −36% was measured against their own older baseline. Their only novel
+knob, 16 simdgroups per threadgroup (`_r16`), was ported behind an env flag
+and measured byte-identical but 2.5–3% slower on the M5 across two
+alternating pairs (24.76/25.16 vs 25.54/25.81 tok/s). Rejected and removed;
+r8 with 256-thread threadgroups stays the default.
