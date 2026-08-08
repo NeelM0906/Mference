@@ -62,7 +62,7 @@ import Mference
         }
     }
 
-    @Test func loadedRuntimeKeyTracksOnlyLoadTimeChoices() {
+    @Test func loadedRuntimeKeyTracksEveryLoadTimeChoice() {
         let directory = URL(fileURLWithPath: "/tmp/model.gturbo")
         let base = AppRuntimeOptions()
         let baseline = AppLoadedRuntimeKey(
@@ -74,6 +74,8 @@ import Mference
         value = base; value.expertCachePolicy = .lru; variants.append(value)
         value = base; value.rdadvisePolicy = .bounded; variants.append(value)
         value = base; value.modelVerification = .trustedInstall; variants.append(value)
+        value = base; value.prefillEnabled = false; variants.append(value)
+        value = base; value.prefillChunkTokens = 64; variants.append(value)
 
         for variant in variants {
             #expect(AppLoadedRuntimeKey(
@@ -86,16 +88,5 @@ import Mference
             maxContextTokens: 4096,
             options: base,
             forceLogitsHead: true) != baseline)
-
-        value = base; value.prefillEnabled = false
-        #expect(AppLoadedRuntimeKey(
-            modelDirectory: directory,
-            maxContextTokens: 4096,
-            options: value) == baseline)
-        value = base; value.prefillChunkTokens = 64
-        #expect(AppLoadedRuntimeKey(
-            modelDirectory: directory,
-            maxContextTokens: 4096,
-            options: value) == baseline)
     }
 }
