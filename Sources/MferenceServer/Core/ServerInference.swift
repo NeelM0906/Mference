@@ -194,12 +194,13 @@ public actor ServerModelSession: ServerInferenceBackend {
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix) async throws -> ServerModelSession {
+        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw MFTokenizerError.missingToolTemplate
         }
         let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
-        let tokenizer = try await MFTokenizer.load(from: tokenizerFolder)
+        let tokenizer = try await MFTokenizer.load(from: tokenizerFolder, family: family)
         // DeepSeek ships no chat_template.jinja — its chat framing is native
         // Swift — so the prompt-cache identity hashes a pinned constant that
         // changes only when that native render does. Every other dialect
@@ -213,7 +214,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             throw MFTokenizerError.missingToolTemplate
         }
         let context = try MetalContext()
-        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let runtime = RuntimeConfiguration(
             expertCacheSlots: RuntimeConfiguration.defaultExpertCacheSlots(for: family),
             forceLogitsHead: true)
@@ -359,10 +359,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
+        let decoder = needsToolTemplate || tokenizer.generationPromptStartsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
-                allowedTools: Set(request.tools.map(\.name)))
+                allowedTools: Set(request.tools.map(\.name)),
+                startsInThought: tokenizer.generationPromptStartsInThinking)
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""

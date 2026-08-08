@@ -319,10 +319,31 @@ actor RealInferenceSession {
             runner.reset()
             progress.prefillStart = Date()
 
+            let decoder = tokenizer.generationPromptStartsInThinking
+                ? StructuredAssistantDecoder(tokenizer: tokenizer,
+                                             allowedTools: [],
+                                             startsInThought: true)
+                : nil
+            var decodingError: Error?
+            var shouldStop = false
+
+            func visibleText(_ events: [StructuredAssistantEvent]) throws -> String {
+                var visible = ""
+                for event in events {
+                    switch event {
+                    case .content(let text): visible += text
+                    case .toolCall: throw ToolCallParserError.malformed
+                    }
+                }
+                return visible
+            }
+
             let result = try await runRawCompletion(
                 producer: runner, tokenizer: tokenizer, promptIds: promptIds,
                 config: config, context: ctx, scratch: scratch,
-                prefillConfig: prefillConfig) { event in
+                prefillConfig: prefillConfig,
+                shouldStop: { shouldStop }) { event in
+                guard decodingError == nil else { return }
                 switch event {
                 case .prefill(let done, let total):
                     if done == total {
@@ -330,18 +351,51 @@ actor RealInferenceSession {
                         progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
                     }
                     continuation.yield(.prefillProgress(done: done, total: total))
-                case .token(let index, _, let delta):
+                case .token(let index, let tokenID, let delta):
                     if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
                     progress.generated = index + 1
                     if index % 8 == 0 { _ = memorySampler.sample() }
-                    continuation.yield(.token(AppTokenEvent(
-                        index: index,
-                        textDelta: delta,
-                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                    do {
+                        let events = if let decoder {
+                            try decoder.consume(tokenID: tokenID, delta: delta)
+                        } else {
+                            delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
+                        }
+                        continuation.yield(.token(AppTokenEvent(
+                            index: index,
+                            textDelta: try visibleText(events),
+                            elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                    } catch {
+                        decodingError = error
+                        shouldStop = true
+                    }
                 case .tail(let text):
+                    do {
+                        let events = if let decoder {
+                            try decoder.consumeFlushedText(text)
+                        } else {
+                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
+                        }
+                        let visible = try visibleText(events)
+                        if !visible.isEmpty {
+                            continuation.yield(.token(AppTokenEvent(
+                                index: max(progress.generated - 1, 0),
+                                textDelta: visible,
+                                elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                        }
+                    } catch {
+                        decodingError = error
+                        shouldStop = true
+                    }
+                }
+            }
+            if let decodingError { throw decodingError }
+            if let decoder {
+                let visible = try visibleText(decoder.finish())
+                if !visible.isEmpty {
                     continuation.yield(.token(AppTokenEvent(
                         index: max(progress.generated - 1, 0),
-                        textDelta: text,
+                        textDelta: visible,
                         elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
                 }
             }
