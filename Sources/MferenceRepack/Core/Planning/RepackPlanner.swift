@@ -367,6 +367,13 @@ enum RepackPlanner {
             guard let weight = registry[name] else {
                 throw RepackError.missingTensor(name: name)
             }
+            if family == .maple,
+               isMaplePackedResidentWeight(name),
+               weight.dtype != .u32 {
+                throw RepackError.dtypeMismatch(
+                    name: name,
+                    detail: "expected U32 packed Maple weight, got \(weight.dtype)")
+            }
             let dtype = ietnyDtype(weight.dtype)
             let isQuantizedPacked = (weight.dtype == .u32) && name.hasSuffix(".weight")
 
@@ -686,6 +693,23 @@ enum RepackPlanner {
         case .i64: 4
         case .i32: 5
         }
+    }
+
+    private static func isMaplePackedResidentWeight(_ name: String) -> Bool {
+        if name == "model.word_embeddings.weight" || name == "lm_head.weight" {
+            return true
+        }
+        let components = name.split(separator: ".")
+        guard components.count == 6,
+              components[0] == "model",
+              components[1] == "layers",
+              Int(components[2]) != nil,
+              components[3] == "self_attn",
+              components[5] == "weight" else {
+            return false
+        }
+        return components[4] == "q_proj" || components[4] == "k_proj"
+            || components[4] == "v_proj" || components[4] == "o_proj"
     }
 
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {
