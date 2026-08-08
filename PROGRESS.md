@@ -156,15 +156,29 @@ system map is [WIKI.md](WIKI.md).
   reset, continuation, forced full logits, malformed metadata, and non-Maple
   factory behavior; focused KV coverage crosses the 512-row sliding wrap while
   a full layer remains linear. The full package run passed 968 tests in 156
-  suites (114.589 seconds). Product entry-point wiring belongs to the next
-  branch. The representative real-checkpoint wrap/long-prefix trace remains a
-  parity-harness gate, so this checkbox stays open until that evidence exists.
+  suites (114.589 seconds). Product entry-point wiring is implemented by the
+  following product branch. The representative real-checkpoint
+  wrap/long-prefix trace remains a parity-harness gate, so this checkbox stays
+  open until that evidence exists.
 
 - [ ] **`feature/maple-product-integration`** — Acceptance: `maple` installs,
   auto-detects, and runs through Repack, CLI, Mac app/decode service, and server;
   model IDs, directory convention, library rows, native-KV diagnostics, hidden
   thought, stop reasons, streaming, and tool-call surfaces behave observably as
-  specified without regressing existing families. **Status:** planned.
+  specified without regressing existing families. **Status:** clean product
+  integration is complete in `6e55a75`, `7c06dd0`, and `24d9f30`. The app
+  catalog publishes the exact pinned Maple descriptor and `maple.gturbo`
+  convention; Repack accepts the selector; and raw/chat CLI, app/decode service,
+  and server construct their producer through the family-aware factory. Maple
+  reports effective sequential prefill and model-native BF16 KV through the
+  decode protocol, while all existing families retain the prior runner,
+  prefill, and FP16 behavior. Focused descriptor/location, selector, factory,
+  diagnostics, and protocol tests pass; the full package run passed 973 tests
+  in 157 suites (113.923 seconds). The baseline and research branch expose
+  descriptor-backed app selection, not a separate richer download-row picker,
+  so none was invented. This checkbox remains open until the env-gated real
+  Maple CLI, app/decode-service, and server smoke workflows run with the parity
+  evidence.
 
 - [ ] **`feature/maple-parity-harness`** — Acceptance: a maintained harness
   pins and verifies checkpoint/runtime/corpus inputs, exports the complete

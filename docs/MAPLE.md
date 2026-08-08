@@ -138,6 +138,13 @@ OpenAI-style function call but never executes it. The model must install,
 auto-detect, load, reset, continue, and report BF16 KV through Repack, CLI, Mac
 app/decode service, and server without changing existing-family behavior.
 
+The clean product wiring selects the standalone Maple runner from manifest
+family metadata at every production construction site. Its effective
+sequential-prefill and BF16-KV modes cross the Mac decode protocol and enter
+the server prompt-cache identity; the existing four families retain their
+prior runner, prefill, and FP16-KV behavior. This model-free wiring evidence is
+not a substitute for the installed-model product smoke and parity gates below.
+
 ## Frozen parity corpus and trace policy
 
 The parity corpus is Edgar Allan Poe's *The Raven*, fetched from

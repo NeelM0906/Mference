@@ -2,12 +2,12 @@
 
 This is the repository-level map for users and agents. It describes the
 shipping four-model codebase on the `main` baseline and shows where the clean
-Maple port will join it. Maple's installer, schema, kernels, tokenizer, and
-standalone runtime are implemented on the clean integration lineage; product
-entry-point wiring and final parity evidence remain open in
-[PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as shipping product
-support. Reference-branch behavior is not present-tense product evidence. The
-frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
+Maple port will join it. Maple's installer, schema, kernels, tokenizer,
+standalone runtime, and product entry-point wiring are implemented on the clean
+integration lineage. Real-model product smoke tests and final parity evidence
+remain open in [PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as
+shipping product support. Reference-branch behavior is not present-tense
+product evidence. The frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
 
 ## What Mference is
 
@@ -72,7 +72,7 @@ convention; detection uses the directory's manifest.
 | Qwen 3.6 35B-A3B | 40 layers; 30 Gated-DeltaNet recurrent layers plus 10 gated full-attention layers; 256 experts, top 8; sigmoid-gated shared expert; untied head. | `qwen36.gturbo` |
 | DeepSeek-V4-Flash 284B-A13B | 43 MoE layers; sliding attention plus CSA/HCA compressed long-range state; four-stream mHC residual; top 6 routing, including three hash-routed layers; 2-bit routed experts. | `deepseekv4flash.gturbo` |
 | Inkling-Small 276B-A12B | 42 layers; learned relative-position attention and short convolutions; 256 experts, top 6; two leading dense layers and two shared experts; padded vocabulary truncated before sampling. | `inklingsmall.gturbo` |
-| Maple Preview (core runtime implemented; product integration pending) | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
+| Maple Preview (clean product wiring implemented; parity pending) | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
 
 At load, `ManifestReader` decodes the model family, resolves the corresponding
 known `ArchConfig`, and rejects field, file, layout, or quantization mismatches.
@@ -212,8 +212,9 @@ Maple's standalone runtime deliberately implements sequential prefill: it
 replays the exact one-token native-BF16 path and emits the full head only for
 the final prompt token. The research-only `MFERENCE_MAPLE_PREFILL=batch` path
 is not part of the port because its batch primitives were never brought to the
-same parity standard. CLI, app, and server selection of this runtime belongs to
-the product-integration branch.
+same parity standard. The family-aware runner factory enforces this path for
+the CLI, Mac app/decode service, and server and reports sequential execution
+with model-native BF16 KV.
 
 ## Tokenization, chat templates, and generation
 
@@ -235,9 +236,9 @@ event is surfaced. The server returns tool calls to the client but never
 executes or authorizes them.
 
 Maple's generation suffix opens `<think>` and leaves it live. Its product
-integration must suppress that private channel until `</think>`, preserve
-template-significant message whitespace, resolve EOS/end-of-turn correctly,
-and select this behavior from explicit model-family metadata—not magic token
+integration suppresses that private channel until `</think>`, preserves
+template-significant message whitespace, resolves EOS/end-of-turn correctly,
+and selects this behavior from explicit model-family metadata—not magic token
 IDs or vocabulary size.
 
 Generation defaults are temperature 0.2, Top-K 64, and Top-P 0.95. Temperature
@@ -268,6 +269,13 @@ Settings that change model/state allocation require reload; request-only
 generation controls do not always do so. See
 [runtime controls](docs/RUNTIME_CONTROLS.md).
 
+Maple uses the existing descriptor-backed catalog surface with its pinned
+repository, revision, source digest, and `maple.gturbo` directory. The decode
+service selects the Maple runner from manifest family metadata and returns the
+effective sequential-prefill and BF16-KV modes over the existing diagnostics
+protocol. The baseline and research branch do not contain a separate richer
+multi-family picker implementation, so the clean port does not invent one.
+
 ## CLI and local server
 
 The CLI supports a raw prompt, a JSON messages file, or an interactive chat.
@@ -275,6 +283,12 @@ It reports prefill and decode timing and can print optional phase diagnostics.
 Interactive turns rerender and re-prefill the fitted conversation. Context
 fitting may drop the oldest complete messages but never the system message or
 current user message.
+
+Raw CLI, chat CLI, and server sessions all construct their producer through the
+same family-aware factory. Maple therefore uses sequential prefill, the exact
+full head, and BF16 KV without adding family conditionals to the existing
+four-model runner; existing families retain their requested chunked/off modes
+and FP16 KV diagnostics.
 
 The server provides `GET /health`, `GET /v1/models`, and
 `POST /v1/chat/completions`, including blocking JSON and SSE streaming. It
