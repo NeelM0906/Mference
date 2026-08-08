@@ -11,6 +11,90 @@ Make only the changes the user asks for, and keep them surgical. Do not start
 optimization work, refactors, or new model ports on your own initiative. The
 model-run safety rules below always apply, whatever the task.
 
+## Maple upstreaming workflow
+
+Reimplement the behavior of `codex/maple-integration` cleanly on top of the
+repository's original `main`. Treat the research branch only as a behavioral
+and implementation reference: inspect it carefully, but do not clean it up in
+place, cherry-pick it wholesale, or copy its accidental structure. Derive a
+feature-parity checklist before implementation and use it to organize the
+work.
+
+The original `main` is an immutable baseline for this project. Never merge
+project changes into it. `feature/maple-integration`, created from `main`, is
+the integration branch. Every subsequent change must use a separate branch
+created from `feature/maple-integration` and merge back into
+`feature/maple-integration` after completion and validation. Completed and
+validated branches may be merged into the integration branch without asking
+the user for permission.
+
+Name branches `<type>/<feature_name>`, for example
+`feature/async_judging`. Allowed types are:
+
+- `feature` for new behavior;
+- `refactor` for simplification or structural changes without behavior changes;
+- `bugfix` for defect fixes; and
+- `methodology` for changes to experimental methodology.
+
+Do not merge a branch that breaks `feature/maple-integration`. Use the
+`@ponytail` workflow throughout: understand the affected behavior first,
+reuse suitable project code and standard or native facilities, and implement
+the smallest clean solution that provides the required behavior. Do not add
+speculative abstractions, dead code, stubs, abandoned experimental paths,
+temporary research or compatibility code, debugging artifacts, unnecessary
+comments, or verbose comments that restate the implementation.
+
+## Commits
+
+Formalize every meaningful code change as a commit containing exactly one
+TODO item. Commit a TODO immediately after it is completed; never accumulate
+completed TODOs into a bulk commit. Use `<type>: <description>` commit
+subjects, for example `feat: Add asynchronous API judging`. Allowed commit
+types are `feat` for new features, `refactor` for behavior-preserving
+refactors, and `fix` for bug fixes. Keep the resulting history logically
+scoped, ordered, and understandable.
+
+## Documentation and progress
+
+Each new module must include a `DOCUMENTATION.md` that explains how it works.
+Maintain `WIKI.md` as a thorough executive summary of all core elements,
+project content, and features, sufficient for a user or agent to understand
+the whole codebase after careful reading.
+
+Record all work in `PROGRESS.md`, updating it whenever a feature is completed
+so that its purpose, completed work, and planned work are clear. If code
+exists but `PROGRESS.md` does not, create it and document the existing
+features as working or planned according to the available evidence. Keep all
+documentation aligned with the final implementation rather than the history
+or accidental structure of the research branch.
+
+## Upstreaming validation
+
+Finish and test each change branch before merging it. Run the project's
+formatter and linter before every merge and fix any reported problems. After
+each branch merge, add any corresponding unit tests on a follow-up branch
+from `feature/maple-integration`, merge them after validation, and run all
+relevant tests; do not defer unit-test additions to a bulk final pass. Package
+tests must still follow the model-safety rules below and run through
+`Scripts/test.sh`.
+
+Verify feature parity explicitly against `codex/maple-integration` with
+tests, representative workflows, outputs, interfaces, configuration
+behavior, and any other relevant observable behavior. Document and justify
+every intentional deviation.
+
+Before declaring the project complete:
+
+- verify the entire feature-parity checklist;
+- run all relevant unit and integration tests plus the formatter and linter;
+- remove dead code, stubs, temporary compatibility layers, debugging code,
+  research-only artifacts, and merely restated comments;
+- review the complete diff from `main` to `feature/maple-integration`;
+- review the Git history for logical scope, order, and clarity; and
+- verify that the documentation describes the final implementation and that
+  `feature/maple-integration` is clean, reviewable, and ready for upstream
+  submission.
+
 ## Layout and commands
 
 `Sources/Mference/` is the runtime and kernels; `Sources/MferenceRepack/`,
