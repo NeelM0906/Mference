@@ -143,6 +143,176 @@ struct MapleRepackPlannerTests {
             "lm_head_flash.token_map", numLayers: 24, family: .deepseekV4Flash) == .unknown)
     }
 
+    @Test func mapleTernaryFixturePlansResidentWideningAndRoutedSlices() throws {
+        let root = temporaryRoot("plan")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let snapshot = try SyntheticSnapshot.buildMaple(at: root)
+        let plan = try maplePlan(snapshot: snapshot, root: root)
+        let resident = plan.resident
+        let q = try #require(resident.entries.first {
+            $0.name == "model.layers.0.self_attn.q_proj.weight"
+        })
+
+        #expect(resident.entries.map(\.name) == [
+            "model.word_embeddings.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+            "lm_head.weight",
+        ])
+        #expect(q.logicalShape4 == [2, 128, 0, 0])
+        #expect(q.sourceWeight.sizeBytes == 64)
+        #expect(q.sizeBytes == 128)
+        #expect(q.scaleSize == 8)
+        #expect(q.biasSize == 8)
+        #expect(q.quantSpec == QuantSpec(bits: 4, groupSize: 64))
+        #expect(q.weightTransform == .unpackInt2ToInt4)
+        #expect(q.scaleTransform == .repeatBF16(count: 2, negated: false))
+        #expect(q.biasTransform == .repeatBF16(count: 2, negated: true))
+        #expect(q.scaleOffset == q.fileOffset + q.sizeBytes)
+        #expect(q.biasOffset == q.scaleOffset + q.scaleSize)
+
+        #expect(plan.layers.count == 24)
+        #expect(plan.layers.allSatisfy {
+            $0.expertsPerLayer == 256 && $0.expertStride == 16_384 && $0.subTensors.count == 9
+        })
+        let layer = plan.layers[0]
+        #expect(layer.expertsPerLayer == 256)
+        #expect(layer.expertStride == 16_384)
+        #expect(layer.fileSize == 4_194_304)
+        #expect([0, 1, 255].map(layer.physicalRank(for:)) == [0, 1, 255])
+        #expect(layer.subTensors.map { "\($0.role):\($0.component)" } == [
+            "gate:weights", "gate:scales", "gate:biases",
+            "up:weights", "up:scales", "up:biases",
+            "down:weights", "down:scales", "down:biases",
+        ])
+        #expect(layer.subTensors.map(\.offsetInExpertBlob) == [
+            0, 64, 72, 80, 144, 152, 160, 224, 232,
+        ])
+        #expect(layer.subTensors.map(\.sizeInExpertBlob) == [
+            64, 8, 8, 64, 8, 8, 64, 8, 8,
+        ])
+        #expect(layer.subTensors.map(\.sourceOffsetPerExpert) == [
+            64, 4, 4, 64, 4, 4, 64, 4, 4,
+        ])
+        #expect(layer.subTensors.map(\.logicalShape) == [
+            [2, 128], [2, 2], [2, 2],
+            [2, 128], [2, 2], [2, 2],
+            [2, 128], [2, 2], [2, 2],
+        ])
+        #expect(layer.subTensors.map(\.bitsForWeights) == [
+            2, nil, nil, 2, nil, nil, 2, nil, nil,
+        ])
+        #expect(layer.subTensors.map(\.transform) == [
+            .identity, .repeatBF16(count: 2, negated: false), .repeatBF16(count: 2, negated: true),
+            .identity, .repeatBF16(count: 2, negated: false), .repeatBF16(count: 2, negated: true),
+            .identity, .repeatBF16(count: 2, negated: false), .repeatBF16(count: 2, negated: true),
+        ])
+        #expect(plan.excludedMultimodalTensorNames == ["lm_head_flash.token_map"])
+    }
+
+    @Test func mapleTernaryRangePlanMapsExpandedDestinationsWithinBounds() throws {
+        let root = temporaryRoot("ranges")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let snapshot = try SyntheticSnapshot.buildMaple(at: root)
+        let plan = try maplePlan(snapshot: snapshot, root: root)
+        let ranges = try RangeCopyPlanner.plan(repackPlan: plan, rangeChunkBytes: 4_096)
+        let q = try #require(plan.resident.entries.first {
+            $0.name == "model.layers.0.self_attn.q_proj.weight"
+        })
+        let layer = plan.layers[0]
+        let transformed = ranges.scalarCopies.filter { $0.transform != .identity }
+        let qCopies = transformed.filter { $0.destinationPath == plan.resident.path }
+
+        #expect(qCopies.map(\.destinationOffset) == [q.fileOffset, q.scaleOffset, q.biasOffset])
+        #expect(qCopies.map(\.transform) == [
+            .unpackInt2ToInt4,
+            .repeatBF16(count: 2, negated: false),
+            .repeatBF16(count: 2, negated: true),
+        ])
+        #expect(transformed.count == 36_867)
+        #expect(Set(transformed.filter { $0.destinationPath.contains("/packed_experts/") }
+            .map(\.destinationPath)).count == 24)
+        #expect(transformed.allSatisfy { copy in
+            let limit = copy.destinationPath == plan.resident.path
+                ? plan.resident.totalSize : layer.fileSize
+            return (try? copy.destinationByteCount()).map {
+                copy.destinationOffset + $0 <= limit
+            } ?? false
+        })
+
+        let firstExpert = transformed.filter {
+            $0.destinationPath == layer.path && $0.destinationOffset < layer.expertStride
+        }
+        let lastBase = 255 * layer.expertStride
+        let lastExpert = transformed.filter {
+            $0.destinationPath == layer.path && $0.destinationOffset >= lastBase
+        }
+        #expect(firstExpert.map(\.destinationOffset) == [64, 72, 144, 152, 224, 232])
+        #expect(lastExpert.map { $0.destinationOffset - lastBase } == [64, 72, 144, 152, 224, 232])
+    }
+
+    @Test func mapleTernaryFixtureRejectsMalformedCompanions() throws {
+        let q = "model.layers.0.self_attn.q_proj"
+        let routed = "model.layers.0.mlp.switch_mlp.gate_proj"
+        let cases: [(String, [SyntheticSnapshot.MapleTensorMutation])] = [
+            ("wrong routed weight dtype", [.replaceDtype(routed + ".weight", "BF16")]),
+            ("wrong alpha dtype", [.replaceDtype(routed + ".row_alpha", "F32")]),
+            ("wrong alpha shape", [.replaceShape(routed + ".row_alpha", [256, 1])]),
+            ("wrong resident alpha dtype", [.replaceDtype(q + ".row_alpha", "F32")]),
+            ("wrong resident alpha shape", [.replaceShape(q + ".row_alpha", [1])]),
+            ("packed input alignment", [.replaceShape(q + ".weight", [2, 7])]),
+            ("missing alpha", [.remove(routed + ".row_alpha")]),
+            ("conflicting affine companions", [.addAffineCompanions(q)]),
+        ]
+
+        for (name, mutations) in cases {
+            let root = temporaryRoot("malformed-\(name)")
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let snapshot = try SyntheticSnapshot.buildMaple(at: root, mutations: mutations)
+
+            #expect(throws: RepackError.self) {
+                _ = try maplePlan(snapshot: snapshot, root: root)
+            }
+        }
+    }
+
+    @Test func localMapleSnapshotPlannerAuditWhenProvided() throws {
+        guard let root = ProcessInfo.processInfo.environment["MFERENCE_MAPLE_SOURCE_SNAPSHOT"],
+              !root.isEmpty else { return }
+
+        let metadata = try IndexLoader.load(snapshotDir: root)
+        let arch = try ArchInfo.load(configPath: configPath(in: root))
+        let headers = try metadata.shardFilenames.map {
+            try mapleHeader(path: (root as NSString).appendingPathComponent($0))
+        }
+        let plan = try RepackPlanner.plan(
+            meta: metadata, arch: arch, shardHeaders: headers,
+            outputDir: (root as NSString).appendingPathComponent("maple-planner-audit"))
+
+        #expect(metadata.indexSha256Hex ==
+            "56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95")
+        #expect(arch.family == .maple)
+        #expect(plan.matchedModelID == "maple-preview-2bit-mlx")
+        #expect(plan.layers.count == 24)
+        #expect(plan.layers.allSatisfy { $0.expertsPerLayer == 256 && $0.subTensors.count == 9 })
+        #expect(plan.layers.allSatisfy { layer in
+            layer.subTensors.filter { $0.component == "weights" }.allSatisfy {
+                $0.bitsForWeights == 2 && $0.transform == .identity
+            }
+        })
+        let ternaryResident = plan.resident.entries.filter {
+            $0.weightTransform == .unpackInt2ToInt4
+        }
+        #expect(!ternaryResident.isEmpty)
+        #expect(ternaryResident.allSatisfy {
+            $0.quantSpec == QuantSpec(bits: 4, groupSize: 64)
+                && $0.scaleTransform == .repeatBF16(count: 32, negated: false)
+                && $0.biasTransform == .repeatBF16(count: 32, negated: true)
+        })
+        #expect(plan.excludedMultimodalTensorNames.contains("lm_head_flash.token_map"))
+    }
+
     @Test func mapleManifestUsesFixedQuantSlotsAndBehavior() throws {
         let root = try makeSnapshot("manifest")
         defer { try? FileManager.default.removeItem(atPath: root) }
@@ -225,6 +395,44 @@ struct MapleRepackPlannerTests {
         try JSONSerialization.data(withJSONObject: ["weight_map": [String: String]()])
             .write(to: URL(fileURLWithPath: (root as NSString)
                 .appendingPathComponent("model.safetensors.index.json")))
+        return root
+    }
+
+    private func maplePlan(snapshot: SyntheticSnapshot.Snapshot,
+                           root: String) throws -> RepackPlan {
+        let metadata = try IndexLoader.load(snapshotDir: root)
+        let arch = try ArchInfo.load(configPath: configPath(in: root))
+        return try RepackPlanner.plan(
+            meta: metadata,
+            arch: arch,
+            shardHeaders: [try mapleHeader(path: snapshot.shardPath)],
+            outputDir: (root as NSString).appendingPathComponent("repacked"))
+    }
+
+    private func mapleHeader(path: String) throws -> Safetensors.Header {
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        guard let lengthData = try handle.read(upToCount: 8), lengthData.count == 8 else {
+            throw RepackError.safetensorsHeaderInvalid(path: path, detail: "missing header length")
+        }
+        let headerSize = [UInt8](lengthData).enumerated().reduce(UInt64(0)) {
+            $0 | (UInt64($1.element) << UInt64(8 * $1.offset))
+        }
+        guard headerSize <= Safetensors.maxHeaderBytes,
+              let headerData = try handle.read(upToCount: Int(headerSize)),
+              headerData.count == Int(headerSize),
+              let fileSize = (try FileManager.default.attributesOfItem(atPath: path)[.size]
+                as? NSNumber)?.uint64Value else {
+            throw RepackError.safetensorsHeaderInvalid(path: path, detail: "truncated header")
+        }
+        return try Safetensors.parseHeaderBytes(path: path, fileSize: fileSize,
+                                                headerBytes: headerData)
+    }
+
+    private func temporaryRoot(_ label: String) -> String {
+        let root = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("mference-maple-\(label)-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
         return root
     }
 
