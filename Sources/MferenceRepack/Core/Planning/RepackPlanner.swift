@@ -31,6 +31,37 @@ struct ResidentEntry: Sendable {
     let sourceWeight: SourceTensor
     let sourceScales: SourceTensor?
     let sourceBiases: SourceTensor?
+    let weightTransform: RangeCopyTransform
+    let scaleTransform: RangeCopyTransform
+    let biasTransform: RangeCopyTransform
+
+    init(name: String, dtype: UInt8, logicalShape4: [UInt32],
+         fileOffset: UInt64, sizeBytes: UInt64,
+         scaleOffset: UInt64, scaleSize: UInt64,
+         biasOffset: UInt64, biasSize: UInt64,
+         quantSpec: QuantSpec?,
+         sourceWeight: SourceTensor,
+         sourceScales: SourceTensor?, sourceBiases: SourceTensor?,
+         weightTransform: RangeCopyTransform = .identity,
+         scaleTransform: RangeCopyTransform = .identity,
+         biasTransform: RangeCopyTransform = .identity) {
+        self.name = name
+        self.dtype = dtype
+        self.logicalShape4 = logicalShape4
+        self.fileOffset = fileOffset
+        self.sizeBytes = sizeBytes
+        self.scaleOffset = scaleOffset
+        self.scaleSize = scaleSize
+        self.biasOffset = biasOffset
+        self.biasSize = biasSize
+        self.quantSpec = quantSpec
+        self.sourceWeight = sourceWeight
+        self.sourceScales = sourceScales
+        self.sourceBiases = sourceBiases
+        self.weightTransform = weightTransform
+        self.scaleTransform = scaleTransform
+        self.biasTransform = biasTransform
+    }
 }
 
 struct ResidentFilePlan: Sendable {
@@ -54,6 +85,24 @@ struct PerExpertTensorSlice: Sendable {
     let sourceOffsetPerExpert: UInt64  // stride per expert in source
     let sourceTensor: SourceTensor
     let bitsForWeights: Int?           // 4 for routed expert weight; nil for scales/biases
+    let transform: RangeCopyTransform
+
+    init(role: String, component: String, dtype: UInt8,
+         logicalShape: [UInt64], offsetInExpertBlob: UInt64,
+         sizeInExpertBlob: UInt64, sourceOffsetPerExpert: UInt64,
+         sourceTensor: SourceTensor, bitsForWeights: Int?,
+         transform: RangeCopyTransform = .identity) {
+        self.role = role
+        self.component = component
+        self.dtype = dtype
+        self.logicalShape = logicalShape
+        self.offsetInExpertBlob = offsetInExpertBlob
+        self.sizeInExpertBlob = sizeInExpertBlob
+        self.sourceOffsetPerExpert = sourceOffsetPerExpert
+        self.sourceTensor = sourceTensor
+        self.bitsForWeights = bitsForWeights
+        self.transform = transform
+    }
 }
 
 struct LayerFilePlan: Sendable {
