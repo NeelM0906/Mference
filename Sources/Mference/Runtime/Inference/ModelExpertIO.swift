@@ -142,6 +142,19 @@ extension Model {
     /// Direct handle on a layer's expert streamer. Used by the speculative
     /// prefetch path, which reserves slots on the caller's thread and then
     /// executes the reads on a background queue without re-resolving the layer.
+    /// GPU bindings for the slot-map decode path; nil for backends without a
+    /// slot cache (resident mode).
+    public func routedSlotMapBinding(layer: Int) throws
+        -> (slab: MTLBuffer, table: MTLBuffer, slotStride: Int)? {
+        try ensureLayerOpened(layer)
+        switch expertBackend(layer) {
+        case .pread(let streamer):
+            return streamer.slotMapBinding
+        case .resident:
+            return nil
+        }
+    }
+
     public func routedExpertStreamer(layer: Int) throws -> PreadExpertStreamer {
         try ensureLayerOpened(layer)
         switch expertBackend(layer) {

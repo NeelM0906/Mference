@@ -70,6 +70,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// slot map needs — and halves per-slot bookkeeping.
     private let slotSlabBuffer: MTLBuffer
     private let slotAllocationSize: Int
+    /// GPU-resident slot map: 256 `Int16` entries, expert -> slot index or
+    /// -1. Mirrors `slotExpert` exactly (updated under `cacheLock` at every
+    /// mutation), so a lookup kernel can resolve routed experts to slab
+    /// offsets without the CPU. Entries are valid only when the slot's
+    /// content is published (reserved/in-flight slots read -1).
+    private let slotOfBuffer: MTLBuffer
+    private let slotOfPointer: UnsafeMutablePointer<Int16>
 
     private var nextSlot = 0
     private let cursorLock = NSLock()
@@ -136,6 +143,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         self.slotSlabBuffer = slabBuffer
         self.slotAllocationSize = allocationSize
+        let tableEntries = max(1, layout.expertsPerLayer)
+        guard let table = device.makeBuffer(
+            length: tableEntries * MemoryLayout<Int16>.stride,
+            options: .storageModeShared) else {
+            throw StreamerError.bufferWrapFailed
+        }
+        self.slotOfBuffer = table
+        self.slotOfPointer = table.contents()
+            .bindMemory(to: Int16.self, capacity: tableEntries)
+        for index in 0..<tableEntries { self.slotOfPointer[index] = -1 }
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.speculativeInFlight = [Bool](repeating: false, count: slotCount)
@@ -240,7 +257,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             let slot = evictable[offset]
             assignedSlots[index] = slot
             reserved[slot] = true
-            slotExpert[slot] = -1
+            setSlotExpert(slot, to: -1)
             slotLastUse[slot] = clock
         }
 
@@ -277,7 +294,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         cacheLock.lock()
         for index in plan.misses {
-            slotExpert[plan.assignedSlots[index]] = plan.experts[index]
+            setSlotExpert(plan.assignedSlots[index], to: plan.experts[index])
         }
         cacheLock.unlock()
 
@@ -347,7 +364,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for index in 0..<budget {
             let slot = evictable[index]
             speculativeInFlight[slot] = true
-            slotExpert[slot] = -1
+            setSlotExpert(slot, to: -1)
             reservation.append((experts[index], slot))
         }
         return reservation
@@ -375,13 +392,51 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         cacheLock.lock()
         for index in loaded {
-            slotExpert[reservation[index].slot] = reservation[index].expert
+            setSlotExpert(reservation[index].slot, to: reservation[index].expert)
         }
         for entry in reservation {
             speculativeInFlight[entry.slot] = false
         }
         cacheLock.unlock()
         return UInt64(loaded.count) * layout.expertStride
+    }
+
+    /// Single point of mutation for slot ownership: keeps the CPU array and
+    /// the GPU-visible table in lockstep. Callers hold `cacheLock`.
+    private func setSlotExpert(_ slot: Int, to expert: Int) {
+        let previous = slotExpert[slot]
+        if previous >= 0, previous < layout.expertsPerLayer {
+            slotOfPointer[previous] = -1
+        }
+        slotExpert[slot] = expert
+        if expert >= 0, expert < layout.expertsPerLayer {
+            slotOfPointer[expert] = Int16(slot)
+        }
+    }
+
+    /// GPU bindings for the slot-map decode path: the slot slab, the
+    /// expert->slot table, and the byte stride between slots.
+    public var slotMapBinding: (slab: MTLBuffer, table: MTLBuffer, slotStride: Int) {
+        (slotSlabBuffer, slotOfBuffer, slotAllocationSize)
+    }
+
+    /// All-hit fast path bookkeeping: bump the LFU counters and use clock
+    /// exactly as `planExpertsCached` would, without planning, assigning, or
+    /// reading anything. Keeps eviction quality identical when the runner
+    /// skips the CPU plan on layers the GPU served entirely from cache.
+    public func noteAllHitUse(experts: [Int]) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        useClock += 1
+        for expert in experts where expert >= 0 && expert < expertUseCount.count {
+            expertUseCount[expert] &+= 1
+        }
+        for expert in experts {
+            for slot in 0..<slotCount where slotExpert[slot] == expert {
+                slotLastUse[slot] = useClock
+                break
+            }
+        }
     }
 
     /// Test/diagnostic view of slot residency.

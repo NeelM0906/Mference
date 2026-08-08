@@ -242,6 +242,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `outIndices`. Feeds the speculative prefetcher; never bound by the
     /// real routed path.
     let pilotIndices: MTLBuffer  // [topK] UInt32
+    /// S3 slot-map scratch: slab byte offsets for the routed experts and the
+    /// GPU-written all-hit flag, both produced by `router_slot_lookup_k8`
+    /// before the router signal so the CPU can trust them at wake.
+    let slotMapOffsets: MTLBuffer // [topK] UInt32
+    let slotMapAllHit: MTLBuffer  // [1] UInt32
     let pilotWeights: MTLBuffer  // [topK] FP16
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     let moeActs: MTLBuffer       // [topK * FmoE] FP16
@@ -433,6 +438,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }()
     var speculativePrefetchMode = SpeculativePrefetchMode.parse(
         ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"])
+    /// S3 experiment gate: run all-hit layers' routed FFN entirely on-GPU
+    /// via the slot map, skipping the per-layer CPU round-trip. Instance
+    /// state so tests can flip it; the env variable sets the process
+    /// default.
+    static let slotMapEnabledDefault =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP"] == "1"
+    var slotMapEnabled = RealForwardRunner.slotMapEnabledDefault
+    /// Debug discriminator: encode the whole slot-map chain but feed the
+    /// lookup an all-empty table, so the guarded kernels always no-op and
+    /// the CPU always falls back. Byte-identity under this mode proves the
+    /// encoding itself is inert.
+    static let slotMapForceMiss =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP_FORCE_MISS"] == "1"
+    /// Debug bisector: arm the slot map on exactly one layer index.
+    static let slotMapOnlyLayer: Int? =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP_LAYER"].flatMap(Int.init)
+    /// Debug: run the guarded chain into shadow buffers, never skip, and
+    /// compare against the fallback's activations after each layer.
+    static let slotMapDebugCompare =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP_DEBUG"] == "1"
+    lazy var slotMapDebugActs: MTLBuffer? = ctx.device.makeBuffer(
+        length: 8 * 4096 * MemoryLayout<Float16>.stride, options: .storageModeShared)
+    lazy var slotMapDebugOut: MTLBuffer? = ctx.device.makeBuffer(
+        length: 4096 * MemoryLayout<Float16>.stride, options: .storageModeShared)
+    lazy var slotMapDebugHidden: MTLBuffer? = ctx.device.makeBuffer(
+        length: 4096 * MemoryLayout<Float16>.stride, options: .storageModeShared)
+    lazy var slotMapEmptyTable: MTLBuffer? = {
+        guard let buf = ctx.device.makeBuffer(
+            length: 256 * MemoryLayout<Int16>.stride,
+            options: .storageModeShared) else { return nil }
+        let ptr = buf.contents().bindMemory(to: Int16.self, capacity: 256)
+        for i in 0..<256 { ptr[i] = -1 }
+        return buf
+    }()
     /// Last token's routed expert ids per layer; empty until a layer has been
     /// routed at least once. This is the default predictor.
     ///
@@ -603,6 +642,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.outIndices    = try buf(paddedTopK, MemoryLayout<UInt32>.size)
         self.outWeights    = try buf(paddedTopK)
         self.pilotIndices  = try buf(paddedTopK, MemoryLayout<UInt32>.size)
+        self.slotMapOffsets = try buf(paddedTopK, MemoryLayout<UInt32>.size)
+        self.slotMapAllHit = try buf(1, MemoryLayout<UInt32>.size)
+        memset(self.slotMapAllHit.contents(), 0, self.slotMapAllHit.length)
         self.pilotWeights  = try buf(paddedTopK)
         self.moeActs       = try buf(paddedTopK * cfg.moeIntermediateSize)
         // Families that route fewer than 8 experts (Inkling: 6) pad the
@@ -2785,6 +2827,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     topK: UInt32(cfg.topKExperts))
             }
 
+            // S3: resolve routed experts to slab offsets and write the
+            // all-hit flag BEFORE the signal, so both are trustworthy the
+            // moment the CPU wakes. Qwen-only (plain pre-norm tail) while
+            // the guarded chain has an accepted A/B for exactly one family.
+            var slotMapArmed = false
+            var slotMapBinding: (slab: MTLBuffer, table: MTLBuffer, slotStride: Int)?
+            if slotMapEnabled,
+               Self.slotMapOnlyLayer == nil || Self.slotMapOnlyLayer == L,
+               !cfg.ffnSandwichNorms,
+               !isLinear,
+               model.config.family == .qwen36,
+               cfg.topKExperts == MoE.maxStreamedExperts,
+               let binding = try? model.routedSlotMapBinding(layer: L) {
+                slotMapBinding = binding
+                slotMapArmed = true
+                moe.encodeSlotLookup(commandBuffer: cb,
+                                     indices: outIndices,
+                                     table: Self.slotMapForceMiss
+                                         ? (slotMapEmptyTable ?? binding.table)
+                                         : binding.table,
+                                     slotStride: binding.slotStride,
+                                     slotOffsets: slotMapOffsets,
+                                     allHit: slotMapAllHit,
+                                     numExperts: UInt32(cfg.numExperts),
+                                     topK: UInt32(cfg.topKExperts))
+            }
+
             // The router indices are written at this point in the buffer, so
             // signal the CPU here and keep encoding into the SAME buffer. The
             // shared dense MLP depends only on the post-attention norm, never
@@ -2863,6 +2932,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // next token's prediction for the same layer.
             settleSpeculation(layer: L, actualExperts: experts)
             recordRoutedExperts(experts, layer: L)
+
+            if slotMapArmed, !Self.slotMapDebugCompare,
+               slotMapAllHit.contents().load(as: UInt32.self) == 1 {
+                // The GPU already finished this layer's routed FFN inside
+                // cb1: no plan, no fetch, no routed command buffer. Keep the
+                // LFU counters exactly as a plan would have left them.
+                if let streamer = try? model.routedExpertStreamer(layer: L) {
+                    streamer.noteAllHitUse(experts: experts)
+                }
+                if Self.phaseInstrumentationEnabled {
+                    totalRoutedLayerSteps &+= 1
+                    totalAllHitLayerSteps &+= 1
+                }
+                issueSpeculativePrefetch(layer: L + 1)
+                continue
+            }
 
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let topK = UInt32(cfg.topKExperts)
@@ -3065,6 +3150,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             gTail(routedCB)
             trackGpuInterval(routedCB)
             routedCB.commit()
+            if Self.slotMapDebugCompare, slotMapArmed,
+               slotMapAllHit.contents().load(as: UInt32.self) == 1 {
+                while routedCB.status != .completed { usleep(200) }
+                let n = Int(topK) * Int(FmoE)
+                let a = moeActs.contents().bindMemory(to: UInt16.self, capacity: n)
+                let b = slotMapDebugActs!.contents().bindMemory(to: UInt16.self, capacity: n)
+                var firstActs = -1
+                for i in 0..<n where a[i] != b[i] { firstActs = i; break }
+                let m = Int(D)
+                let ya = h2Buf.contents().bindMemory(to: UInt16.self, capacity: m)
+                let yb = slotMapDebugOut!.contents().bindMemory(to: UInt16.self, capacity: m)
+                var firstY = -1
+                for i in 0..<m where ya[i] != yb[i] { firstY = i; break }
+                if firstActs >= 0 || firstY >= 0 {
+                    FileHandle.standardError.write(Data(
+                        "[slotmap-debug] L=\(L) actsDiff@\(firstActs) yDiff@\(firstY) a=\(a[max(0,firstActs)]) b=\(b[max(0,firstActs)])\n".utf8))
+                }
+            }
             // GPU is busy with routed work and the next layer's attention, CPU
             // is idle: the natural window for the speculative read.
             issueSpeculativePrefetch(layer: L + 1)

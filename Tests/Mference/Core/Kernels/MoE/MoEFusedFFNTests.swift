@@ -189,6 +189,132 @@ import MferenceValidationSupport
             < Tolerance.fp16ChainedReduction)
     }
 
+    /// S3 parity: the slot-map kernels (slab + GPU-resolved offsets +
+    /// all-hit guard) must produce bit-identical output to the
+    /// argument-buffer production path on identical expert bytes.
+    @Test func slotMapPipelineMatchesArgumentBufferPath() throws {
+        var rng = SeedTree(0x51A9).key("slotmap-parity-top8")
+        let topK = 8
+        func matrix(rows: Int, columns: Int) -> [[Float]] {
+            (0..<rows).map { _ in
+                (0..<columns).map { _ in rng.uniform(-0.4, 0.4) }
+            }
+        }
+        var blobs = [RoutedBlob]()
+        for _ in 0..<topK {
+            blobs.append(Self.makeBlob(
+                gate: matrix(rows: Self.intermediate, columns: Self.dimension),
+                up: matrix(rows: Self.intermediate, columns: Self.dimension),
+                down: matrix(rows: Self.dimension, columns: Self.intermediate)))
+        }
+        let x = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+        let residual = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+        let routingWeights = (0..<topK).map { Float(Float16(0.04 + Float($0) * 0.015)) }
+
+        let context = try MetalContext()
+        let kernel = try MoE(context: context,
+                             specializedD: UInt32(Self.dimension),
+                             specializedF: UInt32(Self.intermediate),
+                             specializedNumExperts: 128,
+                             specializedTopK: UInt32(topK))
+
+        // One contiguous slab holding the blobs at page-ish strides, with the
+        // experts deliberately permuted across slots so offsets matter.
+        let stride = ((blobs.map { $0.bytes.count }.max()! + 4095) / 4096) * 4096
+        var slabBytes = [UInt8](repeating: 0, count: stride * topK)
+        let slotOfExpert: [Int] = [5, 2, 7, 0, 3, 6, 1, 4]
+        for (expert, slot) in slotOfExpert.enumerated() {
+            slabBytes.replaceSubrange(
+                slot * stride ..< slot * stride + blobs[expert].bytes.count,
+                with: blobs[expert].bytes)
+        }
+        // 256-entry expert->slot table; experts 0..7 live in permuted slots.
+        var table = [Int16](repeating: -1, count: 256)
+        for (expert, slot) in slotOfExpert.enumerated() { table[expert] = Int16(slot) }
+        // The router picked experts [0..7] in order.
+        let indices: [UInt32] = (0..<topK).map { UInt32($0) }
+
+        guard let slab = context.device.makeBuffer(
+                bytes: slabBytes, length: slabBytes.count, options: .storageModeShared),
+              let tableBuf = context.device.makeBuffer(
+                bytes: table, length: 256 * MemoryLayout<Int16>.stride,
+                options: .storageModeShared),
+              let indexBuf = context.device.makeBuffer(
+                bytes: indices, length: topK * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared),
+              let offsetsBuf = context.device.makeBuffer(
+                length: topK * MemoryLayout<UInt32>.stride, options: .storageModeShared),
+              let allHitBuf = context.device.makeBuffer(
+                length: MemoryLayout<UInt32>.stride, options: .storageModeShared),
+              let xBuffer = Fp16Buffer.make(context.device, values: x),
+              let residualBuffer = Fp16Buffer.make(context.device, values: residual),
+              let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
+              let refActs = Fp16Buffer.make(context.device, count: topK * Self.intermediate),
+              let mapActs = Fp16Buffer.make(context.device, count: topK * Self.intermediate),
+              let refOut = Fp16Buffer.make(context.device, count: Self.dimension),
+              let mapOut = Fp16Buffer.make(context.device, count: Self.dimension),
+              let hidden = Fp16Buffer.make(context.device, values: residual) else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+
+        // Reference: argument-buffer path over per-expert slab subranges.
+        let refBlobs = (0..<topK).map {
+            (buffer: slab, offset: slotOfExpert[$0] * stride)
+        }
+        guard let argumentBuffer = kernel.makeRoutedArgumentBuffer(
+            routedBlobs: refBlobs, topK: UInt32(topK)) else {
+            Issue.record("argument buffer failed")
+            return
+        }
+        let refCommand = context.queue.makeCommandBuffer()!
+        kernel.encodeRoutedPersistentPhase1U16Load(
+            commandBuffer: refCommand, routedArgBuffer: argumentBuffer,
+            routedBlobs: refBlobs, routedOffsets: blobs[0].offsets,
+            x: xBuffer, acts: refActs,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(topK))
+        kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: refCommand, routedArgBuffer: argumentBuffer,
+            routedBlobs: refBlobs, routedOffsets: blobs[0].offsets,
+            acts: refActs, routingWeights: routingBuffer,
+            residual: residualBuffer, y: refOut,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(topK))
+        refCommand.commit()
+        refCommand.waitUntilCompleted()
+        #expect(refCommand.error == nil)
+
+        // Slot-map path: GPU lookup resolves the same slots, then the guarded
+        // chain runs (and must find all_hit == 1).
+        let mapCommand = context.queue.makeCommandBuffer()!
+        kernel.encodeSlotLookup(
+            commandBuffer: mapCommand, indices: indexBuf, table: tableBuf,
+            slotStride: stride, slotOffsets: offsetsBuf, allHit: allHitBuf,
+            numExperts: 256, topK: UInt32(topK))
+        kernel.encodeSlotMapGuardedFFN(
+            commandBuffer: mapCommand, slab: slab, slotOffsets: offsetsBuf,
+            allHit: allHitBuf, routedOffsets: blobs[0].offsets,
+            x: xBuffer, acts: mapActs, routingWeights: routingBuffer,
+            residual: residualBuffer, y: mapOut, hidden: hidden,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate), topK: UInt32(topK))
+        mapCommand.commit()
+        mapCommand.waitUntilCompleted()
+        #expect(mapCommand.error == nil)
+
+        #expect(allHitBuf.contents().load(as: UInt32.self) == 1)
+        let refA = Fp16Buffer.read(refActs, count: topK * Self.intermediate)
+        let mapA = Fp16Buffer.read(mapActs, count: topK * Self.intermediate)
+        #expect(refA == mapA, "phase-1 activations diverge")
+        let ref = Fp16Buffer.read(refOut, count: Self.dimension)
+        let map = Fp16Buffer.read(mapOut, count: Self.dimension)
+        #expect(ref == map, "phase-2 outputs diverge")
+        // hidden must equal residual + y (the guarded residual add ran).
+        let hiddenOut = Fp16Buffer.read(hidden, count: Self.dimension)
+        let expectedHidden = zip(residual, map).map {
+            Float(Float16(Float(Float16($0)) + Float(Float16($1))))
+        }
+        #expect(hiddenOut == expectedHidden, "guarded residual add diverges")
+    }
+
     private static func makeBlob(gate: [[Float]],
                                  up: [[Float]],
                                  down: [[Float]]) -> RoutedBlob {
