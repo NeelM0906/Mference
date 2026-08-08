@@ -59,7 +59,9 @@ system map is [WIKI.md](WIKI.md).
   never invents repository/revision provenance from `manifest.json`; it
   preserves origin only from an existing receipt bound to the exact directory,
   manifest, and complete file set; forged/stale/missing receipts have tests.
-  **Status:** planned.
+  **Status:** implementation in progress; verification now retains provenance
+  only from an exactly bound existing receipt, with post-merge synthetic tests
+  still required.
 
 - [ ] **`feature/maple-model-schema`** — Acceptance: explicit `.maple` family,
   pinned architecture, manifest fields, quantization contract, source selector,
