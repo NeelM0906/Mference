@@ -151,15 +151,20 @@ system map is [WIKI.md](WIKI.md).
   runtime implementation is complete in `61d6a1d`, `a87ed5c`, and `e89a7fb`.
   A standalone `MapleForwardRunner` validates the exact resident/expert layout,
   owns native-BF16 KV and scratch, overlaps cached expert work with positional
-  reads, replays prefill token by token, and always computes the full head.
+  reads, and replays prefill token by token. Follow-up commits `cd354ba` and
+  `169cef4` keep the complete layer/KV/expert path on every prompt token while
+  skipping final norm and vocabulary-head work until the final uncached prompt
+  token; decode steps still use the complete head.
   Synthetic 24-layer coverage exercises all-miss then all-hit execution,
   reset, continuation, forced full logits, malformed metadata, and non-Maple
   factory behavior; focused KV coverage crosses the 512-row sliding wrap while
-  a full layer remains linear. The full package run passed 968 tests in 156
-  suites (114.589 seconds). Product entry-point wiring is implemented by the
-  following product branch. The representative real-checkpoint
-  wrap/long-prefix trace remains a parity-harness gate, so this checkbox stays
-  open until that evidence exists.
+  a full layer remains linear. Headless reset/resume tests prove that
+  intermediate prompt tokens leave logits untouched, the final uncached token
+  seeds decode, and non-Maple producers retain scalar replay. The full package
+  run at `169cef4` passed 977 tests in 157 suites (117.982 seconds). Product
+  entry-point wiring is implemented by the following product branch. The
+  representative real-checkpoint wrap/long-prefix trace remains a
+  parity-harness gate, so this checkbox stays open until that evidence exists.
 
 - [ ] **`feature/maple-product-integration`** — Acceptance: `maple` installs,
   auto-detects, and runs through Repack, CLI, Mac app/decode service, and server;
