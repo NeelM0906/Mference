@@ -40,7 +40,9 @@ system map is [WIKI.md](WIKI.md).
 - [ ] **`refactor/model-tensor-paths`** — Acceptance: family-specific resident
   tensor paths/accessors are isolated behind one small model abstraction;
   existing four-family behavior and tests remain unchanged; Maple names can be
-  added without widening unrelated runtime switches. **Status:** planned.
+  added without widening unrelated runtime switches. **Status:** implementation
+  in progress; the generic attention accessors now use the existing family
+  trunk prefix, with focused post-merge coverage still required.
 
 - [ ] **`feature/range-copy-transforms`** — Acceptance: the installer supports
   bounded, deterministic identity/INT2-to-INT4/BF16-repeat transforms; source
