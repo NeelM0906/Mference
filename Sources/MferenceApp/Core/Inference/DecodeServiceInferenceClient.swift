@@ -74,7 +74,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             let task = Task.detached(priority: .userInitiated) { [self] in
                 do {
                     try request.validate()
-                    guard let handles = currentHandles() else {
+                    guard let handles = handles(forLoadedDirectory: request.modelDirectory) else {
                         throw AppInferenceError.modelNotLoaded
                     }
                     let generationID = UUID()
@@ -84,6 +84,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,
+                        topK: request.topK,
+                        topP: request.topP,
                         repetitionPenalty: request.repetitionPenalty,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
                         generationID: generationID)
@@ -176,7 +178,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             DecodeServiceCommand.cancel))
     }
 
-    deinit {
+    public func shutdown() {
         let state = connection.withLock { value -> Connection in
             defer { value = Connection() }
             return value
@@ -186,8 +188,14 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                 DecodeServiceCommand.shutdown))
             try? input.close()
         }
+        if let output = state.output { try? output.close() }
         if let label = state.launchLabel { Self.removeLaunchJob(label: label) }
         if let socketPath = state.socketPath { unlink(socketPath) }
+        inferenceMemory.withLock { $0 = nil }
+    }
+
+    deinit {
+        shutdown()
     }
 
     private func ensureProcess() throws -> (input: FileHandle, output: FileHandle) {
@@ -270,6 +278,24 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             }
             return (input, output)
         }
+    }
+
+    private func handles(forLoadedDirectory directory: URL)
+        -> (input: FileHandle, output: FileHandle)? {
+        connection.withLock { state in
+            guard Self.matchesLoadedModelDirectory(
+                directory, loadedDirectory: state.loadedDirectory),
+                let input = state.input, let output = state.output else {
+                return nil
+            }
+            return (input, output)
+        }
+    }
+
+    static func matchesLoadedModelDirectory(
+        _ directory: URL, loadedDirectory: URL?
+    ) -> Bool {
+        directory.standardizedFileURL == loadedDirectory
     }
 
     private func readEvent(from output: FileHandle) async throws
