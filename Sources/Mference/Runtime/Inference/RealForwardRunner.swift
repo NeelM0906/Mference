@@ -951,6 +951,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// while GPU work was still in flight versus the part that ran with an idle
     /// GPU. Only populated when `MFERENCE_PHASES=1`.
     public private(set) var totalIoOverlappedNanos: UInt64 = 0
+    let gpuTimeLock = NSLock()
+    public private(set) var totalGpuBusyNanos: UInt64 = 0
+    var gpuSpanFirstStart: Double = .infinity
+    var gpuSpanLastEnd: Double = 0
     public private(set) var totalIoExposedNanos: UInt64 = 0
     /// Speculative prefetch accounting: experts speculatively read (or advised)
     /// and how many of those the following real plan actually asked for. The
@@ -974,6 +978,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalHeadNanos = 0
         totalHeadFusedNanos = 0
         totalIoOverlappedNanos = 0
+        gpuTimeLock.lock()
+        totalGpuBusyNanos = 0
+        gpuSpanFirstStart = .infinity
+        gpuSpanLastEnd = 0
+        gpuTimeLock.unlock()
         totalIoExposedNanos = 0
         totalSpecPrefetchPredicted = 0
         totalSpecPrefetchIssued = 0
@@ -2810,6 +2819,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let overlapProbe = Self.phaseInstrumentationEnabled ? GPUOverlapProbe() : nil
             overlapProbe?.track(cb)
+            trackGpuInterval(cb)
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForRouterSignal(routerSignal, fallback: cb)
@@ -2932,6 +2942,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // behind. It follows the shared MLP on the same queue.
             if let hitCB = phase1HitCB {
                 overlapProbe?.track(hitCB)
+                trackGpuInterval(hitCB)
                 hitCB.commit()
             }
             if rdadviseEnabled && rdadvisePolicyMode != .off {
@@ -3039,6 +3050,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                    f: FmoE,
                                                    topK: topK)
             gTail(routedCB)
+            trackGpuInterval(routedCB)
             routedCB.commit()
             // GPU is busy with routed work and the next layer's attention, CPU
             // is idle: the natural window for the speculative read.
@@ -3113,6 +3125,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    count: Int, fp32: Bool = false) {
         guard Self.inklingDebugEnabled else { return }
         let cb = ctx.queue.makeCommandBuffer()!
+        trackGpuInterval(cb)
         cb.commit()
         cb.waitUntilCompleted()
         var mn = Float.greatestFiniteMagnitude
@@ -5242,6 +5255,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Tracks when the command buffers that are supposed to hide a pread
     /// actually finished. Completion handlers run on a Metal thread, so the
     /// bookkeeping is lock-guarded.
+    /// GPU-timeline attribution (`MFERENCE_PHASES=1`): busy time summed over
+    /// tracked decode command buffers, plus the wall span they cover. The
+    /// difference is scheduling gap — the target of command-buffer
+    /// consolidation work.
+    func trackGpuInterval(_ cb: MTLCommandBuffer) {
+        guard Self.phaseInstrumentationEnabled else { return }
+        cb.addCompletedHandler { [self] done in
+            let start = done.gpuStartTime
+            let end = done.gpuEndTime
+            guard end > start else { return }
+            gpuTimeLock.lock()
+            totalGpuBusyNanos &+= UInt64((end - start) * 1e9)
+            gpuSpanFirstStart = min(gpuSpanFirstStart, start)
+            gpuSpanLastEnd = max(gpuSpanLastEnd, end)
+            gpuTimeLock.unlock()
+        }
+    }
+
+    public var totalGpuSpanNanos: UInt64 {
+        gpuTimeLock.lock()
+        defer { gpuTimeLock.unlock() }
+        guard gpuSpanLastEnd > gpuSpanFirstStart else { return 0 }
+        return UInt64((gpuSpanLastEnd - gpuSpanFirstStart) * 1e9)
+    }
+
     final class GPUOverlapProbe: @unchecked Sendable {
         private let lock = NSLock()
         private var remaining = 0

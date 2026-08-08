@@ -116,3 +116,20 @@ load-bearing, not legacy. Qwen's remaining exposed-copy share is
 addressable only by fewer misses (the shipped 64-slot default) or by
 hiding copies behind more GPU overlap — a command-buffer pipelining
 question, not a memory-mapping one.
+
+## GPU busy/gap attribution (2026-08-08): decode is orchestration-bound
+
+`MFERENCE_PHASES=1` now reports GPU busy vs span from command-buffer
+timestamps. Qwen 3.6, 64 slots, 128 greedy tokens, 29.8 tok/s:
+
+- gpu busy 1,864 ms / span 4,295 ms → **gap 2,430 ms (57% idle)**
+- per token: 33.6 ms wall = 14.6 ms GPU compute + ~5.9 ms exposed I/O
+  + ~13 ms CPU↔GPU round-trips (40 router wakes: event wait, plan,
+  miss memcpy, routedCB encode+commit per layer)
+
+Consequences: the compute roofline is not the binding constraint — a
+gap-free schedule alone reaches ~68 tok/s on today's kernels. The ranked
+attack is now (1) a GPU-resident slot map + GPU router top-k so all-hit
+layers run with zero CPU involvement (the CPU intervenes only on misses),
+(2) deeper cross-layer encode-ahead. MPP tensor-ops drops in priority:
+faster kernels widen an already-dominant gap.

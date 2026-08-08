@@ -129,6 +129,11 @@ public func run(args: Args,
             lines += "    io exposed (GPU idle): "
             lines += ms(runner.totalIoExposedNanos) + " ms\n"
             lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
+            let gpuBusy = runner.totalGpuBusyNanos
+            let gpuSpan = runner.totalGpuSpanNanos
+            lines += "  gpu busy: " + ms(gpuBusy) + " ms, span: "
+            lines += ms(gpuSpan) + " ms, gap: "
+            lines += ms(gpuSpan > gpuBusy ? gpuSpan - gpuBusy : 0) + " ms\n"
             let predicted = runner.totalSpecPrefetchPredicted
             let recall = predicted > 0
                 ? Double(runner.totalSpecPrefetchConfirmed) / Double(predicted)
