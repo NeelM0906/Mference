@@ -49,9 +49,6 @@ public struct MFTokenizer: @unchecked Sendable {
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
 
     public let dialect: ChatDialect
-    /// The manifest family supplied by a model-directory load. Direct
-    /// tokenizer loads retain their existing family-neutral behavior.
-    public let modelFamily: ModelFamily?
     /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.
     public let bosID: Int32
@@ -72,9 +69,12 @@ public struct MFTokenizer: @unchecked Sendable {
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
 
-    /// Maple's pinned prompt opens a live `<think>` block. This is selected
-    /// from the installed manifest family, never tokenizer vocabulary details.
-    public let generationPromptStartsInThinking: Bool
+    /// Maple's pinned prompt opens a live `<think>` block. The initializer
+    /// resolves this EOS relationship only when the caller supplies the Maple
+    /// manifest family; direct and non-Maple loads retain their old behavior.
+    public var generationPromptStartsInThinking: Bool {
+        dialect == .chatml && eosID == endOfTurnID
+    }
 
     /// BOS actually prepended by `encode(_:addBOS:)`; nil for dialects that
     /// never use a BOS prefix (ChatML).
@@ -87,8 +87,12 @@ public struct MFTokenizer: @unchecked Sendable {
         try await MFTokenizerLoadCoordinator.shared.load(.pretrained(modelID))
     }
 
+    public static func load(from folder: URL) async throws -> MFTokenizer {
+        try await load(from: folder, family: nil)
+    }
+
     public static func load(from folder: URL,
-                            family: ModelFamily? = nil) async throws -> MFTokenizer {
+                            family: ModelFamily?) async throws -> MFTokenizer {
         try await MFTokenizerLoadCoordinator.shared.load(
             .local(folder.standardizedFileURL.path, family))
     }
@@ -125,6 +129,10 @@ public struct MFTokenizer: @unchecked Sendable {
         return try MFTokenizer(tokenizer: underlying)
     }
 
+    static func loadUncached(from folder: URL) async throws -> MFTokenizer {
+        try await loadUncached(from: folder, family: nil)
+    }
+
     static func loadUncached(from folder: URL,
                              family: ModelFamily?) async throws -> MFTokenizer {
         let underlying = try await AutoTokenizer.from(modelFolder: folder)
@@ -135,10 +143,12 @@ public struct MFTokenizer: @unchecked Sendable {
         fileManager.fileExists(atPath: folder.appendingPathComponent("tokenizer.json").path)
     }
 
-    public init(tokenizer: any Tokenizer, family: ModelFamily? = nil) throws {
+    public init(tokenizer: any Tokenizer) throws {
+        try self.init(tokenizer: tokenizer, family: nil)
+    }
+
+    public init(tokenizer: any Tokenizer, family: ModelFamily?) throws {
         self.tokenizer = tokenizer
-        self.modelFamily = family
-        self.generationPromptStartsInThinking = family == .maple
 
         let dialect: ChatDialect =
             if Self.specialTokenID(tokenizer, Self.inklingUserMark) != nil {
