@@ -71,6 +71,20 @@ import Testing
         }
     }
 
+    @Test func installFileEnumerationIncludesManifestDeclaredHiddenFiles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var file = root.appendingPathComponent("config.json")
+        try Data("{}".utf8).write(to: file)
+        var values = URLResourceValues()
+        values.isHidden = true
+        try file.setResourceValues(values)
+
+        #expect(try MapleParityPreflight.regularFiles(in: root) == ["config.json"])
+    }
+
     private func oracleMetadata() -> MapleParityMetadata {
         var runtimeVersions = MapleParityPins.oracleRuntimeVersions
         runtimeVersions["harness"] = String(repeating: "c", count: 40)
