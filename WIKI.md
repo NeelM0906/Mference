@@ -177,9 +177,11 @@ interface:
   dedicated manager rather than the generic KV arrays.
 - Inkling combines FP16 local/full KV with relative-position and depthwise
   short-convolution state.
-- Maple will store native BF16 bit patterns in the same two-byte buffer budget.
-  Sliding layers must use a physical 512-row rotating cache and full layers a
-  linear prefix; physical iteration order is part of exact parity.
+- Maple's implemented projection and normalization primitives store native BF16
+  bit patterns in the same two-byte buffer budget. The planned runtime must keep
+  that representation in its KV path: sliding layers use a physical 512-row
+  rotating cache and full layers a linear prefix; physical iteration order is
+  part of exact parity.
 
 Supported context choices are 4K, 8K, 16K, 32K, and 64K. Reset drops logical
 positions and advises unused state pages back to the OS. The server may retain
