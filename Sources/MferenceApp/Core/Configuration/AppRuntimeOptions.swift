@@ -92,7 +92,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var resultSummary: String {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), FP16 KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), model-native KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
