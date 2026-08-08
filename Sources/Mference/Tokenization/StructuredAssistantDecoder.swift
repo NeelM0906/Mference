@@ -28,14 +28,22 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     public init(tokenizer: MFTokenizer,
                 allowedTools: Set<String>,
-                startsInThought: Bool = false,
                 idGenerator: @escaping @Sendable () -> String = {
                     "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
                 }) {
         self.tokenizer = tokenizer
         self.allowedTools = allowedTools
-        self.channel = startsInThought ? .thought : .visible
         self.idGenerator = idGenerator
+    }
+
+    public convenience init(tokenizer: MFTokenizer,
+                            allowedTools: Set<String>,
+                            startsInThought: Bool,
+                            idGenerator: @escaping @Sendable () -> String = {
+                                "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
+                            }) {
+        self.init(tokenizer: tokenizer, allowedTools: allowedTools, idGenerator: idGenerator)
+        channel = startsInThought ? .thought : .visible
     }
 
     /// Route detokenizer flush text (no backing token, e.g. the end-of-stream
