@@ -4,11 +4,11 @@ This is the repository-level map for users and agents. It describes the
 shipping four-model codebase on the `main` baseline and shows where the clean
 Maple port will join it. Maple's installer, schema, kernels, tokenizer,
 standalone runtime, and product entry-point wiring are implemented on the clean
-integration lineage. The maintained SwiftPM parity harness is implemented, but
-real-model product smoke tests and final parity evidence remain open in
-[PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as shipping product
-support. Reference-branch behavior is not present-tense product evidence. The
-frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
+integration lineage. The maintained SwiftPM parity harness has passed the full
+1,639-position exact oracle comparison; real-model product smoke tests remain
+open in [PROGRESS.md](PROGRESS.md), so Maple is not yet claimed as shipping
+product support. Reference-branch behavior is not present-tense product
+evidence. The frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
 
 ## What Mference is
 
@@ -74,7 +74,7 @@ convention; detection uses the directory's manifest.
 | Qwen 3.6 35B-A3B | 40 layers; 30 Gated-DeltaNet recurrent layers plus 10 gated full-attention layers; 256 experts, top 8; sigmoid-gated shared expert; untied head. | `qwen36.gturbo` |
 | DeepSeek-V4-Flash 284B-A13B | 43 MoE layers; sliding attention plus CSA/HCA compressed long-range state; four-stream mHC residual; top 6 routing, including three hash-routed layers; 2-bit routed experts. | `deepseekv4flash.gturbo` |
 | Inkling-Small 276B-A12B | 42 layers; learned relative-position attention and short convolutions; 256 experts, top 6; two leading dense layers and two shared experts; padded vocabulary truncated before sampling. | `inklingsmall.gturbo` |
-| Maple Preview (clean product wiring implemented; parity pending) | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
+| Maple Preview (parity passed; product smoke pending) | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
 
 At load, `ManifestReader` decodes the model family, resolves the corresponding
 known `ArchConfig`, and rejects field, file, layout, or quantization mismatches.
