@@ -212,3 +212,23 @@ MFERENCE_PHASES=1 .build/release/MferenceCLI \
 
 `--expert-cache-slots` (8, 16, 24, 32) and `--rdadvise`
 (off, default, bounded, adaptive) vary the two policies discussed above.
+
+## Production acceleration round 2 (2026-08-08)
+
+Two accepted defaults on the 24 GB M5, both byte-identical to their
+controls under the community protocol:
+
+- **64 expert-cache slots** on hosts with ≥24 GiB (16 GiB hosts keep 32):
+  +4.6–5.9% decode across all three cases.
+- **GPU-resident slot map** (`MFERENCE_SLOT_MAP=0` to disable): the router
+  top-k is resolved to slot-slab offsets on-GPU, and the ~30% of
+  layer-steps whose experts are all cached complete their routed FFN
+  inside cb1 with no CPU plan, fetch, or routed command buffer. +1.6–3.5%
+  decode on top of the 64-slot rung. Details:
+  [experiments/summaries/15](experiments/summaries/15-gpu-slot-map.md).
+
+Community-protocol medians moved from 29.29 / 27.46 / 23.47 tok/s
+(2026-08-06) to **34.31 / 33.21 / 28.03 tok/s** — a 17–21% cumulative
+decode gain with unchanged outputs. mlx-lm cannot load this model on the
+same host (see
+[experiments/summaries/11](experiments/summaries/11-mlx-qwen-baseline.md)).
