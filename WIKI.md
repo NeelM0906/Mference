@@ -79,11 +79,11 @@ The resident tensor file is mapped read-only and wrapped for Metal. Routed
 expert streamers open lazily per layer. This is why a renamed valid directory
 still works, while an incomplete or incompatible directory does not.
 
-The Mac app discovers models in the configured `Mference.libraryRoot`, the
-checkout's `scratch/`, and `~/Library/Application Support/Mference`. It can
-adopt another valid `.gturbo` directory. Outside the app, the CLI and server
-take an explicit `--model` path; app-family selection can be seeded with the
-`MFERENCE_MODEL` environment variable or the `Mference model` user default.
+For the selected family, the Mac app resolves its conventional directory in
+the checkout's `scratch/` or `~/Library/Application Support/Mference`, or uses
+a remembered explicitly chosen model directory. Outside the app, the CLI and
+server take an explicit `--model` path; app-family selection can be seeded with
+the `MFERENCE_MODEL` environment variable or the `Mference model` user default.
 
 ## Installation and the `.gturbo` format
 
@@ -149,7 +149,8 @@ generation request then:
 1. embeds the next token into the residual stream;
 2. applies each layer's family-specific norm and attention/recurrent path;
 3. runs the router and signals the CPU when selected expert IDs are available;
-4. computes cached expert hits while `pread` fills misses into reusable slots;
+4. plans selected cache hits and misses, then applies the family's GPU/I/O
+   schedule;
 5. reduces routed and shared/dense FFN branches and advances model state;
 6. applies the final norm and language-model head; and
 7. greedily selects or samples the next token, streams detokenized text, and
@@ -165,6 +166,11 @@ The generic fast greedy head avoids materializing all logits when the request
 is pure greedy. Sampling requests use the full logits path. Maple deliberately
 uses only its full, non-approximate 151,936-row head: no existing FP16 fused
 head is claimed as equivalent.
+
+Maple's router selector is deterministic and rejects nonfinite scores. Its
+planner awaits every expert-cache miss, then encodes one full rank-ordered
+phase-1-and-phase-2 command buffer; cached-hit GPU work does not overlap the
+reads.
 
 ## KV, recurrent state, and context
 
@@ -190,7 +196,9 @@ interface:
   expert I/O, reset, and continuation while preserving those layouts; physical
   iteration and rank-reduction order are part of exact parity.
 
-Supported context choices are 4K, 8K, 16K, 32K, and 64K. Reset drops logical
+Maple supports contexts through 128,000 tokens in the runtime, CLI, and server.
+The Mac app currently offers 4K, 8K, 16K, 32K, 64K, and 128K choices; other
+families and product surfaces may impose their own choices. Reset drops logical
 positions and advises unused state pages back to the OS. The server may retain
 one verified prefix for continuation; the CLI chat and Mac app otherwise fit
 or rebuild context according to their product rules.
@@ -314,6 +322,19 @@ installer planning and remote retries/resume, tokenizer/template behavior,
 generation/continuation/cancellation, app state and presentation, and server
 HTTP/queue/prompt-cache behavior. Real-model suites are environment-gated and
 skip unless the matching installed-model path is supplied.
+
+The final Maple acceptance evidence was measured at implementation commit
+`49fd47c13dd9da29c7498663cc1b69a8f0c39463`: `Scripts/test.sh` passed
+1,001 tests in 161 suites (185.394 s), and a release build of the six Maple
+products completed in 10.94 s. One fresh MLX full trace and two independent
+fresh Mference full traces each matched all 1,639 ordered top-10 entries with
+zero retained-logit difference.
+The app/decode-service smoke passed 1/1 in 18.706 s with visible-only output,
+sequential prefill, native BF16 KV, and unload. Raw CLI returned nonempty output;
+ChatML CLI returned visible `4` with end-of-turn and no thought markers; server
+health, models, and chat returned the Maple ID and `4` with stop, then shut down
+cleanly. These timings are validation telemetry, not benchmarks. See the
+[compact parity evidence](docs/evidence/maple-parity-2026-08-09.json).
 
 Before any real model run, require macOS 15+, Swift 6.1+, sufficient disk,
 acceptable `memory_pressure -Q`, a complete required install, and no match from:

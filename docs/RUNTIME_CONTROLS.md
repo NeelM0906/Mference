@@ -52,7 +52,7 @@ The Mac app and CLI expose these generation controls:
 | Control | Mac values | CLI flag | Default | Effect |
 | --- | --- | --- | --- | --- |
 | Maximum response | Automatic | `--max-new` | App: remaining context; CLI: 1,024 tokens | The app can use the context space left after formatting the prompt. The CLI uses its explicit or default `--max-new` limit. |
-| Maximum context | 4K, 8K, 16K, 32K, 64K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the selected model's KV-memory delta. |
+| Maximum context | 4K, 8K, 16K, 32K, 64K, 128K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the selected model's KV-memory delta. Maple supports 128000 tokens in the runtime, CLI, and server; other family or product limits may differ. |
 | Temperature | 0...2 in 0.05 steps | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
 | Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |

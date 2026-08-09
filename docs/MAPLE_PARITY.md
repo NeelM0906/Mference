@@ -138,7 +138,9 @@ research traces, binary hashes, generated text, measurements, or acceptance
 claims. A clean full comparison and the separately required product smoke
 workflows remain necessary before Maple support can be accepted.
 
-The clean implementation run at commit `84d7b62` passed all 1,639 positions:
-1,639/1,639 top-1 and ordered-top-10 matches with zero retained-logit
-difference. The full traces remain ignored; the compact, non-copyrighted run
-record is [maple-parity-2026-08-09.json](evidence/maple-parity-2026-08-09.json).
+At implementation commit `49fd47c13dd9da29c7498663cc1b69a8f0c39463`, one
+fresh MLX full trace and two independent fresh Mference full traces each passed
+all 1,639 positions: 1,639/1,639 top-1 and ordered-top-10 matches with zero
+retained-logit difference. The full traces remain ignored; the compact,
+non-copyrighted run record is
+[maple-parity-2026-08-09.json](evidence/maple-parity-2026-08-09.json).
