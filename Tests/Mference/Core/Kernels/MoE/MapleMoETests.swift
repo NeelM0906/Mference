@@ -138,8 +138,8 @@ import Testing
         assertSentinels(weights)
     }
 
-    @Test("Maple router emits sentinels for BF16 NaNs")
-    func routerNaNEmitsSentinels() throws {
+    @Test("Maple router emits sentinels for non-finite BF16 values")
+    func routerNonFiniteEmitsSentinels() throws {
         let context = try MetalContext()
         let moe = try MapleMoE(context: context)
         var finiteHidden = [UInt16](repeating: 0, count: d)
@@ -149,10 +149,14 @@ import Testing
         let finiteRouter = [UInt16](repeating: 0, count: 256 * d)
         var nanRouter = finiteRouter
         nanRouter[0] = Quantization.bf16Bits(.nan)
-        let routers = try [finiteRouter, nanRouter].map {
+        var positiveInfinityRouter = finiteRouter
+        positiveInfinityRouter[0] = Quantization.bf16Bits(.infinity)
+        var negativeInfinityRouter = finiteRouter
+        negativeInfinityRouter[0] = Quantization.bf16Bits(-Float.infinity)
+        let routers = try [finiteRouter, nanRouter, positiveInfinityRouter, negativeInfinityRouter].map {
             try paddedBuffer(context.device, prefix: 2, payload: bytes($0), suffix: 3)
         }
-        let hidden = try [nanHidden, finiteHidden].map {
+        let hidden = try [nanHidden, finiteHidden, finiteHidden, finiteHidden].map {
             try paddedBuffer(context.device, prefix: 4, payload: bytes($0), suffix: 2)
         }
         let indices = try paddedBuffer(context.device, prefix: 4,
@@ -160,7 +164,7 @@ import Testing
         let weights = try paddedBuffer(context.device, prefix: 4,
                                        payload: [UInt8](repeating: 0, count: topK * 4), suffix: 4)
 
-        for fixture in 0..<2 {
+        for fixture in routers.indices {
             let command = try #require(context.queue.makeCommandBuffer())
             moe.encodeRouterTop8(commandBuffer: command,
                                  weights: routers[fixture].buffer, weightsOffset: 2,
