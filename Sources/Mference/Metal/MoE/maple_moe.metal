@@ -70,6 +70,13 @@ kernel void maple_router_top8_full_softmax(
     float maximum = -1.0e30f;
     for (uint expert = 0u; expert < kMapleExperts; ++expert) {
         const float logit = logits[expert];
+        if (!isfinite(logit)) {
+            for (uint rank = 0u; rank < kMapleTopK; ++rank) {
+                indices[rank] = kMapleExperts;
+                weights[rank] = 0.0f;
+            }
+            return;
+        }
         if (logit > maximum) maximum = logit;
     }
     for (uint expert = 0u; expert < kMapleExperts; ++expert) {
