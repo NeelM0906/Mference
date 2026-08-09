@@ -24,7 +24,7 @@ public struct ServerArguments: Equatable, Sendable {
                              installed model: gemma-4-26b-a4b-it,
                              qwen3.6-35b-a3b, deepseek-v4-flash-2bit-dq,
                              inkling-small-4bit, or maple-preview-2bit-mlx).
-      --max-context <tokens> 4096, 8192, 16384, 32768, or 65536 (default 16384).
+      --max-context <tokens> 4096, 8192, 16384, 32768, 65536, or 128000 (default 16384).
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
@@ -68,7 +68,7 @@ public struct ServerArguments: Equatable, Sendable {
                 modelIDOverride = value
             case "--max-context":
                 guard let parsed = Int(value),
-                      [4_096, 8_192, 16_384, 32_768, 65_536].contains(parsed) else {
+                      [4_096, 8_192, 16_384, 32_768, 65_536, 128_000].contains(parsed) else {
                     throw ServerArgumentError.invalid("--max-context is not supported")
                 }
                 maxContext = parsed

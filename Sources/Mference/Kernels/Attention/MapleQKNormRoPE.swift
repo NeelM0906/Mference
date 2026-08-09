@@ -38,7 +38,7 @@ final class MapleQKNormRoPE {
                 position: UInt32,
                 sliding: Bool) {
         precondition(position < MapleDecodeAttention.maximumSequenceLength,
-                     "Maple position exceeds the supported 64K context")
+                     "Maple position exceeds the supported 128K context")
         let qBytes = Self.numQHeads * Self.headDim * MemoryLayout<UInt16>.stride
         let kBytes = Self.numKVHeads * Self.headDim * MemoryLayout<UInt16>.stride
         let weightBytes = Self.headDim * MemoryLayout<UInt16>.stride

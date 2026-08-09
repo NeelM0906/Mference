@@ -326,7 +326,7 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
             throw MapleForwardRunnerError.invalidConfiguration("model is not the pinned Maple geometry")
         }
         guard maxContext > 0 && maxContext <= Int(MapleDecodeAttention.maximumSequenceLength) else {
-            throw MapleForwardRunnerError.invalidConfiguration("Maple runtime context must be 1...65,536")
+            throw MapleForwardRunnerError.invalidConfiguration("Maple runtime context must be 1...128,000")
         }
     }
 
