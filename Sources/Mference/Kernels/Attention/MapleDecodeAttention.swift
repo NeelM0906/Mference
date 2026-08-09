@@ -13,7 +13,7 @@ final class MapleDecodeAttention {
     static let numKVHeads = 4
     static let headDim = 128
     static let slidingCapacity = 512
-    static let maximumSequenceLength: UInt32 = 65_536
+    static let maximumSequenceLength: UInt32 = 128_000
     static let attentionScale = Float(bitPattern: 0x3db5_04f3)
 
     private static let threads = 1024
@@ -104,7 +104,7 @@ final class MapleDecodeAttention {
                         sequenceLength: UInt32,
                         allowTwoPass: Bool) {
         precondition(sequenceLength > 0 && sequenceLength <= Self.maximumSequenceLength,
-                     "Maple vector SDPA requires 1...65,536 KV rows")
+                     "Maple vector SDPA requires 1...128,000 KV rows")
         let qBytes = Self.numQHeads * Self.headDim * MemoryLayout<UInt16>.stride
         let kvBytes = Int(sequenceLength) * Self.numKVHeads * Self.headDim
             * MemoryLayout<UInt16>.stride
