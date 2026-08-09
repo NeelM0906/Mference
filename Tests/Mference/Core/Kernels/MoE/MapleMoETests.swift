@@ -57,38 +57,128 @@ import Testing
         command.waitUntilCompleted()
         #expect(command.error == nil)
 
-        let expectedLogits = (0..<256).map { expert in
-            routerLogit(router, hidden: hidden, row: expert)
-        }
-        let maximum = expectedLogits.max()!
-        let exponentials = expectedLogits.map { Foundation.exp($0 - maximum) }
-        var simdSums = [Float](repeating: 0, count: 8)
-        for simd in 0..<8 {
-            var lanes = Array(exponentials[(simd * 32)..<((simd + 1) * 32)])
-            for offset in [16, 8, 4, 2, 1] {
-                let prior = lanes
-                for lane in 0..<(32 - offset) { lanes[lane] += prior[lane + offset] }
-            }
-            simdSums[simd] = lanes[0]
-        }
-        let fullSum = simdSums.dropFirst().reduce(simdSums[0], +)
-        let fullSoftmax = exponentials.map { $0 * (1 / (fullSum + 1.0e-20)) }
-        let expectedIndices = fullSoftmax.indices.sorted {
-            fullSoftmax[$0] == fullSoftmax[$1] ? $0 < $1 : fullSoftmax[$0] > fullSoftmax[$1]
-        }.prefix(topK).map(UInt32.init)
-        let selected = expectedIndices.map { fullSoftmax[Int($0)] }
-        let normalizer = selected.reduce(Float(0), +) + 1.0e-20
-        let expectedWeights = selected.map { $0 / normalizer }
+        let expected = routerTop8(router, hidden: hidden)
 
         #expect(nativeRangeContribution != 0)
-        #expect(readUInt32(indices.buffer, offset: 4, count: topK) == expectedIndices)
+        #expect(readUInt32(indices.buffer, offset: 4, count: topK) == expected.indices)
         let actualWeights = readFloat(weights.buffer, offset: 4, count: topK)
-        let routerWeightDiff = maxAbs(actualWeights, expectedWeights)
+        let routerWeightDiff = maxAbs(actualWeights, expected.weights)
         #expect(routerWeightDiff <= 0.000_002,
                 "Maple router max weight diff: \(routerWeightDiff)")
         #expect(abs(actualWeights.reduce(Float(0), +) - 1) <= 0.000_002)
         assertSentinels(weight)
         assertSentinels(x)
+        assertSentinels(indices)
+        assertSentinels(weights)
+    }
+
+    @Test("Maple router is deterministic across serial command-buffer reuse")
+    func routerDeterminismAcrossSerialReuse() throws {
+        let context = try MetalContext()
+        let moe = try MapleMoE(context: context)
+        let firstIDs = [5, 17, 29, 41, 53, 65, 77, 89]
+        let secondIDs = [159, 171, 183, 195, 207, 219, 231, 243]
+        var firstRouter = [UInt16](repeating: Quantization.bf16Bits(-16), count: 256 * d)
+        var secondRouter = [UInt16](repeating: Quantization.bf16Bits(-16), count: 256 * d)
+        for (expert, logit) in zip(firstIDs, [8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5] as [Float]) {
+            firstRouter[expert * d] = Quantization.bf16Bits(logit)
+        }
+        for (expert, logit) in zip(secondIDs, [8, 4, 0, -4, -8, -10, -12, -14] as [Float]) {
+            secondRouter[expert * d + 1] = Quantization.bf16Bits(logit)
+        }
+        var firstHidden = [Float](repeating: 0, count: d)
+        var secondHidden = [Float](repeating: 0, count: d)
+        firstHidden[0] = bf16(1)
+        secondHidden[1] = bf16(1)
+        let expected = [routerTop8(firstRouter, hidden: firstHidden),
+                        routerTop8(secondRouter, hidden: secondHidden)]
+        #expect(Set(expected[0].indices).isDisjoint(with: Set(expected[1].indices)))
+        #expect(abs(expected[0].weights[0] - expected[1].weights[0]) > 0.2)
+
+        let routers = try [firstRouter, secondRouter].map {
+            try paddedBuffer(context.device, prefix: 2, payload: bytes($0), suffix: 3)
+        }
+        let hidden = try [firstHidden, secondHidden].map {
+            try paddedBuffer(context.device, prefix: 4,
+                             payload: bytes($0.map(Quantization.bf16Bits)), suffix: 2)
+        }
+        let indices = try paddedBuffer(context.device, prefix: 4,
+                                       payload: [UInt8](repeating: 0, count: topK * 4), suffix: 4)
+        let weights = try paddedBuffer(context.device, prefix: 4,
+                                       payload: [UInt8](repeating: 0, count: topK * 4), suffix: 4)
+        var baselineWeights = [[UInt32]?](repeating: nil, count: 2)
+
+        for iteration in 0..<3_072 {
+            let fixture = iteration & 1
+            let command = try #require(context.queue.makeCommandBuffer())
+            moe.encodeRouterTop8(commandBuffer: command,
+                                 weights: routers[fixture].buffer, weightsOffset: 2,
+                                 hidden: hidden[fixture].buffer, hiddenOffset: 4,
+                                 indices: indices.buffer, indicesOffset: 4,
+                                 routingWeights: weights.buffer, routingWeightsOffset: 4)
+            command.commit()
+            command.waitUntilCompleted()
+            #expect(command.error == nil)
+
+            let actualIndices = readUInt32(indices.buffer, offset: 4, count: topK)
+            let actualWeights = readFloat(weights.buffer, offset: 4, count: topK)
+            #expect(actualIndices == expected[fixture].indices)
+            #expect(actualWeights.allSatisfy { $0.isFinite })
+            #expect(abs(actualWeights.reduce(Float(0), +) - 1) <= 0.000_002)
+            if let baseline = baselineWeights[fixture] {
+                #expect(actualWeights.map(\.bitPattern) == baseline)
+            } else {
+                #expect(maxAbs(actualWeights, expected[fixture].weights) <= 0.000_002)
+                baselineWeights[fixture] = actualWeights.map(\.bitPattern)
+            }
+        }
+        routers.forEach(assertSentinels)
+        hidden.forEach(assertSentinels)
+        assertSentinels(indices)
+        assertSentinels(weights)
+    }
+
+    @Test("Maple router emits sentinels for non-finite BF16 values")
+    func routerNonFiniteEmitsSentinels() throws {
+        let context = try MetalContext()
+        let moe = try MapleMoE(context: context)
+        var finiteHidden = [UInt16](repeating: 0, count: d)
+        finiteHidden[0] = Quantization.bf16Bits(1)
+        var nanHidden = finiteHidden
+        nanHidden[0] = Quantization.bf16Bits(.nan)
+        let finiteRouter = [UInt16](repeating: 0, count: 256 * d)
+        var nanRouter = finiteRouter
+        nanRouter[0] = Quantization.bf16Bits(.nan)
+        var positiveInfinityRouter = finiteRouter
+        positiveInfinityRouter[0] = Quantization.bf16Bits(.infinity)
+        var negativeInfinityRouter = finiteRouter
+        negativeInfinityRouter[0] = Quantization.bf16Bits(-Float.infinity)
+        let routers = try [finiteRouter, nanRouter, positiveInfinityRouter, negativeInfinityRouter].map {
+            try paddedBuffer(context.device, prefix: 2, payload: bytes($0), suffix: 3)
+        }
+        let hidden = try [nanHidden, finiteHidden, finiteHidden, finiteHidden].map {
+            try paddedBuffer(context.device, prefix: 4, payload: bytes($0), suffix: 2)
+        }
+        let indices = try paddedBuffer(context.device, prefix: 4,
+                                       payload: [UInt8](repeating: 0, count: topK * 4), suffix: 4)
+        let weights = try paddedBuffer(context.device, prefix: 4,
+                                       payload: [UInt8](repeating: 0, count: topK * 4), suffix: 4)
+
+        for fixture in routers.indices {
+            let command = try #require(context.queue.makeCommandBuffer())
+            moe.encodeRouterTop8(commandBuffer: command,
+                                 weights: routers[fixture].buffer, weightsOffset: 2,
+                                 hidden: hidden[fixture].buffer, hiddenOffset: 4,
+                                 indices: indices.buffer, indicesOffset: 4,
+                                 routingWeights: weights.buffer, routingWeightsOffset: 4)
+            command.commit()
+            command.waitUntilCompleted()
+            #expect(command.error == nil)
+            #expect(readUInt32(indices.buffer, offset: 4, count: topK) == [UInt32](repeating: 256, count: topK))
+            #expect(readFloat(weights.buffer, offset: 4, count: topK) == [Float](repeating: 0, count: topK))
+        }
+        routers.forEach(assertSentinels)
+        hidden.forEach(assertSentinels)
         assertSentinels(indices)
         assertSentinels(weights)
     }
@@ -340,6 +430,29 @@ import Testing
             for lane in 0..<(32 - offset) { lanes[lane] += prior[lane + offset] }
         }
         return lanes[0]
+    }
+
+    private func routerTop8(_ router: [UInt16], hidden: [Float]) -> (indices: [UInt32], weights: [Float]) {
+        let logits = (0..<256).map { routerLogit(router, hidden: hidden, row: $0) }
+        let maximum = logits.max()!
+        let exponentials = logits.map { Foundation.exp($0 - maximum) }
+        var simdSums = [Float](repeating: 0, count: 8)
+        for simd in 0..<8 {
+            var lanes = Array(exponentials[(simd * 32)..<((simd + 1) * 32)])
+            for offset in [16, 8, 4, 2, 1] {
+                let prior = lanes
+                for lane in 0..<(32 - offset) { lanes[lane] += prior[lane + offset] }
+            }
+            simdSums[simd] = lanes[0]
+        }
+        let fullSum = simdSums.dropFirst().reduce(simdSums[0], +)
+        let softmax = exponentials.map { $0 * (1 / (fullSum + 1.0e-20)) }
+        let indices = softmax.indices.sorted {
+            softmax[$0] == softmax[$1] ? $0 < $1 : softmax[$0] > softmax[$1]
+        }.prefix(topK).map(UInt32.init)
+        let selected = indices.map { softmax[Int($0)] }
+        let normalizer = selected.reduce(Float(0), +) + 1.0e-20
+        return (indices, selected.map { $0 / normalizer })
     }
 
     private struct PaddedBuffer {
