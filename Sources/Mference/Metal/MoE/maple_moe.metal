@@ -63,91 +63,58 @@ kernel void maple_router_top8_full_softmax(
     device const float* logits [[buffer(0)]],
     device uint* indices [[buffer(1)]],
     device float* weights [[buffer(2)]],
-    uint tid [[thread_position_in_threadgroup]],
-    uint simd [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]) {
-    constexpr uint threads = 256u;
-    constexpr uint simds = 8u;
-    threadgroup float reduction[8];
+    uint tid [[thread_position_in_threadgroup]]) {
     threadgroup float scores[kMapleExperts];
-    threadgroup uint topIndices[kMapleTopK];
-    threadgroup float topValues[kMapleTopK];
-    threadgroup uchar used[kMapleExperts];
+    if (tid != 0u) return;
 
-    float localMax = -1.0e30f;
-    const float value = logits[tid];
-    if (value > localMax) localMax = value;
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        const float other = simd_shuffle_down(localMax, offset);
-        if (other > localMax) localMax = other;
+    float maximum = -1.0e30f;
+    for (uint expert = 0u; expert < kMapleExperts; ++expert) {
+        const float logit = logits[expert];
+        if (!isfinite(logit)) {
+            for (uint rank = 0u; rank < kMapleTopK; ++rank) {
+                indices[rank] = kMapleExperts;
+                weights[rank] = 0.0f;
+            }
+            return;
+        }
+        if (logit > maximum) maximum = logit;
     }
-    if (lane == 0u) reduction[simd] = localMax;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0u) {
-        float maximum = reduction[0];
-        for (uint i = 1u; i < simds; ++i) maximum = max(maximum, reduction[i]);
-        reduction[0] = maximum;
+    for (uint expert = 0u; expert < kMapleExperts; ++expert) {
+        scores[expert] = metal::exp(logits[expert] - maximum);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    scores[tid] = metal::exp(logits[tid] - reduction[0]);
-    float localSum = scores[tid];
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        localSum += simd_shuffle_down(localSum, offset);
+    float sum = 0.0f;
+    for (uint group = 0u; group < 8u; ++group) {
+        float partial[32];
+        for (uint lane = 0u; lane < 32u; ++lane) partial[lane] = scores[group * 32u + lane];
+        for (uint offset = 16u; offset > 0u; offset >>= 1u) {
+            for (uint lane = 0u; lane < offset; ++lane) partial[lane] += partial[lane + offset];
+        }
+        sum += partial[0];
     }
-    if (lane == 0u) reduction[simd] = localSum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0u) {
-        float sum = reduction[0];
-        for (uint i = 1u; i < simds; ++i) sum += reduction[i];
-        reduction[0] = sum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    scores[tid] *= 1.0f / (reduction[0] + 1.0e-20f);
-    used[tid] = 0u;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float reciprocal = 1.0f / (sum + 1.0e-20f);
+    for (uint expert = 0u; expert < kMapleExperts; ++expert) scores[expert] *= reciprocal;
 
-    threadgroup float simdValues[8];
-    threadgroup uint simdIndices[8];
+    uint topIndices[kMapleTopK];
+    float topValues[kMapleTopK];
     for (uint rank = 0u; rank < kMapleTopK; ++rank) {
         float bestValue = -1.0e30f;
-        uint bestIndex = tid;
-        if (!used[tid]) bestValue = scores[tid];
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            const float otherValue = simd_shuffle_down(bestValue, offset);
-            const uint otherIndex = simd_shuffle_down(bestIndex, offset);
-            if (otherValue > bestValue ||
-                (otherValue == bestValue && otherIndex < bestIndex)) {
-                bestValue = otherValue;
-                bestIndex = otherIndex;
+        uint bestIndex = 0u;
+        for (uint expert = 0u; expert < kMapleExperts; ++expert) {
+            if (scores[expert] > bestValue) {
+                bestValue = scores[expert];
+                bestIndex = expert;
             }
         }
-        if (lane == 0u) {
-            simdValues[simd] = bestValue;
-            simdIndices[simd] = bestIndex;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid == 0u) {
-            float selectedValue = simdValues[0];
-            uint selectedIndex = simdIndices[0];
-            for (uint i = 1u; i < simds; ++i) {
-                if (simdValues[i] > selectedValue ||
-                    (simdValues[i] == selectedValue && simdIndices[i] < selectedIndex)) {
-                    selectedValue = simdValues[i];
-                    selectedIndex = simdIndices[i];
-                }
-            }
-            topValues[rank] = selectedValue;
-            topIndices[rank] = selectedIndex;
-            used[selectedIndex] = 1u;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        topValues[rank] = bestValue;
+        topIndices[rank] = bestIndex;
+        scores[bestIndex] = -1.0e30f;
     }
-    if (tid < kMapleTopK) {
-        float selectedSum = 0.0f;
-        for (uint i = 0u; i < kMapleTopK; ++i) selectedSum += topValues[i];
-        indices[tid] = topIndices[tid];
-        weights[tid] = topValues[tid] / (selectedSum + 1.0e-20f);
+    float selectedSum = 0.0f;
+    for (uint rank = 0u; rank < kMapleTopK; ++rank) selectedSum += topValues[rank];
+    for (uint rank = 0u; rank < kMapleTopK; ++rank) {
+        indices[rank] = topIndices[rank];
+        weights[rank] = topValues[rank] / (selectedSum + 1.0e-20f);
     }
 }
 

@@ -47,7 +47,12 @@ final class MapleMoE {
         else {
             throw MetalError.missingFunction("Maple MoE kernels")
         }
-        self.router = try Self.pipeline(routerFunction, device: context.device, threads: 256)
+        let router = try Self.pipeline(routerFunction, device: context.device, threads: 256)
+        guard router.threadExecutionWidth == 32 else {
+            throw MetalError.libraryCompileFailed(
+                "Maple router GEMV requires a 32-lane SIMD width")
+        }
+        self.router = router
         self.select = try Self.pipeline(selectFunction, device: context.device, threads: 256)
         self.phase1 = try Self.pipeline(phase1Function, device: context.device, threads: 64)
         self.phase1Subset = try Self.pipeline(subsetFunction, device: context.device, threads: 64)
