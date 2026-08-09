@@ -144,7 +144,11 @@ system map is [WIKI.md](WIKI.md).
   command-buffer lifetimes; they caught and fixed a shared subset-rank buffer
   race. The full package run passed 964 tests in 155 suites (114.443 seconds).
   Runtime ownership, cache policy, and SSD orchestration remain in
-  `feature/maple-runtime`.
+  `feature/maple-runtime`. Final hardening commits `b5b5b51` and `fb6c6fe`
+  replace the nondeterministic parallel selector with the exact serial
+  full-softmax/top-8 order and reject nonfinite router scores. Follow-up commits
+  `2d851cc` and `e94d5e7` cover 3,072 alternating router submissions plus NaN
+  and positive/negative infinity; all four focused tests pass.
 
 - [x] **`feature/maple-runtime`** — Acceptance: the 24-layer forward pass uses
   native BF16 activations/KV, exact sequential prefill, streamed top-8 experts,
@@ -153,8 +157,9 @@ system map is [WIKI.md](WIKI.md).
   sliding-cache wrap and a longer full-attention prefix. **Status:** the clean
   runtime implementation is complete in `61d6a1d`, `a87ed5c`, and `e89a7fb`.
   A standalone `MapleForwardRunner` validates the exact resident/expert layout,
-  owns native-BF16 KV and scratch, overlaps cached expert work with positional
-  reads, and replays prefill token by token. Follow-up commits `cd354ba` and
+  owns native-BF16 KV and scratch, awaits any expert-cache misses before one
+  full rank-ordered phase-1-and-phase-2 command buffer, and replays prefill
+  token by token. Follow-up commits `cd354ba` and
   `169cef4` keep the complete layer/KV/expert path on every prompt token while
   skipping final norm and vocabulary-head work until the final uncached prompt
   token; decode steps still use the complete head.
@@ -166,9 +171,14 @@ system map is [WIKI.md](WIKI.md).
   seeds decode, and non-Maple producers retain scalar replay. The full package
   run at `169cef4` passed 977 tests in 157 suites (117.982 seconds). Product
   entry-point wiring is implemented by the following product branch. The
-  clean full-checkpoint trace at `84d7b62` covers 1,639 positions, crosses the
-  512-token wrap, grows the full-attention prefix, and matches the pinned MLX
-  oracle exactly at every ordered top-10 logit.
+  final clean full-checkpoint traces at
+  `49fd47c13dd9da29c7498663cc1b69a8f0c39463` cover 1,639 positions, cross the
+  512-token wrap, grow the full-attention prefix, and match the pinned MLX
+  oracle exactly at every ordered top-10 logit. Cache hardening commits
+  `91aeb96` and `7f77b8a` serialize miss filling before one full routed-expert
+  dispatch and test mixed refills. Context commits `a01f75f` and `3e202ab`
+  raise and test Maple's declared limit at 128,000 tokens; that boundary has
+  synthetic coverage but no final installed-model run.
 
 - [x] **`feature/maple-product-integration`** — Acceptance: `maple` installs,
   auto-detects, and runs through Repack, CLI, Mac app/decode service, and server;
@@ -187,8 +197,13 @@ system map is [WIKI.md](WIKI.md).
   descriptor-backed app selection, not a separate richer download-row picker,
   so none was invented. Strict install verification, raw and interactive CLI
   generation, the app-core/decode-service route, and the loopback server then
-  completed against the installed Maple model. The app owns its sibling decode
-  service through standard input/output.
+  completed against the installed Maple model. Final acceptance recorded an
+  app/decode smoke pass (1/1, 18.706 s) with visible-only output, sequential
+  prefill, BF16 KV, and unload; raw CLI returned nonempty output with exit 0;
+  ChatML CLI returned visible `4` with `endOfTurn` and no thought markers; and
+  server health, models, and chat returned the Maple ID and `4` with stop before
+  clean shutdown. The app owns its sibling decode service through standard
+  input/output. Timings are validation telemetry, not benchmarks.
 
 - [x] **`feature/maple-parity-harness`** — Acceptance: a maintained harness
   pins and verifies checkpoint/runtime/corpus inputs, exports the complete
@@ -197,13 +212,13 @@ system map is [WIKI.md](WIKI.md).
   on metadata/environment/dirty-tree mismatch, and records reproducible
   metadata without copyrighted or bulky artifacts. It must use a supported
   Swift target/script interface, not brittle manual object-list linking.
-  **Status:** complete at clean commit `84d7b62`. The SwiftPM product, 12
-  model-free tests, and static script checks pass. A 32-position diagnostic
-  produced 32/32 ordered matches and was correctly rejected as ineligible. The
-  full-SHA acceptance run produced 1,639/1,639 top-1 and ordered-top-10 matches
-  with zero retained-logit difference and comparator exit 0. Full traces stay
-  ignored; compact environment, command, hash, timing, and result metadata is
-  recorded in [the parity evidence](docs/evidence/maple-parity-2026-08-09.json).
+  **Status:** complete at clean commit
+  `49fd47c13dd9da29c7498663cc1b69a8f0c39463`. `Scripts/test.sh` passed 1,001
+  tests in 161 suites (185.394 s). One fresh MLX full trace and two independent
+  fresh Mference full traces each produced 1,639/1,639 ordered top-10 matches
+  with zero retained-logit difference. Full traces stay ignored; compact
+  environment, command, hash, timing, and result metadata is recorded in
+  [the parity evidence](docs/evidence/maple-parity-2026-08-09.json).
 
 - [x] **`feature/maple-documentation`** — Acceptance: user-facing README,
   implementation references, licenses/notices, install/run instructions,
@@ -213,7 +228,8 @@ system map is [WIKI.md](WIKI.md).
   **Status:** complete. User-facing model, storage, BF16-KV, prefill, product,
   reference, and licensing documentation now reflects the clean integration;
   Maple's only published acceptance result is the exact parity record, not a
-  performance benchmark.
+  performance benchmark. Final app/decode, CLI, and server product workflows
+  passed; their timing fields are validation telemetry only.
 
 ## Intentional exclusions and deviations from the research branch
 

@@ -100,11 +100,13 @@ if it reproduces these boundaries:
    sees the complete prefix. Cache traversal/reduction must survive the wrap
    boundary without a parity change.
 6. The router computes all 256 scores with BF16 weights and FP32 accumulation,
-   chooses a deterministic top 8, and renormalizes selected softmax weights.
+   rejects nonfinite scores, chooses a deterministic serial top 8, and
+   renormalizes selected softmax weights.
 7. Each selected INT2 expert performs gate/up, clipped SwiGLU, and down;
    selected outputs reduce with FP32 route weights and re-enter the BF16
-   residual stream at the reference boundary. Cache-hit and miss scheduling may
-   overlap but cannot change router order or arithmetic.
+   residual stream at the reference boundary. The planner awaits every
+   expert-cache miss before one full rank-ordered phase-1-and-phase-2 command
+   buffer; cached-hit GPU work does not overlap those reads.
 8. Final RMSNorm feeds the complete 151,936-row exact head. The runtime may
    expose its existing FP16 logit buffer only if every retained BF16-rounded
    value is represented exactly. Maple never uses the generic fused-row head.
@@ -142,6 +144,11 @@ sequential-prefill and BF16-KV modes cross the Mac decode protocol and enter
 the server prompt-cache identity; the existing four families retain their
 prior runner, prefill, and FP16-KV behavior. This model-free wiring evidence is
 not a substitute for the installed-model product smoke and parity gates below.
+
+Maple supports contexts through 128,000 tokens in the runtime, CLI, and server.
+The Mac app currently exposes its 4K through 128K context choices; the choices
+available to other families or product surfaces may differ. No final acceptance
+run establishes a 128K boundary.
 
 ## Frozen parity corpus and trace policy
 
@@ -193,9 +200,9 @@ new implementation passed.
 | Attention/KV | Sliding partial-RoPE, full NoPE, GQA, 512-row wrap, full-prefix growth, reset, and continuation match reference fixtures. | Focused reference tests exist. | Passed focused tests and full trace. |
 | Router/MoE | Stable top-8 IDs/weights, clipped activation, INT2 experts, FP32 reduce, cache hits/misses, and router-order streaming match fixtures. | Focused reference tests exist. | Passed focused tests and full trace. |
 | Tokenization | Golden prompt/continuation bytes, stop IDs, open-thought suppression, and tool behavior pass using explicit family plumbing. | Reference tests used vocabulary/token-ID inference. | Passed focused clean tests. |
-| Full teacher forcing | Clean pinned engines produce 1,639/1,639 ordered top-10 matches with retained-logit absolute difference 0. | Reference metadata records such a result for commit `997b5ad`. | Passed at clean commit `84d7b62`; see [compact evidence](evidence/maple-parity-2026-08-09.json). |
-| Product smoke | Repack, CLI raw/chat, Mac/decode service, and loopback server install/detect/load/generate/stop/reset correctly, one model process at a time. | Reference branch wired each product. | Passed clean workflows. |
-| Release build | `MferenceRepack`, `MferenceCLI`, `MferenceServer`, `MferenceDecodeService`, `MferenceMac`, and `MferenceMapleParity` build in release. | Historical binaries were recorded. | Passed clean release build. |
+| Full teacher forcing | Clean pinned engines produce 1,639/1,639 ordered top-10 matches with retained-logit absolute difference 0. | Reference metadata records such a result for commit `997b5ad`. | At `49fd47c13dd9da29c7498663cc1b69a8f0c39463`, one fresh MLX run and two independent fresh Mference runs all passed. See [compact evidence](evidence/maple-parity-2026-08-09.json). |
+| Product smoke | Repack, CLI raw/chat, Mac/decode service, and loopback server install/detect/load/generate/stop/reset correctly, one model process at a time. | Reference branch wired each product. | App/decode passed 1/1 with visible-only output, sequential prefill, BF16 KV, and unload; raw CLI was nonempty; ChatML CLI returned visible `4`, end-of-turn, and no thought markers; server returned Maple ID and `4` with stop, then shut down cleanly. |
+| Release build | `MferenceRepack`, `MferenceCLI`, `MferenceServer`, `MferenceDecodeService`, `MferenceMac`, and `MferenceMapleParity` build in release. | Historical binaries were recorded. | Six products built in 10.94 s; `Scripts/test.sh` passed 1,001 tests in 161 suites (185.394 s). Timings are validation telemetry, not benchmarks. |
 | Benchmark (optional) | Fresh-process protocol records complete environment, commands, timing footers, outputs, and deviations without overstating warm-cache results. | A dirty-worktree, one-run-per-engine Raven benchmark exists. | Excluded unless rerun cleanly. |
 
 ## Historical evidence boundary

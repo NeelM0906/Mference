@@ -1,14 +1,17 @@
 {
-  "schema": "mference.maple.parity.evidence.v1",
-  "completed_at": "2026-08-09T00:09:18+03:00",
-  "implementation_commit": "84d7b6286b756e9bcb37baaa2c8af78791aed354",
-  "implementation_checkout_clean": true,
+  "schema": "mference.maple.parity.evidence.v2",
+  "completed_at": "2026-08-09T07:35:12+03:00",
+  "implementation": {
+    "commit": "49fd47c13dd9da29c7498663cc1b69a8f0c39463",
+    "checkout_clean": true
+  },
   "environment": {
-    "hardware": "MacBook Air (Mac16,12), Apple M4, 10 cores",
+    "hardware": "Apple M4 Mac16,12, 10 cores",
     "memory_bytes": 17179869184,
+    "architecture": "arm64",
     "macos": "26.5.2",
-    "swift": "6.3.3",
-    "architecture": "arm64"
+    "macos_build": "25F84",
+    "swift": "6.3.3"
   },
   "pins": {
     "model_id": "maple-preview-2bit-mlx",
@@ -22,176 +25,287 @@
     "top_k": 10,
     "integrity_policy": "full-sha256"
   },
-  "preflight": {
-    "apple_silicon": true,
-    "macos_15_or_newer": true,
-    "swift_6_1_or_newer": true,
-    "minimum_memory_free_percent": 10,
-    "observed_memory_free_percent_before_full_oracle": 65,
-    "observed_memory_free_percent_before_full_mference": 67,
-    "minimum_free_disk_bytes": 1073741824,
-    "competing_model_or_test_processes": [],
-    "oracle_snapshot_full_sha256_command": [
-      "Scripts/verify_maple_snapshot.py",
-      "$PWD/scratch/maple-2bit-mlx",
-      "--full-sha256"
-    ],
-    "oracle_snapshot_full_sha256_exit_code": 0,
-    "oracle_snapshot_full_sha256_wall_seconds": 3.92,
-    "mference_preflight_exit_code": 0
+  "validation": {
+    "package_tests": {
+      "command": ["Scripts/test.sh"],
+      "exit_code": 0,
+      "tests": 1001,
+      "suites": 161,
+      "test_seconds": 185.394
+    },
+    "release_build": {
+      "command": ["swift", "build", "-c", "release"],
+      "exit_code": 0,
+      "reported_seconds": 10.94,
+      "wall_seconds": 11.25,
+      "products": [
+        "MferenceMac",
+        "MferenceDecodeService",
+        "MferenceCLI",
+        "MferenceServer",
+        "MferenceRepack",
+        "MferenceMapleParity"
+      ]
+    },
+    "router_focus": {
+      "command": ["Scripts/test.sh", "--filter", "MapleMoETests"],
+      "exit_code": 0,
+      "tests": 4,
+      "suites": 1,
+      "test_seconds": 10.143
+    },
+    "static_checks": {
+      "diff_check": {
+        "command": ["git", "diff", "--check", "main...49fd47c"],
+        "exit_code": 0
+      },
+      "commit_subjects": {
+        "allowed_prefixes": ["feat:", "fix:", "refactor:"],
+        "commits_checked": 130,
+        "invalid_subjects": 0
+      }
+    }
   },
-  "implementation_validation": {
-    "swift_test": {
+  "real_product_validation": {
+    "safety_preflight_passed": true,
+    "app_decode_service": {
       "command": [
+        "env",
+        "MFERENCE_MAPLE_GTURBO=$PWD/scratch/maple.gturbo",
+        "MFERENCE_MAPLE_DECODE_SERVICE=$PWD/.build/release/MferenceDecodeService",
         "Scripts/test.sh",
         "--filter",
-        "MferenceMapleParityTests"
+        "MapleDecodeServiceSmokeTests"
       ],
       "exit_code": 0,
-      "build_seconds": 1.65,
-      "tests": 12,
-      "suites": 3,
-      "test_seconds": 0.021
+      "tests": 1,
+      "suites": 1,
+      "test_seconds": 18.706
     },
-    "python_syntax": {
+    "cli_raw_completion": {
       "command": [
-        "python3",
-        "-m",
-        "py_compile",
-        "Scripts/fetch_maple_raven.py",
-        "Scripts/verify_maple_snapshot.py",
-        "Scripts/maple_mlx_teacher_forcing.py"
+        "$PWD/.build/release/MferenceCLI",
+        "--model",
+        "$PWD/scratch/maple.gturbo",
+        "--prompt",
+        "Reply with exactly READY.",
+        "--max-context",
+        "4096",
+        "--max-new",
+        "16",
+        "--temperature",
+        "0"
       ],
-      "exit_code": 0
+      "exit_code": 0,
+      "visible_output_nonempty": true,
+      "stop_reason": "maxTokens",
+      "prefill_tokens": 5,
+      "prefill_seconds": 3.76,
+      "new_tokens": 16,
+      "generation_seconds": 0.75
     },
-    "shell_syntax": {
-      "commands": [
-        ["bash", "-n", "Scripts/maple_oracle_preflight.sh"],
-        ["bash", "-n", "Scripts/run_maple_mlx_teacher_forcing.sh"],
-        ["bash", "-n", "Scripts/run_maple_mference_teacher_forcing.sh"]
+    "cli_chat": {
+      "command": [
+        "$PWD/.build/release/MferenceCLI",
+        "--model",
+        "$PWD/scratch/maple.gturbo",
+        "--messages-file",
+        "scratch/maple-product-smoke-messages.json",
+        "--max-context",
+        "4096",
+        "--max-new",
+        "128",
+        "--temperature",
+        "0"
       ],
-      "exit_codes": [0, 0, 0]
+      "messages": [
+        {"role": "user", "content": "What is 2 + 2? Answer only 4."}
+      ],
+      "exit_code": 0,
+      "visible_text": "4",
+      "thought_markers_visible": false,
+      "stop_reason": "endOfTurn",
+      "prefill_tokens": 23,
+      "prefill_seconds": 4.39,
+      "new_tokens": 45,
+      "generation_seconds": 1.81
     },
-    "json_fixtures": {
-      "commands": [
-        ["python3", "-m", "json.tool", "Tests/MferenceMapleParity/Fixtures/maple-snapshot.json"],
-        ["python3", "-m", "json.tool", "Tests/MferenceMapleParity/Fixtures/RavenNormalization.json"]
+    "server": {
+      "launch_command": [
+        "$PWD/.build/release/MferenceServer",
+        "--model",
+        "$PWD/scratch/maple.gturbo",
+        "--bind",
+        "loopback",
+        "--port",
+        "18080",
+        "--max-context",
+        "4096"
       ],
-      "exit_codes": [0, 0]
+      "probe_commands": [
+        [
+          "curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "http://127.0.0.1:18080/health"
+        ],
+        [
+          "curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "http://127.0.0.1:18080/v1/models"
+        ],
+        [
+          "curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "http://127.0.0.1:18080/v1/chat/completions",
+          "-H",
+          "Content-Type: application/json",
+          "-d",
+          "{\"model\":\"maple-preview-2bit-mlx\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 2 + 2? Answer only 4.\"}],\"temperature\":0,\"max_completion_tokens\":128}"
+        ]
+      ],
+      "health_status": "ok",
+      "models_status": "ok",
+      "chat_status": "ok",
+      "model_id": "maple-preview-2bit-mlx",
+      "visible_text": "4",
+      "thought_markers_visible": false,
+      "chat_elapsed_seconds": 6.1,
+      "prompt_tokens": 23,
+      "completion_tokens": 45,
+      "finish_reason": "stop",
+      "server_stopped_after_validation": true
     }
   },
-  "diagnostic_prefix": {
-    "positions": 32,
-    "acceptance_eligible": false,
-    "mlx": {
-      "command": [
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/mlx-lm-deepgrove/.venv/bin/python",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/Scripts/maple_mlx_teacher_forcing.py",
+  "parity_preflight": {
+    "commands": [
+      ["Scripts/maple_oracle_preflight.sh", "$PWD/scratch/maple-2bit-mlx"],
+      [
+        "Scripts/run_maple_mference_teacher_forcing.sh",
+        "preflight",
         "--model",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-2bit-mlx",
-        "--corpus",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/the-raven.txt",
-        "--output",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/mlx-84d7b62-prefix32.jsonl",
-        "--max-positions",
-        "32"
-      ],
-      "trace": "scratch/maple-parity/mlx-84d7b62-prefix32.jsonl",
-      "trace_sha256": "f01e657fadc0abe301752cf5865aea362206cfe73e309bd182e27c30123ae00a",
-      "load_seconds": 4.400273167062551,
-      "elapsed_seconds": 4.24975399998948,
-      "positions_per_second": 7.529847610021478,
-      "exit_code": 0
-    },
-    "mference": {
-      "command": [
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/.build/arm64-apple-macosx/release/MferenceMapleParity",
-        "export",
-        "--model",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple.gturbo",
-        "--corpus",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/the-raven.txt",
-        "--output",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/mference-84d7b62-prefix32.jsonl",
+        "$PWD/scratch/maple.gturbo",
         "--repository",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple",
-        "--max-positions",
-        "32"
-      ],
-      "trace": "scratch/maple-parity/mference-84d7b62-prefix32.jsonl",
-      "trace_sha256": "66207df08f39649b228a27a437012ce1584da7daeeac5888a7ca164037bbd9bd",
-      "load_seconds": 1.0581409931182861,
-      "elapsed_seconds": 4.624758005142212,
-      "positions_per_second": 6.919280957926791,
-      "exit_code": 0
-    },
-    "comparison": {
-      "top1_matches": 32,
-      "ordered_top10_matches": 32,
-      "first_divergence": null,
-      "exit_code": 1,
-      "exit_code_reason": "expected diagnostic-prefix ineligibility"
-    }
+        "$PWD"
+      ]
+    ],
+    "exit_codes": [0, 0],
+    "passed": true
   },
   "full_acceptance": {
     "mlx": {
       "command": [
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/mlx-lm-deepgrove/.venv/bin/python",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/Scripts/maple_mlx_teacher_forcing.py",
+        "$PWD/scratch/mlx-lm-deepgrove/.venv/bin/python",
+        "Scripts/maple_mlx_teacher_forcing.py",
         "--model",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-2bit-mlx",
+        "$PWD/scratch/maple-2bit-mlx",
         "--corpus",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/the-raven.txt",
+        "$PWD/scratch/maple-parity/the-raven.txt",
         "--output",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/mlx-84d7b62-full.jsonl"
+        "$PWD/scratch/maple-parity/mlx-49fd47c-full.jsonl"
       ],
       "engine_source_revision": "eba96c16158f032821b0bf374ea1421cfddef0a9",
       "engine_binary_sha256": "71720f1fc66989ebd691e81c96111b47ae6ff3f1a478666084d1cacbf0fccbf2",
-      "trace": "scratch/maple-parity/mlx-84d7b62-full.jsonl",
-      "trace_sha256": "ba2db5b29a2b27f3165b822d9ed287dbd8ef9fbcc171e110d792cbd68baa74d6",
-      "load_seconds": 1.866689124959521,
-      "elapsed_seconds": 304.500041124993,
-      "positions_per_second": 5.382593690117806,
+      "trace": "scratch/maple-parity/mlx-49fd47c-full.jsonl",
+      "trace_sha256": "04bd0eaba232404e2cbf2f3b3029b99bc0a4bde4c0fe58ec836ffcfb0daddcb7",
+      "load_seconds": 2.988243209081702,
+      "elapsed_seconds": 288.5113520419691,
       "exit_code": 0
     },
-    "mference": {
-      "command": [
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/.build/arm64-apple-macosx/release/MferenceMapleParity",
-        "export",
-        "--model",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple.gturbo",
-        "--corpus",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/the-raven.txt",
-        "--output",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple/scratch/maple-parity/mference-84d7b62-full.jsonl",
-        "--repository",
-        "/Users/chameleon/Documents/ChatGPT/mference-maple"
-      ],
-      "engine_source_revision": "84d7b6286b756e9bcb37baaa2c8af78791aed354",
-      "engine_binary_sha256": "f89ed8adba7ed919187cb8284ae14c1dae2218576b1848aa59357d6f361a94cf",
-      "trace": "scratch/maple-parity/mference-84d7b62-full.jsonl",
-      "trace_sha256": "576237cdff4b9feb9d8c62ed9b67f1ca59ca5256defe29dc2225b0d355ac3174",
-      "load_seconds": 0.6293350458145142,
-      "elapsed_seconds": 76.44297099113464,
-      "positions_per_second": 21.440820244808126,
-      "exit_code": 0
-    },
-    "comparison_command": [
-      ".build/release/MferenceMapleParity",
-      "compare",
-      "scratch/maple-parity/mlx-84d7b62-full.jsonl",
-      "scratch/maple-parity/mference-84d7b62-full.jsonl"
+    "mference_runs": [
+      {
+        "name": "A",
+        "command": [
+          "Scripts/run_maple_mference_teacher_forcing.sh",
+          "export",
+          "--model",
+          "$PWD/scratch/maple.gturbo",
+          "--corpus",
+          "$PWD/scratch/maple-parity/the-raven.txt",
+          "--output",
+          "$PWD/scratch/maple-parity/mference-49fd47c-full-wrapper-a.jsonl",
+          "--repository",
+          "$PWD"
+        ],
+        "engine_binary_sha256": "e829ca4ec225efe9c0db5e3b3c3b61bea58efc5a8c50a259d43853e126d91f07",
+        "trace": "scratch/maple-parity/mference-49fd47c-full-wrapper-a.jsonl",
+        "trace_sha256": "4c5b6d2e89520af61426c0cfc1634ad7707880680b656ce5f88fcc2f094c6419",
+        "load_seconds": 0.41335797309875488,
+        "elapsed_seconds": 58.650416016578674,
+        "wall_seconds": 60.43,
+        "exit_code": 0,
+        "comparison": {
+          "command": [
+            "Scripts/run_maple_mference_teacher_forcing.sh",
+            "compare",
+            "$PWD/scratch/maple-parity/mlx-49fd47c-full.jsonl",
+            "$PWD/scratch/maple-parity/mference-49fd47c-full-wrapper-a.jsonl"
+          ],
+          "exit_code": 0,
+          "positions": 1639,
+          "top1_matches": 1639,
+          "ordered_top10_matches": 1639,
+          "retained_logit_atol": 0,
+          "first_divergence": null
+        }
+      },
+      {
+        "name": "B",
+        "command": [
+          "Scripts/run_maple_mference_teacher_forcing.sh",
+          "export",
+          "--model",
+          "$PWD/scratch/maple.gturbo",
+          "--corpus",
+          "$PWD/scratch/maple-parity/the-raven.txt",
+          "--output",
+          "$PWD/scratch/maple-parity/mference-49fd47c-full-wrapper-b.jsonl",
+          "--repository",
+          "$PWD"
+        ],
+        "engine_binary_sha256": "e829ca4ec225efe9c0db5e3b3c3b61bea58efc5a8c50a259d43853e126d91f07",
+        "trace": "scratch/maple-parity/mference-49fd47c-full-wrapper-b.jsonl",
+        "trace_sha256": "c45e49fc36bfc1e5ca4c25f8c039c53a565f921311630da70d414b144dcd918e",
+        "load_seconds": 0.40592598915100098,
+        "elapsed_seconds": 62.04209291934967,
+        "wall_seconds": 63.84,
+        "exit_code": 0,
+        "comparison": {
+          "command": [
+            "Scripts/run_maple_mference_teacher_forcing.sh",
+            "compare",
+            "$PWD/scratch/maple-parity/mlx-49fd47c-full.jsonl",
+            "$PWD/scratch/maple-parity/mference-49fd47c-full-wrapper-b.jsonl"
+          ],
+          "exit_code": 0,
+          "positions": 1639,
+          "top1_matches": 1639,
+          "ordered_top10_matches": 1639,
+          "retained_logit_atol": 0,
+          "first_divergence": null
+        }
+      }
     ],
-    "comparison_exit_code": 0,
-    "top1_matches": 1639,
-    "ordered_top10_matches": 1639,
-    "retained_logit_atol": 0,
-    "first_divergence": null,
     "accepted": true
   },
+  "tooling_observation": {
+    "command": ["swift", "format", "lint", "--recursive", "Sources", "Tests"],
+    "exit_code": 0,
+    "project_configuration_present": false,
+    "note": "The bundled tool's default two-space configuration reported repository-wide baseline style warnings against the project's four-space style; it made no changes and is not a configured project gate."
+  },
+  "timings_are_benchmark_results": false,
+  "timing_note": "All recorded timings are parity and workflow telemetry, not benchmarks or performance ceilings.",
   "warnings": [
-    "Transformers printed its generic custom model_type compatibility warning while loading the pinned Maple oracle."
+    "The pinned MLX oracle emitted the expected generic Transformers custom model_type compatibility warning."
   ],
-  "protocol_deviations": [],
+  "protocol_deviations": [
+    "The repository defines no formatter or linter configuration. The bundled Swift formatter was run in read-only lint mode and exited 0, but its default two-space rules reported repository-wide baseline style warnings; no mass reformat was performed."
+  ],
   "full_trace_artifacts_committed": false
 }
