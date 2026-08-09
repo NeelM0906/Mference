@@ -37,7 +37,7 @@ struct MapleQKNormRoPETests {
             + [UInt16](repeating: sentinel, count: suffix)
         let kWeightStorage = [UInt16](repeating: sentinel, count: weightPrefix) + kWeight
             + [UInt16](repeating: sentinel, count: suffix)
-        let position: UInt32 = 37
+        let position: UInt32 = 127_999
 
         let context = try MetalContext()
         let kernel = try MapleQKNormRoPE(context: context)

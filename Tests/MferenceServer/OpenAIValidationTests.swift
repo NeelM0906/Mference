@@ -665,6 +665,15 @@ struct ServerArgumentTests {
         #expect(arguments.promptCacheMode == .singlePrefix)
     }
 
+    @Test func parsesAndAdvertises128KContext() throws {
+        let arguments = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--max-context", "128000",
+        ])
+        #expect(arguments.maxContext == 128_000)
+        #expect(ServerArguments.usage.contains("128000"))
+    }
+
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {
         let arguments = try ServerArguments.parse([
             "--model", "model.gturbo",

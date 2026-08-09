@@ -9,6 +9,10 @@ struct MapleDecodeAttentionTests {
     private static let kvStride = MapleDecodeAttention.numKVHeads * MapleDecodeAttention.headDim
     private static let sentinel = UInt16(0x7BAD)
 
+    @Test func maximumSequenceLengthIs128K() {
+        #expect(MapleDecodeAttention.maximumSequenceLength == 128_000)
+    }
+
     @Test("single-pass BF16 SDPA preserves exponent range and maps 16 Q heads onto 4 KV heads")
     func singlePassNativeBF16AndGQAMappingWithOffsets() throws {
         let qCount = Self.qCount

@@ -99,13 +99,13 @@ import Testing
     }
 
     @MainActor
-    @Test func appResponseLimitUsesSelectedContext() throws {
+    @Test func appResponseLimitUsesSelected128KContext() throws {
         let model = AppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.promptText = "go"
-        model.maxContextTokens = AppContextLengthOption.sixtyFourK.tokens
+        model.maxContextTokens = AppContextLengthOption.oneTwentyEightK.tokens
 
-        #expect(try model.makeRequest().maxNewTokens == AppContextLengthOption.sixtyFourK.tokens)
+        #expect(try model.makeRequest().maxNewTokens == AppContextLengthOption.oneTwentyEightK.tokens)
     }
 
     @MainActor
