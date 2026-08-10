@@ -34,7 +34,7 @@ import Testing
         }
     }
 
-    private func makeFixture() throws -> Fixture {
+    private func makeFixture(includeFlashHead: Bool = false) throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("maple-runtime-\(UUID().uuidString)")
         let expertsDirectory = directory.appendingPathComponent("packed_experts")
@@ -77,6 +77,16 @@ import Testing
                       norm("model.norm.weight"),
                       affine("lm_head.weight", rows: Self.vocab)] {
             entries[entry.name] = entry
+        }
+        if includeFlashHead {
+            let map = ResidentIndexEntry(
+                name: "lm_head_flash.token_map", dtype: 5, fileOffset: 0,
+                sizeBytes: UInt64(Self.vocab * MemoryLayout<Int32>.stride),
+                shape: (4_748, 32, 0, 0),
+                scaleOffset: 0, scaleSize: 0, biasOffset: 0, biasSize: 0)
+            let centroids = affine("lm_head_flash.centroids.weight", rows: 4_748)
+            entries[map.name] = map
+            entries[centroids.name] = centroids
         }
         for layer in 0..<Self.layers {
             let prefix = "model.layers.\(layer)"
@@ -161,7 +171,7 @@ import Testing
             ["weightBits": bits, "scheme": scheme, "scaleType": scale,
              "biasType": bias, "groupSize": group]
         }
-        let manifestObject: [String: Any] = [
+        var manifestObject: [String: Any] = [
             "magic": "GTURBO", "versionMajor": 1, "versionMinor": 0,
             "flags": [:], "modelID": "maple-runtime-test", "arch": arch,
             "quant": [
@@ -174,6 +184,14 @@ import Testing
             "files": files, "expertsPerLayer": Self.experts,
             "numLayers": Self.layers, "expertStride": Self.expertStride,
         ]
+        if includeFlashHead {
+            manifestObject["flashHead"] = [
+                "nClusters": 4_748, "clusterSize": 32, "nProbes": 512,
+                "groupSize": 64, "bits": 4, "headGroupSize": 64,
+                "headBits": 4, "scaledCentroids": true,
+                "forceTokens": [151_645, 151_668, 151_643],
+            ]
+        }
         let manifest = try JSONDecoder().decode(
             Manifest.self,
             from: JSONSerialization.data(withJSONObject: manifestObject, options: [.sortedKeys]))
@@ -224,10 +242,10 @@ import Testing
         let runner = try #require(runtime.producer as? MapleForwardRunner)
         #expect(model.integrityPolicy == .sizeCheckTrustedReceipt)
         #expect(model.routedExpertCacheSlotCount(layer: 0) == 8)
-        #expect(runtime.prefillConfig == .off)
-        #expect(runtime.executedPrefillMode == .sequential)
+        #expect(runtime.prefillConfig == requested.prefillConfig)
+        #expect(runtime.executedPrefillMode == .chunked)
         #expect(runtime.kvStorageMode == .bf16)
-        #expect(!(runtime.producer is any ChunkedPrefillRunner))
+        #expect(runtime.producer is any ChunkedPrefillRunner)
         #expect(!(runtime.producer is any FusedHeadLogitProducer))
 
         let logits = try makeLogits(fixture.context)
@@ -277,7 +295,7 @@ import Testing
             model: model, context: fixture.context, maxContext: 4,
             runtimeConfiguration: RuntimeConfiguration(prefillEnabled: false, forceLogitsHead: true))
         let runner = try #require(runtime.producer as? MapleForwardRunner)
-        let headless = try #require(runner as? any HeadlessSequentialPrefillRunner)
+        let headless: any HeadlessSequentialPrefillRunner = runner
         let logits = try makeLogits(fixture.context)
         fillSentinel(logits)
 
@@ -295,6 +313,108 @@ import Testing
 
         #expect(bits(logits).allSatisfy { $0 == 0 })
         #expect(runner.continuationPosition == 2)
+    }
+
+    @Test func mapleFactory_keepsDisabledPrefillExactWithFlashHead() async throws {
+        let fixture = try makeFixture(includeFlashHead: true)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let runtime = try ForwardRunnerFactory.make(
+            model: fixture.model(), context: fixture.context, maxContext: 4,
+            runtimeConfiguration: RuntimeConfiguration(prefillEnabled: false,
+                                                       useMapleFlashHead: true))
+        let runner = try #require(runtime.producer as? MapleForwardRunner)
+        #expect(runtime.prefillConfig == .off)
+        #expect(runtime.executedPrefillMode == .off)
+        #expect(runtime.kvStorageMode == .bf16)
+
+        let logits = try makeLogits(fixture.context)
+        try await runner.produce(token: 0, position: 0, into: logits)
+        let negativeInfinity = Float16(-Float.infinity).bitPattern
+        #expect(bits(logits)[1] == negativeInfinity)
+
+        runner.reset()
+        let prefill: any ExactPrefillLogitProducer = runner
+        try await prefill.produceExactPrefill(token: 0, position: 0, into: logits)
+        #expect(bits(logits).allSatisfy { $0 == 0 })
+    }
+
+    @Test func mapleChunkedPrefill_matchesSequentialLogitsAndContinuation() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let sequential = try MapleForwardRunner(model: fixture.model(), context: fixture.context,
+                                                 maxContext: 4)
+        let chunked = try MapleForwardRunner(model: fixture.model(), context: fixture.context,
+                                              maxContext: 4)
+        let sequentialLogits = try makeLogits(fixture.context)
+        let chunkedLogits = try makeLogits(fixture.context)
+
+        try await sequential.produce(token: 0, position: 0, into: sequentialLogits)
+        try await sequential.produce(token: 0, position: 1, into: sequentialLogits)
+        let expected = bits(sequentialLogits)
+
+        let prefill: any ChunkedPrefillRunner = chunked
+        var progress: [Int] = []
+        let result = try await prefill.prefillChunked(
+            tokens: [0, 0][...], startPosition: 0, outputMode: .logits,
+            config: .production(chunkTokens: 32), into: chunkedLogits,
+            onProgress: { progress.append($0) })
+
+        #expect(result == PrefillResult(newPosition: 2, seed: .logitsWritten))
+        #expect(progress == [2])
+        #expect(bits(chunkedLogits) == expected)
+        #expect(chunked.continuationPosition == 2)
+
+        try await sequential.produce(token: 0, position: 2, into: sequentialLogits)
+        try await chunked.produce(token: 0, position: 2, into: chunkedLogits)
+        #expect(bits(chunkedLogits) == bits(sequentialLogits))
+        #expect(chunked.continuationPosition == 3)
+    }
+
+    @Test func mapleFlashHead_isOptInAndPrefillRemainsExact() async throws {
+        let fixture = try makeFixture(includeFlashHead: true)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let flashRuntime = try ForwardRunnerFactory.make(
+            model: fixture.model(), context: fixture.context, maxContext: 4,
+            runtimeConfiguration: RuntimeConfiguration(useMapleFlashHead: true))
+        let runner = try #require(flashRuntime.producer as? MapleForwardRunner)
+        let logits = try makeLogits(fixture.context)
+
+        try await runner.produce(token: 0, position: 0, into: logits)
+        let selected: Set<Int> = [0, 151_645, 151_668, 151_643]
+        let negativeInfinity = Float16(-Float.infinity).bitPattern
+        #expect(bits(logits).enumerated().allSatisfy { index, value in
+            selected.contains(index) ? value == 0 : value == negativeInfinity
+        })
+
+        runner.reset()
+        let chunked: any ChunkedPrefillRunner = runner
+        _ = try await chunked.prefillChunked(
+            tokens: [0][...], startPosition: 0, outputMode: .logits,
+            config: .production(chunkTokens: 32), into: logits, onProgress: { _ in })
+        let chunkedPrefillBits = bits(logits)
+        #expect(chunkedPrefillBits.allSatisfy { $0 == 0 })
+
+        runner.reset()
+        let sequentialPrefill: any ExactPrefillLogitProducer = runner
+        try await sequentialPrefill.produceExactPrefill(token: 0, position: 0, into: logits)
+        #expect(bits(logits) == chunkedPrefillBits)
+
+        let exactRuntime = try ForwardRunnerFactory.make(
+            model: fixture.model(), context: fixture.context, maxContext: 4,
+            runtimeConfiguration: RuntimeConfiguration(useMapleFlashHead: false))
+        let exactRunner = try #require(exactRuntime.producer as? MapleForwardRunner)
+        try await exactRunner.produce(token: 0, position: 0, into: logits)
+        #expect(bits(logits).allSatisfy { $0 == 0 })
+
+        let unavailable = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: unavailable.directory) }
+        let fallbackRuntime = try ForwardRunnerFactory.make(
+            model: unavailable.model(), context: unavailable.context, maxContext: 4,
+            runtimeConfiguration: RuntimeConfiguration(useMapleFlashHead: true))
+        let fallback = try #require(fallbackRuntime.producer as? MapleForwardRunner)
+        let fallbackLogits = try makeLogits(unavailable.context)
+        try await fallback.produce(token: 0, position: 0, into: fallbackLogits)
+        #expect(bits(fallbackLogits).allSatisfy { $0 == 0 })
     }
 
     @Test func mapleInit_rejectsMalformedResidentAndExpertLayoutMetadata() throws {

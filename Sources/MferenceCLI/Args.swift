@@ -35,6 +35,9 @@ public struct Args: Equatable, Sendable {
     public var expertCacheSlots: ExpertCacheSlotChoice
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice
+    /// Enables Maple's approximate sparse singleton-decode head when the
+    /// installed checkpoint carries the required FlashHead tensors.
+    public var flashHead: Bool
     /// Model-integrity policy. `.fullSha256` re-hashes every routed-expert
     /// file on first touch — 145 GB for Inkling-Small, ~59 s inside the first
     /// prefill. `.sizeCheckTrustedReceipt` checks sizes against the receipt
@@ -59,6 +62,7 @@ public struct Args: Equatable, Sendable {
                 expertCacheSlots: ExpertCacheSlotChoice = .auto,
                 rdadvise: String = "off",
                 prefillChunk: PrefillChunkChoice = .auto,
+                flashHead: Bool = false,
                 verification: ModelIntegrityPolicy = .fullSha256) {
         self.model = model
         self.prompt = prompt
@@ -74,6 +78,7 @@ public struct Args: Equatable, Sendable {
         self.expertCacheSlots = expertCacheSlots
         self.rdadvise = rdadvise
         self.prefillChunk = prefillChunk
+        self.flashHead = flashHead
         self.verification = verification
         self.seed = seed
         self.stops = stops
@@ -139,6 +144,9 @@ extension Args {
                                 prompt processing; auto sizes the chunk to
                                 the prompt (--chat resolves auto to 128). Allowed:
                                 32, 64, 128, 256, 512, 1024, 2048, 4096.
+      --flash-head              Enable Maple's approximate sparse decode head.
+                                Prefill remains exact; unsupported models use
+                                the exact head.
       --verify <mode>           Model integrity: full-sha256 (default)
                                 re-hashes every routed-expert file on first
                                 touch, which for a 145 GB expert pool costs
@@ -167,6 +175,7 @@ extension Args {
         var expertCacheSlots = ExpertCacheSlotChoice.auto
         var rdadvise = "off"
         var prefillChunk = PrefillChunkChoice.auto
+        var flashHead = false
         var verification = ModelIntegrityPolicy.fullSha256
 
         var index = 0
@@ -177,6 +186,9 @@ extension Args {
                 throw ArgsError.helpRequested
             case "--quiet":
                 quiet = true
+                index += 1
+            case "--flash-head":
+                flashHead = true
                 index += 1
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
@@ -309,6 +321,7 @@ extension Args {
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
                     prefillChunk: prefillChunk,
+                    flashHead: flashHead,
                     verification: verification)
     }
 

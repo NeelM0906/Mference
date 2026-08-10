@@ -68,7 +68,7 @@ import MferenceValidationSupport
     }
 
     final class HeadlessContinuationProducer: ContinuableLogitProducer,
-        HeadlessSequentialPrefillRunner, @unchecked Sendable
+        HeadlessSequentialPrefillRunner, ExactPrefillLogitProducer, @unchecked Sendable
     {
         let vocabSize: Int
         private let terminalToken: Int32
@@ -76,6 +76,7 @@ import MferenceValidationSupport
         private(set) var resetCalls = 0
         private(set) var prepareCalls: [Int] = []
         private(set) var headlessPositions: [Int] = []
+        private(set) var exactPrefillPositions: [Int] = []
         private(set) var producePositions: [Int] = []
 
         init(vocabSize: Int, terminalToken: Int32, position: Int = 0) {
@@ -88,6 +89,7 @@ import MferenceValidationSupport
             resetCalls += 1
             continuationPosition = 0
             headlessPositions = []
+            exactPrefillPositions = []
             producePositions = []
         }
 
@@ -109,6 +111,11 @@ import MferenceValidationSupport
             }
             headlessPositions.append(position)
             continuationPosition += 1
+        }
+
+        func produceExactPrefill(token: Int32, position: Int, into logits: MTLBuffer) async throws {
+            try advance(position: position, into: logits)
+            exactPrefillPositions.append(position)
         }
 
         private func advance(position: Int, into logits: MTLBuffer) throws {

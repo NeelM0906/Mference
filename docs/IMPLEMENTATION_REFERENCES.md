@@ -40,7 +40,10 @@ included for broader design context rather than a line-level claim.
   top-8 routed MoE used as the executable reference.
 - [`deepgrove-ai/mlx-lm-deepgrove`](https://github.com/deepgrove-ai/mlx-lm-deepgrove/tree/eba96c16158f032821b0bf374ea1421cfddef0a9)
   at `eba96c16158f032821b0bf374ea1421cfddef0a9` supplied the pinned Maple MLX
-  runtime for teacher-forcing and generation parity.
+  runtime for generation behavior. Its
+  [`maple.py` FlashHead path](https://github.com/deepgrove-ai/mlx-lm-deepgrove/blob/eba96c16158f032821b0bf374ea1421cfddef0a9/mlx_lm/models/maple.py#L853)
+  is the reference for the explicit approximate singleton-decode candidate
+  head; the default complete-head path keeps it disabled.
 
 ## Metal and kernels
 

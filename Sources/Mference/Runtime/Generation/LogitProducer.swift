@@ -58,3 +58,9 @@ protocol HeadlessSequentialPrefillRunner: LogitProducer {
     /// Advance one prompt token without producing vocabulary logits.
     func produceWithoutLogits(token: Int32, position: Int) async throws
 }
+
+/// Produces the final prompt-token logits without enabling a decode-only
+/// approximate head.
+protocol ExactPrefillLogitProducer: LogitProducer {
+    func produceExactPrefill(token: Int32, position: Int, into logits: MTLBuffer) async throws
+}

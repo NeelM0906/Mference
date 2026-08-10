@@ -24,9 +24,11 @@ public enum ForwardRunnerFactory {
                             runtimeConfiguration: RuntimeConfiguration = .production) throws -> ForwardRuntime {
         if model.config.family == .maple {
             return ForwardRuntime(producer: try MapleForwardRunner(
-                model: model, context: context, maxContext: maxContext),
-                                  prefillConfig: .off,
-                                  executedPrefillMode: .sequential,
+                model: model, context: context, maxContext: maxContext,
+                useFlashHead: runtimeConfiguration.useMapleFlashHead),
+                                  prefillConfig: runtimeConfiguration.prefillConfig,
+                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
+                                      ? .chunked : .off,
                                   kvStorageMode: .bf16)
         }
         return ForwardRuntime(producer: try RealForwardRunner(

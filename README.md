@@ -47,9 +47,8 @@ Mference currently runs five pinned instruction checkpoints:
 - **[Inkling-Small 276B-A12B](https://huggingface.co/pipenetwork/Inkling-Small-MLX-4bit)** —
   276B total, ~12B active per token, in ~9 GB of memory.
 - **[Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx)** —
-  a 24-layer routed-expert model with a native-BF16 runtime path. Its complete
-  1,639-position teacher-forcing comparison matched the pinned MLX reference
-  exactly; see [the compact parity evidence](docs/evidence/maple-parity-2026-08-09.json).
+  a 20B total, ~1B active per token, from the ternary (1.58 bit per parameter) quantization, using ~645 MiB
+  of memory.
   
 The runtime, streaming installer, CLI, native Mac app, and loopback
 OpenAI-compatible server are written in Swift and Metal. Mference is
@@ -110,9 +109,9 @@ swift run -c release MferenceCLI \
 
 | Metric | Value |
 | --- | --- |
-| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B (276B total, ~12B active) · Maple Preview |
+| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B (276B total, ~12B active) · Maple Preview (20B total, ~1B active) |
 | Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; larger-host CLI/server auto uses 32) · est. ~6.8 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache; no Maple memory result is published |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; larger-host CLI/server auto uses 32) · est. ~6.8 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) |
 | Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
@@ -120,6 +119,7 @@ swift run -c release MferenceCLI \
 | Measured decode, Qwen 3.6 | 23.5–29.3 tok/s (24 GB M5, automatic 32-slot profile) |
 | Measured decode, DeepSeek-V4-Flash | 5.3–6.1 tok/s (256 GB M3 Ultra) at a 5,671–5,679 MiB peak footprint |
 | Measured decode, Inkling-Small | 3.0–3.7 tok/s (24 GB M5, optimized native top-6 path) · 5.3–6.9 tok/s (256 GB M3 Ultra) at an 8,936–8,939 MiB peak footprint |
+| Measured, Maple Preview | Exact head: 18.9–24.6 tok/s decode, 25.1–44.9 tok/s prefill, and 491–1,211 MiB peak process footprint on 128-8192 context (16 GB M4) |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed
@@ -140,7 +140,7 @@ decode improved from 2.909/2.961/2.819 to 3.434/3.670/3.038 tok/s. That is a
 16.4% geometric-mean gain, with byte-identical generated output in every A/B.
 See the [Inkling performance notes](docs/INKLING_SMALL.md#native-top-6-decode-2026-08-06).
 
-## Products
+# Products
 
 | Product | Purpose |
 | --- | --- |
@@ -150,7 +150,6 @@ See the [Inkling performance notes](docs/INKLING_SMALL.md#native-top-6-decode-20
 | `MferenceCLI` | Command-line instruction chat and raw completion |
 | `MferenceServer` | OpenAI-compatible Chat Completions server, on loopback by default or a Tailnet address with `--bind tailnet` |
 | `MferenceRepack` | Streaming model installer and install verifier |
-| `MferenceMapleParity` | Strict Maple teacher-forcing exporter, preflight, and trace comparator |
 
 Only one model-owning product should run at a time. The server selects the
 installed model's native dialect automatically, including Gemma's chat format,

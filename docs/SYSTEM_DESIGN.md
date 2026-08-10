@@ -456,7 +456,10 @@ machine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).
 
 Mference is a research system. The Mac app exposes a small set of typed runtime
 controls. Existing families use FP16 KV and their family-specific prefill
-paths; Maple uses native BF16 KV and exact sequential prefill. The memory-first
+paths; Maple uses native BF16 KV and layer-major chunked prefill with a
+token-ordered cache/attention sweep. Its exact full head remains the default;
+the CLI can explicitly select the approximate singleton-decode FlashHead when
+the installed model contains its validated centroid/map data. The memory-first
 expert cache has 16 slots per layer, with model-aware alternatives where
 documented. File-read advice (`RDADVISE`) is off by default.
 

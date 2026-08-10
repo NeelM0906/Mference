@@ -13,14 +13,86 @@ public enum MapleForwardRunnerError: Error, CustomStringConvertible {
     }
 }
 
-/// Exact sequential Maple decode. One instance owns mutable BF16/KV/expert scratch and is serial.
+/// Exact Maple decode plus layer-major BF16 prefill. One instance owns mutable KV/expert scratch and is serial.
 public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowReporting,
-    HeadlessSequentialPrefillRunner, @unchecked Sendable {
+    ChunkedPrefillRunner, HeadlessSequentialPrefillRunner, ExactPrefillLogitProducer, @unchecked Sendable {
     private static let hiddenSize = 2_048
     private static let vocabularySize = 151_936
     private static let layerCount = 24
     private static let topK = 8
     private static let epsilon: Float = 1e-6
+
+    private struct PrefillScratch {
+        let capacity: Int
+        let hidden: MTLBuffer
+        let normed: MTLBuffer
+        let q: MTLBuffer
+        let k: MTLBuffer
+        let v: MTLBuffer
+        let attentionOutput: MTLBuffer
+        let attentionDelta: MTLBuffer
+        let routedInput: MTLBuffer
+        let moeDelta: MTLBuffer
+        let routerIndices: MTLBuffer
+        let routerWeights: MTLBuffer
+        let moeActs: MTLBuffer
+
+        init(context: MetalContext, capacity: Int) throws {
+            precondition(capacity > 0, "Maple prefill scratch capacity must be positive")
+
+            func buffer(_ bytes: Int, _ options: MTLResourceOptions) throws -> MTLBuffer {
+                guard let made = context.device.makeBuffer(length: bytes, options: options) else {
+                    throw MapleForwardRunnerError.invalidConfiguration(
+                        "unable to allocate Maple prefill scratch")
+                }
+                return made
+            }
+
+            let vectorBytes = MapleForwardRunner.hiddenSize * MemoryLayout<UInt16>.stride
+            let kvBytes = MapleQKNormRoPE.numKVHeads * MapleQKNormRoPE.headDim
+                * MemoryLayout<UInt16>.stride
+            let actsBytes = MapleForwardRunner.topK * MapleMoE.intermediate
+                * MemoryLayout<UInt16>.stride
+            self.capacity = capacity
+            self.hidden = try buffer(capacity * vectorBytes, .storageModePrivate)
+            self.normed = try buffer(capacity * vectorBytes, .storageModePrivate)
+            self.q = try buffer(capacity * vectorBytes, .storageModePrivate)
+            self.k = try buffer(capacity * kvBytes, .storageModePrivate)
+            self.v = try buffer(capacity * kvBytes, .storageModePrivate)
+            self.attentionOutput = try buffer(capacity * vectorBytes, .storageModePrivate)
+            self.attentionDelta = try buffer(capacity * vectorBytes, .storageModePrivate)
+            self.routedInput = try buffer(capacity * vectorBytes, .storageModePrivate)
+            self.moeDelta = try buffer(capacity * vectorBytes, .storageModePrivate)
+            self.routerIndices = try buffer(capacity * MapleForwardRunner.topK
+                                            * MemoryLayout<UInt32>.stride,
+                                            .storageModeShared)
+            self.routerWeights = try buffer(capacity * MapleForwardRunner.topK
+                                            * MemoryLayout<Float>.stride,
+                                            .storageModeShared)
+            self.moeActs = try buffer(capacity * actsBytes, .storageModePrivate)
+        }
+
+        func vectorOffset(_ row: Int) -> Int {
+            row * MapleForwardRunner.hiddenSize * MemoryLayout<UInt16>.stride
+        }
+
+        func kvOffset(_ row: Int) -> Int {
+            row * MapleQKNormRoPE.numKVHeads * MapleQKNormRoPE.headDim
+                * MemoryLayout<UInt16>.stride
+        }
+
+        func routerIndicesOffset(_ row: Int) -> Int {
+            row * MapleForwardRunner.topK * MemoryLayout<UInt32>.stride
+        }
+
+        func routerWeightsOffset(_ row: Int) -> Int {
+            row * MapleForwardRunner.topK * MemoryLayout<Float>.stride
+        }
+
+        func actsOffset(_ row: Int) -> Int {
+            row * MapleForwardRunner.topK * MapleMoE.intermediate * MemoryLayout<UInt16>.stride
+        }
+    }
 
     private struct LayerTensors {
         let inputNorm: TensorView
@@ -47,6 +119,7 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
     private let embedding: TensorView
     private let finalNorm: TensorView
     private let lmHead: TensorView
+    private let flashHead: MapleFlashHead?
     private let layers: [LayerTensors]
 
     private let hidden: MTLBuffer
@@ -61,10 +134,13 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
     private let routerIndices: MTLBuffer
     private let routerWeights: MTLBuffer
     private let moeActs: MTLBuffer
+    private var prefillScratch: PrefillScratch?
+    private var prefillChunkState = PrefillChunkCommitState()
 
     public let maxContext: Int
 
-    public init(model: Model, context: MetalContext, maxContext: Int) throws {
+    public init(model: Model, context: MetalContext, maxContext: Int,
+                useFlashHead: Bool = false) throws {
         try Self.validate(config: model.config, maxContext: maxContext)
         guard model.routedExpertCacheSlotCount(layer: 0) ?? 0 >= Self.topK else {
             throw MapleForwardRunnerError.invalidConfiguration(
@@ -80,7 +156,8 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
                                      maxPrefillChunkTokens: 1,
                                      fp16RingCapacityOverride: MapleDecodeAttention.slidingCapacity)
         self.addRMSNorm = try MapleAddRMSNorm(context: context)
-        self.ternary = try MapleTernaryGEMV(context: context)
+        let ternary = try MapleTernaryGEMV(context: context)
+        self.ternary = ternary
         self.qkNormRoPE = try MapleQKNormRoPE(context: context)
         self.attention = try MapleDecodeAttention(context: context)
         self.moe = try MapleMoE(context: context)
@@ -93,6 +170,9 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
         self.embedding = embedding
         self.finalNorm = finalNorm
         self.lmHead = lmHead
+        self.flashHead = useFlashHead
+            ? try MapleFlashHead(context: context, model: model, ternary: ternary)
+            : nil
         self.layers = try Self.validateExpertLayout(model)
 
         func buffer(_ elements: Int, _ stride: Int) throws -> MTLBuffer {
@@ -118,12 +198,14 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
     }
 
     public func reset() {
+        prefillChunkState.reset()
         kv.reset()
     }
 
     public var continuationPosition: Int { kv.position }
 
     public func prepareForContinuation(expectedPosition: Int) throws {
+        try prefillChunkState.requireClean(operation: "prepareForContinuation")
         guard expectedPosition > 0, expectedPosition == kv.position else {
             throw PrefillError.prefillCursorMismatch(
                 "Maple continuation cursor \(expectedPosition) does not match \(kv.position)")
@@ -131,14 +213,73 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
     }
 
     public func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
-        try await produce(token: token, position: position, logits: logits)
+        try await produce(token: token, position: position, logits: logits, useFlashHead: true)
     }
 
     func produceWithoutLogits(token: Int32, position: Int) async throws {
-        try await produce(token: token, position: position, logits: nil)
+        try await produce(token: token, position: position, logits: nil, useFlashHead: false)
     }
 
-    private func produce(token: Int32, position: Int, logits: MTLBuffer?) async throws {
+    func produceExactPrefill(token: Int32, position: Int, into logits: MTLBuffer) async throws {
+        try await produce(token: token, position: position, logits: logits, useFlashHead: false)
+    }
+
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try prefillChunkState.requireClean(operation: "prefillChunked")
+        guard config.mode == .chunked else {
+            throw PrefillError.chunkedUnsupported(
+                "Maple prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
+        }
+        guard startPosition >= 0, startPosition == kv.position else {
+            throw PrefillError.chunkedUnsupported(
+                "Maple chunked prefill cursor \(kv.position) != startPosition \(startPosition)")
+        }
+        guard tokens.count <= maxContext - startPosition else {
+            throw PrefillError.chunkedUnsupported(
+                "Maple chunked prefill range exceeds maxContext \(maxContext)")
+        }
+        guard !tokens.isEmpty else {
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+        }
+        guard tokens.allSatisfy({ $0 >= 0 && $0 < Int32(Self.vocabularySize) }) else {
+            throw MapleForwardRunnerError.invalidInput("Maple token is outside the vocabulary")
+        }
+        guard logits.length >= Self.vocabularySize * MemoryLayout<Float16>.stride else {
+            throw MapleForwardRunnerError.invalidInput("Maple logits buffer is too small")
+        }
+
+        let values = Array(tokens)
+        var completed = 0
+        var position = startPosition
+        let chunkCapacity = max(1, min(config.chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
+        while completed < values.count {
+            try Task.checkCancellation()
+            let count = min(chunkCapacity, values.count - completed)
+            let chunk = Array(values[completed..<(completed + count)])
+            let isFinalChunk = completed + count == values.count
+            prefillChunkState.markDirty(startPosition: position, tokenCount: count)
+            try await prefill(chunk: chunk,
+                              startPosition: position,
+                              emitHead: isFinalChunk,
+                              outputMode: outputMode,
+                              into: logits)
+            kv.advance(by: count)
+            prefillChunkState.markCommitted()
+            completed += count
+            position += count
+            onProgress(completed)
+        }
+        return PrefillResult(newPosition: position, seed: .logitsWritten)
+    }
+
+    private func produce(token: Int32, position: Int, logits: MTLBuffer?,
+                         useFlashHead: Bool) async throws {
+        try prefillChunkState.requireClean(operation: "produce")
         try Task.checkCancellation()
         guard position == kv.position, position >= 0, position < maxContext else {
             throw MapleForwardRunnerError.invalidInput("Maple position does not match its KV cursor")
@@ -223,27 +364,210 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
         }
 
         if let logits {
-            let head = try commandBuffer()
-            addRMSNorm.encode(commandBuffer: head,
-                              hidden: hidden,
-                              delta: moeDelta,
-                              weight: finalNorm.buffer,
-                              weightOffset: Int(finalNorm.offset),
-                              normed: finalNormed,
-                              eps: Self.epsilon)
-            ternary.encodeInt4(commandBuffer: head,
-                               weights: lmHead.buffer, weightsOffset: Int(lmHead.offset),
-                               scales: lmHead.buffer, scalesOffset: Int(lmHead.scaleOffset),
-                               biases: lmHead.buffer, biasesOffset: Int(lmHead.biasOffset),
-                               x: finalNormed,
-                               y: logits,
-                               rows: UInt32(Self.vocabularySize))
-            try finish(head)
+            if useFlashHead {
+                try encodeDecodeHead(hidden: hidden, delta: moeDelta, into: logits)
+            } else {
+                try encodeExactHead(hidden: hidden, delta: moeDelta, into: logits)
+            }
         }
         kv.advance()
     }
 
-    private func encodeExperts(plan: RoutedExpertFetchPlan, offsets: MoEExpertOffsets) async throws {
+    private func prefill(chunk: [Int32],
+                         startPosition: Int,
+                         emitHead: Bool,
+                         outputMode: PrefillOutputMode,
+                         into logits: MTLBuffer) async throws {
+        precondition(!chunk.isEmpty, "Maple prefill chunk must not be empty")
+        _ = outputMode // Maple prefill always emits the exact final-token head.
+        let scratch = try scratch(for: chunk.count)
+
+        let embeddingCB = try commandBuffer()
+        for (row, token) in chunk.enumerated() {
+            ternary.encodeEmbedding(commandBuffer: embeddingCB,
+                                    table: embedding.buffer, tableOffset: Int(embedding.offset),
+                                    scales: embedding.buffer, scalesOffset: Int(embedding.scaleOffset),
+                                    biases: embedding.buffer, biasesOffset: Int(embedding.biasOffset),
+                                    out: scratch.hidden, outOffset: scratch.vectorOffset(row),
+                                    tokenID: UInt32(token))
+        }
+        try finish(embeddingCB)
+
+        for (index, layer) in layers.enumerated() {
+            try Task.checkCancellation()
+            let projections = try commandBuffer()
+            for row in chunk.indices {
+                let vectorOffset = scratch.vectorOffset(row)
+                let kvOffset = scratch.kvOffset(row)
+                addRMSNorm.encode(commandBuffer: projections,
+                                  hidden: scratch.hidden, hiddenOffset: vectorOffset,
+                                  delta: index == 0 ? zero : scratch.moeDelta,
+                                  deltaOffset: index == 0 ? 0 : vectorOffset,
+                                  weight: layer.inputNorm.buffer,
+                                  weightOffset: Int(layer.inputNorm.offset),
+                                  normed: scratch.normed, normedOffset: vectorOffset,
+                                  eps: Self.epsilon)
+                encodeProjection(projections, layer.q,
+                                 x: scratch.normed, xOffset: vectorOffset,
+                                 y: scratch.q, yOffset: vectorOffset,
+                                 rows: UInt32(Self.hiddenSize))
+                encodeProjection(projections, layer.k,
+                                 x: scratch.normed, xOffset: vectorOffset,
+                                 y: scratch.k, yOffset: kvOffset,
+                                 rows: UInt32(MapleQKNormRoPE.numKVHeads * MapleQKNormRoPE.headDim))
+                encodeProjection(projections, layer.v,
+                                 x: scratch.normed, xOffset: vectorOffset,
+                                 y: scratch.v, yOffset: kvOffset,
+                                 rows: UInt32(MapleQKNormRoPE.numKVHeads * MapleQKNormRoPE.headDim))
+                qkNormRoPE.encode(commandBuffer: projections,
+                                  q: scratch.q, qOffset: vectorOffset,
+                                  k: scratch.k, kOffset: kvOffset,
+                                  qWeight: layer.qNorm.buffer, qWeightOffset: Int(layer.qNorm.offset),
+                                  kWeight: layer.kNorm.buffer, kWeightOffset: Int(layer.kNorm.offset),
+                                  position: UInt32(startPosition + row),
+                                  sliding: layer.sliding)
+            }
+            try finish(projections)
+
+            let attentionCB = try commandBuffer()
+            for row in chunk.indices {
+                let position = startPosition + row
+                let kSlot = kv.kSlot(layer: index, position: position)
+                let vSlot = kv.vSlot(layer: index, position: position)
+                let kvOffset = scratch.kvOffset(row)
+                guard let blit = attentionCB.makeBlitCommandEncoder() else {
+                    throw MapleForwardRunnerError.commandFailed("unable to create Maple KV blit encoder")
+                }
+                let kvBytes = MapleQKNormRoPE.numKVHeads * MapleQKNormRoPE.headDim
+                    * MemoryLayout<UInt16>.stride
+                blit.copy(from: scratch.k, sourceOffset: kvOffset,
+                          to: kSlot.buffer, destinationOffset: kSlot.offset, size: kvBytes)
+                blit.copy(from: scratch.v, sourceOffset: kvOffset,
+                          to: vSlot.buffer, destinationOffset: vSlot.offset, size: kvBytes)
+                blit.endEncoding()
+                if layer.sliding {
+                    attention.encodeSliding(commandBuffer: attentionCB,
+                                            q: scratch.q, qOffset: scratch.vectorOffset(row),
+                                            k: kSlot.buffer, v: vSlot.buffer,
+                                            out: scratch.attentionOutput,
+                                            outOffset: scratch.vectorOffset(row),
+                                            physicalCount: UInt32(min(position + 1,
+                                                                      MapleDecodeAttention.slidingCapacity)))
+                } else {
+                    attention.encodeFull(commandBuffer: attentionCB,
+                                         q: scratch.q, qOffset: scratch.vectorOffset(row),
+                                         k: kSlot.buffer, v: vSlot.buffer,
+                                         out: scratch.attentionOutput,
+                                         outOffset: scratch.vectorOffset(row),
+                                         sequenceLength: UInt32(position + 1))
+                }
+            }
+            try finish(attentionCB)
+
+            let routed = try commandBuffer()
+            for row in chunk.indices {
+                let vectorOffset = scratch.vectorOffset(row)
+                encodeProjection(routed, layer.o,
+                                 x: scratch.attentionOutput, xOffset: vectorOffset,
+                                 y: scratch.attentionDelta, yOffset: vectorOffset,
+                                 rows: UInt32(Self.hiddenSize))
+                addRMSNorm.encode(commandBuffer: routed,
+                                  hidden: scratch.hidden, hiddenOffset: vectorOffset,
+                                  delta: scratch.attentionDelta, deltaOffset: vectorOffset,
+                                  weight: layer.postAttentionNorm.buffer,
+                                  weightOffset: Int(layer.postAttentionNorm.offset),
+                                  normed: scratch.routedInput, normedOffset: vectorOffset,
+                                  eps: Self.epsilon)
+                moe.encodeRouterTop8(commandBuffer: routed,
+                                     weights: layer.router.buffer,
+                                     weightsOffset: Int(layer.router.offset),
+                                     hidden: scratch.routedInput, hiddenOffset: vectorOffset,
+                                     indices: scratch.routerIndices,
+                                     indicesOffset: scratch.routerIndicesOffset(row),
+                                     routingWeights: scratch.routerWeights,
+                                     routingWeightsOffset: scratch.routerWeightsOffset(row))
+            }
+            try finish(routed)
+
+            for row in chunk.indices {
+                try Task.checkCancellation()
+                let ranks = try routedRanks(indices: scratch.routerIndices,
+                                             offset: scratch.routerIndicesOffset(row))
+                guard let plan = try model.planRoutedExperts(layer: index, experts: ranks) else {
+                    throw ModelError.routedExpertPlanUnavailable(layer: index)
+                }
+                try await encodeExperts(plan: plan,
+                                        offsets: layer.expertOffsets,
+                                        input: scratch.routedInput,
+                                        inputOffset: scratch.vectorOffset(row),
+                                        acts: scratch.moeActs,
+                                        actsOffset: scratch.actsOffset(row),
+                                        routingWeights: scratch.routerWeights,
+                                        routingWeightsOffset: scratch.routerWeightsOffset(row),
+                                        output: scratch.moeDelta,
+                                        outputOffset: scratch.vectorOffset(row))
+            }
+        }
+
+        if emitHead {
+            let finalOffset = scratch.vectorOffset(chunk.count - 1)
+            try encodeExactHead(hidden: scratch.hidden, hiddenOffset: finalOffset,
+                                delta: scratch.moeDelta, deltaOffset: finalOffset,
+                                into: logits)
+        }
+    }
+
+    private func scratch(for capacity: Int) throws -> PrefillScratch {
+        if let prefillScratch, prefillScratch.capacity >= capacity { return prefillScratch }
+        let scratch = try PrefillScratch(context: context, capacity: capacity)
+        prefillScratch = scratch
+        return scratch
+    }
+
+    private func encodeExactHead(hidden: MTLBuffer, hiddenOffset: Int = 0,
+                                 delta: MTLBuffer, deltaOffset: Int = 0,
+                                 into logits: MTLBuffer) throws {
+        let head = try commandBuffer()
+        addRMSNorm.encode(commandBuffer: head,
+                          hidden: hidden, hiddenOffset: hiddenOffset,
+                          delta: delta, deltaOffset: deltaOffset,
+                          weight: finalNorm.buffer,
+                          weightOffset: Int(finalNorm.offset),
+                          normed: finalNormed,
+                          eps: Self.epsilon)
+        ternary.encodeInt4(commandBuffer: head,
+                           weights: lmHead.buffer, weightsOffset: Int(lmHead.offset),
+                           scales: lmHead.buffer, scalesOffset: Int(lmHead.scaleOffset),
+                           biases: lmHead.buffer, biasesOffset: Int(lmHead.biasOffset),
+                           x: finalNormed,
+                           y: logits,
+                           rows: UInt32(Self.vocabularySize))
+        try finish(head)
+    }
+
+    private func encodeDecodeHead(hidden: MTLBuffer, delta: MTLBuffer,
+                                  into logits: MTLBuffer) throws {
+        guard let flashHead else {
+            return try encodeExactHead(hidden: hidden, delta: delta, into: logits)
+        }
+        let norm = try commandBuffer()
+        addRMSNorm.encode(commandBuffer: norm,
+                          hidden: hidden,
+                          delta: delta,
+                          weight: finalNorm.buffer,
+                          weightOffset: Int(finalNorm.offset),
+                          normed: finalNormed,
+                          eps: Self.epsilon)
+        try finish(norm)
+        try flashHead.encode(hidden: finalNormed, lmHead: lmHead, into: logits)
+    }
+
+    private func encodeExperts(plan: RoutedExpertFetchPlan,
+                               offsets: MoEExpertOffsets,
+                               input: MTLBuffer? = nil, inputOffset: Int = 0,
+                               acts: MTLBuffer? = nil, actsOffset: Int = 0,
+                               routingWeights: MTLBuffer? = nil, routingWeightsOffset: Int = 0,
+                               output: MTLBuffer? = nil, outputOffset: Int = 0) async throws {
         let plannedViews = try model.routedExpertBuffers(for: plan)
         let blobs = try expertBlobs(plannedViews)
 
@@ -254,17 +578,27 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
 
         let argument = moe.makeRoutedArgumentBuffer(routedBlobs: blobs, offsets: offsets)
         let commandBuffer = try commandBuffer()
+        let inputBuffer = input ?? routedInput
+        let actsBuffer = acts ?? moeActs
+        let routingWeightsBuffer = routingWeights ?? routerWeights
+        let outputBuffer = output ?? moeDelta
         moe.encodePhase1(commandBuffer: commandBuffer,
                          routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
-                         x: routedInput, acts: moeActs)
+                         x: inputBuffer, xOffset: inputOffset,
+                         acts: actsBuffer, actsOffset: actsOffset)
         moe.encodePhase2(commandBuffer: commandBuffer,
                          routedArgumentBuffer: argument, routedBlobs: blobs, offsets: offsets,
-                         acts: moeActs, routingWeights: routerWeights, output: moeDelta)
+                         acts: actsBuffer, actsOffset: actsOffset,
+                         routingWeights: routingWeightsBuffer,
+                         routingWeightsOffset: routingWeightsOffset,
+                         output: outputBuffer, outputOffset: outputOffset)
         try finish(commandBuffer)
     }
 
-    private func routedRanks() throws -> [Int] {
-        let values = routerIndices.contents().bindMemory(to: UInt32.self, capacity: Self.topK)
+    private func routedRanks(indices: MTLBuffer? = nil, offset: Int = 0) throws -> [Int] {
+        let indicesBuffer = indices ?? routerIndices
+        let values = indicesBuffer.contents().advanced(by: offset)
+            .bindMemory(to: UInt32.self, capacity: Self.topK)
         let ranks = (0..<Self.topK).map { Int(values[$0]) }
         guard Set(ranks).count == Self.topK, ranks.allSatisfy({ $0 >= 0 && $0 < MapleMoE.expertCount }) else {
             throw MapleForwardRunnerError.invalidInput("Maple router returned invalid top-8 ranks")
@@ -290,15 +624,14 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
 
     private func encodeProjection(_ commandBuffer: MTLCommandBuffer,
                                   _ view: TensorView,
-                                  x: MTLBuffer,
-                                  y: MTLBuffer,
-                                  yOffset: Int = 0,
+                                  x: MTLBuffer, xOffset: Int = 0,
+                                  y: MTLBuffer, yOffset: Int = 0,
                                   rows: UInt32) {
         ternary.encode(commandBuffer: commandBuffer,
                        weights: view.buffer, weightsOffset: Int(view.offset),
                        scales: view.buffer, scalesOffset: Int(view.scaleOffset),
                        biases: view.buffer, biasesOffset: Int(view.biasOffset),
-                       x: x, y: y, yOffset: yOffset, rows: rows)
+                       x: x, xOffset: xOffset, y: y, yOffset: yOffset, rows: rows)
     }
 
     private func commandBuffer() throws -> MTLCommandBuffer {

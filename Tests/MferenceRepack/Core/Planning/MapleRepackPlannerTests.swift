@@ -124,7 +124,7 @@ struct MapleRepackPlannerTests {
         #expect(SourceFingerprint.modelID(forIndexSha256: source.sourceIndexSHA256!) == source.modelID)
     }
 
-    @Test func mapleFlashHeadI32TensorIsParsedAndExcluded() throws {
+    @Test func mapleFlashHeadI32TensorIsParsedAndConditionallyRetained() throws {
         let headerData = try JSONSerialization.data(withJSONObject: [
             "lm_head_flash.token_map": [
                 "dtype": "I32", "shape": [2], "data_offsets": [0, 8],
@@ -140,6 +140,12 @@ struct MapleRepackPlannerTests {
             sizeBytes: 8)])
         #expect(RepackPlanner.classify(
             "lm_head_flash.token_map", numLayers: 24, family: .maple) == .excludedMultimodal)
+        #expect(RepackPlanner.classify(
+            "lm_head_flash.token_map", numLayers: 24, family: .maple,
+            includeMapleFlashHead: true) == .lmResident)
+        #expect(RepackPlanner.classify(
+            "lm_head_flash.head.weight", numLayers: 24, family: .maple,
+            includeMapleFlashHead: true) == .excludedMultimodal)
         #expect(RepackPlanner.classify(
             "lm_head_flash.token_map", numLayers: 24, family: .deepseekV4Flash) == .unknown)
     }
@@ -208,7 +214,92 @@ struct MapleRepackPlannerTests {
             .identity, .repeatBF16(count: 2, negated: false), .repeatBF16(count: 2, negated: true),
             .identity, .repeatBF16(count: 2, negated: false), .repeatBF16(count: 2, negated: true),
         ])
-        #expect(plan.excludedMultimodalTensorNames == ["lm_head_flash.token_map"])
+        #expect(plan.excludedMultimodalTensorNames.isEmpty)
+    }
+
+    @Test func mapleFlashHeadPlanRetainsOnlyItsRequiredSourceTensors() throws {
+        let root = temporaryRoot("flash-head-plan")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+
+        let snapshot = try SyntheticSnapshot.buildMaple(at: root, includeFlashHead: true)
+        let plan = try maplePlan(snapshot: snapshot, root: root)
+        let flashHead = try #require(plan.flashHead)
+        let centroid = try #require(plan.resident.entries.first {
+            $0.name == "lm_head_flash.centroids.weight"
+        })
+        let tokenMap = try #require(plan.resident.entries.first {
+            $0.name == "lm_head_flash.token_map"
+        })
+
+        #expect(flashHead.nClusters == 4_748)
+        #expect(flashHead.clusterSize == 32)
+        #expect(flashHead.nProbes == 512)
+        #expect(flashHead.forceTokens == [151_645, 151_668, 151_643])
+        #expect(centroid.dtype == 0)
+        #expect(centroid.logicalShape4 == [4_748, 2_048, 0, 0])
+        #expect(centroid.quantSpec == QuantSpec(bits: 4, groupSize: 64))
+        #expect(centroid.sourceWeight.name == "lm_head_flash.centroids.weight")
+        #expect(centroid.sourceScales?.name == "lm_head_flash.centroids.scales")
+        #expect(centroid.sourceBiases?.name == "lm_head_flash.centroids.biases")
+        #expect(tokenMap.dtype == 5)
+        #expect(tokenMap.logicalShape4 == [4_748, 32, 0, 0])
+        #expect(tokenMap.sourceWeight.name == "lm_head_flash.token_map")
+        #expect(tokenMap.sourceScales == nil)
+        #expect(tokenMap.sourceBiases == nil)
+        #expect(plan.resident.entries.map(\.name).contains {
+            $0.hasPrefix("lm_head_flash.head.") || $0 == "lm_head_flash.cluster_scale"
+        } == false)
+        #expect(plan.excludedMultimodalTensorNames == [
+            "lm_head_flash.cluster_scale",
+            "lm_head_flash.head.biases",
+            "lm_head_flash.head.scales",
+            "lm_head_flash.head.weight",
+        ])
+    }
+
+    @Test func mapleFlashHeadRejectsMalformedSourceTensors() throws {
+        let cases: [(String, [SyntheticSnapshot.MapleTensorMutation])] = [
+            ("missing token map", [.remove("lm_head_flash.token_map")]),
+            ("bad centroid dtype", [.replaceDtype("lm_head_flash.centroids.weight", "BF16")]),
+            ("bad centroid shape", [.replaceShape("lm_head_flash.centroids.weight", [4_748, 255])]),
+            ("bad token-map dtype", [.replaceDtype("lm_head_flash.token_map", "BF16")]),
+            ("bad token-map shape", [.replaceShape("lm_head_flash.token_map", [4_748, 31])]),
+        ]
+        for (name, mutations) in cases {
+            let root = temporaryRoot("flash-head-malformed-\(name)")
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            let snapshot = try SyntheticSnapshot.buildMaple(
+                at: root, includeFlashHead: true, mutations: mutations)
+
+            #expect(throws: RepackError.self) {
+                _ = try maplePlan(snapshot: snapshot, root: root)
+            }
+        }
+    }
+
+    @Test func mapleFlashHeadRejectsMalformedSourceMetadata() throws {
+        let mutations: [(String, (inout [String: Any]) -> Void)] = [
+            ("missing field", { $0.removeValue(forKey: "n_probes") }),
+            ("bad dimensions", { $0["n_clusters"] = 4_747 }),
+            ("too many probes", { $0["n_probes"] = 4_749 }),
+            ("unscaled centroids", { $0["scaled_centroids"] = false }),
+            ("duplicate forced token", { $0["force_tokens"] = [151_645, 151_645] }),
+        ]
+        for (name, mutate) in mutations {
+            let root = temporaryRoot("flash-head-metadata-\(name)")
+            defer { try? FileManager.default.removeItem(atPath: root) }
+            _ = try SyntheticSnapshot.buildMaple(at: root, includeFlashHead: true)
+            let url = URL(fileURLWithPath: configPath(in: root))
+            var config = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+            var flashHead = try #require(config["flash_head"] as? [String: Any])
+            mutate(&flashHead)
+            config["flash_head"] = flashHead
+            try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]).write(to: url)
+
+            #expect(throws: RepackError.self) {
+                _ = try IndexLoader.load(snapshotDir: root)
+            }
+        }
     }
 
     @Test func mapleTernaryRangePlanMapsExpandedDestinationsWithinBounds() throws {
@@ -314,7 +405,8 @@ struct MapleRepackPlannerTests {
                 && $0.scaleTransform == .repeatBF16(count: 32, negated: false)
                 && $0.biasTransform == .repeatBF16(count: 32, negated: true)
         })
-        #expect(plan.excludedMultimodalTensorNames.contains("lm_head_flash.token_map"))
+        #expect(plan.flashHead?.nClusters == 4_748)
+        #expect(!plan.excludedMultimodalTensorNames.contains("lm_head_flash.token_map"))
     }
 
     @Test func mapleManifestUsesFixedQuantSlotsAndBehavior() throws {
@@ -326,7 +418,7 @@ struct MapleRepackPlannerTests {
             resident: ResidentFilePlan(
                 path: "weights.bin", entries: [], stringTable: [], stringTableOffsets: [],
                 indexSize: 0, residentSize: 0),
-            layers: [], matchedModelID: nil, excludedMultimodalTensorNames: [])
+            layers: [], matchedModelID: nil, excludedMultimodalTensorNames: [], flashHead: nil)
 
         let data = try GTurboJSON.encodeManifest(
             plan: plan, modelID: "maple-preview-2bit-mlx", sourceSnapshotHash: "sha256:0",

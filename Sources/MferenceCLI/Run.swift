@@ -74,7 +74,8 @@ public func run(args: Args,
             expertCacheSlots: expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: !config.isPureGreedy)
+            forceLogitsHead: !config.isPureGreedy,
+            useMapleFlashHead: args.flashHead)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -254,7 +255,8 @@ private func runChat(args: Args,
             expertCacheSlots: expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: !baseConfig.isPureGreedy)
+            forceLogitsHead: !baseConfig.isPureGreedy,
+            useMapleFlashHead: args.flashHead)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)

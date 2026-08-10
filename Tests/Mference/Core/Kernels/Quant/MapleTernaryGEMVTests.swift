@@ -253,6 +253,107 @@ struct MapleTernaryGEMVTests {
         #expect(actual.suffix(ySuffix).allSatisfy { $0 == ySentinel })
     }
 
+    @Test("FlashHead gathers exact rows from the original INT4 head")
+    func flashHeadGatherMatchesFullHeadForSelectedTokens() throws {
+        let rows = 7
+        let candidates: [UInt32] = [6, 1, 4]
+        var weights = [UInt8](repeating: 0, count: rows * Self.d / 2)
+        var scales = [UInt16](repeating: 0, count: rows * Self.groups)
+        var biases = [UInt16](repeating: 0, count: rows * Self.groups)
+        let x = (0..<Self.d).map {
+            Quantization.bf16Bits(Float(($0 * 11) % 29 - 14) / 8)
+        }
+        for row in 0..<rows {
+            for index in 0..<Self.d {
+                let code = UInt8((row * 7 + index * 5) & 15)
+                let byte = row * Self.d / 2 + index / 2
+                weights[byte] |= index.isMultiple(of: 2) ? code : code << 4
+            }
+            for group in 0..<Self.groups {
+                scales[row * Self.groups + group] = Quantization.bf16Bits(
+                    Float((row + 2) * (group + 1)) / 64)
+                biases[row * Self.groups + group] = Quantization.bf16Bits(
+                    Float((row - group) % 7) / 16)
+            }
+        }
+
+        let sentinel = Float16(777)
+        let context = try MetalContext()
+        let head = try MapleTernaryGEMV(context: context)
+        let library = try MetalContext.moduleLibrary(device: context.device,
+                                                     module: "maple_flash_head",
+                                                     safeMath: true)
+        guard let fillFunction = library.makeFunction(
+                  name: "maple_flash_head_fill_negative_infinity"),
+              let gatherFunction = library.makeFunction(
+                  name: "maple_flash_head_gather_int4_qmv_d2048"),
+              let fillPipeline = try? context.device.makeComputePipelineState(function: fillFunction),
+              let gatherPipeline = try? context.device.makeComputePipelineState(function: gatherFunction),
+              let weightBuffer = Self.buffer(context.device, weights),
+              let scaleBuffer = Self.buffer(context.device, scales),
+              let biasBuffer = Self.buffer(context.device, biases),
+              let xBuffer = Self.buffer(context.device, x),
+              let referenceBuffer = Self.buffer(context.device,
+                                                [Float16](repeating: sentinel, count: rows)),
+              let candidateBuffer = Self.buffer(context.device, candidates),
+              let gatheredBuffer = Self.buffer(context.device,
+                                               [Float16](repeating: sentinel, count: rows)),
+              let commandBuffer = context.queue.makeCommandBuffer() else {
+            Issue.record("Metal allocation failed")
+            return
+        }
+
+        head.encodeInt4(commandBuffer: commandBuffer,
+                        weights: weightBuffer,
+                        scales: scaleBuffer,
+                        biases: biasBuffer,
+                        x: xBuffer,
+                        y: referenceBuffer,
+                        rows: UInt32(rows))
+        guard let fill = commandBuffer.makeComputeCommandEncoder() else {
+            Issue.record("Metal command encoding failed")
+            return
+        }
+        fill.setComputePipelineState(fillPipeline)
+        fill.setBuffer(gatheredBuffer, offset: 0, index: 0)
+        var vocabularyRows = UInt32(rows)
+        fill.setBytes(&vocabularyRows, length: MemoryLayout<UInt32>.stride, index: 1)
+        fill.dispatchThreads(MTLSize(width: rows, height: 1, depth: 1),
+                             threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        fill.endEncoding()
+
+        guard let gather = commandBuffer.makeComputeCommandEncoder() else {
+            Issue.record("Metal command encoding failed")
+            return
+        }
+        gather.setComputePipelineState(gatherPipeline)
+        gather.setBuffer(weightBuffer, offset: 0, index: 0)
+        gather.setBuffer(scaleBuffer, offset: 0, index: 1)
+        gather.setBuffer(biasBuffer, offset: 0, index: 2)
+        gather.setBuffer(xBuffer, offset: 0, index: 3)
+        gather.setBuffer(candidateBuffer, offset: 0, index: 4)
+        gather.setBuffer(gatheredBuffer, offset: 0, index: 5)
+        var candidateCount = UInt32(candidates.count)
+        gather.setBytes(&candidateCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        gather.dispatchThreadgroups(
+            MTLSize(width: (candidates.count + 7) / 8, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        gather.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.status == .completed)
+
+        let reference: [Float16] = Self.read(referenceBuffer, count: rows)
+        let gathered: [Float16] = Self.read(gatheredBuffer, count: rows)
+        for token in 0..<rows {
+            if candidates.contains(UInt32(token)) {
+                #expect(gathered[token] == reference[token])
+            } else {
+                #expect(gathered[token] == -Float16.infinity)
+            }
+        }
+    }
+
     private static func ternaryReference(weights: [UInt8], scales: [UInt16],
                                          biases: [UInt16], x: [UInt16], rows: Int) -> [UInt16] {
         (0..<rows).map { row in

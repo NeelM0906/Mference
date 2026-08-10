@@ -105,6 +105,20 @@ public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let routedExpert: ManifestQuantSlot
 }
 
+/// Optional sparse singleton-decode head retained from a Maple source
+/// checkpoint. Prefill always uses the exact full vocabulary head.
+public struct ManifestMapleFlashHead: Decodable, Equatable, Sendable {
+    public let nClusters: Int
+    public let clusterSize: Int
+    public let nProbes: Int
+    public let groupSize: Int
+    public let bits: Int
+    public let headGroupSize: Int
+    public let headBits: Int
+    public let scaledCentroids: Bool
+    public let forceTokens: [Int]
+}
+
 public struct Manifest: Decodable, Equatable, Sendable {
     public let magic: String
     public let versionMajor: Int
@@ -114,6 +128,7 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let sourceSnapshotHash: String?
     public let arch: ManifestArch
     public let quant: ManifestQuant?
+    public let flashHead: ManifestMapleFlashHead?
     public let files: [String: ManifestFileEntry]
     public let expertsPerLayer: Int
     public let numLayers: Int
@@ -193,6 +208,9 @@ public enum ManifestReader {
             try validateQuant(quant, expected: expected)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
+        }
+        if let flashHead = m.flashHead {
+            try validateMapleFlashHead(flashHead, expected: expected)
         }
         let pageSize = UInt64(getpagesize())
         guard m.expertStride % pageSize == 0 else {
@@ -281,6 +299,22 @@ public enum ManifestReader {
                   slot.groupSize == Quantization.groupSize else {
                 throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
             }
+        }
+    }
+
+    private static func validateMapleFlashHead(_ flashHead: ManifestMapleFlashHead,
+                                               expected: ArchConfig) throws {
+        guard expected.family == .maple,
+              flashHead.nClusters > 0, flashHead.clusterSize > 0,
+              flashHead.nClusters <= Int.max / flashHead.clusterSize,
+              flashHead.nClusters * flashHead.clusterSize == expected.vocabSize,
+              flashHead.nProbes > 0, flashHead.nProbes <= flashHead.nClusters,
+              flashHead.groupSize == Quantization.groupSize, flashHead.bits == 4,
+              flashHead.headGroupSize == Quantization.groupSize, flashHead.headBits == 4,
+              flashHead.scaledCentroids,
+              Set(flashHead.forceTokens).count == flashHead.forceTokens.count,
+              flashHead.forceTokens.allSatisfy({ $0 >= 0 && $0 < expected.vocabSize }) else {
+            throw ModelError.indexCorrupt(detail: "invalid Maple FlashHead metadata")
         }
     }
 

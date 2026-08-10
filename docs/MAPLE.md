@@ -1,8 +1,7 @@
-# Maple behavioral parity contract
+# Maple runtime contract
 
-This document is the frozen contract for Maple on the clean Mference
-integration branch. The validation matrix records the accepted clean evidence;
-implementation status lives in [PROGRESS.md](../PROGRESS.md).
+This document is the frozen runtime contract for Maple on the clean Mference
+integration branch. Implementation status lives in [PROGRESS.md](../PROGRESS.md).
 
 ## Reference pins
 
@@ -13,21 +12,17 @@ These pins are inputs to parity, not moving recommendations.
 | Checkpoint | [`deepgrove/maple-preview-2bit-mlx`](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) |
 | Checkpoint revision | `361db5da5e74ff6fcdd852d478e1f266ce11013a` |
 | Source index SHA-256 | `56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95` |
-| Snapshot-manifest SHA-256 | `ac8b6d4b118d982b215c98697cca50ebe770ad3d8f68b7ef10a582fd52fb9a5c` |
 | `config.json` SHA-256 | `57eb521da63629196ebda2c103be929c81c1027ddf2766e7b19e2d2427f77443` |
 | Executable reference `maple.py` SHA-256 | `4685745e9cba8802e578b833504213efce21bec9b45d0550d6040340f367f007` |
 | `tokenizer.json` SHA-256 | `aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4` |
 | `tokenizer_config.json` SHA-256 | `bcab9fe0f4f56a0cffba7c916f943c376810d32c08f2cebf01f8b15849039d35` |
 | `chat_template.jinja` SHA-256 | `83e4c58ca602ade89b126cc75a036eb8bd06d373d4fd94b09d2277d609131089` |
 | MLX runtime fork | [`deepgrove-ai/mlx-lm-deepgrove`](https://github.com/deepgrove-ai/mlx-lm-deepgrove/tree/eba96c16158f032821b0bf374ea1421cfddef0a9) at `eba96c16158f032821b0bf374ea1421cfddef0a9` |
-| Oracle environment | CPython 3.12.13; MLX 0.32.0; mlx-lm 0.31.3; Transformers 5.14.1; Tokenizers 0.22.2; NumPy 2.5.1 |
 | Research implementation | `codex/maple-integration` at `997b5ade1d09ead4f9647628cebb34b402f5b015` |
 
-The full checkpoint contains three large safetensors shards. A clean parity run
-must validate their pinned Hugging Face LFS size/object metadata and perform one
-explicit full-SHA audit before using a trusted local oracle snapshot. Per-run
-preflight may validate immutable metadata without rereading 5+ GB immediately
-before only one engine, because that would asymmetrically warm its cache.
+The full checkpoint contains three large safetensors shards. Installation and
+runtime verification use the standard pinned-source and payload-integrity
+controls described in the repository safety guidance.
 
 ## Architecture and model schema
 
@@ -63,7 +58,9 @@ range workflow:
 - embedding, attention, and exact head represented as affine INT4/group-64;
 - routed gate/up/down weights kept packed INT2/group-64;
 - router kept raw BF16, with `sharedExpert` explicitly absent;
-- approximate `lm_head_flash.*` tensors classified and excluded;
+- optional `flash_head` metadata plus `lm_head_flash.centroids.{weight,scales,biases}`
+  and `lm_head_flash.token_map` retained as resident data; the legacy
+  `cluster_scale` and redundant reordered `head.*` copy excluded;
 - no full-snapshot staging and no unbounded transform buffer.
 
 For a source ternary row, packed two-bit codes are widened losslessly where the
@@ -91,14 +88,14 @@ if it reproduces these boundaries:
 2. Residual additions and RMSNorm outputs round at the same native-BF16
    boundaries as the reference.
 3. Ternary projections preserve reference grouping and reduction order closely
-   enough to pass the zero-tolerance full-trace acceptance below.
+   enough to preserve the reference's native-BF16 boundaries.
 4. Q and K receive per-head RMSNorm. Sliding layers rotate their first 64
    dimensions with NeoX RoPE; V is unrotated. Full layers apply no positional
    encoding.
 5. Grouped-query attention reads native-BF16 K/V. Sliding attention sees the
    latest 512 tokens through a physical 512-row rotating cache; full attention
    sees the complete prefix. Cache traversal/reduction must survive the wrap
-   boundary without a parity change.
+   boundary without changing attention semantics.
 6. The router computes all 256 scores with BF16 weights and FP32 accumulation,
    rejects nonfinite scores, chooses a deterministic serial top 8, and
    renormalizes selected softmax weights.
@@ -107,9 +104,13 @@ if it reproduces these boundaries:
    residual stream at the reference boundary. The planner awaits every
    expert-cache miss before one full rank-ordered phase-1-and-phase-2 command
    buffer; cached-hit GPU work does not overlap those reads.
-8. Final RMSNorm feeds the complete 151,936-row exact head. The runtime may
-   expose its existing FP16 logit buffer only if every retained BF16-rounded
-   value is represented exactly. Maple never uses the generic fused-row head.
+8. Final RMSNorm normally feeds the complete 151,936-row exact head. The
+   runtime may expose its existing FP16 logit buffer only if every retained
+   BF16-rounded value is represented exactly. An explicit singleton-decode
+   FlashHead option may instead score centroids and scatter candidate rows from
+   the same original head; it is approximate, leaves non-candidates at
+   negative infinity, and is never used for prefill. Maple
+   never uses the generic fused-row head.
 
 All activation and KV buffers on this path contain native BF16 bit patterns.
 Their two-byte physical size is shared with the existing allocation model, but
@@ -118,9 +119,18 @@ the path begins and remains native BF16.
 
 ## Prefill, tokenization, and products
 
-Maple prefill is sequential replay through the exact one-token forward path.
-Only the final prompt token needs to emit the vocabulary head. There is no
-accepted batch-prefill environment switch or `PrefillMaple*` path.
+Maple prefill stages native-BF16 independent work layer by layer across each
+configured chunk. It still commits K/V and executes attention one token at a
+time, because the physical 512-row sliding ring must not expose future writes
+to an earlier query. Routed-expert execution stays token-serial. Only the final
+prompt token emits the complete exact vocabulary head. There is no accepted
+batch-prefill environment switch or `PrefillMaple*` path: the clean chunked
+implementation does not reuse their FP16 arithmetic.
+
+FlashHead is opt-in through `MferenceCLI --flash-head` when a validated install
+contains the four required FlashHead tensors. It applies only to singleton
+decode and restricts sampling to its selected candidates; the default and all
+prefill paths remain exact.
 
 Maple uses its pinned ChatML template. Model-family metadata explicitly selects
 these differences from Qwen:
@@ -140,49 +150,19 @@ app/decode service, and server without changing existing-family behavior.
 
 The clean product wiring selects the standalone Maple runner from manifest
 family metadata at every production construction site. Its effective
-sequential-prefill and BF16-KV modes cross the Mac decode protocol and enter
-the server prompt-cache identity; the existing four families retain their
-prior runner, prefill, and FP16-KV behavior. This model-free wiring evidence is
-not a substitute for the installed-model product smoke and parity gates below.
+chunked-prefill and BF16-KV modes cross the Mac decode protocol and enter the
+server prompt-cache identity; the existing four families retain their prior
+runner, prefill, and FP16-KV behavior. The CLI exposes the optional FlashHead
+switch; the app and server keep the exact default. This model-free wiring
+evidence is not a substitute for the installed-model product smoke and focused
+runtime tests.
 
 Maple supports contexts through 128,000 tokens in the runtime, CLI, and server.
 The Mac app currently exposes its 4K through 128K context choices; the choices
 available to other families or product surfaces may differ. No final acceptance
 run establishes a 128K boundary.
 
-## Frozen parity corpus and trace policy
-
-The parity corpus is Edgar Allan Poe's *The Raven*, fetched from
-`shahules786/PoetryFoundationData`, `default/train`, row 8507. Copyrighted text
-is never committed. Normalize with Unicode NFC and LF line endings; trim
-trailing space, drop empty source lines, group each six verse lines into a
-stanza separated by one empty line, and end with one LF.
-
-| Corpus property | Pin |
-| --- | --- |
-| Normalized SHA-256 | `6a8ffabe83cf524659bb2c83137e5d41545155f4c650a83c31642c287cc95555` |
-| Shape | 6,877 UTF-8 bytes; 108 verse lines; 18 stanzas |
-| Token policy | `raw-utf8-lf-nfc;add_special_tokens=false;bos=false;eos=false` |
-| Token sequence | 1,639 IDs; SHA-256 `979f944999a0a5039bfe3a9074ca0886ea54a228663fc8ad828a8759871f261f` |
-
-Teacher forcing applies no chat template or special token. At position `p`, an
-engine consumes corpus token `p` with state from `0..<p`, then exports the top K
-IDs and raw logits from the complete vocabulary. `target_id` is token `p+1`, or
-null at the last position. This is vocabulary top K, not router top K.
-
-The oracle runs with `use_flash_head=false`; Mference runs its full logits head.
-Both use stable descending logit order with ascending token ID as the tie break.
-Acceptance requires all 1,639 positions, ordered top-10 token-ID equality, and
-zero absolute difference for retained shared-token logits (`logit_atol=0`). A
-prefix run, top-1-only comparison, unordered set comparison, approximate head,
-dirty source tree, or mismatched metadata is diagnostic only and cannot pass.
-
-The harness must record and verify source commit/dirty state, binary hash,
-checkpoint/runtime pins, tokenizer and corpus hashes, cache slots, integrity
-policy, commands, and exit codes. Full traces remain ignored local artifacts;
-only compact non-copyrighted metadata may be committed.
-
-## Required clean validation matrix
+## Required validation matrix
 
 “Reference inventory” below means that the research branch contains a relevant
 test or record. It is a pointer for rebuilding coverage, not evidence that a
@@ -197,30 +177,27 @@ new implementation passed.
 | Provenance | Forged, stale, partial, moved, or absent receipts cannot mint source origin. | Reference diff exposed the issue and a candidate fix. | Passed focused clean tests. |
 | Real install | Pinned source streams without snapshot staging; `--verify-install` and strict runtime verification pass; manifest/layout/file hashes are recorded. | Reference branch reports an install. | Passed strict verification. |
 | BF16 primitives | Tiny BF16-only values, offsets, residual/norm boundaries, ternary projections, and full head match CPU fixtures. | Focused reference tests exist. | Passed focused clean tests. |
-| Attention/KV | Sliding partial-RoPE, full NoPE, GQA, 512-row wrap, full-prefix growth, reset, and continuation match reference fixtures. | Focused reference tests exist. | Passed focused tests and full trace. |
-| Router/MoE | Stable top-8 IDs/weights, clipped activation, INT2 experts, FP32 reduce, cache hits/misses, and router-order streaming match fixtures. | Focused reference tests exist. | Passed focused tests and full trace. |
+| Attention/KV | Sliding partial-RoPE, full NoPE, GQA, 512-row wrap, full-prefix growth, reset, and continuation match reference fixtures. | Focused reference tests exist. | Passed focused tests. |
+| Router/MoE | Stable top-8 IDs/weights, clipped activation, INT2 experts, FP32 reduce, cache hits/misses, and router-order streaming match fixtures. | Focused reference tests exist. | Passed focused tests. |
+| Chunked prefill / FlashHead | Chunked prefill preserves scalar logits and continuation on the native-BF16 fixture; optional FlashHead retains only its source centroids/map and leaves prefill exact. | The research prefill path was FP16; upstream FlashHead is explicitly approximate. | Focused runtime, schema, planner, and fake-Hub installer tests pass. FlashHead is outside the published benchmark probe. |
 | Tokenization | Golden prompt/continuation bytes, stop IDs, open-thought suppression, and tool behavior pass using explicit family plumbing. | Reference tests used vocabulary/token-ID inference. | Passed focused clean tests. |
-| Full teacher forcing | Clean pinned engines produce 1,639/1,639 ordered top-10 matches with retained-logit absolute difference 0. | Reference metadata records such a result for commit `997b5ad`. | At `49fd47c13dd9da29c7498663cc1b69a8f0c39463`, one fresh MLX run and two independent fresh Mference runs all passed. See [compact evidence](evidence/maple-parity-2026-08-09.json). |
-| Product smoke | Repack, CLI raw/chat, Mac/decode service, and loopback server install/detect/load/generate/stop/reset correctly, one model process at a time. | Reference branch wired each product. | App/decode passed 1/1 with visible-only output, sequential prefill, BF16 KV, and unload; raw CLI was nonempty; ChatML CLI returned visible `4`, end-of-turn, and no thought markers; server returned Maple ID and `4` with stop, then shut down cleanly. |
-| Release build | `MferenceRepack`, `MferenceCLI`, `MferenceServer`, `MferenceDecodeService`, `MferenceMac`, and `MferenceMapleParity` build in release. | Historical binaries were recorded. | Six products built in 10.94 s; `Scripts/test.sh` passed 1,001 tests in 161 suites (185.394 s). Timings are validation telemetry, not benchmarks. |
-| Benchmark (optional) | Fresh-process protocol records complete environment, commands, timing footers, outputs, and deviations without overstating warm-cache results. | A dirty-worktree, one-run-per-engine Raven benchmark exists. | Excluded unless rerun cleanly. |
+| Product smoke | Repack, CLI raw/chat, Mac/decode service, and loopback server install/detect/load/generate/stop/reset correctly, one model process at a time. | Reference branch wired each product. | The pre-feature app/decode smoke passed 1/1 with visible-only output, sequential prefill, BF16 KV, and unload; raw CLI was nonempty; ChatML CLI returned visible `4`, end-of-turn, and no thought markers; server returned Maple ID and `4` with stop, then shut down cleanly. |
+| Release build | `MferenceRepack`, `MferenceCLI`, `MferenceServer`, `MferenceDecodeService`, and `MferenceMac` build in release. | Historical binaries were recorded. | Product builds and the package suite passed before the Maple product release. Timings are validation telemetry, not benchmarks. |
+| Benchmark (optional) | Fresh-process protocol records complete environment, commands, timing footers, outputs, and deviations without overstating warm-cache results. | A dirty-worktree, one-run-per-engine Raven benchmark exists. | Clean exact-head raw-completion probe recorded at `5db0222`; it measures 128/1,024/8,192-token prompt rows and names all deviations in the [README](../README.md#maple-preview-exact-head-generation-probe). It is not a community or quality benchmark. |
 
-## Historical evidence boundary
+## Benchmark boundary
 
-The clean implementation matched the pinned oracle for all 1,639 ordered
-top-10 positions at zero retained-logit tolerance. The committed compact
-evidence, not the research branch, is the acceptance record.
-
-Do not import its dated evidence JSON, full traces, binary hashes, raw outputs,
-or benchmark claims as results for the clean port. In particular, its Raven
-throughput/memory comparison came from an earlier dirty integration worktree,
-one measured process per engine, and an uncontrolled warm OS cache. It is
-research context only. If the final documentation contains performance claims,
-they require a clean rerun and must follow the safety/reporting rules in the
+If the final documentation contains performance claims, they require a clean
+rerun that follows the safety/reporting rules in the
 [community benchmark guide](COMMUNITY_BENCHMARKS.md), with every Maple-specific
 protocol deviation named.
 
-Before any oracle or Mference model process, apply the repository model-process
+The README's exact-head probe is such a clean rerun, but deliberately does not
+claim community comparability: it uses raw project-document prompts, a fixed
+256-token decode limit, prompt-plus-decode context capacities, and trusted
+receipt verification. It excludes the optional approximate FlashHead.
+
+Before any Maple model process, apply the repository model-process
 preflight: supported OS/Swift/hardware, sufficient disk, acceptable memory
 pressure, complete required install, and no other Mference or MLX model process.
 Never terminate an existing process, run two model owners, purge caches, or

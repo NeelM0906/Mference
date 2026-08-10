@@ -66,7 +66,8 @@ extension RawCompletionLoopTests {
 
         #expect(producer.resetCalls == 1)
         #expect(producer.headlessPositions == Array(0..<(prompt.count - 1)))
-        #expect(producer.producePositions == [prompt.count - 1])
+        #expect(producer.exactPrefillPositions == [prompt.count - 1])
+        #expect(producer.producePositions.isEmpty)
         #expect(producer.continuationPosition == prompt.count)
         #expect(progress.map(\.0) == Array(1...prompt.count))
         #expect(progress.allSatisfy { $0.1 == prompt.count })
@@ -97,7 +98,8 @@ extension RawCompletionLoopTests {
         #expect(producer.resetCalls == 0)
         #expect(producer.prepareCalls == [cached])
         #expect(producer.headlessPositions == [cached])
-        #expect(producer.producePositions == [prompt.count - 1])
+        #expect(producer.exactPrefillPositions == [prompt.count - 1])
+        #expect(producer.producePositions.isEmpty)
         #expect(producer.continuationPosition == prompt.count)
     }
 
@@ -124,7 +126,8 @@ extension RawCompletionLoopTests {
 
         #expect(producer.prepareCalls == [cached])
         #expect(producer.headlessPositions.isEmpty)
-        #expect(producer.producePositions == [prompt.count - 1])
+        #expect(producer.exactPrefillPositions == [prompt.count - 1])
+        #expect(producer.producePositions.isEmpty)
         #expect(producer.continuationPosition == prompt.count)
     }
 }

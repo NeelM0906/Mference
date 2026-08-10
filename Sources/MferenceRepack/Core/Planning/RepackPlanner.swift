@@ -139,6 +139,7 @@ struct RepackPlan: Sendable {
     let layers: [LayerFilePlan]
     let matchedModelID: String?
     let excludedMultimodalTensorNames: [String]
+    let flashHead: IndexLoader.MapleFlashHeadMetadata?
 }
 
 // MARK: - Planner
@@ -154,7 +155,14 @@ enum RepackPlanner {
     }
 
     static func classify(_ name: String, numLayers: Int,
-                         family: RepackModelFamily) -> Bucket {
+                         family: RepackModelFamily,
+                         includeMapleFlashHead: Bool = false) -> Bucket {
+        if family == .maple, name.hasPrefix("lm_head_flash.") {
+            if isExcludedMapleFlashTensor(name) || !includeMapleFlashHead {
+                return .excludedMultimodal
+            }
+            return isMapleFlashResidentTensor(name) ? .lmResident : .unknown
+        }
         if isExcludedTensorName(name, family: family) {
             return .excludedMultimodal
         }
@@ -238,13 +246,19 @@ enum RepackPlanner {
         var lmResidentBases: [String] = []
         var excludedMultimodalNames: [String] = []
         var routedByLayerAndRole: [Int: [String: String]] = [:]
+        if let flashHead = meta.flashHead {
+            try validateMapleFlashHead(flashHead, registry: registry, arch: arch)
+        }
         for (name, _) in registry {
-            if isExcludedTensorName(name, family: arch.family) {
+            if isExcludedTensorName(name, family: arch.family)
+                || (arch.family == .maple && meta.flashHead == nil
+                    && name.hasPrefix("lm_head_flash.")) {
                 excludedMultimodalNames.append(name)
             }
             if name.hasSuffix(".scales") || name.hasSuffix(".biases")
                 || (arch.family == .maple && name.hasSuffix(".row_alpha")) { continue }
-            let b = classify(name, numLayers: arch.numLayers, family: arch.family)
+            let b = classify(name, numLayers: arch.numLayers, family: arch.family,
+                             includeMapleFlashHead: meta.flashHead != nil)
             switch b {
             case .lmResident:                   lmResidentBases.append(name)
             case .routedExpert(let role, let layer):
@@ -321,7 +335,8 @@ enum RepackPlanner {
                           resident: resident,
                           layers: layerPlans,
                           matchedModelID: matched,
-                          excludedMultimodalTensorNames: excludedMultimodalNames)
+                          excludedMultimodalTensorNames: excludedMultimodalNames,
+                          flashHead: meta.flashHead)
     }
 
     private static func isExcludedTensorName(_ name: String,
@@ -331,7 +346,20 @@ enum RepackPlanner {
             name.hasPrefix("audio_tower.") ||
             name.hasPrefix("model.visual.") ||
             name.hasPrefix("model.audio.") ||
-            (family == .maple && name.hasPrefix("lm_head_flash."))
+            (family == .maple && isExcludedMapleFlashTensor(name))
+    }
+
+    private static func isMapleFlashResidentTensor(_ name: String) -> Bool {
+        switch name {
+        case "lm_head_flash.centroids.weight", "lm_head_flash.token_map":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isExcludedMapleFlashTensor(_ name: String) -> Bool {
+        name == "lm_head_flash.cluster_scale" || name.hasPrefix("lm_head_flash.head.")
     }
 
     // MARK: - Resident planning
@@ -696,7 +724,8 @@ enum RepackPlanner {
     }
 
     private static func isMaplePackedResidentWeight(_ name: String) -> Bool {
-        if name == "model.word_embeddings.weight" || name == "lm_head.weight" {
+        if name == "model.word_embeddings.weight" || name == "lm_head.weight"
+            || name == "lm_head_flash.centroids.weight" {
             return true
         }
         let components = name.split(separator: ".")
@@ -710,6 +739,59 @@ enum RepackPlanner {
         }
         return components[4] == "q_proj" || components[4] == "k_proj"
             || components[4] == "v_proj" || components[4] == "o_proj"
+    }
+
+    private static func validateMapleFlashHead(_ flashHead: IndexLoader.MapleFlashHeadMetadata,
+                                               registry: [String: SourceTensor],
+                                               arch: ArchInfo) throws {
+        guard arch.family == .maple,
+              flashHead.nClusters > 0, flashHead.clusterSize > 0,
+              flashHead.nClusters <= Int.max / flashHead.clusterSize,
+              flashHead.nClusters * flashHead.clusterSize == arch.vocabSize,
+              flashHead.nProbes > 0, flashHead.nProbes <= flashHead.nClusters,
+              flashHead.groupSize == 64, flashHead.bits == 4,
+              flashHead.headGroupSize == 64, flashHead.headBits == 4,
+              flashHead.scaledCentroids,
+              flashHead.forceTokens.allSatisfy({ $0 >= 0 && $0 < arch.vocabSize }) else {
+            throw RepackError.configurationInvalid(detail: "Maple FlashHead metadata is invalid")
+        }
+        let packedColumns = arch.hiddenSize * flashHead.bits / 32
+        let groups = arch.hiddenSize / flashHead.groupSize
+        let expectedCentroids = [UInt64(flashHead.nClusters), UInt64(packedColumns)]
+        let expectedParameters = [UInt64(flashHead.nClusters), UInt64(groups)]
+        let expectedMap = [UInt64(flashHead.nClusters), UInt64(flashHead.clusterSize)]
+
+        func require(_ name: String, dtype: SourceTensor.Dtype,
+                     shape: [UInt64], elementBytes: UInt64) throws {
+            guard let tensor = registry[name] else {
+                throw RepackError.missingTensor(name: name)
+            }
+            guard tensor.dtype == dtype, tensor.shape == shape else {
+                throw RepackError.shapeMismatch(
+                    name: name,
+                    detail: "expected \(dtype) shape \(shape), got \(tensor.dtype) \(tensor.shape)")
+            }
+            let elements = try shape.reduce(UInt64(1)) { partial, dimension in
+                try checkedProduct(partial, dimension,
+                                   detail: "Maple FlashHead shape product overflows UInt64")
+            }
+            let bytes = try checkedProduct(elements, elementBytes,
+                                           detail: "Maple FlashHead byte count overflows UInt64")
+            guard tensor.sizeBytes == bytes else {
+                throw RepackError.shapeMismatch(
+                    name: name,
+                    detail: "shape requires \(bytes) bytes, got \(tensor.sizeBytes)")
+            }
+        }
+
+        try require("lm_head_flash.centroids.weight", dtype: .u32,
+                    shape: expectedCentroids, elementBytes: 4)
+        try require("lm_head_flash.centroids.scales", dtype: .bf16,
+                    shape: expectedParameters, elementBytes: 2)
+        try require("lm_head_flash.centroids.biases", dtype: .bf16,
+                    shape: expectedParameters, elementBytes: 2)
+        try require("lm_head_flash.token_map", dtype: .i32,
+                    shape: expectedMap, elementBytes: 4)
     }
 
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {

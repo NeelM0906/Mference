@@ -12,7 +12,7 @@ struct SourceTensor: Sendable, Hashable {
         /// Integer lookup tables (DeepSeek V4's `tid2eid`). Copied through
         /// as raw bytes; the runtime reads them dtype-aware on the CPU.
         case i64  = 4
-        /// Integer metadata used by Maple's excluded FlashHead tensors.
+        /// Integer lookup tables, including Maple FlashHead's token map.
         case i32  = 5
 
         var elementBytes: Int {

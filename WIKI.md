@@ -2,10 +2,9 @@
 
 This is the repository-level map for users and agents. The clean integration
 lineage supports five model families, including Maple's installer, schema,
-kernels, tokenizer, standalone runtime, and product wiring. The maintained
-SwiftPM parity harness passed the full 1,639-position exact oracle comparison;
-the real-model CLI, app/decode-service, and server smoke workflows also passed.
-The frozen Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
+kernels, tokenizer, standalone runtime, and product wiring. The real-model
+CLI, app/decode-service, and server smoke workflows also passed. The frozen
+Maple contract is [docs/MAPLE.md](docs/MAPLE.md).
 
 ## What Mference is
 
@@ -46,7 +45,6 @@ The product graph is declared in [Package.swift](Package.swift).
 | `MferenceAppCore` | UI-independent app state, installation, inference, context fitting, chat persistence, attachments, and diagnostics. |
 | `MferenceMacPresentation` | AppKit/SwiftUI transcript, document extraction, Markdown rendering, theme, and chrome. |
 | `MferenceValidationSupport` | CPU references, deterministic fixtures/PRNGs, and numerical tolerances shared by tests. |
-| `MferenceMapleParity` / `MferenceMapleParityCore` | Maintained strict Maple teacher-forcing trace export, preflight, and comparison product; see [docs/MAPLE_PARITY.md](docs/MAPLE_PARITY.md). |
 
 Source ownership follows the package graph:
 
@@ -71,7 +69,7 @@ convention; detection uses the directory's manifest.
 | Qwen 3.6 35B-A3B | 40 layers; 30 Gated-DeltaNet recurrent layers plus 10 gated full-attention layers; 256 experts, top 8; sigmoid-gated shared expert; untied head. | `qwen36.gturbo` |
 | DeepSeek-V4-Flash 284B-A13B | 43 MoE layers; sliding attention plus CSA/HCA compressed long-range state; four-stream mHC residual; top 6 routing, including three hash-routed layers; 2-bit routed experts. | `deepseekv4flash.gturbo` |
 | Inkling-Small 276B-A12B | 42 layers; learned relative-position attention and short convolutions; 256 experts, top 6; two leading dense layers and two shared experts; padded vocabulary truncated before sampling. | `inklingsmall.gturbo` |
-| Maple Preview | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; full exact vocabulary head. | `maple.gturbo` |
+| Maple Preview | 24 native-BF16 layers; three 512-token partial-RoPE sliding layers followed by one NoPE full layer; 256 ternary experts, top 8; no shared expert; exact full vocabulary head by default, with an optional approximate singleton-decode FlashHead. | `maple.gturbo` |
 
 At load, `ManifestReader` decodes the model family, resolves the corresponding
 known `ArchConfig`, and rejects field, file, layout, or quantization mismatches.
@@ -135,7 +133,9 @@ generic bounded range transforms: resident ternary codes widen from packed
 INT2 to the existing INT4 layout, and row alpha values expand into group-64
 affine scale/bias companions; routed experts remain INT2. Transform identity,
 source/destination sizes, and output digests become part of resumability. The
-approximate FlashHead tensors are excluded.
+The installer additionally retains FlashHead centroids and token map when the
+pinned source publishes its validated `flash_head` contract. Its obsolete
+cluster scale and redundant reordered head copy remain excluded.
 
 ## Runtime and one-token pipeline
 
@@ -163,9 +163,12 @@ explicit memory-first 16. Expert hits are reused, misses use positional reads,
 and optional RDADVISE modes remain experimental and off by default.
 
 The generic fast greedy head avoids materializing all logits when the request
-is pure greedy. Sampling requests use the full logits path. Maple deliberately
-uses only its full, non-approximate 151,936-row head: no existing FP16 fused
-head is claimed as equivalent.
+is pure greedy. Sampling requests use the full logits path. Maple's default is
+its full, non-approximate 151,936-row head; `MferenceCLI --flash-head` is an
+explicit opt-in to its approximate singleton-decode candidate head. It scores
+centroids, evaluates only selected original-head rows, and leaves all other
+logits at negative infinity. It is not a parity or full-logit path, and no
+existing FP16 fused head is claimed as equivalent.
 
 Maple's router selector is deterministic and rejects nonfinite scores. Its
 planner awaits every expert-cache miss, then encodes one full rank-ordered
@@ -216,13 +219,15 @@ tensor operations where supported. Inkling has its own batched relative-
 attention and routed-expert kernels. DeepSeek uses its correctness-first
 family path. Chunked Qwen state is tested against sequential decode semantics.
 
-Maple's standalone runtime deliberately implements sequential prefill: it
-replays the exact one-token native-BF16 path and emits the full head only for
-the final uncached prompt token. The research-only
-`MFERENCE_MAPLE_PREFILL=batch` path is not part of the port because its batch
-primitives were never brought to the same parity standard. The family-aware
-runner factory enforces this path for the CLI, Mac app/decode service, and
-server and reports sequential execution with model-native BF16 KV.
+Maple uses a layer-major native-BF16 chunked prefill path. Independent
+embedding, norm, projection, and routing work is staged across the chunk, but
+each row commits K/V and runs attention in token order. That temporal sweep is
+required by the physical 512-row sliding ring: future writes must never become
+visible to an earlier query. Routed experts remain token-serial, and only the
+final prompt row emits the complete exact head. This intentionally differs from
+the research-only `MFERENCE_MAPLE_PREFILL=batch` path, whose FP16 primitives
+were not parity-qualified. Factory diagnostics report chunked execution with
+model-native BF16 KV.
 
 ## Tokenization, chat templates, and generation
 
@@ -281,7 +286,7 @@ generation controls do not always do so. See
 Maple uses the existing descriptor-backed catalog surface with its pinned
 repository, revision, source digest, and `maple.gturbo` directory. The decode
 service selects the Maple runner from manifest family metadata and returns the
-effective sequential-prefill and BF16-KV modes over the existing diagnostics
+effective chunked-prefill and BF16-KV modes over the existing diagnostics
 protocol. The baseline and research branch do not contain a separate richer
 multi-family picker implementation, so the clean port does not invent one.
 
@@ -294,10 +299,10 @@ fitting may drop the oldest complete messages but never the system message or
 current user message.
 
 Raw CLI, chat CLI, and server sessions all construct their producer through the
-same family-aware factory. Maple therefore uses sequential prefill, the exact
-full head, and BF16 KV without adding family conditionals to the existing
-non-Maple runner; existing families retain their requested chunked/off modes
-and FP16 KV diagnostics.
+same family-aware factory. Maple therefore uses native-BF16 chunked prefill and
+the exact full head by default; the CLI alone exposes the explicit approximate
+`--flash-head` decode option. Existing families retain their requested
+chunked/off modes and FP16 KV diagnostics.
 
 The server provides `GET /health`, `GET /v1/models`, and
 `POST /v1/chat/completions`, including blocking JSON and SSE streaming. It
@@ -323,18 +328,21 @@ generation/continuation/cancellation, app state and presentation, and server
 HTTP/queue/prompt-cache behavior. Real-model suites are environment-gated and
 skip unless the matching installed-model path is supplied.
 
-The final Maple acceptance evidence was measured at implementation commit
-`49fd47c13dd9da29c7498663cc1b69a8f0c39463`: `Scripts/test.sh` passed
-1,001 tests in 161 suites (185.394 s), and a release build of the six Maple
-products completed in 10.94 s. One fresh MLX full trace and two independent
-fresh Mference full traces each matched all 1,639 ordered top-10 entries with
-zero retained-logit difference.
-The app/decode-service smoke passed 1/1 in 18.706 s with visible-only output,
-sequential prefill, native BF16 KV, and unload. Raw CLI returned nonempty output;
+The pre-feature app/decode-service smoke passed 1/1 in 18.706 s with
+visible-only output, sequential prefill, native BF16 KV, and unload. Raw CLI returned nonempty output;
 ChatML CLI returned visible `4` with end-of-turn and no thought markers; server
 health, models, and chat returned the Maple ID and `4` with stop, then shut down
-cleanly. These timings are validation telemetry, not benchmarks. See the
-[compact parity evidence](docs/evidence/maple-parity-2026-08-09.json).
+cleanly. That historical trace covers the exact default head, not the optional
+FlashHead candidate path. These timings are validation telemetry, not benchmarks.
+
+At commit `5db0222`, a separate clean exact-head raw-completion throughput
+probe on a 16 GB M4 measured 25.755/44.697/40.935 prefill tok/s and
+24.598/22.750/18.931 decode tok/s at 128/1,024/8,192 prompt tokens. Peak
+process footprint was 490.64/645.16/1,210.25 MiB, respectively. Each row had a
+256-token decode allowance, used auto prefill (128, 1,024, then two 4,096-token
+chunks), and omitted the approximate `--flash-head` path. It is not a community
+benchmark or quality claim; the prompts, fixed output limit, trusted receipt,
+and other deviations are recorded in the [README Maple probe](README.md#maple-preview-exact-head-generation-probe).
 
 Before any real model run, require macOS 15+, Swift 6.1+, sufficient disk,
 acceptable `memory_pressure -Q`, a complete required install, and no match from:
@@ -353,8 +361,7 @@ Performance work must build release once and follow the
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) exactly. Report
 commit and dirty state, hardware/RAM, macOS, Swift, exact command, exit code,
 complete timing footer/error, and every deviation. Measurements are data points,
-not ceilings. Maple parity has its stricter, frozen protocol in
-[docs/MAPLE.md](docs/MAPLE.md).
+not ceilings. Maple-specific runtime details are in [docs/MAPLE.md](docs/MAPLE.md).
 
 ## Documentation map
 
@@ -372,5 +379,4 @@ not ceilings. Maple parity has its stricter, frozen protocol in
 | [docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) | Inkling source, architecture, validation, memory, and performance notes. Read before touching that model. |
 | [docs/IMPLEMENTATION_REFERENCES.md](docs/IMPLEMENTATION_REFERENCES.md) | Pinned external model, kernel, I/O, and attention references. |
 | [docs/MAPLE.md](docs/MAPLE.md) | Maple behavioral contract, reference pins, exclusions, and required validation. |
-| [docs/MAPLE_PARITY.md](docs/MAPLE_PARITY.md) | Maintained local-only Maple oracle/candidate parity protocol, trace schema, and acceptance boundary. |
 | [PROGRESS.md](PROGRESS.md) | Ordered branch ledger and observable acceptance criteria for the clean Maple port. |

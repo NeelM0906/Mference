@@ -185,7 +185,7 @@ enum GTurboJSON {
             filesDict[path] = ["size": info.size, "sha256": info.sha256]
         }
 
-        let manifest: [String: Any] = [
+        var manifest: [String: Any] = [
             "magic": GTurboJSON.magic,
             "versionMajor": GTurboJSON.versionMajor,
             "versionMinor": GTurboJSON.versionMinor,
@@ -204,6 +204,19 @@ enum GTurboJSON {
             "expertStride": expertStride,
             "bitWidthOverridesHonored": plan.bitsOverrideCount
         ]
+        if let flashHead = plan.flashHead {
+            manifest["flashHead"] = [
+                "nClusters": flashHead.nClusters,
+                "clusterSize": flashHead.clusterSize,
+                "nProbes": flashHead.nProbes,
+                "groupSize": flashHead.groupSize,
+                "bits": flashHead.bits,
+                "headGroupSize": flashHead.headGroupSize,
+                "headBits": flashHead.headBits,
+                "scaledCentroids": flashHead.scaledCentroids,
+                "forceTokens": flashHead.forceTokens,
+            ]
+        }
         return try JSONSerialization.data(withJSONObject: manifest,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }

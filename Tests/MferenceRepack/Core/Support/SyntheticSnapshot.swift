@@ -218,7 +218,7 @@ enum SyntheticSnapshot {
     static func buildMaple(
         at dir: String,
         seed: UInt64 = 0x4D41_504C_455F_0002,
-        includeFlashHead: Bool = true,
+        includeFlashHead: Bool = false,
         mutations: [MapleTensorMutation] = []) throws -> Snapshot {
         try? FileManager.default.removeItem(atPath: dir)
         try FileManager.default.createDirectory(atPath: dir,
@@ -248,8 +248,7 @@ enum SyntheticSnapshot {
             }
         }
         if includeFlashHead {
-            appendMapleFlashHead(name: "lm_head_flash.token_map", into: &tensors,
-                                 rng: &rng)
+            appendMapleFlashHead(into: &tensors, rng: &rng)
         }
 
         for mutation in mutations {
@@ -282,7 +281,7 @@ enum SyntheticSnapshot {
         let shardPath = (dir as NSString).appendingPathComponent(shardName)
         try writeShard(path: shardPath, tensors: tensors)
 
-        let config: [String: Any] = [
+        var config: [String: Any] = [
             "model_type": "maple",
             "hidden_size": 2_048,
             "moe_shared_expert_intermediate_size": 512,
@@ -319,6 +318,19 @@ enum SyntheticSnapshot {
                 "lm_head": ["bits": 4, "group_size": 64],
             ],
         ]
+        if includeFlashHead {
+            config["flash_head"] = [
+                "n_clusters": 4_748,
+                "cluster_size": 32,
+                "n_probes": 512,
+                "group_size": 64,
+                "bits": 4,
+                "head_group_size": 64,
+                "head_bits": 4,
+                "scaled_centroids": true,
+                "force_tokens": [151_645, 151_668, 151_643],
+            ]
+        }
         try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
             .write(to: URL(fileURLWithPath: (dir as NSString)
                 .appendingPathComponent("config.json")))
@@ -894,10 +906,34 @@ enum SyntheticSnapshot {
     }
 
     private static func appendMapleFlashHead(
-        name: String,
         into tensors: inout [(String, String, [Int], [UInt8])],
         rng: inout SplitMix64) {
-        tensors.append((name, "I32", [2], maplePayload(dtype: "I32", shape: [2], rng: &rng)))
+        appendQuantizedWeight(name: "lm_head_flash.centroids", outerShape: [4_748],
+                              innerLogical: 2_048, bits: 4, groupSize: 64,
+                              into: &tensors, rng: &rng)
+        let mapShape = [4_748, 32]
+        tensors.append(("lm_head_flash.token_map", "I32", mapShape,
+                        mapleFlashTokenMapPayload(count: mapShape[0] * mapShape[1])))
+        tensors.append(("lm_head_flash.cluster_scale", "BF16", [4_748],
+                        maplePayload(dtype: "BF16", shape: [4_748], rng: &rng)))
+        // The source carries this redundant cluster-order copy of lm_head.
+        // The repacker must retain neither it nor its companions.
+        appendQuantizedWeight(name: "lm_head_flash.head", outerShape: [2],
+                              innerLogical: 128, bits: 4, groupSize: 64,
+                              into: &tensors, rng: &rng)
+    }
+
+    private static func mapleFlashTokenMapPayload(count: Int) -> [UInt8] {
+        var payload = [UInt8](repeating: 0, count: count * MemoryLayout<UInt32>.stride)
+        for token in 0..<count {
+            let value = UInt32(token)
+            let offset = token * MemoryLayout<UInt32>.stride
+            payload[offset] = UInt8(truncatingIfNeeded: value)
+            payload[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+            payload[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
+            payload[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+        }
+        return payload
     }
 
     private static func maplePayload(dtype: String, shape: [Int],

@@ -17,7 +17,6 @@ let package = Package(
         .executable(name: "MferenceMac", targets: ["MferenceMac"]),
         .executable(name: "MferenceDecodeService", targets: ["MferenceDecodeService"]),
         .executable(name: "MferenceServer", targets: ["MferenceServer"]),
-        .executable(name: "MferenceMapleParity", targets: ["MferenceMapleParity"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -30,6 +29,7 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/Mference",
+            exclude: ["Kernels/Quant/DOCUMENTATION.md"],
             resources: [
                 .copy("Metal"),
             ]
@@ -91,18 +91,6 @@ let package = Package(
             dependencies: ["MferenceServerCore"],
             path: "Sources/MferenceServer/Command"
         ),
-        .target(
-            name: "MferenceMapleParityCore",
-            dependencies: ["Mference", "MferenceRepackCore"],
-            path: "Sources/MferenceMapleParity/Core",
-            exclude: ["DOCUMENTATION.md"]
-        ),
-        .executableTarget(
-            name: "MferenceMapleParity",
-            dependencies: ["MferenceMapleParityCore"],
-            path: "Sources/MferenceMapleParity/Command",
-            exclude: ["DOCUMENTATION.md"]
-        ),
         .executableTarget(
             name: "MferenceMac",
             dependencies: ["MferenceAppCore", "MferenceMacPresentation"],
@@ -144,12 +132,6 @@ let package = Package(
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             path: "Tests/MferenceServer",
-            resources: [.copy("Fixtures")]
-        ),
-        .testTarget(
-            name: "MferenceMapleParityTests",
-            dependencies: ["MferenceMapleParityCore"],
-            path: "Tests/MferenceMapleParity",
             resources: [.copy("Fixtures")]
         ),
     ]

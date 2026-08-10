@@ -47,13 +47,30 @@ import Testing
 
     private static func writeMapleManifest(
         archOverrides: [String: Any] = mapleArchExtensions(),
-        quant: [String: Any] = mapleQuant()
+        quant: [String: Any] = mapleQuant(),
+        flashHead: [String: Any]? = nil
     ) throws -> URL {
-        try ManifestReaderTests.writeToyManifest(
-            ["quant": quant],
+        var overrides: [String: Any] = ["quant": quant]
+        if let flashHead { overrides["flashHead"] = flashHead }
+        return try ManifestReaderTests.writeToyManifest(
+            overrides,
             archOverrides: archOverrides,
             config: maple
         ).0
+    }
+
+    private static func mapleFlashHead() -> [String: Any] {
+        [
+            "nClusters": 4_748,
+            "clusterSize": 32,
+            "nProbes": 512,
+            "groupSize": 64,
+            "bits": 4,
+            "headGroupSize": 64,
+            "headBits": 4,
+            "scaledCentroids": true,
+            "forceTokens": [151_645, 151_668, 151_643],
+        ]
     }
 
     @Test func pinnedMapleArchitectureAndSpecializationsAreRegistered() {
@@ -98,6 +115,31 @@ import Testing
         #expect(manifest.quant?.router.weightBits == 16)
         #expect(manifest.quant?.sharedExpert.weightBits == 0)
         #expect(try ManifestReader.peekFamily(directoryURL: dir) == .maple)
+    }
+
+    @Test func mapleFlashHeadManifestRequiresItsPinnedContract() throws {
+        let dir = try Self.writeMapleManifest(flashHead: Self.mapleFlashHead())
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: Self.maple)
+        #expect(manifest.flashHead?.nClusters == 4_748)
+        #expect(manifest.flashHead?.forceTokens == [151_645, 151_668, 151_643])
+
+        let mutations: [(String, Any)] = [
+            ("nClusters", 4_747), ("clusterSize", 31), ("nProbes", 4_749),
+            ("groupSize", 32), ("bits", 2), ("headGroupSize", 32),
+            ("headBits", 2), ("scaledCentroids", false),
+            ("forceTokens", [151_645, 151_645]),
+            ("forceTokens", [151_936]),
+        ]
+        for (field, value) in mutations {
+            var flashHead = Self.mapleFlashHead()
+            flashHead[field] = value
+            let invalid = try Self.writeMapleManifest(flashHead: flashHead)
+            defer { try? FileManager.default.removeItem(at: invalid) }
+            #expect(throws: ModelError.self) {
+                _ = try ManifestReader.load(directoryURL: invalid, expecting: Self.maple)
+            }
+        }
     }
 
     @Test func mapleManifestRejectsEveryQuantSlotFieldMutation() throws {

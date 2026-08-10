@@ -10,7 +10,8 @@ extension RemotePayloadCopyTests {
     defer { cleanUpRemote([snapshotDir, output]) }
     let snapshot = try SyntheticSnapshot.buildMaple(
       at: snapshotDir,
-      seed: 0x4D41_504C_4500_0001)
+      seed: 0x4D41_504C_4500_0001,
+      includeFlashHead: true)
     let source = try mapleSourceTensors(in: snapshot.shardPath)
 
     resetFakeHF()
@@ -27,14 +28,31 @@ extension RemotePayloadCopyTests {
     ).run()
 
     #expect(result.plan.arch.family == .maple)
-    #expect(result.excludedMultimodalTensorCount == 1)
+    #expect(result.excludedMultimodalTensorCount == 4)
     #expect(result.outputBytes > result.remoteBytesToDownload)
     #expect(result.downloadedThisRunBytes == result.remoteBytesToDownload)
 
     let residentPath = (output as NSString).appendingPathComponent("model_weights.bin")
     let resident = try Data(contentsOf: URL(fileURLWithPath: residentPath))
     let entries = try mapleResidentEntries(in: resident)
-    #expect(entries["lm_head_flash.token_map"] == nil)
+    let centroids = try #require(entries["lm_head_flash.centroids.weight"])
+    let tokenMap = try #require(entries["lm_head_flash.token_map"])
+    #expect(centroids.size == UInt64(4_748 * 2_048 / 2))
+    #expect(centroids.scaleSize == UInt64(4_748 * (2_048 / 64) * 2))
+    #expect(centroids.biasSize == centroids.scaleSize)
+    #expect(tokenMap.size == UInt64(4_748 * 32 * 4))
+    #expect(entries["lm_head_flash.cluster_scale"] == nil)
+    #expect(entries["lm_head_flash.head.weight"] == nil)
+    for (name, offset, size) in [
+      ("lm_head_flash.centroids.weight", centroids.offset, centroids.size),
+      ("lm_head_flash.centroids.scales", centroids.scaleOffset, centroids.scaleSize),
+      ("lm_head_flash.centroids.biases", centroids.biasOffset, centroids.biasSize),
+      ("lm_head_flash.token_map", tokenMap.offset, tokenMap.size),
+    ] {
+      let sourceTensor = try #require(source[name])
+      #expect(try mapleBytes(resident, offset: offset, count: size)
+        == mapleBytes(at: snapshot.shardPath, tensor: sourceTensor))
+    }
     let q = try #require(entries["model.layers.0.self_attn.q_proj.weight"])
     let sourceQ = try #require(source["model.layers.0.self_attn.q_proj.weight"])
     let sourceAlpha = try #require(source["model.layers.0.self_attn.q_proj.row_alpha"])
@@ -75,6 +93,10 @@ extension RemotePayloadCopyTests {
 
     let manifest = try mapleJSON((output as NSString).appendingPathComponent("manifest.json"))
     try mapleExpectManifest(manifest, expertStride: try #require(manifest["expertStride"] as? Int))
+    let flashHead = try #require(manifest["flashHead"] as? [String: Any])
+    #expect(flashHead["nClusters"] as? Int == 4_748)
+    #expect(flashHead["clusterSize"] as? Int == 32)
+    #expect(flashHead["nProbes"] as? Int == 512)
 
     let verify = try VerifiedInstallTool.run(options: VerifyInstallOptions(inputGTurbo: output))
     #expect(verify.unexpectedEntries.isEmpty)

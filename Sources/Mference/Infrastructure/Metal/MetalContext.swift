@@ -93,6 +93,7 @@ public final class MetalContext: @unchecked Sendable {
         "logit": "Metal/Sampling",
         "maple_add_rmsnorm": "Metal/Primitives",
         "maple_attention": "Metal/Attention",
+        "maple_flash_head": "Metal/Quant",
         "maple_ternary": "Metal/Quant",
         "maple_moe": "Metal/MoE",
         "moe": "Metal/MoE",

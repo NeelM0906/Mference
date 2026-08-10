@@ -71,7 +71,7 @@ import Mference
             "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--prefill-chunk", "--quiet", "--help",
-            "--rdadvise", "--expert-cache-slots", "--verify",
+            "--rdadvise", "--expert-cache-slots", "--flash-head", "--verify",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -153,6 +153,14 @@ import Mference
     @Test func prefillChunkDefaultsToAuto() throws {
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(arguments.prefillChunk == .auto)
+        #expect(!arguments.flashHead)
+    }
+
+    @Test func flashHeadRequiresExplicitOptIn() throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi", "--flash-head",
+        ])
+        #expect(arguments.flashHead)
     }
 
     @Test func expertCacheSlotsDefaultToModelAwareAuto() throws {
