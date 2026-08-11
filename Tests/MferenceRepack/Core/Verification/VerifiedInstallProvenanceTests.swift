@@ -3,8 +3,13 @@ import Testing
 
 @testable import MferenceRepackCore
 
-@Suite(.serialized)
-struct VerifiedInstallProvenanceTests {
+// Joins the serialized remote suite: every test that mutates the shared
+// `FakeHFURLProtocol` statics must run in `RemotePayloadCopyTests`, whose
+// `.serialized` trait is the only thing keeping those statics race-free.
+// A separate `@Suite(.serialized)` type still runs in parallel WITH that
+// suite and produced flaky Content-Range/416 failures under full-suite
+// parallelism.
+extension RemotePayloadCopyTests {
     @Test func verificationRetainsOnlyBoundInstallerProvenance() async throws {
         let snapshotDir = tmpDirForRemote("verified-provenance-snapshot")
         let output = tmpPathForRemote("verified-provenance-output")
