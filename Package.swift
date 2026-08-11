@@ -29,7 +29,6 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/Mference",
-            exclude: ["Kernels/Quant/DOCUMENTATION.md"],
             resources: [
                 .copy("Metal"),
             ]
