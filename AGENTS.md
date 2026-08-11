@@ -1,99 +1,15 @@
 # Mference
 
 Swift and Metal inference for pinned mixture-of-experts checkpoints on Apple
-Silicon: Gemma 4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B,
-Inkling-Small 276B-A12B, and Maple Preview. The shared core and KV cache stay
-resident; routed experts stream from SSD per token.
+Silicon: Gemma 4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, and
+Inkling-Small 276B-A12B. The shared core and KV cache stay resident; routed
+experts stream from SSD per token.
 
 ## Scope
 
 Make only the changes the user asks for, and keep them surgical. Do not start
 optimization work, refactors, or new model ports on your own initiative. The
 model-run safety rules below always apply, whatever the task.
-
-## Maple upstreaming workflow
-
-Reimplement the behavior of `codex/maple-integration` cleanly on top of the
-repository's original `main`. Treat the research branch only as a behavioral
-and implementation reference: inspect it carefully, but do not clean it up in
-place, cherry-pick it wholesale, or copy its accidental structure. Derive a
-feature-parity checklist before implementation and use it to organize the
-work.
-
-The original `main` is an immutable baseline for this project. Never merge
-project changes into it. `feature/maple-integration`, created from `main`, is
-the integration branch. Every subsequent change must use a separate branch
-created from `feature/maple-integration` and merge back into
-`feature/maple-integration` after completion and validation. Completed and
-validated branches may be merged into the integration branch without asking
-the user for permission.
-
-Name branches `<type>/<feature_name>`, for example
-`feature/async_judging`. Allowed types are:
-
-- `feature` for new behavior;
-- `refactor` for simplification or structural changes without behavior changes;
-- `bugfix` for defect fixes; and
-- `methodology` for changes to experimental methodology.
-
-Do not merge a branch that breaks `feature/maple-integration`. Use the
-`@ponytail` workflow throughout: understand the affected behavior first,
-reuse suitable project code and standard or native facilities, and implement
-the smallest clean solution that provides the required behavior. Do not add
-speculative abstractions, dead code, stubs, abandoned experimental paths,
-temporary research or compatibility code, debugging artifacts, unnecessary
-comments, or verbose comments that restate the implementation.
-
-## Commits
-
-Formalize every meaningful code change as a commit containing exactly one
-TODO item. Commit a TODO immediately after it is completed; never accumulate
-completed TODOs into a bulk commit. Use `<type>: <description>` commit
-subjects, for example `feat: Add asynchronous API judging`. Allowed commit
-types are `feat` for new features, `refactor` for behavior-preserving
-refactors, and `fix` for bug fixes. Keep the resulting history logically
-scoped, ordered, and understandable.
-
-## Documentation and progress
-
-Each new module must include a `DOCUMENTATION.md` that explains how it works.
-Maintain `WIKI.md` as a thorough executive summary of all core elements,
-project content, and features, sufficient for a user or agent to understand
-the whole codebase after careful reading.
-
-Record all work in `PROGRESS.md`, updating it whenever a feature is completed
-so that its purpose, completed work, and planned work are clear. If code
-exists but `PROGRESS.md` does not, create it and document the existing
-features as working or planned according to the available evidence. Keep all
-documentation aligned with the final implementation rather than the history
-or accidental structure of the research branch.
-
-## Upstreaming validation
-
-Finish and test each change branch before merging it. Run the project's
-formatter and linter before every merge and fix any reported problems. After
-each branch merge, add any corresponding unit tests on a follow-up branch
-from `feature/maple-integration`, merge them after validation, and run all
-relevant tests; do not defer unit-test additions to a bulk final pass. Package
-tests must still follow the model-safety rules below and run through
-`Scripts/test.sh`.
-
-Verify feature parity explicitly against `codex/maple-integration` with
-tests, representative workflows, outputs, interfaces, configuration
-behavior, and any other relevant observable behavior. Document and justify
-every intentional deviation.
-
-Before declaring the project complete:
-
-- verify the entire feature-parity checklist;
-- run all relevant unit and integration tests plus the formatter and linter;
-- remove dead code, stubs, temporary compatibility layers, debugging code,
-  research-only artifacts, and merely restated comments;
-- review the complete diff from `main` to `feature/maple-integration`;
-- review the Git history for logical scope, order, and clarity; and
-- verify that the documentation describes the final implementation and that
-  `feature/maple-integration` is clean, reviewable, and ready for upstream
-  submission.
 
 ## Layout and commands
 
@@ -116,7 +32,7 @@ swift run -c release MferenceCLI \
 ```
 
 The installer streams each pinned checkpoint without staging the full source.
-Set `HF_TOKEN` only if requested. Downloads range from ~6.6 GB (Maple) to
+Set `HF_TOKEN` only if requested. Downloads range from ~15 GB (Gemma 4) to
 ~148 GB (Inkling-Small); check disk before installing, and read
 [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) or
 [docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) before touching those two.
@@ -126,13 +42,14 @@ remove them with `--discard-partial`.
 ## Models and the library
 
 Install directories are named `gemma4.gturbo`, `qwen36.gturbo`,
-`deepseekv4flash.gturbo`, `inklingsmall.gturbo`, and `maple.gturbo`, but
-detection goes by each directory's own manifest, not its name. The Mac app
-resolves the selected family's conventional location in the checkout or
-Application Support and remembers an explicitly chosen model folder. Family
-selection persists via `defaults write Mference model qwen36` (or
-`MFERENCE_MODEL` in the environment). The CLI and server take an explicit
-`--model` path. `MferenceCLI --verify
+`deepseekv4flash.gturbo`, and `inklingsmall.gturbo`, but detection goes by
+each directory's own manifest, not its name. The Mac app scans its library
+roots — the `Mference.libraryRoot` default if set, the package checkout's
+`scratch/`, and `~/Library/Application Support/Mference` — and auto-adopts
+installed models; its toolbar picker switches between families and offers
+downloads for missing ones. The CLI and server take an explicit `--model`
+path. Non-app selection persists via `defaults write Mference model qwen36`
+(or `MFERENCE_MODEL` in the environment). `MferenceCLI --verify
 trusted-receipt` skips the first-touch SHA-256 of the expert pool in favor of
 the install receipt's size checks; the strict `full-sha256` mode is the
 default.
@@ -166,9 +83,8 @@ Run only one app, CLI, or model-using test at a time.
 
 For performance results, build release once and follow the [community
 benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable
-experimental controls or profiling. Measured baselines are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md); Maple has exact parity evidence, not
-a published benchmark.
+experimental controls or profiling. Measured baselines for all four families
+are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 Do not download a full checkpoint, duplicate a `.gturbo` model, create a
 worktree, or purge caches just to run tests.
@@ -187,7 +103,6 @@ document attachments. The inspector shows realtime tok/s, token count, and
 inference memory, and exposes context length, expert-cache slots, temperature,
 Top-K, Top-P, prefill, and RDADVISE. The defaults are temperature `0.2`,
 Top-K `64`, and Top-P `0.95`. Responses can use the context space left after
-formatting the prompt. Existing families use FP16 KV; Maple uses native BF16
-KV and sequential prefill. Build the app with its sibling
-`MferenceDecodeService`; it never loads a second in-process model. See
-[README](README.md) and [Runtime controls](docs/RUNTIME_CONTROLS.md).
+formatting the prompt, and FP16 is the runtime KV format. Build the app with
+its sibling `MferenceDecodeService`; it never loads a second in-process model.
+See [README](README.md) and [Runtime controls](docs/RUNTIME_CONTROLS.md).
