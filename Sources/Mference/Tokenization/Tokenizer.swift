@@ -69,6 +69,13 @@ public struct MFTokenizer: @unchecked Sendable {
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
 
+    /// Maple's pinned prompt opens a live `<think>` block. The initializer
+    /// resolves this EOS relationship only when the caller supplies the Maple
+    /// manifest family; direct and non-Maple loads retain their old behavior.
+    public var generationPromptStartsInThinking: Bool {
+        dialect == .chatml && eosID == endOfTurnID
+    }
+
     /// BOS actually prepended by `encode(_:addBOS:)`; nil for dialects that
     /// never use a BOS prefix (ChatML).
     private let bosPrefixID: Int32?
@@ -81,14 +88,22 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     public static func load(from folder: URL) async throws -> MFTokenizer {
-        try await MFTokenizerLoadCoordinator.shared.load(.local(folder.standardizedFileURL.path))
+        try await load(from: folder, family: nil)
+    }
+
+    public static func load(from folder: URL,
+                            family: ModelFamily?) async throws -> MFTokenizer {
+        try await MFTokenizerLoadCoordinator.shared.load(
+            .local(folder.standardizedFileURL.path, family))
     }
 
     public static func load(forModelDirectory modelDirectory: URL,
                             environment: [String: String] = ProcessInfo.processInfo.environment) async throws -> MFTokenizer {
+        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         if let folder = tokenizerFolder(forModelDirectory: modelDirectory, environment: environment) {
-            return try await load(from: folder)
+            return try await load(from: folder, family: family)
         }
+        if family == .maple { throw MFTokenizerError.missingToolTemplate }
         return try await load()
     }
 
@@ -115,8 +130,13 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     static func loadUncached(from folder: URL) async throws -> MFTokenizer {
+        try await loadUncached(from: folder, family: nil)
+    }
+
+    static func loadUncached(from folder: URL,
+                             family: ModelFamily?) async throws -> MFTokenizer {
         let underlying = try await AutoTokenizer.from(modelFolder: folder)
-        return try MFTokenizer(tokenizer: underlying)
+        return try MFTokenizer(tokenizer: underlying, family: family)
     }
 
     private static func hasTokenizerJSON(in folder: URL, fileManager: FileManager) -> Bool {
@@ -124,6 +144,10 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     public init(tokenizer: any Tokenizer) throws {
+        try self.init(tokenizer: tokenizer, family: nil)
+    }
+
+    public init(tokenizer: any Tokenizer, family: ModelFamily?) throws {
         self.tokenizer = tokenizer
 
         let dialect: ChatDialect =
@@ -136,9 +160,12 @@ public struct MFTokenizer: @unchecked Sendable {
             } else {
                 .gemma
             }
+        guard family != .maple || dialect == .chatml else {
+            throw MFTokenizerError.unsupportedForDialect("Maple requires ChatML framing")
+        }
         let resolved = switch dialect {
         case .gemma: try Self.resolveGemmaTokens(tokenizer)
-        case .chatml: try Self.resolveChatMLTokens(tokenizer)
+        case .chatml: try Self.resolveChatMLTokens(tokenizer, maple: family == .maple)
         case .deepseek: try Self.resolveDeepseekTokens(tokenizer)
         case .inkling: try Self.resolveInklingTokens(tokenizer)
         }
@@ -231,7 +258,8 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     private static func resolveChatMLTokens(
-        _ tokenizer: any Tokenizer
+        _ tokenizer: any Tokenizer,
+        maple: Bool
     ) throws -> ResolvedSpecialTokens {
         func id(_ token: String) throws -> Int32 {
             guard let value = specialTokenID(tokenizer, token) else {
@@ -253,7 +281,7 @@ public struct MFTokenizer: @unchecked Sendable {
         return ResolvedSpecialTokens(
             bosID: endOfText,
             bosPrefixID: nil,
-            eosID: endOfText,
+            eosID: maple ? imEnd : endOfText,
             padID: endOfText,
             endOfTurnID: imEnd,
             toolCallStartID: toolCallStart,
@@ -265,9 +293,7 @@ public struct MFTokenizer: @unchecked Sendable {
             thinkStartID: thinkStart,
             thinkEndID: thinkEnd,
             stopTokenIDs: [imEnd, endOfText],
-            // The model's padded embedding/lm_head row count, not the
-            // tokenizer's actual vocab (248 077) — logits buffers use this.
-            vocabSize: 248_320)
+            vocabSize: maple ? 151_936 : 248_320)
     }
 
     /// Sentinel for token roles a dialect frames as plain text rather than a
@@ -400,6 +426,8 @@ public struct MFTokenizer: @unchecked Sendable {
     /// `add_generation_prompt` + `enable_thinking=false` branch.
     private static let chatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    private static let mapleChatMLGenerationSuffix =
+        "<|im_start|>assistant\n<think>\n"
     /// DeepSeek-V4 special-token text; note the fullwidth vertical bars
     /// (U+FF5C) and the U+2581 fillers in the sentence markers.
     private static let deepseekBOSMark       = "<｜begin▁of▁sentence｜>"
@@ -537,13 +565,17 @@ public struct MFTokenizer: @unchecked Sendable {
             guard let rawContent = message.content else {
                 throw MFTokenizerError.invalidChatTemplate("text-only messages require content")
             }
-            let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+            let content = generationPromptStartsInThinking
+                ? rawContent
+                : rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.role == .system && index != 0 {
                 throw MFTokenizerError.invalidChatTemplate("system message must be first")
             }
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }
-        s += Self.chatMLGenerationSuffix
+        s += generationPromptStartsInThinking
+            ? Self.mapleChatMLGenerationSuffix
+            : Self.chatMLGenerationSuffix
         return s
     }
 
@@ -794,17 +826,21 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     public func encodeTextContinuation(userContent: String) -> [Int32] {
-        let content = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedContent = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
         switch dialect {
         case .gemma:
             return [endOfTurnID] + encode(
-                "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
+                "\n\(Self.turnOpen)user\n\(trimmedContent)\(Self.turnClose)\n"
                     + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
                 addBOS: false)
         case .chatml:
+            let content = generationPromptStartsInThinking ? userContent : trimmedContent
+            let suffix = generationPromptStartsInThinking
+                ? Self.mapleChatMLGenerationSuffix
+                : Self.chatMLGenerationSuffix
             return [endOfTurnID] + encode(
                 "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
-                    + Self.chatMLGenerationSuffix,
+                    + suffix,
                 addBOS: false)
         case .deepseek:
             // The cached assistant turn stopped just before its EOS; the
@@ -880,7 +916,7 @@ private extension Array where Element: Equatable {
 
 private enum MFTokenizerLoadSource: Hashable {
     case pretrained(String)
-    case local(String)
+    case local(String, ModelFamily?)
 }
 
 private actor MFTokenizerLoadCoordinator {
@@ -899,8 +935,9 @@ private actor MFTokenizerLoadCoordinator {
             switch source {
             case .pretrained(let modelID):
                 return try await MFTokenizer.loadUncached(pretrained: modelID)
-            case .local(let path):
-                return try await MFTokenizer.loadUncached(from: URL(fileURLWithPath: path))
+            case .local(let path, let family):
+                return try await MFTokenizer.loadUncached(
+                    from: URL(fileURLWithPath: path), family: family)
             }
         }
         tasks[source] = task

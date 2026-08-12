@@ -93,7 +93,7 @@ public func runRawCompletion(producer: any LogitProducer,
     guard !promptIds.isEmpty else {
         throw GeneratorError.emptyPrompt
     }
-    let fusedRunner = producer as? RealForwardRunner
+    let fusedRunner = producer as? any FusedHeadLogitProducer
     let fusedGreedy = fusedRunner?.usesFusedGreedyHead == true
     guard !fusedGreedy || config.isPureGreedy else {
         throw PrefillError.unsupportedPrefillSeed(
@@ -164,9 +164,18 @@ public func runRawCompletion(producer: any LogitProducer,
         throw PrefillError.chunkedUnsupported(
             PrefillError.chunkedRequiresChunkedRunnerReason)
     case .off:
-        for t in prefillTokens {
+        let headless = producer as? any HeadlessSequentialPrefillRunner
+        let exactPrefill = producer as? any ExactPrefillLogitProducer
+        for (offset, t) in prefillTokens.enumerated() {
             try Task.checkCancellation()
-            try await producer.produce(token: t, position: position, into: scratch.logits)
+            if offset + 1 < prefillTokens.count, let headless {
+                try await headless.produceWithoutLogits(token: t, position: position)
+            } else if let exactPrefill {
+                try await exactPrefill.produceExactPrefill(token: t, position: position,
+                                                           into: scratch.logits)
+            } else {
+                try await producer.produce(token: t, position: position, into: scratch.logits)
+            }
             position += 1
             history.append(t)
             onProgress(.prefill(done: position, total: promptIds.count))

@@ -644,6 +644,18 @@ struct StreamingStopMatcherTests {
 
 @Suite("Server arguments")
 struct ServerArgumentTests {
+    @Test func usageListsInstalledModelFamilies() {
+        for modelID in [
+            "gemma-4-26b-a4b-it",
+            "qwen3.6-35b-a3b",
+            "deepseek-v4-flash-2bit-dq",
+            "inkling-small-4bit",
+            "maple-preview-2bit-mlx",
+        ] {
+            #expect(ServerArguments.usage.contains(modelID))
+        }
+    }
+
     @Test func defaults() throws {
         let arguments = try ServerArguments.parse(["--model", "model.gturbo"])
         #expect(arguments.port == 8080)
@@ -651,6 +663,15 @@ struct ServerArgumentTests {
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
         #expect(arguments.promptCacheMode == .singlePrefix)
+    }
+
+    @Test func parsesAndAdvertises128KContext() throws {
+        let arguments = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--max-context", "128000",
+        ])
+        #expect(arguments.maxContext == 128_000)
+        #expect(ServerArguments.usage.contains("128000"))
     }
 
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {

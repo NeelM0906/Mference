@@ -35,7 +35,7 @@ Mference builds on that: it keeps each model's shared core and KV cache in
 memory, then streams just the experts chosen for each token from SSD. The
 model never has to fit in RAM — only its working set does.
 
-Mference currently runs four pinned instruction checkpoints:
+Mference currently runs five pinned instruction checkpoints:
 
 - **[Gemma 4 26B-A4B](https://ai.google.dev/gemma/docs/core/model_card_4)** —
   26B total, ~3.88B active per token, in ~2 GB of memory.
@@ -46,6 +46,9 @@ Mference currently runs four pinned instruction checkpoints:
   the 2-bit dynamic-quant checkpoint (2-bit experts, 4-bit core). Budget: ~6.8 GB peak at the 8-slot floor, ~91 GB on  disk;
 - **[Inkling-Small 276B-A12B](https://huggingface.co/pipenetwork/Inkling-Small-MLX-4bit)** —
   276B total, ~12B active per token, in ~9 GB of memory.
+- **[Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx)** —
+  a 20B total, ~1B active per token, from the ternary (1.58 bit per parameter) quantization, using ~645 MiB
+  of memory.
   
 The runtime, streaming installer, CLI, native Mac app, and loopback
 OpenAI-compatible server are written in Swift and Metal. Mference is
@@ -66,8 +69,9 @@ When the app opens, choose **Download** and let Mference fetch and repack the
 pinned model — or choose **Choose Existing Model…** to point at a `.gturbo`
 directory already on disk. Once it is ready, choose **Load Model**, type your
 prompt, and press **Generate**. The app installs Gemma 4 by default; select
-Qwen 3.6 with `defaults write Mference model qwen36` (or `MFERENCE_MODEL=qwen36`
-in the environment) before launching.
+Qwen 3.6 or Maple with `defaults write Mference model qwen36` or
+`defaults write Mference model maple` (or the matching `MFERENCE_MODEL` value)
+before launching.
 
 Each chat keeps its own multi-turn history in a collapsible left sidebar
 (<kbd>Command</kbd>+<kbd>N</kbd> for a new chat,
@@ -105,16 +109,17 @@ swift run -c release MferenceCLI \
 
 | Metric | Value |
 | --- | --- |
-| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B (276B total, ~12B active) |
-| Weights | MLX affine, group 64; 8-bit routers; 4-bit shared experts; 4-bit routed experts (2-bit for DeepSeek-V4-Flash) |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; larger-host CLI/server auto uses 32) · est. ~6.8 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache |
-| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) |
+| Models | Gemma 4 26B-A4B IT (26B total, ~3.88B active) · Qwen 3.6 35B-A3B (35B total, ~3B active) · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B (276B total, ~12B active) · Maple Preview (20B total, ~1B active) |
+| Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; larger-host CLI/server auto uses 32) · est. ~6.8 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) |
+| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) |
 | Measured decode, Qwen 3.6 | 23.5–29.3 tok/s (24 GB M5, automatic 32-slot profile) |
 | Measured decode, DeepSeek-V4-Flash | 5.3–6.1 tok/s (256 GB M3 Ultra) at a 5,671–5,679 MiB peak footprint |
 | Measured decode, Inkling-Small | 3.0–3.7 tok/s (24 GB M5, optimized native top-6 path) · 5.3–6.9 tok/s (256 GB M3 Ultra) at an 8,936–8,939 MiB peak footprint |
+| Measured, Maple Preview | Exact head: 18.9–24.6 tok/s decode, 25.1–44.9 tok/s prefill, and 491–1,211 MiB peak process footprint on 128-8192 context (16 GB M4) |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed
@@ -135,7 +140,7 @@ decode improved from 2.909/2.961/2.819 to 3.434/3.670/3.038 tok/s. That is a
 16.4% geometric-mean gain, with byte-identical generated output in every A/B.
 See the [Inkling performance notes](docs/INKLING_SMALL.md#native-top-6-decode-2026-08-06).
 
-## Products
+# Products
 
 | Product | Purpose |
 | --- | --- |
@@ -146,16 +151,16 @@ See the [Inkling performance notes](docs/INKLING_SMALL.md#native-top-6-decode-20
 | `MferenceServer` | OpenAI-compatible Chat Completions server, on loopback by default or a Tailnet address with `--bind tailnet` |
 | `MferenceRepack` | Streaming model installer and install verifier |
 
-Only one model-owning product should run at a time. The server speaks each
-model's native dialect — Gemma's chat format and tool-call DSL, or Qwen's
-ChatML template with `<tool_call>` function calls — selected automatically
-from the installed model.
+Only one model-owning product should run at a time. The server selects the
+installed model's native dialect automatically, including Gemma's chat format,
+Qwen's ChatML template with `<tool_call>` function calls, and Maple's ChatML
+template with hidden reasoning.
 
 ### Requirements
 
 - An Apple Silicon Mac (arm64 only)
 - macOS 15 or later, with Metal 3; Xcode 16.3 and Swift 6.1 or newer
-- Free storage for the model install (~14.3 GB Gemma 4, ~19.6 GB Qwen 3.6)
+- Free storage for the model install (~6.6 GB Maple, ~14.3 GB Gemma 4, ~19.6 GB Qwen 3.6; the largest families require substantially more)
 - An internet connection for the first install
 
 The shader library is compiled from source at startup, and the choice of
@@ -175,7 +180,8 @@ for per-expert reads: resident tensors in one mapped file, and each layer's
 routed experts as fixed-stride, page-aligned blobs. At generation time the
 runtime keeps the common weights mapped read-only, holds a small per-layer LFU
 expert cache, and `pread`s only the experts each layer's router selects for the
-current token. Inkling dispatches six experts; Gemma and Qwen dispatch eight.
+current token. Inkling dispatches six experts; Gemma, Qwen, and Maple dispatch
+eight.
 The memory-first path uses 16 slots; CLI and server auto select 32 for Qwen on
 hosts with at least 16 GiB because its 256 experts per layer benefit measurably
 from the added coverage. Inkling remains at 16 because a 24-slot control
@@ -193,8 +199,7 @@ engine are in [System design](docs/SYSTEM_DESIGN.md) and the
 
 ## Roadmap
 
-- More architectures — the model layer is built for enumeration, and the
-  Qwen 3.6 port is the template for the next one
+- More explicitly pinned architectures without a generic-model fallback
 - Extend resident-expert compute/I/O overlap to every model family and prefill
 - Per-model quality validation (KLD against reference implementations)
 - Longer contexts, vision towers, and a hardware benchmark matrix
@@ -212,3 +217,7 @@ code is [MIT-licensed](LICENSE).
 Model weights remain subject to their own terms: the
 [Gemma 4 license](https://ai.google.dev/gemma/apache_2) and the
 [Qwen license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE).
+Maple's pinned checkpoint declares no license; establish the necessary rights
+before downloading, using, or redistributing it. Maple's MLX-derived kernel
+work is covered by [LICENSE-MLX](LICENSE-MLX); see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

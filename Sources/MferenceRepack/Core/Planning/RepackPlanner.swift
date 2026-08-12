@@ -31,6 +31,37 @@ struct ResidentEntry: Sendable {
     let sourceWeight: SourceTensor
     let sourceScales: SourceTensor?
     let sourceBiases: SourceTensor?
+    let weightTransform: RangeCopyTransform
+    let scaleTransform: RangeCopyTransform
+    let biasTransform: RangeCopyTransform
+
+    init(name: String, dtype: UInt8, logicalShape4: [UInt32],
+         fileOffset: UInt64, sizeBytes: UInt64,
+         scaleOffset: UInt64, scaleSize: UInt64,
+         biasOffset: UInt64, biasSize: UInt64,
+         quantSpec: QuantSpec?,
+         sourceWeight: SourceTensor,
+         sourceScales: SourceTensor?, sourceBiases: SourceTensor?,
+         weightTransform: RangeCopyTransform = .identity,
+         scaleTransform: RangeCopyTransform = .identity,
+         biasTransform: RangeCopyTransform = .identity) {
+        self.name = name
+        self.dtype = dtype
+        self.logicalShape4 = logicalShape4
+        self.fileOffset = fileOffset
+        self.sizeBytes = sizeBytes
+        self.scaleOffset = scaleOffset
+        self.scaleSize = scaleSize
+        self.biasOffset = biasOffset
+        self.biasSize = biasSize
+        self.quantSpec = quantSpec
+        self.sourceWeight = sourceWeight
+        self.sourceScales = sourceScales
+        self.sourceBiases = sourceBiases
+        self.weightTransform = weightTransform
+        self.scaleTransform = scaleTransform
+        self.biasTransform = biasTransform
+    }
 }
 
 struct ResidentFilePlan: Sendable {
@@ -54,6 +85,24 @@ struct PerExpertTensorSlice: Sendable {
     let sourceOffsetPerExpert: UInt64  // stride per expert in source
     let sourceTensor: SourceTensor
     let bitsForWeights: Int?           // 4 for routed expert weight; nil for scales/biases
+    let transform: RangeCopyTransform
+
+    init(role: String, component: String, dtype: UInt8,
+         logicalShape: [UInt64], offsetInExpertBlob: UInt64,
+         sizeInExpertBlob: UInt64, sourceOffsetPerExpert: UInt64,
+         sourceTensor: SourceTensor, bitsForWeights: Int?,
+         transform: RangeCopyTransform = .identity) {
+        self.role = role
+        self.component = component
+        self.dtype = dtype
+        self.logicalShape = logicalShape
+        self.offsetInExpertBlob = offsetInExpertBlob
+        self.sizeInExpertBlob = sizeInExpertBlob
+        self.sourceOffsetPerExpert = sourceOffsetPerExpert
+        self.sourceTensor = sourceTensor
+        self.bitsForWeights = bitsForWeights
+        self.transform = transform
+    }
 }
 
 struct LayerFilePlan: Sendable {
@@ -90,6 +139,7 @@ struct RepackPlan: Sendable {
     let layers: [LayerFilePlan]
     let matchedModelID: String?
     let excludedMultimodalTensorNames: [String]
+    let flashHead: IndexLoader.MapleFlashHeadMetadata?
 }
 
 // MARK: - Planner
@@ -105,7 +155,17 @@ enum RepackPlanner {
     }
 
     static func classify(_ name: String, numLayers: Int,
-                         family: RepackModelFamily) -> Bucket {
+                         family: RepackModelFamily,
+                         includeMapleFlashHead: Bool = false) -> Bucket {
+        if family == .maple, name.hasPrefix("lm_head_flash.") {
+            if isExcludedMapleFlashTensor(name) || !includeMapleFlashHead {
+                return .excludedMultimodal
+            }
+            return isMapleFlashResidentTensor(name) ? .lmResident : .unknown
+        }
+        if isExcludedTensorName(name, family: family) {
+            return .excludedMultimodal
+        }
         if hasResidentPrefix(name, family: family) {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
@@ -114,9 +174,6 @@ enum RepackPlanner {
                 return .routedExpert(role: role, layer: layer)
             }
             return .lmResident
-        }
-        if isMultimodalTensorName(name) {
-            return .excludedMultimodal
         }
         return .unknown
     }
@@ -130,7 +187,7 @@ enum RepackPlanner {
         switch family {
         case .gemma4, .qwen36:
             return name.hasPrefix("language_model.")
-        case .deepseekV4Flash:
+        case .deepseekV4Flash, .maple:
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
         case .inklingSmall:
             // Inkling is multimodal but names its towers as siblings, so the
@@ -147,6 +204,7 @@ enum RepackPlanner {
         case .gemma4:          routedContainer = ".experts.switch_glu."
         case .qwen36:          routedContainer = ".mlp.switch_mlp."
         case .deepseekV4Flash: routedContainer = ".ffn.switch_mlp."
+        case .maple:           routedContainer = ".mlp.switch_mlp."
         // `.mlp.experts.` does not match the shared experts, which sit under
         // `.mlp.shared_experts.`.
         case .inklingSmall:    routedContainer = ".mlp.experts."
@@ -188,12 +246,19 @@ enum RepackPlanner {
         var lmResidentBases: [String] = []
         var excludedMultimodalNames: [String] = []
         var routedByLayerAndRole: [Int: [String: String]] = [:]
+        if let flashHead = meta.flashHead {
+            try validateMapleFlashHead(flashHead, registry: registry, arch: arch)
+        }
         for (name, _) in registry {
-            if isMultimodalTensorName(name) {
+            if isExcludedTensorName(name, family: arch.family)
+                || (arch.family == .maple && meta.flashHead == nil
+                    && name.hasPrefix("lm_head_flash.")) {
                 excludedMultimodalNames.append(name)
             }
-            if name.hasSuffix(".scales") || name.hasSuffix(".biases") { continue }
-            let b = classify(name, numLayers: arch.numLayers, family: arch.family)
+            if name.hasSuffix(".scales") || name.hasSuffix(".biases")
+                || (arch.family == .maple && name.hasSuffix(".row_alpha")) { continue }
+            let b = classify(name, numLayers: arch.numLayers, family: arch.family,
+                             includeMapleFlashHead: meta.flashHead != nil)
             switch b {
             case .lmResident:                   lmResidentBases.append(name)
             case .routedExpert(let role, let layer):
@@ -216,7 +281,8 @@ enum RepackPlanner {
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             baseNames: lmResidentBases,
-                                            registry: registry, meta: meta)
+                                            registry: registry, meta: meta,
+                                            family: arch.family)
 
         let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
         var layerPlans: [LayerFilePlan] = []
@@ -264,20 +330,36 @@ enum RepackPlanner {
 
         return RepackPlan(arch: arch,
                           baseMode: meta.baseMode,
-                          baseGroupSize: meta.baseGroupSize,
+                          baseGroupSize: arch.family == .maple ? 64 : meta.baseGroupSize,
                           bitsOverrideCount: bitsOverrideCount,
                           resident: resident,
                           layers: layerPlans,
                           matchedModelID: matched,
-                          excludedMultimodalTensorNames: excludedMultimodalNames)
+                          excludedMultimodalTensorNames: excludedMultimodalNames,
+                          flashHead: meta.flashHead)
     }
 
-    private static func isMultimodalTensorName(_ name: String) -> Bool {
+    private static func isExcludedTensorName(_ name: String,
+                                             family: RepackModelFamily) -> Bool {
         name.hasPrefix("vision_tower.") ||
             name.hasPrefix("embed_vision.") ||
             name.hasPrefix("audio_tower.") ||
             name.hasPrefix("model.visual.") ||
-            name.hasPrefix("model.audio.")
+            name.hasPrefix("model.audio.") ||
+            (family == .maple && isExcludedMapleFlashTensor(name))
+    }
+
+    private static func isMapleFlashResidentTensor(_ name: String) -> Bool {
+        switch name {
+        case "lm_head_flash.centroids.weight", "lm_head_flash.token_map":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isExcludedMapleFlashTensor(_ name: String) -> Bool {
+        name == "lm_head_flash.cluster_scale" || name.hasPrefix("lm_head_flash.head.")
     }
 
     // MARK: - Resident planning
@@ -285,7 +367,8 @@ enum RepackPlanner {
     private static func planResidentFile(path: String,
                                          baseNames: [String],
                                          registry: [String: SourceTensor],
-                                         meta: IndexLoader.SourceMetadata) throws
+                                         meta: IndexLoader.SourceMetadata,
+                                         family: RepackModelFamily) throws
                                         -> ResidentFilePlan {
         let entryCount = baseNames.count
 
@@ -312,11 +395,86 @@ enum RepackPlanner {
             guard let weight = registry[name] else {
                 throw RepackError.missingTensor(name: name)
             }
+            if family == .maple,
+               isMaplePackedResidentWeight(name),
+               weight.dtype != .u32 {
+                throw RepackError.dtypeMismatch(
+                    name: name,
+                    detail: "expected U32 packed Maple weight, got \(weight.dtype)")
+            }
             let dtype = ietnyDtype(weight.dtype)
             let isQuantizedPacked = (weight.dtype == .u32) && name.hasSuffix(".weight")
 
             if isQuantizedPacked {
                 let base = String(name.dropLast(".weight".count))
+                if family == .maple {
+                    let sourceSpec = IndexLoader.quantSpec(forTensor: name, meta: meta)
+                    if sourceSpec.bits == 2 {
+                        guard let alpha = registry[base + ".row_alpha"] else {
+                            throw RepackError.configurationInvalid(
+                                detail: "Maple INT2 tensor \(name) is missing row_alpha")
+                        }
+                        guard registry[base + ".scales"] == nil,
+                              registry[base + ".biases"] == nil else {
+                            throw RepackError.configurationInvalid(
+                                detail: "Maple INT2 tensor \(name) has affine companions")
+                        }
+                        guard alpha.dtype == .bf16 else {
+                            throw RepackError.dtypeMismatch(
+                                name: alpha.name,
+                                detail: "expected BF16 row_alpha, got \(alpha.dtype)")
+                        }
+                        try validateMapleStorage(weight, elementBytes: 4)
+                        try validateMapleStorage(alpha, elementBytes: 2)
+                        let logical = try mapleLogicalShape(forPackedSource: weight.shape,
+                                                            name: name)
+                        guard let input = logical.last, input.isMultiple(of: 64), input > 0,
+                              alpha.shape == Array(logical.dropLast()) else {
+                            throw RepackError.shapeMismatch(
+                                name: name,
+                                detail: "row_alpha shape \(alpha.shape) does not match ternary output rows \(Array(logical.dropLast()))")
+                        }
+                        let repetitionCount = input / 64
+                        let repetitions = try exactInt(repetitionCount,
+                                                       name: name,
+                                                       detail: "Maple row_alpha repeat count is not representable as Int")
+                        let wOff = fileCursor
+                        let wSize = try checkedProduct(weight.sizeBytes, 2,
+                                                       detail: "Maple widened weight size overflows UInt64")
+                        let sOff = try checkedAdd(wOff, wSize,
+                                                   detail: "Maple resident scale offset overflows UInt64")
+                        let sSize = try checkedProduct(alpha.sizeBytes, repetitionCount,
+                                                       detail: "Maple resident companion size overflows UInt64")
+                        let bOff = try checkedAdd(sOff, sSize,
+                                                   detail: "Maple resident bias offset overflows UInt64")
+                        let bSize = sSize
+                        fileCursor = try checkedAdd(bOff, bSize,
+                                                    detail: "Maple resident file size overflows UInt64")
+                        entries.append(ResidentEntry(
+                            name: name, dtype: 0,
+                            logicalShape4: try mapleShape4(logical, name: name),
+                            fileOffset: wOff, sizeBytes: wSize,
+                            scaleOffset: sOff, scaleSize: sSize,
+                            biasOffset: bOff, biasSize: bSize,
+                            quantSpec: QuantSpec(bits: 4, groupSize: 64),
+                            sourceWeight: weight,
+                            sourceScales: alpha,
+                            sourceBiases: alpha,
+                            weightTransform: .unpackInt2ToInt4,
+                            scaleTransform: .repeatBF16(count: repetitions, negated: false),
+                            biasTransform: .repeatBF16(count: repetitions, negated: true)))
+                        continue
+                    }
+                    guard sourceSpec.bits == 4, sourceSpec.groupSize == 64 else {
+                        throw RepackError.configJsonInvalid(
+                            path: meta.configPath,
+                            detail: "Maple packed tensor \(name) is neither INT2 ternary nor INT4/group-64 affine")
+                    }
+                    guard registry[base + ".row_alpha"] == nil else {
+                        throw RepackError.configurationInvalid(
+                            detail: "Maple INT4 tensor \(name) has a row_alpha companion")
+                    }
+                }
                 guard let scales = registry[base + ".scales"] else {
                     throw RepackError.missingScalesCompanion(name: name)
                 }
@@ -390,11 +548,99 @@ enum RepackPlanner {
 
         for (role, name) in roles {
             guard let w = registry[name] else { throw RepackError.missingTensor(name: name) }
-            if w.dtype != .u32 || w.shape.count != 3 || Int(w.shape[0]) != expertCount {
+            guard let sourceExpertCount = Int(exactly: w.shape.first ?? 0),
+                  w.dtype == .u32, w.shape.count == 3,
+                  sourceExpertCount == expertCount else {
                 throw RepackError.shapeMismatch(name: name,
                     detail: "expected U32 rank-3 with leading \(expertCount), got \(w.dtype) \(w.shape)")
             }
             let base = name.hasSuffix(".weight") ? String(name.dropLast(".weight".count)) : name
+            if arch.family == .maple {
+                let sourceSpec = IndexLoader.quantSpec(forTensor: name, meta: meta)
+                guard sourceSpec.bits == 2 else {
+                    throw RepackError.configJsonInvalid(
+                        path: meta.configPath,
+                        detail: "Maple routed tensor \(name) is not INT2")
+                }
+                guard let alpha = registry[base + ".row_alpha"] else {
+                    throw RepackError.configurationInvalid(
+                        detail: "Maple INT2 routed tensor \(name) is missing row_alpha")
+                }
+                guard registry[base + ".scales"] == nil,
+                      registry[base + ".biases"] == nil else {
+                    throw RepackError.configurationInvalid(
+                        detail: "Maple INT2 routed tensor \(name) has affine companions")
+                }
+                guard alpha.dtype == .bf16 else {
+                    throw RepackError.dtypeMismatch(
+                        name: alpha.name,
+                        detail: "expected BF16 row_alpha, got \(alpha.dtype)")
+                }
+                try validateMapleStorage(w, elementBytes: 4)
+                try validateMapleStorage(alpha, elementBytes: 2)
+                let expertCount64 = try exactUInt64(expertCount,
+                                                    name: name,
+                                                    detail: "Maple expert count is not representable as UInt64")
+                guard w.sizeBytes.isMultiple(of: expertCount64),
+                      alpha.sizeBytes.isMultiple(of: expertCount64) else {
+                    throw RepackError.shapeMismatch(
+                        name: name,
+                        detail: "source bytes not evenly divisible by \(expertCount) experts")
+                }
+                let perExpertWeightSize = w.sizeBytes / expertCount64
+                let perExpertAlphaSize = alpha.sizeBytes / expertCount64
+                let logicalPerExpert = try mapleLogicalShape(
+                    forPackedSource: Array(w.shape.dropFirst()), name: name)
+                guard let input = logicalPerExpert.last, input.isMultiple(of: 64), input > 0,
+                      alpha.shape == [expertCount64] + Array(logicalPerExpert.dropLast()) else {
+                    throw RepackError.shapeMismatch(
+                        name: name,
+                        detail: "row_alpha shape \(alpha.shape) does not match routed output rows")
+                }
+                let repetitionCount = input / 64
+                let repetitions = try exactInt(repetitionCount,
+                                               name: name,
+                                               detail: "Maple row_alpha repeat count is not representable as Int")
+                let perExpertCompanionSize = try checkedProduct(
+                    perExpertAlphaSize, repetitionCount,
+                    detail: "Maple routed companion size overflows UInt64")
+                let companionLogical = Array(logicalPerExpert.dropLast()) + [repetitionCount]
+
+                let wSlice = PerExpertTensorSlice(
+                    role: role, component: "weights", dtype: 0,
+                    logicalShape: logicalPerExpert,
+                    offsetInExpertBlob: blobCursor,
+                    sizeInExpertBlob: perExpertWeightSize,
+                    sourceOffsetPerExpert: perExpertWeightSize,
+                    sourceTensor: w,
+                    bitsForWeights: 2)
+                blobCursor = try checkedAdd(blobCursor, perExpertWeightSize,
+                                            detail: "Maple routed weight cursor overflows UInt64")
+                let sSlice = PerExpertTensorSlice(
+                    role: role, component: "scales", dtype: 1,
+                    logicalShape: companionLogical,
+                    offsetInExpertBlob: blobCursor,
+                    sizeInExpertBlob: perExpertCompanionSize,
+                    sourceOffsetPerExpert: perExpertAlphaSize,
+                    sourceTensor: alpha,
+                    bitsForWeights: nil,
+                    transform: .repeatBF16(count: repetitions, negated: false))
+                blobCursor = try checkedAdd(blobCursor, perExpertCompanionSize,
+                                            detail: "Maple routed scale cursor overflows UInt64")
+                let bSlice = PerExpertTensorSlice(
+                    role: role, component: "biases", dtype: 1,
+                    logicalShape: companionLogical,
+                    offsetInExpertBlob: blobCursor,
+                    sizeInExpertBlob: perExpertCompanionSize,
+                    sourceOffsetPerExpert: perExpertAlphaSize,
+                    sourceTensor: alpha,
+                    bitsForWeights: nil,
+                    transform: .repeatBF16(count: repetitions, negated: true))
+                blobCursor = try checkedAdd(blobCursor, perExpertCompanionSize,
+                                            detail: "Maple routed bias cursor overflows UInt64")
+                subs.append(wSlice); subs.append(sSlice); subs.append(bSlice)
+                continue
+            }
             guard let s = registry[base + ".scales"] else { throw RepackError.missingScalesCompanion(name: name) }
             guard let b = registry[base + ".biases"] else { throw RepackError.missingBiasesCompanion(name: name) }
             if s.dtype != .bf16 || b.dtype != .bf16 {
@@ -443,7 +689,21 @@ enum RepackPlanner {
             subs.append(wSlice); subs.append(sSlice); subs.append(bSlice)
         }
 
-        let expertStride = roundUpToPage(blobCursor)
+        let expertStride: UInt64
+        if arch.family == .maple {
+            expertStride = try roundUpToPageChecked(
+                blobCursor,
+                detail: "Maple expert stride alignment overflows UInt64")
+            let expertCount64 = try exactUInt64(
+                expertCount,
+                name: "layer_\(layer)",
+                detail: "Maple expert count is not representable as UInt64")
+            _ = try checkedProduct(
+                expertCount64, expertStride,
+                detail: "Maple expert file size overflows UInt64")
+        } else {
+            expertStride = roundUpToPage(blobCursor)
+        }
         return LayerFilePlan(layerIndex: layer, path: path,
                              expertsPerLayer: expertCount,
                              expertStride: expertStride,
@@ -453,12 +713,97 @@ enum RepackPlanner {
     // MARK: - Helpers
 
     private static func ietnyDtype(_ d: SourceTensor.Dtype) -> UInt8 {
-        switch d { case .u32: 0; case .bf16: 1; case .fp16: 2; case .fp32: 3; case .i64: 4 }
+        switch d {
+        case .u32: 0
+        case .bf16: 1
+        case .fp16: 2
+        case .fp32: 3
+        case .i64: 4
+        case .i32: 5
+        }
+    }
+
+    private static func isMaplePackedResidentWeight(_ name: String) -> Bool {
+        if name == "model.word_embeddings.weight" || name == "lm_head.weight"
+            || name == "lm_head_flash.centroids.weight" {
+            return true
+        }
+        let components = name.split(separator: ".")
+        guard components.count == 6,
+              components[0] == "model",
+              components[1] == "layers",
+              Int(components[2]) != nil,
+              components[3] == "self_attn",
+              components[5] == "weight" else {
+            return false
+        }
+        return components[4] == "q_proj" || components[4] == "k_proj"
+            || components[4] == "v_proj" || components[4] == "o_proj"
+    }
+
+    private static func validateMapleFlashHead(_ flashHead: IndexLoader.MapleFlashHeadMetadata,
+                                               registry: [String: SourceTensor],
+                                               arch: ArchInfo) throws {
+        guard arch.family == .maple,
+              flashHead.nClusters > 0, flashHead.clusterSize > 0,
+              flashHead.nClusters <= Int.max / flashHead.clusterSize,
+              flashHead.nClusters * flashHead.clusterSize == arch.vocabSize,
+              flashHead.nProbes > 0, flashHead.nProbes <= flashHead.nClusters,
+              flashHead.groupSize == 64, flashHead.bits == 4,
+              flashHead.headGroupSize == 64, flashHead.headBits == 4,
+              flashHead.scaledCentroids,
+              flashHead.forceTokens.allSatisfy({ $0 >= 0 && $0 < arch.vocabSize }) else {
+            throw RepackError.configurationInvalid(detail: "Maple FlashHead metadata is invalid")
+        }
+        let packedColumns = arch.hiddenSize * flashHead.bits / 32
+        let groups = arch.hiddenSize / flashHead.groupSize
+        let expectedCentroids = [UInt64(flashHead.nClusters), UInt64(packedColumns)]
+        let expectedParameters = [UInt64(flashHead.nClusters), UInt64(groups)]
+        let expectedMap = [UInt64(flashHead.nClusters), UInt64(flashHead.clusterSize)]
+
+        func require(_ name: String, dtype: SourceTensor.Dtype,
+                     shape: [UInt64], elementBytes: UInt64) throws {
+            guard let tensor = registry[name] else {
+                throw RepackError.missingTensor(name: name)
+            }
+            guard tensor.dtype == dtype, tensor.shape == shape else {
+                throw RepackError.shapeMismatch(
+                    name: name,
+                    detail: "expected \(dtype) shape \(shape), got \(tensor.dtype) \(tensor.shape)")
+            }
+            let elements = try shape.reduce(UInt64(1)) { partial, dimension in
+                try checkedProduct(partial, dimension,
+                                   detail: "Maple FlashHead shape product overflows UInt64")
+            }
+            let bytes = try checkedProduct(elements, elementBytes,
+                                           detail: "Maple FlashHead byte count overflows UInt64")
+            guard tensor.sizeBytes == bytes else {
+                throw RepackError.shapeMismatch(
+                    name: name,
+                    detail: "shape requires \(bytes) bytes, got \(tensor.sizeBytes)")
+            }
+        }
+
+        try require("lm_head_flash.centroids.weight", dtype: .u32,
+                    shape: expectedCentroids, elementBytes: 4)
+        try require("lm_head_flash.centroids.scales", dtype: .bf16,
+                    shape: expectedParameters, elementBytes: 2)
+        try require("lm_head_flash.centroids.biases", dtype: .bf16,
+                    shape: expectedParameters, elementBytes: 2)
+        try require("lm_head_flash.token_map", dtype: .i32,
+                    shape: expectedMap, elementBytes: 4)
     }
 
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {
         let p = Layout.pageBytes
         return ((v + p - 1) / p) * p
+    }
+
+    private static func roundUpToPageChecked(_ value: UInt64,
+                                             detail: String) throws -> UInt64 {
+        let adjusted = try checkedAdd(value, Layout.pageBytes - 1, detail: detail)
+        return try checkedProduct(adjusted / Layout.pageBytes, Layout.pageBytes,
+                                  detail: detail)
     }
 
     private static func padTo4(_ s: [UInt64]) -> [UInt32] {
@@ -476,6 +821,80 @@ enum RepackPlanner {
         var out = source
         out[out.count - 1] = source[source.count - 1] * factor
         return out
+    }
+
+    private static func mapleLogicalShape(forPackedSource source: [UInt64],
+                                          name: String) throws -> [UInt64] {
+        guard let packedInput = source.last, packedInput.isMultiple(of: 4) else {
+            throw RepackError.shapeMismatch(
+                name: name,
+                detail: "INT2 packed input dimension must be a nonempty multiple of four U32 values")
+        }
+        var logical = source
+        logical[logical.count - 1] = try checkedProduct(
+            packedInput, 16,
+            detail: "Maple logical input dimension overflows UInt64")
+        return logical
+    }
+
+    private static func mapleShape4(_ shape: [UInt64], name: String) throws -> [UInt32] {
+        guard shape.count <= 4 else {
+            throw RepackError.shapeMismatch(name: name,
+                                            detail: "Maple logical rank exceeds four")
+        }
+        var result = try shape.map {
+            guard let value = UInt32(exactly: $0) else {
+                throw RepackError.shapeMismatch(
+                    name: name,
+                    detail: "Maple logical dimension is not representable as UInt32")
+            }
+            return value
+        }
+        while result.count < 4 { result.append(0) }
+        return result
+    }
+
+    private static func validateMapleStorage(_ tensor: SourceTensor,
+                                             elementBytes: UInt64) throws {
+        let elements = try tensor.shape.reduce(UInt64(1)) { partial, dimension in
+            try checkedProduct(partial, dimension,
+                               detail: "Maple tensor shape product overflows UInt64")
+        }
+        let expectedSize = try checkedProduct(elements, elementBytes,
+                                              detail: "Maple tensor byte size overflows UInt64")
+        guard tensor.sizeBytes == expectedSize else {
+            throw RepackError.shapeMismatch(
+                name: tensor.name,
+                detail: "shape requires \(expectedSize) bytes, got \(tensor.sizeBytes)")
+        }
+    }
+
+    private static func exactInt(_ value: UInt64, name: String, detail: String) throws -> Int {
+        guard let exact = Int(exactly: value) else {
+            throw RepackError.shapeMismatch(name: name, detail: detail)
+        }
+        return exact
+    }
+
+    private static func exactUInt64(_ value: Int, name: String, detail: String) throws -> UInt64 {
+        guard let exact = UInt64(exactly: value) else {
+            throw RepackError.shapeMismatch(name: name, detail: detail)
+        }
+        return exact
+    }
+
+    private static func checkedAdd(_ lhs: UInt64, _ rhs: UInt64,
+                                   detail: String) throws -> UInt64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        guard !overflow else { throw RepackError.configurationInvalid(detail: detail) }
+        return sum
+    }
+
+    private static func checkedProduct(_ lhs: UInt64, _ rhs: UInt64,
+                                       detail: String) throws -> UInt64 {
+        let (product, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else { throw RepackError.configurationInvalid(detail: detail) }
+        return product
     }
 
     /// Stable order for the resident LM tensor list. Embedding first, then
@@ -496,6 +915,10 @@ enum RepackPlanner {
                 if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "lm_head.weight"             { return (4, 0, 0, n) }
+            case .maple:
+                if n == "model.word_embeddings.weight" { return (0, 0, 0, n) }
+                if n == "model.norm.weight"             { return (3, 0, 0, n) }
+                if n == "lm_head.weight"                { return (4, 0, 0, n) }
             case .inklingSmall:
                 if n == "model.llm.embed.weight"      { return (0, 0, 0, n) }
                 if n == "model.llm.embed_norm.weight" { return (0, 0, 1, n) }
@@ -509,6 +932,7 @@ enum RepackPlanner {
                 case .qwen36:          slot = qwenSlotRank(in: n)
                 case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
                 case .inklingSmall:    slot = inklingSlotRank(in: n)
+                case .maple:           slot = mapleSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -521,6 +945,19 @@ enum RepackPlanner {
             if ka.2 != kb.2 { return ka.2 < kb.2 }
             return ka.3 < kb.3
         }
+    }
+
+    private static func mapleSlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight") { return 0 }
+        if n.contains(".self_attn.k_proj.weight") { return 1 }
+        if n.contains(".self_attn.v_proj.weight") { return 2 }
+        if n.contains(".self_attn.o_proj.weight") { return 3 }
+        if n.contains(".self_attn.q_norm.weight") { return 4 }
+        if n.contains(".self_attn.k_norm.weight") { return 5 }
+        if n.contains(".mlp.gate.weight") { return 6 }
+        if n.hasSuffix(".input_layernorm.weight") { return 7 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 8 }
+        return 99
     }
 
     /// Within-layer slot order for Inkling: the attention bundle (QKV/O, the

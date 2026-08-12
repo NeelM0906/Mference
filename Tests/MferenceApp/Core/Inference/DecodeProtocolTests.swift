@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import MferenceDecodeProtocol
+@testable import MferenceAppCore
 
 @Suite struct DecodeProtocolTests {
     @Test func loadRequestRoundTripPreservesEveryPublicRuntimeOption() throws {
@@ -91,6 +92,29 @@ import MferenceDecodeProtocol
         #expect(decoded.prefillTotal == 514)
     }
 
+    @Test func terminalEventRoundTripPreservesSequentialBF16PrefillDiagnostics() throws {
+        let prefill = DecodePrefillDiagnostics(
+            requestedMode: "chunked",
+            executedMode: "sequential",
+            kvStorageMode: "bf16",
+            chunkCompleteness: "complete",
+            unsupportedReason: nil)
+        let event = DecodeServiceEvent(
+            kind: .finished,
+            generationID: UUID(),
+            prefill: prefill)
+        let pipe = Pipe()
+        try pipe.fileHandleForWriting.write(
+            contentsOf: DecodeFrameCodec.encode(event))
+        try pipe.fileHandleForWriting.close()
+
+        let decoded = try DecodeFrameCodec.read(
+            DecodeServiceEvent.self,
+            from: pipe.fileHandleForReading)
+
+        #expect(decoded.prefill == prefill)
+    }
+
     @Test func generationRequestRoundTripPreservesChatRoles() throws {
         let generationID = UUID()
         let runtimeOptions = DecodeRuntimeOptions(
@@ -110,6 +134,8 @@ import MferenceDecodeProtocol
             maxNewTokens: 128,
             maxContextTokens: 8_192,
             temperature: 0.2,
+            topK: 32,
+            topP: 0.7,
             repetitionPenalty: 1.1,
             runtimeOptions: runtimeOptions,
             generationID: generationID)
@@ -127,6 +153,8 @@ import MferenceDecodeProtocol
         #expect(decoded.maxNewTokens == 128)
         #expect(decoded.maxContextTokens == 8_192)
         #expect(decoded.temperature == 0.2)
+        #expect(decoded.topK == 32)
+        #expect(decoded.topP == 0.7)
         #expect(decoded.repetitionPenalty == 1.1)
         #expect(decoded.runtimeOptions == runtimeOptions)
         #expect(decoded.generationID == generationID)
@@ -157,6 +185,90 @@ import MferenceDecodeProtocol
             temperature: 0)
 
         #expect(request.prompt == "First")
+    }
+
+    @Test func legacyGenerationRequestDefaultsMissingTruncationControls() throws {
+        let generationID = UUID()
+        let payload = """
+        {
+          "messages": [{"role": "user", "content": "Question"}],
+          "maxNewTokens": 16,
+          "maxContextTokens": 4096,
+          "temperature": 0.2,
+          "repetitionPenalty": 1,
+          "runtimeOptions": {
+            "expertCacheSlots": 16,
+            "expertCachePolicy": "lfu",
+            "prefillEnabled": true,
+            "prefillChunkTokens": 128,
+            "rdadvisePolicy": "off",
+            "modelVerification": "full-sha256"
+          },
+          "generationID": "\(generationID.uuidString)"
+        }
+        """
+
+        let decoded = try JSONDecoder().decode(
+            DecodeGenerationRequest.self, from: Data(payload.utf8))
+
+        #expect(decoded.topK == 64)
+        #expect(decoded.topP == 0.95)
+    }
+
+    @Test func generationRequestRoundTripPreservesDisabledTruncationControls() throws {
+        let request = DecodeGenerationRequest(
+            prompt: "Question",
+            maxNewTokens: 16,
+            maxContextTokens: 4_096,
+            temperature: 0.2,
+            topK: nil,
+            topP: nil)
+        let decoded = try JSONDecoder().decode(
+            DecodeGenerationRequest.self, from: JSONEncoder().encode(request))
+
+        #expect(decoded.topK == nil)
+        #expect(decoded.topP == nil)
+    }
+
+    @Test func decodeServiceClientRequiresItsLoadedModelDirectory() {
+        let loaded = URL(fileURLWithPath: "/tmp/loaded.gturbo")
+        let other = URL(fileURLWithPath: "/tmp/other.gturbo")
+
+        #expect(DecodeServiceInferenceClient.matchesLoadedModelDirectory(
+            loaded, loadedDirectory: loaded))
+        #expect(!DecodeServiceInferenceClient.matchesLoadedModelDirectory(
+            other, loadedDirectory: loaded))
+        #expect(!DecodeServiceInferenceClient.matchesLoadedModelDirectory(
+            loaded, loadedDirectory: nil))
+    }
+
+    @Test func decodeServiceClientMissingExecutableHasSafeIdleTeardown() async {
+        let serviceURL = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("mference-missing-service-\(UUID())")
+        let client = DecodeServiceInferenceClient(serviceURL: serviceURL)
+        do {
+            try await client.ensureLoaded(
+                modelDirectory: URL(fileURLWithPath: "/tmp/model.gturbo"),
+                maxContextTokens: 4_096,
+                options: AppRuntimeOptions(),
+                forceLogitsHead: false,
+                onState: { _ in })
+            Issue.record("Missing decode service unexpectedly loaded a model")
+        } catch let error as AppInferenceError {
+            switch error {
+            case .modelLoadFailed:
+                break
+            default:
+                Issue.record("Expected modelLoadFailed, received \(error)")
+            }
+        } catch {
+            Issue.record("Expected AppInferenceError, received \(error)")
+        }
+
+        client.shutdown()
+        client.shutdown()
+        await client.unload()
+        #expect(client.currentInferenceMemoryBytes == nil)
     }
 
     @Test func decoderAcceptsAFrameSplitAcrossSingleByteWrites() throws {

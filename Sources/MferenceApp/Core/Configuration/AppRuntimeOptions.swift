@@ -92,7 +92,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var resultSummary: String {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), FP16 KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), model-native KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
@@ -122,6 +122,8 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var maxContextTokens: Int
     public var expertCacheSlots: Int
     public var expertCachePolicy: AppExpertCachePolicy
+    public var prefillEnabled: Bool
+    public var prefillChunkTokens: Int
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var forceLogitsHead: Bool
@@ -134,6 +136,8 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.maxContextTokens = maxContextTokens
         self.expertCacheSlots = options.expertCacheSlots
         self.expertCachePolicy = options.expertCachePolicy
+        self.prefillEnabled = options.prefillEnabled
+        self.prefillChunkTokens = options.prefillChunkTokens
         self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
         self.forceLogitsHead = forceLogitsHead

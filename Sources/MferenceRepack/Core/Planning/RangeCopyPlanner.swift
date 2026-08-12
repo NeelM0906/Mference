@@ -1,22 +1,74 @@
 import Foundation
 
+public enum RangeCopyTransform: Sendable, Equatable {
+    case identity
+    case unpackInt2ToInt4
+    case repeatBF16(count: Int, negated: Bool)
+
+    var inputUnitBytes: UInt64 {
+        switch self {
+        case .identity: 1
+        case .unpackInt2ToInt4: 4
+        case .repeatBF16: 2
+        }
+    }
+
+    func destinationByteCount(for sourceByteCount: UInt64) throws -> UInt64 {
+        let multiplier: UInt64
+        switch self {
+        case .identity:
+            multiplier = 1
+        case .unpackInt2ToInt4:
+            multiplier = 2
+        case .repeatBF16(let count, _):
+            guard count > 0, let value = UInt64(exactly: count) else {
+                throw RepackError.configurationInvalid(
+                    detail: "repeat-bf16 count must be positive")
+            }
+            multiplier = value
+        }
+        let (result, overflow) = sourceByteCount.multipliedReportingOverflow(by: multiplier)
+        guard !overflow else {
+            throw RepackError.configurationInvalid(
+                detail: "range transform output size overflows UInt64")
+        }
+        return result
+    }
+
+    var fingerprintDescription: String {
+        switch self {
+        case .identity: "identity"
+        case .unpackInt2ToInt4: "unpack-int2-to-int4"
+        case .repeatBF16(let count, let negated):
+            "repeat-bf16:\(count):\(negated ? 1 : 0)"
+        }
+    }
+}
+
 public struct RangeCopy: Sendable, Equatable {
     public let shardID: String
     public let sourceOffset: UInt64
     public let size: UInt64
     public let destinationPath: String
     public let destinationOffset: UInt64
+    public let transform: RangeCopyTransform
 
     public init(shardID: String,
                 sourceOffset: UInt64,
                 size: UInt64,
                 destinationPath: String,
-                destinationOffset: UInt64) {
+                destinationOffset: UInt64,
+                transform: RangeCopyTransform = .identity) {
         self.shardID = shardID
         self.sourceOffset = sourceOffset
         self.size = size
         self.destinationPath = destinationPath
         self.destinationOffset = destinationOffset
+        self.transform = transform
+    }
+
+    func destinationByteCount() throws -> UInt64 {
+        try transform.destinationByteCount(for: size)
     }
 }
 
@@ -26,6 +78,18 @@ public struct CoalescedRangeCopy: Sendable, Equatable {
     public let sourceOffset: UInt64
     public let size: UInt64
     public let destinations: [RangeCopy]
+
+    func destinationByteCount() throws -> UInt64 {
+        try destinations.reduce(UInt64(0)) { total, destination in
+            let (next, overflow) = total.addingReportingOverflow(
+                try destination.destinationByteCount())
+            guard !overflow else {
+                throw RepackError.configurationInvalid(
+                    detail: "coalesced destination size overflows UInt64")
+            }
+            return next
+        }
+    }
 }
 
 public struct RemoteExpectedOutput: Codable, Sendable, Equatable {
@@ -51,39 +115,96 @@ public enum RangeCopyPlanner {
         var copies: [RangeCopy] = []
         copies.reserveCapacity(repackPlan.resident.entries.count * 3)
 
+        func appendCopy(shardID: String,
+                        sourceOffset: UInt64,
+                        sourceSize: UInt64,
+                        destinationPath: String,
+                        destinationOffset: UInt64,
+                        destinationSize: UInt64,
+                        destinationLimit: UInt64,
+                        transform: RangeCopyTransform) throws {
+            let copy = RangeCopy(
+                shardID: shardID,
+                sourceOffset: sourceOffset,
+                size: sourceSize,
+                destinationPath: destinationPath,
+                destinationOffset: destinationOffset,
+                transform: transform)
+            guard try copy.destinationByteCount() == destinationSize else {
+                throw RepackError.configurationInvalid(
+                    detail: "range transform output size does not match its planned destination")
+            }
+            let destinationEnd = try checkedEnd(
+                offset: destinationOffset,
+                size: destinationSize,
+                detail: "planned destination range overflows UInt64")
+            guard destinationEnd <= destinationLimit else {
+                throw RepackError.configurationInvalid(
+                    detail: "range transform output exceeds its planned file")
+            }
+            copies.append(copy)
+        }
+
         for entry in repackPlan.resident.entries {
-            copies.append(RangeCopy(shardID: entry.sourceWeight.shardPath,
-                                    sourceOffset: entry.sourceWeight.absoluteOffset,
-                                    size: entry.sizeBytes,
-                                    destinationPath: entry.fileOffsetPath(in: repackPlan.resident),
-                                    destinationOffset: entry.fileOffset))
+            try appendCopy(
+                shardID: entry.sourceWeight.shardPath,
+                sourceOffset: entry.sourceWeight.absoluteOffset,
+                sourceSize: entry.sourceWeight.sizeBytes,
+                destinationPath: entry.fileOffsetPath(in: repackPlan.resident),
+                destinationOffset: entry.fileOffset,
+                destinationSize: entry.sizeBytes,
+                destinationLimit: repackPlan.resident.totalSize,
+                transform: entry.weightTransform)
             if let scales = entry.sourceScales {
-                copies.append(RangeCopy(shardID: scales.shardPath,
-                                        sourceOffset: scales.absoluteOffset,
-                                        size: entry.scaleSize,
-                                        destinationPath: repackPlan.resident.path,
-                                        destinationOffset: entry.scaleOffset))
+                try appendCopy(
+                    shardID: scales.shardPath,
+                    sourceOffset: scales.absoluteOffset,
+                    sourceSize: scales.sizeBytes,
+                    destinationPath: repackPlan.resident.path,
+                    destinationOffset: entry.scaleOffset,
+                    destinationSize: entry.scaleSize,
+                    destinationLimit: repackPlan.resident.totalSize,
+                    transform: entry.scaleTransform)
             }
             if let biases = entry.sourceBiases {
-                copies.append(RangeCopy(shardID: biases.shardPath,
-                                        sourceOffset: biases.absoluteOffset,
-                                        size: entry.biasSize,
-                                        destinationPath: repackPlan.resident.path,
-                                        destinationOffset: entry.biasOffset))
+                try appendCopy(
+                    shardID: biases.shardPath,
+                    sourceOffset: biases.absoluteOffset,
+                    sourceSize: biases.sizeBytes,
+                    destinationPath: repackPlan.resident.path,
+                    destinationOffset: entry.biasOffset,
+                    destinationSize: entry.biasSize,
+                    destinationLimit: repackPlan.resident.totalSize,
+                    transform: entry.biasTransform)
             }
         }
 
         for layer in repackPlan.layers where layer.expertsPerLayer > 0 {
             for expert in 0..<layer.expertsPerLayer {
-                let blobBase = UInt64(layer.physicalRank(for: expert)) * layer.expertStride
+                let blobBase = try checkedProduct(
+                    UInt64(layer.physicalRank(for: expert)),
+                    layer.expertStride,
+                    detail: "expert destination offset overflows UInt64")
                 for slice in layer.subTensors {
-                    copies.append(RangeCopy(
+                    let sourceStride = try checkedProduct(
+                        UInt64(expert),
+                        slice.sourceOffsetPerExpert,
+                        detail: "expert source offset overflows UInt64")
+                    try appendCopy(
                         shardID: slice.sourceTensor.shardPath,
-                        sourceOffset: slice.sourceTensor.absoluteOffset
-                            + UInt64(expert) * slice.sourceOffsetPerExpert,
-                        size: slice.sizeInExpertBlob,
+                        sourceOffset: checkedEnd(
+                            offset: slice.sourceTensor.absoluteOffset,
+                            size: sourceStride,
+                            detail: "expert source offset overflows UInt64"),
+                        sourceSize: slice.sourceOffsetPerExpert,
                         destinationPath: layer.path,
-                        destinationOffset: blobBase + slice.offsetInExpertBlob))
+                        destinationOffset: checkedEnd(
+                            offset: blobBase,
+                            size: slice.offsetInExpertBlob,
+                            detail: "expert destination offset overflows UInt64"),
+                        destinationSize: slice.sizeInExpertBlob,
+                        destinationLimit: layer.fileSize,
+                        transform: slice.transform)
                 }
             }
         }
@@ -101,8 +222,14 @@ public enum RangeCopyPlanner {
             layoutOrderSha256: layoutOrderSha256,
             residentIndexSha256: indexSha,
             expectedOutputs: expectedOutputs)
-        let downloaded = coalesced.reduce(UInt64(0)) { $0 + $1.size }
-        let copied = copies.reduce(UInt64(0)) { $0 + $1.size }
+        let downloaded = try checkedSum(
+            coalesced.map(\.size),
+            detail: "remote range byte total overflows UInt64")
+        let copied = try sourceUnionBytes(copies)
+        guard downloaded >= copied else {
+            throw RepackError.configurationInvalid(
+                detail: "coalesced source ranges are smaller than their source union")
+        }
         return RangeCopyPlan(scalarCopies: copies,
                              coalescedCopies: coalesced,
                              remoteBytesToDownload: downloaded,
@@ -117,7 +244,7 @@ public enum RangeCopyPlanner {
         guard rangeChunkBytes > 0 else {
             throw RepackError.configurationInvalid(detail: "rangeChunkBytes must be positive")
         }
-        let sorted = splitLargeCopies(copies, rangeChunkBytes: rangeChunkBytes).sorted {
+        let sorted = try splitLargeCopies(copies, rangeChunkBytes: rangeChunkBytes).sorted {
             if $0.shardID != $1.shardID { return $0.shardID < $1.shardID }
             return $0.sourceOffset < $1.sourceOffset
         }
@@ -137,7 +264,10 @@ public enum RangeCopyPlanner {
         }
 
         for copy in sorted where copy.size > 0 {
-            let copyEnd = copy.sourceOffset + copy.size
+            let copyEnd = try checkedEnd(
+                offset: copy.sourceOffset,
+                size: copy.size,
+                detail: "source range overflows UInt64")
             if currentShard == nil {
                 currentShard = copy.shardID
                 currentStart = copy.sourceOffset
@@ -173,23 +303,38 @@ public enum RangeCopyPlanner {
     }
 
     private static func splitLargeCopies(_ copies: [RangeCopy],
-                                         rangeChunkBytes: Int) -> [RangeCopy] {
+                                         rangeChunkBytes: Int) throws -> [RangeCopy] {
         let limit = UInt64(rangeChunkBytes)
         var out: [RangeCopy] = []
         for copy in copies {
+            let unit = copy.transform.inputUnitBytes
+            guard copy.size > 0, copy.size % unit == 0, limit >= unit else {
+                throw RepackError.configurationInvalid(
+                    detail: "range transform \(copy.transform.fingerprintDescription) "
+                        + "requires nonempty \(unit)-byte aligned source chunks")
+            }
+            _ = try copy.destinationByteCount()
+            let alignedLimit = limit - limit % unit
             var remaining = copy.size
             var src = copy.sourceOffset
             var dst = copy.destinationOffset
             while remaining > 0 {
-                let n = min(remaining, limit)
+                let n = min(remaining, alignedLimit)
                 out.append(RangeCopy(shardID: copy.shardID,
                                      sourceOffset: src,
                                      size: n,
                                      destinationPath: copy.destinationPath,
-                                     destinationOffset: dst))
+                                     destinationOffset: dst,
+                                     transform: copy.transform))
                 remaining -= n
-                src += n
-                dst += n
+                src = try checkedEnd(
+                    offset: src,
+                    size: n,
+                    detail: "split source range overflows UInt64")
+                dst = try checkedEnd(
+                    offset: dst,
+                    size: copy.transform.destinationByteCount(for: n),
+                    detail: "split destination range overflows UInt64")
             }
         }
         return out
@@ -197,6 +342,70 @@ public enum RangeCopyPlanner {
 
     private static func outputRoot(for plan: RepackPlan) -> String {
         (plan.resident.path as NSString).deletingLastPathComponent
+    }
+
+    private static func checkedEnd(offset: UInt64,
+                                   size: UInt64,
+                                   detail: String) throws -> UInt64 {
+        let (end, overflow) = offset.addingReportingOverflow(size)
+        guard !overflow else {
+            throw RepackError.configurationInvalid(detail: detail)
+        }
+        return end
+    }
+
+    private static func checkedProduct(_ lhs: UInt64,
+                                       _ rhs: UInt64,
+                                       detail: String) throws -> UInt64 {
+        let (product, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else {
+            throw RepackError.configurationInvalid(detail: detail)
+        }
+        return product
+    }
+
+    private static func checkedSum(_ values: [UInt64],
+                                   detail: String) throws -> UInt64 {
+        try values.reduce(UInt64(0)) { total, value in
+            try checkedEnd(offset: total, size: value, detail: detail)
+        }
+    }
+
+    private static func sourceUnionBytes(_ copies: [RangeCopy]) throws -> UInt64 {
+        let sorted = copies.filter { $0.size > 0 }.sorted {
+            if $0.shardID != $1.shardID { return $0.shardID < $1.shardID }
+            return $0.sourceOffset < $1.sourceOffset
+        }
+        var total: UInt64 = 0
+        var shard: String?
+        var start: UInt64 = 0
+        var end: UInt64 = 0
+        for copy in sorted {
+            let copyEnd = try checkedEnd(
+                offset: copy.sourceOffset,
+                size: copy.size,
+                detail: "source range overflows UInt64")
+            if shard != copy.shardID || copy.sourceOffset > end {
+                if shard != nil {
+                    total = try checkedEnd(
+                        offset: total,
+                        size: end - start,
+                        detail: "source union byte total overflows UInt64")
+                }
+                shard = copy.shardID
+                start = copy.sourceOffset
+                end = copyEnd
+            } else {
+                end = max(end, copyEnd)
+            }
+        }
+        if shard != nil {
+            total = try checkedEnd(
+                offset: total,
+                size: end - start,
+                detail: "source union byte total overflows UInt64")
+        }
+        return total
     }
 
     private static func expectedOutputList(for plan: RepackPlan) -> [RemoteExpectedOutput] {
@@ -225,16 +434,16 @@ public enum RangeCopyPlanner {
         var previousPath: String?
         var previousEnd: UInt64 = 0
         for (path, copy) in sorted {
-            guard copy.destinationOffset <= UInt64.max - copy.size else {
-                throw RepackError.configurationInvalid(
-                    detail: "destination range overflows \(path)")
-            }
+            let destinationEnd = try checkedEnd(
+                offset: copy.destinationOffset,
+                size: copy.destinationByteCount(),
+                detail: "destination range overflows \(path)")
             if previousPath == path, copy.destinationOffset < previousEnd {
                 throw RepackError.configurationInvalid(
                     detail: "overlapping destination ranges in \(path)")
             }
             previousPath = path
-            previousEnd = copy.destinationOffset + copy.size
+            previousEnd = destinationEnd
         }
     }
 
@@ -247,7 +456,12 @@ public enum RangeCopyPlanner {
         residentIndexSha256: String,
         expectedOutputs: [RemoteExpectedOutput]
     ) throws -> String {
-        var writer = FingerprintWriter(domain: "Mference.RemoteInstallPlan.v1")
+        let usesTransforms = copies.contains { copy in
+            copy.destinations.contains { $0.transform != .identity }
+        }
+        var writer = FingerprintWriter(domain: usesTransforms
+            ? "Mference.RemoteInstallPlan.v2"
+            : "Mference.RemoteInstallPlan.v1")
         writer.append(UInt64(GTurboJSON.versionMajor))
         writer.append(UInt64(GTurboJSON.versionMinor))
         writer.append(UInt64(rangeChunkBytes))
@@ -271,8 +485,16 @@ public enum RangeCopyPlanner {
                     destination.destinationPath,
                     root: outputRoot))
                 writer.append(destination.destinationOffset)
+                guard destination.sourceOffset >= copy.sourceOffset else {
+                    throw RepackError.configurationInvalid(
+                        detail: "destination source offset precedes its coalesced range")
+                }
                 writer.append(destination.sourceOffset - copy.sourceOffset)
                 writer.append(destination.size)
+                if usesTransforms {
+                    writer.append(try destination.destinationByteCount())
+                    writer.append(destination.transform.fingerprintDescription)
+                }
             }
         }
         return writer.finalize()

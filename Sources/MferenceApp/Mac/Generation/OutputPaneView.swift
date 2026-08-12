@@ -470,7 +470,7 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
     }
 }
 
-#if DEBUG
+#if DEBUG && canImport(PreviewsMacros)
 private struct TranscriptPreview: View {
     let response: String
     let isTerminal: Bool

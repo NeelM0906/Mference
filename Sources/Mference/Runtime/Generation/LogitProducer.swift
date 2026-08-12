@@ -15,6 +15,11 @@ public protocol ContinuableLogitProducer: LogitProducer {
     func prepareForContinuation(expectedPosition: Int) throws
 }
 
+protocol FusedHeadLogitProducer: LogitProducer {
+    var usesFusedGreedyHead: Bool { get }
+    var lastGreedyToken: UInt32 { get }
+}
+
 protocol ContextWindowReporting: Sendable {
     var maxContext: Int { get }
 }
@@ -47,4 +52,15 @@ protocol ChunkedPrefillRunner: LogitProducer {
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult
+}
+
+protocol HeadlessSequentialPrefillRunner: LogitProducer {
+    /// Advance one prompt token without producing vocabulary logits.
+    func produceWithoutLogits(token: Int32, position: Int) async throws
+}
+
+/// Produces the final prompt-token logits without enabling a decode-only
+/// approximate head.
+protocol ExactPrefillLogitProducer: LogitProducer {
+    func produceExactPrefill(token: Int32, position: Int, into logits: MTLBuffer) async throws
 }

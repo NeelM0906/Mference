@@ -74,7 +74,8 @@ public func run(args: Args,
             expertCacheSlots: expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: !config.isPureGreedy)
+            forceLogitsHead: !config.isPureGreedy,
+            useMapleFlashHead: args.flashHead)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -86,36 +87,69 @@ public func run(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
-        let runner = try RealForwardRunner(
+        let forwardRuntime = try ForwardRunnerFactory.make(
             model: model,
             context: context,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
+        let runner = forwardRuntime.producer
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
+        let decoder = args.messagesFile != nil && tokenizer.generationPromptStartsInThinking
+            ? StructuredAssistantDecoder(tokenizer: tokenizer,
+                                         allowedTools: [],
+                                         startsInThought: true)
+            : nil
+        var completionConfig = config
+        var stopMatcher = StreamingStopMatcher(stops: decoder == nil ? [] : config.stopStrings)
+        if decoder != nil { completionConfig.stopStrings = [] }
+        var decodingError: Error?
+        var shouldStop = false
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
             promptIds: promptIds,
-            config: config,
+            config: completionConfig,
             context: context,
             scratch: scratch,
-            prefillConfig: runtime.prefillConfig) { progress in
+            prefillConfig: forwardRuntime.prefillConfig,
+            shouldStop: { shouldStop }) { progress in
+                guard decodingError == nil else { return }
+                do {
                 switch progress {
                 case .prefill:
                     break
-                case .token(_, _, let delta):
-                    if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
+                case .token(_, let tokenID, let delta):
+                    let events = try structuredEvents(decoder, tokenID: tokenID, text: delta)
+                    let visible = try visibleAssistantText(events)
+                    let emitted = decoder == nil ? visible : stopMatcher.push(visible)
+                    if !emitted.isEmpty { stdout.write(Data(emitted.utf8)) }
+                    if decoder != nil, stopMatcher.isStopped { shouldStop = true }
                 case .tail(let tail):
-                    stdout.write(Data(tail.utf8))
+                    let events = try structuredTailEvents(decoder, text: tail)
+                    let visible = try visibleAssistantText(events)
+                    let emitted = decoder == nil ? visible : stopMatcher.push(visible)
+                    if !emitted.isEmpty { stdout.write(Data(emitted.utf8)) }
+                }
+                } catch {
+                    decodingError = error
+                    shouldStop = true
                 }
             }
+        if let decodingError { throw decodingError }
+        if let decoder {
+            let visible = try visibleAssistantText(decoder.finish())
+            let emitted = stopMatcher.push(visible) + stopMatcher.finish()
+            if !emitted.isEmpty { stdout.write(Data(emitted.utf8)) }
+        }
 
-        if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1" {
+        if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1",
+           runner is RealForwardRunner {
             RealForwardRunner.dumpPrefillBreakdown()
         }
-        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1" {
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let runner = runner as? RealForwardRunner {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000
             let accounted = Double(runner.totalCb1Nanos + runner.totalIoNanos
@@ -164,6 +198,30 @@ private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> 
     return RunResult(exitCode: code)
 }
 
+private func structuredEvents(_ decoder: StructuredAssistantDecoder?,
+                              tokenID: Int32,
+                              text: String) throws -> [StructuredAssistantEvent] {
+    if let decoder { return try decoder.consume(tokenID: tokenID, delta: text) }
+    return text.isEmpty ? [] : [.content(text)]
+}
+
+private func structuredTailEvents(_ decoder: StructuredAssistantDecoder?,
+                                  text: String) throws -> [StructuredAssistantEvent] {
+    if let decoder { return try decoder.consumeFlushedText(text) }
+    return text.isEmpty ? [] : [.content(text)]
+}
+
+private func visibleAssistantText(_ events: [StructuredAssistantEvent]) throws -> String {
+    var visible = ""
+    for event in events {
+        switch event {
+        case .content(let text): visible += text
+        case .toolCall: throw ToolCallParserError.malformed
+        }
+    }
+    return visible
+}
+
 /// Interactive multi-turn chat. The model is loaded once and every turn
 /// re-renders the whole history through the tokenizer's chat template, so the
 /// REPL follows whichever dialect the loaded checkpoint uses. Each turn starts
@@ -197,7 +255,8 @@ private func runChat(args: Args,
             expertCacheSlots: expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: !baseConfig.isPureGreedy)
+            forceLogitsHead: !baseConfig.isPureGreedy,
+            useMapleFlashHead: args.flashHead)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -209,11 +268,12 @@ private func runChat(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
-        let runner = try RealForwardRunner(
+        let forwardRuntime = try ForwardRunnerFactory.make(
             model: model,
             context: context,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
+        let runner = forwardRuntime.producer
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
@@ -275,7 +335,7 @@ private func runChat(args: Args,
                                                  runner: runner,
                                                  context: context,
                                                  scratch: scratch,
-                                                 runtime: runtime,
+                                                 prefillConfig: forwardRuntime.prefillConfig,
                                                  quiet: args.quiet,
                                                  stdout: stdout,
                                                  stderr: stderr)
@@ -307,37 +367,60 @@ private func resolveExpertCacheSlots(_ choice: ExpertCacheSlotChoice,
 private func streamChatTurn(promptIds: [Int32],
                             config: GenerationConfig,
                             tokenizer: MFTokenizer,
-                            runner: RealForwardRunner,
+                            runner: any ContinuableLogitProducer,
                             context: MetalContext,
                             scratch: RawCompletionScratch,
-                            runtime: RuntimeConfiguration,
+                            prefillConfig: PrefillRuntimeConfig,
                             quiet: Bool,
                             stdout: FileHandle,
                             stderr: FileHandle) async throws -> String {
     var reply = ""
+    let decoder = tokenizer.generationPromptStartsInThinking
+        ? StructuredAssistantDecoder(tokenizer: tokenizer,
+                                     allowedTools: [],
+                                     startsInThought: true)
+        : nil
+    var completionConfig = config
+    var stopMatcher = StreamingStopMatcher(stops: decoder == nil ? [] : config.stopStrings)
+    if decoder != nil { completionConfig.stopStrings = [] }
+    var decodingError: Error?
+    var shouldStop = false
     let stats = try await runRawCompletion(
         producer: runner,
         tokenizer: tokenizer,
         promptIds: promptIds,
-        config: config,
+        config: completionConfig,
         context: context,
         scratch: scratch,
-        prefillConfig: runtime.prefillConfig) { progress in
+        prefillConfig: prefillConfig,
+        shouldStop: { shouldStop }) { progress in
+            guard decodingError == nil else { return }
+            do {
             switch progress {
             case .prefill:
                 break
-            case .token(_, _, let delta):
-                if !delta.isEmpty {
-                    stdout.write(Data(delta.utf8))
-                    reply += delta
-                }
+            case .token(_, let tokenID, let delta):
+                let visible = try visibleAssistantText(
+                    structuredEvents(decoder, tokenID: tokenID, text: delta))
+                let emitted = decoder == nil ? visible : stopMatcher.push(visible)
+                if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+                if decoder != nil, stopMatcher.isStopped { shouldStop = true }
             case .tail(let tail):
-                if !tail.isEmpty {
-                    stdout.write(Data(tail.utf8))
-                    reply += tail
-                }
+                let visible = try visibleAssistantText(structuredTailEvents(decoder, text: tail))
+                let emitted = decoder == nil ? visible : stopMatcher.push(visible)
+                if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+            }
+            } catch {
+                decodingError = error
+                shouldStop = true
             }
         }
+    if let decodingError { throw decodingError }
+    if let decoder {
+        let visible = try visibleAssistantText(decoder.finish())
+        let emitted = stopMatcher.push(visible) + stopMatcher.finish()
+        if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+    }
     stdout.write(Data("\n".utf8))
     if !quiet {
         let tokensPerSecond = stats.decodeSeconds > 0

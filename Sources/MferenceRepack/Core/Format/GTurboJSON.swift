@@ -122,6 +122,14 @@ enum GTurboJSON {
             archDict["routerGlobalScale"] = arch.routerGlobalScale
             archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
         }
+        if arch.family == .maple {
+            archDict["routerScoringFunc"] = arch.routerScoringFunc
+            archDict["routedScalingFactor"] = arch.routedScalingFactor
+            archDict["swigluLimit"] = arch.swigluLimit
+            archDict["numSharedExperts"] = arch.numSharedExperts
+            archDict["numDenseLayers"] = arch.numDenseLayers
+            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
+        }
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -139,13 +147,45 @@ enum GTurboJSON {
                 "groupSize": plan.baseGroupSize
             ]
         }
+        if arch.family == .maple {
+            let affineInt4: [String: Any] = [
+                "weightBits": 4,
+                "scheme": "affine",
+                "scaleType": "BF16",
+                "biasType": "BF16",
+                "groupSize": 64,
+            ]
+            quantDict["embedding"] = affineInt4
+            quantDict["attention"] = affineInt4
+            quantDict["router"] = [
+                "weightBits": 16,
+                "scheme": "unquantized",
+                "scaleType": "none",
+                "biasType": "none",
+                "groupSize": 0,
+            ]
+            quantDict["sharedExpert"] = [
+                "weightBits": 0,
+                "scheme": "none",
+                "scaleType": "none",
+                "biasType": "none",
+                "groupSize": 0,
+            ]
+            quantDict["routedExpert"] = [
+                "weightBits": 2,
+                "scheme": "affine",
+                "scaleType": "BF16",
+                "biasType": "BF16",
+                "groupSize": 64,
+            ]
+        }
 
         var filesDict: [String: Any] = [:]
         for (path, info) in files {
             filesDict[path] = ["size": info.size, "sha256": info.sha256]
         }
 
-        let manifest: [String: Any] = [
+        var manifest: [String: Any] = [
             "magic": GTurboJSON.magic,
             "versionMajor": GTurboJSON.versionMajor,
             "versionMinor": GTurboJSON.versionMinor,
@@ -164,6 +204,19 @@ enum GTurboJSON {
             "expertStride": expertStride,
             "bitWidthOverridesHonored": plan.bitsOverrideCount
         ]
+        if let flashHead = plan.flashHead {
+            manifest["flashHead"] = [
+                "nClusters": flashHead.nClusters,
+                "clusterSize": flashHead.clusterSize,
+                "nProbes": flashHead.nProbes,
+                "groupSize": flashHead.groupSize,
+                "bits": flashHead.bits,
+                "headGroupSize": flashHead.headGroupSize,
+                "headBits": flashHead.headBits,
+                "scaledCentroids": flashHead.scaledCentroids,
+                "forceTokens": flashHead.forceTokens,
+            ]
+        }
         return try JSONSerialization.data(withJSONObject: manifest,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }

@@ -32,6 +32,18 @@ included for broader design context rather than a line-level claim.
 - [Hugging Face swift-transformers](https://github.com/huggingface/swift-transformers)
   is the direct tokenizer dependency. Mference adds bounded streaming
   detokenization around it.
+- [`deepgrove/maple-preview-2bit-mlx`](https://huggingface.co/deepgrove/maple-preview-2bit-mlx),
+  pinned at `361db5da5e74ff6fcdd852d478e1f266ce11013a` with source-index SHA-256
+  `56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95`, is the
+  Maple checkpoint. Its custom `maple.py` defines the ternary projections,
+  BF16 decode boundaries, hybrid NoPE/sliding-window attention, and 256-way
+  top-8 routed MoE used as the executable reference.
+- [`deepgrove-ai/mlx-lm-deepgrove`](https://github.com/deepgrove-ai/mlx-lm-deepgrove/tree/eba96c16158f032821b0bf374ea1421cfddef0a9)
+  at `eba96c16158f032821b0bf374ea1421cfddef0a9` supplied the pinned Maple MLX
+  runtime for generation behavior. Its
+  [`maple.py` FlashHead path](https://github.com/deepgrove-ai/mlx-lm-deepgrove/blob/eba96c16158f032821b0bf374ea1421cfddef0a9/mlx_lm/models/maple.py#L853)
+  is the reference for the explicit approximate singleton-decode candidate
+  head; the default complete-head path keeps it disabled.
 
 ## Metal and kernels
 
@@ -39,6 +51,10 @@ included for broader design context rather than a line-level claim.
   were the main reference for quantized QMV/QMM, RMSNorm, RoPE, and attention
   geometry. The tagged [v0.32.0 vector SDPA](https://github.com/ml-explore/mlx/blob/v0.32.0/mlx/backend/metal/kernels/sdpa_vector.h)
   inspired the D512 one-pass attention variant.
+- Maple's native-BF16 quantized GEMV and vector-SDPA kernels were checked
+  operation-for-operation against [Apple MLX v0.32.0](https://github.com/ml-explore/mlx/tree/v0.32.0/mlx/backend/metal/kernels),
+  including safe-math QMV compilation, architecture-specific one/two-pass SDPA
+  dispatch, and rotating-cache physical iteration order.
 - Pinned [llama.cpp/ggml Metal](https://github.com/ggml-org/llama.cpp/tree/79bba02a6741de194912d370015866414faa83ad/ggml/src/ggml-metal)
   informed row-SIMD quantized matvec, register-resident decode,
   capability-gated kernels, memory mappings, and resource hazards.

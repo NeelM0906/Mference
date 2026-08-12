@@ -1,9 +1,10 @@
 # Local OpenAI-compatible server
 
-`MferenceServer` exposes a local Chat Completions API for one Gemma
-model. It binds to `127.0.0.1` by default, or to the machine's exact Tailscale
-IPv4 address with `--bind tailnet`. It has no application-level authentication
-or TLS; do not expose it through a wildcard interface, proxy, or tunnel.
+`MferenceServer` exposes a local Chat Completions API for one installed
+supported model. It binds to `127.0.0.1` by default, or to the machine's exact
+Tailscale IPv4 address with `--bind tailnet`. It has no application-level
+authentication or TLS; do not expose it through a wildcard interface, proxy,
+or tunnel.
 
 ## Start the server
 
@@ -224,6 +225,7 @@ The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,
 batching, log probabilities, or remote model switching.
 
-Context length can be 4K, 8K, 16K, 32K, or 64K. The default is 16K. Larger FP16
-KV contexts use more memory. On an 8 GB Mac, run one model process at a time and
-watch memory pressure.
+Context length can be 4K, 8K, 16K, 32K, 64K, or 128000 tokens; the default is
+16K. Maple supports 128000 tokens in the server and uses native BF16 KV with
+sequential prefill; existing families use FP16 KV. On an 8 GB Mac, run one
+model process at a time and watch memory pressure.

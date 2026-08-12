@@ -429,9 +429,9 @@ references lead to the supporting code and tests.
 
 ## Scope and limitations
 
-The runtime supports text-only generation from two pinned instruction
-checkpoints, Gemma 4 26B-A4B and Qwen 3.6 35B-A3B. Both source models support
-image input; Mference omits both vision towers.
+The runtime supports text-only generation from five pinned checkpoints: Gemma
+4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, Inkling-Small
+276B-A12B, and Maple Preview. Mference omits vision towers and multimodal input.
 
 Qwen 3.6 is selected from `manifest.json -> arch.family`. It is a hybrid of 30
 gated-DeltaNet linear-attention layers and 10 gated full-attention layers, with
@@ -444,22 +444,24 @@ needs about 19.6 GB of disk against Gemma's 14.3 GB. Acceptance evidence covers
 4K context. See [Qwen 3.6 performance notes](QWEN36_PERFORMANCE.md) and
 [Benchmarks](BENCHMARKS.md#qwen-36-35b-a3b-measured-decode).
 
-The Mac app offers 4K, 8K, 16K, 32K, and 64K context lengths. Published app
-and CLI acceptance evidence covers up to 4K. Vision input, training,
-fine-tuning, server batching, remote serving, and general model support are
-outside the current scope. The runtime supports the two architectures above by
-explicit enumeration — each with its own pinned checkpoint, compile-time
-baseline, and manifest contract — rather than by discovering arbitrary
-checkpoints. The optional HTTP server is loopback-only, owns one
+The Mac app offers 4K, 8K, 16K, 32K, 64K, and 128K context lengths. Maple's
+runtime, CLI, and server accept up to 128,000 tokens, but no final acceptance
+run establishes that boundary. Vision input, training, fine-tuning, server
+batching, and generic model discovery are outside the current scope. Each of
+the five architectures is explicitly enumerated with its own pinned checkpoint,
+compile-time baseline, and manifest contract. The optional HTTP server owns one
 warm model, serializes generation, and retains one verified conversational KV
-prefix by default. It retains only that prefix. See the
-[local server guide](OPENAI_SERVER.md).
+prefix by default. It binds to loopback unless the user explicitly selects the
+machine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).
 
-Mference is a research system. The Mac app exposes a small set of typed
-runtime controls. The production path uses FP16 KV, exact split-K/V
-attention, a 16-slot LFU expert cache, chunked prefill, staged affine MPP
-prefill, and batched routed MoE prefill. File-read advice (`RDADVISE`) is off by
-default.
+Mference is a research system. The Mac app exposes a small set of typed runtime
+controls. Existing families use FP16 KV and their family-specific prefill
+paths; Maple uses native BF16 KV and layer-major chunked prefill with a
+token-ordered cache/attention sweep. Its exact full head remains the default;
+the CLI can explicitly select the approximate singleton-decode FlashHead when
+the installed model contains its validated centroid/map data. The memory-first
+expert cache has 16 slots per layer, with model-aware alternatives where
+documented. File-read advice (`RDADVISE`) is off by default.
 
 ## Read next
 
