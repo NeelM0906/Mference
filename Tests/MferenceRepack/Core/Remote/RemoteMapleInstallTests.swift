@@ -240,8 +240,12 @@ private func mapleExpandedInt2(_ source: Data) -> Data {
       | UInt32(source[source.startIndex + offset + 2]) << 16
       | UInt32(source[source.startIndex + offset + 3]) << 24
     for half in 0..<2 {
-      let expanded = (0..<8).reduce(UInt32(0)) {
-        $0 | ((word >> UInt32((half * 8 + $1) * 2) & 3) << UInt32($1 * 4))
+      // Explicit loop, not a closed-form reduce: Swift 6.1 (the macOS 15 CI
+      // floor) cannot type-check the reduce form in reasonable time.
+      var expanded: UInt32 = 0
+      for nibble in 0..<8 {
+        let pair = (word >> UInt32((half * 8 + nibble) * 2)) & 3
+        expanded |= pair << UInt32(nibble * 4)
       }
       output.append(UInt8(truncatingIfNeeded: expanded))
       output.append(UInt8(truncatingIfNeeded: expanded >> 8))
