@@ -14,11 +14,12 @@ sensitive to OS page-cache state; see [Warming the page cache backfires]
 
 ## Production acceleration (2026-08-06)
 
-The production CLI and server now resolve their expert-cache default by model
-family and physical memory: Qwen uses 32 slots per layer on hosts with at least
-16 GiB and 16 slots on smaller hosts. An explicit `--expert-cache-slots 16`
-keeps the lower-memory path. The Mac app retains its explicit 16-slot setting
-and offers 32 in the inspector.
+The production CLI and server resolve their expert-cache default by model
+family and physical memory; at this record's date Qwen used 32 slots per layer
+on hosts with at least 16 GiB and 16 slots on smaller hosts (the ≥24 GiB rung
+has since moved to 96 slots — see round 3 below). An explicit
+`--expert-cache-slots 16` keeps the lower-memory path. The Mac app keeps 16 as
+its explicit default and offers every allowed slot count in the inspector.
 
 On the M5/24 GB host, the exact community protocol at commit `3d6996b` produced:
 
@@ -115,6 +116,13 @@ That is inherent to the streaming design — a layer's routed experts cannot be
 read until that layer's router has run, and the next layer cannot start until
 this layer's MoE has finished.
 
+The table is the July 16-slot record; the 2026-08-08 defaults relaxed the
+serialization — on all-hit layers the GPU slot map skips the CPU plan
+entirely, and on miss layers the eager routed commit runs the preads in the
+background (see round 3 below). The phase report now also splits the I/O
+await into GPU-overlapped and exposed time, and prints the all-hit
+layer-step rate, GPU busy/span/gap, and the speculative-prefetch counters.
+
 Per token the runtime touches about 1.6 GB of weights, of which roughly
 540 MiB is routed-expert data (40 layers x 8 experts x 1.69 MiB).
 
@@ -132,9 +140,11 @@ Each of these was measured before being ruled out.
   0.25 ms/token difference — not worth restructuring for.
 - **Expert cache policy.** The July workload moved from 19.0 to 19.8 tok/s when
   raising slots from 16 to 32, but the frozen August same-output cases gained
-  9.2–36.3%. LFU remains the replacement policy and slot counts above 32 are
-  not offered. Auto uses 32 only for Qwen on hosts with at least 16 GiB; the
-  8 GB path and every other family retain 16.
+  9.2–36.3%. LFU remains the replacement policy. Slot counts above 32 were not
+  offered at the time of this record; the allowed set has since grown to
+  8/16/24/32/64/96/128 plus an explicit `resident` mode, and auto now gives
+  Qwen 96 slots on hosts with at least 24 GiB and 32 at 16 GiB; the 8 GB path
+  and every other family retain 16.
 - **RDADVISE read-ahead.** `--rdadvise default` cut the I/O await from 3474 to
   2931 ms, but the synchronous advice calls cost what the reads saved; total
   decode was unchanged (19.3 vs 19.3 tok/s). It stays off by default.
@@ -210,8 +220,9 @@ MFERENCE_PHASES=1 .build/release/MferenceCLI \
   --max-new 128 --temperature 0
 ```
 
-`--expert-cache-slots` (8, 16, 24, 32) and `--rdadvise`
-(off, default, bounded, adaptive) vary the two policies discussed above.
+`--expert-cache-slots` (8, 16, 24, 32, 64, 96, 128, `resident`, or `auto`)
+and `--rdadvise` (off, default, bounded, adaptive) vary the two policies
+discussed above.
 
 ## Production acceleration round 2 (2026-08-08)
 
@@ -219,7 +230,8 @@ Two accepted defaults on the 24 GB M5, both byte-identical to their
 controls under the community protocol:
 
 - **64 expert-cache slots** on hosts with ≥24 GiB (16 GiB hosts keep 32):
-  +4.6–5.9% decode across all three cases.
+  +4.6–5.9% decode across all three cases. The auto rung has since moved
+  to 96 — see round 3 below.
 - **GPU-resident slot map** (`MFERENCE_SLOT_MAP=0` to disable): the router
   top-k is resolved to slot-slab offsets on-GPU, and the ~30% of
   layer-steps whose experts are all cached complete their routed FFN
@@ -232,3 +244,29 @@ Community-protocol medians moved from 29.29 / 27.46 / 23.47 tok/s
 decode gain with unchanged outputs. mlx-lm cannot load this model on the
 same host (see
 [experiments/summaries/11](experiments/summaries/11-mlx-qwen-baseline.md)).
+
+## Production acceleration round 3 (2026-08-08)
+
+Two further accepted defaults, byte-identical to their controls:
+
+- **96 expert-cache slots** as the auto rung on hosts with ≥24 GiB (16 GiB
+  hosts keep 32, smaller hosts 16). The slot map changed the slot-count
+  economics: at 96 slots the all-hit layer rate doubles to 50.7% (from
+  29.9% at 64), and the pre-slot-map 96-slot regression no longer
+  reproduces.
+- **Eager routed commit** (`MFERENCE_EAGER_ROUTED=0` to disable): the
+  routed command buffer is encoded against the plan's slot-slab views,
+  committed gated on a shared fill event, and the preads run in the
+  background — the fetch leaves the CPU critical path, and the phase
+  report's `expert io await` reads near zero. +1.5–3.3% median by case on
+  top of the round-2 state. A failed eager expert read aborts the decode
+  step with `ModelError.eagerExpertFillFailed` instead of letting a
+  partially filled slot corrupt output.
+
+Community-protocol medians moved to **34.85 / 33.97 / 28.27 tok/s**. An
+explicit `--expert-cache-slots resident` mode (map every layer file once,
+no slot cache) also exists but lost the community A/B on this 24 GB host
+on every case (short −2%, long −56% from page-cache thrash), so auto
+always uses the slot cache and resident stays opt-in. Details:
+[experiments/summaries/15](experiments/summaries/15-gpu-slot-map.md) and
+[10](experiments/summaries/10-qwen-resident-rung.md).

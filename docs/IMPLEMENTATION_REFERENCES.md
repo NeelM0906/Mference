@@ -1,11 +1,13 @@
 # Implementation references
 
 Mference builds on work by other developers and researchers. These are
-the sources that materially shaped its Gemma 4 implementation, Metal kernels,
-out-of-core runtime, and experiments under the 8 GB memory constraint.
+the sources that materially shaped its Gemma 4 and Maple implementations,
+Metal kernels, out-of-core runtime, and experiments under the 8 GB memory
+constraint.
 
-Upstream code references whose exact behavior mattered are pinned to commits
-checked on 2026-07-16. Project home pages remain branch-level when they are
+Upstream code references whose exact behavior mattered are pinned to the
+commits checked when each reference was adopted (the original Gemma 4 set on
+2026-07-16). Project home pages remain branch-level when they are
 included for broader design context rather than a line-level claim.
 
 ## Model and weights

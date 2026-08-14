@@ -10,8 +10,9 @@ public enum PrefillChunkChoice: Equatable, Sendable {
 }
 
 /// Routed-expert cache selection. Auto keeps the 16-slot memory-first default
-/// for every family except Qwen 3.6 on hosts with at least 16 GiB, whose 256
-/// experts per layer measurably benefit from 32 slots.
+/// for every family except Qwen 3.6, whose 256 experts per layer measurably
+/// benefit from larger rungs: 96 slots on hosts with at least 24 GiB,
+/// 32 with at least 16 GiB.
 public enum ExpertCacheSlotChoice: Equatable, Sendable {
     case fixed(Int)
     case resident

@@ -1,7 +1,8 @@
 # System design
 
-Mference is a Swift and Metal runtime for Gemma 4 26B-A4B on Apple
-Silicon. The text-only installation is about 14.3 GB, but the target machine
+Mference is a Swift and Metal runtime for pinned MoE checkpoints on Apple
+Silicon; Gemma 4 26B-A4B is the founding family and this document's running
+example. Its text-only installation is about 14.3 GB, but the target machine
 has 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
 the experts chosen for the current token or prefill chunk.
@@ -155,7 +156,7 @@ Streamed expert resources:
 
 | Resource | Current size or capacity | Ownership and behavior |
 | --- | ---: | --- |
-| Routed-expert slots | 16 per opened layer; one page-rounded 3,358,720-byte blob per slot | App-owned buffers allocated with 2 MiB alignment and wrapped by Metal without another copy. Opening all 30 layer streamers reserves about 1.50 GiB of slot capacity; pages become resident as reads fill them. |
+| Routed-expert slots | 16 per opened layer; one page-rounded 3,358,720-byte blob per slot | App-owned. All of a layer's slots live in one contiguous 2 MiB-aligned allocation wrapped by a single Metal buffer; consumers address slots as (buffer, offset, length) slices. Opening all 30 layer streamers reserves about 1.50 GiB of slot capacity; pages become resident as reads fill them. |
 | Routed-expert files | 12,897,484,800 bytes (12.01 GiB) on disk | Thirty per-layer files. Only selected blobs enter explicit slots; the files are not mapped as one resident pool. |
 | macOS unified file cache | Dynamic | OS-owned second-chance cache. It may make a `pread` cheap, but it is not a guaranteed part of the app budget. |
 
@@ -170,9 +171,13 @@ The loader maps `model_weights.bin` read-only and wraps its aligned regions in
 `MTLBuffer` objects without copying them into Swift collections.
 
 Routed-expert files open lazily. Each opened layer owns one file descriptor and
-a fixed group of slot buffers with 2 MiB alignment. Each slot is allocated
-once, registered with Metal through `makeBuffer(bytesNoCopy:)`, filled with
-`pread`, and reused until the layer streamer is released.
+one contiguous 2 MiB-aligned slot slab holding all of its slots, registered
+with Metal once through `makeBuffer(bytesNoCopy:)`. Slot `n` is the fixed
+offset `n × slot-stride` within the slab; each slot is filled with `pread` and
+reused until the layer streamer is released. The layer also keeps a small
+GPU-visible expert-to-slot table (`Int16` per expert, −1 for absent), mirrored
+on every cache mutation, so a lookup kernel can resolve routed experts to slab
+offsets without the CPU.
 
 The expert cache records which expert occupies each slot. Production uses
 least-frequently used (LFU) eviction with recency as the tie-breaker. A hit
@@ -337,6 +342,23 @@ Routed work for cache hits may start while reads for missing experts are still
 running. Work for a cache miss starts after its slot is filled. Queue order
 makes the layer tail wait for both the shared and routed branches.
 
+Three accepted decode defaults tighten this handoff further. For Qwen, the
+GPU-resident slot map (`router_slot_lookup_k8`) resolves the router's top-8
+IDs against the per-layer expert-to-slot table on the GPU; a layer whose
+selected experts are all cached runs its routed branch from pre-encoded,
+GPU-guarded commands, skipping CPU expert planning, fetching, and
+routed-command encoding — the router readback and LFU bookkeeping remain on
+the CPU every layer (`MFERENCE_SLOT_MAP=0` disables). The eager
+routed commit submits the routed command buffer before its expert fills land,
+gated on an `MTLSharedEvent` the fill completions signal
+(`MFERENCE_EAGER_ROUTED=0` disables); a failed eager fill aborts the decode
+step with `ModelError.eagerExpertFillFailed` rather than emitting corrupt
+output. For DeepSeek-V4-Flash, shadow speculative prefetch issues a bounded
+number of non-blocking reads per layer from a router-lookahead prediction
+(`MFERENCE_SPEC_PREFETCH` selects the mode, `MFERENCE_SHADOW_BUDGET` caps the
+reads); other families keep speculation off. All three are byte-identical to
+their disabled paths.
+
 After layer 30, the tied 4-bit head has two output modes. A pure-greedy
 configuration (temperature `0` and repetition penalty `1`) returns the argmax
 token directly. Other configurations write the full logits vector for the
@@ -449,7 +471,8 @@ runtime, CLI, and server accept up to 128,000 tokens, but no final acceptance
 run establishes that boundary. Vision input, training, fine-tuning, server
 batching, and generic model discovery are outside the current scope. Each of
 the five architectures is explicitly enumerated with its own pinned checkpoint,
-compile-time baseline, and manifest contract. The optional HTTP server owns one
+compile-time baseline, and manifest contract; a new family merges only after
+passing the [family acceptance gate](FAMILY_GATE.md). The optional HTTP server owns one
 warm model, serializes generation, and retains one verified conversational KV
 prefix by default. It binds to loopback unless the user explicitly selects the
 machine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).
@@ -460,8 +483,11 @@ paths; Maple uses native BF16 KV and layer-major chunked prefill with a
 token-ordered cache/attention sweep. Its exact full head remains the default;
 the CLI can explicitly select the approximate singleton-decode FlashHead when
 the installed model contains its validated centroid/map data. The memory-first
-expert cache has 16 slots per layer, with model-aware alternatives where
-documented. File-read advice (`RDADVISE`) is off by default.
+expert cache defaults to 16 slots per layer; the allowed rungs are 8, 16, 24,
+32, 64, 96, and 128, plus an explicit `resident` opt-in, and the CLI/server
+auto profile always uses the slot cache — 96 slots for Qwen on hosts with at
+least 24 GiB, 32 on at least 16 GiB, and 16 everywhere else. File-read advice
+(`RDADVISE`) is off by default.
 
 ## Read next
 

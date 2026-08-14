@@ -57,6 +57,18 @@ resident set size; and **NLL** is negative log-likelihood. See
 | Validation methodology | [False rejections, holdouts, thermal state, and benchmark artifacts](summaries/09-validation-and-measurement-lessons.md) | 9 |
 | **Total** | | **103** |
 
+The 2026-08 Qwen/DSV4 performance campaign is recorded in narrative
+summaries rather than tabled entries:
+[Qwen resident rung](summaries/10-qwen-resident-rung.md),
+[mlx-lm Qwen baseline attempt](summaries/11-mlx-qwen-baseline.md),
+[decode attribution](summaries/12-decode-attribution-qwen-dsv4.md),
+[DSV4 streaming iterations](summaries/13-dsv4-streaming-iterations.md),
+[DSV4 shadow prefetch](summaries/14-dsv4-shadow-prefetch.md), and the
+[GPU-resident slot map](summaries/15-gpu-slot-map.md). The campaign landed
+on main via PR #16 (merge `e030f4e`, 2026-08-13), alongside the Maple
+family from PR #15. The 103 tabled entries below are the original Gemma 4
+program.
+
 ## All 103 experiments
 
 ### Model installation and expert I/O
