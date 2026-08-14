@@ -70,6 +70,26 @@ public enum MTPAttachTool {
             throw RepackError.configurationInvalid(
                 detail: "\(manifestPath) is not a Qwen 3.8 manifest")
         }
+        // -- Every manifest file must exist at its recorded size BEFORE the
+        // irreversible append: a pre-existing missing/truncated sidecar would
+        // otherwise only surface in the post-attach receipt pass, when a
+        // retry is already rejected as "already attached".
+        if let files = manifestRoot["files"] as? [String: Any] {
+            for (name, entry) in files {
+                let path = (gturboDirectory as NSString).appendingPathComponent(name)
+                let recorded = (entry as? [String: Any])?["size"] as? Int
+                let actual = (try? FileManager.default
+                    .attributesOfItem(atPath: path)[.size] as? Int) ?? nil
+                guard let recorded, let actual, recorded == actual else {
+                    throw RepackError.configurationInvalid(detail:
+                        "install file \(name) is missing or has size " +
+                        "\(actual.map(String.init) ?? "unknown") (manifest records " +
+                        "\(recorded.map(String.init) ?? "unknown")); repair the " +
+                        "install before attaching MTP tensors")
+                }
+            }
+        }
+
         let qDim = numHeads * headDim
         let kvDim = numKVHeads * headDim
         let expected: [ExpectedTensor] = [
@@ -324,12 +344,21 @@ public enum MTPAttachTool {
                               durableIn: gturboDirectory)
         // The attach invalidated the old receipt; regenerate it so installs
         // that gate on verified-install.json (the Mac app) keep working
-        // without a manual --verify-install pass.
+        // without a manual --verify-install pass. The attach itself is
+        // complete at this point, so a receipt failure must say so and point
+        // at the retryable step rather than reading as a failed attach.
         let receiptPath = (gturboDirectory as NSString)
             .appendingPathComponent("verified-install.json")
         try? FileManager.default.removeItem(atPath: receiptPath)
-        _ = try VerifiedInstallTool.run(
-            options: VerifyInstallOptions(inputGTurbo: gturboDirectory))
+        do {
+            _ = try VerifiedInstallTool.run(
+                options: VerifyInstallOptions(inputGTurbo: gturboDirectory))
+        } catch {
+            throw RepackError.configurationInvalid(detail:
+                "MTP tensors were attached, but regenerating the install " +
+                "receipt failed (\(error)); repair the install and run " +
+                "--verify-install --input-gturbo \(gturboDirectory)")
+        }
 
         return Result(tensorCount: newEntries.count,
                       appendedBytes: UInt64(appended.count),
