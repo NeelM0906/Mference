@@ -6,6 +6,91 @@ import Testing
 
 @Suite
 struct RemoteInstallCheckpointTests {
+    @Test func identityDestinationDigestRetainsLegacyV1Serialization() throws {
+        let root = tmpDirForRemote("checkpoint-v1-digest")
+        let path = (root as NSString).appendingPathComponent("weights.bin")
+        defer { cleanUpRemote([root]) }
+        try Posix.mkdirP(root)
+        let descriptor = try Posix.openCreateRW(path)
+        let bytes: [UInt8] = [1, 2, 3, 4]
+        try bytes.withUnsafeBytes {
+            try Posix.pwriteAll(
+                fd: descriptor,
+                path: path,
+                buf: $0.baseAddress!,
+                count: $0.count,
+                offset: 0)
+        }
+        close(descriptor)
+
+        let copy = CoalescedRangeCopy(
+            id: "range-00000000",
+            shardID: "source.bin",
+            sourceOffset: 0,
+            size: 4,
+            destinations: [RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: 0,
+                size: 4,
+                destinationPath: path,
+                destinationOffset: 0)])
+
+        #expect(try HTTPRangeSourceByteProvider.destinationDigest(
+            copy,
+            partialDirectory: root)
+            == "b9ae1be999b259f6de9cc3024bee4d145692881e19d17722351cccbf994a1b52")
+    }
+
+    @Test func transformedDestinationDigestCoversExpandedTail() throws {
+        let root = tmpDirForRemote("checkpoint-v2-tail")
+        let path = (root as NSString).appendingPathComponent("weights.bin")
+        defer { cleanUpRemote([root]) }
+        try Posix.mkdirP(root)
+        let descriptor = try Posix.openCreateRW(path)
+        var bytes = [UInt8](repeating: 7, count: 8)
+        try bytes.withUnsafeBytes {
+            try Posix.pwriteAll(
+                fd: descriptor,
+                path: path,
+                buf: $0.baseAddress!,
+                count: $0.count,
+                offset: 0)
+        }
+        close(descriptor)
+
+        let copy = CoalescedRangeCopy(
+            id: "range-00000000",
+            shardID: "source.bin",
+            sourceOffset: 0,
+            size: 4,
+            destinations: [RangeCopy(
+                shardID: "source.bin",
+                sourceOffset: 0,
+                size: 4,
+                destinationPath: path,
+                destinationOffset: 0,
+                transform: .unpackInt2ToInt4)])
+        let original = try HTTPRangeSourceByteProvider.destinationDigest(
+            copy,
+            partialDirectory: root)
+
+        let writeDescriptor = try Posix.openExistingRW(path)
+        bytes[7] = 8
+        try bytes.withUnsafeBytes {
+            try Posix.pwriteAll(
+                fd: writeDescriptor,
+                path: path,
+                buf: $0.baseAddress!.advanced(by: 7),
+                count: 1,
+                offset: 7)
+        }
+        close(writeDescriptor)
+
+        #expect(try HTTPRangeSourceByteProvider.destinationDigest(
+            copy,
+            partialDirectory: root) != original)
+    }
+
     @Test func roundTripsCompactCheckpoint() throws {
         let root = tmpDirForRemote("checkpoint")
         let path = (root as NSString).appendingPathComponent("resume.json")

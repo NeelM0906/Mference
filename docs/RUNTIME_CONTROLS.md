@@ -2,9 +2,9 @@
 
 The Mac app exposes generation and runtime controls in its collapsible right
 settings pane. Use the right-sidebar button in the status bar or
-<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> to hide or restore it. FP16 is
-the fixed KV format. Generation settings apply to the next request; load-time
-settings require a reload.
+<kbd>Shift</kbd>+<kbd>Command</kbd>+<kbd>I</kbd> to hide or restore it.
+Existing families use FP16 KV; Maple uses native BF16 KV. Generation settings
+apply to the next request; load-time settings require a reload.
 
 Chat navigation lives separately in the collapsible left sidebar. Use its
 **New chat** button or <kbd>Command</kbd>+<kbd>N</kbd> to create an independent
@@ -52,7 +52,7 @@ The Mac app and CLI expose these generation controls:
 | Control | Mac values | CLI flag | Default | Effect |
 | --- | --- | --- | --- | --- |
 | Maximum response | Automatic | `--max-new` | App: remaining context; CLI: 1,024 tokens | The app can use the context space left after formatting the prompt. The CLI uses its explicit or default `--max-new` limit. |
-| Maximum context | 4K, 8K, 16K, 32K, 64K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the FP16 KV-memory delta. |
+| Maximum context | 4K, 8K, 16K, 32K, 64K, 128K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the selected model's KV-memory delta. Maple supports 128000 tokens in the runtime, CLI, and server; other family or product limits may differ. |
 | Temperature | 0...2 in 0.05 steps | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
 | Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
@@ -68,12 +68,13 @@ benchmark protocol.
 | Control | Values | CLI flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
 | Expert-cache slots | 8, 16, 24, 32; CLI also accepts auto | `--expert-cache-slots` | App: 16; CLI/server auto | Auto selects 32 for Qwen on hosts with at least 16 GiB and 16 otherwise. Other families stay at 16. More slots retain more routed experts and reduce later reads at the cost of RAM. |
-| Prompt prefill | On, off | — | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
+| Prompt prefill | On, off | — | On | On requests the family prefill path. Maple uses a native-BF16 chunked path that preserves token-ordered K/V commits and attention; other families use their own supported paths. Off selects correctness-first scalar replay rather than skipping prompt processing. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
-| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Larger chunks use more prefill scratch memory, and on sliding-window models more KV ring memory. DeepSeek-V4 models prefill through the decode path and ignore the chunk size. |
+| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Maple stages each chunk layer-major but preserves its fixed 512-slot sliding-cache semantics by committing and attending rows in time order. |
+| Maple FlashHead | Off, on | `--flash-head` | Off | Enables Maple's approximate singleton-decode candidate head when the install carries validated FlashHead tensors. It leaves all non-candidates at negative infinity, so sampling is restricted to selected rows. Prefill and the default decode head remain exact; an install without the data falls back to the exact head. |
 | Model verification | Full SHA-256, trusted receipt | `--verify` | Full SHA-256 | `full-sha256` re-hashes each routed-expert file on first touch, which for a 145 GB expert pool costs about 59 s inside the first prefill. `trusted-receipt` instead checks each file's size against the receipt written at install time; the receipt itself is still validated against the manifest hash, and `model_weights.bin` and `layout.json` are still hashed. It trades detection of size-preserving corruption for that time. The Mac app exposes the same choice. |
 
-The prefill chunk size is a CLI control; the Mac app uses the default. The Mac
+The prefill chunk size and FlashHead switch are CLI controls; the Mac app uses the default exact head. The Mac
 app also keeps its explicit 16-slot default so an existing memory preference is
 never silently enlarged; Qwen users on larger Macs can select 32 in the
 inspector.
@@ -84,11 +85,11 @@ waits) after the timing footer; `MFERENCE_PREFILL_BREAKDOWN=1` prints the
 Inkling prefill routed-expert split (fetch, encode, drain). Both are
 diagnostics and do not change behavior.
 
-Changing context length, expert-cache slots, RDADVISE, model verification, or
-the prefill chunk size requires a reload.
+Changing context length, expert-cache slots, RDADVISE, model verification,
+prompt-prefill enablement, the prefill chunk size, or FlashHead selection
+requires a reload.
 Some sampling changes also require a reload because greedy and sampled
-generation use different output-head paths. Prompt-prefill settings apply to
-each request and do not require a reload.
+generation use different output-head paths.
 
 Multi-turn chat history is fitted with the model tokenizer before generation.
 When older complete turns no longer fit, the app runs a bounded local

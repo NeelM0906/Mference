@@ -49,13 +49,18 @@ public enum VerifiedInstallTool {
                                                 sha256: actualSha))
         }
         let unexpectedEntries = try findUnexpectedEntries(root: root, manifest: manifest)
+        let provenance = validatedExistingProvenance(
+            root: root,
+            manifestSha256: manifestSha,
+            manifestSize: manifestSize,
+            files: files)
 
         let receiptData = try VerifiedInstallReceiptWriter.encode(
             outputDir: root.path,
             manifestSha256: manifestSha,
             manifestSize: manifestSize,
-            sourceRepoID: nil,
-            sourceRevision: manifest.sourceSnapshotHash,
+            sourceRepoID: provenance?.repoID,
+            sourceRevision: provenance?.revision,
             toolVersion: "MferenceRepack verify-install",
             files: files)
         let receiptPath = root.appendingPathComponent(VerifiedInstallReceiptWriter.fileName).path
@@ -78,6 +83,21 @@ public enum VerifiedInstallTool {
         let sha256: String
     }
 
+    private struct ExistingReceipt: Decodable {
+        struct FileEntry: Decodable {
+            let size: UInt64
+            let sha256: String
+        }
+
+        let schemaVersion: Int
+        let manifestSha256: String
+        let modelDirectoryPath: String
+        let sourceRepoID: String?
+        let sourceRevision: String?
+        let toolVersion: String
+        let files: [String: FileEntry]
+    }
+
     private struct ManifestArchSubset: Decodable {
         let numDenseLayers: Int?
     }
@@ -87,7 +107,6 @@ public enum VerifiedInstallTool {
         let expertsPerLayer: Int
         let numLayers: Int
         let expertStride: UInt64
-        let sourceSnapshotHash: String?
         let arch: ManifestArchSubset?
     }
 
@@ -117,6 +136,50 @@ public enum VerifiedInstallTool {
         } catch {
             throw RepackError.configurationInvalid(detail: "manifest.json invalid: \(error)")
         }
+    }
+
+    private static func validatedExistingProvenance(
+        root: URL,
+        manifestSha256: String,
+        manifestSize: UInt64,
+        files: [RepackAudit.OutputFile]
+    ) -> (repoID: String, revision: String)? {
+        let relativePath = VerifiedInstallReceiptWriter.fileName
+        let receiptPath = root.appendingPathComponent(relativePath).path
+        guard let data = try? loadMetadataJSON(
+            path: receiptPath,
+            relativePath: relativePath),
+              let receipt = try? JSONDecoder().decode(
+                ExistingReceipt.self,
+                from: data),
+              receipt.schemaVersion == 1,
+              receipt.manifestSha256.lowercased() == manifestSha256.lowercased(),
+              receipt.modelDirectoryPath == root.standardizedFileURL.path,
+              receipt.toolVersion == "MferenceRepack"
+                || receipt.toolVersion == "MferenceRepack verify-install",
+              let repoID = receipt.sourceRepoID,
+              !repoID.isEmpty,
+              let revision = receipt.sourceRevision,
+              !revision.isEmpty else {
+            return nil
+        }
+
+        var expectedPaths = Set(files.map(\.relativePath))
+        expectedPaths.insert("manifest.json")
+        guard Set(receipt.files.keys) == expectedPaths,
+              let manifestEntry = receipt.files["manifest.json"],
+              manifestEntry.size == manifestSize,
+              manifestEntry.sha256.lowercased() == manifestSha256.lowercased() else {
+            return nil
+        }
+        for file in files {
+            guard let entry = receipt.files[file.relativePath],
+                  entry.size == file.size,
+                  entry.sha256.lowercased() == file.sha256.lowercased() else {
+                return nil
+            }
+        }
+        return (repoID, revision)
     }
 
     private static func loadLayout(path: String) throws -> PackedExpertsLayout {

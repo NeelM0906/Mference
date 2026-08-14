@@ -63,6 +63,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var maxNewTokens: Int
     public var maxContextTokens: Int
     public var temperature: Float
+    public var topK: Int?
+    public var topP: Float?
     public var repetitionPenalty: Float
     public var runtimeOptions: DecodeRuntimeOptions
     public var generationID: UUID
@@ -72,13 +74,16 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     }
 
     public init(prompt: String, maxNewTokens: Int, maxContextTokens: Int,
-                temperature: Float, repetitionPenalty: Float = 1,
+                temperature: Float, topK: Int? = 64, topP: Float? = 0.95,
+                repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 generationID: UUID = UUID()) {
         self.messages = [DecodeGenerationMessage(role: .user, content: prompt)]
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.temperature = temperature
+        self.topK = topK
+        self.topP = topP
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID
@@ -88,6 +93,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 maxNewTokens: Int,
                 maxContextTokens: Int,
                 temperature: Float,
+                topK: Int? = 64,
+                topP: Float? = 0.95,
                 repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 generationID: UUID = UUID()) {
@@ -95,9 +102,57 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.temperature = temperature
+        self.topK = topK
+        self.topP = topP
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case messages
+        case maxNewTokens
+        case maxContextTokens
+        case temperature
+        case topK
+        case topP
+        case repetitionPenalty
+        case runtimeOptions
+        case generationID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        messages = try container.decode([DecodeGenerationMessage].self, forKey: .messages)
+        maxNewTokens = try container.decode(Int.self, forKey: .maxNewTokens)
+        maxContextTokens = try container.decode(Int.self, forKey: .maxContextTokens)
+        temperature = try container.decode(Float.self, forKey: .temperature)
+        if container.contains(.topK) {
+            topK = try container.decodeIfPresent(Int.self, forKey: .topK)
+        } else {
+            topK = 64
+        }
+        if container.contains(.topP) {
+            topP = try container.decodeIfPresent(Float.self, forKey: .topP)
+        } else {
+            topP = 0.95
+        }
+        repetitionPenalty = try container.decode(Float.self, forKey: .repetitionPenalty)
+        runtimeOptions = try container.decode(DecodeRuntimeOptions.self, forKey: .runtimeOptions)
+        generationID = try container.decode(UUID.self, forKey: .generationID)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(messages, forKey: .messages)
+        try container.encode(maxNewTokens, forKey: .maxNewTokens)
+        try container.encode(maxContextTokens, forKey: .maxContextTokens)
+        try container.encode(temperature, forKey: .temperature)
+        try container.encode(topK, forKey: .topK)
+        try container.encode(topP, forKey: .topP)
+        try container.encode(repetitionPenalty, forKey: .repetitionPenalty)
+        try container.encode(runtimeOptions, forKey: .runtimeOptions)
+        try container.encode(generationID, forKey: .generationID)
     }
 }
 

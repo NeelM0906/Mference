@@ -121,14 +121,14 @@ public struct Model {
     var trunkPrefix: String {
         switch config.family {
         case .gemma4, .qwen36: return "language_model.model."
-        case .deepseekV4Flash: return "model."
+        case .deepseekV4Flash, .maple: return "model."
         case .inklingSmall: return "model.llm."
         }
     }
     private var lmHeadName: String {
         switch config.family {
         case .gemma4, .qwen36: return "language_model.lm_head.weight"
-        case .deepseekV4Flash: return "lm_head.weight"
+        case .deepseekV4Flash, .maple: return "lm_head.weight"
         case .inklingSmall: return "model.llm.unembed.weight"
         }
     }
@@ -137,6 +137,8 @@ public struct Model {
         switch config.family {
         case .gemma4, .qwen36, .deepseekV4Flash:
             return "\(trunkPrefix)embed_tokens.weight"
+        case .maple:
+            return "\(trunkPrefix)word_embeddings.weight"
         case .inklingSmall:
             return "\(trunkPrefix)embed.weight"
         }
@@ -161,16 +163,16 @@ public struct Model {
     }
 
     public func qProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.q_proj.weight")
     }
     public func kProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.k_proj.weight")
     }
     public func vProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.v_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.v_proj.weight")
     }
     public func oProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.o_proj.weight")
     }
     /// Gemma's writer emits `.router.proj.weight` (no `.mlp.` segment);
     /// Qwen's router is the source-named `.mlp.gate.weight`.
@@ -184,6 +186,8 @@ public struct Model {
             return try resident(name: "model.layers.\(L).ffn.gate.weight")
         case .inklingSmall:
             return try resident(name: "model.llm.layers.\(L).mlp.gate.weight")
+        case .maple:
+            return try resident(name: "model.layers.\(L).mlp.gate.weight")
         }
     }
     /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
@@ -208,6 +212,8 @@ public struct Model {
             return "model.layers.\(L).ffn.shared_experts.\(proj).weight"
         case .inklingSmall:
             return "model.llm.layers.\(L).mlp.shared_experts.\(proj).weight"
+        case .maple:
+            return "model.layers.\(L).mlp.shared_expert.\(proj).weight"
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
@@ -217,7 +223,7 @@ public struct Model {
     }
     public func inputNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36:
+        case .gemma4, .qwen36, .maple:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
         case .deepseekV4Flash, .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
@@ -225,7 +231,7 @@ public struct Model {
     }
     public func postAttnNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36:
+        case .gemma4, .qwen36, .maple:
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
         case .deepseekV4Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).ffn_norm.weight")
@@ -245,10 +251,10 @@ public struct Model {
     // explicit no-scale variant rather than consuming a unit-weight buffer.
 
     public func qNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_norm.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.q_norm.weight")
     }
     public func kNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_norm.weight")
+        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.k_norm.weight")
     }
 
     // MARK: - Feed-forward norms
@@ -485,6 +491,12 @@ public struct Model {
             throw ModelError.tensorNotFound(name: name)
         }
         let residentFileOffset = residentIndex.header.indexSize
+        guard entry.fileOffset >= residentFileOffset,
+              entry.scaleSize == 0 || entry.scaleOffset >= residentFileOffset,
+              entry.biasSize == 0 || entry.biasOffset >= residentFileOffset else {
+            throw ModelError.indexCorrupt(
+                detail: "resident tensor \(name) has an offset before the resident region")
+        }
         let relativeOffset = entry.fileOffset - residentFileOffset
         let scaleRel: UInt64 = entry.scaleSize > 0
             ? entry.scaleOffset - residentFileOffset : 0

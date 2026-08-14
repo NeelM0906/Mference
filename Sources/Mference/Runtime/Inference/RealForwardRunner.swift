@@ -149,7 +149,7 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
-public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, @unchecked Sendable {
+public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, FusedHeadLogitProducer, @unchecked Sendable {
     /// Per-layer fp32 short-convolution states, one buffer per conv site.
     /// k/v carry the last K-1 KV-stream inputs; attn/mlp the last K-1
     /// sublayer outputs.

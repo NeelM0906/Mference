@@ -13,6 +13,7 @@ import Testing
         #expect(runtime.prefillChunkTokens == 128)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
         #expect(runtime.headPath == .fusedRows)
+        #expect(!runtime.useMapleFlashHead)
     }
 
     @Test func automaticExpertCacheSlotsAreQwenSpecific() {
@@ -41,13 +42,15 @@ import Testing
             prefillEnabled: false,
             prefillChunkTokens: 64,
             prefillAttentionPath: .causalTiled,
-            forceLogitsHead: true)
+            forceLogitsHead: true,
+            useMapleFlashHead: true)
         #expect(runtime.expertCacheSlots == 32)
         #expect(runtime.modelExpertCachePolicy == .lru)
         #expect(runtime.rdadviseEnabled)
         #expect(runtime.prefillConfig == .off)
         #expect(runtime.prefillAttentionPath == .causalTiled)
         #expect(runtime.headPath == .logits)
+        #expect(runtime.useMapleFlashHead)
     }
 
     @Test(arguments: [32, 64, 128, 256, 512, 1024, 2048, 4096])

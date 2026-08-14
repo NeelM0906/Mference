@@ -119,11 +119,23 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 149_000_000_000,
         reserveBytes: 2_147_483_648)
 
+    public static let maple = SupportedModelSource(
+        name: "maple",
+        displayName: "Maple Preview 2-bit MLX",
+        repoID: "deepgrove/maple-preview-2bit-mlx",
+        revision: "361db5da5e74ff6fcdd852d478e1f266ce11013a",
+        sourceIndexSHA256:
+            "56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95",
+        modelID: "maple-preview-2bit-mlx",
+        approximateDownloadBytes: 5_330_000_000,
+        installedBytes: 6_650_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, deepseekV4Flash, inklingSmall,
+        gemma4, qwen36, deepseekV4Flash, inklingSmall, maple,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

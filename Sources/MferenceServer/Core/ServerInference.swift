@@ -175,6 +175,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         case .qwen36: return "qwen3.6-35b-a3b"
         case .deepseekV4Flash: return "deepseek-v4-flash-2bit-dq"
         case .inklingSmall: return "inkling-small-4bit"
+        case .maple: return "maple-preview-2bit-mlx"
         }
     }
     private nonisolated let modelFamily: ModelFamily
@@ -182,7 +183,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let context: MetalContext
     private let model: Model
     private let tokenizer: MFTokenizer
-    private let runner: RealForwardRunner
+    private let runner: any ContinuableLogitProducer
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
     private let maxContext: Int
@@ -193,12 +194,13 @@ public actor ServerModelSession: ServerInferenceBackend {
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix) async throws -> ServerModelSession {
+        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw MFTokenizerError.missingToolTemplate
         }
         let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
-        let tokenizer = try await MFTokenizer.load(from: tokenizerFolder)
+        let tokenizer = try await MFTokenizer.load(from: tokenizerFolder, family: family)
         // DeepSeek ships no chat_template.jinja — its chat framing is native
         // Swift — so the prompt-cache identity hashes a pinned constant that
         // changes only when that native render does. Every other dialect
@@ -212,7 +214,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             throw MFTokenizerError.missingToolTemplate
         }
         let context = try MetalContext()
-        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let streamingMode = RuntimeConfiguration.defaultExpertStreamingMode(
             for: family,
             expertPoolBytes: try ExpertPoolInspector.poolByteSize(
@@ -234,10 +235,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             streamingMode: streamingMode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
-        let runner = try RealForwardRunner(model: model,
-                                           context: context,
-                                           maxContext: maxContext,
-                                           runtimeConfiguration: runtime)
+        let forwardRuntime = try ForwardRunnerFactory.make(model: model,
+                                                            context: context,
+                                                            maxContext: maxContext,
+                                                            runtimeConfiguration: runtime)
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: templateData)
@@ -247,8 +248,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             String(runtime.expertCacheSlots),
             runtime.expertCachePolicy.rawValue,
             runtime.rdadvisePolicy.rawValue,
-            runtime.prefillPolicy.rawValue,
-            String(runtime.prefillChunkTokens),
+            forwardRuntime.prefillConfig.mode.rawValue,
+            String(forwardRuntime.prefillConfig.chunkTokens),
             runtime.headPath.rawValue,
         ].joined(separator: ":")
         let runtimeDigest = SHA256.hash(data: Data(runtimeIdentity.utf8))
@@ -259,15 +260,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             sourceSnapshotHash: model.sourceSnapshotHash,
             runtimeProfileHash: runtimeDigest,
             maximumContext: maxContext,
-            kvStorage: PrefillKVStorageMode.fp16.rawValue,
+            kvStorage: forwardRuntime.kvStorageMode.rawValue,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
         return ServerModelSession(context: context,
                                   model: model,
                                   tokenizer: tokenizer,
-                                  runner: runner,
+                                  runner: forwardRuntime.producer,
                                   scratch: scratch,
-                                  prefillConfig: runtime.prefillConfig,
+                                  prefillConfig: forwardRuntime.prefillConfig,
                                   maxContext: maxContext,
                                   promptCacheMode: promptCacheMode,
                                   promptCacheDomain: promptCacheDomain)
@@ -276,7 +277,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private init(context: MetalContext,
                  model: Model,
                  tokenizer: MFTokenizer,
-                 runner: RealForwardRunner,
+                 runner: any ContinuableLogitProducer,
                  scratch: RawCompletionScratch,
                  prefillConfig: PrefillRuntimeConfig,
                  maxContext: Int,
@@ -370,10 +371,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
+        let decoder = needsToolTemplate || tokenizer.generationPromptStartsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
-                allowedTools: Set(request.tools.map(\.name)))
+                allowedTools: Set(request.tools.map(\.name)),
+                startsInThought: tokenizer.generationPromptStartsInThinking)
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""

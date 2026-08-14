@@ -9,6 +9,13 @@ enum SyntheticSnapshot {
         let shardPath: String
     }
 
+    enum MapleTensorMutation {
+        case remove(String)
+        case replaceDtype(String, String)
+        case replaceShape(String, [Int])
+        case addAffineCompanions(String)
+    }
+
     struct Arch {
         let hidden: Int = 128
         let moeIntermediate: Int = 64
@@ -201,6 +208,138 @@ enum SyntheticSnapshot {
         let indexData = try JSONSerialization.data(withJSONObject: indexObj, options: [.sortedKeys])
         let indexPath = (dir as NSString).appendingPathComponent("model.safetensors.index.json")
         try indexData.write(to: URL(fileURLWithPath: indexPath))
+        return Snapshot(shardPath: shardPath)
+    }
+
+    // MARK: - Maple variant
+
+    /// Pinned Maple metadata with the smallest tensor inventory that exercises
+    /// ternary resident widening and routed-expert planning.
+    static func buildMaple(
+        at dir: String,
+        seed: UInt64 = 0x4D41_504C_455F_0002,
+        includeFlashHead: Bool = false,
+        mutations: [MapleTensorMutation] = []) throws -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+        let input = 128
+        let rows = 2
+        let experts = 256
+
+        appendQuantizedWeight(name: "model.word_embeddings", outerShape: [rows],
+                              innerLogical: input, bits: 4, groupSize: 64,
+                              into: &tensors, rng: &rng)
+        appendQuantizedWeight(name: "lm_head", outerShape: [rows],
+                              innerLogical: input, bits: 4, groupSize: 64,
+                              into: &tensors, rng: &rng)
+        appendMapleTernaryWeight(name: "model.layers.0.self_attn.q_proj",
+                                 outerShape: [rows], innerLogical: input,
+                                 into: &tensors, rng: &rng)
+        for layer in 0..<24 {
+            for role in ["gate", "up", "down"] {
+                appendMapleTernaryWeight(
+                    name: "model.layers.\(layer).mlp.switch_mlp.\(role)_proj",
+                    outerShape: [experts, rows], innerLogical: input,
+                    into: &tensors, rng: &rng)
+            }
+        }
+        if includeFlashHead {
+            appendMapleFlashHead(into: &tensors, rng: &rng)
+        }
+
+        for mutation in mutations {
+            switch mutation {
+            case .remove(let name):
+                tensors.removeAll { $0.0 == name }
+            case .replaceDtype(let name, let dtype):
+                guard let index = tensors.firstIndex(where: { $0.0 == name }) else {
+                    preconditionFailure("unknown Maple fixture tensor \(name)")
+                }
+                tensors[index].1 = dtype
+                tensors[index].3 = maplePayload(dtype: dtype, shape: tensors[index].2,
+                                                 rng: &rng)
+            case .replaceShape(let name, let shape):
+                guard let index = tensors.firstIndex(where: { $0.0 == name }) else {
+                    preconditionFailure("unknown Maple fixture tensor \(name)")
+                }
+                tensors[index].2 = shape
+                tensors[index].3 = maplePayload(dtype: tensors[index].1, shape: shape,
+                                                 rng: &rng)
+            case .addAffineCompanions(let base):
+                tensors.append((base + ".scales", "BF16", [1], maplePayload(
+                    dtype: "BF16", shape: [1], rng: &rng)))
+                tensors.append((base + ".biases", "BF16", [1], maplePayload(
+                    dtype: "BF16", shape: [1], rng: &rng)))
+            }
+        }
+
+        let shardName = "model-00001-of-00001.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+
+        var config: [String: Any] = [
+            "model_type": "maple",
+            "hidden_size": 2_048,
+            "moe_shared_expert_intermediate_size": 512,
+            "moe_intermediate_size": 512,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "head_dim": 128,
+            "vocab_size": 151_936,
+            "max_position_embeddings": 128_000,
+            "sliding_window": 512,
+            "rope_theta": 10_000.0,
+            "partial_rotary_factor": 0.5,
+            "num_hidden_layers": 24,
+            "num_experts": experts,
+            "num_experts_per_tok": 8,
+            "num_shared_experts": 0,
+            "first_k_dense_replace": 0,
+            "rms_norm_eps": 0.000_001,
+            "layer_types": (0..<24).map {
+                $0 % 4 == 3 ? "full_attention" : "sliding_attention"
+            },
+            "use_qk_norm": true,
+            "norm_topk_prob": true,
+            "tie_word_embeddings": false,
+            "use_rmsnorm": true,
+            "use_bias": false,
+            "router_dtype": "fp32",
+            "hidden_act": "silu",
+            "quantization": [
+                "bits": 2,
+                "group_size": 128,
+                "mode": "affine",
+                "model.word_embeddings": ["bits": 4, "group_size": 64],
+                "lm_head": ["bits": 4, "group_size": 64],
+            ],
+        ]
+        if includeFlashHead {
+            config["flash_head"] = [
+                "n_clusters": 4_748,
+                "cluster_size": 32,
+                "n_probes": 512,
+                "group_size": 64,
+                "bits": 4,
+                "head_group_size": 64,
+                "head_bits": 4,
+                "scaled_centroids": true,
+                "force_tokens": [151_645, 151_668, 151_643],
+            ]
+        }
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("config.json")))
+
+        let weightMap = Dictionary(uniqueKeysWithValues: tensors.map { ($0.0, shardName) })
+        try JSONSerialization.data(withJSONObject: ["weight_map": weightMap],
+                                   options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("model.safetensors.index.json")))
         return Snapshot(shardPath: shardPath)
     }
 
@@ -750,6 +889,65 @@ enum SyntheticSnapshot {
         var bb = [UInt8](repeating: 0, count: companionElems * 2)
         for i in 0..<bb.count { bb[i] = UInt8(rng.next() & 0xFF) }
         tensors.append((name + ".biases", "BF16", companionShape, bb))
+    }
+
+    private static func appendMapleTernaryWeight(
+        name: String,
+        outerShape: [Int],
+        innerLogical: Int,
+        into tensors: inout [(String, String, [Int], [UInt8])],
+        rng: inout SplitMix64) {
+        precondition(innerLogical % 64 == 0 && innerLogical % 16 == 0)
+        let packedShape = outerShape + [innerLogical / 16]
+        tensors.append((name + ".weight", "U32", packedShape,
+                        maplePayload(dtype: "U32", shape: packedShape, rng: &rng)))
+        tensors.append((name + ".row_alpha", "BF16", outerShape,
+                        maplePayload(dtype: "BF16", shape: outerShape, rng: &rng)))
+    }
+
+    private static func appendMapleFlashHead(
+        into tensors: inout [(String, String, [Int], [UInt8])],
+        rng: inout SplitMix64) {
+        appendQuantizedWeight(name: "lm_head_flash.centroids", outerShape: [4_748],
+                              innerLogical: 2_048, bits: 4, groupSize: 64,
+                              into: &tensors, rng: &rng)
+        let mapShape = [4_748, 32]
+        tensors.append(("lm_head_flash.token_map", "I32", mapShape,
+                        mapleFlashTokenMapPayload(count: mapShape[0] * mapShape[1])))
+        tensors.append(("lm_head_flash.cluster_scale", "BF16", [4_748],
+                        maplePayload(dtype: "BF16", shape: [4_748], rng: &rng)))
+        // The source carries this redundant cluster-order copy of lm_head.
+        // The repacker must retain neither it nor its companions.
+        appendQuantizedWeight(name: "lm_head_flash.head", outerShape: [2],
+                              innerLogical: 128, bits: 4, groupSize: 64,
+                              into: &tensors, rng: &rng)
+    }
+
+    private static func mapleFlashTokenMapPayload(count: Int) -> [UInt8] {
+        var payload = [UInt8](repeating: 0, count: count * MemoryLayout<UInt32>.stride)
+        for token in 0..<count {
+            let value = UInt32(token)
+            let offset = token * MemoryLayout<UInt32>.stride
+            payload[offset] = UInt8(truncatingIfNeeded: value)
+            payload[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+            payload[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
+            payload[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+        }
+        return payload
+    }
+
+    private static func maplePayload(dtype: String, shape: [Int],
+                                     rng: inout SplitMix64) -> [UInt8] {
+        let elementBytes: Int
+        switch dtype {
+        case "U32", "F32", "I32": elementBytes = 4
+        case "BF16", "F16": elementBytes = 2
+        case "I64": elementBytes = 8
+        default: preconditionFailure("unsupported synthetic dtype \(dtype)")
+        }
+        var bytes = [UInt8](repeating: 0, count: shape.reduce(1, *) * elementBytes)
+        for index in bytes.indices { bytes[index] = UInt8(rng.next() & 0xFF) }
+        return bytes
     }
 
     private static func appendUnquantizedBF16(name: String, shape: [Int],

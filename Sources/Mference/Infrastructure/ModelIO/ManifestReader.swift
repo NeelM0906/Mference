@@ -105,6 +105,20 @@ public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let routedExpert: ManifestQuantSlot
 }
 
+/// Optional sparse singleton-decode head retained from a Maple source
+/// checkpoint. Prefill always uses the exact full vocabulary head.
+public struct ManifestMapleFlashHead: Decodable, Equatable, Sendable {
+    public let nClusters: Int
+    public let clusterSize: Int
+    public let nProbes: Int
+    public let groupSize: Int
+    public let bits: Int
+    public let headGroupSize: Int
+    public let headBits: Int
+    public let scaledCentroids: Bool
+    public let forceTokens: [Int]
+}
+
 public struct Manifest: Decodable, Equatable, Sendable {
     public let magic: String
     public let versionMajor: Int
@@ -114,6 +128,7 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let sourceSnapshotHash: String?
     public let arch: ManifestArch
     public let quant: ManifestQuant?
+    public let flashHead: ManifestMapleFlashHead?
     public let files: [String: ManifestFileEntry]
     public let expertsPerLayer: Int
     public let numLayers: Int
@@ -190,9 +205,12 @@ public enum ManifestReader {
         }
         try validateArch(m.arch, expected: expected)
         if let quant = m.quant {
-            try validateQuant(quant)
+            try validateQuant(quant, expected: expected)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
+        }
+        if let flashHead = m.flashHead {
+            try validateMapleFlashHead(flashHead, expected: expected)
         }
         let pageSize = UInt64(getpagesize())
         guard m.expertStride % pageSize == 0 else {
@@ -227,7 +245,42 @@ public enum ManifestReader {
         return false
     }
 
-    private static func validateQuant(_ quant: ManifestQuant) throws {
+    private static func validateQuant(_ quant: ManifestQuant,
+                                      expected: ArchConfig) throws {
+        if expected.family == .maple {
+            let affine: [(String, ManifestQuantSlot, Int)] = [
+                ("embedding", quant.embedding, 4),
+                ("attention", quant.attention, 4),
+                ("routedExpert", quant.routedExpert, 2),
+            ]
+            for (name, slot, bits) in affine {
+                guard slot.weightBits == bits,
+                      slot.scheme.lowercased() == "affine",
+                      slot.scaleType.lowercased() == "bf16",
+                      slot.biasType.lowercased() == "bf16",
+                      slot.groupSize == Quantization.groupSize else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported Maple quantization for \(name)")
+                }
+            }
+            guard quant.router.weightBits == 16,
+                  quant.router.scheme.lowercased() == "unquantized",
+                  quant.router.scaleType.lowercased() == "none",
+                  quant.router.biasType.lowercased() == "none",
+                  quant.router.groupSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "unsupported Maple quantization for router")
+            }
+            guard quant.sharedExpert.weightBits == 0,
+                  quant.sharedExpert.scheme.lowercased() == "none",
+                  quant.sharedExpert.scaleType.lowercased() == "none",
+                  quant.sharedExpert.biasType.lowercased() == "none",
+                  quant.sharedExpert.groupSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "Maple manifest must mark sharedExpert absent")
+            }
+            return
+        }
         // Routed experts additionally allow 2-bit: the DeepSeek-V4-Flash
         // dynamic-quant checkpoint ships Q2 experts under a Q4 core, and the
         // MoE runtime dispatches on `quant.routedExpert.weightBits`.
@@ -246,6 +299,22 @@ public enum ManifestReader {
                   slot.groupSize == Quantization.groupSize else {
                 throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
             }
+        }
+    }
+
+    private static func validateMapleFlashHead(_ flashHead: ManifestMapleFlashHead,
+                                               expected: ArchConfig) throws {
+        guard expected.family == .maple,
+              flashHead.nClusters > 0, flashHead.clusterSize > 0,
+              flashHead.nClusters <= Int.max / flashHead.clusterSize,
+              flashHead.nClusters * flashHead.clusterSize == expected.vocabSize,
+              flashHead.nProbes > 0, flashHead.nProbes <= flashHead.nClusters,
+              flashHead.groupSize == Quantization.groupSize, flashHead.bits == 4,
+              flashHead.headGroupSize == Quantization.groupSize, flashHead.headBits == 4,
+              flashHead.scaledCentroids,
+              Set(flashHead.forceTokens).count == flashHead.forceTokens.count,
+              flashHead.forceTokens.allSatisfy({ $0 >= 0 && $0 < expected.vocabSize }) else {
+            throw ModelError.indexCorrupt(detail: "invalid Maple FlashHead metadata")
         }
     }
 
@@ -279,10 +348,38 @@ public enum ManifestReader {
         try check("tieWordEmbeddings",   a.tieWordEmbeddings,   e.tieWordEmbeddings)
         try check("attentionKEqV",       a.attentionKEqV,       e.attentionKEqV)
         try check("hiddenActivation",    a.hiddenActivation,    e.hiddenActivation)
-        let actualMask = a.fullAttentionLayerMask.map { UInt8($0) }
+        guard a.fullAttentionLayerMask.allSatisfy({ UInt8(exactly: $0) != nil }) else {
+            throw ModelError.archMismatch(
+                field: "fullAttentionLayerMask",
+                expected: e.fullAttentionLayerMask.description,
+                actual: a.fullAttentionLayerMask.description)
+        }
+        let actualMask = a.fullAttentionLayerMask.compactMap { UInt8(exactly: $0) }
         try check("fullAttentionLayerMask",
                   actualMask.description,
                   e.fullAttentionLayerMask.description)
+
+        if e.family == .maple {
+            let requiredExtensions: [(String, Bool)] = [
+                ("family", a.family != nil),
+                ("attnOutputGate", a.attnOutputGate != nil),
+                ("attentionScale", a.attentionScale != nil),
+                ("embeddingScaledBySqrtHidden", a.embeddingScaledBySqrtHidden != nil),
+                ("routerScaled", a.routerScaled != nil),
+                ("ffnSandwichNorms", a.ffnSandwichNorms != nil),
+                ("ropeNeoxSubdim", a.ropeNeoxSubdim != nil),
+                ("routerScoringFunc", a.routerScoringFunc != nil),
+                ("routedScalingFactor", a.routedScalingFactor != nil),
+                ("swigluLimit", a.swigluLimit != nil),
+                ("numSharedExperts", a.numSharedExperts != nil),
+                ("routerNormAfterTopK", a.routerNormAfterTopK != nil),
+            ]
+            if let missing = requiredExtensions.first(where: { !$0.1 }) {
+                throw ModelError.archMismatch(field: missing.0,
+                                              expected: "present",
+                                              actual: "missing")
+            }
+        }
 
         // Family extensions: absent fields mean the Gemma defaults.
         let gemmaDefaults = ArchConfig.gemma4_26B_A4B

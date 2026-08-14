@@ -166,7 +166,10 @@ actor RealInferenceSession {
     private var ctx: MetalContext?
     private var tokenizer: MFTokenizer?
     private var tokenizerDirectoryCache = TokenizerDirectoryCache()
-    private var runner: RealForwardRunner?
+    private var runner: (any ContinuableLogitProducer)?
+    private var effectivePrefillConfig: PrefillRuntimeConfig?
+    private var executedPrefillMode: PrefillExecutedMode?
+    private var kvStorageMode: PrefillKVStorageMode?
     private var scratch: RawCompletionScratch?
 
     func ensureLoaded(key: SessionLoadKey,
@@ -174,6 +177,9 @@ actor RealInferenceSession {
         if loadedKey == key, runner != nil { return }
 
         runner = nil
+        effectivePrefillConfig = nil
+        executedPrefillMode = nil
+        kvStorageMode = nil
         scratch = nil
         loadedKey = nil
 
@@ -215,7 +221,7 @@ actor RealInferenceSession {
             try Task.checkCancellation()
 
             onState(.loading(.preparingRunner))
-            let loadedRunner = try RealForwardRunner(
+            let loadedRuntime = try ForwardRunnerFactory.make(
                 model: loadedModel,
                 context: context,
                 maxContext: key.maxContext,
@@ -225,7 +231,10 @@ actor RealInferenceSession {
                                                          logitSoftcap: Float(loadedModel.config.finalLogitSoftcap))
             try Task.checkCancellation()
 
-            runner = loadedRunner
+            runner = loadedRuntime.producer
+            effectivePrefillConfig = loadedRuntime.prefillConfig
+            executedPrefillMode = loadedRuntime.executedPrefillMode
+            kvStorageMode = loadedRuntime.kvStorageMode
             scratch = loadedScratch
             loadedKey = key
             onState(.ready(modelDirectory: key.directory,
@@ -267,6 +276,9 @@ actor RealInferenceSession {
 
     func unload() {
         runner = nil
+        effectivePrefillConfig = nil
+        executedPrefillMode = nil
+        kvStorageMode = nil
         scratch = nil
         tokenizer = nil
         tokenizerDirectoryCache.clear()
@@ -276,15 +288,13 @@ actor RealInferenceSession {
     func run(request: AppGenerationRequest,
              memorySampler: AppMemorySampler,
              continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation) async {
-        let prefillConfig = request.runtimeOptions.prefillConfig
+        let requestedPrefillConfig = request.runtimeOptions.prefillConfig
         let progress = ProgressState()
+        var kvStorageMode = PrefillKVStorageMode.fp16
+        var executedPrefillMode: PrefillExecutedMode = requestedPrefillConfig.mode == .chunked
+            ? .chunked : .off
         do {
             try request.validate()
-            let executedPrefillMode: PrefillExecutedMode =
-                prefillConfig.mode == .chunked ? .chunked : .off
-            let prefillDiagnostics = PrefillExecutionDiagnostics(config: prefillConfig,
-                                                                 executedMode: executedPrefillMode,
-                                                                 kvStorageMode: .fp16)
             let requestKey = SessionLoadKey(
                 directory: request.modelDirectory.standardizedFileURL,
                 maxContext: request.maxContextTokens,
@@ -292,9 +302,18 @@ actor RealInferenceSession {
                 forceLogitsHead: Self.forceLogitsHead(for: request))
             guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
             guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
-            guard let runner, let tokenizer, let ctx, let scratch else {
+            guard let runner,
+                  let effectivePrefillConfig,
+                  let loadedExecutedPrefillMode = self.executedPrefillMode,
+                  let loadedKVStorageMode = self.kvStorageMode,
+                  let tokenizer, let ctx, let scratch else {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
+            executedPrefillMode = loadedExecutedPrefillMode
+            kvStorageMode = loadedKVStorageMode
+            let prefillDiagnostics = PrefillExecutionDiagnostics(config: requestedPrefillConfig,
+                                                                 executedMode: executedPrefillMode,
+                                                                 kvStorageMode: kvStorageMode)
 
             let request = try AppGenerationContextWindow.prepare(
                 request,
@@ -303,10 +322,10 @@ actor RealInferenceSession {
                 request.messages.map(Self.tokenizerMessage))
             let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
             progress.promptTokenCount = promptIds.count
-            guard promptIds.count < runner.maxContext else {
+            guard promptIds.count < requestKey.maxContext else {
                 throw AppInferenceError.contextOverflow(prompt: promptIds.count,
                                                         maxNew: request.maxNewTokens,
-                                                        maxContext: runner.maxContext)
+                                                        maxContext: requestKey.maxContext)
             }
             memorySampler.resetPeak()
             _ = memorySampler.sample()
@@ -315,33 +334,88 @@ actor RealInferenceSession {
                 maxNewTokens: Self.effectiveMaxNewTokens(
                     requested: request.maxNewTokens,
                     promptTokenCount: promptIds.count,
-                    maxContext: runner.maxContext))
+                    maxContext: requestKey.maxContext))
             runner.reset()
             progress.prefillStart = Date()
+
+            let decoder = tokenizer.generationPromptStartsInThinking
+                ? StructuredAssistantDecoder(tokenizer: tokenizer,
+                                             allowedTools: [],
+                                             startsInThought: true)
+                : nil
+            var decodingError: Error?
+            var shouldStop = false
+
+            func visibleText(_ events: [StructuredAssistantEvent]) throws -> String {
+                var visible = ""
+                for event in events {
+                    switch event {
+                    case .content(let text): visible += text
+                    case .toolCall: throw ToolCallParserError.malformed
+                    }
+                }
+                return visible
+            }
 
             let result = try await runRawCompletion(
                 producer: runner, tokenizer: tokenizer, promptIds: promptIds,
                 config: config, context: ctx, scratch: scratch,
-                prefillConfig: prefillConfig) { event in
+                prefillConfig: effectivePrefillConfig,
+                shouldStop: { shouldStop }) { event in
+                guard decodingError == nil else { return }
                 switch event {
                 case .prefill(let done, let total):
                     if done == total {
                         progress.decodeStart = Date()
-                        progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
+                        progress.countersAtDecodeStart = (runner as? RealForwardRunner)
+                            .map(RunnerCounterSnapshot.init)
                     }
                     continuation.yield(.prefillProgress(done: done, total: total))
-                case .token(let index, _, let delta):
+                case .token(let index, let tokenID, let delta):
                     if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
                     progress.generated = index + 1
                     if index % 8 == 0 { _ = memorySampler.sample() }
-                    continuation.yield(.token(AppTokenEvent(
-                        index: index,
-                        textDelta: delta,
-                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                    do {
+                        let events = if let decoder {
+                            try decoder.consume(tokenID: tokenID, delta: delta)
+                        } else {
+                            delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
+                        }
+                        continuation.yield(.token(AppTokenEvent(
+                            index: index,
+                            textDelta: try visibleText(events),
+                            elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                    } catch {
+                        decodingError = error
+                        shouldStop = true
+                    }
                 case .tail(let text):
+                    do {
+                        let events = if let decoder {
+                            try decoder.consumeFlushedText(text)
+                        } else {
+                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
+                        }
+                        let visible = try visibleText(events)
+                        if !visible.isEmpty {
+                            continuation.yield(.token(AppTokenEvent(
+                                index: max(progress.generated - 1, 0),
+                                textDelta: visible,
+                                elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                        }
+                    } catch {
+                        decodingError = error
+                        shouldStop = true
+                    }
+                }
+            }
+            if let decodingError { throw decodingError }
+            if let decoder {
+                let visible = try visibleText(decoder.finish())
+                if !visible.isEmpty {
                     continuation.yield(.token(AppTokenEvent(
                         index: max(progress.generated - 1, 0),
-                        textDelta: text,
+                        textDelta: visible,
                         elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
                 }
             }
@@ -365,14 +439,14 @@ actor RealInferenceSession {
                                               decodeSeconds: progress.elapsedDecodeSeconds,
                                               generated: progress.generated,
                                               prefill: PrefillExecutionDiagnostics(
-                                                config: prefillConfig,
-                                                executedMode: prefillConfig.mode == .chunked ? .chunked : .off,
-                                                kvStorageMode: .fp16))
+                                                config: requestedPrefillConfig,
+                                                executedMode: executedPrefillMode,
+                                                kvStorageMode: kvStorageMode))
             continuation.yield(.cancelled(diagnostics))
             continuation.finish(throwing: AppInferenceError.cancelled)
         } catch let prefillError as PrefillError {
-            let diagnostics = Self.prefillFailureDiagnostics(config: prefillConfig,
-                                                             kvStorageMode: .fp16,
+            let diagnostics = Self.prefillFailureDiagnostics(config: requestedPrefillConfig,
+                                                             kvStorageMode: kvStorageMode,
                                                              reason: prefillError.description)
             failGeneration(.unknown(prefillError.description),
                            request: request,
@@ -443,7 +517,9 @@ actor RealInferenceSession {
     /// The forward count is `generated - 1`: each loop iteration that continues
     /// ends with one `produce`; the final sampled token never runs a forward.
     private func runnerDiagnostics(progress: ProgressState, generated: Int) -> AppRunnerDiagnostics? {
-        guard let runner, let base = progress.countersAtDecodeStart, generated > 1 else { return nil }
+        guard let runner = runner as? RealForwardRunner,
+              let base = progress.countersAtDecodeStart,
+              generated > 1 else { return nil }
         let now = RunnerCounterSnapshot(runner)
         let forwards = Double(generated - 1)
         func ms(_ end: UInt64, _ start: UInt64) -> Double {
