@@ -3,10 +3,15 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <gemma4|qwen36|deepseekv4flash|inklingsmall|maple>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <gemma4|qwen36|qwen38|deepseekv4flash|inklingsmall|maple>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
+  MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
   MferenceRepack --help
+
+--attach-mtp appends the Qwen 3.8 MTP draft-layer tensors from a local BF16
+safetensors shard to an existing install (projections quantized to INT4
+affine group-64), enabling speculative decoding.
 
 The installer streams the selected checkpoint (default: the supported Gemma 4
 checkpoint) from Hugging Face and repackages it without materializing the
@@ -22,6 +27,7 @@ private struct Arguments {
     var resume = false
     var discardPartial = false
     var verifyInstall = false
+    var attachMTP: String?
     var inputGTurbo: String?
     var baseURL: URL?
     var dryRun = false
@@ -49,6 +55,12 @@ private struct Arguments {
             case "--verify-install":
                 parsed.verifyInstall = true
                 index += 1
+            case "--attach-mtp":
+                guard index + 1 < values.count else {
+                    throw ParseError.missingValue(flag)
+                }
+                parsed.attachMTP = values[index + 1]
+                index += 2
             case "--model":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
@@ -95,6 +107,16 @@ private struct Arguments {
             }
             guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.verifyInstall else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
+            }
+            return parsed
+        }
+        if parsed.attachMTP != nil {
+            guard parsed.output != nil else {
+                throw ParseError.missingRequired("--output")
+            }
+            guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.resume,
+                  !parsed.verifyInstall, !parsed.dryRun else {
+                throw ParseError.invalidMode("--attach-mtp only accepts --output")
             }
             return parsed
         }
@@ -158,6 +180,21 @@ private func run(_ values: [String]) async -> Int32 {
             return 0
         } catch {
             printError("discard failed: \(error)")
+            return 1
+        }
+    }
+
+    if let shard = arguments.attachMTP, let output = arguments.output {
+        do {
+            let result = try MTPAttachTool.run(gturboDirectory: output,
+                                               shardPath: shard)
+            print("Attached \(result.tensorCount) MTP tensors to \(output)")
+            print("Appended bytes: \(result.appendedBytes)")
+            print("model_weights.bin: \(result.weightsFileBytes) bytes"
+                + (result.rewroteWeightsFile ? " (rewritten with grown index)" : " (in-place)"))
+            return 0
+        } catch {
+            printError("attach-mtp failed: \(error)")
             return 1
         }
     }

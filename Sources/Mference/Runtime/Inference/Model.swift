@@ -120,14 +120,14 @@ public struct Model {
     /// `model.audio.`).
     var trunkPrefix: String {
         switch config.family {
-        case .gemma4, .qwen36: return "language_model.model."
+        case .gemma4, .qwen36, .qwen38: return "language_model.model."
         case .deepseekV4Flash, .maple: return "model."
         case .inklingSmall: return "model.llm."
         }
     }
     private var lmHeadName: String {
         switch config.family {
-        case .gemma4, .qwen36: return "language_model.lm_head.weight"
+        case .gemma4, .qwen36, .qwen38: return "language_model.lm_head.weight"
         case .deepseekV4Flash, .maple: return "lm_head.weight"
         case .inklingSmall: return "model.llm.unembed.weight"
         }
@@ -135,7 +135,7 @@ public struct Model {
     /// Inkling names the token embedding `embed`, not `embed_tokens`.
     private var embeddingName: String {
         switch config.family {
-        case .gemma4, .qwen36, .deepseekV4Flash:
+        case .gemma4, .qwen36, .qwen38, .deepseekV4Flash:
             return "\(trunkPrefix)embed_tokens.weight"
         case .maple:
             return "\(trunkPrefix)word_embeddings.weight"
@@ -180,7 +180,9 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
-        case .qwen36:
+        case .qwen36, .qwen38:
+            // Qwen 3.8 is dense and has no router tensor; the accessor throws
+            // tensorNotFound if a caller ever asks.
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
         case .deepseekV4Flash:
             return try resident(name: "model.layers.\(L).ffn.gate.weight")
@@ -204,7 +206,9 @@ public struct Model {
     }
     private func sharedExpertName(_ proj: String, layer L: Int) -> String {
         switch config.family {
-        case .gemma4:
+        case .gemma4, .qwen38:
+            // For dense Qwen 3.8 these accessors serve the per-layer MLP,
+            // which the checkpoint names exactly like Gemma's shared FFN.
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
         case .qwen36:
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
@@ -223,7 +227,7 @@ public struct Model {
     }
     public func inputNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36, .maple:
+        case .gemma4, .qwen36, .qwen38, .maple:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
         case .deepseekV4Flash, .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
@@ -231,7 +235,7 @@ public struct Model {
     }
     public func postAttnNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36, .maple:
+        case .gemma4, .qwen36, .qwen38, .maple:
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
         case .deepseekV4Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).ffn_norm.weight")
@@ -502,12 +506,30 @@ public struct Model {
             ? entry.scaleOffset - residentFileOffset : 0
         let biasRel: UInt64 = entry.biasSize > 0
             ? entry.biasOffset - residentFileOffset : 0
+        // Resolve the chunk holding the tensor's full span; offsets in the
+        // returned view are relative to that chunk's buffer.
+        var spanLo = relativeOffset
+        var spanHi = relativeOffset + entry.sizeBytes
+        if entry.scaleSize > 0 {
+            spanLo = min(spanLo, scaleRel)
+            spanHi = max(spanHi, scaleRel + entry.scaleSize)
+        }
+        if entry.biasSize > 0 {
+            spanLo = min(spanLo, biasRel)
+            spanHi = max(spanHi, biasRel + entry.biasSize)
+        }
+        guard let chunk = residentBuffer.chunk(containing: spanLo, spanHi) else {
+            throw ModelError.indexCorrupt(
+                detail: "resident tensor \(name) straddles a chunk boundary")
+        }
         return TensorView(
-            buffer: residentBuffer.buffer,
-            offset: relativeOffset,
+            buffer: chunk.buffer,
+            offset: relativeOffset - chunk.start,
             length: entry.sizeBytes,
-            scaleOffset: scaleRel, scaleLength: entry.scaleSize,
-            biasOffset:  biasRel,  biasLength:  entry.biasSize,
+            scaleOffset: entry.scaleSize > 0 ? scaleRel - chunk.start : 0,
+            scaleLength: entry.scaleSize,
+            biasOffset:  entry.biasSize > 0 ? biasRel - chunk.start : 0,
+            biasLength:  entry.biasSize,
             shape: entry.shape,
             dtype: entry.dtype)
     }
@@ -727,11 +749,30 @@ extension Model {
             }
         }
 
+        // Region-relative spans (tensor + companions) so an oversized region
+        // can be cut into multiple buffers without splitting any tensor.
+        let regionStart = residentIndex.header.indexSize
+        let tensorSpans = residentIndex.entries.values
+            .filter { $0.fileOffset >= regionStart }
+            .map { entry -> (start: UInt64, end: UInt64) in
+                var lo = entry.fileOffset
+                var hi = entry.fileOffset + entry.sizeBytes
+                if entry.scaleSize > 0 {
+                    lo = min(lo, entry.scaleOffset)
+                    hi = max(hi, entry.scaleOffset + entry.scaleSize)
+                }
+                if entry.biasSize > 0 {
+                    lo = min(lo, entry.biasOffset)
+                    hi = max(hi, entry.biasOffset + entry.biasSize)
+                }
+                return (lo - regionStart, hi - regionStart)
+            }
         let residentBuffer = try ResidentBuffer(
             fileURL: weightsURL,
             fileOffset: residentIndex.header.indexSize,
             residentSize: residentIndex.header.residentSize,
-            device: device)
+            device: device,
+            tensorSpans: tensorSpans)
 
         let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
         if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {

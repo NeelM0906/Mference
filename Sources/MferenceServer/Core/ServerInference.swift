@@ -173,6 +173,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         switch modelFamily {
         case .gemma4: return "gemma-4-26b-a4b-it"
         case .qwen36: return "qwen3.6-35b-a3b"
+        case .qwen38: return "qwen3.8-27b-4bit"
         case .deepseekV4Flash: return "deepseek-v4-flash-2bit-dq"
         case .inklingSmall: return "inkling-small-4bit"
         case .maple: return "maple-preview-2bit-mlx"

@@ -68,6 +68,19 @@ struct RepackCLITests {
         #expect(result.stderr.contains("no resumable install state exists"))
     }
 
+    @Test func qwen38ModelSelectorIsAccepted() throws {
+        let output = temporaryOutput("qwen38-model")
+        defer { clean(output) }
+        let result = try run([
+            "--model", "qwen38",
+            "--output", output,
+            "--resume",
+        ])
+
+        #expect(result.status == 1)
+        #expect(result.stderr.contains("no resumable install state exists"))
+    }
+
     @Test func mapleModelSelectorIsAccepted() throws {
         let output = temporaryOutput("maple-model")
         defer { clean(output) }

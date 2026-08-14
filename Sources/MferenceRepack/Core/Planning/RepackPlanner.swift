@@ -185,7 +185,7 @@ enum RepackPlanner {
     private static func hasResidentPrefix(_ name: String,
                                           family: RepackModelFamily) -> Bool {
         switch family {
-        case .gemma4, .qwen36:
+        case .gemma4, .qwen36, .qwen38:
             return name.hasPrefix("language_model.")
         case .deepseekV4Flash, .maple:
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
@@ -203,6 +203,8 @@ enum RepackPlanner {
         switch family {
         case .gemma4:          routedContainer = ".experts.switch_glu."
         case .qwen36:          routedContainer = ".mlp.switch_mlp."
+        // Dense family: every `.mlp.*_proj` is the layer's own FFN, resident.
+        case .qwen38:          return nil
         case .deepseekV4Flash: routedContainer = ".ffn.switch_mlp."
         case .maple:           routedContainer = ".mlp.switch_mlp."
         // `.mlp.experts.` does not match the shared experts, which sit under
@@ -907,7 +909,7 @@ enum RepackPlanner {
         // norm (DeepSeek V4's `model.hc_head.*` stream collapse lands there).
         func key(_ n: String) -> (Int, Int, Int, String) {
             switch family {
-            case .gemma4, .qwen36:
+            case .gemma4, .qwen36, .qwen38:
                 if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
@@ -930,6 +932,7 @@ enum RepackPlanner {
                 switch family {
                 case .gemma4:          slot = slotRank(in: n)
                 case .qwen36:          slot = qwenSlotRank(in: n)
+                case .qwen38:          slot = qwen38SlotRank(in: n)
                 case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
                 case .inklingSmall:    slot = inklingSlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
@@ -1022,6 +1025,34 @@ enum RepackPlanner {
         if n.contains(".mlp.shared_expert.down_proj.weight") { return 19 }
         if n.hasSuffix(".input_layernorm.weight")        { return 20 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 21 }
+        return 100
+    }
+
+    /// Within-layer slot order for the dense Qwen 3.8 family: the Qwen 3.6
+    /// attention and gated-DeltaNet ranks unchanged, then the layer's own
+    /// SwiGLU MLP where the router/shared-expert bundle would sit, then the
+    /// two layer norms.
+    private static func qwen38SlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight")   { return 0 }
+        if n.contains(".self_attn.k_proj.weight")   { return 1 }
+        if n.contains(".self_attn.v_proj.weight")   { return 2 }
+        if n.contains(".self_attn.o_proj.weight")   { return 3 }
+        if n.contains(".self_attn.q_norm.weight")   { return 4 }
+        if n.contains(".self_attn.k_norm.weight")   { return 5 }
+        if n.contains(".linear_attn.in_proj_qkv.weight") { return 6 }
+        if n.contains(".linear_attn.in_proj_z.weight")   { return 7 }
+        if n.contains(".linear_attn.in_proj_a.weight")   { return 8 }
+        if n.contains(".linear_attn.in_proj_b.weight")   { return 9 }
+        if n.contains(".linear_attn.conv1d.weight")      { return 10 }
+        if n.hasSuffix(".linear_attn.A_log")             { return 11 }
+        if n.hasSuffix(".linear_attn.dt_bias")           { return 12 }
+        if n.contains(".linear_attn.norm.weight")        { return 13 }
+        if n.contains(".linear_attn.out_proj.weight")    { return 14 }
+        if n.contains(".mlp.gate_proj.weight")           { return 15 }
+        if n.contains(".mlp.up_proj.weight")             { return 16 }
+        if n.contains(".mlp.down_proj.weight")           { return 17 }
+        if n.hasSuffix(".input_layernorm.weight")        { return 18 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 19 }
         return 100
     }
 

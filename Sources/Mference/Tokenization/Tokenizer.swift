@@ -69,9 +69,10 @@ public struct MFTokenizer: @unchecked Sendable {
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
 
-    /// Maple's pinned prompt opens a live `<think>` block. The initializer
-    /// resolves this EOS relationship only when the caller supplies the Maple
-    /// manifest family; direct and non-Maple loads retain their old behavior.
+    /// Maple's and Qwen 3.8's pinned prompts open a live `<think>` block. The
+    /// initializer resolves this EOS relationship only when the caller
+    /// supplies one of those manifest families; direct loads and other
+    /// families retain their old behavior.
     public var generationPromptStartsInThinking: Bool {
         dialect == .chatml && eosID == endOfTurnID
     }
@@ -165,7 +166,7 @@ public struct MFTokenizer: @unchecked Sendable {
         }
         let resolved = switch dialect {
         case .gemma: try Self.resolveGemmaTokens(tokenizer)
-        case .chatml: try Self.resolveChatMLTokens(tokenizer, maple: family == .maple)
+        case .chatml: try Self.resolveChatMLTokens(tokenizer, family: family)
         case .deepseek: try Self.resolveDeepseekTokens(tokenizer)
         case .inkling: try Self.resolveInklingTokens(tokenizer)
         }
@@ -259,7 +260,7 @@ public struct MFTokenizer: @unchecked Sendable {
 
     private static func resolveChatMLTokens(
         _ tokenizer: any Tokenizer,
-        maple: Bool
+        family: ModelFamily?
     ) throws -> ResolvedSpecialTokens {
         func id(_ token: String) throws -> Int32 {
             guard let value = specialTokenID(tokenizer, token) else {
@@ -278,10 +279,15 @@ public struct MFTokenizer: @unchecked Sendable {
         let toolResponseEnd = try id("</tool_response>")
         let thinkStart = try id("<think>")
         let thinkEnd = try id("</think>")
+        // Maple and Qwen 3.8 chat templates end the generation prompt inside
+        // a live `<think>` block and stop on `<|im_end|>`; the eos ==
+        // end-of-turn identity is what `generationPromptStartsInThinking`
+        // keys off. A nil family keeps the Qwen 3.6 (non-thinking) behavior.
+        let startsInThinking = family == .maple || family == .qwen38
         return ResolvedSpecialTokens(
             bosID: endOfText,
             bosPrefixID: nil,
-            eosID: maple ? imEnd : endOfText,
+            eosID: startsInThinking ? imEnd : endOfText,
             padID: endOfText,
             endOfTurnID: imEnd,
             toolCallStartID: toolCallStart,
@@ -293,7 +299,7 @@ public struct MFTokenizer: @unchecked Sendable {
             thinkStartID: thinkStart,
             thinkEndID: thinkEnd,
             stopTokenIDs: [imEnd, endOfText],
-            vocabSize: maple ? 151_936 : 248_320)
+            vocabSize: family == .maple ? 151_936 : 248_320)
     }
 
     /// Sentinel for token roles a dialect frames as plain text rather than a
@@ -426,7 +432,7 @@ public struct MFTokenizer: @unchecked Sendable {
     /// `add_generation_prompt` + `enable_thinking=false` branch.
     private static let chatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    private static let mapleChatMLGenerationSuffix =
+    private static let thinkingChatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n"
     /// DeepSeek-V4 special-token text; note the fullwidth vertical bars
     /// (U+FF5C) and the U+2581 fillers in the sentence markers.
@@ -574,7 +580,7 @@ public struct MFTokenizer: @unchecked Sendable {
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }
         s += generationPromptStartsInThinking
-            ? Self.mapleChatMLGenerationSuffix
+            ? Self.thinkingChatMLGenerationSuffix
             : Self.chatMLGenerationSuffix
         return s
     }
@@ -836,7 +842,7 @@ public struct MFTokenizer: @unchecked Sendable {
         case .chatml:
             let content = generationPromptStartsInThinking ? userContent : trimmedContent
             let suffix = generationPromptStartsInThinking
-                ? Self.mapleChatMLGenerationSuffix
+                ? Self.thinkingChatMLGenerationSuffix
                 : Self.chatMLGenerationSuffix
             return [endOfTurnID] + encode(
                 "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"

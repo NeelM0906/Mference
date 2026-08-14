@@ -247,6 +247,40 @@ public enum ManifestReader {
 
     private static func validateQuant(_ quant: ManifestQuant,
                                       expected: ArchConfig) throws {
+        if expected.family == .qwen38 {
+            let affine: [(String, ManifestQuantSlot)] = [
+                ("embedding", quant.embedding),
+                ("attention", quant.attention),
+            ]
+            for (name, slot) in affine {
+                guard slot.weightBits == 4,
+                      slot.scheme.lowercased() == "affine",
+                      slot.scaleType.lowercased() == "bf16",
+                      slot.biasType.lowercased() == "bf16",
+                      slot.groupSize == Quantization.groupSize else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported Qwen3.8 quantization for \(name)")
+                }
+            }
+            // Dense: the manifest must mark the router, shared-expert and
+            // routed-expert slots absent.
+            let absent: [(String, ManifestQuantSlot)] = [
+                ("router", quant.router),
+                ("sharedExpert", quant.sharedExpert),
+                ("routedExpert", quant.routedExpert),
+            ]
+            for (name, slot) in absent {
+                guard slot.weightBits == 0,
+                      slot.scheme.lowercased() == "none",
+                      slot.scaleType.lowercased() == "none",
+                      slot.biasType.lowercased() == "none",
+                      slot.groupSize == 0 else {
+                    throw ModelError.indexCorrupt(
+                        detail: "Qwen3.8 manifest must mark \(name) absent")
+                }
+            }
+            return
+        }
         if expected.family == .maple {
             let affine: [(String, ManifestQuantSlot, Int)] = [
                 ("embedding", quant.embedding, 4),

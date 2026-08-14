@@ -544,6 +544,100 @@ kernel void gdn_delta_gated_decode_qwen(
     }
 }
 
+// Qwen 3.8 variant of the fused decode recurrence + gated norm. Identical
+// structure to gdn_delta_gated_decode_qwen; only the geometry differs:
+// Hv=48 value heads over the same Hk=16 key heads, so the value-to-key head
+// mapping divides by 3 (Hv/Hk) instead of 2. Dk=Dv=128 are unchanged, so the
+// per-head lane mapping, reduction order, and norm layout carry over exactly.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void gdn_delta_gated_decode_qwen38(
+    device const half*   conv_out [[buffer(0)]],
+    device const half*   a_proj   [[buffer(1)]],
+    device const half*   b_proj   [[buffer(2)]],
+    device const bfloat* A_log    [[buffer(3)]],
+    device const bfloat* dt_bias  [[buffer(4)]],
+    device float*        state    [[buffer(5)]],
+    device const half*   z        [[buffer(6)]],
+    device const bfloat* weight   [[buffer(7)]],
+    device half*         out      [[buffer(8)]],
+    constant uint&       kHeads   [[buffer(9)]],
+    constant uint&       vHeads   [[buffer(10)]],
+    constant uint&       keyDim   [[buffer(11)]],
+    constant uint&       valueDim [[buffer(12)]],
+    uint h [[threadgroup_position_in_grid]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    constexpr uint Hk = 16u;
+    constexpr uint Hv = 48u;
+    constexpr uint Dk = 128u;
+    constexpr uint Dv = 128u;
+    constexpr uint simd_groups = 8u;
+    if (h >= Hv) return;
+    if (kHeads != Hk || vHeads != Hv || keyDim != Dk || valueDim != Dv) return;
+
+    threadgroup half y_half[Dv];
+    threadgroup float norm_partial[4];
+    threadgroup float inv_rms;
+
+    const uint hk = h / 3u;   // Hv/Hk = 3
+    device const half* q = conv_out + hk * Dk;
+    device const half* k = conv_out + Hk * Dk + hk * Dk;
+    device const half* v = conv_out + 2u * Hk * Dk + h * Dv;
+    const float g = exp(-exp(float(A_log[h]))
+                        * gdn_softplus(float(a_proj[h]) + float(dt_bias[h])));
+    const float beta = 1.0f / (1.0f + exp(-float(b_proj[h])));
+
+    for (uint dv = simd_group; dv < Dv; dv += simd_groups) {
+        device float* srow = state + (h * Dv + dv) * Dk;
+        float s[4];
+        float kv = 0.0f;
+        for (uint i = 0; i < 4u; ++i) {
+            const uint idx = lane * 4u + i;
+            s[i] = srow[idx] * g;
+            kv = fma(s[i], float(k[idx]), kv);
+        }
+        kv = simd_sum(kv);
+
+        const float delta = (float(v[dv]) - kv) * beta;
+        float y_value = 0.0f;
+        for (uint i = 0; i < 4u; ++i) {
+            const uint idx = lane * 4u + i;
+            s[i] = fma(float(k[idx]), delta, s[i]);
+            y_value = fma(s[i], float(q[idx]), y_value);
+            srow[idx] = s[i];
+        }
+        y_value = simd_sum(y_value);
+        if (lane == 0u) y_half[dv] = half(y_value);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Match gdn_gated_norm's 128-thread reduction exactly: four contiguous
+    // SIMD reductions, then scalar accumulation of their lane-zero results.
+    if (simd_group < 4u) {
+        const uint dv = simd_group * 32u + lane;
+        const float y_value = float(y_half[dv]);
+        float sumsq = 0.0f;
+        sumsq = fma(y_value, y_value, sumsq);
+        sumsq = simd_sum(sumsq);
+        if (lane == 0u) norm_partial[simd_group] = sumsq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group == 0u && lane == 0u) {
+        float sumsq = 0.0f;
+        for (uint i = 0; i < 4u; ++i) sumsq += norm_partial[i];
+        inv_rms = rsqrt(sumsq / float(Dv) + kGdnRmsEps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group < 4u) {
+        const uint dv = simd_group * 32u + lane;
+        const float normed = float(y_half[dv]) * inv_rms * float(weight[dv]);
+        const float gate = gdn_silu(float(z[h * Dv + dv]));
+        out[h * Dv + dv] = half(normed * gate);
+    }
+}
+
 // Prefill: identical math with the token loop inside the kernel. q/k/v/a/b
 // advance by their row strides each step; state persists in registers across
 // the whole chunk and is written back once.

@@ -30,16 +30,20 @@ final class Attention {
     private let psoCombine: MTLComputePipelineState
     private let psoPartialSWA: MTLComputePipelineState
     private let psoPartialQwenFull: MTLComputePipelineState
+    private let psoPartialQwen38Full: MTLComputePipelineState
     private let psoPartialFull: MTLComputePipelineState
     private let psoGQAPartialSWA: MTLComputePipelineState
     private let psoGQAPartialSWAChunks16: MTLComputePipelineState
     private let psoPartialQwenFullChunks16: MTLComputePipelineState
+    private let psoPartialQwen38FullChunks16: MTLComputePipelineState
     private let psoPartialFullChunks16: MTLComputePipelineState
     private let psoCombineSWA: MTLComputePipelineState
     private let psoCombineQwenFull: MTLComputePipelineState
+    private let psoCombineQwen38Full: MTLComputePipelineState
     private let psoCombineFull: MTLComputePipelineState
     private let psoCombineSWAChunks16: MTLComputePipelineState
     private let psoCombineQwenFullChunks16: MTLComputePipelineState
+    private let psoCombineQwen38FullChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
 
     /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
@@ -48,9 +52,10 @@ final class Attention {
     static let threadsPerGroup: Int = 256
 
     /// Project ceilings for the split-KV partial scratch. `kAttnMaxHeadDim` in
-    /// attention.metal is 512; the model has 16 Q heads; `maxChunks` bounds the
-    /// split factor (and therefore the scratch size: 16·64·512 FP32 ≈ 2 MB).
-    static let maxQHeads = 16
+    /// attention.metal is 512; the widest family (Qwen 3.8) has 24 Q heads;
+    /// `maxChunks` bounds the split factor (and therefore the scratch size:
+    /// 24·64·512 FP32 ≈ 3 MB).
+    static let maxQHeads = 24
     static let maxHeadDim = 512
     static let maxChunks = 64
     /// Full attention uses 16 base chunks by default.
@@ -79,6 +84,11 @@ final class Attention {
                                                                headDim: 256,
                                                                numQHeads: 16,
                                                                numKVHeads: 2)
+        self.psoPartialQwen38Full = try Self.specializedPipeline(context,
+                                                                 "attention_decode_partial",
+                                                                 headDim: 256,
+                                                                 numQHeads: 24,
+                                                                 numKVHeads: 4)
         self.psoPartialFull = try Self.specializedPipeline(context,
                                                            "attention_decode_partial",
                                                            headDim: 512,
@@ -101,6 +111,12 @@ final class Attention {
                                                                        numQHeads: 16,
                                                                        numKVHeads: 2,
                                                                        numChunks: 16)
+        self.psoPartialQwen38FullChunks16 = try Self.specializedPipeline(context,
+                                                                         "attention_decode_partial",
+                                                                         headDim: 256,
+                                                                         numQHeads: 24,
+                                                                         numKVHeads: 4,
+                                                                         numChunks: 16)
         self.psoPartialFullChunks16 = try Self.specializedPipeline(context,
                                                                    "attention_decode_partial",
                                                                    headDim: 512,
@@ -117,6 +133,11 @@ final class Attention {
                                                                headDim: 256,
                                                                numQHeads: 16,
                                                                numKVHeads: 2)
+        self.psoCombineQwen38Full = try Self.specializedPipeline(context,
+                                                                 "attention_decode_combine",
+                                                                 headDim: 256,
+                                                                 numQHeads: 24,
+                                                                 numKVHeads: 4)
         self.psoCombineFull = try Self.specializedPipeline(context,
                                                            "attention_decode_combine",
                                                            headDim: 512,
@@ -134,6 +155,12 @@ final class Attention {
                                                                        numQHeads: 16,
                                                                        numKVHeads: 2,
                                                                        numChunks: 16)
+        self.psoCombineQwen38FullChunks16 = try Self.specializedPipeline(context,
+                                                                         "attention_decode_combine",
+                                                                         headDim: 256,
+                                                                         numQHeads: 24,
+                                                                         numKVHeads: 4,
+                                                                         numChunks: 16)
         self.psoCombineFullChunks16 = try Self.specializedPipeline(context,
                                                                    "attention_decode_combine",
                                                                    headDim: 512,
@@ -387,6 +414,9 @@ final class Attention {
         if !useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 2 {
             return numChunks == 16 ? psoPartialQwenFullChunks16 : psoPartialQwenFull
         }
+        if !useGQAPartial && headDim == 256 && numQHeads == 24 && numKVHeads == 4 {
+            return numChunks == 16 ? psoPartialQwen38FullChunks16 : psoPartialQwen38Full
+        }
         if !useGQAPartial && headDim == 512 && numQHeads == 16 && numKVHeads == 2 {
             if numChunks == 16 {
                 return psoPartialFullChunks16
@@ -405,6 +435,9 @@ final class Attention {
         }
         if headDim == 256 && numQHeads == 16 && numKVHeads == 2 {
             return numChunks == 16 ? psoCombineQwenFullChunks16 : psoCombineQwenFull
+        }
+        if headDim == 256 && numQHeads == 24 && numKVHeads == 4 {
+            return numChunks == 16 ? psoCombineQwen38FullChunks16 : psoCombineQwen38Full
         }
         if headDim == 512 && numQHeads == 16 && numKVHeads == 2 {
             return numChunks == 16 ? psoCombineFullChunks16 : psoCombineFull

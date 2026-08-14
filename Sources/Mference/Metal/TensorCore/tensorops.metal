@@ -135,8 +135,12 @@ kernel void inkling_attention_prefill_tensorops(
     constant     float&  scale          [[buffer(16)]],
     constant     float&  logAlpha       [[buffer(17)]],
     uint3 tgid [[threadgroup_position_in_grid]],
-    uint lid [[thread_position_in_threadgroup]],
-    uint threads [[threads_per_threadgroup]]) {
+    uint3 lid3 [[thread_position_in_threadgroup]],
+    uint3 threads3 [[threads_per_threadgroup]]) {
+    // GPUCompiler 32023 requires stage-in attribute declarations to be all
+    // scalar or all vector of one width; keep the all-uint3 convention.
+    const uint lid = lid3.x;
+    const uint threads = threads3.x;
     constexpr auto qkDescriptor = matmul2d_descriptor(
         kInklingAttentionQueries,
         kInklingAttentionKeys,
@@ -225,13 +229,15 @@ kernel void inkling_attention_prefill_tensorops(
         array<int32_t, 2>({1, kInklingAttentionKeys}));
     const uint cacheCount = ringCapacity != 0u
         ? ringCapacity : startPosition + queryCount;
+    // The tensor handle type is non-const; the kernel only reads through
+    // these views, so shedding the const qualifier is safe.
     deviceHalfTensor keyTensor(
-        K + kvHead * headDim,
+        (device half *)(K + kvHead * headDim),
         dextents<int32_t, 2>(
             int32_t(headDim), int32_t(cacheCount)),
         array<int32_t, 2>({1, int32_t(kvStride)}));
     deviceHalfTensor valueTensor(
-        V + kvHead * headDim,
+        (device half *)(V + kvHead * headDim),
         dextents<int32_t, 2>(
             int32_t(headDim), int32_t(cacheCount)),
         array<int32_t, 2>({1, int32_t(kvStride)}));

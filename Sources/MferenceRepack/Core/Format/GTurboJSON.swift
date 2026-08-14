@@ -122,6 +122,14 @@ enum GTurboJSON {
             archDict["routerGlobalScale"] = arch.routerGlobalScale
             archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
         }
+        // Qwen 3.8 is dense: the reader validates numSharedExperts against 0
+        // (absence would default to 1) and numDenseLayers/denseIntermediateSize
+        // against the full-depth dense FFN, so all three must be written.
+        if arch.family == .qwen38 {
+            archDict["numSharedExperts"] = arch.numSharedExperts
+            archDict["numDenseLayers"] = arch.numDenseLayers
+            archDict["denseIntermediateSize"] = arch.denseIntermediateSize
+        }
         if arch.family == .maple {
             archDict["routerScoringFunc"] = arch.routerScoringFunc
             archDict["routedScalingFactor"] = arch.routedScalingFactor
@@ -146,6 +154,21 @@ enum GTurboJSON {
                 "biasType": "BF16",
                 "groupSize": plan.baseGroupSize
             ]
+        }
+        // Dense family: there is no router, shared expert or routed expert to
+        // quantize. Mark the slots absent (Maple's sharedExpert convention);
+        // embedding/attention keep the affine INT4 entries from the loop.
+        if arch.family == .qwen38 {
+            let absent: [String: Any] = [
+                "weightBits": 0,
+                "scheme": "none",
+                "scaleType": "none",
+                "biasType": "none",
+                "groupSize": 0,
+            ]
+            quantDict["router"] = absent
+            quantDict["sharedExpert"] = absent
+            quantDict["routedExpert"] = absent
         }
         if arch.family == .maple {
             let affineInt4: [String: Any] = [
