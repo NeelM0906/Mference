@@ -137,13 +137,12 @@ extension Args {
                                 bounded, or adaptive (default off).
       --expert-cache-slots <n|resident|auto>
                                 Routed-expert cache slots per layer: 8, 16,
-                                24, 32, 96, 128, resident, or auto. resident maps
-                                every layer file once and skips the slot cache
-                                entirely. auto picks resident when the whole
-                                expert pool plus core weights and 4 GiB
-                                headroom fit physical memory (Qwen only),
-                                else Qwen uses 32 slots on hosts with at
-                                least 16 GiB and 16 otherwise.
+                                24, 32, 64, 96, 128, resident, or auto.
+                                resident maps every layer file once and skips
+                                the slot cache entirely. auto always uses the
+                                slot cache: Qwen gets 96 slots on hosts with
+                                at least 24 GiB, 32 with at least 16 GiB,
+                                else 16; other families get 16.
                                 More slots raise the hit rate but use more RAM.
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
