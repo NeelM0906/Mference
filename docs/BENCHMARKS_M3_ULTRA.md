@@ -1,8 +1,8 @@
 # Mference benchmark results — Mac Studio M3 Ultra, 256 GB
 
-All four supported model families installed, hash-verified, and benchmarked
-under the frozen community protocol. Every measured run reached a natural end
-of turn (36/36).
+All four model families supported at the time (Maple landed later) installed,
+hash-verified, and benchmarked under the frozen community protocol. Every
+measured run reached a natural end of turn (36/36).
 
 ## Host
 
@@ -43,9 +43,9 @@ pass.
 The frozen community protocol ([COMMUNITY_BENCHMARKS.md](COMMUNITY_BENCHMARKS.md)): the three
 `real-generation-v1` prompts with fixed seeds (20260721 / 20260722 / 20260723),
 temperature 0.2, Top-K 64, Top-P 0.95, 4,096-token context, up to 1,024
-generated tokens, production runtime defaults (16 expert-cache slots, prefill
-on, RDADVISE off), one discarded warmup per case, each measured run in a fresh
-process with no other model process running.
+generated tokens, the runtime defaults at the measured commit (16 expert-cache
+slots, prefill on, RDADVISE off), one discarded warmup per case, each measured
+run in a fresh process with no other model process running.
 
 Stated deviation: **three** measured repetitions per case instead of one, so
 medians and run-to-run spread can be reported. Generated token counts were
@@ -154,8 +154,9 @@ requires ~60% of expert reads served from RAM. Here the entire 90 GB expert
 pool fits in page cache after warmup (`vm_stat` showed ~139 GB of cached pages
 during the runs), so the ~2.03 GB/token of expert reads is served from memory.
 Throughput still sits below the document's ~8–12 tok/s GPU-compute ceiling
-estimate, consistent with the roadmap item that expert I/O is not yet
-overlapped with GPU work.
+estimate, consistent with the then-open roadmap item that expert I/O was not
+yet overlapped with GPU work (the DSV4 shadow speculative prefetch has since
+landed as that family's default).
 
 ### Inkling-Small — beats its estimate
 
@@ -230,7 +231,7 @@ configuration that can keep their expert pools resident.
 
 ```bash
 swift build -c release
-.build/release/MferenceRepack --model <gemma4|qwen36|deepseekv4flash|inklingsmall> \
+.build/release/MferenceRepack --model <gemma4|qwen36|deepseekv4flash|inklingsmall|maple> \
   --output scratch/<name>.gturbo
 .build/release/MferenceRepack --verify-install --input-gturbo scratch/<name>.gturbo
 ./run-benchmark.sh <label> scratch/<name>.gturbo 3

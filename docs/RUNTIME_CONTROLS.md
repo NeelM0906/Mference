@@ -67,7 +67,7 @@ benchmark protocol.
 
 | Control | Values | CLI flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
-| Expert-cache slots | 8, 16, 24, 32; CLI also accepts auto | `--expert-cache-slots` | App: 16; CLI/server auto | Auto selects 32 for Qwen on hosts with at least 16 GiB and 16 otherwise. Other families stay at 16. More slots retain more routed experts and reduce later reads at the cost of RAM. |
+| Expert-cache slots | 8, 16, 24, 32, 64, 96, 128; CLI also accepts resident and auto | `--expert-cache-slots` | App: 16; CLI/server auto | Auto always uses the slot cache: Qwen gets 96 slots on hosts with at least 24 GiB, 32 with at least 16 GiB, and 16 otherwise; other families get 16. `resident` maps every layer file once and skips the slot cache entirely — it lost the community A/B to the slot rungs (page-cache thrash), so it remains an explicit opt-in. More slots retain more routed experts and reduce later reads at the cost of RAM. |
 | Prompt prefill | On, off | — | On | On requests the family prefill path. Maple uses a native-BF16 chunked path that preserves token-ordered K/V commits and attention; other families use their own supported paths. Off selects correctness-first scalar replay rather than skipping prompt processing. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 | Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Maple stages each chunk layer-major but preserves its fixed 512-slot sliding-cache semantics by committing and attending rows in time order. |
@@ -76,14 +76,29 @@ benchmark protocol.
 
 The prefill chunk size and FlashHead switch are CLI controls; the Mac app uses the default exact head. The Mac
 app also keeps its explicit 16-slot default so an existing memory preference is
-never silently enlarged; Qwen users on larger Macs can select 32 in the
-inspector.
+never silently enlarged; Qwen users on larger Macs can select a larger rung in
+the inspector.
 The CLI applies these settings when it loads the model, so each run uses the
 values passed on its command line. Setting `MFERENCE_PHASES=1` makes the
-CLI print the decode phase split (`cb1`, expert I/O await, `cb2`, and GPU
-waits) after the timing footer; `MFERENCE_PREFILL_BREAKDOWN=1` prints the
+CLI print the decode phase report after the timing footer: `cb1` and `cb2`
+encode-and-commit time, expert I/O await split into GPU-overlapped and exposed
+time, the all-hit layer-step rate, GPU busy/span/gap, speculative-prefetch
+counters, and unaccounted GPU waits. `MFERENCE_PREFILL_BREAKDOWN=1` prints the
 Inkling prefill routed-expert split (fetch, encode, drain). Both are
 diagnostics and do not change behavior.
+
+The accepted decode defaults carry environment kill-switches for A/B runs.
+`MFERENCE_SLOT_MAP=0` disables the GPU-resident expert-to-slot map that lets
+Qwen layers whose eight experts are all cached skip the CPU round-trip
+(default on). `MFERENCE_EAGER_ROUTED=0` disables the eager routed commit,
+which commits the routed command buffer before its expert fills land, gated on
+a shared event; a failed eager fill aborts the decode step with an error
+rather than emitting corrupt output (default on). `MFERENCE_ROUTER_EVENT=0`
+disables the early mid-buffer router readback. `MFERENCE_SPEC_PREFETCH`
+selects the speculative-prefetch mode — shadow prefetch is the accepted
+DeepSeek-V4-Flash default, off elsewhere — and `MFERENCE_SHADOW_BUDGET` caps
+its per-layer speculative reads. All are byte-identical toggles, not quality
+controls.
 
 Changing context length, expert-cache slots, RDADVISE, model verification,
 prompt-prefill enablement, the prefill chunk size, or FlashHead selection

@@ -97,8 +97,9 @@ Streamed experts: one expert blob = 25.17M params at 2-bit ≈ **7.87 MB**
 of expert reads per token** at 0% cache hit.
 
 Expert-slot memory and the throughput ladder (per-layer slot pools, like
-Gemma/Qwen; the runtime's allowed slot counts are 8/16/24/32, and top-6
-routing needs at least 6 in-flight blobs per layer):
+Gemma/Qwen; the runtime's allowed slot counts are now 8/16/24/32/64/96/128
+plus an explicit `resident` mode, and top-6 routing needs at least 6
+in-flight blobs per layer):
 
 | Slots/layer | Slot RAM | Peak footprint | Expected decode |
 | ---: | ---: | ---: | --- |
@@ -167,9 +168,12 @@ global `expertStride` — plus ~4 GB resident file).
   structure; CSA layers add an indexer-score readback only once the
   compressed count exceeds `index_topk` (context > 2048), i.e. never at the
   default 4K context's first half.
-- Prefill v1 runs the decode path token-by-token (the Qwen port's
+- Prefill v1 ran the decode path token-by-token (the Qwen port's
   chunked-prefill ≡ sequential-decode guarantee is the correctness
-  contract; the chunked implementation is follow-up work).
+  contract). The chunked implementation has since landed
+  (`DSV4ChunkedPrefill`): a span's eligible prefix is batched, and only
+  the remainder past the lightning-selection cutover replays
+  token-by-token.
 
 ## First-install verification record
 
@@ -225,7 +229,8 @@ The first slice of that overlap work shipped: the pilot lookahead router
 (layer L+1's routing computed from layer L's state) now feeds an
 asynchronous prefetcher that joins the critical path only when a predicted
 expert is actually routed, reads at user-initiated I/O priority, and issues
-at most two weight-ranked predictions per layer. Output is byte-identical;
+at most two weight-ranked predictions per layer (`MFERENCE_SHADOW_BUDGET`
+overrides the budget). Output is byte-identical;
 the mode is the DSV4 production default (`MFERENCE_SPEC_PREFETCH` still
 overrides). Community-protocol A/B on the two naturally-terminating cases,
 16 slots + adaptive:

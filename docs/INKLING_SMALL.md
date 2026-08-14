@@ -57,9 +57,12 @@ BF16 router too, so whatever the repacker does there already applies.
 The 3-bit and mixed-2-bit builds are genuinely attractive on decode bandwidth
 (see below), and the 3-bit build in particular protects the every-token path.
 Both are rejected for the same structural reason rather than a quality one:
-they leave attention and embeddings in **BF16**, and Mference has no resident
-BF16 matmul path — the attention slot is required to be INT4 and every decode
-GEMV is an INT4 or INT8 kernel. Adopting either means adding a BF16 weight path
+they leave attention and embeddings in **BF16**, and Mference's shared
+streamed-expert engine has no resident BF16 matmul path — the attention slot
+is required to be INT4 and every decode GEMV is an INT4 or INT8 kernel. (The
+later Maple family's self-contained runner carries its own ternary and BF16
+paths, but they do not extend to this engine.) Adopting either means adding
+a BF16 weight path
 *and* (for 3-bit) an INT3 unpack kernel whose weights straddle `u32` word
 boundaries (3 does not divide 32). That is a second project layered on top of
 an already large one.

@@ -120,6 +120,9 @@ stopped speculative cross-layer prefetch before it reached the runtime.
 
 Past routing decisions identified weights worth keeping. The tested signal
 could not identify the next layer's weights early enough to prefetch them.
+A later DeepSeek-V4-Flash predictor that runs the next layer's router against
+the current token's state did pay off, and its shadow prefetch is now that
+family's default. The Gemma cross-layer signal stayed rejected.
 
 The always-resident shared MLP offered a safer way to hide read time. The GPU
 can execute it while the CPU fills routed-expert misses. In a later paired

@@ -16,9 +16,9 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | 8 GB M2, Mference | 5.10-6.30 tok/s | ~1.9-2.1 GB footprint |
 | 24 GB M5 Pro, Mference | 31-35 tok/s | ~2.1 GB footprint |
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
-| M5, Mference, Qwen 3.6 35B-A3B | 23.5-29.3 tok/s | 32-slot Qwen auto profile |
+| M5, Mference, Qwen 3.6 35B-A3B | 23.5-29.3 tok/s | 32-slot Qwen profile (auto as of 2026-08-06) |
 
-A separate report covers all four model families on a 256 GB M3 Ultra,
+A separate report covers the four pre-Maple model families on a 256 GB M3 Ultra,
 including the first measured DeepSeek-V4-Flash and Inkling-Small rows:
 [M3 Ultra benchmarks](BENCHMARKS_M3_ULTRA.md).
 
@@ -79,7 +79,7 @@ loop.
 
 ## Qwen 3.6 35B-A3B measured decode
 
-The current optimized production run was recorded on 2026-08-06 on an M5
+This optimized production run was recorded on 2026-08-06 on an M5
 MacBook Pro (`Mac17,2`) with 24 GB, macOS 26.5, and Swift 6.3.3. The CLI's
 automatic profile selected 32 Qwen expert-cache slots; no experimental flag or
 profiler was active. One discarded warmup preceded one fresh-process measured
@@ -97,6 +97,13 @@ model-aware default, on top of the custom Qwen decode kernels. Long-prompt
 prefill is 2.20x faster than the original 58.45 s baseline. The original and
 current generated token counts differ, so only the same-output controls are
 used for the decode speedup claim.
+
+Since this run, the 2026-08 performance campaign (PR #16, merged 2026-08-13)
+changed the Qwen production defaults: the automatic profile now selects 96
+expert-cache slots on hosts with at least 24 GiB (32 with at least 16 GiB,
+else 16), with the GPU-resident slot map and eager routed commit on by
+default. The rows above therefore describe the 2026-08-06 32-slot automatic
+profile, not a current checkout.
 
 ### Historical 16-slot run
 

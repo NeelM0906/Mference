@@ -212,11 +212,10 @@ Chat Completions supports JSON and Server-Sent Events responses. Set
 
 Requests may contain system, developer, user, assistant, and tool messages.
 Guidance must precede the conversation, and consecutive messages of the same
-guidance role are merged into one block separated by a blank line. Qwen's chat
-template has no `developer` role, so with a Qwen model loaded a `developer`
-message is treated as a `system` message — it merges with adjacent system
-guidance instead of rendering as its own block. Gemma keeps the two roles
-distinct.
+guidance role are merged into one block separated by a blank line. Only
+Gemma's chat template has a distinct `developer` role; with any other family
+loaded a `developer` message is treated as a `system` message — it merges
+with adjacent system guidance instead of rendering as its own block.
 Supported options include `temperature`, `top_p`, `top_k`,
 `repetition_penalty`, `seed`, `stop`, `max_tokens`,
 `max_completion_tokens`, and function-tool fields.
@@ -225,7 +224,14 @@ The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,
 batching, log probabilities, or remote model switching.
 
+Maple's chat template opens a live `<think>` reasoning block at the start of
+every completion. The server suppresses the reasoning text from the response,
+but those tokens still count as completion tokens, so give Maple requests a
+generous allowance — around 2048 `max_completion_tokens` (when neither cap is
+set the server uses 4096) — or the reasoning budget swallows the visible
+answer and the request finishes with `finish_reason` `"length"`.
+
 Context length can be 4K, 8K, 16K, 32K, 64K, or 128000 tokens; the default is
 16K. Maple supports 128000 tokens in the server and uses native BF16 KV with
-sequential prefill; existing families use FP16 KV. On an 8 GB Mac, run one
-model process at a time and watch memory pressure.
+layer-major chunked prefill; existing families use FP16 KV. On an 8 GB Mac,
+run one model process at a time and watch memory pressure.
