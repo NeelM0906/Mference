@@ -322,9 +322,14 @@ public enum MTPAttachTool {
             options: [.sortedKeys, .withoutEscapingSlashes])
         try Posix.atomicWrite(newManifest, to: manifestPath,
                               durableIn: gturboDirectory)
+        // The attach invalidated the old receipt; regenerate it so installs
+        // that gate on verified-install.json (the Mac app) keep working
+        // without a manual --verify-install pass.
         let receiptPath = (gturboDirectory as NSString)
             .appendingPathComponent("verified-install.json")
         try? FileManager.default.removeItem(atPath: receiptPath)
+        _ = try VerifiedInstallTool.run(
+            options: VerifyInstallOptions(inputGTurbo: gturboDirectory))
 
         return Result(tensorCount: newEntries.count,
                       appendedBytes: UInt64(appended.count),

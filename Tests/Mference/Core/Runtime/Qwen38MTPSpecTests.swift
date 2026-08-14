@@ -87,6 +87,18 @@ import Testing
     @Test func attachProducesLoadableInstall() throws {
         let dir = try Self.makeAttachedDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
+        // The attach must leave a fresh install receipt behind — the Mac app
+        // gates "installed" on verified-install.json, so a stale or missing
+        // receipt strands an otherwise valid install on the download screen.
+        let receiptURL = dir.appendingPathComponent("verified-install.json")
+        let receiptData = try Data(contentsOf: receiptURL)
+        let receipt = try JSONSerialization.jsonObject(with: receiptData) as? [String: Any]
+        let receiptFiles = receipt?["files"] as? [String: [String: Any]] ?? [:]
+        let weightsEntry = receiptFiles["model_weights.bin"]
+        let weightsSize = try FileManager.default
+            .attributesOfItem(atPath: dir.appendingPathComponent("model_weights.bin").path)[.size] as? Int
+        #expect(weightsEntry?["size"] as? Int == weightsSize,
+                "receipt must record the post-attach weights size")
         let ctx = try MetalContext()
         // Model.load re-verifies the manifest sha256 of the rewritten
         // weights file, so a load success also validates the attach output.
