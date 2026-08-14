@@ -50,16 +50,24 @@ final class GDN {
             && config.numVHeads == 32
             && config.keyHeadDim == 128
             && config.valueHeadDim == 128
+        let isQwen38Geometry = config.numKHeads == 16
+            && config.numVHeads == 48
+            && config.keyHeadDim == 128
+            && config.valueHeadDim == 128
         self.qwenDeltaDecodePSO = useQwenDecodeSpecialization && isQwenGeometry
             ? try context.pipeline("gdn_delta_step_decode_qwen",
                                    constants: [],
                                    maxTotalThreadsPerThreadgroup: 256)
             : nil
-        self.qwenDeltaGatedDecodePSO = useQwenDecodeSpecialization && isQwenGeometry
-            ? try context.pipeline("gdn_delta_gated_decode_qwen",
-                                   constants: [],
-                                   maxTotalThreadsPerThreadgroup: 256)
-            : nil
+        if useQwenDecodeSpecialization && (isQwenGeometry || isQwen38Geometry) {
+            self.qwenDeltaGatedDecodePSO = try context.pipeline(
+                isQwenGeometry ? "gdn_delta_gated_decode_qwen"
+                               : "gdn_delta_gated_decode_qwen38",
+                constants: [],
+                maxTotalThreadsPerThreadgroup: 256)
+        } else {
+            self.qwenDeltaGatedDecodePSO = nil
+        }
         self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
         self.gatedNormPSO = try context.pipeline("gdn_gated_norm")
         self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",

@@ -613,17 +613,18 @@ import MferenceValidationSupport
         }
     }
 
-    @Test func qwenFusedDeltaGatedNormMatchesSeparateDispatches() throws {
-        let cfg = LinearAttentionConfig(
-            numKHeads: 16, numVHeads: 32,
-            keyHeadDim: 128, valueHeadDim: 128,
-            convKernelSize: 4)
+    /// The fused decode recurrence + gated norm must match the generic
+    /// two-dispatch path bit-for-bit, including the carried FP32 state.
+    private static func expectFusedDeltaGatedNormMatchesSeparateDispatches(
+        cfg: LinearAttentionConfig,
+        seed: UInt64
+    ) throws {
         let ctx = try MetalContext()
         let reference = try GDN(context: ctx, config: cfg,
                                 useQwenDecodeSpecialization: false)
         let fused = try GDN(context: ctx, config: cfg,
                             useQwenDecodeSpecialization: true)
-        var rng = SplitMix64(seed: 0x6D_3602)
+        var rng = SplitMix64(seed: seed)
         let stateCount = cfg.numVHeads * cfg.valueHeadDim * cfg.keyHeadDim
         let initialState = (0..<stateCount).map { _ in rng.uniform(-0.02, 0.02) }
         let aLogValues = (0..<cfg.numVHeads).map { _ in
@@ -703,6 +704,24 @@ import MferenceValidationSupport
             #expect(referenceState[index].bitPattern == fusedState[index].bitPattern,
                     "state differs at \(index)")
         }
+    }
+
+    @Test func qwenFusedDeltaGatedNormMatchesSeparateDispatches() throws {
+        try Self.expectFusedDeltaGatedNormMatchesSeparateDispatches(
+            cfg: LinearAttentionConfig(
+                numKHeads: 16, numVHeads: 32,
+                keyHeadDim: 128, valueHeadDim: 128,
+                convKernelSize: 4),
+            seed: 0x6D_3602)
+    }
+
+    @Test func qwen38FusedDeltaGatedNormMatchesSeparateDispatches() throws {
+        try Self.expectFusedDeltaGatedNormMatchesSeparateDispatches(
+            cfg: LinearAttentionConfig(
+                numKHeads: 16, numVHeads: 48,
+                keyHeadDim: 128, valueHeadDim: 128,
+                convKernelSize: 4),
+            seed: 0x6D_3803)
     }
 
     @Test func shortChunkTailCarry() throws {

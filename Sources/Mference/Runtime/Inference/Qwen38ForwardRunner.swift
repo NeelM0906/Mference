@@ -34,8 +34,13 @@ public enum Qwen38ForwardRunnerError: Error, CustomStringConvertible {
 ///
 /// Every weight is resident (`numExperts == 0`: the expert streamer never
 /// opens), so a decode step encodes into a single command buffer with no
-/// CPU readback between layers. Prefill v1 is sequential decode replay —
-/// exact by construction; layer-major chunking is a follow-up.
+/// CPU readback between layers. Prefill is chunked and layer-major: each
+/// chunk of prompt tokens runs token-parallel projections, attention, and
+/// MLP kernels (the qwen36 prefill kernel set), with the inherently
+/// sequential DeltaNet recurrence handled by its dedicated in-kernel scan
+/// (`gdn_delta_step_prefill`), which produces the exact FP32 state of
+/// token-by-token decode. There is no router readback, so a whole chunk —
+/// all 64 layers — encodes into one command buffer.
 public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowReporting,
     ChunkedPrefillRunner, HeadlessSequentialPrefillRunner, ExactPrefillLogitProducer,
     FusedHeadLogitProducer, @unchecked Sendable {
@@ -69,6 +74,76 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         let isLinear: Bool
     }
 
+    /// Chunk-sized prefill scratch: one FP16 row per token, device-private.
+    /// Allocated on the first chunked prefill from the resolved chunk size
+    /// and reused; reallocated only when that size changes. `attnOut` is
+    /// shared by the two attention branches, so its per-token width covers
+    /// both the full-attention output (qDim) and the gated-norm output of
+    /// the DeltaNet branch (valueDim).
+    private struct PrefillScratch {
+        let chunkTokens: Int
+        let hidden: MTLBuffer     // [T, D]
+        let normed: MTLBuffer     // [T, D] input_layernorm output
+        let mlpX: MTLBuffer       // [T, D] post_attention_layernorm output
+        let h1: MTLBuffer         // [T, D] attention-branch (o_proj) output
+        let mlpOut: MTLBuffer     // [T, D] dense MLP output
+        let qPacked: MTLBuffer    // [T, 2*qDim] packed [query ; gate]
+        let attnQ: MTLBuffer      // [T, qDim]
+        let attnGate: MTLBuffer   // [T, qDim]
+        let kStage: MTLBuffer     // [T, kvDim] pre-cache K staging
+        let vStage: MTLBuffer     // [T, kvDim] pre-cache V staging
+        let attnOut: MTLBuffer    // [T, max(qDim, valueDim)]
+        let mlpGate: MTLBuffer    // [T, F]
+        let mlpUp: MTLBuffer      // [T, F]
+        let mlpAct: MTLBuffer     // [T, F]
+        let gdnQKV: MTLBuffer     // [T, qkvDim] raw in_proj_qkv rows
+        let gdnConvOut: MTLBuffer // [T, qkvDim] conv + SiLU output
+        let gdnZ: MTLBuffer       // [T, valueDim]
+        let gdnA: MTLBuffer       // [T, numVHeads]
+        let gdnB: MTLBuffer       // [T, numVHeads]
+        let gdnY: MTLBuffer       // [T, valueDim] delta-rule output
+
+        init(device: MTLDevice, config: ArchConfig, chunkTokens: Int) throws {
+            precondition(chunkTokens > 0, "prefill scratch chunk size must be positive")
+            func buf(_ elementsPerToken: Int, _ label: String) throws -> MTLBuffer {
+                guard let made = device.makeBuffer(
+                    length: max(chunkTokens * elementsPerToken, 1) * MemoryLayout<Float16>.stride,
+                    options: .storageModePrivate) else {
+                    throw Qwen38ForwardRunnerError.invalidConfiguration(
+                        "unable to allocate Qwen 3.8 prefill scratch")
+                }
+                made.label = "qwen38.prefill.\(label)"
+                return made
+            }
+            let D = config.hiddenSize
+            let F = config.intermediateSize
+            let qDim = config.numHeads * config.fullHeadDim
+            let kvDim = config.numFullKVHeads * config.fullHeadDim
+            let la = config.linearAttention
+            self.chunkTokens = chunkTokens
+            self.hidden = try buf(D, "hidden")
+            self.normed = try buf(D, "normed")
+            self.mlpX = try buf(D, "mlpX")
+            self.h1 = try buf(D, "h1")
+            self.mlpOut = try buf(D, "mlpOut")
+            self.qPacked = try buf(2 * qDim, "qPacked")
+            self.attnQ = try buf(qDim, "attnQ")
+            self.attnGate = try buf(qDim, "attnGate")
+            self.kStage = try buf(kvDim, "kStage")
+            self.vStage = try buf(kvDim, "vStage")
+            self.attnOut = try buf(max(qDim, la.valueDim), "attnOut")
+            self.mlpGate = try buf(F, "mlpGate")
+            self.mlpUp = try buf(F, "mlpUp")
+            self.mlpAct = try buf(F, "mlpAct")
+            self.gdnQKV = try buf(la.qkvDim, "gdnQKV")
+            self.gdnConvOut = try buf(la.qkvDim, "gdnConvOut")
+            self.gdnZ = try buf(la.valueDim, "gdnZ")
+            self.gdnA = try buf(la.numVHeads, "gdnA")
+            self.gdnB = try buf(la.numVHeads, "gdnB")
+            self.gdnY = try buf(la.valueDim, "gdnY")
+        }
+    }
+
     private let model: Model
     private let ctx: MetalContext
     private let cfg: ArchConfig
@@ -87,6 +162,19 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     private let fusionHead: LMHeadChainInt4
     private let fusedQKVGEMV: FusedQKVGEMV
     private let layers: [LayerTensors]
+
+    // Chunked-prefill kernels (token-parallel variants of the decode set).
+    private let prefillEmbed: PrefillEmbedLookupInt4
+    private let prefillRMS: PrefillRMSNorm
+    private let prefillQMM: PrefillInt4QMM
+    private let prefillMPPInt4: MPPPrefillInt4QMM
+    private let prefillQKVEpilogue: PrefillQKVEpilogue
+    private let prefillAttention: PrefillAttention
+    private let prefillMLP: PrefillSharedExpert
+    private let prefillMLPActivation: MTLComputePipelineState
+    private let mlpWeightBits: Int
+    private var prefillScratch: PrefillScratch?
+    private var prefillChunkState = PrefillChunkCommitState()
 
     // Decode scratch, allocated once. FP16 unless noted. At production shape
     // (D 5120, F 17408, qDim 24*256 = 6144, gdn qkvDim 10240, valueDim 6144)
@@ -162,6 +250,20 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                               maxD: cfg.hiddenSize,
                                               maxVocab: cfg.vocabSize)
         self.fusedQKVGEMV = try FusedQKVGEMV(context: context)
+        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
+        self.prefillRMS = try PrefillRMSNorm(context: context)
+        self.prefillQMM = try PrefillInt4QMM(context: context)
+        self.prefillMPPInt4 = MPPPrefillInt4QMM(context: context)
+        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
+        self.prefillAttention = try PrefillAttention(context: context)
+        let mlpWeightBits = model.manifest.quant?.attention.weightBits ?? 8
+        self.mlpWeightBits = mlpWeightBits
+        self.prefillMLP = try PrefillSharedExpert(
+            context: context,
+            weightBits: mlpWeightBits,
+            siluActivation: cfg.hiddenActivation == "silu")
+        self.prefillMLPActivation = try context.pipeline(
+            cfg.hiddenActivation == "silu" ? "silu_mul_fp16" : "gelu_mul_fp16")
 
         let device = context.device
         func buf(_ elements: Int, _ stride: Int = MemoryLayout<Float16>.stride) throws -> MTLBuffer {
@@ -255,6 +357,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     // MARK: - LogitProducer
 
     public func reset() {
+        prefillChunkState.reset()
         kv.reset()
         gdnState.reset()
     }
@@ -262,6 +365,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     public var continuationPosition: Int { kv.position }
 
     public func prepareForContinuation(expectedPosition: Int) throws {
+        try prefillChunkState.requireClean(operation: "prepareForContinuation")
         guard expectedPosition > 0, expectedPosition == kv.position else {
             throw PrefillError.prefillCursorMismatch(
                 "Qwen 3.8 continuation cursor \(expectedPosition) does not match \(kv.position)")
@@ -283,19 +387,22 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                emitHead: true, outputMode: .logits)
     }
 
-    // MARK: - Prefill (v1: sequential decode replay)
+    // MARK: - Prefill (chunked, layer-major)
 
-    /// Sequential decode-path replay: each prompt token runs the full decode
-    /// step, heads suppressed until the last token. Exact by construction —
-    /// prefill and decode share every kernel and all recurrent state. The
-    /// chunked layer-major path is a follow-up; `config.chunkTokens` only
-    /// affects progress granularity here.
+    /// Chunk-at-a-time prefill: each chunk of prompt tokens runs the whole
+    /// layer stack with token-parallel kernels, and only the DeltaNet
+    /// recurrence walks the chunk sequentially — inside its prefill kernel,
+    /// producing exactly the FP32 state of token-by-token decode. The last
+    /// chunk emits the final token's head through the decode head kernels
+    /// (same buffers, same kernels), so prefill-then-decode continues
+    /// bit-identically to pure sequential decode.
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
                         outputMode: PrefillOutputMode,
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try prefillChunkState.requireClean(operation: "prefillChunked")
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
                 "Qwen 3.8 prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
@@ -311,25 +418,531 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
         }
+        guard tokens.allSatisfy({ $0 >= 0 && $0 < Int32(cfg.vocabSize) }) else {
+            throw Qwen38ForwardRunnerError.invalidInput(
+                "Qwen 3.8 prefill token is outside the vocabulary")
+        }
+        let emitLogitsHead = !(outputMode == .greedyIfAvailable && useFusedGreedyHead)
+        if emitLogitsHead {
+            guard logits.length >= cfg.vocabSize * MemoryLayout<Float16>.stride else {
+                throw Qwen38ForwardRunnerError.invalidInput(
+                    "Qwen 3.8 logits buffer is too small")
+            }
+        }
 
-        var position = startPosition
-        var index = 0
-        for token in tokens {
+        let scratch = try ensurePrefillScratch(config: config)
+        let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
+                                              startPosition: startPosition,
+                                              config: config)
+        for (spanIndex, span) in spans.enumerated() {
             try Task.checkCancellation()
-            let isLast = index == tokens.count - 1
-            try await produceToken(token: token, position: position,
-                                   into: logits,
-                                   emitHead: isLast,
-                                   outputMode: outputMode)
-            position += 1
-            index += 1
-            if index % 16 == 0 { onProgress(index) }
+            let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
+            let upper = tokens.index(lower, offsetBy: span.tokenCount)
+            try executePrefillChunk(tokens: tokens[lower..<upper],
+                                    startPosition: span.startPosition,
+                                    outputMode: outputMode,
+                                    logits: logits,
+                                    scratch: scratch,
+                                    writeFinalHead: spanIndex == spans.count - 1)
+            onProgress(span.completedCount)
         }
-        onProgress(tokens.count)
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
-            return PrefillResult(newPosition: position, seed: .greedyToken(lastGreedyToken))
+            return PrefillResult(newPosition: startPosition + tokens.count,
+                                 seed: .greedyToken(lastGreedyToken))
         }
-        return PrefillResult(newPosition: position, seed: .logitsWritten)
+        return PrefillResult(newPosition: startPosition + tokens.count,
+                             seed: .logitsWritten)
+    }
+
+    private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillScratch {
+        let chunkTokens = max(1, min(config.chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
+        if let scratch = prefillScratch, scratch.chunkTokens == chunkTokens {
+            return scratch
+        }
+        let scratch = try PrefillScratch(device: ctx.device,
+                                         config: cfg,
+                                         chunkTokens: chunkTokens)
+        prefillScratch = scratch
+        return scratch
+    }
+
+    /// One prefill chunk: embed the chunk, run all layers token-parallel,
+    /// and (on the final chunk) emit the last token's head. Everything
+    /// encodes into a single command buffer — this family has no router
+    /// readback — and the KV cursor advances only after it completes.
+    private func executePrefillChunk(tokens: ArraySlice<Int32>,
+                                     startPosition: Int,
+                                     outputMode: PrefillOutputMode,
+                                     logits: MTLBuffer,
+                                     scratch: PrefillScratch,
+                                     writeFinalHead: Bool) throws {
+        let t = tokens.count
+        precondition(t > 0 && t <= scratch.chunkTokens,
+                     "prefill chunk exceeds its scratch capacity")
+        let D = cfg.hiddenSize
+        let tokenIDs = tokens.map { UInt32(bitPattern: $0) }
+        guard let tokenBuffer = ctx.device.makeBuffer(
+            bytes: tokenIDs,
+            length: tokenIDs.count * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared) else {
+            throw Qwen38ForwardRunnerError.commandFailed(
+                "unable to allocate Qwen 3.8 prefill token buffer")
+        }
+
+        prefillChunkState.markDirty(startPosition: startPosition, tokenCount: t)
+        let cb = try commandBuffer()
+
+        let emb = model.embedding
+        prefillEmbed.encode(commandBuffer: cb,
+                            table: emb.buffer, tableOffset: Int(emb.offset),
+                            scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                            biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                            tokens: tokenBuffer,
+                            out: scratch.hidden,
+                            t: UInt32(t), d: UInt32(D),
+                            outScale: 1.0)
+
+        for (index, layer) in layers.enumerated() {
+            prefillRMS.encodeBF16W(commandBuffer: cb,
+                                   x: scratch.hidden,
+                                   weight: layer.inputNorm.buffer,
+                                   weightOffset: Int(layer.inputNorm.offset),
+                                   out: scratch.normed,
+                                   t: UInt32(t), d: UInt32(D),
+                                   eps: Self.epsilon)
+            if layer.isLinear {
+                encodeLinearAttentionPrefill(cb, layer: layer, layerIndex: index,
+                                             scratch: scratch, tokenCount: t)
+            } else {
+                try encodeGatedFullAttentionPrefill(cb, layer: layer,
+                                                    layerIndex: index,
+                                                    scratch: scratch,
+                                                    tokenCount: t,
+                                                    startPosition: startPosition)
+            }
+            elementwise.encodeResidualAdd(commandBuffer: cb,
+                                          hidden: scratch.hidden,
+                                          delta: scratch.h1,
+                                          count: t * D)
+            prefillRMS.encodeBF16W(commandBuffer: cb,
+                                   x: scratch.hidden,
+                                   weight: layer.postAttnNorm.buffer,
+                                   weightOffset: Int(layer.postAttnNorm.offset),
+                                   out: scratch.mlpX,
+                                   t: UInt32(t), d: UInt32(D),
+                                   eps: Self.epsilon)
+            try encodeDenseMLPPrefill(cb, layer: layer, scratch: scratch,
+                                      tokenCount: t)
+            elementwise.encodeResidualAdd(commandBuffer: cb,
+                                          hidden: scratch.hidden,
+                                          delta: scratch.mlpOut,
+                                          count: t * D)
+        }
+
+        let emitGreedyHead = outputMode == .greedyIfAvailable && useFusedGreedyHead
+        if writeFinalHead {
+            // The decode head kernels over the last token's row, so the
+            // emitted logits are bit-identical to a sequential-decode head.
+            let lastRowOffset = (t - 1) * D * MemoryLayout<Float16>.stride
+            let fNorm = model.finalNorm
+            let lm = model.lmHead
+            if emitGreedyHead {
+                fusionHead.encodeGreedyDecode(commandBuffer: cb,
+                                              hidden: scratch.hidden,
+                                              hiddenOffset: lastRowOffset,
+                                              normWeight: fNorm.buffer,
+                                              normOffset: Int(fNorm.offset),
+                                              weights: lm.buffer,
+                                              weightsOffset: Int(lm.offset),
+                                              scales: lm.buffer,
+                                              scalesOffset: Int(lm.scaleOffset),
+                                              biases: lm.buffer,
+                                              biasesOffset: Int(lm.biasOffset),
+                                              outToken: greedyTokenBuf,
+                                              d: UInt32(D), vocab: UInt32(cfg.vocabSize),
+                                              rmsEps: Self.epsilon)
+            } else {
+                rms.encodeBF16W(commandBuffer: cb,
+                                x: scratch.hidden, xOffset: lastRowOffset,
+                                weight: fNorm.buffer,
+                                weightOffset: Int(fNorm.offset),
+                                out: normed,
+                                d: UInt32(D), eps: Self.epsilon)
+                int4.encode(commandBuffer: cb,
+                            weights: lm.buffer, weightsOffset: Int(lm.offset),
+                            scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                            biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                            x: normed, y: logits,
+                            m: UInt32(cfg.vocabSize), n: UInt32(D))
+            }
+        }
+
+        try withExtendedLifetime(tokenBuffer) {
+            try finish(cb)
+        }
+        if writeFinalHead, emitGreedyHead {
+            lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
+        }
+        kv.advance(by: t)
+        prefillChunkState.markCommitted()
+    }
+
+    /// Gated-DeltaNet linear attention over one chunk: batched qkv/z/a/b
+    /// projections, causal conv over [tail | chunk] with the tail carried
+    /// forward, per-head q/k norm, the in-kernel sequential delta scan
+    /// (exact FP32 state), gated norm, then out_proj into `h1`.
+    private func encodeLinearAttentionPrefill(_ cb: MTLCommandBuffer,
+                                              layer: LayerTensors,
+                                              layerIndex: Int,
+                                              scratch: PrefillScratch,
+                                              tokenCount t: Int) {
+        guard let qkvW = layer.linQKV, let zW = layer.linZ,
+              let aW = layer.linA, let bW = layer.linB,
+              let outW = layer.linOut, let convW = layer.linConv,
+              let aLog = layer.linALog, let dtBias = layer.linDtBias,
+              let gatedNormW = layer.linNorm else {
+            preconditionFailure("linear-attention layer without GDN tensors")
+        }
+        let la = cfg.linearAttention
+        let D = cfg.hiddenSize
+        encodePrefillInt4Projection(cb,
+                                    weights: qkvW,
+                                    x: scratch.normed, y: scratch.gdnQKV,
+                                    rows: la.qkvDim, columns: D,
+                                    tokenCount: t,
+                                    xStrideElements: D,
+                                    yStrideElements: la.qkvDim)
+        encodePrefillInt4Projection(cb,
+                                    weights: zW,
+                                    x: scratch.normed, y: scratch.gdnZ,
+                                    rows: la.valueDim, columns: D,
+                                    tokenCount: t,
+                                    xStrideElements: D,
+                                    yStrideElements: la.valueDim)
+        encodePrefillInt4Projection(cb,
+                                    weights: aW,
+                                    x: scratch.normed, y: scratch.gdnA,
+                                    rows: la.numVHeads, columns: D,
+                                    tokenCount: t,
+                                    xStrideElements: D,
+                                    yStrideElements: la.numVHeads)
+        encodePrefillInt4Projection(cb,
+                                    weights: bW,
+                                    x: scratch.normed, y: scratch.gdnB,
+                                    rows: la.numVHeads, columns: D,
+                                    tokenCount: t,
+                                    xStrideElements: D,
+                                    yStrideElements: la.numVHeads)
+        let tail = gdnState.convTailBuffer(layer: layerIndex)
+        gdn.encodeConvPrefill(commandBuffer: cb,
+                              tail: tail,
+                              qkvRows: scratch.gdnQKV,
+                              convWeight: convW.buffer,
+                              convWeightOffset: Int(convW.offset),
+                              out: scratch.gdnConvOut,
+                              rows: t)
+        gdn.encodeConvTailUpdate(commandBuffer: cb,
+                                 tail: tail,
+                                 qkvRows: scratch.gdnQKV,
+                                 rows: t)
+        gdn.encodeQKNorm(commandBuffer: cb,
+                         convOut: scratch.gdnConvOut,
+                         rows: t)
+        gdn.encodeDeltaStepPrefill(commandBuffer: cb,
+                                   convOut: scratch.gdnConvOut,
+                                   aProj: scratch.gdnA,
+                                   bProj: scratch.gdnB,
+                                   aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+                                   dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+                                   state: gdnState.stateBuffer(layer: layerIndex),
+                                   y: scratch.gdnY,
+                                   rows: t)
+        gdn.encodeGatedNorm(commandBuffer: cb,
+                            y: scratch.gdnY,
+                            z: scratch.gdnZ,
+                            weight: gatedNormW.buffer,
+                            weightOffset: Int(gatedNormW.offset),
+                            out: scratch.attnOut,
+                            rows: t)
+        encodePrefillInt4Projection(cb,
+                                    weights: outW,
+                                    x: scratch.attnOut, y: scratch.h1,
+                                    rows: D, columns: la.valueDim,
+                                    tokenCount: t,
+                                    xStrideElements: la.valueDim,
+                                    yStrideElements: D)
+    }
+
+    /// Gated full attention over one chunk: batched packed-[query ; gate]
+    /// q_proj plus K/V projections, per-head q/k norm + NeoX sub-dim RoPE
+    /// over the chunk, KV-cache append, causal tiled prefill attention,
+    /// sigmoid output gate, then o_proj into `h1`.
+    private func encodeGatedFullAttentionPrefill(_ cb: MTLCommandBuffer,
+                                                 layer: LayerTensors,
+                                                 layerIndex: Int,
+                                                 scratch: PrefillScratch,
+                                                 tokenCount t: Int,
+                                                 startPosition: Int) throws {
+        guard let q = layer.q, let k = layer.k, let v = layer.v, let o = layer.o,
+              let qNormW = layer.qNorm, let kNormW = layer.kNorm else {
+            preconditionFailure("full-attention layer without attention tensors")
+        }
+        let D = cfg.hiddenSize
+        let headDim = cfg.fullHeadDim
+        let numKV = cfg.numFullKVHeads
+        let qDim = cfg.numHeads * headDim
+        let kvDim = numKV * headDim
+        let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
+
+        encodePrefillInt4Projection(cb,
+                                    weights: q,
+                                    x: scratch.normed, y: scratch.qPacked,
+                                    rows: 2 * qDim, columns: D,
+                                    tokenCount: t,
+                                    xStrideElements: D,
+                                    yStrideElements: 2 * qDim)
+        encodePrefillInt4Projection(cb,
+                                    weights: k,
+                                    x: scratch.normed, y: scratch.kStage,
+                                    rows: kvDim, columns: D,
+                                    tokenCount: t,
+                                    xStrideElements: D,
+                                    yStrideElements: kvDim)
+        encodePrefillInt4Projection(cb,
+                                    weights: v,
+                                    x: scratch.normed, y: scratch.vStage,
+                                    rows: kvDim, columns: D,
+                                    tokenCount: t,
+                                    xStrideElements: D,
+                                    yStrideElements: kvDim)
+        elementwise.encodeSplitQGate(commandBuffer: cb,
+                                     packed: scratch.qPacked,
+                                     q: scratch.attnQ,
+                                     gate: scratch.attnGate,
+                                     heads: cfg.numHeads,
+                                     dim: headDim,
+                                     rows: t)
+        prefillQKVEpilogue.encodeNeoxSubdimNoVNorm(
+            commandBuffer: cb,
+            q: scratch.attnQ,
+            k: scratch.kStage,
+            qWeight: qNormW.buffer,
+            qWeightOffset: Int(qNormW.offset),
+            kWeight: kNormW.buffer,
+            kWeightOffset: Int(kNormW.offset),
+            startPosition: UInt32(startPosition),
+            queryCount: UInt32(t),
+            headDim: UInt32(headDim),
+            numQHeads: UInt32(cfg.numHeads),
+            numKVHeads: UInt32(numKV),
+            qTokenStrideElements: UInt32(qDim),
+            kvTokenStrideElements: UInt32(kvDim),
+            theta: Float(cfg.fullRopeTheta),
+            rotaryDim: rotaryDim,
+            eps: Self.epsilon)
+        try copyStagedKVToCache(cb, layer: layerIndex,
+                                startPosition: startPosition,
+                                tokenCount: t,
+                                keySource: scratch.kStage,
+                                valueSource: scratch.vStage,
+                                bytesPerToken: kvDim * MemoryLayout<Float16>.stride)
+        let params = PrefillAttentionParams(
+            startPosition: UInt32(startPosition),
+            queryCount: UInt32(t),
+            headDim: UInt32(headDim),
+            numQHeads: UInt32(cfg.numHeads),
+            numKVHeads: UInt32(numKV),
+            kvValidCount: UInt32(startPosition + t),
+            slidingWindow: UInt32(startPosition + t),
+            kvTokenStrideElements: UInt32(kvDim),
+            qTokenStrideElements: UInt32(qDim),
+            oTokenStrideElements: UInt32(qDim),
+            scale: Float(cfg.attentionScale))
+        prefillAttention.encodeCausal(
+            commandBuffer: cb,
+            q: scratch.attnQ,
+            k: kv.keyBuffer(layer: layerIndex, validTokenCount: startPosition + t),
+            v: kv.valueBuffer(layer: layerIndex, validTokenCount: startPosition + t),
+            out: scratch.attnOut,
+            params: params)
+        elementwise.encodeSigmoidGateMul(commandBuffer: cb,
+                                         out: scratch.attnOut,
+                                         gate: scratch.attnGate,
+                                         count: t * qDim)
+        encodePrefillInt4Projection(cb,
+                                    weights: o,
+                                    x: scratch.attnOut, y: scratch.h1,
+                                    rows: D, columns: qDim,
+                                    tokenCount: t,
+                                    xStrideElements: qDim,
+                                    yStrideElements: D)
+    }
+
+    /// Dense SwiGLU MLP over the chunk. With INT4 weights and a chunk tall
+    /// enough to feed the tiled QMM, all three projections go batched (gate
+    /// and up over [t, F], SiLU-mul, down over [t, D]) — this branch is the
+    /// bulk of the prefill FLOPs, D 5120 x F 17408 on all 64 layers. The
+    /// toy fixture's INT8 MLP and sub-tile chunks fall back to
+    /// `PrefillSharedExpert`, whose per-row path is the decode kernel and
+    /// therefore exact.
+    private func encodeDenseMLPPrefill(_ cb: MTLCommandBuffer,
+                                       layer: LayerTensors,
+                                       scratch: PrefillScratch,
+                                       tokenCount t: Int) throws {
+        let D = cfg.hiddenSize
+        let F = cfg.intermediateSize
+        guard mlpWeightBits == 4, t >= 32 else {
+            try prefillMLP.encodeBlock(commandBuffer: cb,
+                                       x: scratch.mlpX,
+                                       y: scratch.mlpOut,
+                                       gate: layer.mlpGate,
+                                       up: layer.mlpUp,
+                                       down: layer.mlpDown,
+                                       scratchGate: scratch.mlpGate,
+                                       scratchUp: scratch.mlpUp,
+                                       scratchAct: scratch.mlpAct,
+                                       queryCount: t,
+                                       d: D,
+                                       intermediate: F,
+                                       xStrideElements: D,
+                                       yStrideElements: D)
+            return
+        }
+        func qmm(_ proj: SharedExpertProjection, x: MTLBuffer, y: MTLBuffer,
+                 n: Int, k: Int) {
+            encodeQMMOrMPP(cb,
+                           weights: proj.weights, weightsOffset: proj.weightsOffset,
+                           scales: proj.scales, scalesOffset: proj.scalesOffset,
+                           biases: proj.biases, biasesOffset: proj.biasesOffset,
+                           x: x, y: y, t: t, n: n, k: k)
+        }
+        qmm(layer.mlpGate, x: scratch.mlpX, y: scratch.mlpGate, n: F, k: D)
+        qmm(layer.mlpUp, x: scratch.mlpX, y: scratch.mlpUp, n: F, k: D)
+        guard let activation = cb.makeComputeCommandEncoder() else {
+            throw Qwen38ForwardRunnerError.commandFailed(
+                "unable to create Qwen 3.8 prefill MLP activation encoder")
+        }
+        activation.setComputePipelineState(prefillMLPActivation)
+        activation.setBuffer(scratch.mlpGate, offset: 0, index: 0)
+        activation.setBuffer(scratch.mlpUp, offset: 0, index: 1)
+        activation.setBuffer(scratch.mlpAct, offset: 0, index: 2)
+        var count = UInt32(t * F)
+        activation.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
+        let width = min(prefillMLPActivation.maxTotalThreadsPerThreadgroup, 256)
+        activation.dispatchThreads(
+            MTLSize(width: Int(count), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        activation.endEncoding()
+        qmm(layer.mlpDown, x: scratch.mlpAct, y: scratch.mlpOut, n: D, k: F)
+    }
+
+    /// Batched INT4 projection over the chunk: the MPP TensorOps QMM when
+    /// available and the chunk is at least one tile tall, the threadgroup
+    /// QMM for tall chunks otherwise, and the decode GEMV repeated per row
+    /// for short chunks. Unlike qwen36's dispatch policy, the q family also
+    /// goes through the QMM: this family's q-side matrices (packed q_proj,
+    /// GDN in_proj_qkv) are its largest resident projections, and a per-row
+    /// replay of them would collapse the chunk back to sequential cost.
+    private func encodePrefillInt4Projection(_ cb: MTLCommandBuffer,
+                                             weights: TensorView,
+                                             x: MTLBuffer,
+                                             y: MTLBuffer,
+                                             rows: Int,
+                                             columns: Int,
+                                             tokenCount: Int,
+                                             xStrideElements: Int,
+                                             yStrideElements: Int) {
+        if tokenCount >= 32 {
+            encodeQMMOrMPP(cb,
+                           weights: weights.buffer, weightsOffset: Int(weights.offset),
+                           scales: weights.buffer, scalesOffset: Int(weights.scaleOffset),
+                           biases: weights.buffer, biasesOffset: Int(weights.biasOffset),
+                           x: x, y: y,
+                           t: tokenCount, n: rows, k: columns)
+            return
+        }
+        for row in 0..<tokenCount {
+            int4.encode(commandBuffer: cb,
+                        weights: weights.buffer, weightsOffset: Int(weights.offset),
+                        scales: weights.buffer, scalesOffset: Int(weights.scaleOffset),
+                        biases: weights.buffer, biasesOffset: Int(weights.biasOffset),
+                        x: x,
+                        xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
+                        y: y,
+                        yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
+                        m: UInt32(rows), n: UInt32(columns))
+        }
+    }
+
+    private func encodeQMMOrMPP(_ cb: MTLCommandBuffer,
+                                weights: MTLBuffer, weightsOffset: Int,
+                                scales: MTLBuffer, scalesOffset: Int,
+                                biases: MTLBuffer, biasesOffset: Int,
+                                x: MTLBuffer, y: MTLBuffer,
+                                t: Int, n: Int, k: Int) {
+        if prefillMPPInt4.isAvailable {
+            let path = prefillMPPInt4.encode(commandBuffer: cb,
+                                             weights: weights, weightsOffset: weightsOffset,
+                                             scales: scales, scalesOffset: scalesOffset,
+                                             biases: biases, biasesOffset: biasesOffset,
+                                             x: x, y: y,
+                                             m: t, n: n, k: k)
+            if path == .affineThreadgroupF16 {
+                return
+            }
+        }
+        prefillQMM.encode(commandBuffer: cb,
+                          weights: weights, weightsOffset: weightsOffset,
+                          scales: scales, scalesOffset: scalesOffset,
+                          biases: biases, biasesOffset: biasesOffset,
+                          x: x, y: y,
+                          t: t, n: n, k: k)
+    }
+
+    /// Blit the chunk's staged K/V rows into the layer's cache, split into
+    /// two spans when the physical layout wraps (never for the full-attention
+    /// layers of this family, whose capacity is maxContext).
+    private func copyStagedKVToCache(_ cb: MTLCommandBuffer,
+                                     layer: Int,
+                                     startPosition: Int,
+                                     tokenCount: Int,
+                                     keySource: MTLBuffer,
+                                     valueSource: MTLBuffer,
+                                     bytesPerToken: Int) throws {
+        func copy(_ source: MTLBuffer,
+                  to destination: (buffer: MTLBuffer, offset: Int, stride: Int),
+                  sourceTokenOffset: Int,
+                  count: Int) throws {
+            guard count > 0 else { return }
+            guard let blit = cb.makeBlitCommandEncoder() else {
+                throw Qwen38ForwardRunnerError.commandFailed(
+                    "unable to create Qwen 3.8 prefill KV blit encoder")
+            }
+            blit.copy(from: source,
+                      sourceOffset: sourceTokenOffset * bytesPerToken,
+                      to: destination.buffer,
+                      destinationOffset: destination.offset,
+                      size: count * bytesPerToken)
+            blit.endEncoding()
+        }
+        let capacity = kv.capacity(layer: layer)
+        let physicalStart = startPosition % capacity
+        let firstSpan = min(tokenCount, capacity - physicalStart)
+        try copy(keySource,
+                 to: kv.kRange(layer: layer, start: startPosition, count: firstSpan),
+                 sourceTokenOffset: 0, count: firstSpan)
+        try copy(valueSource,
+                 to: kv.vRange(layer: layer, start: startPosition, count: firstSpan),
+                 sourceTokenOffset: 0, count: firstSpan)
+        guard firstSpan < tokenCount else { return }
+        let secondCount = tokenCount - firstSpan
+        let secondStart = startPosition + firstSpan
+        try copy(keySource,
+                 to: kv.kRange(layer: layer, start: secondStart, count: secondCount),
+                 sourceTokenOffset: firstSpan, count: secondCount)
+        try copy(valueSource,
+                 to: kv.vRange(layer: layer, start: secondStart, count: secondCount),
+                 sourceTokenOffset: firstSpan, count: secondCount)
     }
 
     // MARK: - Decode step
@@ -342,6 +955,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                               into logits: MTLBuffer?,
                               emitHead: Bool,
                               outputMode: PrefillOutputMode) async throws {
+        try prefillChunkState.requireClean(operation: "produce")
         try Task.checkCancellation()
         guard position == kv.position, position >= 0, position < maxContext else {
             throw Qwen38ForwardRunnerError.invalidInput(
