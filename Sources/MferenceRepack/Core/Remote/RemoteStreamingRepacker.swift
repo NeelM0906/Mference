@@ -624,6 +624,13 @@ public final class RemoteStreamingRepacker {
            let routedBits = layer.subTensors.first?.bitsForWeights {
             bits.routedExpert = routedBits
         }
+        // The dense Qwen 3.8 family has no router, shared expert or routed
+        // experts; report the slots absent rather than the 8-bit defaults.
+        if plan.arch.family == .qwen38 {
+            bits.router = 0
+            bits.sharedExpert = 0
+            bits.routedExpert = 0
+        }
         let files = audit.outputFiles.map {
             ($0.relativePath, GTurboJSON.FileEntry(size: $0.size, sha256: $0.sha256))
         }

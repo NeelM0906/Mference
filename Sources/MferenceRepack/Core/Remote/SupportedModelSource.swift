@@ -85,6 +85,23 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 19_546_491_213,
         reserveBytes: 1_073_741_824)
 
+    /// Text stack of the multimodal Qwen3.8 checkpoint; the vision tower is
+    /// excluded by the planner, so the download estimate is the repo total
+    /// (16.05 GB) minus the ~0.9 GB tower. Installed bytes add the resident
+    /// index plus layout/manifest sidecars — dense, so there are no
+    /// packed-expert blobs or page rounding.
+    public static let qwen38 = SupportedModelSource(
+        name: "qwen38",
+        displayName: "Qwen3.8 27B 4-bit",
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        revision: "3e6447f082e89cc7f0bc6e5441afd38dfce760ff",
+        sourceIndexSHA256:
+            "13b840162b4cb35c66fef7df072f7dbb4717908204364f5e5d9f9655a2758fa8",
+        modelID: "qwen3.8-27b-4bit",
+        approximateDownloadBytes: 15_200_000_000,
+        installedBytes: 15_400_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// Revision and index hash are not yet pinned (the upload has not been
     /// fingerprinted); the installer resolves HEAD and prints the computed
     /// index SHA-256 to record here. Byte estimates follow
@@ -135,7 +152,7 @@ public struct SupportedModelSource: Sendable, Equatable {
     public static let `default` = gemma4
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, deepseekV4Flash, inklingSmall, maple,
+        gemma4, qwen36, qwen38, deepseekV4Flash, inklingSmall, maple,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

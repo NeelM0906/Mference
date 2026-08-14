@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <gemma4|qwen36|deepseekv4flash|inklingsmall|maple>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <gemma4|qwen36|qwen38|deepseekv4flash|inklingsmall|maple>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
   MferenceRepack --help
