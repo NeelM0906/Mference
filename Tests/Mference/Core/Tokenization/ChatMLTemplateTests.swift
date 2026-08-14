@@ -50,6 +50,24 @@ struct ChatMLTemplateTests {
         #expect(tok.vocabSize == 248_320)
     }
 
+    @Test("qwen38 family starts the generation prompt inside a live think block")
+    func qwen38StartsInThinking() async throws {
+        let tokenizer = try await MFTokenizer.load(from: Self.fixtureFolder(),
+                                                   family: .qwen38)
+        #expect(tokenizer.dialect == .chatml)
+        #expect(tokenizer.generationPromptStartsInThinking)
+        #expect(tokenizer.eosID == tokenizer.endOfTurnID)
+        #expect(tokenizer.stopTokenIDs == [tokenizer.endOfTurnID, 248044])
+        #expect(tokenizer.vocabSize == 248_320)
+        let prompt = try tokenizer.applyChatTemplate([
+            Message(role: .user, content: "Hi"),
+        ])
+        #expect(prompt == "<|im_start|>user\nHi<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n")
+        // A family-neutral load of the same fixture keeps Qwen 3.6 behavior.
+        #expect(!tok.generationPromptStartsInThinking)
+    }
+
     @Test("Encode never prepends a BOS")
     func noBOS() {
         let with = tok.encode("hi", addBOS: true)
