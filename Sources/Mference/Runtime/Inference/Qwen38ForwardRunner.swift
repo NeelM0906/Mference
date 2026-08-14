@@ -150,8 +150,11 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         self.rope = try RoPE(context: context)
         self.gdn = try GDN(context: context, config: cfg.linearAttention,
                            specializedHiddenSize: cfg.hiddenSize)
+        // The dense MLP shares the attention quant (the manifest's
+        // sharedExpert slot is deliberately absent for this family); the
+        // quant-less toy manifest keeps the INT8 default.
         self.mlp = try SharedExpertRuntime(context: context,
-                                           weightBits: model.sharedExpertWeightBits,
+                                           weightBits: model.manifest.quant?.attention.weightBits ?? 8,
                                            siluActivation: cfg.hiddenActivation == "silu",
                                            specializedD: cfg.hiddenSize,
                                            specializedF: cfg.intermediateSize)

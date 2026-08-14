@@ -506,12 +506,30 @@ public struct Model {
             ? entry.scaleOffset - residentFileOffset : 0
         let biasRel: UInt64 = entry.biasSize > 0
             ? entry.biasOffset - residentFileOffset : 0
+        // Resolve the chunk holding the tensor's full span; offsets in the
+        // returned view are relative to that chunk's buffer.
+        var spanLo = relativeOffset
+        var spanHi = relativeOffset + entry.sizeBytes
+        if entry.scaleSize > 0 {
+            spanLo = min(spanLo, scaleRel)
+            spanHi = max(spanHi, scaleRel + entry.scaleSize)
+        }
+        if entry.biasSize > 0 {
+            spanLo = min(spanLo, biasRel)
+            spanHi = max(spanHi, biasRel + entry.biasSize)
+        }
+        guard let chunk = residentBuffer.chunk(containing: spanLo, spanHi) else {
+            throw ModelError.indexCorrupt(
+                detail: "resident tensor \(name) straddles a chunk boundary")
+        }
         return TensorView(
-            buffer: residentBuffer.buffer,
-            offset: relativeOffset,
+            buffer: chunk.buffer,
+            offset: relativeOffset - chunk.start,
             length: entry.sizeBytes,
-            scaleOffset: scaleRel, scaleLength: entry.scaleSize,
-            biasOffset:  biasRel,  biasLength:  entry.biasSize,
+            scaleOffset: entry.scaleSize > 0 ? scaleRel - chunk.start : 0,
+            scaleLength: entry.scaleSize,
+            biasOffset:  entry.biasSize > 0 ? biasRel - chunk.start : 0,
+            biasLength:  entry.biasSize,
             shape: entry.shape,
             dtype: entry.dtype)
     }
@@ -731,11 +749,30 @@ extension Model {
             }
         }
 
+        // Region-relative spans (tensor + companions) so an oversized region
+        // can be cut into multiple buffers without splitting any tensor.
+        let regionStart = residentIndex.header.indexSize
+        let tensorSpans = residentIndex.entries.values
+            .filter { $0.fileOffset >= regionStart }
+            .map { entry -> (start: UInt64, end: UInt64) in
+                var lo = entry.fileOffset
+                var hi = entry.fileOffset + entry.sizeBytes
+                if entry.scaleSize > 0 {
+                    lo = min(lo, entry.scaleOffset)
+                    hi = max(hi, entry.scaleOffset + entry.scaleSize)
+                }
+                if entry.biasSize > 0 {
+                    lo = min(lo, entry.biasOffset)
+                    hi = max(hi, entry.biasOffset + entry.biasSize)
+                }
+                return (lo - regionStart, hi - regionStart)
+            }
         let residentBuffer = try ResidentBuffer(
             fileURL: weightsURL,
             fileOffset: residentIndex.header.indexSize,
             residentSize: residentIndex.header.residentSize,
-            device: device)
+            device: device,
+            tensorSpans: tensorSpans)
 
         let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
         if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
