@@ -247,6 +247,17 @@ public final class KVCacheManager {
         position += count
     }
 
+    /// Rewind the position cursor to `position` after a partially accepted
+    /// speculative-verify span. Storage is untouched — attention reads only
+    /// `[0, validTokenCount)`, so rows past the cursor are dead until the
+    /// next writer overwrites their slots.
+    public func rewind(to position: Int) {
+        precondition(position >= 0, "rewind position must be non-negative")
+        precondition(position <= self.position,
+                     "rewind \(position) is ahead of cursor \(self.position)")
+        self.position = position
+    }
+
     /// Drop all cached positions and return physical pages to the OS.
     ///
     /// No buffer zeroing — the attention kernels read only `[0, validTokenCount]`,

@@ -189,6 +189,21 @@ public func run(args: Args,
             lines += String(format: "%.1f", total - accounted) + " ms\n"
             stderr.write(Data(lines.utf8))
         }
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let q38 = runner as? Qwen38ForwardRunner,
+           let spec = q38.mtpSpecStats, spec.rounds > 0 {
+            let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
+            let acceptRate = spec.draftedTokens > 0
+                ? Double(spec.acceptedTokens) / Double(spec.draftedTokens) : 0
+            var lines = "\n[mtp spec over \(spec.rounds) rounds]\n"
+            lines += "  drafted \(spec.draftedTokens), accepted \(spec.acceptedTokens)"
+            lines += String(format: " (accept rate %.1f%%)", acceptRate * 100)
+            lines += ", emitted \(spec.emittedTokens), rollbacks \(spec.rollbacks)\n"
+            lines += "  draft: " + ms(spec.draftNanos) + " ms, verify: "
+            lines += ms(spec.verifyNanos) + " ms, accept: "
+            lines += ms(spec.acceptNanos) + " ms\n"
+            stderr.write(Data(lines.utf8))
+        }
         if !args.quiet {
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds

@@ -184,15 +184,33 @@ enum Qwen38ToySynthetic {
             _ = stringTable.withUnsafeBytes { sb in
                 memcpy(base.advanced(by: stringTableBase), sb.baseAddress!, stringTable.count)
             }
-            // Quantized tensors: weight bytes 0x11 (nibbles/bytes of small
-            // positive codes), scales 0.01, biases zero. BF16 tensors: 1.0.
+            // Quantized tensors: deterministic varied nibbles (splitmix-style
+            // LCG over the byte index) with varied small scales and biases, so
+            // dot products exercise real, order-sensitive FP accumulation
+            // (uniform fills would make every reduction order agree by
+            // construction and mask parity bugs). BF16 tensors: 1.0 plus a
+            // small deterministic ripple.
+            var lcg: UInt64 = 0x9E3779B97F4A7C15
+            func nextByte() -> UInt8 {
+                lcg = lcg &* 6364136223846793005 &+ 1442695040888963407
+                return UInt8(truncatingIfNeeded: lcg >> 33)
+            }
             for entry in entries where entry.dtype == 0 {
-                memset(base.advanced(by: Int(entry.fileOffset)), 0x11, Int(entry.sizeBytes))
+                let weights = base.advanced(by: Int(entry.fileOffset))
+                    .assumingMemoryBound(to: UInt8.self)
+                for i in 0..<Int(entry.sizeBytes) { weights[i] = nextByte() }
                 if entry.scaleSize > 0 {
                     let scales = base.advanced(by: Int(entry.scaleOffset))
                         .assumingMemoryBound(to: UInt16.self)
                     for i in 0..<(Int(entry.scaleSize) / u16) {
-                        scales[i] = Quantization.bf16Bits(0.01)
+                        scales[i] = Quantization.bf16Bits(0.004 + 0.002 * Float(i % 7))
+                    }
+                }
+                if entry.biasSize > 0 {
+                    let biases = base.advanced(by: Int(entry.biasOffset))
+                        .assumingMemoryBound(to: UInt16.self)
+                    for i in 0..<(Int(entry.biasSize) / u16) {
+                        biases[i] = Quantization.bf16Bits(-0.05 + 0.01 * Float(i % 11))
                     }
                 }
             }
@@ -200,7 +218,7 @@ enum Qwen38ToySynthetic {
                 let dst = base.advanced(by: Int(entry.fileOffset))
                     .assumingMemoryBound(to: UInt16.self)
                 for i in 0..<(Int(entry.sizeBytes) / u16) {
-                    dst[i] = Quantization.bf16Bits(1.0)
+                    dst[i] = Quantization.bf16Bits(1.0 + 0.03 * Float(i % 5) - 0.06)
                 }
             }
         }
@@ -287,6 +305,75 @@ enum Qwen38ToySynthetic {
             options: [.sortedKeys, .withoutEscapingSlashes])
         try manifestData.write(to: dir.appendingPathComponent("manifest.json"))
         return dir
+    }
+}
+
+extension Qwen38ToySynthetic {
+
+    /// Write a toy BF16 MTP shard (the 15 `mtp.*` tensors of the HF layout,
+    /// sized for `ArchConfig.qwen38Toy`) for `MTPAttachTool`. Norm vectors
+    /// are written zero-centered, matching the HF convention the attach
+    /// step's `+1` conversion expects. Values are deterministic and varied.
+    static func writeMTPShard() throws -> URL {
+        let toy = ArchConfig.qwen38Toy()
+        let d = toy.hiddenSize
+        let f = toy.intermediateSize
+        let qDim = toy.numHeads * toy.fullHeadDim
+        let kvDim = toy.numFullKVHeads * toy.fullHeadDim
+
+        // (name, shape, zeroCenteredNorm)
+        let tensors: [(String, [Int], Bool)] = [
+            ("mtp.fc.weight", [d, 2 * d], false),
+            ("mtp.pre_fc_norm_embedding.weight", [d], true),
+            ("mtp.pre_fc_norm_hidden.weight", [d], true),
+            ("mtp.norm.weight", [d], true),
+            ("mtp.layers.0.input_layernorm.weight", [d], true),
+            ("mtp.layers.0.post_attention_layernorm.weight", [d], true),
+            ("mtp.layers.0.self_attn.q_proj.weight", [2 * qDim, d], false),
+            ("mtp.layers.0.self_attn.k_proj.weight", [kvDim, d], false),
+            ("mtp.layers.0.self_attn.v_proj.weight", [kvDim, d], false),
+            ("mtp.layers.0.self_attn.o_proj.weight", [d, qDim], false),
+            ("mtp.layers.0.self_attn.q_norm.weight", [toy.fullHeadDim], true),
+            ("mtp.layers.0.self_attn.k_norm.weight", [toy.fullHeadDim], true),
+            ("mtp.layers.0.mlp.gate_proj.weight", [f, d], false),
+            ("mtp.layers.0.mlp.up_proj.weight", [f, d], false),
+            ("mtp.layers.0.mlp.down_proj.weight", [d, f], false),
+        ]
+
+        var headerEntries: [String] = []
+        var payload = Data()
+        var lcg: UInt64 = 0x5DEECE66D
+        func nextFloat() -> Float {
+            lcg = lcg &* 6364136223846793005 &+ 1442695040888963407
+            return Float(lcg >> 40) / Float(1 << 24) - 0.5
+        }
+        for (name, shape, isNorm) in tensors {
+            let count = shape.reduce(1, *)
+            let begin = payload.count
+            var bits = [UInt16](repeating: 0, count: count)
+            for i in 0..<count {
+                let value = isNorm ? 0.3 * nextFloat() : 0.25 * nextFloat()
+                bits[i] = Quantization.bf16Bits(value)
+            }
+            bits.withUnsafeBufferPointer {
+                payload.append(UnsafeRawBufferPointer($0).bindMemory(to: UInt8.self))
+            }
+            let dims = shape.map(String.init).joined(separator: ",")
+            headerEntries.append(
+                "\"\(name)\":{\"dtype\":\"BF16\",\"shape\":[\(dims)],"
+                + "\"data_offsets\":[\(begin),\(payload.count)]}")
+        }
+        let headerJSON = "{" + headerEntries.joined(separator: ",") + "}"
+        let headerBytes = Data(headerJSON.utf8)
+        var file = Data()
+        var headerLen = UInt64(headerBytes.count).littleEndian
+        withUnsafeBytes(of: &headerLen) { file.append(contentsOf: $0) }
+        file.append(headerBytes)
+        file.append(payload)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qwen38-toy-mtp-\(UUID().uuidString).safetensors")
+        try file.write(to: url)
+        return url
     }
 }
 

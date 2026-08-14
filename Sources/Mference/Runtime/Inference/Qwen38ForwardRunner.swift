@@ -46,8 +46,9 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     FusedHeadLogitProducer, @unchecked Sendable {
 
     /// Every per-layer TensorView, resolved once at init so the decode hot
-    /// path never touches the resident-index dictionary.
-    private struct LayerTensors {
+    /// path never touches the resident-index dictionary. Internal so the MTP
+    /// speculator's verify pass can reuse the resolved views.
+    struct LayerTensors {
         let inputNorm: TensorView
         let postAttnNorm: TensorView
         // Full-attention layers (mask 1) only.
@@ -210,6 +211,37 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
 
+    /// MTP speculative decoding, present when the install carries the
+    /// `mtp.*` draft tensors and `MFERENCE_MTP` is not "0". Greedy-only:
+    /// rounds run only through the fused-greedy `produce` path, which the
+    /// generation loop already restricts to temperature 0 with no
+    /// repetition penalty. Internal var so tests can disable it per-instance.
+    var mtp: Qwen38MTPSpeculator?
+
+    public struct MTPSpecStats: Sendable {
+        public let rounds: Int
+        public let draftedTokens: Int
+        public let acceptedTokens: Int
+        public let emittedTokens: Int
+        public let rollbacks: Int
+        public let draftNanos: UInt64
+        public let verifyNanos: UInt64
+        public let acceptNanos: UInt64
+    }
+
+    public var mtpSpecStats: MTPSpecStats? {
+        mtp.map {
+            MTPSpecStats(rounds: $0.stats.rounds,
+                         draftedTokens: $0.stats.draftedTokens,
+                         acceptedTokens: $0.stats.acceptedTokens,
+                         emittedTokens: $0.stats.emittedTokens,
+                         rollbacks: $0.stats.rollbacks,
+                         draftNanos: $0.stats.draftNanos,
+                         verifyNanos: $0.stats.verifyNanos,
+                         acceptNanos: $0.stats.acceptNanos)
+        }
+    }
+
     private static let epsilon: Float = 1e-6
 
     public init(model: Model, context: MetalContext, maxContext: Int,
@@ -334,6 +366,17 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                 mlpDown: projection(try model.sharedExpertDown(layer: L), rows: D, cols: F),
                 isLinear: isLinear)
         }
+
+        if ProcessInfo.processInfo.environment["MFERENCE_MTP"] != "0" {
+            self.mtp = try Qwen38MTPSpeculator.probe(model: model,
+                                                     context: context,
+                                                     config: cfg,
+                                                     kv: kv,
+                                                     gdnState: gdnState,
+                                                     layers: layers,
+                                                     maxContext: maxContext,
+                                                     mlpWeightBits: mlpWeightBits)
+        }
     }
 
     private static func validate(config: ArchConfig, maxContext: Int) throws {
@@ -360,12 +403,17 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         prefillChunkState.reset()
         kv.reset()
         gdnState.reset()
+        mtp?.reset()
     }
 
     public var continuationPosition: Int { kv.position }
 
     public func prepareForContinuation(expectedPosition: Int) throws {
         try prefillChunkState.requireClean(operation: "prepareForContinuation")
+        // A speculative round may have committed verified tokens past the
+        // consumed stream; the speculator rewinds the KV/GDN state when the
+        // requested cursor falls inside its last verify span.
+        if let mtp { try mtp.prepareForContinuation(expectedPosition: expectedPosition) }
         guard expectedPosition > 0, expectedPosition == kv.position else {
             throw PrefillError.prefillCursorMismatch(
                 "Qwen 3.8 continuation cursor \(expectedPosition) does not match \(kv.position)")
@@ -373,6 +421,22 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     }
 
     public func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
+        if let mtp, useFusedGreedyHead {
+            if let queued = try mtp.consumePending(token: token, position: position) {
+                lastGreedyToken = queued
+                return
+            }
+            if mtp.canRunRound(position: position) {
+                try prefillChunkState.requireClean(operation: "produce")
+                try Task.checkCancellation()
+                guard token >= 0, token < Int32(cfg.vocabSize) else {
+                    throw Qwen38ForwardRunnerError.invalidInput(
+                        "Qwen 3.8 token is outside the vocabulary")
+                }
+                lastGreedyToken = try mtp.runRound(bonus: token, position: position)
+                return
+            }
+        }
         try await produceToken(token: token, position: position, into: logits,
                                emitHead: true, outputMode: .greedyIfAvailable)
     }
@@ -574,6 +638,16 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                             biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
                             x: normed, y: logits,
                             m: UInt32(cfg.vocabSize), n: UInt32(D))
+            }
+            if let mtp {
+                // Seed the drafter's hidden input with the last prompt
+                // position's final-norm row.
+                rms.encodeBF16W(commandBuffer: cb,
+                                x: scratch.hidden, xOffset: lastRowOffset,
+                                weight: fNorm.buffer,
+                                weightOffset: Int(fNorm.offset),
+                                out: mtp.lastHiddenBuf,
+                                d: UInt32(D), eps: Self.epsilon)
             }
         }
 
@@ -957,6 +1031,10 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                               outputMode: PrefillOutputMode) async throws {
         try prefillChunkState.requireClean(operation: "produce")
         try Task.checkCancellation()
+        if let mtp, mtp.hasPending {
+            throw Qwen38ForwardRunnerError.invalidInput(
+                "Qwen 3.8 decode step with unconsumed speculative tokens; reset or continue first")
+        }
         guard position == kv.position, position >= 0, position < maxContext else {
             throw Qwen38ForwardRunnerError.invalidInput(
                 "Qwen 3.8 position \(position) does not match its KV cursor \(kv.position)")
@@ -1058,6 +1136,17 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                               outToken: greedyTokenBuf,
                                               d: D, vocab: UInt32(cfg.vocabSize),
                                               rmsEps: Self.epsilon)
+            }
+            if let mtp {
+                // The drafter consumes the target's final-norm hidden of the
+                // last processed position; keep it current so a spec round
+                // can start after any plain decode step.
+                rms.encodeBF16W(commandBuffer: cb,
+                                x: hidden,
+                                weight: fNorm.buffer,
+                                weightOffset: Int(fNorm.offset),
+                                out: mtp.lastHiddenBuf,
+                                d: D, eps: Self.epsilon)
             }
         }
 
