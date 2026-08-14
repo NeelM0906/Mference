@@ -89,8 +89,9 @@ diagnostics and do not change behavior.
 
 The accepted decode defaults carry environment kill-switches for A/B runs.
 `MFERENCE_SLOT_MAP=0` disables the GPU-resident expert-to-slot map that lets
-Qwen layers whose eight experts are all cached skip the CPU round-trip
-(default on). `MFERENCE_EAGER_ROUTED=0` disables the eager routed commit,
+Qwen layers whose eight experts are all cached skip CPU expert planning,
+fetching, and routed-command encoding — the router readback itself remains on
+the CPU (default on). `MFERENCE_EAGER_ROUTED=0` disables the eager routed commit,
 which commits the routed command buffer before its expert fills land, gated on
 a shared event; a failed eager fill aborts the decode step with an error
 rather than emitting corrupt output (default on). `MFERENCE_ROUTER_EVENT=0`

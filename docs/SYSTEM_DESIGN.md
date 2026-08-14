@@ -345,8 +345,10 @@ makes the layer tail wait for both the shared and routed branches.
 Three accepted decode defaults tighten this handoff further. For Qwen, the
 GPU-resident slot map (`router_slot_lookup_k8`) resolves the router's top-8
 IDs against the per-layer expert-to-slot table on the GPU; a layer whose
-selected experts are all cached completes its routed branch entirely on-GPU
-and skips the CPU round-trip (`MFERENCE_SLOT_MAP=0` disables). The eager
+selected experts are all cached runs its routed branch from pre-encoded,
+GPU-guarded commands, skipping CPU expert planning, fetching, and
+routed-command encoding — the router readback and LFU bookkeeping remain on
+the CPU every layer (`MFERENCE_SLOT_MAP=0` disables). The eager
 routed commit submits the routed command buffer before its expert fills land,
 gated on an `MTLSharedEvent` the fill completions signal
 (`MFERENCE_EAGER_ROUTED=0` disables); a failed eager fill aborts the decode

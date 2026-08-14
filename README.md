@@ -192,7 +192,8 @@ because its 256 experts per layer benefit measurably from the added coverage.
 Inkling remains at 16 because a 24-slot control warmup on the 24 GB M5 entered
 memory pressure and regressed sharply. Each layer's slots share one contiguous
 wired buffer, and on Qwen a GPU-resident expert-to-slot map lets layers whose
-eight experts are all cached run their routed branch without a CPU round-trip;
+eight experts are all cached run their routed branch from pre-encoded,
+GPU-guarded commands, with no CPU expert planning or fetching;
 the routed command buffer also commits eagerly, gated on a shared event that
 fires as expert fills land. An explicit `resident` mode that maps every layer
 file once exists as an opt-in, but it measured slower than the slot rungs under
