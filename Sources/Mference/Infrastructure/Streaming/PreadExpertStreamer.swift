@@ -445,21 +445,26 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// slots immediately and gates it on an event its completion signals;
     /// the in-flight marks keep concurrent plans away exactly as the
     /// speculative path does.
+    ///
+    /// `completion(false)` means at least one read failed and its slot stays
+    /// unpublished: the caller must still unblock its gated GPU work but must
+    /// not use the results, because the failed slot holds stale bytes.
     public func beginAsyncFill(_ plan: ExpertCachePlan,
                                qos: DispatchQoS.QoSClass = .userInitiated,
-                               completion: @escaping @Sendable () -> Void) {
+                               completion: @escaping @Sendable (Bool) -> Void) {
         let pairs = plan.misses.map { (expert: plan.experts[$0],
                                        slot: plan.assignedSlots[$0]) }
         guard !pairs.isEmpty else {
-            completion()
+            completion(true)
             return
         }
         cacheLock.lock()
         for pair in pairs { speculativeInFlight[pair.slot] = true }
         cacheLock.unlock()
+        let expectedBytes = UInt64(pairs.count) * layout.expertStride
         DispatchQueue.global(qos: qos).async { [self] in
-            executeSpeculativeReservation(pairs)
-            completion()
+            let loadedBytes = executeSpeculativeReservation(pairs)
+            completion(loadedBytes == expectedBytes)
         }
     }
 

@@ -143,16 +143,17 @@ extension Model {
     /// prefetch path, which reserves slots on the caller's thread and then
     /// executes the reads on a background queue without re-resolving the layer.
     /// Eager decode path: fill the plan's miss slots asynchronously.
-    /// `completion` fires when the slots hold their experts; resident mode
-    /// completes immediately (nothing to fill).
+    /// `completion(true)` fires when the slots hold their experts; resident
+    /// mode completes immediately (nothing to fill). `completion(false)`
+    /// means a read failed and the results must not be used.
     public func fillRoutedExpertsAsync(plan: RoutedExpertFetchPlan,
-                                       completion: @escaping @Sendable () -> Void) throws {
+                                       completion: @escaping @Sendable (Bool) -> Void) throws {
         try ensureLayerOpened(plan.layer)
         switch expertBackend(plan.layer) {
         case .pread(let streamer):
             streamer.beginAsyncFill(plan.cachePlan, completion: completion)
         case .resident:
-            completion()
+            completion(true)
         }
     }
 

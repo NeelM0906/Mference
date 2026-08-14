@@ -379,6 +379,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var eagerFetchDone = Set<UInt64>()
     private var eagerFetchSignaled: UInt64 = 0
     private let eagerFetchLock = NSLock()
+    /// First eager fill failure (layer index). The event still advances on
+    /// failure — the gated command buffer is already committed and must not
+    /// deadlock — so the decode loop checks this and aborts the step before
+    /// its output is used.
+    private var eagerFetchFailedLayer: Int?
     /// Accepted default (A/B 2026-08-08: +1.5–3.3% median on every case,
     /// byte-identical): the routed CB commits before its fills land, gated
     /// on the fill event. `MFERENCE_EAGER_ROUTED=0` disables.
@@ -3212,8 +3217,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             trackGpuInterval(routedCB)
             routedCB.commit()
             if let seq = eagerSeq, let plannedFetch {
-                try model.fillRoutedExpertsAsync(plan: plannedFetch) { [weak self] in
-                    self?.eagerFetchCompleted(seq)
+                try model.fillRoutedExpertsAsync(plan: plannedFetch) {
+                    [weak self, layer = plannedFetch.layer] success in
+                    self?.eagerFetchCompleted(seq, success: success, layer: layer)
                 }
             }
             if Self.slotMapDebugCompare, slotMapArmed,
@@ -3250,6 +3256,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             finishPendingRoutedCommand(pending, waitIfNeeded: true)
             pendingRoutedCommand = nil
         }
+        try throwIfEagerFillFailed()
 
         // The fused head skips the vocab buffer and leaves a greedy token in
         // greedyTokenBuf; the logits path writes the complete vector.
@@ -5437,8 +5444,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Tracks when the command buffers that are supposed to hide a pread
     /// actually finished. Completion handlers run on a Metal thread, so the
     /// bookkeeping is lock-guarded.
-    private func eagerFetchCompleted(_ seq: UInt64) {
+    private func eagerFetchCompleted(_ seq: UInt64, success: Bool, layer: Int) {
         eagerFetchLock.lock()
+        if !success, eagerFetchFailedLayer == nil {
+            eagerFetchFailedLayer = layer
+        }
         eagerFetchDone.insert(seq)
         while eagerFetchDone.contains(eagerFetchSignaled + 1) {
             eagerFetchDone.remove(eagerFetchSignaled + 1)
@@ -5450,6 +5460,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             event.signaledValue = eagerFetchSignaled
         }
         eagerFetchLock.unlock()
+    }
+
+    /// A failed eager fill leaves its slot unpublished while the gated GPU
+    /// work runs against stale slab bytes; the step's output is garbage and
+    /// must not reach the caller.
+    private func throwIfEagerFillFailed() throws {
+        eagerFetchLock.lock()
+        let failedLayer = eagerFetchFailedLayer
+        eagerFetchFailedLayer = nil
+        eagerFetchLock.unlock()
+        if let failedLayer {
+            throw ModelError.eagerExpertFillFailed(layer: failedLayer)
+        }
     }
 
     /// GPU-timeline attribution (`MFERENCE_PHASES=1`): busy time summed over
