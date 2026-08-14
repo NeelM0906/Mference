@@ -8,6 +8,7 @@ import Metal
 public enum ModelFamily: String, Sendable, Hashable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case qwen38 = "qwen38"
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
     case maple = "maple"
@@ -454,6 +455,60 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Canonical Qwen3.8-27B baseline (text stack of the multimodal
+    /// checkpoint; the vision tower is excluded at repack). A 64-layer dense
+    /// hybrid: 48 gated-DeltaNet linear-attention layers and 16 full-attention
+    /// layers (every 4th layer), one SwiGLU MLP per layer — no routed experts,
+    /// no shared expert, no router. Sigmoid attention output gate, QK norms,
+    /// partial RoPE over 64 of 256 dims, untied 248k-row lm_head. Everything
+    /// is resident: with zero experts per layer the expert streamer never
+    /// opens a pool.
+    public static let qwen38_27B = ArchConfig(
+        hiddenSize: 5120,
+        intermediateSize: 17_408,
+        moeIntermediateSize: 0,
+        numHeads: 24,
+        numKVHeads: 4,
+        numFullKVHeads: 4,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 64,
+        numExperts: 0,
+        topKExperts: 0,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.qwen38LayerMask(),
+        hiddenActivation: "silu",
+        family: .qwen38,
+        attnOutputGate: true,
+        attentionScale: 0.0625,   // 256^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        linearAttention: LinearAttentionConfig(
+            numKHeads: 16, numVHeads: 48,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4),
+        numSharedExperts: 0,
+        numDenseLayers: 64,
+        denseIntermediateSize: 17_408
+    )
+
+    private static func qwen38LayerMask() -> [UInt8] {
+        // Same 3:1 hybrid shape as Qwen 3.6 (full_attention_interval = 4).
+        var mask = [UInt8](repeating: 2, count: 64)
+        for i in stride(from: 3, to: 64, by: 4) { mask[i] = 1 }
+        return mask
+    }
+
     /// Canonical Maple Preview baseline: 24 plain pre-norm MoE layers with
     /// 256 routed experts (top-8) and no shared expert. Three sliding layers
     /// are followed by one global NoPE layer.
@@ -650,6 +705,7 @@ public struct ArchConfig: Sendable, Equatable {
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
+        .qwen38: .qwen38_27B,
         .deepseekV4Flash: .deepseekV4Flash_284B_A13B,
         .inklingSmall: .inklingSmall_276B_A12B,
         .maple: .maplePreview,
@@ -692,6 +748,11 @@ public struct ArchConfig: Sendable, Equatable {
         if numSharedExperts > 0 {
             shapes.append((m: intermediateSize, n: hiddenSize))
             shapes.append((m: hiddenSize, n: intermediateSize))
+        }
+        if numDenseLayers == numLayers, denseIntermediateSize > 0 {
+            // Fully dense family: every layer runs one resident SwiGLU MLP.
+            shapes.append((m: denseIntermediateSize, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: denseIntermediateSize))
         }
         return shapes
     }

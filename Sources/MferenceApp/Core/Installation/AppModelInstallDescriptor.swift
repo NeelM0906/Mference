@@ -110,6 +110,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         switch family {
         case .gemma4: return .default
         case .qwen36: return .qwen36
+        case .qwen38: return nil   // no shipped app descriptor yet
         case .deepseekV4Flash: return .deepseekV4Flash
         case .inklingSmall: return .inklingSmall
         case .maple: return .maple
@@ -121,6 +122,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         switch family {
         case .gemma4: return "gemma4.gturbo"
         case .qwen36: return "qwen36.gturbo"
+        case .qwen38: return "qwen38.gturbo"
         case .deepseekV4Flash: return "deepseekv4flash.gturbo"
         case .inklingSmall: return "inklingsmall.gturbo"
         case .maple: return "maple.gturbo"
