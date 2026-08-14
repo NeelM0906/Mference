@@ -214,13 +214,25 @@ public actor ServerModelSession: ServerInferenceBackend {
             throw MFTokenizerError.missingToolTemplate
         }
         let context = try MetalContext()
+        let streamingMode = RuntimeConfiguration.defaultExpertStreamingMode(
+            for: family,
+            expertPoolBytes: try ExpertPoolInspector.poolByteSize(
+                directoryURL: modelDirectory),
+            coreWeightsBytes: try ExpertPoolInspector.coreWeightsByteSize(
+                directoryURL: modelDirectory))
+        let configSlots: Int
+        switch streamingMode {
+        case .pread(let slots): configSlots = slots
+        case .resident:
+            configSlots = RuntimeConfiguration.allowedExpertCacheSlots.max()!
+        }
         let runtime = RuntimeConfiguration(
-            expertCacheSlots: RuntimeConfiguration.defaultExpertCacheSlots(for: family),
+            expertCacheSlots: configSlots,
             forceLogitsHead: true)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
-            streamingMode: .pread(slotCount: runtime.expertCacheSlots),
+            streamingMode: streamingMode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
         let forwardRuntime = try ForwardRunnerFactory.make(model: model,

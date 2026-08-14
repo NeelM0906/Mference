@@ -582,6 +582,131 @@ kernel void moe_phase1_gate_up_act_u16load(
         moe_fc_top_k(top_k), rows_per_tg, tg_idx, sg_idx, lane);
 }
 
+// ---------------------------------------------------------------------------
+// GPU-resident slot map (S3): resolve the router's top-k experts to slab
+// byte offsets without the CPU, and run the whole routed FFN inside cb1 when
+// every expert is already cached. The three guarded kernels are no-ops when
+// `all_hit[0] == 0`; the CPU fallback then does the work exactly as before.
+// The math bodies are shared with the production kernels, so an all-hit
+// layer's output is byte-identical to the argument-buffer path.
+// ---------------------------------------------------------------------------
+
+kernel void router_slot_lookup_k8(
+    device const uint* indices [[buffer(0)]],
+    device const short* slot_of [[buffer(1)]],
+    device uint* out_slot_offsets [[buffer(2)]],
+    device uint* out_all_hit [[buffer(3)]],
+    constant uint& top_k [[buffer(4)]],
+    constant uint& slot_stride [[buffer(5)]],
+    constant uint& num_experts [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid != 0) return;
+    uint all_hit = 1u;
+    for (uint k = 0; k < top_k; ++k) {
+        const uint e = min(indices[k], num_experts - 1u);
+        const short slot = slot_of[e];
+        if (slot < 0) {
+            all_hit = 0u;
+            out_slot_offsets[k] = 0u;
+        } else {
+            out_slot_offsets[k] = uint(slot) * slot_stride;
+        }
+    }
+    out_all_hit[0] = all_hit;
+}
+
+kernel void moe_phase1_gate_up_act_slotmap(
+    device const uint8_t* slab [[buffer(0)]],
+    device const uint* slot_offsets [[buffer(1)]],
+    device const uint* all_hit [[buffer(2)]],
+    constant ExpertOffsets& routed_offsets [[buffer(3)]],
+    device const half* x [[buffer(4)]],
+    device half* acts [[buffer(5)]],
+    constant uint& D [[buffer(6)]],
+    constant uint& F [[buffer(7)]],
+    constant uint& top_k [[buffer(8)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    if (all_hit[0] == 0u) return;
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    const uint K = moe_fc_top_k(top_k);
+    const uint rowg = tg_idx * 8u + sg_idx;
+    if (rowg >= K * FF) return;
+    const uint slot = rowg / FF;
+    const uint f = rowg % FF;
+
+    device const uint8_t* base = slab + slot_offsets[slot];
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* gW = base + re.gate_W_off;
+    device const uint8_t* uW = base + re.up_W_off;
+    device const bfloat* gS = (device const bfloat*)(base + re.gate_s_off);
+    device const bfloat* uS = (device const bfloat*)(base + re.up_s_off);
+    device const bfloat* gB = (device const bfloat*)(base + re.gate_b_off);
+    device const bfloat* uB = (device const bfloat*)(base + re.up_b_off);
+
+    const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
+        gW, gS, gB, uW, uS, uB, x, f, DD, lane);
+    if (lane == 0) acts[slot * FF + f] = half(moe_hidden_activation(gu.x) * gu.y);
+}
+
+kernel void moe_phase2_down_reduce_k8_slotmap(
+    device const uint8_t* slab [[buffer(0)]],
+    device const uint* slot_offsets [[buffer(1)]],
+    device const uint* all_hit [[buffer(2)]],
+    constant ExpertOffsets& routed_offsets [[buffer(3)]],
+    device const half* acts [[buffer(4)]],
+    device const half* routing_w [[buffer(5)]],
+    device const half* residual [[buffer(6)]],
+    device half* y [[buffer(7)]],
+    constant uint& D [[buffer(8)]],
+    constant uint& F [[buffer(9)]],
+    uint d [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    if (all_hit[0] == 0u) return;
+    threadgroup float partial[8];
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    if (d >= DD) return;
+
+    device const uint8_t* base = slab + slot_offsets[sg_idx];
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* dW = base + re.down_W_off;
+    device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
+    device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
+    device const half* act_slot = acts + sg_idx * FF;
+
+    const float value = moe_int4_gemv_row_simd_dev_vec(
+        dW, dS, dB, act_slot, d, FF, lane);
+    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg_idx == 0 && lane == 0) {
+        float acc = float(residual[d]);
+        acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
+        acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+        y[d] = half(acc);
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void residual_add_fp16_guarded(
+    device half*       hidden [[buffer(0)]],
+    device const half* delta  [[buffer(1)]],
+    constant uint&     count  [[buffer(2)]],
+    device const uint* all_hit [[buffer(3)]],
+    uint               tid   [[thread_position_in_grid]]
+) {
+    if (all_hit[0] == 0u) return;
+    if (tid >= count) return;
+    hidden[tid] = half(float(hidden[tid]) + float(delta[tid]));
+}
+
 kernel void moe_phase1_gate_up_act_subset_u16load(
     device const RoutedBlobs& routed [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],

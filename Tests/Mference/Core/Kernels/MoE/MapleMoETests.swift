@@ -189,8 +189,12 @@ import Testing
         let moe = try MapleMoE(context: context)
         let fixtures = (0..<topK).map { makeExpert($0) }
         let offsets = fixtures[0].offsets
-        let originalBlobs = try fixtures.map { fixture in
-            try paddedBuffer(context.device, prefix: 0, payload: fixture.bytes, suffix: 0).buffer
+        // Nonzero prefixes model slot-slab slices: expert data at a nonzero
+        // offset inside a larger cache buffer.
+        let originalBlobs: [MapleMoE.RoutedBlob] = try fixtures.map { fixture in
+            let padded = try paddedBuffer(context.device, prefix: 64,
+                                          payload: fixture.bytes, suffix: 32)
+            return (buffer: padded.buffer, offset: padded.prefix, length: fixture.bytes.count)
         }
         var x = (0..<d).map { index -> Float in
             index == 1 ? bf16(1.0e-30) : bf16(0.09 + Float(index % 23) * 0.006)

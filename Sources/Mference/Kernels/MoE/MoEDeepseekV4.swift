@@ -172,25 +172,25 @@ final class MoEDeepseekV4 {
         encoder.endEncoding()
     }
 
-    func makeReusedRoutedArgumentBuffer(routedBlobs: [MTLBuffer]) -> MTLBuffer {
+    func makeReusedRoutedArgumentBuffer(routedBlobs: [(buffer: MTLBuffer, offset: Int)]) -> MTLBuffer {
         validate(routedBlobs: routedBlobs)
         routedArgEncoder.setArgumentBuffer(reusableRoutedArgBuffer, offset: 0)
         for (index, blob) in routedBlobs.enumerated() {
-            routedArgEncoder.setBuffer(blob, offset: 0, index: index)
+            routedArgEncoder.setBuffer(blob.buffer, offset: blob.offset, index: index)
         }
         // The Metal-side RoutedBlobs struct carries 8 slots; point the two
         // unused ones at a valid buffer so the argument buffer never holds a
         // dangling reference.
         if let first = routedBlobs.first {
-            routedArgEncoder.setBuffer(first, offset: 0, index: 6)
-            routedArgEncoder.setBuffer(first, offset: 0, index: 7)
+            routedArgEncoder.setBuffer(first.buffer, offset: first.offset, index: 6)
+            routedArgEncoder.setBuffer(first.buffer, offset: first.offset, index: 7)
         }
         return reusableRoutedArgBuffer
     }
 
     func encodeRoutedPhase1(commandBuffer: MTLCommandBuffer,
                             routedArgBuffer: MTLBuffer,
-                            routedBlobs: [MTLBuffer],
+                            routedBlobs: [(buffer: MTLBuffer, offset: Int)],
                             routedOffsets: MoEExpertOffsets,
                             x: MTLBuffer,
                             acts: MTLBuffer,
@@ -205,7 +205,7 @@ final class MoEDeepseekV4 {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(phase1Int2PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
-        for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
+        for blob in routedBlobs { encoder.useResource(blob.buffer, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(x, offset: 0, index: 2)
@@ -222,7 +222,7 @@ final class MoEDeepseekV4 {
 
     func encodeRoutedPhase1Subset(commandBuffer: MTLCommandBuffer,
                                   routedArgBuffer: MTLBuffer,
-                                  routedBlobs: [MTLBuffer],
+                                  routedBlobs: [(buffer: MTLBuffer, offset: Int)],
                                   routedOffsets: MoEExpertOffsets,
                                   x: MTLBuffer,
                                   acts: MTLBuffer,
@@ -244,7 +244,7 @@ final class MoEDeepseekV4 {
         encoder.setComputePipelineState(phase1SubsetInt2PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for slot in activeSlotIndices {
-            encoder.useResource(routedBlobs[Int(slot)], usage: .read)
+            encoder.useResource(routedBlobs[Int(slot)].buffer, usage: .read)
         }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
@@ -264,7 +264,7 @@ final class MoEDeepseekV4 {
 
     func encodeRoutedPhase2Reduce(commandBuffer: MTLCommandBuffer,
                                   routedArgBuffer: MTLBuffer,
-                                  routedBlobs: [MTLBuffer],
+                                  routedBlobs: [(buffer: MTLBuffer, offset: Int)],
                                   routedOffsets: MoEExpertOffsets,
                                   acts: MTLBuffer,
                                   routingWeights: MTLBuffer,
@@ -278,7 +278,7 @@ final class MoEDeepseekV4 {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(phase2ReduceInt2K6PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
-        for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
+        for blob in routedBlobs { encoder.useResource(blob.buffer, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(acts, offset: 0, index: 2)
@@ -294,7 +294,7 @@ final class MoEDeepseekV4 {
         encoder.endEncoding()
     }
 
-    private func validate(routedBlobs: [MTLBuffer]) {
+    private func validate(routedBlobs: [(buffer: MTLBuffer, offset: Int)]) {
         precondition(routedBlobs.count == Self.topK)
     }
 }

@@ -606,17 +606,23 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
         return ranks
     }
 
-    private func expertBlobs(_ views: [TensorView]) throws -> [MTLBuffer] {
+    /// Slot caches hand out slices of one wired slab buffer, so views carry
+    /// nonzero offsets; each slice must stay within its buffer.
+    private func expertBlobs(_ views: [TensorView]) throws -> [MapleMoE.RoutedBlob] {
         guard views.count == Self.topK,
-              views.allSatisfy({ $0.offset == 0 && $0.length == UInt64($0.buffer.length) }) else {
-            throw MapleForwardRunnerError.invalidConfiguration("Maple routed experts must occupy whole cache buffers")
+              views.allSatisfy({ $0.offset + $0.length <= UInt64($0.buffer.length) }) else {
+            throw MapleForwardRunnerError.invalidConfiguration(
+                "Maple routed expert views must stay within their cache buffers")
         }
-        return views.map(\.buffer)
+        return views.map { (buffer: $0.buffer, offset: Int($0.offset), length: Int($0.length)) }
     }
 
-    private func requireSameExpertBuffers(_ views: [TensorView], _ blobs: [MTLBuffer]) throws {
+    private func requireSameExpertBuffers(_ views: [TensorView], _ blobs: [MapleMoE.RoutedBlob]) throws {
         let loaded = try expertBlobs(views)
-        guard loaded.count == blobs.count, zip(loaded, blobs).allSatisfy({ $0 === $1 }) else {
+        guard loaded.count == blobs.count,
+              zip(loaded, blobs).allSatisfy({
+                  $0.buffer === $1.buffer && $0.offset == $1.offset && $0.length == $1.length
+              }) else {
             throw MapleForwardRunnerError.invalidConfiguration(
                 "Maple expert fetch changed the planned cache-slot binding")
         }

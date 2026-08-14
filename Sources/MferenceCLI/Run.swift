@@ -20,8 +20,8 @@ public func run(args: Args,
     }
     do {
         let modelURL = URL(fileURLWithPath: args.model)
-        let expertCacheSlots = try resolveExpertCacheSlots(args.expertCacheSlots,
-                                                           modelURL: modelURL)
+        let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
+                                                         modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
         let promptIds: [Int32]
         if let rawPrompt = args.prompt {
@@ -71,7 +71,7 @@ public func run(args: Args,
                 ?? RuntimeConfiguration.allowedPrefillChunkTokens.last!
         }
         let runtime = RuntimeConfiguration(
-            expertCacheSlots: expertCacheSlots,
+            expertCacheSlots: expertStreaming.configSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy,
@@ -84,7 +84,7 @@ public func run(args: Args,
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
-            streamingMode: .pread(slotCount: runtime.expertCacheSlots),
+            streamingMode: expertStreaming.mode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
         let forwardRuntime = try ForwardRunnerFactory.make(
@@ -163,6 +163,18 @@ public func run(args: Args,
             lines += "    io exposed (GPU idle): "
             lines += ms(runner.totalIoExposedNanos) + " ms\n"
             lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
+            if runner.totalRoutedLayerSteps > 0 {
+                let rate = 100.0 * Double(runner.totalAllHitLayerSteps)
+                    / Double(runner.totalRoutedLayerSteps)
+                lines += "  all-hit layer steps: \(runner.totalAllHitLayerSteps)"
+                lines += "/\(runner.totalRoutedLayerSteps) ("
+                lines += String(format: "%.1f", rate) + "%)\n"
+            }
+            let gpuBusy = runner.totalGpuBusyNanos
+            let gpuSpan = runner.totalGpuSpanNanos
+            lines += "  gpu busy: " + ms(gpuBusy) + " ms, span: "
+            lines += ms(gpuSpan) + " ms, gap: "
+            lines += ms(gpuSpan > gpuBusy ? gpuSpan - gpuBusy : 0) + " ms\n"
             let predicted = runner.totalSpecPrefetchPredicted
             let recall = predicted > 0
                 ? Double(runner.totalSpecPrefetchConfirmed) / Double(predicted)
@@ -232,8 +244,8 @@ private func runChat(args: Args,
                      stderr: FileHandle) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
-        let expertCacheSlots = try resolveExpertCacheSlots(args.expertCacheSlots,
-                                                           modelURL: modelURL)
+        let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
+                                                         modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
         let baseConfig = GenerationConfig(
             maxNewTokens: args.maxNew,
@@ -252,7 +264,7 @@ private func runChat(args: Args,
         case .auto: prefillChunkTokens = 128
         }
         let runtime = RuntimeConfiguration(
-            expertCacheSlots: expertCacheSlots,
+            expertCacheSlots: expertStreaming.configSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !baseConfig.isPureGreedy,
@@ -265,7 +277,7 @@ private func runChat(args: Args,
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
-            streamingMode: .pread(slotCount: runtime.expertCacheSlots),
+            streamingMode: expertStreaming.mode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
         let forwardRuntime = try ForwardRunnerFactory.make(
@@ -351,14 +363,41 @@ private func runChat(args: Args,
     }
 }
 
-private func resolveExpertCacheSlots(_ choice: ExpertCacheSlotChoice,
-                                     modelURL: URL) throws -> Int {
+/// Resolved expert-cache choice: the streaming mode `Model.load` uses and the
+/// slot count `RuntimeConfiguration` carries. Resident mode has no slot cache,
+/// so it carries the largest allowed count for the config's slot-budget
+/// consumers, which resident-mode models ignore.
+private struct ExpertStreamingResolution {
+    let mode: ExpertStreamingMode
+    let configSlots: Int
+}
+
+private func resolveExpertStreaming(_ choice: ExpertCacheSlotChoice,
+                                    modelURL: URL) throws -> ExpertStreamingResolution {
     switch choice {
     case .fixed(let slots):
-        return slots
+        return ExpertStreamingResolution(mode: .pread(slotCount: slots),
+                                         configSlots: slots)
+    case .resident:
+        return ExpertStreamingResolution(
+            mode: .resident,
+            configSlots: RuntimeConfiguration.allowedExpertCacheSlots.max()!)
     case .auto:
         let family = try ManifestReader.peekFamily(directoryURL: modelURL)
-        return RuntimeConfiguration.defaultExpertCacheSlots(for: family)
+        let mode = RuntimeConfiguration.defaultExpertStreamingMode(
+            for: family,
+            expertPoolBytes: try ExpertPoolInspector.poolByteSize(
+                directoryURL: modelURL),
+            coreWeightsBytes: try ExpertPoolInspector.coreWeightsByteSize(
+                directoryURL: modelURL))
+        switch mode {
+        case .pread(let slots):
+            return ExpertStreamingResolution(mode: mode, configSlots: slots)
+        case .resident:
+            return ExpertStreamingResolution(
+                mode: mode,
+                configSlots: RuntimeConfiguration.allowedExpertCacheSlots.max()!)
+        }
     }
 }
 

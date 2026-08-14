@@ -22,7 +22,9 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 }
 
 public struct RuntimeConfiguration: Sendable, Equatable {
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32]
+    /// 96 and 128 are the near-resident rungs: large wired LFU sets for hosts
+    /// with RAM to spare but not enough to cache the whole expert pool.
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
     public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024, 2048, 4096]
 
     public let expertCacheSlots: Int
@@ -64,12 +66,46 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     /// Qwen's 256 experts per layer need twice Gemma's cache coverage to avoid
     /// repeated SSD reads. Keep the larger footprint family- and RAM-specific.
+    /// 64 slots beat 32 by 4.6–5.9% (2026-08-08 A/B); with the GPU slot map
+    /// the economics improved further and 96 slots (~6.8 GB wired, 50.7%
+    /// all-hit layer rate) beat 64 on every case — so ≥24 GiB hosts run 96.
+    /// Pre-slot-map, 96 lost to working-set pressure; both verdicts are
+    /// recorded in experiments/summaries 10 and 15.
     public static func defaultExpertCacheSlots(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) -> Int {
-        let sixteenGiB = UInt64(16) * 1024 * 1024 * 1024
-        return family == .qwen36 && physicalMemoryBytes >= sixteenGiB ? 32 : 16
+        guard family == .qwen36 else { return 16 }
+        let gib = UInt64(1) << 30
+        if physicalMemoryBytes >= 24 * gib { return 96 }
+        if physicalMemoryBytes >= 16 * gib { return 32 }
+        return 16
+    }
+
+    /// Fixed reserve the resident rung leaves for the KV cache, scratch, the
+    /// process, and the OS. Clean file-backed expert pages degrade toward
+    /// page-cache streaming under pressure, so the rung only needs the nominal
+    /// working set to fit.
+    static let residentHeadroomBytes = UInt64(4) * 1024 * 1024 * 1024
+
+    /// The auto profile's streaming mode. Measured on the 24 GB M5
+    /// (2026-08-07): `.resident` lost the community A/B on every case
+    /// (short −2%, long −56% from page-cache thrash), and 128 near-resident
+    /// slots beat nothing, because at 32 slots the page cache already holds
+    /// the whole Qwen expert pool. Auto therefore stays on the slot rule;
+    /// `resident`, 96, and 128 remain explicit flags for hosts where the
+    /// arithmetic differs. `expertPoolBytes`/`coreWeightsBytes` stay in the
+    /// signature so a future measured rung can use them without replumbing
+    /// callers.
+    public static func defaultExpertStreamingMode(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        expertPoolBytes _: UInt64,
+        coreWeightsBytes _: UInt64
+    ) -> ExpertStreamingMode {
+        return .pread(slotCount: defaultExpertCacheSlots(
+            for: family,
+            physicalMemoryBytes: physicalMemoryBytes))
     }
 
     public var fp16RingEnabled: Bool { true }

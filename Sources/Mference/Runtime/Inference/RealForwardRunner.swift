@@ -237,6 +237,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let zeroResidual: MTLBuffer  // [D] FP16 zeros — for routed branch base
     let outIndices: MTLBuffer    // [topK] UInt32
     let outWeights: MTLBuffer    // [topK] FP16
+    /// Lookahead router output: layer L+1's routing computed against layer
+    /// L's pre-FFN normed state, read at the same router wake as
+    /// `outIndices`. Feeds the speculative prefetcher; never bound by the
+    /// real routed path.
+    let pilotIndices: MTLBuffer  // [topK] UInt32
+    /// S3 slot-map scratch: slab byte offsets for the routed experts and the
+    /// GPU-written all-hit flag, both produced by `router_slot_lookup_k8`
+    /// before the router signal so the CPU can trust them at wake.
+    let slotMapOffsets: MTLBuffer // [topK] UInt32
+    let slotMapAllHit: MTLBuffer  // [1] UInt32
+    let pilotWeights: MTLBuffer  // [topK] FP16
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     let moeActs: MTLBuffer       // [topK * FmoE] FP16
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
@@ -359,6 +370,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// GPU work instead of following it. Nil when the device cannot vend a
     /// shared event; the code then falls back to waiting on the whole buffer.
     private let routerEvent: MTLSharedEvent?
+    /// Eager routed decode: the routed command buffer is committed before
+    /// its expert fills land, gated on this event. Fill completions advance
+    /// it in contiguous issue order, so an out-of-order completion can never
+    /// unblock an earlier layer's command buffer.
+    private let eagerFetchEvent: MTLSharedEvent?
+    private var eagerFetchIssued: UInt64 = 0
+    private var eagerFetchDone = Set<UInt64>()
+    private var eagerFetchSignaled: UInt64 = 0
+    private let eagerFetchLock = NSLock()
+    /// First eager fill failure (layer index). The event still advances on
+    /// failure — the gated command buffer is already committed and must not
+    /// deadlock — so the decode loop checks this and aborts the step before
+    /// its output is used.
+    private var eagerFetchFailedLayer: Int?
+    /// Accepted default (A/B 2026-08-08: +1.5–3.3% median on every case,
+    /// byte-identical): the routed CB commits before its fills land, gated
+    /// on the fill event. `MFERENCE_EAGER_ROUTED=0` disables.
+    static let eagerRoutedDefault =
+        ProcessInfo.processInfo.environment["MFERENCE_EAGER_ROUTED"] != "0"
+    var eagerRoutedEnabled = RealForwardRunner.eagerRoutedDefault
     private var routerEventValue: UInt64 = 0
     private static let routerEventTimeoutMS: UInt64 = 60_000
     /// Phase probes cost a completion handler per command buffer, so they are
@@ -395,18 +426,75 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// state inside layer L's command buffer, feeding real preads. The
         /// only mode whose predictor knows anything about the current token.
         case pilot
+        /// SHADOW: pilot's predictor with a non-blocking transport. Real
+        /// plans never wait for an in-flight speculative read (the slot
+        /// reservation system already keeps them safe to plan around), and
+        /// each layer issues at most `shadowIssueBudget` of its top-ranked
+        /// missing predictions, so speculation cannot flood the SSD or evict
+        /// more than it earns. Response to the measured pilot failure: 73%
+        /// recall but slower end-to-end from joins and unthrottled reads.
+        case shadow
 
         static func parse(_ raw: String?) -> SpeculativePrefetchMode {
             switch raw?.lowercased() {
             case "1", "on", "prefetch": return .prefetch
             case "advise": return .advise
             case "pilot": return .pilot
+            case "shadow": return .shadow
             default: return .off
             }
         }
     }
+
+    /// Shadow mode: speculative reads issued per layer, taken from the front
+    /// of the pilot's weight-ranked prediction list. Env-tunable while the
+    /// knob is being characterized; the measured best becomes the constant.
+    private static let shadowIssueBudget: Int = {
+        if let raw = ProcessInfo.processInfo.environment["MFERENCE_SHADOW_BUDGET"],
+           let parsed = Int(raw), parsed > 0 {
+            return parsed
+        }
+        return 2
+    }()
     var speculativePrefetchMode = SpeculativePrefetchMode.parse(
         ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"])
+    /// S3 experiment gate: run all-hit layers' routed FFN entirely on-GPU
+    /// via the slot map, skipping the per-layer CPU round-trip. Instance
+    /// state so tests can flip it; the env variable sets the process
+    /// default.
+    /// Accepted Qwen production default (community A/B 2026-08-08: short
+    /// +3.5%, medium +3.3%, long +1.6% median over four alternating blocks,
+    /// byte-identical). `MFERENCE_SLOT_MAP=0` is the kill-switch.
+    static let slotMapEnabledDefault =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP"] != "0"
+    var slotMapEnabled = RealForwardRunner.slotMapEnabledDefault
+    /// Debug discriminator: encode the whole slot-map chain but feed the
+    /// lookup an all-empty table, so the guarded kernels always no-op and
+    /// the CPU always falls back. Byte-identity under this mode proves the
+    /// encoding itself is inert.
+    static let slotMapForceMiss =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP_FORCE_MISS"] == "1"
+    /// Debug bisector: arm the slot map on exactly one layer index.
+    static let slotMapOnlyLayer: Int? =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP_LAYER"].flatMap(Int.init)
+    /// Debug: run the guarded chain into shadow buffers, never skip, and
+    /// compare against the fallback's activations after each layer.
+    static let slotMapDebugCompare =
+        ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP_DEBUG"] == "1"
+    lazy var slotMapDebugActs: MTLBuffer? = ctx.device.makeBuffer(
+        length: 8 * 4096 * MemoryLayout<Float16>.stride, options: .storageModeShared)
+    lazy var slotMapDebugOut: MTLBuffer? = ctx.device.makeBuffer(
+        length: 4096 * MemoryLayout<Float16>.stride, options: .storageModeShared)
+    lazy var slotMapDebugHidden: MTLBuffer? = ctx.device.makeBuffer(
+        length: 4096 * MemoryLayout<Float16>.stride, options: .storageModeShared)
+    lazy var slotMapEmptyTable: MTLBuffer? = {
+        guard let buf = ctx.device.makeBuffer(
+            length: 256 * MemoryLayout<Int16>.stride,
+            options: .storageModeShared) else { return nil }
+        let ptr = buf.contents().bindMemory(to: Int16.self, capacity: 256)
+        for i in 0..<256 { ptr[i] = -1 }
+        return buf
+    }()
     /// Last token's routed expert ids per layer; empty until a layer has been
     /// routed at least once. This is the default predictor.
     ///
@@ -439,7 +527,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.ctx = context
         self.cfg = model.config
         self.routerEvent = context.device.makeSharedEvent()
+        self.eagerFetchEvent = context.device.makeSharedEvent()
         self.maxContext = maxContext
+        // Shadow prefetch is the accepted DSV4 production default
+        // (community A/B 2026-08-07: short +18%, long +13%, byte-identical;
+        // docs/experiments/summaries/14-dsv4-shadow-prefetch.md). The env
+        // variable still overrides in either direction; other families keep
+        // `off` until they have their own accepted A/B.
+        if ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"] == nil,
+           model.config.family == .deepseekV4Flash {
+            self.speculativePrefetchMode = .shadow
+        }
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
@@ -567,6 +665,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let paddedTopK = max(cfg.topKExperts, MoE.maxStreamedExperts)
         self.outIndices    = try buf(paddedTopK, MemoryLayout<UInt32>.size)
         self.outWeights    = try buf(paddedTopK)
+        self.pilotIndices  = try buf(paddedTopK, MemoryLayout<UInt32>.size)
+        self.slotMapOffsets = try buf(paddedTopK, MemoryLayout<UInt32>.size)
+        self.slotMapAllHit = try buf(1, MemoryLayout<UInt32>.size)
+        memset(self.slotMapAllHit.contents(), 0, self.slotMapAllHit.length)
+        self.pilotWeights  = try buf(paddedTopK)
         self.moeActs       = try buf(paddedTopK * cfg.moeIntermediateSize)
         // Families that route fewer than 8 experts (Inkling: 6) pad the
         // streamed-expert list with duplicates carrying weight 0; zeroing the
@@ -890,6 +993,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     private func resetTransientState() {
+        // Reset must drain fully even in shadow mode: a background read may
+        // not write into slots after this point.
+        if let pending = pendingSpeculation {
+            pendingSpeculation = nil
+            totalSpecPrefetchBytes &+= pending.join()
+        }
         joinPendingSpeculation()
         previousTokenExperts = []
         prefillChunkState.reset()
@@ -908,6 +1017,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// while GPU work was still in flight versus the part that ran with an idle
     /// GPU. Only populated when `MFERENCE_PHASES=1`.
     public private(set) var totalIoOverlappedNanos: UInt64 = 0
+    /// S2 decision metric for the GPU-resident slot map: how many routed
+    /// layer-steps needed no miss at all — those are the steps S3 can run
+    /// entirely GPU-side.
+    public private(set) var totalRoutedLayerSteps: UInt64 = 0
+    public private(set) var totalAllHitLayerSteps: UInt64 = 0
+    let gpuTimeLock = NSLock()
+    public private(set) var totalGpuBusyNanos: UInt64 = 0
+    var gpuSpanFirstStart: Double = .infinity
+    var gpuSpanLastEnd: Double = 0
     public private(set) var totalIoExposedNanos: UInt64 = 0
     /// Speculative prefetch accounting: experts speculatively read (or advised)
     /// and how many of those the following real plan actually asked for. The
@@ -931,6 +1049,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalHeadNanos = 0
         totalHeadFusedNanos = 0
         totalIoOverlappedNanos = 0
+        totalRoutedLayerSteps = 0
+        totalAllHitLayerSteps = 0
+        gpuTimeLock.lock()
+        totalGpuBusyNanos = 0
+        gpuSpanFirstStart = .infinity
+        gpuSpanLastEnd = 0
+        gpuTimeLock.unlock()
         totalIoExposedNanos = 0
         totalSpecPrefetchPredicted = 0
         totalSpecPrefetchIssued = 0
@@ -976,14 +1101,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             defer { lock.unlock() }
             return bytes
         }
+
+        /// Non-blocking join: nil while the reads are still in flight.
+        func tryJoin() -> UInt64? {
+            lock.lock()
+            if joined {
+                defer { lock.unlock() }
+                return bytes
+            }
+            lock.unlock()
+            guard finished.wait(timeout: .now()) == .success else { return nil }
+            lock.lock()
+            defer { lock.unlock() }
+            joined = true
+            return bytes
+        }
     }
 
     /// Drains any outstanding speculation. Called before every real plan (so no
     /// slot is replanned while a background read is filling it) and on reset.
     /// Returns the joined record so the caller can score its prediction.
+    ///
+    /// Shadow mode never blocks here: an unfinished read stays pending — the
+    /// streamer's `speculativeInFlight` reservations already exclude its slots
+    /// from hits and eviction, so planning around it is safe — and it is
+    /// reaped by a later call once it has landed.
     @discardableResult
     private func joinPendingSpeculation() -> (layer: Int, predicted: Set<Int>)? {
         guard let pending = pendingSpeculation else { return nil }
+        if speculativePrefetchMode == .shadow {
+            guard let bytes = pending.tryJoin() else { return nil }
+            pendingSpeculation = nil
+            totalSpecPrefetchBytes &+= bytes
+            return (pending.layer, pending.predicted)
+        }
         pendingSpeculation = nil
         totalSpecPrefetchBytes &+= pending.join()
         return (pending.layer, pending.predicted)
@@ -991,7 +1142,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// Joins outstanding speculation and credits it against the experts the
     /// real plan turned out to need.
+    ///
+    /// Shadow mode joins **only when it pays**: if a predicted expert for
+    /// this layer is actually needed, the in-flight read is nearly done and
+    /// joining is cheaper than re-reading it on the demand path; otherwise
+    /// the record is reaped lazily and the plan never waits.
     private func settleSpeculation(layer: Int, actualExperts: [Int]) {
+        if speculativePrefetchMode == .shadow,
+           let pending = pendingSpeculation,
+           pending.layer == layer,
+           actualExperts.contains(where: pending.predicted.contains) {
+            pendingSpeculation = nil
+            totalSpecPrefetchBytes &+= pending.join()
+            var counted = Set<Int>()
+            for expert in actualExperts
+                where pending.predicted.contains(expert)
+                    && counted.insert(expert).inserted {
+                totalSpecPrefetchConfirmed &+= 1
+            }
+            return
+        }
         guard let joined = joinPendingSpeculation(), joined.layer == layer else { return }
         var counted = Set<Int>()
         for expert in actualExperts
@@ -1022,7 +1192,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             record.complete(bytes: 0)
             return
         }
-        let missing = streamer.nonResidentExperts(predicted)
+        var missing = streamer.nonResidentExperts(predicted)
+        if speculativePrefetchMode == .shadow {
+            // The prediction list is weight-ranked; a strict per-layer issue
+            // budget keeps speculation from flooding the SSD or evicting
+            // more slots than a right guess earns back.
+            missing = Array(missing.prefix(Self.shadowIssueBudget))
+        }
         guard !missing.isEmpty else {
             record.complete(bytes: 0)
             return
@@ -1046,7 +1222,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return
         }
         totalSpecPrefetchIssued &+= UInt64(reservation.count)
-        DispatchQueue.global(qos: .utility).async {
+        // Shadow joins these reads on the critical path the moment a
+        // prediction is confirmed, so they must not run at utility I/O
+        // priority; utility stays correct for the fire-and-forget modes.
+        let readQoS: DispatchQoS.QoSClass =
+            speculativePrefetchMode == .shadow ? .userInitiated : .utility
+        DispatchQueue.global(qos: readQoS).async {
             record.complete(bytes: streamer.executeSpeculativeReservation(reservation))
         }
     }
@@ -1054,7 +1235,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func predictedExperts(for layer: Int) -> [Int] {
         if let speculativeExpertPredictor { return speculativeExpertPredictor(layer) }
         switch speculativePrefetchMode {
-        case .pilot:
+        case .pilot, .shadow:
             guard let pilotPrediction, pilotPrediction.layer == layer else { return [] }
             return pilotPrediction.experts
         case .prefetch, .advise:
@@ -1085,7 +1266,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// on, the layer exists, and its expert set is not already exactly known
     /// from the hash table.
     private func shouldEncodePilotGemv(nextLayer: Int) -> Bool {
-        speculativePrefetchMode == .pilot
+        (speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow)
             && speculativeExpertPredictor == nil
             && nextLayer < cfg.numLayers
             && !cfg.layerIsHashRouted(nextLayer)
@@ -1095,7 +1276,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// bypass the GEMV entirely (exact from the token id).
     private func capturePilotPrediction(nextLayer: Int, token: Int32, gemvEncoded: Bool) {
         pilotPrediction = nil
-        guard speculativePrefetchMode == .pilot, nextLayer < cfg.numLayers else { return }
+        guard speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow, nextLayer < cfg.numLayers else { return }
         if let hashed = hashRoutedExperts(layer: nextLayer, token: token) {
             pilotPrediction = (nextLayer, hashed)
             return
@@ -2638,6 +2819,88 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
 
+            // Lookahead: layer L+1's router against layer L's pre-FFN normed
+            // state, in the same CB so the result is ready at the router
+            // wake below — no extra synchronization. Approximate by
+            // construction; scored as recall by the phase diagnostics and
+            // consumed only by the speculative prefetcher.
+            if speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow,
+               speculativeExpertPredictor == nil,
+               L + 1 < cfg.numLayers,
+               let nextRouterW = try? model.router(layer: L + 1) {
+                let nextPerExpertScale: (buffer: MTLBuffer, offset: Int)
+                if cfg.routerScaled,
+                   let view = try? model.routerPerExpertScale(layer: L + 1) {
+                    nextPerExpertScale = (view.buffer, Int(view.offset))
+                } else {
+                    nextPerExpertScale = (onesPerExpertScale!, 0)
+                }
+                moe.encodeRouterGemma4(commandBuffer: cb,
+                    weights: nextRouterW.buffer,
+                    weightsOffset: Int(nextRouterW.offset),
+                    scales:  nextRouterW.buffer,
+                    scalesOffset:  Int(nextRouterW.scaleOffset),
+                    biases:  nextRouterW.buffer,
+                    biasesOffset:  Int(nextRouterW.biasOffset),
+                    hidden: cfg.ffnSandwichNorms ? routerInput : routedX,
+                    effectiveScale: effectiveScaleBuffers[L + 1],
+                    perExpertScale: nextPerExpertScale.buffer,
+                    perExpertScaleOffset: nextPerExpertScale.offset,
+                    outIndices: pilotIndices, outWeights: pilotWeights,
+                    numExperts: UInt32(cfg.numExperts), d: D,
+                    topK: UInt32(cfg.topKExperts))
+            }
+
+            // S3: resolve routed experts to slab offsets and write the
+            // all-hit flag BEFORE the signal, so both are trustworthy the
+            // moment the CPU wakes. Qwen-only (plain pre-norm tail) while
+            // the guarded chain has an accepted A/B for exactly one family.
+            var slotMapArmed = false
+            var slotMapBinding: (slab: MTLBuffer, table: MTLBuffer, slotStride: Int)?
+            if slotMapEnabled,
+               Self.slotMapOnlyLayer == nil || Self.slotMapOnlyLayer == L,
+               !cfg.ffnSandwichNorms,
+               !isLinear,
+               model.config.family == .qwen36,
+               cfg.topKExperts == MoE.maxStreamedExperts,
+               let binding = try? model.routedSlotMapBinding(layer: L) {
+                slotMapBinding = binding
+                slotMapArmed = true
+                moe.encodeSlotLookup(commandBuffer: cb,
+                                     indices: outIndices,
+                                     table: Self.slotMapForceMiss
+                                         ? (slotMapEmptyTable ?? binding.table)
+                                         : binding.table,
+                                     slotStride: binding.slotStride,
+                                     slotOffsets: slotMapOffsets,
+                                     allHit: slotMapAllHit,
+                                     numExperts: UInt32(cfg.numExperts),
+                                     topK: UInt32(cfg.topKExperts))
+            }
+
+            // S3 guarded routed FFN in its own command buffer, committed
+            // right behind cb1 (tracked hazards order it after the lookup,
+            // shared expert, and gate writes). Completes all-hit layers
+            // entirely on-GPU; no-ops otherwise.
+            var slotMapGuardCB: MTLCommandBuffer?
+            if slotMapArmed, let binding = slotMapBinding {
+                let debug = Self.slotMapDebugCompare
+                let guardCB = ctx.queue.makeCommandBuffer()!
+                moe.encodeSlotMapGuardedFFN(commandBuffer: guardCB,
+                    slab: binding.slab,
+                    slotOffsets: slotMapOffsets,
+                    allHit: slotMapAllHit,
+                    routedOffsets: model.routedExpertOffsets(layer: L),
+                    x: routedX,
+                    acts: debug ? slotMapDebugActs! : moeActs,
+                    routingWeights: outWeights,
+                    residual: h1Buf,
+                    y: debug ? slotMapDebugOut! : h2Buf,
+                    hidden: debug ? slotMapDebugHidden! : hidden,
+                    d: D, f: FmoE, topK: UInt32(cfg.topKExperts))
+                slotMapGuardCB = guardCB
+            }
+
             // The router indices are written at this point in the buffer, so
             // signal the CPU here and keep encoding into the SAME buffer. The
             // shared dense MLP depends only on the post-attention norm, never
@@ -2679,7 +2942,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let overlapProbe = Self.phaseInstrumentationEnabled ? GPUOverlapProbe() : nil
             overlapProbe?.track(cb)
+            trackGpuInterval(cb)
             cb.commit()
+            if let guardCB = slotMapGuardCB {
+                trackGpuInterval(guardCB)
+                guardCB.commit()
+            }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForRouterSignal(routerSignal, fallback: cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
@@ -2697,12 +2965,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
 
+            // The lookahead router result is complete at this wake; it feeds
+            // the L+1 prefetch issued after this layer's routed CB commits.
+            if speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow,
+               speculativeExpertPredictor == nil,
+               L + 1 < cfg.numLayers {
+                let pilotPtr = pilotIndices.contents().bindMemory(
+                    to: UInt32.self, capacity: cfg.topKExperts)
+                pilotPrediction = (L + 1, (0..<cfg.topKExperts).map {
+                    min(Int(pilotPtr[$0]), cfg.numExperts - 1)
+                })
+            }
+
             // Join any speculative read aimed at this layer before planning —
             // the plan must not evict a slot a background pread is filling —
             // and score the prediction. Then this layer's routing becomes the
             // next token's prediction for the same layer.
             settleSpeculation(layer: L, actualExperts: experts)
             recordRoutedExperts(experts, layer: L)
+
+            if slotMapArmed, !Self.slotMapDebugCompare,
+               slotMapAllHit.contents().load(as: UInt32.self) == 1 {
+                // The GPU already finished this layer's routed FFN inside
+                // cb1: no plan, no fetch, no routed command buffer. Keep the
+                // LFU counters exactly as a plan would have left them.
+                if let streamer = try? model.routedExpertStreamer(layer: L) {
+                    streamer.noteAllHitUse(experts: experts)
+                }
+                if Self.phaseInstrumentationEnabled {
+                    totalRoutedLayerSteps &+= 1
+                    totalAllHitLayerSteps &+= 1
+                }
+                issueSpeculativePrefetch(layer: L + 1)
+                continue
+            }
 
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let topK = UInt32(cfg.topKExperts)
@@ -2711,9 +3007,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let plannedFetch = canPlanPhase1HitSplit
                 ? try model.planRoutedExperts(layer: L, experts: experts)
                 : nil
+            if Self.phaseInstrumentationEnabled {
+                totalRoutedLayerSteps &+= 1
+                if let plannedFetch, plannedFetch.misses.isEmpty {
+                    totalAllHitLayerSteps &+= 1
+                }
+            }
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSplitArgBuf: MTLBuffer?
-            var phase1HitSplitRoutedBufs: [MTLBuffer] = []
+            var phase1HitSplitRoutedBufs: [(buffer: MTLBuffer, offset: Int)] = []
             var phase1HitSlots: [UInt32] = []
             var phase1MissSlots: [UInt32] = []
             if let plan = plannedFetch {
@@ -2726,7 +3028,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             func encodeRoutedPhase1Full(
                 _ cb: MTLCommandBuffer,
                 argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer]
+                routedBufs: [(buffer: MTLBuffer, offset: Int)]
             ) {
                 moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: cb,
                                                         routedArgBuffer: argBuf,
@@ -2742,7 +3044,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             func encodeRoutedPhase1Subset(
                 _ cb: MTLCommandBuffer,
                 argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer],
+                routedBufs: [(buffer: MTLBuffer, offset: Int)],
                 activeSlots: MTLBuffer,
                 activeSlotIndices: [UInt32],
                 activeCount: UInt32
@@ -2766,7 +3068,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                plan.hits > 0,
                !plan.misses.isEmpty {
                 let plannedBlobs = try model.routedExpertBuffers(for: plan)
-                phase1HitSplitRoutedBufs = plannedBlobs.map { $0.buffer }
+                phase1HitSplitRoutedBufs = plannedBlobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
                 phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
                     routedBlobs: phase1HitSplitRoutedBufs,
                     topK: topK)
@@ -2789,6 +3091,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // behind. It follows the shared MLP on the same queue.
             if let hitCB = phase1HitCB {
                 overlapProbe?.track(hitCB)
+                trackGpuInterval(hitCB)
                 hitCB.commit()
             }
             if rdadviseEnabled && rdadvisePolicyMode != .off {
@@ -2815,21 +3118,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
 
-            // Routed-expert pread — overlaps the shared MLP still running in
-            // CB1 plus the phase-1 hit work committed above.
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let blobs: [TensorView]
-            if let plannedFetch {
-                blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+            // Routed-expert fills. Eager mode encodes the routed command
+            // buffer against the plan's slot views (slab offsets need no
+            // I/O), gates it on the fill event, and runs the preads in the
+            // background — the fetch leaves the CPU critical path entirely.
+            // The awaited path remains the fallback.
+            let routedBufs: [(buffer: MTLBuffer, offset: Int)]
+            var eagerSeq: UInt64?
+            if eagerRoutedEnabled, let plannedFetch, eagerFetchEvent != nil {
+                routedBufs = try model.routedExpertBuffers(for: plannedFetch)
+                    .map { (buffer: $0.buffer, offset: Int($0.offset)) }
+                eagerFetchIssued &+= 1
+                eagerSeq = eagerFetchIssued
             } else {
-                blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+                let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let blobs: [TensorView]
+                if let plannedFetch {
+                    blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+                } else {
+                    blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+                }
+                let tIoEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                totalIoNanos &+= tIoEnd - tIoStart
+                recordExpertIOOverlap(probe: overlapProbe,
+                                      startNanos: tIoStart,
+                                      endNanos: tIoEnd)
+                routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
             }
-            let tIoEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            totalIoNanos &+= tIoEnd - tIoStart
-            recordExpertIOOverlap(probe: overlapProbe,
-                                  startNanos: tIoStart,
-                                  endNanos: tIoEnd)
-            let routedBufs = blobs.map { $0.buffer }
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let gTail: (MTLCommandBuffer) -> Void
             if cfg.ffnSandwichNorms {
@@ -2864,6 +3179,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
             }
             let routedCB = ctx.queue.makeCommandBuffer()!
+            if let seq = eagerSeq, let event = eagerFetchEvent {
+                routedCB.encodeWaitForEvent(event, value: seq)
+            }
             let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
                 ? phase1HitSplitArgBuf
                 : nil
@@ -2896,7 +3214,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                    f: FmoE,
                                                    topK: topK)
             gTail(routedCB)
+            trackGpuInterval(routedCB)
             routedCB.commit()
+            if let seq = eagerSeq, let plannedFetch {
+                try model.fillRoutedExpertsAsync(plan: plannedFetch) {
+                    [weak self, layer = plannedFetch.layer] success in
+                    self?.eagerFetchCompleted(seq, success: success, layer: layer)
+                }
+            }
+            if Self.slotMapDebugCompare, slotMapArmed,
+               slotMapAllHit.contents().load(as: UInt32.self) == 1 {
+                while routedCB.status != .completed { usleep(200) }
+                let n = Int(topK) * Int(FmoE)
+                let a = moeActs.contents().bindMemory(to: UInt16.self, capacity: n)
+                let b = slotMapDebugActs!.contents().bindMemory(to: UInt16.self, capacity: n)
+                var firstActs = -1
+                for i in 0..<n where a[i] != b[i] { firstActs = i; break }
+                let m = Int(D)
+                let ya = h2Buf.contents().bindMemory(to: UInt16.self, capacity: m)
+                let yb = slotMapDebugOut!.contents().bindMemory(to: UInt16.self, capacity: m)
+                var firstY = -1
+                for i in 0..<m where ya[i] != yb[i] { firstY = i; break }
+                if firstActs >= 0 || firstY >= 0 {
+                    FileHandle.standardError.write(Data(
+                        "[slotmap-debug] L=\(L) actsDiff@\(firstActs) yDiff@\(firstY) a=\(a[max(0,firstActs)]) b=\(b[max(0,firstActs)])\n".utf8))
+                }
+            }
             // GPU is busy with routed work and the next layer's attention, CPU
             // is idle: the natural window for the speculative read.
             issueSpeculativePrefetch(layer: L + 1)
@@ -2913,6 +3256,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             finishPendingRoutedCommand(pending, waitIfNeeded: true)
             pendingRoutedCommand = nil
         }
+        try throwIfEagerFillFailed()
 
         // The fused head skips the vocab buffer and leaves a greedy token in
         // greedyTokenBuf; the logits path writes the complete vector.
@@ -2970,6 +3314,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    count: Int, fp32: Bool = false) {
         guard Self.inklingDebugEnabled else { return }
         let cb = ctx.queue.makeCommandBuffer()!
+        trackGpuInterval(cb)
         cb.commit()
         cb.waitUntilCompleted()
         var mn = Float.greatestFiniteMagnitude
@@ -3415,13 +3760,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let phase1MissSlots = (plannedFetch?.misses ?? []).map { UInt32($0) }
             var phase1HitCB: MTLCommandBuffer?
             var splitArgBuf: MTLBuffer?
-            var splitRoutedBufs: [MTLBuffer] = []
+            var splitRoutedBufs: [(buffer: MTLBuffer, offset: Int)] = []
 
             if let plan = plannedFetch,
                plan.hits > 0,
                !plan.misses.isEmpty {
                 splitRoutedBufs = try model.routedExpertBuffers(for: plan)
-                    .map(\.buffer)
+                    .map { (buffer: $0.buffer, offset: Int($0.offset)) }
                 // Router readback is a same-queue fence for the prior layer,
                 // so MoE's preallocated argument storage is no longer in use.
                 splitArgBuf = moe.makeRoutedArgumentBuffer(
@@ -3455,7 +3800,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
             }
             totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            let routedBufs = blobs.map(\.buffer)
+            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
 
             let routedCB = ctx.queue.makeCommandBuffer()!
             let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
@@ -4878,7 +5223,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
             if plannedFetch.hits > 0, !plannedFetch.misses.isEmpty {
                 let plannedBlobs = try model.routedExpertBuffers(for: plannedFetch)
-                let bufs = plannedBlobs.map { $0.buffer }
+                let bufs = plannedBlobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
                 writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
                 let hitCB = ctx.queue.makeCommandBuffer()!
                 let argBuf = moeDSV4.makeReusedRoutedArgumentBuffer(routedBlobs: bufs)
@@ -4930,7 +5275,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             recordExpertIOOverlap(probe: overlapProbe,
                                   startNanos: tIoStart,
                                   endNanos: tIoEnd)
-            let routedBufs = blobs.map { $0.buffer }
+            let routedBufs = blobs.map { (buffer: $0.buffer, offset: Int($0.offset)) }
 
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let routedCB = ctx.queue.makeCommandBuffer()!
@@ -5099,6 +5444,62 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Tracks when the command buffers that are supposed to hide a pread
     /// actually finished. Completion handlers run on a Metal thread, so the
     /// bookkeeping is lock-guarded.
+    private func eagerFetchCompleted(_ seq: UInt64, success: Bool, layer: Int) {
+        eagerFetchLock.lock()
+        if !success, eagerFetchFailedLayer == nil {
+            eagerFetchFailedLayer = layer
+        }
+        eagerFetchDone.insert(seq)
+        while eagerFetchDone.contains(eagerFetchSignaled + 1) {
+            eagerFetchDone.remove(eagerFetchSignaled + 1)
+            eagerFetchSignaled += 1
+        }
+        // Signal inside the lock: two completions racing outside it could
+        // write the event backwards.
+        if let event = eagerFetchEvent, event.signaledValue < eagerFetchSignaled {
+            event.signaledValue = eagerFetchSignaled
+        }
+        eagerFetchLock.unlock()
+    }
+
+    /// A failed eager fill leaves its slot unpublished while the gated GPU
+    /// work runs against stale slab bytes; the step's output is garbage and
+    /// must not reach the caller.
+    private func throwIfEagerFillFailed() throws {
+        eagerFetchLock.lock()
+        let failedLayer = eagerFetchFailedLayer
+        eagerFetchFailedLayer = nil
+        eagerFetchLock.unlock()
+        if let failedLayer {
+            throw ModelError.eagerExpertFillFailed(layer: failedLayer)
+        }
+    }
+
+    /// GPU-timeline attribution (`MFERENCE_PHASES=1`): busy time summed over
+    /// tracked decode command buffers, plus the wall span they cover. The
+    /// difference is scheduling gap — the target of command-buffer
+    /// consolidation work.
+    func trackGpuInterval(_ cb: MTLCommandBuffer) {
+        guard Self.phaseInstrumentationEnabled else { return }
+        cb.addCompletedHandler { [self] done in
+            let start = done.gpuStartTime
+            let end = done.gpuEndTime
+            guard end > start else { return }
+            gpuTimeLock.lock()
+            totalGpuBusyNanos &+= UInt64((end - start) * 1e9)
+            gpuSpanFirstStart = min(gpuSpanFirstStart, start)
+            gpuSpanLastEnd = max(gpuSpanLastEnd, end)
+            gpuTimeLock.unlock()
+        }
+    }
+
+    public var totalGpuSpanNanos: UInt64 {
+        gpuTimeLock.lock()
+        defer { gpuTimeLock.unlock() }
+        guard gpuSpanLastEnd > gpuSpanFirstStart else { return 0 }
+        return UInt64((gpuSpanLastEnd - gpuSpanFirstStart) * 1e9)
+    }
+
     final class GPUOverlapProbe: @unchecked Sendable {
         private let lock = NSLock()
         private var remaining = 0

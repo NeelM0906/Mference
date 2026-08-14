@@ -5,6 +5,11 @@ import Metal
 /// instance is serial: its router logits and routed argument table must not
 /// be rebound until their prior command buffers complete.
 final class MapleMoE {
+    /// One routed expert's blob as a byte range inside a cache buffer. Slot
+    /// caches pack many experts into a single slab buffer, so consumers must
+    /// carry the offset; a whole dedicated buffer is (buffer, 0, length).
+    typealias RoutedBlob = (buffer: MTLBuffer, offset: Int, length: Int)
+
     static let dimension = 2_048
     static let intermediate = 512
     static let expertCount = 256
@@ -31,7 +36,7 @@ final class MapleMoE {
     private let routedArgumentEncoder: MTLArgumentEncoder
     private let routedArgumentBuffer: MTLBuffer
     private let routedArgumentBytes: Int
-    private var boundBlobs: [MTLBuffer]?
+    private var boundBlobs: [RoutedBlob]?
     private var boundOffsets: MoEExpertOffsets?
     private var routedArgumentUsers: [MTLCommandBuffer] = []
     private var routerLogitsUser: MTLCommandBuffer?
@@ -126,12 +131,12 @@ final class MapleMoE {
     }
 
     /// Binds exactly eight expert blobs in descending router-rank order.
-    func makeRoutedArgumentBuffer(routedBlobs: [MTLBuffer], offsets: MoEExpertOffsets) -> MTLBuffer {
+    func makeRoutedArgumentBuffer(routedBlobs: [RoutedBlob], offsets: MoEExpertOffsets) -> MTLBuffer {
         requireArgumentTableAvailableForRebind()
         Self.validateBlobs(routedBlobs, offsets: offsets)
         routedArgumentEncoder.setArgumentBuffer(routedArgumentBuffer, offset: 0)
         for (rank, blob) in routedBlobs.enumerated() {
-            routedArgumentEncoder.setBuffer(blob, offset: 0, index: rank)
+            routedArgumentEncoder.setBuffer(blob.buffer, offset: blob.offset, index: rank)
         }
         boundBlobs = routedBlobs
         boundOffsets = offsets
@@ -140,7 +145,7 @@ final class MapleMoE {
 
     func encodePhase1(commandBuffer: MTLCommandBuffer,
                       routedArgumentBuffer: MTLBuffer,
-                      routedBlobs: [MTLBuffer], offsets: MoEExpertOffsets,
+                      routedBlobs: [RoutedBlob], offsets: MoEExpertOffsets,
                       x: MTLBuffer, xOffset: Int = 0,
                       acts: MTLBuffer, actsOffset: Int = 0) {
         requireOwnedArgumentBuffer(routedArgumentBuffer)
@@ -153,7 +158,7 @@ final class MapleMoE {
         markArgumentTableRead(by: commandBuffer)
         encoder.setComputePipelineState(phase1)
         encoder.setBuffer(routedArgumentBuffer, offset: 0, index: 0)
-        for blob in routedBlobs { encoder.useResource(blob, usage: .read) }
+        for blob in routedBlobs { encoder.useResource(blob.buffer, usage: .read) }
         var offsets = offsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(x, offset: xOffset, index: 2)
@@ -167,7 +172,7 @@ final class MapleMoE {
     /// Writes each subset result into its original router-rank act slot.
     func encodePhase1Subset(commandBuffer: MTLCommandBuffer,
                             routedArgumentBuffer: MTLBuffer,
-                            routedBlobs: [MTLBuffer], offsets: MoEExpertOffsets,
+                            routedBlobs: [RoutedBlob], offsets: MoEExpertOffsets,
                             x: MTLBuffer, xOffset: Int = 0,
                             acts: MTLBuffer, actsOffset: Int = 0,
                             activeSlotIndices: [UInt32]) {
@@ -190,7 +195,7 @@ final class MapleMoE {
         markArgumentTableRead(by: commandBuffer)
         encoder.setComputePipelineState(phase1Subset)
         encoder.setBuffer(routedArgumentBuffer, offset: 0, index: 0)
-        for rank in activeSlotIndices { encoder.useResource(routedBlobs[Int(rank)], usage: .read) }
+        for rank in activeSlotIndices { encoder.useResource(routedBlobs[Int(rank)].buffer, usage: .read) }
         var offsets = offsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(x, offset: xOffset, index: 2)
@@ -208,7 +213,7 @@ final class MapleMoE {
     /// Emits the routed expert sum only. The outer Maple layer owns residual addition.
     func encodePhase2(commandBuffer: MTLCommandBuffer,
                       routedArgumentBuffer: MTLBuffer,
-                      routedBlobs: [MTLBuffer], offsets: MoEExpertOffsets,
+                      routedBlobs: [RoutedBlob], offsets: MoEExpertOffsets,
                       acts: MTLBuffer, actsOffset: Int = 0,
                       routingWeights: MTLBuffer, routingWeightsOffset: Int = 0,
                       output: MTLBuffer, outputOffset: Int = 0) {
@@ -232,7 +237,7 @@ final class MapleMoE {
         markArgumentTableRead(by: commandBuffer)
         encoder.setComputePipelineState(phase2)
         encoder.setBuffer(routedArgumentBuffer, offset: 0, index: 0)
-        for blob in routedBlobs { encoder.useResource(blob, usage: .read) }
+        for blob in routedBlobs { encoder.useResource(blob.buffer, usage: .read) }
         var offsets = offsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(acts, offset: actsOffset, index: 2)
@@ -292,12 +297,14 @@ final class MapleMoE {
         commandBuffer.status == .completed || commandBuffer.status == .error
     }
 
-    private func requireCurrentBinding(_ blobs: [MTLBuffer], offsets: MoEExpertOffsets) {
+    private func requireCurrentBinding(_ blobs: [RoutedBlob], offsets: MoEExpertOffsets) {
         guard let boundBlobs, let boundOffsets else {
             preconditionFailure("Maple MoE argument table has not been bound")
         }
         precondition(boundBlobs.count == blobs.count &&
-                     zip(boundBlobs, blobs).allSatisfy { $0 === $1 },
+                     zip(boundBlobs, blobs).allSatisfy {
+                         $0.buffer === $1.buffer && $0.offset == $1.offset && $0.length == $1.length
+                     },
                      "Maple MoE blobs differ from the current argument table")
         precondition(Self.offsetsEqual(boundOffsets, offsets),
                      "Maple MoE offsets differ from the current argument table")
@@ -313,7 +320,7 @@ final class MapleMoE {
 
     private static func validatePhase1Inputs(routedArgumentBuffer: MTLBuffer,
                                              routedArgumentBytes: Int,
-                                             routedBlobs: [MTLBuffer], offsets: MoEExpertOffsets,
+                                             routedBlobs: [RoutedBlob], offsets: MoEExpertOffsets,
                                              x: MTLBuffer, xOffset: Int,
                                              acts: MTLBuffer, actsOffset: Int) {
         validateBlobs(routedBlobs, offsets: offsets)
@@ -329,15 +336,20 @@ final class MapleMoE {
                         routedArgumentBuffer, 0, routedArgumentBytes,
                         left: "acts", right: "routed argument table")
         for blob in routedBlobs {
-            requireDisjoint(acts, actsOffset, actsBytes, blob, 0, blob.length,
+            requireDisjoint(acts, actsOffset, actsBytes, blob.buffer, blob.offset, blob.length,
                             left: "acts", right: "routed expert")
         }
     }
 
-    private static func validateBlobs(_ routedBlobs: [MTLBuffer], offsets: MoEExpertOffsets) {
+    private static func validateBlobs(_ routedBlobs: [RoutedBlob], offsets: MoEExpertOffsets) {
         precondition(routedBlobs.count == topK, "Maple MoE requires eight routed blobs")
-        precondition(Set(routedBlobs.map { ObjectIdentifier($0) }).count == topK,
-                     "Maple MoE routed blobs must be distinct rank slots")
+        for left in routedBlobs.indices {
+            for right in routedBlobs.indices where right > left {
+                precondition(routedBlobs[left].buffer !== routedBlobs[right].buffer ||
+                             routedBlobs[left].offset != routedBlobs[right].offset,
+                             "Maple MoE routed blobs must be distinct rank slots")
+            }
+        }
         let ranges: [(Int, Int, String)] = [
             (Int(offsets.gateWOff), projectionWeightBytes, "gate weights"),
             (Int(offsets.gateSOff), projectionCompanionBytes, "gate scales"),
@@ -350,10 +362,14 @@ final class MapleMoE {
             (Int(offsets.downBOff), downCompanionBytes, "down biases"),
         ]
         for blob in routedBlobs {
+            precondition(blob.offset >= 0 && blob.length >= 0 &&
+                         blob.offset <= blob.buffer.length &&
+                         blob.length <= blob.buffer.length - blob.offset,
+                         "Maple MoE routed blob slice exceeds its buffer")
             for (offset, bytes, name) in ranges {
-                requireRange(blob, offset: offset, bytes: bytes,
-                             alignment: name.hasSuffix("weights") ? 1 : MemoryLayout<UInt16>.stride,
-                             named: name)
+                requireSliceRange(blob, offset: offset, bytes: bytes,
+                                  alignment: name.hasSuffix("weights") ? 1 : MemoryLayout<UInt16>.stride,
+                                  named: name)
             }
             for left in ranges.indices {
                 for right in ranges.indices where right > left {
@@ -368,7 +384,7 @@ final class MapleMoE {
 
     private static func requirePhase2Disjoint(_ output: MTLBuffer, _ outputOffset: Int,
                                               _ argument: MTLBuffer, _ argumentBytes: Int,
-                                              _ blobs: [MTLBuffer],
+                                              _ blobs: [RoutedBlob],
                                               _ acts: MTLBuffer, _ actsOffset: Int,
                                               _ weights: MTLBuffer, _ weightsOffset: Int) {
         requireDisjoint(output, outputOffset, vectorBytes, acts, actsOffset, actsBytes,
@@ -378,9 +394,19 @@ final class MapleMoE {
         requireDisjoint(output, outputOffset, vectorBytes, argument, 0, argumentBytes,
                         left: "output", right: "routed argument table")
         for blob in blobs {
-            requireDisjoint(output, outputOffset, vectorBytes, blob, 0, blob.length,
+            requireDisjoint(output, outputOffset, vectorBytes, blob.buffer, blob.offset, blob.length,
                             left: "output", right: "routed expert")
         }
+    }
+
+    /// Validates a tensor range relative to a blob slice. Alignment applies to
+    /// the absolute buffer offset the kernel dereferences.
+    private static func requireSliceRange(_ blob: RoutedBlob, offset: Int, bytes: Int,
+                                          alignment: Int, named: String) {
+        precondition(offset >= 0 && offset <= blob.length && bytes <= blob.length - offset,
+                     "Maple \(named) buffer is too small")
+        precondition((blob.offset + offset).isMultiple(of: alignment),
+                     "Maple \(named) offset is misaligned")
     }
 
     private static func requireRange(_ buffer: MTLBuffer, offset: Int, bytes: Int,

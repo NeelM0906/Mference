@@ -124,25 +124,28 @@ phase.
 
 ### Under an 8 GB working set
 
-The same host was constrained by pinning 16 GB resident in a separate process,
-leaving about 8 GB for the OS, page cache, and the model. All three cases were
-rerun unchanged, in fresh processes, with the same seeds:
+**Correction (2026-08-08):** the table originally published here reported
+throughput unchanged under an emulated 8 GB working set. That run's memory
+pin did not hold — the ballast was reclaimable, so the page cache kept the
+expert pool and the run measured the unconstrained machine twice. (The
+original rationale, "the 18.1 GB pool does not fit the page cache on
+either configuration," was also wrong for the 24 GB host, where it does.)
+With a verified ballast (15.2 GiB `mlock`ed, free memory near zero), the
+community cases at the 8 GB auto profile (16 slots) measure:
 
-| Case | Decode, 24 GB | Decode, ~8 GB | Footprint, 24 GB | Footprint, ~8 GB | Output |
-| --- | ---: | ---: | ---: | ---: | --- |
-| short-explanation | 23.05 tok/s | 22.95 tok/s | 1,447 MiB | 1,464 MiB | byte-identical |
-| medium-review | 21.20 tok/s | 21.35 tok/s | 1,448 MiB | 1,448 MiB | byte-identical |
-| long-synthesis | 18.84 tok/s | 18.62 tok/s | 1,464 MiB | 1,388 MiB | byte-identical |
+| Case | Decode, 24 GB | Decode, ~8 GB (verified) | Footprint |
+| --- | ---: | ---: | ---: |
+| short-explanation | 26.45 tok/s | 14.35 tok/s | ~1.1 GB |
+| medium-review | 24.99 tok/s | 12.75 tok/s | ~1.1 GB |
+| long-synthesis | 21.96 tok/s | 10.81 tok/s | ~1.1 GB |
 
-Every case still reported `stop=endOfTurn`, and each generated file matched its
-unconstrained counterpart byte for byte. Throughput and footprint are unchanged
-within run-to-run noise, because the 18.1 GB expert pool does not fit the page
-cache on either configuration — decode is already streaming from SSD, so
-shrinking available memory does not change what the runtime reads.
-
-This is emulated pressure on M5 hardware, not a measurement on a physical 8 GB
-Mac; a real 8 GB machine has a slower SSD and GPU and should be expected to
-decode more slowly, as the M2 rows above show for Gemma 4.
+Every run reached `stop=endOfTurn`. With the pool unable to cache, decode
+is SSD-latency-bound; rerunning with the 2026-08-08 optimizations disabled
+lands in the same regime (12.3/12.4 tok/s short/long), confirming the
+correction concerns the pin, not the runtime changes. This remains
+emulated pressure on M5 hardware: a physical 8 GB Mac has a slower SSD and
+GPU and should be expected to decode more slowly still, as the M2 rows
+above show for Gemma 4.
 
 ## Inkling-Small 276B-A12B measured decode
 

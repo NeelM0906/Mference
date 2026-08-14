@@ -740,6 +740,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case posixFailed(call: String, errno: Int32)
     case trustedReceiptInvalid(detail: String)
     case routedExpertPlanUnavailable(layer: Int)
+    case eagerExpertFillFailed(layer: Int)
 
     public var description: String {
         switch self {
@@ -773,6 +774,8 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "trusted install receipt invalid: \(detail)"
         case .routedExpertPlanUnavailable(let layer):
             return "routed expert fetch plan unavailable for layer \(layer)"
+        case .eagerExpertFillFailed(let layer):
+            return "eager routed expert read failed for layer \(layer); decode step aborted"
         }
     }
 }

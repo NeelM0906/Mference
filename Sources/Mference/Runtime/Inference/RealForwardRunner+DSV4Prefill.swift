@@ -766,7 +766,8 @@ final class DSV4ChunkedPrefill {
                 throw ModelError.routedExpertPlanUnavailable(layer: L)
             }
 
-            let blobs = try await b.model.fetchRoutedExperts(plan: tilePlan).map(\.buffer)
+            let blobs = try await b.model.fetchRoutedExperts(plan: tilePlan)
+                .map { (buffer: $0.buffer, offset: Int($0.offset)) }
             let argBuf = argBuffers[index % argBuffers.count]
             encodeArguments(into: argBuf, blobs: blobs)
             let cb = try makeCommandBuffer()
@@ -995,15 +996,16 @@ final class DSV4ChunkedPrefill {
         enc.endEncoding()
     }
 
-    private func encodeArguments(into argBuffer: MTLBuffer, blobs: [MTLBuffer]) {
+    private func encodeArguments(into argBuffer: MTLBuffer,
+                                 blobs: [(buffer: MTLBuffer, offset: Int)]) {
         argEncoder.setArgumentBuffer(argBuffer, offset: 0)
         for (index, blob) in blobs.enumerated() where index < Self.tileExpertCapacity {
-            argEncoder.setBuffer(blob, offset: 0, index: index)
+            argEncoder.setBuffer(blob.buffer, offset: blob.offset, index: index)
         }
         // Never leave a dangling pointer in an unused slot.
         if let first = blobs.first {
             for index in blobs.count..<Self.tileExpertCapacity {
-                argEncoder.setBuffer(first, offset: 0, index: index)
+                argEncoder.setBuffer(first.buffer, offset: first.offset, index: index)
             }
         }
     }
@@ -1011,7 +1013,7 @@ final class DSV4ChunkedPrefill {
     private func encodeRoutedPairs(_ cb: MTLCommandBuffer,
                                    pso: MTLComputePipelineState,
                                    argBuffer: MTLBuffer,
-                                   blobs: [MTLBuffer],
+                                   blobs: [(buffer: MTLBuffer, offset: Int)],
                                    offsets: MoEExpertOffsets,
                                    gateGroupSize: UInt32,
                                    routeStart: Int,
@@ -1021,7 +1023,7 @@ final class DSV4ChunkedPrefill {
         guard routeCount > 0, let enc = cb.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(argBuffer, offset: 0, index: 0)
-        for blob in blobs { enc.useResource(blob, usage: .read) }
+        for blob in blobs { enc.useResource(blob.buffer, usage: .read) }
         var routedOffsets = offsets
         enc.setBytes(&routedOffsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         var d = UInt32(b.cfg.hiddenSize)

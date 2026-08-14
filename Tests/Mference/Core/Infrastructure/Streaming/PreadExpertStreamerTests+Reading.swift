@@ -15,9 +15,8 @@ extension PreadExpertStreamerTests {
 
     for e in 0..<Self.numExperts {
       let r = try streamer.loadExpert(layer: 0, expert: e)
-      #expect(r.offset == 0)
-      #expect(r.size == UInt64(Self.expertStride))
-      let got = Self.bytes(of: r.buffer, offset: 0, count: Self.expertStride)
+            #expect(r.size == UInt64(Self.expertStride))
+      let got = Self.bytes(of: r.buffer, offset: r.offset, count: Self.expertStride)
       #expect(
         got.allSatisfy { $0 == Self.tagByte(e) },
         "expert \(e) slot not uniformly tagged")
@@ -56,14 +55,16 @@ extension PreadExpertStreamerTests {
     let r2 = try streamer.loadExpert(layer: 0, expert: 2)
     let r3 = try streamer.loadExpert(layer: 0, expert: 3)
 
-    #expect(r0.buffer === r2.buffer, "expert 0 and 2 should share slot 0's buffer")
-    #expect(r1.buffer === r3.buffer, "expert 1 and 3 should share slot 1's buffer")
-    #expect(r0.buffer !== r1.buffer, "slots 0 and 1 must be distinct buffers")
+    // All slots live in one contiguous slab buffer; slot identity is the
+    // byte offset within it.
+    #expect(r0.offset == r2.offset, "expert 0 and 2 should share slot 0")
+    #expect(r1.offset == r3.offset, "expert 1 and 3 should share slot 1")
+    #expect(r0.offset != r1.offset, "slots 0 and 1 must be distinct")
 
     // r0 was overwritten by r2; reading slot 0 now yields expert 2's tag.
-    let slot0 = Self.bytes(of: r2.buffer, offset: 0, count: Self.expertStride)
+    let slot0 = Self.bytes(of: r2.buffer, offset: r2.offset, count: Self.expertStride)
     #expect(slot0.allSatisfy { $0 == Self.tagByte(2) })
-    let slot1 = Self.bytes(of: r3.buffer, offset: 0, count: Self.expertStride)
+    let slot1 = Self.bytes(of: r3.buffer, offset: r3.offset, count: Self.expertStride)
     #expect(slot1.allSatisfy { $0 == Self.tagByte(3) })
   }
 

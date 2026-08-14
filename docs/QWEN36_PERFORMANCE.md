@@ -69,31 +69,31 @@ smaller.
 
 ### Measured under an emulated 8 GB machine
 
-16 GB of this 24 GB host was pinned resident by a separate process, leaving
-about 8 GB for the OS, the page cache, and the model process. Greedy decode of
-128 tokens, 4K context, 16 slots:
+**Correction (2026-08-08):** the original version of this section reported
+decode unchanged within noise under an emulated 8 GB working set
+(22.95 / 21.35 / 18.62 tok/s). That experiment's memory pin did not hold —
+the ballast was reclaimable, so the expert pool stayed in the page cache
+and the run measured a 24 GB machine twice. The claim also fails
+arithmetic: 16-slot decode above 20 tok/s would need 5–9 GB/s of
+sustained random SSD reads. The numbers below use a verified ballast
+(15.2 GiB `mlock`ed of 16 GiB held, free memory observed near zero), and
+the pre/post-optimization spread was cross-checked by rerunning with the
+2026-08-08 features disabled (12.3 / 12.4 tok/s short/long — same regime,
+so the correction is about the pin, not the code).
 
-Running all three community benchmark cases (fixed seeds, app sampling
-defaults, 4K context) both ways:
+Community protocol, 16 slots, one measured rep under pressure:
 
-| Case | Decode, 24 GB | Decode, ~8 GB | Footprint, 24 GB | Footprint, ~8 GB |
-| --- | ---: | ---: | ---: | ---: |
-| short-explanation | 23.05 tok/s | 22.95 tok/s | 1,447 MiB | 1,464 MiB |
-| medium-review | 21.20 tok/s | 21.35 tok/s | 1,448 MiB | 1,448 MiB |
-| long-synthesis | 18.84 tok/s | 18.62 tok/s | 1,464 MiB | 1,388 MiB |
+| Case | Decode, 24 GB unconstrained | Decode, ~8 GB verified ballast |
+| --- | ---: | ---: |
+| short-explanation | 26.45 tok/s | 14.35 tok/s |
+| medium-review | 24.99 tok/s | 12.75 tok/s |
+| long-synthesis | 21.96 tok/s | 10.81 tok/s |
 
-All three still reported `stop=endOfTurn`, and every generated file matched its
-unconstrained counterpart byte for byte.
-
-Throughput and footprint are unchanged within noise. That is the expected
-result: the 18.1 GB expert pool never fits the page cache on either
-configuration, so decode is already streaming from SSD, and shrinking
-available memory does not change what the runtime reads.
-
-This is emulated pressure on M5 hardware, not a physical 8 GB Mac. A real
-8 GB machine has a slower SSD and GPU, so expect lower absolute throughput
-there — compare the 8 GB M2 and 24 GB M5 Gemma 4 rows in
-[Benchmarks](BENCHMARKS.md).
+All runs reached `stop=endOfTurn`; process footprint stayed ~1.1 GB. With
+the pool unable to cache, decode is SSD-latency-bound: the honest 8 GB
+story is 11–14 tok/s on M5-class hardware, and less on older 8 GB
+machines with slower SSDs and GPUs — compare the 8 GB M2 and 24 GB M5
+Gemma 4 rows in [Benchmarks](BENCHMARKS.md).
 
 The practical 8 GB requirement is therefore disk, not memory: the install
 needs about 19.6 GB free, against Gemma's 14.3 GB.
@@ -212,3 +212,23 @@ MFERENCE_PHASES=1 .build/release/MferenceCLI \
 
 `--expert-cache-slots` (8, 16, 24, 32) and `--rdadvise`
 (off, default, bounded, adaptive) vary the two policies discussed above.
+
+## Production acceleration round 2 (2026-08-08)
+
+Two accepted defaults on the 24 GB M5, both byte-identical to their
+controls under the community protocol:
+
+- **64 expert-cache slots** on hosts with ≥24 GiB (16 GiB hosts keep 32):
+  +4.6–5.9% decode across all three cases.
+- **GPU-resident slot map** (`MFERENCE_SLOT_MAP=0` to disable): the router
+  top-k is resolved to slot-slab offsets on-GPU, and the ~30% of
+  layer-steps whose experts are all cached complete their routed FFN
+  inside cb1 with no CPU plan, fetch, or routed command buffer. +1.6–3.5%
+  decode on top of the 64-slot rung. Details:
+  [experiments/summaries/15](experiments/summaries/15-gpu-slot-map.md).
+
+Community-protocol medians moved from 29.29 / 27.46 / 23.47 tok/s
+(2026-08-06) to **34.31 / 33.21 / 28.03 tok/s** — a 17–21% cumulative
+decode gain with unchanged outputs. mlx-lm cannot load this model on the
+same host (see
+[experiments/summaries/11](experiments/summaries/11-mlx-qwen-baseline.md)).

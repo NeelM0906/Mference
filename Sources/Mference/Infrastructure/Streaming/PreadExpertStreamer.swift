@@ -64,7 +64,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     private let fd: Int32
     private let slotPointers: [UnsafeMutableRawPointer]
-    private let slotBuffers: [MTLBuffer]
+    /// One contiguous wired allocation holding every slot; slot `n` lives at
+    /// byte offset `n * slotAllocationSize`. A single buffer lets the GPU
+    /// address slots by offset arithmetic — the substrate the GPU-resident
+    /// slot map needs — and halves per-slot bookkeeping.
+    private let slotSlabBuffer: MTLBuffer
+    private let slotAllocationSize: Int
+    /// GPU-resident slot map: 256 `Int16` entries, expert -> slot index or
+    /// -1. Mirrors `slotExpert` exactly (updated under `cacheLock` at every
+    /// mutation), so a lookup kernel can resolve routed experts to slab
+    /// offsets without the CPU. Entries are valid only when the slot's
+    /// content is published (reserved/in-flight slots read -1).
+    private let slotOfBuffer: MTLBuffer
+    private let slotOfPointer: UnsafeMutablePointer<Int16>
 
     private var nextSlot = 0
     private let cursorLock = NSLock()
@@ -107,41 +119,40 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
-        var pointers: [UnsafeMutableRawPointer] = []
-        var buffers: [MTLBuffer] = []
-        pointers.reserveCapacity(slotCount)
-        buffers.reserveCapacity(slotCount)
-
-        func unwind() {
-            for index in buffers.count..<pointers.count {
-                free(pointers[index])
-            }
+        var slabRaw: UnsafeMutableRawPointer?
+        let allocResult = posix_memalign(&slabRaw, Self.scratchAlignment,
+                                         allocationSize * slotCount)
+        guard allocResult == 0, let slab = slabRaw else {
             close(openedFD)
+            throw StreamerError.allocFailed(errno: allocResult)
+        }
+        nonisolated(unsafe) let capturedSlab = slab
+        guard let slabBuffer = device.makeBuffer(
+            bytesNoCopy: slab,
+            length: allocationSize * slotCount,
+            options: .storageModeShared,
+            deallocator: { _, _ in free(capturedSlab) })
+        else {
+            free(slab)
+            close(openedFD)
+            throw StreamerError.bufferWrapFailed
         }
 
-        for _ in 0..<slotCount {
-            var raw: UnsafeMutableRawPointer?
-            let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
-            guard result == 0, let pointer = raw else {
-                unwind()
-                throw StreamerError.allocFailed(errno: result)
-            }
-            pointers.append(pointer)
-            nonisolated(unsafe) let capturedPointer = pointer
-            guard let buffer = device.makeBuffer(
-                bytesNoCopy: pointer,
-                length: allocationSize,
-                options: .storageModeShared,
-                deallocator: { _, _ in free(capturedPointer) })
-            else {
-                unwind()
-                throw StreamerError.bufferWrapFailed
-            }
-            buffers.append(buffer)
+        self.slotPointers = (0..<slotCount).map {
+            slab.advanced(by: $0 * allocationSize)
         }
-
-        self.slotPointers = pointers
-        self.slotBuffers = buffers
+        self.slotSlabBuffer = slabBuffer
+        self.slotAllocationSize = allocationSize
+        let tableEntries = max(1, layout.expertsPerLayer)
+        guard let table = device.makeBuffer(
+            length: tableEntries * MemoryLayout<Int16>.stride,
+            options: .storageModeShared) else {
+            throw StreamerError.bufferWrapFailed
+        }
+        self.slotOfBuffer = table
+        self.slotOfPointer = table.contents()
+            .bindMemory(to: Int16.self, capacity: tableEntries)
+        for index in 0..<tableEntries { self.slotOfPointer[index] = -1 }
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.speculativeInFlight = [Bool](repeating: false, count: slotCount)
@@ -174,7 +185,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             into: slotPointers[slot],
             fileOffset: layout.streamOffset + regionOffset,
             count: Int(layout.expertStride))
-        return (slotBuffers[slot], 0, layout.expertStride)
+        return (slotSlabBuffer, UInt64(slot * slotAllocationSize),
+                layout.expertStride)
     }
 
     public func loadExpertsCached(experts: [Int]) throws
@@ -245,7 +257,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             let slot = evictable[offset]
             assignedSlots[index] = slot
             reserved[slot] = true
-            slotExpert[slot] = -1
+            setSlotExpert(slot, to: -1)
             slotLastUse[slot] = clock
         }
 
@@ -282,7 +294,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         cacheLock.lock()
         for index in plan.misses {
-            slotExpert[plan.assignedSlots[index]] = plan.experts[index]
+            setSlotExpert(plan.assignedSlots[index], to: plan.experts[index])
         }
         cacheLock.unlock()
 
@@ -294,7 +306,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
         return plan.assignedSlots.map { slot in
-            (slotBuffers[slot], UInt64(0), layout.expertStride)
+            (slotSlabBuffer, UInt64(slot * slotAllocationSize),
+             layout.expertStride)
         }
     }
 
@@ -351,7 +364,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for index in 0..<budget {
             let slot = evictable[index]
             speculativeInFlight[slot] = true
-            slotExpert[slot] = -1
+            setSlotExpert(slot, to: -1)
             reservation.append((experts[index], slot))
         }
         return reservation
@@ -379,13 +392,80 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         cacheLock.lock()
         for index in loaded {
-            slotExpert[reservation[index].slot] = reservation[index].expert
+            setSlotExpert(reservation[index].slot, to: reservation[index].expert)
         }
         for entry in reservation {
             speculativeInFlight[entry.slot] = false
         }
         cacheLock.unlock()
         return UInt64(loaded.count) * layout.expertStride
+    }
+
+    /// Single point of mutation for slot ownership: keeps the CPU array and
+    /// the GPU-visible table in lockstep. Callers hold `cacheLock`.
+    private func setSlotExpert(_ slot: Int, to expert: Int) {
+        let previous = slotExpert[slot]
+        if previous >= 0, previous < layout.expertsPerLayer {
+            slotOfPointer[previous] = -1
+        }
+        slotExpert[slot] = expert
+        if expert >= 0, expert < layout.expertsPerLayer {
+            slotOfPointer[expert] = Int16(slot)
+        }
+    }
+
+    /// GPU bindings for the slot-map decode path: the slot slab, the
+    /// expert->slot table, and the byte stride between slots.
+    public var slotMapBinding: (slab: MTLBuffer, table: MTLBuffer, slotStride: Int) {
+        (slotSlabBuffer, slotOfBuffer, slotAllocationSize)
+    }
+
+    /// All-hit fast path bookkeeping: bump the LFU counters and use clock
+    /// exactly as `planExpertsCached` would, without planning, assigning, or
+    /// reading anything. Keeps eviction quality identical when the runner
+    /// skips the CPU plan on layers the GPU served entirely from cache.
+    public func noteAllHitUse(experts: [Int]) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        useClock += 1
+        for expert in experts where expert >= 0 && expert < expertUseCount.count {
+            expertUseCount[expert] &+= 1
+        }
+        for expert in experts {
+            for slot in 0..<slotCount where slotExpert[slot] == expert {
+                slotLastUse[slot] = useClock
+                break
+            }
+        }
+    }
+
+    /// Eager decode path: mark the plan's miss slots in-flight and fill them
+    /// on a background queue, invoking `completion` when every read has
+    /// landed and been published. The caller encodes GPU work against the
+    /// slots immediately and gates it on an event its completion signals;
+    /// the in-flight marks keep concurrent plans away exactly as the
+    /// speculative path does.
+    ///
+    /// `completion(false)` means at least one read failed and its slot stays
+    /// unpublished: the caller must still unblock its gated GPU work but must
+    /// not use the results, because the failed slot holds stale bytes.
+    public func beginAsyncFill(_ plan: ExpertCachePlan,
+                               qos: DispatchQoS.QoSClass = .userInitiated,
+                               completion: @escaping @Sendable (Bool) -> Void) {
+        let pairs = plan.misses.map { (expert: plan.experts[$0],
+                                       slot: plan.assignedSlots[$0]) }
+        guard !pairs.isEmpty else {
+            completion(true)
+            return
+        }
+        cacheLock.lock()
+        for pair in pairs { speculativeInFlight[pair.slot] = true }
+        cacheLock.unlock()
+        let expectedBytes = UInt64(pairs.count) * layout.expertStride
+        DispatchQueue.global(qos: qos).async { [self] in
+            let loadedBytes = executeSpeculativeReservation(pairs)
+            completion(loadedBytes == expectedBytes)
+        }
     }
 
     /// Test/diagnostic view of slot residency.
