@@ -105,12 +105,27 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 1_073_741_824)
 
+    /// Pinned to the same revision/index digest as
+    /// `SupportedModelSource.qwen38`; installed bytes measured after the
+    /// first real install with the MTP tensors attached.
+    public static let qwen38 = AppModelInstallDescriptor(
+        family: .qwen38,
+        displayName: "Qwen3.8 27B 4-bit",
+        repoID: "mlx-community/Qwen3.8-27B-4bit",
+        revision: "3e6447f082e89cc7f0bc6e5441afd38dfce760ff",
+        sourceIndexSHA256:
+            "13b840162b4cb35c66fef7df072f7dbb4717908204364f5e5d9f9655a2758fa8",
+        approximateDownloadBytes: 15_200_000_000,
+        installedBytes: 15_371_847_680,
+        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+        reserveBytes: 1_073_741_824)
+
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
         switch family {
         case .gemma4: return .default
         case .qwen36: return .qwen36
-        case .qwen38: return nil   // no shipped app descriptor yet
+        case .qwen38: return .qwen38
         case .deepseekV4Flash: return .deepseekV4Flash
         case .inklingSmall: return .inklingSmall
         case .maple: return .maple
@@ -139,6 +154,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
             .string(forKey: "model")
         switch environmentValue ?? preferenceValue {
         case "qwen36": return .qwen36
+        case "qwen38": return .qwen38
         case "deepseekv4flash", "dsv4": return .deepseekV4Flash
         case "inklingsmall", "inkling": return .inklingSmall
         case "maple": return .maple
