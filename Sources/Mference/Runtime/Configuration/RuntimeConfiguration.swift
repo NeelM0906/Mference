@@ -21,6 +21,14 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lru
 }
 
+/// Paged KV cache for long contexts (Qwen 3.8 full-attention layers): fixed
+/// 64-token pages with an SSD spill tier and Quest-style query-aware sparse
+/// decode. `.off` keeps the linear FP16 cache and the dense decode path.
+public enum RuntimeKVPagedPolicy: String, Codable, Sendable {
+    case off
+    case on
+}
+
 public struct RuntimeConfiguration: Sendable, Equatable {
     /// 96 and 128 are the near-resident rungs: large wired LFU sets for hosts
     /// with RAM to spare but not enough to cache the whole expert pool.
@@ -37,6 +45,14 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// Opt-in approximate singleton-decode head for Maple checkpoints that
     /// retain FlashHead tensors. Prefill continues to use the exact head.
     public let useMapleFlashHead: Bool
+    public let kvPagedPolicy: RuntimeKVPagedPolicy
+    /// Sparse decode selection budget, in 64-token pages.
+    public let kvTopKPages: Int
+    public let kvSinkPages: Int
+    public let kvRecentPages: Int
+    /// Pool residency per full-attention layer, in pages. `nil` sizes the
+    /// pool to the full context (everything resident; SSD tier idle).
+    public let kvPoolPagesPerLayer: Int?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -45,7 +61,12 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
                 forceLogitsHead: Bool = false,
-                useMapleFlashHead: Bool = false) {
+                useMapleFlashHead: Bool = false,
+                kvPagedPolicy: RuntimeKVPagedPolicy = .off,
+                kvTopKPages: Int = 60,
+                kvSinkPages: Int = 2,
+                kvRecentPages: Int = 4,
+                kvPoolPagesPerLayer: Int? = nil) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
@@ -58,6 +79,13 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
         self.useMapleFlashHead = useMapleFlashHead
+        precondition(kvTopKPages >= 0 && kvSinkPages >= 0 && kvRecentPages >= 1,
+                     "invalid paged-KV selection parameters")
+        self.kvPagedPolicy = kvPagedPolicy
+        self.kvTopKPages = kvTopKPages
+        self.kvSinkPages = kvSinkPages
+        self.kvRecentPages = kvRecentPages
+        self.kvPoolPagesPerLayer = kvPoolPagesPerLayer
     }
 
     public static var production: RuntimeConfiguration {

@@ -151,6 +151,82 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     private let kv: KVCacheManager
     private let gdnState: GDNStateManager
 
+    /// Paged long-context state (kvPagedPolicy == .on): the page store owns
+    /// full-attention KV, decode runs Quest-selected sparse attention, and
+    /// sealed pages carry min/max metadata for the next token's selection.
+    private final class PagedKV {
+        let store: KVPageStore
+        let kernels: KVPageKernels
+        let selector: KVPageSelector
+        /// [numFull][pagesPerLayer] float — Quest scores written per token,
+        /// read back after the command buffer completes (lag-one selection).
+        let scoresBuf: MTLBuffer
+        /// [numFull][pagesPerLayer] uint32 — CPU-built page tables bound by
+        /// the paged attention kernel.
+        let tablesBuf: MTLBuffer
+        var lastScores: [[Float]]
+        var pendingMetadata: [Int] = []
+        var selections: [KVPageSelector.Selection]
+        private let spillDir: URL
+
+        init(context: MetalContext, config: ArchConfig, maxContext: Int,
+             runtimeConfiguration: RuntimeConfiguration) throws {
+            let device = context.device
+            let pagesPerLayer = (maxContext + KVPageGeometry.tokensPerPage - 1)
+                / KVPageGeometry.tokensPerPage
+            let poolPages = runtimeConfiguration.kvPoolPagesPerLayer ?? pagesPerLayer
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mference-kvpages-\(UUID().uuidString)",
+                                        isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            self.spillDir = dir
+            self.store = try KVPageStore(device: device,
+                                         config: config,
+                                         maxContext: maxContext,
+                                         poolPagesPerLayer: poolPages,
+                                         spillDirectory: dir)
+            self.kernels = try KVPageKernels(context: context)
+            self.selector = KVPageSelector(sinkPages: runtimeConfiguration.kvSinkPages,
+                                           recentPages: runtimeConfiguration.kvRecentPages,
+                                           topKPages: runtimeConfiguration.kvTopKPages)
+            let numFull = store.geometry.fullLayerOrdinals.count
+            let tableEntries = numFull * store.geometry.pagesPerLayer
+            guard let scores = device.makeBuffer(length: tableEntries * 4,
+                                                 options: .storageModeShared),
+                  let tables = device.makeBuffer(length: tableEntries * 4,
+                                                 options: .storageModeShared) else {
+                throw KVPageStoreError.allocationFailed("paged KV selection buffers")
+            }
+            scores.label = "kvpage.scores"
+            tables.label = "kvpage.tables"
+            self.scoresBuf = scores
+            self.tablesBuf = tables
+            self.lastScores = Array(repeating: [], count: numFull)
+            self.selections = Array(repeating: .init(pages: [], selTokens: 0),
+                                    count: numFull)
+            // The per-token selection must fit the pool alongside pinned
+            // sinks/recents and the unsealed tail.
+            let worstSelection = runtimeConfiguration.kvSinkPages
+                + runtimeConfiguration.kvRecentPages
+                + runtimeConfiguration.kvTopKPages + 1
+            guard poolPages >= min(pagesPerLayer, worstSelection) else {
+                throw KVPageStoreError.allocationFailed(
+                    "kv pool (\(poolPages) pages/layer) smaller than the selection budget")
+            }
+        }
+
+        func resetState() {
+            store.reset()
+            for i in 0..<lastScores.count { lastScores[i] = [] }
+            pendingMetadata.removeAll()
+            for i in 0..<selections.count { selections[i] = .init(pages: [], selTokens: 0) }
+        }
+
+        deinit { try? FileManager.default.removeItem(at: spillDir) }
+    }
+
+    private var pagedKV: PagedKV?
+
     // Kernels
     private let embedInt4: EmbedLookupInt4
     private let rms: RMSNorm
@@ -253,12 +329,20 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         self.cfg = cfg
         self.maxContext = maxContext
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
+        let paged = runtimeConfiguration.kvPagedPolicy == .on
         self.kv = try KVCacheManager(device: context.device,
                                      config: cfg,
                                      maxContext: maxContext,
                                      fp16RingEnabled: runtimeConfiguration.fp16RingEnabled,
                                      slidingWindow: cfg.slidingWindow,
-                                     maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens)
+                                     maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens,
+                                     pagedFullAttention: paged)
+        if paged {
+            self.pagedKV = try PagedKV(context: context,
+                                       config: cfg,
+                                       maxContext: maxContext,
+                                       runtimeConfiguration: runtimeConfiguration)
+        }
         self.gdnState = try GDNStateManager(device: context.device, config: cfg)
 
         self.embedInt4 = try EmbedLookupInt4(context: context)
@@ -367,7 +451,10 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                 isLinear: isLinear)
         }
 
-        if ProcessInfo.processInfo.environment["MFERENCE_MTP"] != "0" {
+        // MTP speculative decode verifies against the linear KV cache; the
+        // paged mode owns full-attention storage, so it decodes plainly (v1).
+        if pagedKV == nil,
+           ProcessInfo.processInfo.environment["MFERENCE_MTP"] != "0" {
             self.mtp = try Qwen38MTPSpeculator.probe(model: model,
                                                      context: context,
                                                      config: cfg,
@@ -404,6 +491,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         kv.reset()
         gdnState.reset()
         mtp?.reset()
+        pagedKV?.resetState()
     }
 
     public var continuationPosition: Int { kv.position }
@@ -657,6 +745,17 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         if writeFinalHead, emitGreedyHead {
             lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
         }
+        if let paged = pagedKV {
+            let sealedBefore = paged.store.position / KVPageGeometry.tokensPerPage
+            paged.store.advance(by: t)
+            let sealedAfter = paged.store.position / KVPageGeometry.tokensPerPage
+            if sealedAfter > sealedBefore {
+                paged.pendingMetadata.append(contentsOf: sealedBefore..<sealedAfter)
+            }
+            // The chunk moved the frontier; any scores from an earlier token
+            // are stale. The next decode token takes the warmup selection.
+            for i in 0..<paged.lastScores.count { paged.lastScores[i] = [] }
+        }
         kv.advance(by: t)
         prefillChunkState.markCommitted()
     }
@@ -835,8 +934,10 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         prefillAttention.encodeCausal(
             commandBuffer: cb,
             q: scratch.attnQ,
-            k: kv.keyBuffer(layer: layerIndex, validTokenCount: startPosition + t),
-            v: kv.valueBuffer(layer: layerIndex, validTokenCount: startPosition + t),
+            k: pagedKV?.store.kPoolBuffer(layer: layerIndex)
+                ?? kv.keyBuffer(layer: layerIndex, validTokenCount: startPosition + t),
+            v: pagedKV?.store.vPoolBuffer(layer: layerIndex)
+                ?? kv.valueBuffer(layer: layerIndex, validTokenCount: startPosition + t),
             out: scratch.attnOut,
             params: params)
         elementwise.encodeSigmoidGateMul(commandBuffer: cb,
@@ -999,6 +1100,21 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                       size: count * bytesPerToken)
             blit.endEncoding()
         }
+        if let paged = pagedKV {
+            // Identity slot mapping (pool == full context) keeps the pool
+            // linear, so a chunk lands as one span per stream.
+            try copy(keySource,
+                     to: paged.store.contiguousKRange(layer: layer,
+                                                      start: startPosition,
+                                                      count: tokenCount),
+                     sourceTokenOffset: 0, count: tokenCount)
+            try copy(valueSource,
+                     to: paged.store.contiguousVRange(layer: layer,
+                                                      start: startPosition,
+                                                      count: tokenCount),
+                     sourceTokenOffset: 0, count: tokenCount)
+            return
+        }
         let capacity = kv.capacity(layer: layer)
         let physicalStart = startPosition % capacity
         let firstSpan = min(tokenCount, capacity - physicalStart)
@@ -1053,8 +1169,21 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             }
         }
 
+        // Paged mode: pick this token's page selection per layer (lag-one
+        // scores from the previous token), fetch any spilled members, and
+        // build the page tables — all before the command buffer encodes.
+        if let paged = pagedKV {
+            try preparePagedSelections(paged, position: position)
+        }
+
         let D = UInt32(cfg.hiddenSize)
         let cb = try commandBuffer()
+
+        // Sealed pages from the previous token need their Quest min/max
+        // summaries before this token's score pass reads them.
+        if let paged = pagedKV {
+            try encodePendingPageMetadata(paged, commandBuffer: cb)
+        }
 
         let emb = model.embedding
         embedInt4.encode(commandBuffer: cb,
@@ -1076,7 +1205,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             if layer.isLinear {
                 encodeLinearAttentionDecode(cb, layer: layer, layerIndex: index)
             } else {
-                encodeGatedFullAttentionDecode(cb, layer: layer,
+                try encodeGatedFullAttentionDecode(cb, layer: layer,
                                                layerIndex: index,
                                                position: position,
                                                seqLen: UInt32(position + 1))
@@ -1154,7 +1283,73 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         if emitHead, !emitLogitsHead {
             lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
         }
+        if let paged = pagedKV {
+            readBackPagedScores(paged, position: position)
+            paged.store.advance()
+            if (position + 1) % KVPageGeometry.tokensPerPage == 0 {
+                paged.pendingMetadata.append(position / KVPageGeometry.tokensPerPage)
+            }
+        }
         kv.advance()
+    }
+
+    // MARK: - Paged decode support
+
+    private func preparePagedSelections(_ paged: PagedKV, position: Int) throws {
+        let g = paged.store.geometry
+        let sealedPages = position / KVPageGeometry.tokensPerPage
+        let tailValid = position % KVPageGeometry.tokensPerPage + 1
+        let tables = paged.tablesBuf.contents()
+            .bindMemory(to: UInt32.self,
+                        capacity: g.fullLayerOrdinals.count * g.pagesPerLayer)
+        for (ordinal, layerIndex) in g.fullLayerOrdinals.enumerated() {
+            // Touch the tail page so it has a slot before selection maps it.
+            _ = try paged.store.kSlot(layer: layerIndex, position: position)
+            let selection = paged.selector.select(scores: paged.lastScores[ordinal],
+                                                  sealedPages: sealedPages,
+                                                  tailValidTokens: tailValid)
+            let table = try paged.store.pageTable(layer: layerIndex,
+                                                  selectedPages: selection.pages)
+            let base = ordinal * g.pagesPerLayer
+            for (i, slot) in table.enumerated() { tables[base + i] = slot }
+            paged.selections[ordinal] = selection
+        }
+    }
+
+    private func encodePendingPageMetadata(_ paged: PagedKV,
+                                           commandBuffer cb: MTLCommandBuffer) throws {
+        guard !paged.pendingMetadata.isEmpty else { return }
+        let g = paged.store.geometry
+        for pageIndex in paged.pendingMetadata {
+            for (ordinal, layerIndex) in g.fullLayerOrdinals.enumerated() {
+                let slot = try paged.store.ensureResident(layer: layerIndex,
+                                                          pageIndex: pageIndex)
+                paged.kernels.encodePageMinMax(
+                    commandBuffer: cb,
+                    kPool: paged.store.kPoolBuffer(layer: layerIndex),
+                    slot: UInt32(slot),
+                    validTokens: UInt32(KVPageGeometry.tokensPerPage),
+                    metadata: paged.store.metadataBuffer,
+                    metadataOffset: g.metadataOffset(layerOrdinal: ordinal,
+                                                     pageIndex: pageIndex),
+                    numKVHeads: UInt32(cfg.numFullKVHeads),
+                    headDim: UInt32(cfg.fullHeadDim))
+            }
+        }
+        paged.pendingMetadata.removeAll(keepingCapacity: true)
+    }
+
+    private func readBackPagedScores(_ paged: PagedKV, position: Int) {
+        let sealedPages = position / KVPageGeometry.tokensPerPage
+        guard sealedPages > 0 else { return }
+        let g = paged.store.geometry
+        let numFull = g.fullLayerOrdinals.count
+        let ptr = paged.scoresBuf.contents()
+            .bindMemory(to: Float.self, capacity: numFull * g.pagesPerLayer)
+        for ordinal in 0..<numFull {
+            paged.lastScores[ordinal] = Array(UnsafeBufferPointer(
+                start: ptr + ordinal * g.pagesPerLayer, count: sealedPages))
+        }
     }
 
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step. Reads
@@ -1234,7 +1429,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                                 layer: LayerTensors,
                                                 layerIndex: Int,
                                                 position: Int,
-                                                seqLen: UInt32) {
+                                                seqLen: UInt32) throws {
         guard let q = layer.q, let k = layer.k, let v = layer.v, let o = layer.o,
               let qNormW = layer.qNorm, let kNormW = layer.kNorm else {
             preconditionFailure("full-attention layer without attention tensors")
@@ -1244,8 +1439,15 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         let numKV = cfg.numFullKVHeads
         let qDim = UInt32(cfg.numHeads * headDim)
         let kvDim = UInt32(numKV * headDim)
-        let kSlot = kv.kSlot(layer: layerIndex, position: position)
-        let vSlot = kv.vSlot(layer: layerIndex, position: position)
+        let kSlot: (buffer: MTLBuffer, offset: Int)
+        let vSlot: (buffer: MTLBuffer, offset: Int)
+        if let paged = pagedKV {
+            kSlot = try paged.store.kSlot(layer: layerIndex, position: position)
+            vSlot = try paged.store.vSlot(layer: layerIndex, position: position)
+        } else {
+            kSlot = kv.kSlot(layer: layerIndex, position: position)
+            vSlot = kv.vSlot(layer: layerIndex, position: position)
+        }
         let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
 
         fusedQKVGEMV.encode(commandBuffer: cb,
@@ -1302,16 +1504,53 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                               numHeads: UInt32(numKV),
                               rotaryDim: rotaryDim,
                               theta: Float(cfg.fullRopeTheta))
-        attention.encodeFull(commandBuffer: cb,
-                             q: qScratch,
-                             k: kSlot.buffer, kOffset: 0,
-                             v: vSlot.buffer, vOffset: 0,
-                             out: attnOut,
-                             headDim: UInt32(headDim),
-                             numQHeads: UInt32(cfg.numHeads),
-                             numKVHeads: UInt32(numKV),
-                             seqLen: seqLen,
-                             scale: Float(cfg.attentionScale))
+        if let paged = pagedKV {
+            let g = paged.store.geometry
+            guard let ordinal = paged.store.fullLayerOrdinal(forLayer: layerIndex) else {
+                preconditionFailure("paged decode on a non-full-attention layer")
+            }
+            let selection = paged.selections[ordinal]
+            attention.encodeFullPaged(commandBuffer: cb,
+                                      q: qScratch,
+                                      kPool: paged.store.kPoolBuffer(layer: layerIndex),
+                                      vPool: paged.store.vPoolBuffer(layer: layerIndex),
+                                      pageTable: paged.tablesBuf,
+                                      pageTableOffset: ordinal * g.pagesPerLayer
+                                          * MemoryLayout<UInt32>.stride,
+                                      out: attnOut,
+                                      headDim: UInt32(headDim),
+                                      numQHeads: UInt32(cfg.numHeads),
+                                      numKVHeads: UInt32(numKV),
+                                      selTokens: UInt32(selection.selTokens),
+                                      scale: Float(cfg.attentionScale))
+            // Score every sealed page against this token's query — the
+            // selection input for the *next* token (lag-one policy).
+            let sealedPages = position / KVPageGeometry.tokensPerPage
+            if sealedPages > 0 {
+                paged.kernels.encodePageScores(
+                    commandBuffer: cb,
+                    q: qScratch,
+                    metadata: paged.store.metadataBuffer,
+                    metadataOffset: g.metadataOffset(layerOrdinal: ordinal, pageIndex: 0),
+                    scores: paged.scoresBuf,
+                    scoresOffset: ordinal * g.pagesPerLayer * MemoryLayout<Float>.stride,
+                    numPages: UInt32(sealedPages),
+                    headDim: UInt32(headDim),
+                    numQHeads: UInt32(cfg.numHeads),
+                    numKVHeads: UInt32(numKV))
+            }
+        } else {
+            attention.encodeFull(commandBuffer: cb,
+                                 q: qScratch,
+                                 k: kSlot.buffer, kOffset: 0,
+                                 v: vSlot.buffer, vOffset: 0,
+                                 out: attnOut,
+                                 headDim: UInt32(headDim),
+                                 numQHeads: UInt32(cfg.numHeads),
+                                 numKVHeads: UInt32(numKV),
+                                 seqLen: seqLen,
+                                 scale: Float(cfg.attentionScale))
+        }
         elementwise.encodeSigmoidGateMul(commandBuffer: cb,
                                          out: attnOut,
                                          gate: attnGateScratch,

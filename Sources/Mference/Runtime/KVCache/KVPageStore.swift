@@ -217,6 +217,39 @@ public final class KVPageStore {
         return (ordinal, slot, position % KVPageGeometry.tokensPerPage)
     }
 
+    /// Contiguous K range for a prefill chunk write, valid under the
+    /// identity slot mapping (pool sized to the full context, no evictions):
+    /// pages are allocated sequentially so page `i` sits at slot `i` and a
+    /// multi-page span is one linear region of the pool. The beyond-RAM
+    /// prefill path (blocked attention) replaces this.
+    public func contiguousKRange(layer: Int, start: Int,
+                                 count: Int) throws -> (buffer: MTLBuffer, offset: Int, stride: Int) {
+        let ordinal = try contiguousRangeOrdinal(layer: layer, start: start, count: count)
+        return (kPools[ordinal], start * geometry.tokenStrideBytes, geometry.tokenStrideBytes)
+    }
+
+    public func contiguousVRange(layer: Int, start: Int,
+                                 count: Int) throws -> (buffer: MTLBuffer, offset: Int, stride: Int) {
+        let ordinal = try contiguousRangeOrdinal(layer: layer, start: start, count: count)
+        return (vPools[ordinal], start * geometry.tokenStrideBytes, geometry.tokenStrideBytes)
+    }
+
+    private func contiguousRangeOrdinal(layer: Int, start: Int, count: Int) throws -> Int {
+        precondition(count > 0 && start >= 0 && start + count <= geometry.maxContext,
+                     "range \(start)..<\(start + count) exceeds maxContext")
+        let ordinal = requireOrdinal(layer)
+        let firstPage = start / KVPageGeometry.tokensPerPage
+        let lastPage = (start + count - 1) / KVPageGeometry.tokensPerPage
+        for page in firstPage...lastPage {
+            let slot = try residentSlot(ordinal: ordinal, layer: layer, pageIndex: page,
+                                        allocateAs: .unsealed)
+            precondition(slot == page,
+                         "contiguous KV range requires the identity slot mapping "
+                         + "(page \(page) at slot \(slot)); use the blocked prefill path")
+        }
+        return ordinal
+    }
+
     // MARK: - Position / sealing
 
     /// Advance the position cursor. Every page fully crossed by the cursor is

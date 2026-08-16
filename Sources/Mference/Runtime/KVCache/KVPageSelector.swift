@@ -25,20 +25,21 @@ public struct KVPageSelector: Sendable, Equatable {
     }
 
     /// - Parameters:
-    ///   - scores: Quest score per *sealed* page (`sealedPages` entries),
-    ///     from the previous token's query. Empty on the first decode token
-    ///     after a prefill (warmup: sinks + recent only, plus trailing fill
-    ///     up to the top-k budget).
+    ///   - scores: Quest score per *sealed* page, from the previous token's
+    ///     query. Empty on the first decode token after a prefill (warmup:
+    ///     sinks + recent only, plus trailing fill up to the top-k budget).
+    ///     May cover fewer pages than `sealedPages` — a page that sealed on
+    ///     the previous token has no score yet; unscored trailing pages are
+    ///     recent by construction and the recent window covers them.
     ///   - sealedPages: pages fully written (64 valid tokens each).
-    ///   - tailValidTokens: valid rows in the unsealed tail page; 0 when the
-    ///     position sits exactly on a page boundary.
+    ///   - tailValidTokens: valid rows in the unsealed tail page (up to a
+    ///     full 64 for a page written but not yet sealed by `advance`); 0
+    ///     when the position sits exactly on a page boundary.
     public func select(scores: [Float],
                        sealedPages: Int,
                        tailValidTokens: Int) -> Selection {
-        precondition(tailValidTokens >= 0 && tailValidTokens < 64,
-                     "tailValidTokens must be 0..<64")
-        precondition(scores.isEmpty || scores.count >= sealedPages,
-                     "scores must cover every sealed page")
+        precondition(tailValidTokens >= 0 && tailValidTokens <= 64,
+                     "tailValidTokens must be 0...64")
         let totalPages = sealedPages + (tailValidTokens > 0 ? 1 : 0)
         guard totalPages > 0 else { return Selection(pages: [], selTokens: 0) }
 
@@ -58,7 +59,8 @@ public struct KVPageSelector: Sendable, Equatable {
                 }
             } else {
                 // Deterministic top-k: score desc, index asc on ties.
-                let candidates = (0..<sealedPages)
+                let scoredPages = min(scores.count, sealedPages)
+                let candidates = (0..<scoredPages)
                     .filter { !picked.contains($0) }
                     .sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1 }
                 for page in candidates.prefix(topKPages) { picked.insert(page) }

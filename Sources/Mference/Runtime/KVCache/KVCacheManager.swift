@@ -69,13 +69,18 @@ public final class KVCacheManager {
 
     private static let fp16Size = 2
 
+    /// `pagedFullAttention` hands full-attention KV storage to a
+    /// `KVPageStore`: those layers get the shared placeholder here (no linear
+    /// allocation — 16 GiB at 262k context) while this manager keeps serving
+    /// the position cursor and the linear-layer placeholders.
     public init(device: MTLDevice,
                 config: ArchConfig,
                 maxContext: Int,
                 fp16RingEnabled: Bool = false,
                 slidingWindow: Int? = nil,
                 maxPrefillChunkTokens: Int = 128,
-                fp16RingCapacityOverride: Int? = nil) throws {
+                fp16RingCapacityOverride: Int? = nil,
+                pagedFullAttention: Bool = false) throws {
         precondition(maxContext > 0, "maxContext must be positive")
         precondition(maxPrefillChunkTokens > 0, "maxPrefillChunkTokens must be positive")
         self.config = config
@@ -109,7 +114,7 @@ public final class KVCacheManager {
 
         for layer in 0..<config.numLayers {
             let maskValue = config.fullAttentionLayerMask[layer]
-            if maskValue == 2 || allPlaceholder {
+            if maskValue == 2 || allPlaceholder || pagedFullAttention {
                 let placeholder: MTLBuffer
                 if let existing = linearPlaceholder {
                     placeholder = existing
@@ -125,7 +130,15 @@ public final class KVCacheManager {
                 ks.append(placeholder)
                 vs.append(placeholder)
                 st.append(0)
-                kd.append(maskValue == 2 ? .linear : .compressed)
+                if maskValue == 2 {
+                    kd.append(.linear)
+                } else if pagedFullAttention && maskValue == 1 {
+                    // Storage lives in KVPageStore; kind stays .full so
+                    // diagnostics report the layer's true attention variant.
+                    kd.append(.full)
+                } else {
+                    kd.append(.compressed)
+                }
                 caps.append(0)
                 continue
             }
