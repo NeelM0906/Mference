@@ -444,6 +444,89 @@ void attention_decode_gqa_swa_partial(
     }
 }
 
+// ============================================================================
+// KV page maintenance kernels (paged long-context path).
+// ============================================================================
+
+// Element-wise min/max over a sealed page's K rows — the Quest (arXiv
+// 2406.10774) page summary used to estimate a page's attention criticality
+// without reading it. One threadgroup; runs once per page seal.
+// `metadata` points at the page's metadata slot: min[NKV*HD] then max[NKV*HD].
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void kv_page_minmax(
+    device const half*  K_pool        [[buffer(0)]],
+    device       half*  metadata      [[buffer(1)]],
+    constant     uint&  slot          [[buffer(2)]],
+    constant     uint&  valid_tokens  [[buffer(3)]],
+    constant     uint&  num_kv_heads  [[buffer(4)]],
+    constant     uint&  head_dim      [[buffer(5)]],
+    uint lid   [[thread_position_in_threadgroup]],
+    uint lsize [[threads_per_threadgroup]]
+) {
+    const uint elems = num_kv_heads * head_dim;
+    const uint base = slot * kAttnPageTokens * elems;
+    for (uint e = lid; e < elems; e += lsize) {
+        float mn = INFINITY;
+        float mx = -INFINITY;
+        for (uint t = 0; t < valid_tokens; ++t) {
+            const float v = float(K_pool[base + t * elems + e]);
+            mn = min(mn, v);
+            mx = max(mx, v);
+        }
+        metadata[e] = half(mn);
+        metadata[elems + e] = half(mx);
+    }
+}
+
+// Quest page criticality: for each page, per q-head upper bound of q·k over
+// the page — sum_d max(q_d·min_d, q_d·max_d) against the head's kv-head
+// min/max summary — reduced with max over q heads. One threadgroup per page;
+// `metadata` points at the layer's metadata base.
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_page_scores(
+    device const half*  Q             [[buffer(0)]],   // [num_q_heads, head_dim]
+    device const half*  metadata      [[buffer(1)]],
+    device       float* scores        [[buffer(2)]],   // [num_pages]
+    constant     uint&  num_pages     [[buffer(3)]],
+    constant     uint&  head_dim      [[buffer(4)]],
+    constant     uint&  num_q_heads   [[buffer(5)]],
+    constant     uint&  num_kv_heads  [[buffer(6)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint lid             [[thread_position_in_threadgroup]],
+    uint lsize           [[threads_per_threadgroup]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]],
+    uint simdgroups      [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float reduce_scratch[kAttnMaxSimdGroups];
+    threadgroup float bcast;
+    const uint page = tg_id;
+    if (page >= num_pages) { return; }
+
+    const uint elems = num_kv_heads * head_dim;
+    device const half* mn = metadata + page * 2 * elems;
+    device const half* mx = mn + elems;
+
+    const uint q_per_kv = num_q_heads / num_kv_heads;
+    float best = -INFINITY;
+    for (uint qh = 0; qh < num_q_heads; ++qh) {
+        const uint kvh = qh / q_per_kv;
+        device const half* Q_row = Q + qh * head_dim;
+        device const half* lo = mn + kvh * head_dim;
+        device const half* hi = mx + kvh * head_dim;
+        float partial = 0.0f;
+        for (uint i = lid; i < head_dim; i += lsize) {
+            const float q = float(Q_row[i]);
+            partial += max(q * float(lo[i]), q * float(hi[i]));
+        }
+        const float s = block_reduce_sum(partial,
+                                         simd_lane_id, simd_group_id, simdgroups,
+                                         reduce_scratch, &bcast);
+        best = max(best, s);
+    }
+    if (lid == 0) { scores[page] = best; }
+}
+
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_combine(
     device const float* m_in         [[buffer(0)]],    // [num_q_heads * num_chunks]
