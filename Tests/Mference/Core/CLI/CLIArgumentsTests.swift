@@ -72,6 +72,7 @@ import Mference
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--prefill-chunk", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--flash-head", "--verify",
+            "--kv-paged", "--kv-topk", "--kv-pool-pages",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

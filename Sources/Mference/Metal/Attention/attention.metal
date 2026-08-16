@@ -445,6 +445,160 @@ void attention_decode_gqa_swa_partial(
 }
 
 // ============================================================================
+// Blocked (streamed) prefill attention — beyond-RAM contexts.
+//
+// A prefill chunk's queries attend the whole past, which no longer fits the
+// pool. The past streams through staging windows; each window dispatch folds
+// its positions into per-(query, q-head) running online-softmax state
+// (m, d, o[head_dim], FP32 in device memory), and a finalize pass writes
+// out = o/d in FP16. The chunk's own pages run as a final window with the
+// causal predicate p <= q_pos.
+//
+// Geometry: one simdgroup per (query token, q head) — 32 lanes split the
+// head_dim, positions run sequentially with simd-level reduction only (no
+// threadgroup barriers). K/V rows resolve through a page table like the
+// paged decode kernel; staging passes an identity table.
+// ============================================================================
+
+constant constexpr uint kFlashSimdgroupsPerTG = 8;
+
+[[kernel]]
+void attention_prefill_flash_init(
+    device float* m_state [[buffer(0)]],   // [query_count * num_q_heads]
+    device float* d_state [[buffer(1)]],
+    device float* o_state [[buffer(2)]],   // [query_count * num_q_heads * head_dim]
+    constant uint& rows   [[buffer(3)]],   // query_count * num_q_heads
+    constant uint& head_dim [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid < rows) {
+        m_state[gid] = -INFINITY;
+        d_state[gid] = 0.0f;
+    }
+    const uint total = rows * head_dim;
+    for (uint i = gid; i < total; i += rows) {
+        // rows threads stride the o_state clear; grid is sized to `rows`.
+        o_state[i] = 0.0f;
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(kFlashSimdgroupsPerTG * 32)]]
+void attention_prefill_flash_update(
+    device const half*  Q             [[buffer(0)]],   // [query_count, q_stride] FP16
+    device const half*  K_pool        [[buffer(1)]],
+    device const half*  V_pool        [[buffer(2)]],
+    device const uint*  page_table    [[buffer(3)]],   // window pages -> pool/staging slots
+    device       float* m_state       [[buffer(4)]],
+    device       float* d_state       [[buffer(5)]],
+    device       float* o_state       [[buffer(6)]],
+    constant     uint&  query_count   [[buffer(7)]],
+    constant     uint&  q_start       [[buffer(8)]],   // global position of query row 0
+    constant     uint&  head_dim      [[buffer(9)]],
+    constant     uint&  num_q_heads   [[buffer(10)]],
+    constant     uint&  num_kv_heads  [[buffer(11)]],
+    constant     uint&  win_start     [[buffer(12)]],  // global position of window token 0 (page-aligned)
+    constant     uint&  win_tokens    [[buffer(13)]],
+    constant     uint&  q_stride      [[buffer(14)]],  // elements per query row
+    constant     float& scale         [[buffer(15)]],
+    constant     uint&  causal        [[buffer(16)]],  // 1: apply p <= q_pos within the window
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]]
+) {
+    const uint row = tg_id * kFlashSimdgroupsPerTG + simd_group_id;
+    const uint total_rows = query_count * num_q_heads;
+    if (row >= total_rows) { return; }
+    const uint t = row / num_q_heads;
+    const uint q_head = row % num_q_heads;
+    const uint kv_head = q_head / (num_q_heads / num_kv_heads);
+    const uint q_pos = q_start + t;
+
+    // Effective window span for this query under the causal predicate.
+    uint span = win_tokens;
+    if (causal != 0u) {
+        if (q_pos + 1 <= win_start) { return; }
+        span = min(span, q_pos + 1 - win_start);
+    }
+    if (span == 0u) { return; }
+
+    device const half* Q_row = Q + t * q_stride + q_head * head_dim;
+
+    // Lane-strided registers: head_dim <= 512 -> at most 16 elems per lane.
+    constexpr uint kMaxPerLane = kAttnMaxHeadDim / 32;
+    float q_reg[kMaxPerLane];
+    const uint per_lane = (head_dim + 31) / 32;
+    for (uint k = 0; k < per_lane; ++k) {
+        const uint i = simd_lane_id + k * 32;
+        q_reg[k] = i < head_dim ? float(Q_row[i]) : 0.0f;
+    }
+
+    float m_run = m_state[row];
+    float d_run = d_state[row];
+    device float* o_row = o_state + row * head_dim;
+    float o_reg[kMaxPerLane];
+    for (uint k = 0; k < per_lane; ++k) {
+        const uint i = simd_lane_id + k * 32;
+        o_reg[k] = i < head_dim ? o_row[i] : 0.0f;
+    }
+
+    const uint elems = num_kv_heads * head_dim;
+    for (uint w = 0; w < span; ++w) {
+        const uint slot = page_table[w / kAttnPageTokens];
+        const uint phys = slot * kAttnPageTokens + (w % kAttnPageTokens);
+        device const half* K_row = K_pool + phys * elems + kv_head * head_dim;
+        device const half* V_row = V_pool + phys * elems + kv_head * head_dim;
+
+        float partial = 0.0f;
+        for (uint k = 0; k < per_lane; ++k) {
+            const uint i = simd_lane_id + k * 32;
+            if (i < head_dim) { partial = fma(q_reg[k], float(K_row[i]), partial); }
+        }
+        const float s = simd_sum(partial) * scale;
+
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float p_exp = attn_softmax_exp(s - m_new);
+        d_run = d_run * alpha + p_exp;
+        for (uint k = 0; k < per_lane; ++k) {
+            const uint i = simd_lane_id + k * 32;
+            if (i < head_dim) {
+                o_reg[k] = o_reg[k] * alpha + p_exp * float(V_row[i]);
+            }
+        }
+        m_run = m_new;
+    }
+
+    if (simd_lane_id == 0) { m_state[row] = m_run; d_state[row] = d_run; }
+    for (uint k = 0; k < per_lane; ++k) {
+        const uint i = simd_lane_id + k * 32;
+        if (i < head_dim) { o_row[i] = o_reg[k]; }
+    }
+}
+
+[[kernel]]
+void attention_prefill_flash_finalize(
+    device const float* m_state   [[buffer(0)]],
+    device const float* d_state   [[buffer(1)]],
+    device const float* o_state   [[buffer(2)]],
+    device       half*  out       [[buffer(3)]],   // [query_count, o_stride]
+    constant     uint&  query_count [[buffer(4)]],
+    constant     uint&  head_dim  [[buffer(5)]],
+    constant     uint&  num_q_heads [[buffer(6)]],
+    constant     uint&  o_stride  [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = query_count * num_q_heads * head_dim;
+    if (gid >= total) { return; }
+    const uint row = gid / head_dim;
+    const uint i = gid % head_dim;
+    const uint t = row / num_q_heads;
+    const uint q_head = row % num_q_heads;
+    const float d = d_state[row];
+    const float v = d > 0.0f ? o_state[row * head_dim + i] / d : 0.0f;
+    out[t * o_stride + q_head * head_dim + i] = half(v);
+}
+
+// ============================================================================
 // KV page maintenance kernels (paged long-context path).
 // ============================================================================
 

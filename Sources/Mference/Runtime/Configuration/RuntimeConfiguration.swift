@@ -136,6 +136,28 @@ public struct RuntimeConfiguration: Sendable, Equatable {
             physicalMemoryBytes: physicalMemoryBytes))
     }
 
+    /// Auto pool sizing for the paged KV cache: everything resident when it
+    /// fits, otherwise whatever RAM remains after weights and headroom
+    /// (~physical − 20 GiB on the 24 GiB M5 → ~4 GiB of pool ≈ 65k resident
+    /// tokens per full-attention layer), never below 1 GiB.
+    public static func defaultKVPoolPagesPerLayer(
+        config: ArchConfig,
+        maxContext: Int,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Int {
+        let pageTokens = 64
+        let pagesPerLayer = (maxContext + pageTokens - 1) / pageTokens
+        let numFull = config.fullAttentionLayerMask.lazy.filter { $0 == 1 }.count
+        guard numFull > 0 else { return pagesPerLayer }
+        let pagePairBytes = 2 * pageTokens * config.numFullKVHeads * config.fullHeadDim * 2
+        let gib = UInt64(1) << 30
+        let headroom = UInt64(20) * gib
+        let budget = max(gib, physicalMemoryBytes > headroom
+                         ? physicalMemoryBytes - headroom : gib)
+        let budgetPages = Int(budget) / (numFull * pagePairBytes)
+        return max(1, min(pagesPerLayer, budgetPages))
+    }
+
     public var fp16RingEnabled: Bool { true }
     public var rdadviseEnabled: Bool { rdadvisePolicy != .off }
     public var prefillConfig: PrefillRuntimeConfig {

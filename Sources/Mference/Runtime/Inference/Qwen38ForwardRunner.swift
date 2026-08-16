@@ -167,6 +167,11 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         var lastScores: [[Float]]
         var pendingMetadata: [Int] = []
         var selections: [KVPageSelector.Selection]
+        /// Pages pinned for the in-flight token, per ordinal — the selection
+        /// must survive its own fetches under a tight pool, where LRU alone
+        /// could evict an earlier selection member to admit a later one.
+        var pinnedSelections: [[Int]]
+        let poolPagesPerLayer: Int
         private let spillDir: URL
 
         init(context: MetalContext, config: ArchConfig, maxContext: Int,
@@ -174,7 +179,12 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             let device = context.device
             let pagesPerLayer = (maxContext + KVPageGeometry.tokensPerPage - 1)
                 / KVPageGeometry.tokensPerPage
-            let poolPages = runtimeConfiguration.kvPoolPagesPerLayer ?? pagesPerLayer
+            let poolPages = min(
+                runtimeConfiguration.kvPoolPagesPerLayer
+                    ?? RuntimeConfiguration.defaultKVPoolPagesPerLayer(config: config,
+                                                                       maxContext: maxContext),
+                pagesPerLayer)
+            self.poolPagesPerLayer = poolPages
             let dir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("mference-kvpages-\(UUID().uuidString)",
                                         isDirectory: true)
@@ -204,11 +214,12 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             self.lastScores = Array(repeating: [], count: numFull)
             self.selections = Array(repeating: .init(pages: [], selTokens: 0),
                                     count: numFull)
-            // The per-token selection must fit the pool alongside pinned
-            // sinks/recents and the unsealed tail.
+            self.pinnedSelections = Array(repeating: [], count: numFull)
+            // The pinned per-token selection (plus the unsealed tail and one
+            // slot of eviction slack) must fit the pool.
             let worstSelection = runtimeConfiguration.kvSinkPages
                 + runtimeConfiguration.kvRecentPages
-                + runtimeConfiguration.kvTopKPages + 1
+                + runtimeConfiguration.kvTopKPages + 2
             guard poolPages >= min(pagesPerLayer, worstSelection) else {
                 throw KVPageStoreError.allocationFailed(
                     "kv pool (\(poolPages) pages/layer) smaller than the selection budget")
@@ -220,12 +231,86 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             for i in 0..<lastScores.count { lastScores[i] = [] }
             pendingMetadata.removeAll()
             for i in 0..<selections.count { selections[i] = .init(pages: [], selTokens: 0) }
+            for i in 0..<pinnedSelections.count { pinnedSelections[i] = [] }
         }
 
         deinit { try? FileManager.default.removeItem(at: spillDir) }
     }
 
     private var pagedKV: PagedKV?
+
+    /// Scratch for the blocked (streamed) prefill attention: FP32 running
+    /// online-softmax state per (query, q-head) plus two staging buffers the
+    /// past KV windows stream through (ring of two so a window's pread can
+    /// overlap the previous window's GPU pass).
+    private struct BlockedPrefillScratch {
+        static let windowPages = 128            // 8k tokens, 32 MiB per stage
+        let chunkTokens: Int
+        let mState: MTLBuffer
+        let dState: MTLBuffer
+        let oState: MTLBuffer
+        let stages: [MTLBuffer]
+        /// Stride-2 identity table addressing the interleaved [K|V] staging
+        /// layout (K page i at slot 2i, its V page at +1 K-page offset).
+        let stagingTable: MTLBuffer
+        let tailTable: MTLBuffer
+
+        init(device: MTLDevice, config: ArchConfig, chunkTokens: Int,
+             pagesPerLayer: Int, kPageBytes: Int) throws {
+            self.chunkTokens = chunkTokens
+            let rows = chunkTokens * config.numHeads
+            let headDim = config.fullHeadDim
+            guard let m = device.makeBuffer(length: rows * 4, options: .storageModeShared),
+                  let d = device.makeBuffer(length: rows * 4, options: .storageModeShared),
+                  let o = device.makeBuffer(length: rows * headDim * 4,
+                                            options: .storageModeShared) else {
+                throw KVPageStoreError.allocationFailed("blocked prefill state")
+            }
+            m.label = "kvpage.flash.m"; d.label = "kvpage.flash.d"; o.label = "kvpage.flash.o"
+            self.mState = m; self.dState = d; self.oState = o
+
+            var stages: [MTLBuffer] = []
+            for i in 0..<2 {
+                guard let s = device.makeBuffer(length: Self.windowPages * 2 * kPageBytes,
+                                                options: .storageModeShared) else {
+                    throw KVPageStoreError.allocationFailed("blocked prefill staging")
+                }
+                s.label = "kvpage.flash.stage\(i)"
+                stages.append(s)
+            }
+            self.stages = stages
+
+            var identity = (0..<Self.windowPages).map { UInt32(2 * $0) }
+            guard let table = device.makeBuffer(bytes: &identity,
+                                                length: identity.count * 4,
+                                                options: .storageModeShared),
+                  let tail = device.makeBuffer(
+                      length: (chunkTokens / KVPageGeometry.tokensPerPage + 2) * 4,
+                      options: .storageModeShared) else {
+                throw KVPageStoreError.allocationFailed("blocked prefill tables")
+            }
+            table.label = "kvpage.flash.stagingTable"
+            tail.label = "kvpage.flash.tailTable"
+            self.stagingTable = table
+            self.tailTable = tail
+        }
+    }
+
+    private var blockedPrefillScratch: BlockedPrefillScratch?
+
+    private func ensureBlockedPrefillScratch(chunkTokens: Int,
+                                             paged: PagedKV) throws -> BlockedPrefillScratch {
+        if let scratch = blockedPrefillScratch, scratch.chunkTokens >= chunkTokens {
+            return scratch
+        }
+        let scratch = try BlockedPrefillScratch(device: ctx.device,
+                                                config: cfg,
+                                                chunkTokens: chunkTokens,
+                                                pagesPerLayer: paged.store.geometry.pagesPerLayer,
+                                                kPageBytes: paged.store.geometry.kPageBytes)
+        blockedPrefillScratch = scratch
+        return scratch
+    }
 
     // Kernels
     private let embedInt4: EmbedLookupInt4
@@ -642,7 +727,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         }
 
         prefillChunkState.markDirty(startPosition: startPosition, tokenCount: t)
-        let cb = try commandBuffer()
+        var cb = try commandBuffer()
 
         let emb = model.embedding
         prefillEmbed.encode(commandBuffer: cb,
@@ -666,11 +751,11 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                 encodeLinearAttentionPrefill(cb, layer: layer, layerIndex: index,
                                              scratch: scratch, tokenCount: t)
             } else {
-                try encodeGatedFullAttentionPrefill(cb, layer: layer,
-                                                    layerIndex: index,
-                                                    scratch: scratch,
-                                                    tokenCount: t,
-                                                    startPosition: startPosition)
+                cb = try encodeGatedFullAttentionPrefill(cb, layer: layer,
+                                                         layerIndex: index,
+                                                         scratch: scratch,
+                                                         tokenCount: t,
+                                                         startPosition: startPosition)
             }
             elementwise.encodeResidualAdd(commandBuffer: cb,
                                           hidden: scratch.hidden,
@@ -746,14 +831,11 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
         }
         if let paged = pagedKV {
-            let sealedBefore = paged.store.position / KVPageGeometry.tokensPerPage
+            // Page summaries for chunk-sealed pages were encoded in the chunk
+            // command buffer itself, so nothing is pending here. The chunk
+            // moved the frontier; any scores from an earlier token are stale
+            // and the next decode token takes the warmup selection.
             paged.store.advance(by: t)
-            let sealedAfter = paged.store.position / KVPageGeometry.tokensPerPage
-            if sealedAfter > sealedBefore {
-                paged.pendingMetadata.append(contentsOf: sealedBefore..<sealedAfter)
-            }
-            // The chunk moved the frontier; any scores from an earlier token
-            // are stale. The next decode token takes the warmup selection.
             for i in 0..<paged.lastScores.count { paged.lastScores[i] = [] }
         }
         kv.advance(by: t)
@@ -850,12 +932,15 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     /// q_proj plus K/V projections, per-head q/k norm + NeoX sub-dim RoPE
     /// over the chunk, KV-cache append, causal tiled prefill attention,
     /// sigmoid output gate, then o_proj into `h1`.
+    /// Returns the command buffer that later encoders must continue on: the
+    /// incoming one on the resident paths, or a fresh one after the blocked
+    /// streamed path completed the incoming buffer mid-layer.
     private func encodeGatedFullAttentionPrefill(_ cb: MTLCommandBuffer,
                                                  layer: LayerTensors,
                                                  layerIndex: Int,
                                                  scratch: PrefillScratch,
                                                  tokenCount t: Int,
-                                                 startPosition: Int) throws {
+                                                 startPosition: Int) throws -> MTLCommandBuffer {
         guard let q = layer.q, let k = layer.k, let v = layer.v, let o = layer.o,
               let qNormW = layer.qNorm, let kNormW = layer.kNorm else {
             preconditionFailure("full-attention layer without attention tensors")
@@ -913,44 +998,252 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             theta: Float(cfg.fullRopeTheta),
             rotaryDim: rotaryDim,
             eps: Self.epsilon)
-        try copyStagedKVToCache(cb, layer: layerIndex,
-                                startPosition: startPosition,
-                                tokenCount: t,
-                                keySource: scratch.kStage,
-                                valueSource: scratch.vStage,
-                                bytesPerToken: kvDim * MemoryLayout<Float16>.stride)
-        let params = PrefillAttentionParams(
-            startPosition: UInt32(startPosition),
-            queryCount: UInt32(t),
-            headDim: UInt32(headDim),
-            numQHeads: UInt32(cfg.numHeads),
-            numKVHeads: UInt32(numKV),
-            kvValidCount: UInt32(startPosition + t),
-            slidingWindow: UInt32(startPosition + t),
-            kvTokenStrideElements: UInt32(kvDim),
-            qTokenStrideElements: UInt32(qDim),
-            oTokenStrideElements: UInt32(qDim),
-            scale: Float(cfg.attentionScale))
-        prefillAttention.encodeCausal(
-            commandBuffer: cb,
-            q: scratch.attnQ,
-            k: pagedKV?.store.kPoolBuffer(layer: layerIndex)
-                ?? kv.keyBuffer(layer: layerIndex, validTokenCount: startPosition + t),
-            v: pagedKV?.store.vPoolBuffer(layer: layerIndex)
-                ?? kv.valueBuffer(layer: layerIndex, validTokenCount: startPosition + t),
-            out: scratch.attnOut,
-            params: params)
-        elementwise.encodeSigmoidGateMul(commandBuffer: cb,
+        var activeCB = cb
+        let bytesPerToken = kvDim * MemoryLayout<Float16>.stride
+        let endPages = (startPosition + t + KVPageGeometry.tokensPerPage - 1)
+            / KVPageGeometry.tokensPerPage
+        if let paged = pagedKV,
+           !(paged.store.identityMappingIntact && endPages <= paged.poolPagesPerLayer) {
+            // Blocked (streamed) path: the chunk's KV scatters into whatever
+            // pool slots are free while the sealed past streams from the
+            // spill file through staging windows, folded into FP32 running
+            // softmax state. Exact — only the summation order differs from
+            // the tensor-ops path.
+            try encodePagedChunkKVScatter(cb, paged: paged, layerIndex: layerIndex,
+                                          startPosition: startPosition, tokenCount: t,
+                                          keySource: scratch.kStage,
+                                          valueSource: scratch.vStage,
+                                          bytesPerToken: bytesPerToken)
+            try encodePagedChunkMinMax(cb, paged: paged, layerIndex: layerIndex,
+                                       startPosition: startPosition, tokenCount: t)
+            try finish(cb)
+            let blocked = try ensureBlockedPrefillScratch(chunkTokens: scratch.chunkTokens,
+                                                          paged: paged)
+            try runBlockedAttention(paged: paged, blocked: blocked,
+                                    layerIndex: layerIndex,
+                                    queryCount: t, startPosition: startPosition,
+                                    scratch: scratch)
+            activeCB = try commandBuffer()
+        } else {
+            try copyStagedKVToCache(cb, layer: layerIndex,
+                                    startPosition: startPosition,
+                                    tokenCount: t,
+                                    keySource: scratch.kStage,
+                                    valueSource: scratch.vStage,
+                                    bytesPerToken: bytesPerToken)
+            if let paged = pagedKV {
+                try encodePagedChunkMinMax(cb, paged: paged, layerIndex: layerIndex,
+                                           startPosition: startPosition, tokenCount: t)
+            }
+            let params = PrefillAttentionParams(
+                startPosition: UInt32(startPosition),
+                queryCount: UInt32(t),
+                headDim: UInt32(headDim),
+                numQHeads: UInt32(cfg.numHeads),
+                numKVHeads: UInt32(numKV),
+                kvValidCount: UInt32(startPosition + t),
+                slidingWindow: UInt32(startPosition + t),
+                kvTokenStrideElements: UInt32(kvDim),
+                qTokenStrideElements: UInt32(qDim),
+                oTokenStrideElements: UInt32(qDim),
+                scale: Float(cfg.attentionScale))
+            prefillAttention.encodeCausal(
+                commandBuffer: cb,
+                q: scratch.attnQ,
+                k: pagedKV?.store.kPoolBuffer(layer: layerIndex)
+                    ?? kv.keyBuffer(layer: layerIndex, validTokenCount: startPosition + t),
+                v: pagedKV?.store.vPoolBuffer(layer: layerIndex)
+                    ?? kv.valueBuffer(layer: layerIndex, validTokenCount: startPosition + t),
+                out: scratch.attnOut,
+                params: params)
+        }
+        elementwise.encodeSigmoidGateMul(commandBuffer: activeCB,
                                          out: scratch.attnOut,
                                          gate: scratch.attnGate,
                                          count: t * qDim)
-        encodePrefillInt4Projection(cb,
+        encodePrefillInt4Projection(activeCB,
                                     weights: o,
                                     x: scratch.attnOut, y: scratch.h1,
                                     rows: D, columns: qDim,
                                     tokenCount: t,
                                     xStrideElements: qDim,
                                     yStrideElements: D)
+        return activeCB
+    }
+
+    /// Scatter a chunk's staged K/V rows into their (possibly non-identity)
+    /// pool page slots — one blit per touched page per stream.
+    private func encodePagedChunkKVScatter(_ cb: MTLCommandBuffer,
+                                           paged: PagedKV,
+                                           layerIndex: Int,
+                                           startPosition: Int,
+                                           tokenCount: Int,
+                                           keySource: MTLBuffer,
+                                           valueSource: MTLBuffer,
+                                           bytesPerToken: Int) throws {
+        let pageTokens = KVPageGeometry.tokensPerPage
+        let firstPage = startPosition / pageTokens
+        let lastPage = (startPosition + tokenCount - 1) / pageTokens
+        guard let blit = cb.makeBlitCommandEncoder() else {
+            throw Qwen38ForwardRunnerError.commandFailed(
+                "unable to create Qwen 3.8 paged KV scatter encoder")
+        }
+        for page in firstPage...lastPage {
+            let writeStart = max(page * pageTokens, startPosition)
+            let writeEnd = min((page + 1) * pageTokens, startPosition + tokenCount)
+            let count = writeEnd - writeStart
+            guard count > 0 else { continue }
+            let kDst = try paged.store.kSlot(layer: layerIndex, position: writeStart)
+            let vDst = try paged.store.vSlot(layer: layerIndex, position: writeStart)
+            let srcOffset = (writeStart - startPosition) * bytesPerToken
+            blit.copy(from: keySource, sourceOffset: srcOffset,
+                      to: kDst.buffer, destinationOffset: kDst.offset,
+                      size: count * bytesPerToken)
+            blit.copy(from: valueSource, sourceOffset: srcOffset,
+                      to: vDst.buffer, destinationOffset: vDst.offset,
+                      size: count * bytesPerToken)
+        }
+        blit.endEncoding()
+    }
+
+    /// Quest min/max summaries for every page this chunk finishes filling —
+    /// encoded in the chunk's own command buffer while the rows are
+    /// guaranteed resident, so a long prefill never triggers a refetch storm
+    /// at first decode.
+    private func encodePagedChunkMinMax(_ cb: MTLCommandBuffer,
+                                        paged: PagedKV,
+                                        layerIndex: Int,
+                                        startPosition: Int,
+                                        tokenCount: Int) throws {
+        let pageTokens = KVPageGeometry.tokensPerPage
+        let firstSealed = startPosition / pageTokens
+        let sealedEnd = (startPosition + tokenCount) / pageTokens
+        guard sealedEnd > firstSealed,
+              let ordinal = paged.store.fullLayerOrdinal(forLayer: layerIndex) else { return }
+        let g = paged.store.geometry
+        for page in firstSealed..<sealedEnd {
+            guard let slot = paged.store.residentSlot(layer: layerIndex, pageIndex: page) else {
+                throw KVPageStoreError.pageNotSealed(layer: layerIndex, pageIndex: page)
+            }
+            paged.kernels.encodePageMinMax(
+                commandBuffer: cb,
+                kPool: paged.store.kPoolBuffer(layer: layerIndex),
+                slot: UInt32(slot),
+                validTokens: UInt32(pageTokens),
+                metadata: paged.store.metadataBuffer,
+                metadataOffset: g.metadataOffset(layerOrdinal: ordinal, pageIndex: page),
+                numKVHeads: UInt32(cfg.numFullKVHeads),
+                headDim: UInt32(cfg.fullHeadDim))
+        }
+    }
+
+    /// Stream the sealed past through staging windows and fold it, then the
+    /// resident tail (the chunk's own pages plus any unsealed prefix) with
+    /// the causal predicate, into the chunk's attention output. Synchronous:
+    /// window N+1's pread overlaps window N's GPU pass via the stage ring.
+    private func runBlockedAttention(paged: PagedKV,
+                                     blocked: BlockedPrefillScratch,
+                                     layerIndex: Int,
+                                     queryCount t: Int,
+                                     startPosition: Int,
+                                     scratch: PrefillScratch) throws {
+        let g = paged.store.geometry
+        let pageTokens = KVPageGeometry.tokensPerPage
+        let headDim = UInt32(cfg.fullHeadDim)
+        let numQ = UInt32(cfg.numHeads)
+        let numKV = UInt32(cfg.numFullKVHeads)
+        let qStride = UInt32(cfg.numHeads * cfg.fullHeadDim)
+        let rows = UInt32(t * cfg.numHeads)
+        let scale = Float(cfg.attentionScale)
+
+        let initCB = try commandBuffer()
+        paged.kernels.encodeFlashInit(commandBuffer: initCB,
+                                      mState: blocked.mState,
+                                      dState: blocked.dState,
+                                      oState: blocked.oState,
+                                      rows: rows, headDim: headDim)
+        initCB.commit()
+
+        // Sealed past pages stream from the spill file.
+        let pastPages = startPosition / pageTokens
+        paged.store.flushSpills()
+        var stageCBs: [MTLCommandBuffer?] = [nil, nil]
+        var page = 0
+        var windowIndex = 0
+        while page < pastPages {
+            let count = min(BlockedPrefillScratch.windowPages, pastPages - page)
+            let stageIndex = windowIndex % 2
+            if let previous = stageCBs[stageIndex] {
+                previous.waitUntilCompleted()   // the stage is about to be rewritten
+            }
+            try paged.store.readSpilledSpan(layer: layerIndex,
+                                            firstPage: page, pageCount: count,
+                                            into: blocked.stages[stageIndex])
+            let windowCB = try commandBuffer()
+            paged.kernels.encodeFlashUpdate(
+                commandBuffer: windowCB,
+                q: scratch.attnQ,
+                kPool: blocked.stages[stageIndex],
+                vPool: blocked.stages[stageIndex], vPoolOffset: g.kPageBytes,
+                pageTable: blocked.stagingTable,
+                mState: blocked.mState, dState: blocked.dState, oState: blocked.oState,
+                queryCount: UInt32(t),
+                qStartPosition: UInt32(startPosition),
+                headDim: headDim, numQHeads: numQ, numKVHeads: numKV,
+                windowStartPosition: UInt32(page * pageTokens),
+                windowTokens: UInt32(count * pageTokens),
+                qStrideElements: qStride,
+                scale: scale,
+                causal: false)
+            windowCB.commit()
+            stageCBs[stageIndex] = windowCB
+            page += count
+            windowIndex += 1
+        }
+
+        // Resident tail: the partially-filled page at the prefill frontier
+        // (if any) plus the chunk's own pages, causal-masked per query.
+        let endPage = (startPosition + t - 1) / pageTokens
+        var tailSlots: [UInt32] = []
+        for tailPage in pastPages...endPage {
+            guard let slot = paged.store.residentSlot(layer: layerIndex, pageIndex: tailPage) else {
+                throw KVPageStoreError.pageNotSealed(layer: layerIndex, pageIndex: tailPage)
+            }
+            tailSlots.append(UInt32(slot))
+        }
+        precondition(tailSlots.count * 4 <= blocked.tailTable.length,
+                     "tail window exceeds its table")
+        tailSlots.withUnsafeBytes { raw in
+            blocked.tailTable.contents().copyMemory(from: raw.baseAddress!,
+                                                    byteCount: raw.count)
+        }
+
+        let tailCB = try commandBuffer()
+        paged.kernels.encodeFlashUpdate(
+            commandBuffer: tailCB,
+            q: scratch.attnQ,
+            kPool: paged.store.kPoolBuffer(layer: layerIndex),
+            vPool: paged.store.vPoolBuffer(layer: layerIndex),
+            pageTable: blocked.tailTable,
+            mState: blocked.mState, dState: blocked.dState, oState: blocked.oState,
+            queryCount: UInt32(t),
+            qStartPosition: UInt32(startPosition),
+            headDim: headDim, numQHeads: numQ, numKVHeads: numKV,
+            windowStartPosition: UInt32(pastPages * pageTokens),
+            windowTokens: UInt32(startPosition + t - pastPages * pageTokens),
+            qStrideElements: qStride,
+            scale: scale,
+            causal: true)
+        paged.kernels.encodeFlashFinalize(commandBuffer: tailCB,
+                                          mState: blocked.mState,
+                                          dState: blocked.dState,
+                                          oState: blocked.oState,
+                                          out: scratch.attnOut,
+                                          queryCount: UInt32(t),
+                                          headDim: headDim,
+                                          numQHeads: numQ,
+                                          oStrideElements: qStride)
+        try finish(tailCB)
     }
 
     /// Dense SwiGLU MLP over the chunk. With INT4 weights and a chunk tall
@@ -1308,10 +1601,21 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
             let selection = paged.selector.select(scores: paged.lastScores[ordinal],
                                                   sealedPages: sealedPages,
                                                   tailValidTokens: tailValid)
-            let table = try paged.store.pageTable(layer: layerIndex,
-                                                  selectedPages: selection.pages)
+            // Swap pins to the new selection before fetching: members fetched
+            // early must survive fetches of later members under LRU pressure.
+            for page in paged.pinnedSelections[ordinal] {
+                paged.store.unpin(layer: layerIndex, pageIndex: page)
+            }
+            var pinned: [Int] = []
+            pinned.reserveCapacity(selection.pages.count)
             let base = ordinal * g.pagesPerLayer
-            for (i, slot) in table.enumerated() { tables[base + i] = slot }
+            for (i, page) in selection.pages.enumerated() {
+                let slot = try paged.store.ensureResident(layer: layerIndex, pageIndex: page)
+                paged.store.pin(layer: layerIndex, pageIndex: page)
+                pinned.append(page)
+                tables[base + i] = UInt32(slot)
+            }
+            paged.pinnedSelections[ordinal] = pinned
             paged.selections[ordinal] = selection
         }
     }

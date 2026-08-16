@@ -70,6 +70,10 @@ public final class KVPageStore {
 
     public private(set) var position: Int = 0
     public private(set) var sealedPageCount: Int = 0
+    /// True while every page has only ever landed at slot == pageIndex and
+    /// nothing has been evicted — the pool region [0, position) is then one
+    /// linear cache and the fast (tensor-ops) prefill path applies.
+    public private(set) var identityMappingIntact = true
 
     private let poolPagesPerLayer: Int
     private let kPools: [MTLBuffer]           // [fullLayerOrdinal]
@@ -328,6 +332,38 @@ public final class KVPageStore {
         return table
     }
 
+    // MARK: - Streamed window reads (blocked prefill)
+
+    /// One sequential `pread` of `pageCount` interleaved [K page | V page]
+    /// pairs starting at `firstPage` into `staging` — the blocked-prefill
+    /// streaming path. Pages must be sealed and spilled (`flushSpills()`
+    /// first). The flash kernel addresses the interleaved layout with a
+    /// stride-2 page table and a V base offset of one K page.
+    public func readSpilledSpan(layer: Int, firstPage: Int, pageCount: Int,
+                                into staging: MTLBuffer) throws {
+        precondition(pageCount > 0, "empty span read")
+        let ordinal = requireOrdinal(layer)
+        let bytes = pageCount * 2 * geometry.kPageBytes
+        precondition(staging.length >= bytes, "staging buffer too small for span")
+        precondition(firstPage + pageCount <= geometry.pagesPerLayer, "span out of range")
+        let offset = off_t(geometry.fileOffset(layerOrdinal: ordinal, pageIndex: firstPage))
+        var done = 0
+        while done < bytes {
+            let n = pread(spillFD, staging.contents() + done, bytes - done, offset + off_t(done))
+            guard n > 0 else {
+                throw KVPageStoreError.ioFailed(operation: "pread span", errno: errno)
+            }
+            done += n
+        }
+    }
+
+    /// Current pool slot of a resident page (unsealed or fetched); the
+    /// blocked-prefill tail window builds its page table from these.
+    public func residentSlot(layer: Int, pageIndex: Int) -> Int? {
+        let slot = pageSlot[requireOrdinal(layer)][pageIndex]
+        return slot >= 0 ? Int(slot) : nil
+    }
+
     // MARK: - Reset
 
     /// Drop all pages, rewind the cursor, and return pool pages to the OS.
@@ -335,6 +371,7 @@ public final class KVPageStore {
         flushSpills()
         position = 0
         sealedPageCount = 0
+        identityMappingIntact = true
         let pages = geometry.pagesPerLayer
         for ordinal in 0..<kPools.count {
             pageSlot[ordinal] = Array(repeating: -1, count: pages)
@@ -394,7 +431,11 @@ public final class KVPageStore {
     }
 
     private func claimSlot(ordinal: Int, layer: Int, pageIndex: Int) throws -> Int {
-        if let free = slotPage[ordinal].firstIndex(of: -1) { return free }
+        if let free = slotPage[ordinal].firstIndex(of: -1) {
+            if free != pageIndex { identityMappingIntact = false }
+            return free
+        }
+        identityMappingIntact = false
 
         var victim = -1
         var victimUse = UInt64.max
