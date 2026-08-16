@@ -272,6 +272,34 @@ public final class KVPageStore {
 
     public func advance() { advance(by: 1) }
 
+    /// Rewind the cursor after a rejected speculative span. Pages the cursor
+    /// backs out of revert to unsealed — they are still resident (nothing
+    /// allocates between the span's advance and its rewind) and their rows
+    /// will simply be rewritten. Spills are flushed first so no in-flight
+    /// write races the rows' reuse; a stale spill of an unsealed page is
+    /// unreachable (fetches only read sealed pages) and is replaced when the
+    /// page seals again.
+    public func rewind(to newPosition: Int) {
+        precondition(newPosition >= 0 && newPosition <= position,
+                     "rewind target \(newPosition) outside 0...\(position)")
+        let keepSealed = newPosition / KVPageGeometry.tokensPerPage
+        let currentSealed = position / KVPageGeometry.tokensPerPage
+        position = newPosition
+        guard currentSealed > keepSealed else { return }
+        flushSpills()
+        for pageIndex in keepSealed..<currentSealed {
+            var unsealedAny = false
+            for ordinal in 0..<kPools.count {
+                guard pageState[ordinal][pageIndex] == .sealed else { continue }
+                precondition(pageSlot[ordinal][pageIndex] >= 0,
+                             "rewind found an evicted in-span page")
+                pageState[ordinal][pageIndex] = .unsealed
+                unsealedAny = true
+            }
+            if unsealedAny { sealedPageCount -= 1 }
+        }
+    }
+
     private func seal(pageIndex: Int) {
         var sealedAny = false
         for ordinal in 0..<kPools.count {

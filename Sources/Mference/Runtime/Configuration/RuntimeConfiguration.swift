@@ -138,8 +138,11 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     /// Auto pool sizing for the paged KV cache: everything resident when it
     /// fits, otherwise whatever RAM remains after weights and headroom
-    /// (~physical − 20 GiB on the 24 GiB M5 → ~4 GiB of pool ≈ 65k resident
-    /// tokens per full-attention layer), never below 1 GiB.
+    /// (~physical − 22 GiB on the 24 GiB M5 → ~2 GiB of pool ≈ 32k resident
+    /// tokens per full-attention layer), never below 1 GiB. Measured: a
+    /// 4 GiB pool beside 14 GiB of weights pushed the host into compression
+    /// and cost ~2× decode; 2 GiB keeps full speed and the SSD tier absorbs
+    /// the rest.
     public static func defaultKVPoolPagesPerLayer(
         config: ArchConfig,
         maxContext: Int,
@@ -151,7 +154,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         guard numFull > 0 else { return pagesPerLayer }
         let pagePairBytes = 2 * pageTokens * config.numFullKVHeads * config.fullHeadDim * 2
         let gib = UInt64(1) << 30
-        let headroom = UInt64(20) * gib
+        let headroom = UInt64(22) * gib
         let budget = max(gib, physicalMemoryBytes > headroom
                          ? physicalMemoryBytes - headroom : gib)
         let budgetPages = Int(budget) / (numFull * pagePairBytes)
