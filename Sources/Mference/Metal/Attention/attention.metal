@@ -223,6 +223,111 @@ void attention_decode_partial(
     }
 }
 
+// ============================================================================
+// Paged decode attention — split-KV partial over a page-table selection.
+//
+// The KV cache lives in per-layer page pools (KVPageStore): fixed 64-token
+// pages at arbitrary pool slots. `page_table[i]` is the pool slot of the
+// i-th *selected* page, in ascending logical-position order; `sel_tokens`
+// counts the selected logical tokens (the last listed page may be a partial
+// tail). Softmax runs over exactly the selected subset — the sparse
+// (Quest-style) decode path. With an identity table and a full selection the
+// accumulation order matches `attention_decode_partial` bit for bit.
+// Combine pass is shared (`attention_decode_combine`).
+// ============================================================================
+
+constant constexpr uint kAttnPageTokens = 64;
+
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_paged_partial(
+    device const half*   Q             [[buffer(0)]],
+    device const half*   K_pool        [[buffer(1)]],
+    device const half*   V_pool        [[buffer(2)]],
+    device       float*  m_out         [[buffer(3)]],   // [num_q_heads * num_chunks]
+    device       float*  d_out         [[buffer(4)]],   // [num_q_heads * num_chunks]
+    device       float*  o_out         [[buffer(5)]],   // [num_q_heads * num_chunks * head_dim]
+    constant     uint&   head_dim      [[buffer(6)]],
+    constant     uint&   num_q_heads   [[buffer(7)]],
+    constant     uint&   num_kv_heads  [[buffer(8)]],
+    constant     uint&   sel_tokens    [[buffer(9)]],
+    device const uint*   page_table    [[buffer(10)]],
+    constant     uint&   chunk_len     [[buffer(11)]],
+    constant     uint&   num_chunks    [[buffer(12)]],
+    constant     float&  scale         [[buffer(13)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint lid             [[thread_position_in_threadgroup]],
+    uint lsize           [[threads_per_threadgroup]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]],
+    uint simdgroups      [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float q_smem[kAttnMaxHeadDim];
+    threadgroup float reduce_scratch[kAttnMaxSimdGroups];
+    threadgroup float bcast;
+    const uint HD = attn_fc_head_dim(head_dim);
+    const uint NQ = attn_fc_num_q_heads(num_q_heads);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint NC = attn_fc_num_chunks(num_chunks);
+
+    const uint q_head = tg_id / NC;
+    const uint chunk  = tg_id % NC;
+    const uint l_start = chunk * chunk_len;
+    uint l_end = l_start + chunk_len;
+    if (l_end > sel_tokens) { l_end = sel_tokens; }
+
+    const uint kv_head = q_head / (NQ / NKV);
+
+    device const half* Q_row = Q + uint(q_head) * HD;
+    for (uint i = lid; i < HD; i += lsize) {
+        q_smem[i] = float(Q_row[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    constexpr uint kPerThread = (kAttnMaxHeadDim + kAttnThreads - 1) / kAttnThreads;
+    float o_local[kPerThread];
+    for (uint k = 0; k < kPerThread; ++k) { o_local[k] = 0.0f; }
+
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+
+    for (uint l = l_start; l < l_end; ++l) {
+        const uint slot = page_table[l / kAttnPageTokens];
+        const uint phys_p = slot * kAttnPageTokens + (l % kAttnPageTokens);
+        device const half* K_row = K_pool + (phys_p * NKV + kv_head) * HD;
+        device const half* V_row = V_pool + (phys_p * NKV + kv_head) * HD;
+
+        float partial = 0.0f;
+        for (uint i = lid; i < HD; i += lsize) {
+            partial = fma(q_smem[i], float(K_row[i]), partial);
+        }
+        float s = block_reduce_sum(partial,
+                                   simd_lane_id, simd_group_id, simdgroups,
+                                   reduce_scratch, &bcast);
+        s *= attn_fc_scale(scale);
+
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float p_exp = attn_softmax_exp(s     - m_new);
+        d_run = d_run * alpha + p_exp;
+
+        uint slot_i = 0;
+        for (uint i = lid; i < HD; i += lsize) {
+            o_local[slot_i] = o_local[slot_i] * alpha + p_exp * float(V_row[i]);
+            slot_i += 1;
+        }
+        m_run = m_new;
+    }
+
+    const uint base = uint(q_head) * NC + chunk;
+    if (lid == 0) { m_out[base] = m_run; d_out[base] = d_run; }
+    device float* o_row = o_out + base * HD;
+    uint slot_i = 0;
+    for (uint i = lid; i < HD; i += lsize) {
+        o_row[i] = o_local[slot_i];
+        slot_i += 1;
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_gqa_swa_partial(
     device const half*  Q             [[buffer(0)]],
