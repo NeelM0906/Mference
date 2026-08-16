@@ -66,6 +66,10 @@ final class Qwen38MTPSpeculator {
     private let ctx: MetalContext
     private let cfg: ArchConfig
     private let kv: KVCacheManager
+    /// Paged long-context state shared with the runner; nil in linear mode.
+    /// The verify pass writes draft rows through the page store and runs
+    /// per-position paged sparse attention over the round's pinned selection.
+    private let paged: Qwen38PagedKVRuntime?
     private let gdnState: GDNStateManager
     private let layers: [Qwen38ForwardRunner.LayerTensors]
     private let maxContext: Int
@@ -209,12 +213,14 @@ final class Qwen38MTPSpeculator {
                       gdnState: GDNStateManager,
                       layers: [Qwen38ForwardRunner.LayerTensors],
                       maxContext: Int,
-                      mlpWeightBits: Int) throws -> Qwen38MTPSpeculator? {
+                      mlpWeightBits: Int,
+                      paged: Qwen38PagedKVRuntime? = nil) throws -> Qwen38MTPSpeculator? {
         guard (try? model.resident(name: "mtp.fc.weight")) != nil else { return nil }
         return try Qwen38MTPSpeculator(model: model, context: context, config: config,
                                        kv: kv, gdnState: gdnState, layers: layers,
                                        maxContext: maxContext,
-                                       mlpWeightBits: mlpWeightBits)
+                                       mlpWeightBits: mlpWeightBits,
+                                       paged: paged)
     }
 
     private init(model: Model,
@@ -224,11 +230,13 @@ final class Qwen38MTPSpeculator {
                  gdnState: GDNStateManager,
                  layers: [Qwen38ForwardRunner.LayerTensors],
                  maxContext: Int,
-                 mlpWeightBits: Int) throws {
+                 mlpWeightBits: Int,
+                 paged: Qwen38PagedKVRuntime?) throws {
         self.model = model
         self.ctx = context
         self.cfg = config
         self.kv = kv
+        self.paged = paged
         self.gdnState = gdnState
         self.layers = layers
         self.maxContext = maxContext
@@ -456,6 +464,7 @@ final class Qwen38MTPSpeculator {
                 "Qwen 3.8 MTP continuation restore did not complete")
         }
         kv.rewind(to: expectedPosition)
+        paged?.store.rewind(to: expectedPosition)
         arenaRoundBase = -1
         arenaCaptured = 0
     }
@@ -479,7 +488,10 @@ final class Qwen38MTPSpeculator {
 
     /// A round needs the cursor caught up and room for at least one draft.
     func canRunRound(position: Int) -> Bool {
-        position == kv.position && position + 2 <= maxContext
+        // A round needs a prior decoded position: the drafter seeds from the
+        // previous token's final-norm hidden, and `basePair = position - 1`
+        // anchors its RoPE — position 0 decodes plainly.
+        position >= 1 && position == kv.position && position + 2 <= maxContext
     }
 
     /// Run one draft/verify/accept round for `produce(bonus, position)`.
@@ -537,8 +549,15 @@ final class Qwen38MTPSpeculator {
         // 2. Verify.
         let verifyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let verifyTokens = [bonus] + drafts
+        if let paged {
+            // Round selection: lag-one scores as in plain decode, with the
+            // table extended over the pages the verify span writes into.
+            try paged.prepareSelections(position: P)
+            try paged.appendVerifySpan(position: P, count: verifyTokens.count)
+        }
         try runVerifyPass(tokens: verifyTokens, startPosition: P)
         kv.advance(by: verifyTokens.count)
+        paged?.store.advance(by: verifyTokens.count)
         arenaRoundBase = P
         arenaCaptured = verifyTokens.count - 1
 
@@ -560,6 +579,14 @@ final class Qwen38MTPSpeculator {
         if rolledBack {
             stats.rollbacks += 1
             kv.rewind(to: P + accepted + 1)
+            paged?.store.rewind(to: P + accepted + 1)
+        }
+        if let paged {
+            // Net-sealed pages need their summaries next command buffer, and
+            // the round's score pass (bonus-position query) feeds the next
+            // selection.
+            paged.noteAdvance(from: P, to: P + accepted + 1)
+            paged.readBackScores(sealedPages: P / KVPageGeometry.tokensPerPage)
         }
         try runAcceptPass(bonus: bonus, emitted: emitted, position: P,
                           restoreSlot: rolledBack ? accepted : nil)
@@ -584,6 +611,7 @@ final class Qwen38MTPSpeculator {
         for (i, token) in tokens.enumerated() { ids[i] = UInt32(bitPattern: token) }
 
         let cb = try commandBuffer()
+        try paged?.encodePendingMetadata(commandBuffer: cb)
         let emb = model.embedding
         prefillEmbed.encode(commandBuffer: cb,
                             table: emb.buffer, tableOffset: Int(emb.offset),
@@ -674,23 +702,46 @@ final class Qwen38MTPSpeculator {
                                      packed: vQPacked, q: vQ, gate: vGate,
                                      heads: cfg.numHeads, dim: headDim, rows: t)
 
-        // Stage -> cache (contiguous slots for a linear full-attention layer).
-        let kRange = kv.kRange(layer: layerIndex, start: startPosition, count: t)
-        let vRange = kv.vRange(layer: layerIndex, start: startPosition, count: t)
+        // Stage -> cache: contiguous slots in linear mode, per-page scatter
+        // through the page store in paged mode (the span may cross a page
+        // boundary into a freshly allocated slot).
         guard let blit = cb.makeBlitCommandEncoder() else {
             throw Qwen38ForwardRunnerError.commandFailed(
                 "unable to create Qwen 3.8 MTP verify KV blit encoder")
         }
-        blit.copy(from: vKStage, sourceOffset: 0,
-                  to: kRange.buffer, destinationOffset: kRange.offset,
-                  size: t * kvDim * h)
-        blit.copy(from: vVStage, sourceOffset: 0,
-                  to: vRange.buffer, destinationOffset: vRange.offset,
-                  size: t * kvDim * h)
+        if let paged {
+            let pageTokens = KVPageGeometry.tokensPerPage
+            let firstPage = startPosition / pageTokens
+            let lastPage = (startPosition + t - 1) / pageTokens
+            for page in firstPage...lastPage {
+                let writeStart = max(page * pageTokens, startPosition)
+                let writeEnd = min((page + 1) * pageTokens, startPosition + t)
+                let kDst = try paged.store.kSlot(layer: layerIndex, position: writeStart)
+                let vDst = try paged.store.vSlot(layer: layerIndex, position: writeStart)
+                let srcOffset = (writeStart - startPosition) * kvDim * h
+                blit.copy(from: vKStage, sourceOffset: srcOffset,
+                          to: kDst.buffer, destinationOffset: kDst.offset,
+                          size: (writeEnd - writeStart) * kvDim * h)
+                blit.copy(from: vVStage, sourceOffset: srcOffset,
+                          to: vDst.buffer, destinationOffset: vDst.offset,
+                          size: (writeEnd - writeStart) * kvDim * h)
+            }
+        } else {
+            let kRange = kv.kRange(layer: layerIndex, start: startPosition, count: t)
+            let vRange = kv.vRange(layer: layerIndex, start: startPosition, count: t)
+            blit.copy(from: vKStage, sourceOffset: 0,
+                      to: kRange.buffer, destinationOffset: kRange.offset,
+                      size: t * kvDim * h)
+            blit.copy(from: vVStage, sourceOffset: 0,
+                      to: vRange.buffer, destinationOffset: vRange.offset,
+                      size: t * kvDim * h)
+        }
         blit.endEncoding()
 
         for i in 0..<t {
-            let kSlot = kv.kSlot(layer: layerIndex, position: startPosition + i)
+            let kSlot = try paged?.store.kSlot(layer: layerIndex,
+                                               position: startPosition + i)
+                ?? kv.kSlot(layer: layerIndex, position: startPosition + i)
             rms.encodeBF16WPerHead(commandBuffer: cb,
                                    x: vQ, xOffset: i * qDim * h,
                                    weight: qNormW.buffer,
@@ -722,19 +773,53 @@ final class Qwen38MTPSpeculator {
                                   rotaryDim: rotaryDim,
                                   theta: Float(cfg.fullRopeTheta))
         }
-        for i in 0..<t {
-            attention.encodeFull(commandBuffer: cb,
-                                 q: vQ, qOffset: i * qDim * h,
-                                 k: kv.keyBuffer(layer: layerIndex,
-                                                 validTokenCount: startPosition + i + 1),
-                                 v: kv.valueBuffer(layer: layerIndex,
-                                                   validTokenCount: startPosition + i + 1),
-                                 out: vAttnOut, outOffset: i * qDim * h,
-                                 headDim: UInt32(headDim),
-                                 numQHeads: UInt32(cfg.numHeads),
-                                 numKVHeads: UInt32(numKV),
-                                 seqLen: UInt32(startPosition + i + 1),
-                                 scale: Float(cfg.attentionScale))
+        if let paged {
+            let g = paged.store.geometry
+            guard let ordinal = paged.store.fullLayerOrdinal(forLayer: layerIndex) else {
+                preconditionFailure("paged verify on a non-full-attention layer")
+            }
+            // Verify position i attends the round's selected pages plus the
+            // span's rows through i — the tail page fills logically in place,
+            // so the selected-token count just grows by one per position.
+            let base = paged.verifyBaseTokens(ordinal: ordinal)
+                + startPosition % KVPageGeometry.tokensPerPage
+            for i in 0..<t {
+                attention.encodeFullPaged(
+                    commandBuffer: cb,
+                    q: vQ, qOffset: i * qDim * h,
+                    kPool: paged.store.kPoolBuffer(layer: layerIndex),
+                    vPool: paged.store.vPoolBuffer(layer: layerIndex),
+                    pageTable: paged.tablesBuf,
+                    pageTableOffset: ordinal * g.pagesPerLayer
+                        * MemoryLayout<UInt32>.stride,
+                    out: vAttnOut, outOffset: i * qDim * h,
+                    headDim: UInt32(headDim),
+                    numQHeads: UInt32(cfg.numHeads),
+                    numKVHeads: UInt32(numKV),
+                    selTokens: UInt32(base + i + 1),
+                    scale: Float(cfg.attentionScale))
+            }
+            // Bonus-position query scores every sealed page for the next
+            // selection — the bonus token is always committed, so its query
+            // is always the right one to rank against.
+            paged.encodeScores(commandBuffer: cb, ordinal: ordinal,
+                               q: vQ, qOffset: 0,
+                               sealedPages: startPosition / KVPageGeometry.tokensPerPage)
+        } else {
+            for i in 0..<t {
+                attention.encodeFull(commandBuffer: cb,
+                                     q: vQ, qOffset: i * qDim * h,
+                                     k: kv.keyBuffer(layer: layerIndex,
+                                                     validTokenCount: startPosition + i + 1),
+                                     v: kv.valueBuffer(layer: layerIndex,
+                                                       validTokenCount: startPosition + i + 1),
+                                     out: vAttnOut, outOffset: i * qDim * h,
+                                     headDim: UInt32(headDim),
+                                     numQHeads: UInt32(cfg.numHeads),
+                                     numKVHeads: UInt32(numKV),
+                                     seqLen: UInt32(startPosition + i + 1),
+                                     scale: Float(cfg.attentionScale))
+            }
         }
         elementwise.encodeSigmoidGateMul(commandBuffer: cb,
                                          out: vAttnOut, gate: vGate,

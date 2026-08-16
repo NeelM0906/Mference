@@ -21,6 +21,14 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lru
 }
 
+/// Paged KV cache for long contexts (Qwen 3.8 full-attention layers): fixed
+/// 64-token pages with an SSD spill tier and Quest-style query-aware sparse
+/// decode. `.off` keeps the linear FP16 cache and the dense decode path.
+public enum RuntimeKVPagedPolicy: String, Codable, Sendable {
+    case off
+    case on
+}
+
 public struct RuntimeConfiguration: Sendable, Equatable {
     /// 96 and 128 are the near-resident rungs: large wired LFU sets for hosts
     /// with RAM to spare but not enough to cache the whole expert pool.
@@ -37,6 +45,14 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// Opt-in approximate singleton-decode head for Maple checkpoints that
     /// retain FlashHead tensors. Prefill continues to use the exact head.
     public let useMapleFlashHead: Bool
+    public let kvPagedPolicy: RuntimeKVPagedPolicy
+    /// Sparse decode selection budget, in 64-token pages.
+    public let kvTopKPages: Int
+    public let kvSinkPages: Int
+    public let kvRecentPages: Int
+    /// Pool residency per full-attention layer, in pages. `nil` sizes the
+    /// pool to the full context (everything resident; SSD tier idle).
+    public let kvPoolPagesPerLayer: Int?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -45,7 +61,12 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
                 forceLogitsHead: Bool = false,
-                useMapleFlashHead: Bool = false) {
+                useMapleFlashHead: Bool = false,
+                kvPagedPolicy: RuntimeKVPagedPolicy = .off,
+                kvTopKPages: Int = 60,
+                kvSinkPages: Int = 2,
+                kvRecentPages: Int = 4,
+                kvPoolPagesPerLayer: Int? = nil) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
@@ -58,6 +79,13 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
         self.useMapleFlashHead = useMapleFlashHead
+        precondition(kvTopKPages >= 0 && kvSinkPages >= 0 && kvRecentPages >= 1,
+                     "invalid paged-KV selection parameters")
+        self.kvPagedPolicy = kvPagedPolicy
+        self.kvTopKPages = kvTopKPages
+        self.kvSinkPages = kvSinkPages
+        self.kvRecentPages = kvRecentPages
+        self.kvPoolPagesPerLayer = kvPoolPagesPerLayer
     }
 
     public static var production: RuntimeConfiguration {
@@ -106,6 +134,31 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         return .pread(slotCount: defaultExpertCacheSlots(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes))
+    }
+
+    /// Auto pool sizing for the paged KV cache: everything resident when it
+    /// fits, otherwise whatever RAM remains after weights and headroom
+    /// (~physical − 22 GiB on the 24 GiB M5 → ~2 GiB of pool ≈ 32k resident
+    /// tokens per full-attention layer), never below 1 GiB. Measured: a
+    /// 4 GiB pool beside 14 GiB of weights pushed the host into compression
+    /// and cost ~2× decode; 2 GiB keeps full speed and the SSD tier absorbs
+    /// the rest.
+    public static func defaultKVPoolPagesPerLayer(
+        config: ArchConfig,
+        maxContext: Int,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Int {
+        let pageTokens = 64
+        let pagesPerLayer = (maxContext + pageTokens - 1) / pageTokens
+        let numFull = config.fullAttentionLayerMask.lazy.filter { $0 == 1 }.count
+        guard numFull > 0 else { return pagesPerLayer }
+        let pagePairBytes = 2 * pageTokens * config.numFullKVHeads * config.fullHeadDim * 2
+        let gib = UInt64(1) << 30
+        let headroom = UInt64(22) * gib
+        let budget = max(gib, physicalMemoryBytes > headroom
+                         ? physicalMemoryBytes - headroom : gib)
+        let budgetPages = Int(budget) / (numFull * pagePairBytes)
+        return max(1, min(pagesPerLayer, budgetPages))
     }
 
     public var fp16RingEnabled: Bool { true }

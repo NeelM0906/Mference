@@ -75,7 +75,10 @@ public func run(args: Args,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !config.isPureGreedy,
-            useMapleFlashHead: args.flashHead)
+            useMapleFlashHead: args.flashHead,
+            kvPagedPolicy: kvPagedPolicy(for: args),
+            kvTopKPages: args.kvTopKPages,
+            kvPoolPagesPerLayer: args.kvPoolPages)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -225,6 +228,17 @@ private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> 
     return RunResult(exitCode: code)
 }
 
+/// "auto" enables the paged KV cache above 32k context — the point where the
+/// linear FP16 full-attention cache (2 GiB there, growing 64 KiB/token)
+/// stops being the sensible default on consumer RAM.
+private func kvPagedPolicy(for args: Args) -> RuntimeKVPagedPolicy {
+    switch args.kvPaged {
+    case "on": return .on
+    case "off": return .off
+    default: return args.maxContext > 32_768 ? .on : .off
+    }
+}
+
 private func structuredEvents(_ decoder: StructuredAssistantDecoder?,
                               tokenID: Int32,
                               text: String) throws -> [StructuredAssistantEvent] {
@@ -283,7 +297,10 @@ private func runChat(args: Args,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             prefillChunkTokens: prefillChunkTokens,
             forceLogitsHead: !baseConfig.isPureGreedy,
-            useMapleFlashHead: args.flashHead)
+            useMapleFlashHead: args.flashHead,
+            kvPagedPolicy: kvPagedPolicy(for: args),
+            kvTopKPages: args.kvTopKPages,
+            kvPoolPagesPerLayer: args.kvPoolPages)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
