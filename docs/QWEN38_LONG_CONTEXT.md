@@ -41,8 +41,11 @@ The paged KV mode solves both at full FP16 precision (no KV quantization):
 ```
 
 `RuntimeConfiguration`: `kvPagedPolicy`, `kvTopKPages`, `kvSinkPages`,
-`kvRecentPages`, `kvPoolPagesPerLayer`. MTP speculative decode defers to
-plain decode while paged mode is on (v1).
+`kvRecentPages`, `kvPoolPagesPerLayer`. MTP speculative decode composes
+with paged mode: verify rounds write draft rows through the page store and
+run per-position paged attention over the round's pinned selection, with
+cursor rewinds un-sealing pages on rejected drafts — byte-identical to
+plain paged decode (`Qwen38PagedMTPTests`).
 
 ## Correctness
 
@@ -60,15 +63,26 @@ plain decode while paged mode is on (v1).
   evict them; page summaries are computed in the same command buffer that
   seals a page, so long prefills never trigger a metadata refetch storm.
 
-## Measured (M5 MacBook Pro, 24 GB, 2026-08-15)
+## Measured (M5 MacBook Pro, 24 GB, real 27B checkpoint, 2026-08-15)
+
+Plain decode (no MTP attach):
 
 | run | context | pool | prefill | decode | notes |
 |---|---|---|---|---|---|
 | dense baseline | 4k | — | — | 7.8 tok/s | `--kv-paged off` |
 | paged, all resident | 4k | auto | — | 8.0 tok/s | output identical to dense |
 | paged + SSD, needle @30% | 5.4k prompt | 72 pages (4.6k tok) | 39 tok/s | 5.9 tok/s | passkey retrieved exactly |
-| paged + SSD, needle @45% | TBD | 128 pages (8k tok) | TBD | TBD | TBD |
-| capacity smoke | 262,144 max-context | auto | TBD | TBD | TBD |
+| paged + SSD, needle @45% | 12.2k prompt | 128 pages (8k tok) | 27 tok/s | 6.3 tok/s | passkey retrieved exactly through spill |
+| capacity smoke | 262,144 max-context | auto (2 GiB) | — | 7.9 tok/s | full-context settings, no decode regression |
+
+With MTP speculative decode attached (byte-identical greedy):
+
+| run | context | decode | notes |
+|---|---|---|---|
+| dense + MTP | 4k | 16.7 tok/s | reference |
+| paged + MTP | 4k | **16.8 tok/s** | identical output to dense+MTP, zero paging overhead |
+| paged + SSD needle + MTP | 5.4k prompt, 4.6k-token pool | **10.5 tok/s** | passkey retrieved exactly |
+| 262k settings + MTP | 262,144 max-context | **14.0 tok/s** | |
 
 Notes:
 
