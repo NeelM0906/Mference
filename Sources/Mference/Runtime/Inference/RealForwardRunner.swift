@@ -467,6 +467,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// byte-identical). `MFERENCE_SLOT_MAP=0` is the kill-switch.
     static let slotMapEnabledDefault =
         ProcessInfo.processInfo.environment["MFERENCE_SLOT_MAP"] != "0"
+    /// Inkling prefill expert streaming: depth-1 pipeline — pread expert e+1
+    /// while expert e's GLU runs, misses placed only in slots the in-flight
+    /// command buffer does not touch. `MFERENCE_INKLING_PREFILL_PIPELINE=0`
+    /// is the kill-switch back to the serialized fetch->encode->drain loop.
+    static let inklingPrefillPipelineEnabled =
+        ProcessInfo.processInfo.environment["MFERENCE_INKLING_PREFILL_PIPELINE"] != "0"
     var slotMapEnabled = RealForwardRunner.slotMapEnabledDefault
     /// Debug discriminator: encode the whole slot-map chain but feed the
     /// lookup an all-empty table, so the guarded kernels always no-op and
@@ -4473,10 +4479,47 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             func now() -> UInt64 {
                 breakdown ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0
             }
-            for range in routedRanges {
+            // Depth-1 pipeline: while the GPU runs expert e's GLU, the CPU
+            // plans and preads expert e+1 into slots the in-flight buffer
+            // does not touch (`avoidingSlots`), so the fetch overlaps GPU
+            // work. `acc`/`act` hazards need no explicit sync: consecutive
+            // buffers on the serial queue are hazard-tracked on those
+            // resources, so expert accumulation order — and therefore the
+            // output — is byte-identical to the serialized loop. When slot
+            // pressure leaves no avoiding plan (or the pipeline is switched
+            // off), the next iteration drains first and demand-fetches,
+            // which *is* the old serialized behavior.
+            let tileScheduler = PrefillRoutedTileScheduler(
+                config: Self.prefillRoutedTileSchedulerConfig)
+            var pendingExpertCB: (cb: MTLCommandBuffer, slots: [Int])?
+            var prefetched: (expert: Int, plan: RoutedExpertFetchPlan,
+                             blob: TensorView)?
+            func drainPendingExpertCB() throws {
+                guard let pending = pendingExpertCB else { return }
+                pendingExpertCB = nil
+                let tDrain = now()
+                waitForCompletion(pending.cb)
+                if breakdown { Self.prefillDrainNanos &+= now() - tDrain }
+                if let error = pending.cb.error { throw error }
+            }
+            for (index, range) in routedRanges.enumerated() {
                 let t0 = now()
-                let blob = try await model.fetchRoutedExperts(layer: L,
-                                                              experts: [range.expert])[0]
+                let blob: TensorView
+                let blobSlots: [Int]
+                if let ready = prefetched, ready.expert == range.expert {
+                    blob = ready.blob
+                    blobSlots = ready.plan.assignedSlots
+                    prefetched = nil
+                } else {
+                    prefetched = nil
+                    try drainPendingExpertCB()
+                    guard let plan = try model.planRoutedExperts(
+                        layer: L, experts: [range.expert]) else {
+                        throw ModelError.routedExpertPlanUnavailable(layer: L)
+                    }
+                    blob = try await model.fetchRoutedExperts(plan: plan)[0]
+                    blobSlots = plan.assignedSlots
+                }
                 let t1 = now()
                 let cb = ctx.queue.makeCommandBuffer()!
                 prefillGLU.encode(commandBuffer: cb,
@@ -4490,20 +4533,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   params: expertParams(range, base: Int(blob.offset)))
                 cb.commit()
                 let t2 = now()
-                // The next fetch may evict this expert's slot, and the shared
-                // `act` tile is reused, so drain before moving on. This
-                // serialization is why fetch does not overlap GPU work; see
-                // PrefillRoutedTileScheduler for the pipelined alternative the
-                // other families use.
-                waitForCompletion(cb)
                 if breakdown {
-                    let t3 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                     Self.prefillFetchNanos &+= t1 - t0
                     Self.prefillEncodeNanos &+= t2 - t1
-                    Self.prefillDrainNanos &+= t3 - t2
                     Self.prefillExpertCount &+= 1
                 }
+                try drainPendingExpertCB()
+                pendingExpertCB = (cb, blobSlots)
+
+                if Self.inklingPrefillPipelineEnabled,
+                   index + 1 < routedRanges.count {
+                    let nextExpert = routedRanges[index + 1].expert
+                    let nextPlan = try model.planRoutedExpertsIfPossible(
+                        layer: L,
+                        experts: [nextExpert],
+                        avoidingSlots: Set(blobSlots))
+                    let decision = tileScheduler.decide(
+                        PrefillRoutedTileSchedulerInput(
+                            hasPendingTile: true,
+                            pendingAssignedSlots: blobSlots,
+                            avoidingSlotPlanAvailable: nextPlan != nil))
+                    if case .prefetchNext = decision, let nextPlan {
+                        let tFetch = now()
+                        let nextBlob =
+                            try await model.fetchRoutedExperts(plan: nextPlan)[0]
+                        if breakdown { Self.prefillFetchNanos &+= now() - tFetch }
+                        prefetched = (nextExpert, nextPlan, nextBlob)
+                    }
+                }
             }
+            try drainPendingExpertCB()
             totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
 
             // Tail: one causal channel-wise dispatch replaces N narrowing,
