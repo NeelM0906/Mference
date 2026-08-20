@@ -517,8 +517,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// PILOT lookahead kernels, built on first use so `off` pays nothing and
     /// the (concurrently edited) DSV4 init block stays untouched.
     private var pilotRouter: SpeculativeRouterDSV4?
-    /// The prediction read out of `pilotRouter` (or the hash table) at the
-    /// current layer's router wake, consumed by `issueSpeculativePrefetch`.
+    /// Inkling twin of `pilotRouter`: same lazy construction, same lifecycle,
+    /// family-matched scoring kernels.
+    private var inklingPilotRouter: SpeculativeRouterInkling?
+    /// The prediction read out of `pilotRouter`/`inklingPilotRouter` (or the
+    /// hash table) at the current layer's router wake, consumed by
+    /// `issueSpeculativePrefetch`.
     private var pilotPrediction: (layer: Int, experts: [Int])?
 
     public init(model: Model, context: MetalContext, maxContext: Int,
@@ -1294,6 +1298,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                  d: UInt32(cfg.hiddenSize),
                                                  topK: UInt32(cfg.topKExperts))
         return pilotRouter
+    }
+
+    private func ensureInklingPilotRouter() -> SpeculativeRouterInkling? {
+        if let inklingPilotRouter { return inklingPilotRouter }
+        inklingPilotRouter = try? SpeculativeRouterInkling(
+            context: ctx,
+            numRouted: cfg.numExperts,
+            numShared: cfg.numSharedExperts,
+            topK: cfg.topKExperts)
+        return inklingPilotRouter
+    }
+
+    /// Inkling wake-side twin of `capturePilotPrediction`: no hash-routed
+    /// layers exist in this family, so the prediction comes only from the
+    /// pilot GEMV.
+    private func captureInklingPilotPrediction(nextLayer: Int, gemvEncoded: Bool) {
+        pilotPrediction = nil
+        guard speculativePrefetchMode == .pilot || speculativePrefetchMode == .shadow,
+              nextLayer < cfg.numLayers, gemvEncoded,
+              let buffer = inklingPilotRouter?.predictedIndices else { return }
+        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
+        let cap = cfg.numExperts - 1
+        pilotPrediction = (nextLayer, (0..<cfg.topKExperts).map { min(Int(ptr[$0]), cap) })
     }
 
     /// Records this layer's routing for the next token's predictor.
@@ -3710,6 +3737,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  routeScale: Float(cfg.routedScalingFactor)
                                      / Self.inklingFFNPrescale,
                                  d: D)
+            // PILOT lookahead: layer L+1's router against *this* layer's
+            // post-attention state, into private buffers, before the signal —
+            // the CPU reads real L indices and speculative L+1 indices at one
+            // wake. Dense layers all precede the MoE layers in this family,
+            // so L+1 here is always routed (or past the last layer, which
+            // `shouldEncodePilotGemv` rejects).
+            var pilotGemvEncoded = false
+            if shouldEncodePilotGemv(nextLayer: L + 1),
+               let pilot = ensureInklingPilotRouter(),
+               let nextRouter = try? model.router(layer: L + 1),
+               let nextGateBias = try? model.inklingGateBias(layer: L + 1),
+               let nextGateScale = try? model.inklingGateGlobalScale(layer: L + 1) {
+                pilot.encodePrediction(
+                    commandBuffer: cb,
+                    weights: nextRouter.buffer,
+                    weightsOffset: Int(nextRouter.offset),
+                    hidden: routedX,
+                    onesScale: effectiveScaleBuffers[L + 1],
+                    gateBias: nextGateBias.buffer,
+                    gateBiasOffset: Int(nextGateBias.offset),
+                    globalScale: nextGateScale.buffer,
+                    globalScaleOffset: Int(nextGateScale.offset),
+                    numRouted: UInt32(cfg.numExperts),
+                    numShared: UInt32(cfg.numSharedExperts),
+                    topK: UInt32(cfg.topKExperts),
+                    routeScale: Float(cfg.routedScalingFactor)
+                        / Self.inklingFFNPrescale,
+                    d: D)
+                pilotGemvEncoded = true
+            }
             let routerSignal = encodeRouterSignal(cb)
             let sharedProjs = inklingSharedProjections[L]
             try! shared.encode(commandBuffer: cb,
@@ -3750,6 +3807,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
+            // Join any speculative read aimed at this layer before planning —
+            // the plan must not evict a slot a background pread is filling —
+            // and score the prediction. Then this layer's routing becomes the
+            // next token's prediction for the same layer.
+            settleSpeculation(layer: L, actualExperts: experts)
+            recordRoutedExperts(experts, layer: L)
+            captureInklingPilotPrediction(nextLayer: L + 1,
+                                          gemvEncoded: pilotGemvEncoded)
             let topK = UInt32(cfg.topKExperts)
             let routedOffsets = model.routedExpertOffsets(layer: L)
             let plannedFetch = try model.planRoutedExperts(layer: L, experts: experts)
@@ -3855,6 +3920,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                               count: D,
                                               scale: Self.inklingFFNPrescale)
             routedCB.commit()
+            // The GPU is now busy with routed work; the CPU is free until the
+            // next layer's router wake — the window where a speculative read
+            // never competes with a critical-path pread.
+            issueSpeculativePrefetch(layer: L + 1)
             if Self.inklingDebugEnabled {
                 waitForCompletion(routedCB)
                 if !(L <= 6 || L == 41) {
