@@ -101,7 +101,11 @@ DeepSeek-V4-Flash default, off elsewhere — and `MFERENCE_SHADOW_BUDGET` caps
 its per-layer speculative reads. For Qwen 3.8, `MFERENCE_MTP=0` disables MTP
 speculative decoding (on by default for greedy decode when the install
 carries the attached MTP tensors) and `MFERENCE_MTP_K` (1–6, default 3) sets
-the draft depth. All are byte-identical toggles, not quality controls.
+the draft depth. `MFERENCE_DFLASH2_DIR` points at a DFlash2 drafter
+checkpoint and swaps the round's draft source to it (draft depth defaults
+to 6; see docs/QWEN38_DFLASH2.md); `MFERENCE_DFLASH2_BF16=1` skips its
+load-time INT4 quantization for reference runs. All are byte-identical
+toggles, not quality controls.
 
 Changing context length, expert-cache slots, RDADVISE, model verification,
 prompt-prefill enablement, the prefill chunk size, or FlashHead selection
