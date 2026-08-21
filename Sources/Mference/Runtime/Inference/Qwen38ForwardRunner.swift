@@ -304,6 +304,8 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         public let draftNanos: UInt64
         public let verifyNanos: UInt64
         public let acceptNanos: UInt64
+        public let positionTrials: [Int]
+        public let positionAccepts: [Int]
     }
 
     public var mtpSpecStats: MTPSpecStats? {
@@ -315,7 +317,9 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                          rollbacks: $0.stats.rollbacks,
                          draftNanos: $0.stats.draftNanos,
                          verifyNanos: $0.stats.verifyNanos,
-                         acceptNanos: $0.stats.acceptNanos)
+                         acceptNanos: $0.stats.acceptNanos,
+                         positionTrials: $0.stats.positionTrials,
+                         positionAccepts: $0.stats.positionAccepts)
         }
     }
 
@@ -589,6 +593,18 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         }
 
         let scratch = try ensurePrefillScratch(config: config)
+        // DFlash2 conditioning: the prompt's trailing tap rows (one drafter
+        // context window) prime the first draft rounds — without them the
+        // drafter starts blind and early acceptance craters. Restart the
+        // drafter at the window base; each chunk stages its in-window rows.
+        var dflash2TapBase = Int.max
+        if let drafter = mtp?.dflash2 {
+            drafter.reset()
+            let finalPosition = startPosition + tokens.count
+            dflash2TapBase = max(startPosition,
+                                 finalPosition - drafter.contextWindowRows)
+            drafter.alignPositionBase(dflash2TapBase)
+        }
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
                                               startPosition: startPosition,
                                               config: config)
@@ -601,7 +617,8 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                     outputMode: outputMode,
                                     logits: logits,
                                     scratch: scratch,
-                                    writeFinalHead: spanIndex == spans.count - 1)
+                                    writeFinalHead: spanIndex == spans.count - 1,
+                                    dflash2TapBase: dflash2TapBase)
             onProgress(span.completedCount)
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
@@ -633,7 +650,8 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                      outputMode: PrefillOutputMode,
                                      logits: MTLBuffer,
                                      scratch: PrefillScratch,
-                                     writeFinalHead: Bool) throws {
+                                     writeFinalHead: Bool,
+                                     dflash2TapBase: Int = .max) throws {
         let t = tokens.count
         precondition(t > 0 && t <= scratch.chunkTokens,
                      "prefill chunk exceeds its scratch capacity")
@@ -695,6 +713,19 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                           hidden: scratch.hidden,
                                           delta: scratch.mlpOut,
                                           count: t * D)
+            if let drafter = mtp?.dflash2, drafter.isTapLayer(index),
+               dflash2TapBase < startPosition + t {
+                let local = max(0, dflash2TapBase - startPosition)
+                drafter.encodeTapCapture(
+                    commandBuffer: cb,
+                    layerIndex: index,
+                    src: scratch.hidden,
+                    srcOffset: local * D * MemoryLayout<Float16>.stride,
+                    rows: t - local)
+            }
+        }
+        if let drafter = mtp?.dflash2, dflash2TapBase < startPosition + t {
+            drafter.commitTapRows(t - max(0, dflash2TapBase - startPosition))
         }
 
         let emitGreedyHead = outputMode == .greedyIfAvailable && useFusedGreedyHead

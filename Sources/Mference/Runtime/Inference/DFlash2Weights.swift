@@ -2,23 +2,31 @@ import Darwin
 import Foundation
 import Metal
 
-/// mmap-backed view of the DFlash2 drafter checkpoint (a single BF16
-/// safetensors file), wrapped in one shared `MTLBuffer`. Tensors are
-/// addressed by byte offset into that buffer; the CPU-side selector reads
-/// the codebook rows straight from the mapping.
+/// mmap view of the DFlash2 drafter checkpoint (a single BF16 safetensors
+/// file). In production the mapping is a *CPU-side source only*: the
+/// drafter quantizes the projections into `DFlash2Int4Slab`, copies the
+/// small norm/conv tensors into an anonymous GPU buffer, and reads the
+/// selector codebooks straight from the mapping — no command buffer ever
+/// references file-backed memory (the driver wires file-backed buffers on
+/// the CB timeline; the DSV4 copy-free experiment measured that collapse,
+/// and this loader reproduced it at ~20x before the split). The lazy
+/// `gpuBuffer` wrap over the mapping exists for the BF16 parity path only.
 final class DFlash2Weights {
 
     struct Tensor {
-        let offset: Int      // byte offset into `buffer`
+        let offset: Int      // byte offset into the mapping
         let shape: [Int]
         let byteCount: Int
     }
 
-    let buffer: MTLBuffer
-    private let base: UnsafeRawPointer
+    private let base: UnsafeMutableRawPointer
+    private let mappedLen: Int
     private let tensors: [String: Tensor]
+    private var lazyGPUBuffer: MTLBuffer?
+    private let device: MTLDevice
 
     init(safetensorsURL: URL, device: MTLDevice) throws {
+        self.device = device
         let fd = open(safetensorsURL.path, O_RDONLY)
         guard fd >= 0 else {
             throw ModelError.posixFailed(call: "open(\(safetensorsURL.path))",
@@ -39,6 +47,8 @@ final class DFlash2Weights {
         guard mapped != MAP_FAILED, let mappedBase = mapped else {
             throw ModelError.posixFailed(call: "mmap", errno: errno)
         }
+        self.base = mappedBase
+        self.mappedLen = mappedLen
 
         var headerLen: UInt64 = 0
         memcpy(&headerLen, mappedBase, 8)
@@ -78,21 +88,15 @@ final class DFlash2Weights {
             parsed[name] = Tensor(offset: start, shape: shape, byteCount: byteCount)
         }
         self.tensors = parsed
+        _ = posix_madvise(mappedBase, mappedLen, POSIX_MADV_RANDOM)
+    }
 
-        _ = posix_madvise(mappedBase, mappedLen, POSIX_MADV_WILLNEED)
-        nonisolated(unsafe) let captureBase = mappedBase
-        let captureLen = mappedLen
-        guard let buf = device.makeBuffer(
-            bytesNoCopy: mappedBase,
-            length: mappedLen,
-            options: .storageModeShared,
-            deallocator: { _, _ in munmap(captureBase, captureLen) }) else {
-            munmap(mappedBase, mappedLen)
-            throw ModelError.residentBufferWrapFailed
+    deinit {
+        // The lazy GPU wrap, when built, owns the unmap through its
+        // deallocator; otherwise the mapping is ours to release.
+        if lazyGPUBuffer == nil {
+            munmap(base, mappedLen)
         }
-        buf.label = "dflash2.weights"
-        self.buffer = buf
-        self.base = UnsafeRawPointer(mappedBase)
     }
 
     func tensor(_ name: String, shape expected: [Int]) throws -> Tensor {
@@ -106,8 +110,27 @@ final class DFlash2Weights {
         return t
     }
 
-    /// CPU pointer to a tensor's BF16 payload (selector codebook reads).
+    /// CPU pointer to a tensor's BF16 payload (quantization source and
+    /// selector codebook reads).
     func cpuPointer(of t: Tensor) -> UnsafePointer<UInt16> {
-        base.advanced(by: t.offset).assumingMemoryBound(to: UInt16.self)
+        UnsafeRawPointer(base).advanced(by: t.offset)
+            .assumingMemoryBound(to: UInt16.self)
+    }
+
+    /// File-backed GPU wrap of the whole mapping — BF16 parity path only;
+    /// never referenced by production command buffers.
+    func gpuBuffer() throws -> MTLBuffer {
+        if let lazyGPUBuffer { return lazyGPUBuffer }
+        nonisolated(unsafe) let captureBase = base
+        let captureLen = mappedLen
+        guard let buf = device.makeBuffer(
+            bytesNoCopy: base, length: mappedLen,
+            options: .storageModeShared,
+            deallocator: { _, _ in munmap(captureBase, captureLen) }) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        buf.label = "dflash2.weights.bf16"
+        lazyGPUBuffer = buf
+        return buf
     }
 }

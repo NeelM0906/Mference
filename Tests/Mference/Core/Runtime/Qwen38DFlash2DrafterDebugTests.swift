@@ -26,7 +26,8 @@ import Testing
                               shape: (0, 0, 0, 0), dtype: 0)
         let drafter = try Qwen38DFlash2Drafter(context: context, directory: dir,
                                                embedding: view, lmHead: view,
-                                               targetConfig: cfg)
+                                               targetConfig: cfg,
+                                               precision: .bf16)
         func floats(_ name: String) throws -> [Float] {
             let data = try Data(contentsOf: fixtures.appendingPathComponent(name))
             return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
@@ -58,5 +59,14 @@ import Testing
             stats(name, buf, count: min(buf.length / 2, 8 * 17408))
         }
         stats("normedFinal", drafter.parityNormedOut, count: 8 * 5120)
+
+        // Isolated draft-round latency: the core forward with no target
+        // model in memory. Bounds the drafter's own compute cost.
+        for round in 0..<5 {
+            let t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            try drafter.runCoreForParity(blockTokens: 8)
+            let ms = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6
+            print("[dflash2-debug] core round \(round): \(String(format: "%.1f", ms)) ms")
+        }
     }
 }
