@@ -79,6 +79,7 @@ public final class MetalContext: @unchecked Sendable {
         "gdn",
         "dsv4",
         "inkling",
+        "dflash2",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -86,6 +87,7 @@ public final class MetalContext: @unchecked Sendable {
         "attention": "Metal/Attention",
         "dequant_int4": "Metal/Quant",
         "dequant_int8": "Metal/Quant",
+        "dflash2": "Metal/DFlash2",
         "dsv4": "Metal/DSV4",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
