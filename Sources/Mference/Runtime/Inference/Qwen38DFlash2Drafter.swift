@@ -317,6 +317,14 @@ final class Qwen38DFlash2Drafter {
         pendingTapRows = 0
     }
 
+    /// After a reset, restart position bookkeeping at `base` so appended
+    /// rows carry the target stream's true RoPE positions.
+    func alignPositionBase(_ base: Int) {
+        precondition(ctxKept == 0 && pendingTapRows == 0,
+                     "position base can only move on an empty context")
+        ctxTotal = base
+    }
+
     // MARK: - Draft round
 
     /// Runs one draft round: consumes the pending tap rows as new context,

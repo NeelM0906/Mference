@@ -202,6 +202,12 @@ final class Qwen38MTPSpeculator {
     /// value this returns.
     var draftOverride: ((_ round: Int, _ k: Int) -> [Int32])?
 
+    /// Alternative draft source: the DFlash2 block-diffusion drafter. When
+    /// set, rounds draft through it (the MTP layer sits idle), the verify
+    /// pass stages target-tap rows for it, and the accept pass shrinks to
+    /// the GDN restore. Emitted bytes stay identical either way.
+    var dflash2: Qwen38DFlash2Drafter?
+
     private static let epsilon: Float = 1e-6
 
     /// Probe the resident index for MTP tensors; returns nil when the
@@ -281,8 +287,11 @@ final class Qwen38MTPSpeculator {
         let requestedK = ProcessInfo.processInfo.environment["MFERENCE_MTP_K"].flatMap(Int.init)
         // Upper bound 6 keeps the GDN capture arena bounded (k slots of every
         // linear layer's FP32 state) and the verify batch within the multi-x
-        // kernels' 8-token limit.
-        let capacity = min(max(requestedK ?? 3, 1), 6)
+        // kernels' 8-token limit. The DFlash2 drafter's acceptance length
+        // justifies the full width by default; MTP stays at its measured 3.
+        let dflash2Requested = (ProcessInfo.processInfo
+            .environment["MFERENCE_DFLASH2_DIR"]?.isEmpty == false)
+        let capacity = min(max(requestedK ?? (dflash2Requested ? 6 : 3), 1), 6)
         self.draftCapacity = capacity
         self.draftCount = capacity
         let vT = capacity + 1
@@ -429,6 +438,7 @@ final class Qwen38MTPSpeculator {
         basePair = 0
         arenaRoundBase = -1
         arenaCaptured = 0
+        dflash2?.reset()
     }
 
     var hasPending: Bool { !pending.isEmpty }
@@ -532,6 +542,16 @@ final class Qwen38MTPSpeculator {
             precondition(!drafts.isEmpty, "draft override returned no tokens")
             precondition(drafts.allSatisfy { $0 >= 0 && $0 < Int32(cfg.vocabSize) },
                          "draft override token outside the vocabulary")
+        } else if let dflash2 {
+            // Continuity invariant: the drafter's context rows plus its
+            // pending taps must land exactly at P. Plain-decode gaps or a
+            // continuation rewind break it; the drafter restarts with empty
+            // context at the right positions (quality-only, never bytes).
+            if dflash2.ctxTotal + dflash2.pendingTapRows != P {
+                dflash2.reset()
+                dflash2.alignPositionBase(P)
+            }
+            drafts = try dflash2.propose(anchor: bonus, maxDrafts: kRound)
         } else {
             var slot = mtpLen
             var tok: Int32
@@ -601,8 +621,19 @@ final class Qwen38MTPSpeculator {
             paged.noteAdvance(from: P, to: P + accepted + 1)
             paged.readBackScores(sealedPages: P / KVPageGeometry.tokensPerPage)
         }
-        try runAcceptPass(bonus: bonus, emitted: emitted, position: P,
-                          restoreSlot: rolledBack ? accepted : nil)
+        if let dflash2 {
+            // DFlash2 keeps its own context; the accept pass reduces to the
+            // GDN rollback restore plus committing the accepted tap rows.
+            if rolledBack {
+                let restoreCB = try commandBuffer()
+                try encodeGDNRestore(restoreCB, slot: accepted)
+                try finish(restoreCB)
+            }
+            dflash2.commitTapRows(accepted + 1)
+        } else {
+            try runAcceptPass(bonus: bonus, emitted: emitted, position: P,
+                              restoreSlot: rolledBack ? accepted : nil)
+        }
         stats.acceptNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - acceptStart
 
         // 4. Queue.
@@ -663,6 +694,15 @@ final class Qwen38MTPSpeculator {
             elementwise.encodeResidualAdd(commandBuffer: cb,
                                           hidden: vHidden, delta: vMlpOut,
                                           count: t * D)
+            // DFlash2 conditioning: stage this layer's output rows for the
+            // drafter's target-hidden feature. Rows beyond the accepted
+            // prefix are overwritten by the next verify (commitTapRows only
+            // advances past the committed ones).
+            if let dflash2, dflash2.isTapLayer(index) {
+                dflash2.encodeTapCapture(commandBuffer: cb,
+                                         layerIndex: index,
+                                         src: vHidden, rows: t)
+            }
         }
 
         let fNorm = model.finalNorm
