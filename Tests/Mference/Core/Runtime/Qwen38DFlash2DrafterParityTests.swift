@@ -56,7 +56,8 @@ import Testing
                                         directory: Self.drafterDir,
                                         embedding: view,
                                         lmHead: view,
-                                        targetConfig: cfg)
+                                        targetConfig: cfg,
+                                        precision: .bf16)
     }
 
     private static func stageTaps(_ drafter: Qwen38DFlash2Drafter,

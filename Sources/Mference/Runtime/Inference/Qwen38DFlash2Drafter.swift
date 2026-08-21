@@ -17,6 +17,21 @@ import Metal
 /// trades only acceptance length.
 final class Qwen38DFlash2Drafter {
 
+    /// Projection storage. `.int4` (default) quantizes at load into the
+    /// production multi-x GEMV format — 3.85 GB BF16 would both thrash a
+    /// 24 GB host against the 15 GB target and read 4x the bytes per round.
+    /// `.bf16` (MFERENCE_DFLASH2_BF16=1, and the parity tests) runs the
+    /// checkpoint unquantized for reference comparison.
+    enum Precision {
+        case int4
+        case bf16
+
+        static var fromEnvironment: Precision {
+            ProcessInfo.processInfo.environment["MFERENCE_DFLASH2_BF16"] == "1"
+                ? .bf16 : .int4
+        }
+    }
+
     struct DrafterConfig: Decodable {
         struct DFlash: Decodable {
             let block_size: Int
@@ -68,6 +83,15 @@ final class Qwen38DFlash2Drafter {
 
     private let ctx: MetalContext
     private let weights: DFlash2Weights
+    private let precision: Precision
+    /// BF16-mode GPU wrap of the checkpoint mapping; nil in INT4 mode.
+    private let weightsGPU: MTLBuffer?
+    /// INT4 mode: quantized projections; nil in BF16 mode.
+    private let slab: DFlash2Int4Slab?
+    /// Anonymous copies of the small tensors (norms, conv base kernels) so
+    /// production command buffers never touch file-backed memory.
+    private let smallBuf: MTLBuffer
+    private let smallOffsets: [Int: Int]
     private let kernels: DFlash2Kernels
     private let prefillRMS: PrefillRMSNorm
     private let prefillRope: PrefillRoPE
@@ -140,14 +164,17 @@ final class Qwen38DFlash2Drafter {
             directory: URL(fileURLWithPath: dir),
             embedding: model.embedding,
             lmHead: model.lmHead,
-            targetConfig: targetConfig)
+            targetConfig: targetConfig,
+            precision: .fromEnvironment)
     }
 
     init(context: MetalContext,
          directory: URL,
          embedding: TensorView,
          lmHead: TensorView,
-         targetConfig: ArchConfig) throws {
+         targetConfig: ArchConfig,
+         precision: Precision = .fromEnvironment) throws {
+        self.precision = precision
         self.ctx = context
         let configData = try Data(contentsOf: directory.appendingPathComponent("config.json"))
         self.config = try JSONDecoder().decode(DrafterConfig.self, from: configData)
@@ -222,6 +249,66 @@ final class Qwen38DFlash2Drafter {
                 mlpConvProj: try t("mlp_conv.kernel_projection.weight", [2 * K * G, D]))
         }
 
+        // Small tensors -> one anonymous GPU buffer (norms, conv bases).
+        var smallTensors: [DFlash2Weights.Tensor] = [hiddenNorm, finalNorm]
+        for layer in layers {
+            smallTensors.append(contentsOf: [layer.inputNorm, layer.postAttnNorm,
+                                             layer.qNorm, layer.kNorm,
+                                             layer.attnConvBase, layer.mlpConvBase])
+        }
+        var smallTotal = 0
+        var smallMap: [Int: Int] = [:]
+        for t in smallTensors {
+            smallMap[t.offset] = smallTotal
+            smallTotal += (t.byteCount + 63) / 64 * 64
+        }
+        guard let small = context.device.makeBuffer(length: max(smallTotal, 64),
+                                                    options: .storageModeShared) else {
+            throw Qwen38ForwardRunnerError.invalidConfiguration(
+                "unable to allocate dflash2 small-tensor buffer")
+        }
+        small.label = "dflash2.small"
+        for t in smallTensors {
+            small.contents().advanced(by: smallMap[t.offset]!)
+                .copyMemory(from: UnsafeRawPointer(weightsFile.cpuPointer(of: t)),
+                            byteCount: t.byteCount)
+        }
+        self.smallBuf = small
+        self.smallOffsets = smallMap
+
+        switch precision {
+        case .bf16:
+            self.weightsGPU = try weightsFile.gpuBuffer()
+            self.slab = nil
+        case .int4:
+            self.weightsGPU = nil
+            var quantList: [(name: String, base: UnsafePointer<UInt16>, shape: [Int])] = [
+                ("fc", weightsFile.cpuPointer(of: fc), fc.shape),
+                ("sel", weightsFile.cpuPointer(of: selectorHiddenProj),
+                 selectorHiddenProj.shape),
+            ]
+            for (l, layer) in layers.enumerated() {
+                for (suffix, t) in [("q", layer.q), ("k", layer.k), ("v", layer.v),
+                                    ("o", layer.o), ("gate", layer.mlpGate),
+                                    ("up", layer.mlpUp), ("down", layer.mlpDown),
+                                    ("aconv", layer.attnConvProj),
+                                    ("mconv", layer.mlpConvProj)] {
+                    quantList.append(("L\(l).\(suffix)",
+                                      weightsFile.cpuPointer(of: t), t.shape))
+                }
+            }
+            let attrs = try? FileManager.default.attributesOfItem(
+                atPath: directory.appendingPathComponent("model.safetensors").path)
+            let size = (attrs?[.size] as? Int) ?? 0
+            let mtime = (attrs?[.modificationDate] as? Date)?
+                .timeIntervalSince1970 ?? 0
+            self.slab = try DFlash2Int4Slab(
+                tensors: quantList,
+                cacheURL: directory.appendingPathComponent("int4-slab.cache"),
+                cacheKey: "v1:\(size):\(Int(mtime))",
+                device: context.device)
+        }
+
         let window = config.sliding_window
         self.tapCapacity = window - 1 + B
         self.ringCapacity = 4096
@@ -280,6 +367,10 @@ final class Qwen38DFlash2Drafter {
 
     /// Whether target layer `layerIndex` is one of the drafter's tap layers.
     func isTapLayer(_ layerIndex: Int) -> Bool { tapOrdinal[layerIndex] != nil }
+
+    /// How many trailing prompt rows are worth capturing: the drafter's
+    /// sliding context window (matching the reference's `hidden_limit`).
+    var contextWindowRows: Int { config.sliding_window - 1 }
 
     /// Encode a tap capture: `rows` rows of the target's hidden state after
     /// layer `layerIndex` ([rows, D] at `srcOffset`) land in the staging
@@ -366,12 +457,10 @@ final class Qwen38DFlash2Drafter {
                              logits: logitsBuf,
                              outIndices: candIdxBuf, outValues: candValBuf,
                              rows: drafts, vocab: targetVocab)
-        kernels.encodeGEMV(commandBuffer: cb,
-                           weights: weights.buffer,
-                           weightsOffset: selectorHiddenProj.offset,
-                           x: normedFinal, y: hprojBuf,
-                           m: config.dflash_config.selector_rank,
-                           n: config.hidden_size, tokens: drafts)
+        encodeProjection(cb, name: "sel", tensor: selectorHiddenProj,
+                         x: normedFinal, y: hprojBuf,
+                         m: config.dflash_config.selector_rank,
+                         n: config.hidden_size, tokens: drafts)
         try finish(cb)
         pendingTapRows = 0
         return selectPath(anchor: anchor, drafts: drafts)
@@ -420,12 +509,10 @@ final class Qwen38DFlash2Drafter {
                              logits: logitsBuf,
                              outIndices: candIdxBuf, outValues: candValBuf,
                              rows: rows, vocab: targetVocab)
-        kernels.encodeGEMV(commandBuffer: cb,
-                           weights: weights.buffer,
-                           weightsOffset: selectorHiddenProj.offset,
-                           x: normedFinal, y: hprojBuf,
-                           m: config.dflash_config.selector_rank,
-                           n: config.hidden_size, tokens: rows)
+        encodeProjection(cb, name: "sel", tensor: selectorHiddenProj,
+                         x: normedFinal, y: hprojBuf,
+                         m: config.dflash_config.selector_rank,
+                         n: config.hidden_size, tokens: rows)
         try finish(cb)
         let path = selectPath(anchor: anchor, drafts: rows)
         let idx = candIdxBuf.contents().bindMemory(to: UInt32.self,
@@ -448,13 +535,12 @@ final class Qwen38DFlash2Drafter {
         let kvDim = config.num_key_value_heads * config.head_dim
         let h = MemoryLayout<Float16>.stride
 
-        kernels.encodeGEMV(commandBuffer: cb,
-                           weights: weights.buffer, weightsOffset: fc.offset,
-                           x: tapStaging, y: ctxFeat,
-                           m: D, n: taps * D, tokens: S)
+        encodeProjection(cb, name: "fc", tensor: fc,
+                         x: tapStaging, y: ctxFeat,
+                         m: D, n: taps * D, tokens: S)
         prefillRMS.encodeBF16W(commandBuffer: cb,
                                x: ctxFeat,
-                               weight: weights.buffer, weightOffset: hiddenNorm.offset,
+                               weight: smallBuf, weightOffset: small(hiddenNorm),
                                out: hCtx,
                                t: UInt32(S), d: UInt32(D),
                                eps: config.rms_norm_eps)
@@ -482,18 +568,16 @@ final class Qwen38DFlash2Drafter {
         }
 
         for (l, layer) in layers.enumerated() {
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer, weightsOffset: layer.k.offset,
-                               x: hCtx, y: ctxKNew,
-                               m: kvDim, n: D, tokens: S)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer, weightsOffset: layer.v.offset,
-                               x: hCtx, y: ctxVNew,
-                               m: kvDim, n: D, tokens: S)
+            encodeProjection(cb, name: "L\(l).k", tensor: layer.k,
+                             x: hCtx, y: ctxKNew,
+                             m: kvDim, n: D, tokens: S)
+            encodeProjection(cb, name: "L\(l).v", tensor: layer.v,
+                             x: hCtx, y: ctxVNew,
+                             m: kvDim, n: D, tokens: S)
             prefillRMS.encodeBF16W(commandBuffer: cb,
                                    x: ctxKNew,
-                                   weight: weights.buffer,
-                                   weightOffset: layer.kNorm.offset,
+                                   weight: smallBuf,
+                                   weightOffset: small(layer.kNorm),
                                    out: ctxKNew,
                                    t: UInt32(S * config.num_key_value_heads),
                                    d: UInt32(config.head_dim),
@@ -557,47 +641,42 @@ final class Qwen38DFlash2Drafter {
             // Attention sublayer with the dynamic conv wrap.
             kernels.encodeRMSF32Rows(commandBuffer: cb,
                                      x: blockH,
-                                     weight: weights.buffer,
-                                     weightOffset: layer.inputNorm.offset,
+                                     weight: smallBuf,
+                                     weightOffset: small(layer.inputNorm),
                                      out: blockNormed,
                                      rows: B, d: D,
                                      eps: config.rms_norm_eps)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer,
-                               weightsOffset: layer.attnConvProj.offset,
-                               x: blockNormed, y: blockDyn,
-                               m: 2 * K * (D / groupSize), n: D, tokens: B)
+            encodeProjection(cb, name: "L\(l).aconv", tensor: layer.attnConvProj,
+                             x: blockNormed, y: blockDyn,
+                             m: 2 * K * (D / groupSize), n: D, tokens: B)
             kernels.encodeDynConv(commandBuffer: cb,
                                   x: blockNormed, dynamic: blockDyn,
-                                  base: weights.buffer,
-                                  baseOffset: layer.attnConvBase.offset,
+                                  base: smallBuf,
+                                  baseOffset: small(layer.attnConvBase),
                                   out: blockConvX,
                                   tokens: B, hidden: D,
                                   kernelSize: K, groupSize: groupSize, plane: 0)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer, weightsOffset: layer.q.offset,
-                               x: blockConvX, y: blockQ,
-                               m: qDim, n: D, tokens: B)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer, weightsOffset: layer.k.offset,
-                               x: blockConvX, y: blockK,
-                               m: kvDim, n: D, tokens: B)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer, weightsOffset: layer.v.offset,
-                               x: blockConvX, y: blockV,
-                               m: kvDim, n: D, tokens: B)
+            encodeProjection(cb, name: "L\(l).q", tensor: layer.q,
+                             x: blockConvX, y: blockQ,
+                             m: qDim, n: D, tokens: B)
+            encodeProjection(cb, name: "L\(l).k", tensor: layer.k,
+                             x: blockConvX, y: blockK,
+                             m: kvDim, n: D, tokens: B)
+            encodeProjection(cb, name: "L\(l).v", tensor: layer.v,
+                             x: blockConvX, y: blockV,
+                             m: kvDim, n: D, tokens: B)
             prefillRMS.encodeBF16W(commandBuffer: cb,
                                    x: blockQ,
-                                   weight: weights.buffer,
-                                   weightOffset: layer.qNorm.offset,
+                                   weight: smallBuf,
+                                   weightOffset: small(layer.qNorm),
                                    out: blockQ,
                                    t: UInt32(B * config.num_attention_heads),
                                    d: UInt32(config.head_dim),
                                    eps: config.rms_norm_eps)
             prefillRMS.encodeBF16W(commandBuffer: cb,
                                    x: blockK,
-                                   weight: weights.buffer,
-                                   weightOffset: layer.kNorm.offset,
+                                   weight: smallBuf,
+                                   weightOffset: small(layer.kNorm),
                                    out: blockK,
                                    t: UInt32(B * config.num_key_value_heads),
                                    d: UInt32(config.head_dim),
@@ -632,15 +711,14 @@ final class Qwen38DFlash2Drafter {
                 numQHeads: config.num_attention_heads,
                 numKVHeads: config.num_key_value_heads,
                 scale: 1.0 / Float(config.head_dim).squareRoot())
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer, weightsOffset: layer.o.offset,
-                               x: blockAttnOut, y: blockO,
-                               m: D, n: qDim, tokens: B,
-                               outputFloat32: true)
+            encodeProjection(cb, name: "L\(l).o", tensor: layer.o,
+                             x: blockAttnOut, y: blockO,
+                             m: D, n: qDim, tokens: B,
+                             outputFloat32: true)
             kernels.encodeDynConv(commandBuffer: cb,
                                   x: blockO, dynamic: blockDyn,
-                                  base: weights.buffer,
-                                  baseOffset: layer.attnConvBase.offset + basePlaneBytes,
+                                  base: smallBuf,
+                                  baseOffset: small(layer.attnConvBase) + basePlaneBytes,
                                   out: blockConvOut,
                                   tokens: B, hidden: D,
                                   kernelSize: K, groupSize: groupSize, plane: 1,
@@ -652,45 +730,37 @@ final class Qwen38DFlash2Drafter {
             // MLP sublayer with its own dynamic conv wrap.
             kernels.encodeRMSF32Rows(commandBuffer: cb,
                                      x: blockH,
-                                     weight: weights.buffer,
-                                     weightOffset: layer.postAttnNorm.offset,
+                                     weight: smallBuf,
+                                     weightOffset: small(layer.postAttnNorm),
                                      out: blockNormed,
                                      rows: B, d: D,
                                      eps: config.rms_norm_eps)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer,
-                               weightsOffset: layer.mlpConvProj.offset,
-                               x: blockNormed, y: blockDyn,
-                               m: 2 * K * (D / groupSize), n: D, tokens: B)
+            encodeProjection(cb, name: "L\(l).mconv", tensor: layer.mlpConvProj,
+                             x: blockNormed, y: blockDyn,
+                             m: 2 * K * (D / groupSize), n: D, tokens: B)
             kernels.encodeDynConv(commandBuffer: cb,
                                   x: blockNormed, dynamic: blockDyn,
-                                  base: weights.buffer,
-                                  baseOffset: layer.mlpConvBase.offset,
+                                  base: smallBuf,
+                                  baseOffset: small(layer.mlpConvBase),
                                   out: blockConvX,
                                   tokens: B, hidden: D,
                                   kernelSize: K, groupSize: groupSize, plane: 0)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer,
-                               weightsOffset: layer.mlpGate.offset,
-                               x: blockConvX, y: mlpGateBuf,
-                               m: F, n: D, tokens: B)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer,
-                               weightsOffset: layer.mlpUp.offset,
-                               x: blockConvX, y: mlpUpBuf,
-                               m: F, n: D, tokens: B)
+            encodeProjection(cb, name: "L\(l).gate", tensor: layer.mlpGate,
+                             x: blockConvX, y: mlpGateBuf,
+                             m: F, n: D, tokens: B)
+            encodeProjection(cb, name: "L\(l).up", tensor: layer.mlpUp,
+                             x: blockConvX, y: mlpUpBuf,
+                             m: F, n: D, tokens: B)
             try encodeSiluMul(cb, gate: mlpGateBuf, up: mlpUpBuf,
                               out: mlpActBuf, count: B * F)
-            kernels.encodeGEMV(commandBuffer: cb,
-                               weights: weights.buffer,
-                               weightsOffset: layer.mlpDown.offset,
-                               x: mlpActBuf, y: mlpOutBuf,
-                               m: D, n: F, tokens: B,
-                               outputFloat32: true)
+            encodeProjection(cb, name: "L\(l).down", tensor: layer.mlpDown,
+                             x: mlpActBuf, y: mlpOutBuf,
+                             m: D, n: F, tokens: B,
+                             outputFloat32: true)
             kernels.encodeDynConv(commandBuffer: cb,
                                   x: mlpOutBuf, dynamic: blockDyn,
-                                  base: weights.buffer,
-                                  baseOffset: layer.mlpConvBase.offset + basePlaneBytes,
+                                  base: smallBuf,
+                                  baseOffset: small(layer.mlpConvBase) + basePlaneBytes,
                                   out: blockConvOut,
                                   tokens: B, hidden: D,
                                   kernelSize: K, groupSize: groupSize, plane: 1,
@@ -704,11 +774,52 @@ final class Qwen38DFlash2Drafter {
         kernels.encodeRMSF32Rows(commandBuffer: cb,
                                  x: blockH,
                                  xOffset: normStartRow * D * MemoryLayout<Float>.stride,
-                                 weight: weights.buffer, weightOffset: finalNorm.offset,
+                                 weight: smallBuf, weightOffset: small(finalNorm),
                                  out: normedFinal,
                                  rows: rows, d: D,
                                  eps: config.rms_norm_eps)
     }
+
+    /// One projection through the active precision's kernel: quantized
+    /// multi-x GEMV from the slab, or the BF16 reference GEMV.
+    private func encodeProjection(_ cb: MTLCommandBuffer,
+                                  name: String, tensor: DFlash2Weights.Tensor,
+                                  x: MTLBuffer, xOffset: Int = 0,
+                                  y: MTLBuffer, yOffset: Int = 0,
+                                  m: Int, n: Int, tokens: Int,
+                                  outputFloat32: Bool = false) {
+        if let slab {
+            let view = slab.view(name)
+            var remaining = tokens
+            var xByte = xOffset
+            var yByte = yOffset
+            let yStride = outputFloat32 ? MemoryLayout<Float>.stride
+                                        : MemoryLayout<Float16>.stride
+            while remaining > 0 {
+                let t = min(remaining, DequantInt4GEMVMultiX.maxTokens)
+                multix.encode(commandBuffer: cb,
+                              weights: slab.buffer, weightsOffset: view.weightsOffset,
+                              scales: slab.buffer, scalesOffset: view.scalesOffset,
+                              biases: slab.buffer, biasesOffset: view.biasesOffset,
+                              x: x, xOffset: xByte,
+                              y: y, yOffset: yByte,
+                              m: m, n: n, tokens: t,
+                              outputFloat32: outputFloat32)
+                remaining -= t
+                xByte += t * n * MemoryLayout<Float16>.stride
+                yByte += t * m * yStride
+            }
+        } else {
+            kernels.encodeGEMV(commandBuffer: cb,
+                               weights: weightsGPU!, weightsOffset: tensor.offset,
+                               x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                               m: m, n: n, tokens: tokens,
+                               outputFloat32: outputFloat32)
+        }
+    }
+
+    /// Offset of a small tensor's anonymous GPU copy in `smallBuf`.
+    private func small(_ t: DFlash2Weights.Tensor) -> Int { smallOffsets[t.offset]! }
 
     private func encodeSiluMul(_ cb: MTLCommandBuffer,
                                gate: MTLBuffer, up: MTLBuffer, out: MTLBuffer,

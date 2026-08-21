@@ -41,6 +41,10 @@ final class Qwen38MTPSpeculator {
         var draftNanos: UInt64 = 0
         var verifyNanos: UInt64 = 0
         var acceptNanos: UInt64 = 0
+        /// Per-draft-position accept/trial counts (index = draft ordinal):
+        /// separates "weak first draft" from "decay along the block".
+        var positionTrials = [Int](repeating: 0, count: 8)
+        var positionAccepts = [Int](repeating: 0, count: 8)
     }
 
     /// Resolved MTP tensor views (`mtp.*` names in the resident index).
@@ -605,6 +609,10 @@ final class Qwen38MTPSpeculator {
         stats.verifyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - verifyStart
         stats.rounds += 1
         stats.acceptedTokens += accepted
+        for i in 0..<min(drafts.count, stats.positionTrials.count) {
+            stats.positionTrials[i] += 1
+            if i < accepted { stats.positionAccepts[i] += 1 }
+        }
 
         // 3. Accept + rollback.
         let acceptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
