@@ -462,6 +462,13 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                                      maxContext: maxContext,
                                                      mlpWeightBits: mlpWeightBits,
                                                      paged: pagedKV)
+            // MFERENCE_DFLASH2_DIR swaps the round's draft source to the
+            // DFlash2 block-diffusion drafter; the verify/accept machinery
+            // (and therefore emitted bytes) is unchanged.
+            if let mtp {
+                mtp.dflash2 = try Qwen38DFlash2Drafter.probe(
+                    context: context, model: model, targetConfig: cfg)
+            }
         }
     }
 
