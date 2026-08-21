@@ -4494,6 +4494,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var pendingExpertCB: (cb: MTLCommandBuffer, slots: [Int])?
             var prefetched: (expert: Int, plan: RoutedExpertFetchPlan,
                              blob: TensorView)?
+            // Error-path backstop: any throw below (a failed prefetch pread,
+            // a drain surfacing a GPU error) must not leave the in-flight
+            // buffer running against the persistent act/acc scratch — an
+            // immediate reset or retry would race it. The success path
+            // drains and clears `pendingExpertCB`, so this no-ops there.
+            defer {
+                if let pending = pendingExpertCB {
+                    waitForCompletion(pending.cb)
+                    pendingExpertCB = nil
+                }
+            }
             func drainPendingExpertCB() throws {
                 guard let pending = pendingExpertCB else { return }
                 pendingExpertCB = nil
