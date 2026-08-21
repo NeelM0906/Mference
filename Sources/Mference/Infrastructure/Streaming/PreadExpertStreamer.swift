@@ -275,15 +275,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
 
+        let missFileOffsets = try plan.misses.map { index in
+            try fileOffsetForExpert(plan.experts[index])
+        }
+        let runs = Self.coalescedReadRuns(offsets: missFileOffsets,
+                                          stride: layout.expertStride)
         let errorLock = NSLock()
         nonisolated(unsafe) var firstError: Error?
-        DispatchQueue.concurrentPerform(iterations: plan.misses.count) { missOffset in
-            let index = plan.misses[missOffset]
+        DispatchQueue.concurrentPerform(iterations: runs.count) { runIndex in
+            let run = runs[runIndex]
+            let destinations = run.map {
+                self.slotPointers[plan.assignedSlots[plan.misses[$0]]]
+            }
             do {
-                _ = try self.loadExpert(
-                    layer: 0,
-                    expert: plan.experts[index],
-                    slot: plan.assignedSlots[index])
+                try self.readScattered(
+                    into: destinations,
+                    fileOffset: missFileOffsets[run[0]],
+                    strideBytes: Int(self.layout.expertStride))
             } catch {
                 errorLock.lock()
                 if firstError == nil { firstError = error }
@@ -378,15 +386,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         _ reservation: [(expert: Int, slot: Int)]
     ) -> UInt64 {
         guard !reservation.isEmpty else { return 0 }
+        let fileOffsets = reservation.map { entry in
+            (try? fileOffsetForExpert(entry.expert)) ?? UInt64.max
+        }
+        let readable = reservation.indices.filter { fileOffsets[$0] != UInt64.max }
+        let runs = Self.coalescedReadRuns(offsets: readable.map { fileOffsets[$0] },
+                                          stride: layout.expertStride)
         let loadedLock = NSLock()
         nonisolated(unsafe) var loaded: [Int] = []
-        DispatchQueue.concurrentPerform(iterations: reservation.count) { index in
-            let entry = reservation[index]
-            guard (try? self.loadExpert(layer: 0,
-                                        expert: entry.expert,
-                                        slot: entry.slot)) != nil else { return }
+        DispatchQueue.concurrentPerform(iterations: runs.count) { runIndex in
+            let entries = runs[runIndex].map { readable[$0] }
+            let destinations = entries.map { self.slotPointers[reservation[$0].slot] }
+            guard (try? self.readScattered(
+                into: destinations,
+                fileOffset: fileOffsets[entries[0]],
+                strideBytes: Int(self.layout.expertStride))) != nil else { return }
             loadedLock.lock()
-            loaded.append(index)
+            loaded.append(contentsOf: entries)
             loadedLock.unlock()
         }
 
@@ -556,6 +572,70 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             calls: coalesced.count,
             bytes: bytes,
             maxCallNanos: maxCallNanos)
+    }
+
+    private func fileOffsetForExpert(_ expert: Int) throws -> UInt64 {
+        let regionOffset = layout.expertOffset(layer: 0, expert: expert)
+        guard regionOffset + layout.expertStride <= layout.streamSize else {
+            throw StreamerError.offsetOutOfRange(regionOffset)
+        }
+        return layout.streamOffset + regionOffset
+    }
+
+    /// Groups reads of `stride` bytes at `offsets` into runs that are exactly
+    /// contiguous on disk, so each run can be fetched with one scattered
+    /// `preadv` instead of one random `pread` per expert. Returns runs of
+    /// indices into `offsets`, each run in ascending disk order. Duplicate
+    /// offsets never share a run: their reads would overlap.
+    static func coalescedReadRuns(offsets: [UInt64], stride: UInt64) -> [[Int]] {
+        let sorted = offsets.indices.sorted { offsets[$0] < offsets[$1] }
+        var runs: [[Int]] = []
+        for index in sorted {
+            if let last = runs.last?.last, offsets[index] == offsets[last] &+ stride {
+                runs[runs.count - 1].append(index)
+            } else {
+                runs.append([index])
+            }
+        }
+        return runs
+    }
+
+    /// Reads `destinations.count * strideBytes` contiguous file bytes starting
+    /// at `fileOffset`, scattering `strideBytes` into each destination in
+    /// order. Single-destination runs use the plain `pread` path.
+    private func readScattered(into destinations: [UnsafeMutableRawPointer],
+                               fileOffset: UInt64,
+                               strideBytes: Int) throws {
+        guard destinations.count > 1 else {
+            return try readFull(into: destinations[0],
+                                fileOffset: fileOffset,
+                                count: strideBytes)
+        }
+        let total = destinations.count * strideBytes
+        var filled = 0
+        while filled < total {
+            let startIndex = filled / strideBytes
+            let within = filled % strideBytes
+            var vectors = [iovec(
+                iov_base: destinations[startIndex].advanced(by: within),
+                iov_len: strideBytes - within)]
+            for index in (startIndex + 1)..<destinations.count {
+                vectors.append(iovec(iov_base: destinations[index],
+                                     iov_len: strideBytes))
+            }
+            let readCount = vectors.withUnsafeBufferPointer { buffer in
+                preadv(fd, buffer.baseAddress, Int32(buffer.count),
+                       off_t(fileOffset) + off_t(filled))
+            }
+            if readCount < 0 {
+                throw StreamerError.preadFailed(errno: errno)
+            }
+            if readCount == 0 {
+                throw StreamerError.sizeMismatch(expected: UInt64(total),
+                                                 actual: UInt64(filled))
+            }
+            filled += readCount
+        }
     }
 
     private func readFull(into destination: UnsafeMutableRawPointer,

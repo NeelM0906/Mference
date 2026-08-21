@@ -98,6 +98,45 @@ import Metal
                 "completion is implausibly short:\n\(text)")
     }
 
+    /// Shadow speculative prefetch must be a pure transport change: greedy
+    /// tokens with the pilot+shadow path on are byte-identical to `off`.
+    /// Env-gated on the real install like the suite's other tests.
+    @Test func shadowPrefetchKeepsGreedyTokensIdentical() async throws {
+        guard let path = ProcessInfo.processInfo
+            .environment["MFERENCE_INKLING_GTURBO"] else { return }
+        let ctx = try MetalContext()
+        let cfg = try #require(ArchConfig.knownArchitectures[.inklingSmall])
+        // Eight slots force eviction churn, so speculation actually issues.
+        let model = try Model.load(directoryURL: URL(fileURLWithPath: path),
+                                   device: ctx.device,
+                                   expecting: cfg,
+                                   streamingMode: .pread(slotCount: 8))
+        let runner = try RealForwardRunner(model: model, context: ctx,
+                                           maxContext: 64)
+        let logits = ctx.device.makeBuffer(
+            length: cfg.vocabSize * MemoryLayout<Float16>.stride,
+            options: .storageModeShared)!
+
+        func decode(steps: Int) async throws -> [UInt32] {
+            var out: [UInt32] = []
+            var token: Int32 = 200_028
+            for position in 0..<steps {
+                try await runner.produce(token: token, position: position,
+                                         into: logits)
+                out.append(runner.lastGreedyToken)
+                token = Int32(runner.lastGreedyToken)
+            }
+            return out
+        }
+
+        runner.speculativePrefetchMode = .off
+        let reference = try await decode(steps: 8)
+        runner.reset()
+        runner.speculativePrefetchMode = .shadow
+        let shadowed = try await decode(steps: 8)
+        #expect(reference == shadowed)
+    }
+
     /// The head guard itself: with a finite residual stream the epilogue must
     /// report zero non-finite logits, so `produce()` cannot throw
     /// `InklingHeadError`. Cheap — one token, no generation loop.
