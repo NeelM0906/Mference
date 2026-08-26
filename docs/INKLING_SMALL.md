@@ -465,9 +465,16 @@ Those measurements identified two follow-ups:
 1. **Batched prefill attention was the main compute opportunity.** The
    chunk-wide portable and Apple10 TensorOps paths described below now cover
    Inkling's relative-position attention, including a wrapped sliding KV ring.
-2. **Expert streaming is serialized.** `prefillInklingChunk` awaits a fetch,
-   encodes, then drains, so the fetch never overlaps GPU work.
-   `PrefillRoutedTileScheduler` implements the pipelined alternative.
+2. **Expert streaming is serialized.** `prefillInklingChunk` awaited a fetch,
+   encoded, then drained, so the fetch never overlapped GPU work.
+   *Addressed 2026-08-20:* the loop now runs a depth-1 pipeline on the
+   `PrefillRoutedTileScheduler` contract — expert e+1 is planned and preaded
+   while expert e's GLU runs, misses placed only in slots the in-flight
+   buffer does not touch, output byte-identical.
+   `MFERENCE_INKLING_PREFILL_PIPELINE=0` restores the serialized loop.
+   Decode-side, the DSV4 pilot/shadow speculative prefetch is also ported
+   (`SpeculativeRouterInkling`, opt-in via `MFERENCE_SPEC_PREFETCH=shadow`
+   until an install A/B accepts a default).
 
 Method note, recorded because it cost real time: the first three attempts at
 this ranked the levers from dispatch counts and a per-pair cost fitted across
