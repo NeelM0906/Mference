@@ -80,9 +80,10 @@ import Testing
         let logitsSpec = try makeLogits(ctxSpec)
         let specStream = try await drive(spec, logitsSpec, steps: 200)
 
-        setenv("MFERENCE_MTP", "0", 1)
-        defer { unsetenv("MFERENCE_MTP") }
+        // Disable MTP per-instance — setenv would race runners constructed
+        // concurrently by other suites.
         let (ctxPlain, plain) = try makeRunner(dir, maxContext: 256, paged: true)
+        plain.mtp = nil
         let logitsPlain = try makeLogits(ctxPlain)
         let plainStream = try await drive(plain, logitsPlain, steps: 200)
 
@@ -103,8 +104,59 @@ import Testing
         #expect(first == second)
     }
 
-    /// Tight pool: rounds fetch selection members from the spill file and
-    /// stay deterministic.
+    /// A selection budget the context outgrows mid-run: spec rounds run
+    /// while the selection is exhaustive, then the gate hands decode off to
+    /// plain paged tokens — the stream must stay byte-identical to MTP-off
+    /// paged decode across the crossover into sparse selection.
+    @Test func pagedSpecDecode_sparseBudget_byteIdenticalToPagedPlain() async throws {
+        let dir = try Self.makeAttachedDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Coverage ends at 5 pages (sink 1 + recent 2 + topk 2); 400 steps
+        // put the crossover near position 320.
+        let (ctxSpec, spec) = try makeRunner(dir, maxContext: 512, paged: true,
+                                             topK: 2, sink: 1, recent: 2)
+        let logitsSpec = try makeLogits(ctxSpec)
+        let specStream = try await drive(spec, logitsSpec, steps: 400)
+
+        let (ctxPlain, plain) = try makeRunner(dir, maxContext: 512, paged: true,
+                                               topK: 2, sink: 1, recent: 2)
+        plain.mtp = nil
+        let logitsPlain = try makeLogits(ctxPlain)
+        let plainStream = try await drive(plain, logitsPlain, steps: 400)
+
+        #expect(specStream == plainStream)
+    }
+
+    /// The exactness gate: speculative rounds run while the selection is
+    /// exhaustive (5 pages here) and stop for good once the context
+    /// outgrows the budget — the sparse tail decodes as plain paged tokens.
+    @Test func pagedSpecDecode_gateStopsRoundsPastCoverage() async throws {
+        let dir = try Self.makeAttachedDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (ctx, runner) = try makeRunner(dir, maxContext: 512, paged: true,
+                                           topK: 2, sink: 1, recent: 2)
+        let mtp = try #require(runner.mtp)
+        let logits = try makeLogits(ctx)
+
+        var token: Int32 = 7
+        var roundsAtCrossover = -1
+        for position in 0..<400 {
+            try await runner.produce(token: token, position: position, into: logits)
+            if position == 330 { roundsAtCrossover = mtp.stats.rounds }
+            token = Int32(runner.lastGreedyToken % UInt32(Self.vocab))
+        }
+        // Rounds ran in the covered prefix and none started in the sparse
+        // tail (coverage ends at position 320; the gate's horizon stops
+        // rounds a few positions earlier).
+        #expect(roundsAtCrossover > 0)
+        #expect(mtp.stats.rounds == roundsAtCrossover)
+    }
+
+    /// Tight pool: while the selection is exhaustive, rounds run under pool
+    /// pressure; past the coverage gate, plain paged decode fetches sparse
+    /// selections from the spill file. Both phases must replay
+    /// deterministically.
     @Test func pagedSpecDecode_tightPool_replaysDeterministically() async throws {
         let dir = try Self.makeAttachedDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

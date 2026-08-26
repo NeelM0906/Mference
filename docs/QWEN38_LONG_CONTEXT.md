@@ -47,6 +47,15 @@ run per-position paged attention over the round's pinned selection, with
 cursor rewinds un-sealing pages on rejected drafts — byte-identical to
 plain paged decode (`Qwen38PagedMTPTests`).
 
+Speculative rounds run only while the page selection is **exhaustive**
+(every context page fits the sinks + recent + top-k budget, ≈ 4.2k tokens
+at the defaults). A round reuses one page table across its verify rows
+where plain decode reselects per token, so under a sparse selection the
+speculative stream could drift from the plain paged stream; the gate
+(`Qwen38MTPSpeculator.canRunRound`) hands decode off to plain paged tokens
+just before the selection turns sparse, preserving byte-identity across
+the crossover. Raise `--kv-topk` to extend the exact-MTP window.
+
 ## Correctness
 
 - The paged decode kernel is **bit-identical** to the contiguous kernel
@@ -81,8 +90,14 @@ With MTP speculative decode attached (byte-identical greedy):
 |---|---|---|---|
 | dense + MTP | 4k | 16.7 tok/s | reference |
 | paged + MTP | 4k | **16.8 tok/s** | identical output to dense+MTP, zero paging overhead |
-| paged + SSD needle + MTP | 5.4k prompt, 4.6k-token pool | **10.5 tok/s** | passkey retrieved exactly |
+| paged + SSD needle + MTP | 5.4k prompt, 4.6k-token pool | 10.5 tok/s † | passkey retrieved exactly |
 | 262k settings + MTP | 262,144 max-context | **14.0 tok/s** | |
+
+† Measured before the exactness gate. At the default budget the needle's
+5.4k context exceeds the exhaustive-selection window, so MTP now hands
+those decodes to plain paged tokens (≈ the 5.9 tok/s plain rate); raise
+`--kv-topk` past the context length to keep speculative rounds running
+exactly.
 
 Notes:
 

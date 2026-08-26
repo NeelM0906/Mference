@@ -74,4 +74,23 @@ public struct KVPageSelector: Sendable, Equatable {
         }
         return Selection(pages: pages, selTokens: selTokens)
     }
+
+    /// True when `select` over `totalPages` pages provably picks every page
+    /// no matter what the scores contain, provided at most
+    /// `maxUnscoredSealedPages` trailing sealed pages lack Quest scores
+    /// (plain decode lags one page; speculative rounds can lag by their
+    /// span). Gap pages — neither sink nor recent — are picked by top-k
+    /// only when scored, so any unscored page must sit inside the recent
+    /// window for coverage to be unconditional.
+    public func coversEntireContext(totalPages: Int,
+                                    maxUnscoredSealedPages: Int) -> Bool {
+        guard totalPages > 0 else { return true }
+        let sinks = min(sinkPages, totalPages)
+        let recentStart = max(0, totalPages - recentPages)
+        let unionCount = sinks + (totalPages - recentStart)
+            - max(0, sinks - recentStart)
+        let gap = totalPages - unionCount
+        if gap == 0 { return true }
+        return gap <= topKPages && recentPages >= 1 + maxUnscoredSealedPages
+    }
 }

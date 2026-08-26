@@ -491,7 +491,20 @@ final class Qwen38MTPSpeculator {
         // A round needs a prior decoded position: the drafter seeds from the
         // previous token's final-norm hidden, and `basePair = position - 1`
         // anchors its RoPE — position 0 decodes plainly.
-        position >= 1 && position == kv.position && position + 2 <= maxContext
+        guard position >= 1, position == kv.position,
+              position + 2 <= maxContext else { return false }
+        guard let paged else { return true }
+        // Sparse selections break the byte-identity contract: a round reuses
+        // one page table across its verify rows where plain decode reselects
+        // per token, and accepted rows are emitted without their own score
+        // pass. Rounds therefore run only while the selection through the
+        // round's span — plus one position of margin, so the token feeding
+        // the first sparse selection's lag-one scores is always
+        // plain-decoded — covers the entire context. Past that point decode
+        // falls back to plain paged tokens.
+        let kRound = min(draftCount, maxContext - position - 1)
+        let horizon = min(position + kRound + 1, maxContext - 1)
+        return paged.selectionIsExhaustive(at: horizon, maxSpanTokens: kRound + 1)
     }
 
     /// Run one draft/verify/accept round for `produce(bonus, position)`.

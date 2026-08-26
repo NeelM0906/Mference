@@ -172,6 +172,37 @@ import MferenceValidationSupport
         #expect(empty.pages.isEmpty && empty.selTokens == 0)
     }
 
+    @Test func selector_coversEntireContext_flipsAtTheBudgetBoundary() {
+        let selector = KVPageSelector(sinkPages: 2, recentPages: 4, topKPages: 60)
+        // 66 pages = sinks(2) + recent(4) + topk(60) exactly.
+        #expect(selector.coversEntireContext(totalPages: 66, maxUnscoredSealedPages: 1))
+        #expect(!selector.coversEntireContext(totalPages: 67, maxUnscoredSealedPages: 1))
+        #expect(selector.coversEntireContext(totalPages: 1, maxUnscoredSealedPages: 1))
+    }
+
+    @Test func selector_coversEntireContext_agreesWithSelect() {
+        let selector = KVPageSelector(sinkPages: 2, recentPages: 4, topKPages: 60)
+        for totalPages in [1, 6, 40, 65, 66, 67, 80] {
+            let sealed = totalPages - 1
+            let sel = selector.select(scores: (0..<sealed).map { Float($0) },
+                                      sealedPages: sealed, tailValidTokens: 10)
+            let covered = sel.pages.count == totalPages
+            #expect(selector.coversEntireContext(totalPages: totalPages,
+                                                 maxUnscoredSealedPages: 1) == covered,
+                    "totalPages \(totalPages)")
+        }
+    }
+
+    @Test func selector_coversEntireContext_requiresRecentOverUnscoredPages() {
+        // recent(1) covers only the tail, so an unscored just-sealed page
+        // would fall in the gap — coverage cannot be guaranteed.
+        let narrow = KVPageSelector(sinkPages: 0, recentPages: 1, topKPages: 10)
+        #expect(!narrow.coversEntireContext(totalPages: 5, maxUnscoredSealedPages: 1))
+        let wide = KVPageSelector(sinkPages: 0, recentPages: 2, topKPages: 10)
+        #expect(wide.coversEntireContext(totalPages: 5, maxUnscoredSealedPages: 1))
+        #expect(!wide.coversEntireContext(totalPages: 5, maxUnscoredSealedPages: 2))
+    }
+
     @Test func selector_boundaryPosition_hasNoTailPage() {
         let selector = KVPageSelector(sinkPages: 1, recentPages: 2, topKPages: 0)
         let sel = selector.select(scores: [1, 2, 3, 4], sealedPages: 4, tailValidTokens: 0)

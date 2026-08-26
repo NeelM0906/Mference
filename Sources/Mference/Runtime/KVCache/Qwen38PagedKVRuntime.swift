@@ -133,6 +133,20 @@ final class Qwen38PagedKVRuntime {
         }
     }
 
+    /// True when the selection at `position` provably includes every context
+    /// page regardless of score staleness — the regime where speculative
+    /// rounds are byte-identical to plain paged decode. `maxSpanTokens`
+    /// bounds how many tokens can commit between Quest score refreshes (a
+    /// verify span's accepted rows are emitted without their own score
+    /// pass), which bounds how many trailing sealed pages may be unscored.
+    func selectionIsExhaustive(at position: Int, maxSpanTokens: Int) -> Bool {
+        let totalPages = position / KVPageGeometry.tokensPerPage + 1
+        let lagPages = (maxSpanTokens + KVPageGeometry.tokensPerPage - 1)
+            / KVPageGeometry.tokensPerPage
+        return selector.coversEntireContext(totalPages: totalPages,
+                                            maxUnscoredSealedPages: max(1, lagPages))
+    }
+
     /// Extend each layer's table past the selection tail with the unsealed
     /// pages a speculative verify span [position, position + count) writes
     /// into, so per-position paged attention can address the whole span.
