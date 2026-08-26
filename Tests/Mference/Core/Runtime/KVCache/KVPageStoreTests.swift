@@ -217,6 +217,46 @@ import Metal
         #expect(store.residentPageCount(layer: 3) == 0)
     }
 
+    // MARK: spill write failures
+
+    @Test func writeFully_surfacesDescriptorErrors() {
+        let bytes: [UInt8] = [1, 2, 3, 4]
+        #expect(throws: KVPageStoreError.self) {
+            try bytes.withUnsafeBytes { buf in
+                try KVPageStore.writeFully(fd: -1, from: buf.baseAddress!,
+                                           count: buf.count, offset: 0)
+            }
+        }
+    }
+
+    @Test func recordedSpillFailure_failsSpillReadsUntilReset() throws {
+        let (ctx, store, dir) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try store.kSlot(layer: 3, position: 0)
+        store.advance(by: Self.pageTokens)
+        store.flushSpills()
+
+        store.recordSpillError(.ioFailed(operation: "pwrite spill", errno: ENOSPC))
+        #expect(store.spillFailure != nil)
+        let staging = try #require(ctx.device.makeBuffer(
+            length: 2 * store.geometry.kPageBytes, options: .storageModeShared))
+        #expect(throws: KVPageStoreError.ioFailed(operation: "pwrite spill",
+                                                  errno: ENOSPC)) {
+            try store.readSpilledSpan(layer: 3, firstPage: 0, pageCount: 1,
+                                      into: staging)
+        }
+
+        // Reset rewrites every page before it can be read again, so the
+        // recorded failure clears with the rest of the state.
+        store.reset()
+        #expect(store.spillFailure == nil)
+        _ = try store.kSlot(layer: 3, position: 0)
+        store.advance(by: Self.pageTokens)
+        store.flushSpills()
+        try store.readSpilledSpan(layer: 3, firstPage: 0, pageCount: 1,
+                                  into: staging)
+    }
+
     // MARK: metadata layout
 
     @Test func metadataOffsets_areDistinctPerLayerAndPage() throws {

@@ -103,6 +103,33 @@ public final class KVPageStore {
     private let spillFD: Int32
     private let spillQueue = DispatchQueue(label: "mference.kvpage.spill")
     private let spillDirectory: URL
+    /// First write-behind failure (ENOSPC, short write, I/O error), recorded
+    /// on the spill queue and surfaced by the next spill-file read — pages
+    /// past a failed spill are unreliable on disk, so the run must fail
+    /// cleanly instead of fetching garbage. A separate box because spill
+    /// closures must not retain the store: its deinit synchronizes on the
+    /// spill queue, and releasing the last reference on that queue would
+    /// deadlock.
+    private final class SpillErrorBox {
+        private let lock = NSLock()
+        private var error: KVPageStoreError?
+        func record(_ newError: KVPageStoreError) {
+            lock.lock()
+            defer { lock.unlock() }
+            if error == nil { error = newError }
+        }
+        var value: KVPageStoreError? {
+            lock.lock()
+            defer { lock.unlock() }
+            return error
+        }
+        func clear() {
+            lock.lock()
+            defer { lock.unlock() }
+            error = nil
+        }
+    }
+    private let spillError = SpillErrorBox()
 
     public init(device: MTLDevice,
                 config: ArchConfig,
@@ -370,6 +397,7 @@ public final class KVPageStore {
     public func readSpilledSpan(layer: Int, firstPage: Int, pageCount: Int,
                                 into staging: MTLBuffer) throws {
         precondition(pageCount > 0, "empty span read")
+        try throwIfSpillFailed()
         let ordinal = requireOrdinal(layer)
         let bytes = pageCount * 2 * geometry.kPageBytes
         precondition(staging.length >= bytes, "staging buffer too small for span")
@@ -397,6 +425,9 @@ public final class KVPageStore {
     /// Drop all pages, rewind the cursor, and return pool pages to the OS.
     public func reset() {
         flushSpills()
+        // A fresh run depends on no failed write: the file is re-punched
+        // below and every page rewritten before it can be read again.
+        spillError.clear()
         position = 0
         sealedPageCount = 0
         identityMappingIntact = true
@@ -497,17 +528,50 @@ public final class KVPageStore {
         let vSrc = vPools[ordinal].contents() + slot * pageBytes
         let offset = off_t(geometry.fileOffset(layerOrdinal: ordinal, pageIndex: pageIndex))
         let fd = spillFD
-        spillQueue.async {
+        spillQueue.async { [box = spillError] in
             // The slot cannot be reused while its spill is pending (eviction
             // barriers on this queue first), so the pointers stay valid.
-            let wroteK = pwrite(fd, kSrc, pageBytes, offset)
-            let wroteV = pwrite(fd, vSrc, pageBytes, offset + off_t(pageBytes))
-            precondition(wroteK == pageBytes && wroteV == pageBytes,
-                         "kv spill pwrite failed: errno \(errno)")
+            do {
+                try Self.writeFully(fd: fd, from: kSrc, count: pageBytes,
+                                    offset: offset)
+                try Self.writeFully(fd: fd, from: vSrc, count: pageBytes,
+                                    offset: offset + off_t(pageBytes))
+            } catch let error as KVPageStoreError {
+                box.record(error)
+            } catch {
+                box.record(.ioFailed(operation: "pwrite spill", errno: EIO))
+            }
         }
     }
 
+    /// `pwrite` until `count` bytes land, resuming short writes and EINTR.
+    static func writeFully(fd: Int32, from source: UnsafeRawPointer,
+                           count: Int, offset: off_t) throws {
+        var done = 0
+        while done < count {
+            let n = pwrite(fd, source + done, count - done, offset + off_t(done))
+            guard n > 0 else {
+                if n < 0 && errno == EINTR { continue }
+                throw KVPageStoreError.ioFailed(operation: "pwrite spill",
+                                                errno: n < 0 ? errno : ENOSPC)
+            }
+            done += n
+        }
+    }
+
+    func recordSpillError(_ error: KVPageStoreError) {
+        spillError.record(error)
+    }
+
+    /// The first recorded write-behind failure, if any.
+    public var spillFailure: KVPageStoreError? { spillError.value }
+
+    private func throwIfSpillFailed() throws {
+        if let error = spillFailure { throw error }
+    }
+
     private func fetch(ordinal: Int, pageIndex: Int, slot: Int) throws {
+        try throwIfSpillFailed()
         let pageBytes = geometry.kPageBytes
         let kDst = kPools[ordinal].contents() + slot * pageBytes
         let vDst = vPools[ordinal].contents() + slot * pageBytes
