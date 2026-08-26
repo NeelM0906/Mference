@@ -187,6 +187,14 @@ final class Qwen38DFlash2Drafter {
                 "dflash2 drafter expects \(config.num_target_layers) target layers, "
                 + "target has \(targetConfig.numLayers)")
         }
+        // The drafter shares the target's embedding/LM head and consumes tap
+        // captures of the target's hidden rows, so a width mismatch would
+        // mis-stride those kernels instead of failing cleanly.
+        guard config.hidden_size == targetConfig.hiddenSize else {
+            throw Qwen38ForwardRunnerError.invalidConfiguration(
+                "dflash2 drafter hidden size \(config.hidden_size) "
+                + "!= target \(targetConfig.hiddenSize)")
+        }
         self.tapOrdinal = Dictionary(
             uniqueKeysWithValues: config.dflash_config.target_layer_ids.enumerated()
                 .map { ($0.element, $0.offset) })
