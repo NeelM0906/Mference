@@ -46,6 +46,13 @@ public struct Args: Equatable, Sendable {
     /// written at install time instead. Mirrors the Mac app's existing
     /// verification control.
     public var verification: ModelIntegrityPolicy
+    /// Paged KV cache with SSD spill + sparse decode (Qwen 3.8):
+    /// "on" / "off" / "auto" (auto enables it above 32k context).
+    public var kvPaged: String
+    /// Sparse decode selection budget in 64-token pages.
+    public var kvTopKPages: Int
+    /// Resident pool per full-attention layer in pages; nil = auto by RAM.
+    public var kvPoolPages: Int?
 
     public init(model: String,
                 prompt: String? = nil,
@@ -65,7 +72,10 @@ public struct Args: Equatable, Sendable {
                 rdadvise: String = "off",
                 prefillChunk: PrefillChunkChoice = .auto,
                 flashHead: Bool = false,
-                verification: ModelIntegrityPolicy = .fullSha256) {
+                verification: ModelIntegrityPolicy = .fullSha256,
+                kvPaged: String = "auto",
+                kvTopKPages: Int = 60,
+                kvPoolPages: Int? = nil) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -82,6 +92,9 @@ public struct Args: Equatable, Sendable {
         self.prefillChunk = prefillChunk
         self.flashHead = flashHead
         self.verification = verification
+        self.kvPaged = kvPaged
+        self.kvTopKPages = kvTopKPages
+        self.kvPoolPages = kvPoolPages
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
@@ -128,6 +141,13 @@ extension Args {
       --system <string>         System message for --chat (repeatable).
       --max-new <int>           Generated-token limit (default 1024).
       --max-context <int>       Context limit in tokens (default 4096).
+      --kv-paged <on|off|auto>  Paged KV cache with SSD spill + Quest sparse
+                                decode (Qwen 3.8; default auto: on above 32k
+                                context). Exact when everything fits RAM.
+      --kv-topk <pages>         Sparse decode budget in 64-token pages
+                                (default 60 ≈ 3.8k attended tokens/layer).
+      --kv-pool-pages <n|auto>  Resident pool per full-attention layer in
+                                pages (default auto: sized from RAM).
       --temperature <float>     Sampling temperature (default 0.2; 0 = greedy).
       --top-k <int>             Top-k truncation, 1...256 (default 64; 0 = off).
       --top-p <float>           Nucleus truncation (default 0.95).
@@ -183,6 +203,9 @@ extension Args {
         var prefillChunk = PrefillChunkChoice.auto
         var flashHead = false
         var verification = ModelIntegrityPolicy.fullSha256
+        var kvPaged = "auto"
+        var kvTopKPages = 60
+        var kvPoolPages: Int? = nil
 
         var index = 0
         while index < argv.count {
@@ -220,6 +243,28 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 maxContext = parsed
+            case "--kv-paged":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard ["on", "off", "auto"].contains(value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                kvPaged = value
+            case "--kv-topk":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Int(value), parsed >= 0 else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                kvTopKPages = parsed
+            case "--kv-pool-pages":
+                let value = try takeValue(argv, &index, flag: flag)
+                if value == "auto" {
+                    kvPoolPages = nil
+                } else {
+                    guard let parsed = Int(value), parsed > 0 else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    kvPoolPages = parsed
+                }
             case "--temperature":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed >= 0 else {
@@ -330,7 +375,10 @@ extension Args {
                     rdadvise: rdadvise,
                     prefillChunk: prefillChunk,
                     flashHead: flashHead,
-                    verification: verification)
+                    verification: verification,
+                    kvPaged: kvPaged,
+                    kvTopKPages: kvTopKPages,
+                    kvPoolPages: kvPoolPages)
     }
 
     private static func takeValue(_ argv: [String],

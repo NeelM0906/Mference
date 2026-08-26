@@ -56,7 +56,10 @@ Mference currently runs five pinned instruction checkpoints:
   multimodal checkpoint, fully resident in ~15 GB (24 GB Macs). Ships MTP
   speculative decoding with byte-identical greedy output — 15.0 tok/s decode
   on a 24 GB M5 (2.35× mlx-vlm on the same checkpoint). Its chat template
-  also opens a live `<think>` block.
+  also opens a live `<think>` block. Long contexts (past RAM, up to the
+  model's 262k) run a paged KV cache with an SSD spill tier and query-aware
+  sparse decode at full FP16 — see
+  [docs/QWEN38_LONG_CONTEXT.md](docs/QWEN38_LONG_CONTEXT.md).
   
 The runtime, streaming installer, CLI, native Mac app, and loopback
 OpenAI-compatible server are written in Swift and Metal. Mference is

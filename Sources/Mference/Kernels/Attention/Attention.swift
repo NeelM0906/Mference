@@ -45,6 +45,9 @@ final class Attention {
     private let psoCombineQwenFullChunks16: MTLComputePipelineState
     private let psoCombineQwen38FullChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
+    private let psoPagedPartial: MTLComputePipelineState
+    private let psoPagedPartialQwen38: MTLComputePipelineState
+    private let psoPagedPartialQwen38Chunks16: MTLComputePipelineState
 
     /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
     /// with a hardcoded 256-thread group so its threadgroup-memory scratch
@@ -167,6 +170,18 @@ final class Attention {
                                                                    numQHeads: 16,
                                                                    numKVHeads: 2,
                                                                    numChunks: 16)
+        self.psoPagedPartial = try context.pipeline("attention_decode_paged_partial")
+        self.psoPagedPartialQwen38 = try Self.specializedPipeline(context,
+                                                                  "attention_decode_paged_partial",
+                                                                  headDim: 256,
+                                                                  numQHeads: 24,
+                                                                  numKVHeads: 4)
+        self.psoPagedPartialQwen38Chunks16 = try Self.specializedPipeline(context,
+                                                                          "attention_decode_paged_partial",
+                                                                          headDim: 256,
+                                                                          numQHeads: 24,
+                                                                          numKVHeads: 4,
+                                                                          numChunks: 16)
         let md = Self.maxQHeads * Self.maxChunks
         guard let m = context.device.makeBuffer(length: md * MemoryLayout<Float>.size,
                                                 options: .storageModeShared),
@@ -272,6 +287,85 @@ final class Attention {
                     preferGQASWA: false)
     }
 
+
+    /// Paged full attention over a page-table selection (KVPageStore pools).
+    /// `pageTable` holds one `uint32` pool slot per selected 64-token page in
+    /// ascending logical order; `selTokens` counts selected tokens (the last
+    /// page may be partial). Split geometry and the combine pass match
+    /// `encodeFull`, so with a full identity selection the result is
+    /// bit-identical to the contiguous kernel.
+    func encodeFullPaged(commandBuffer: MTLCommandBuffer,
+                         q: MTLBuffer, qOffset: Int = 0,
+                         kPool: MTLBuffer,
+                         vPool: MTLBuffer,
+                         pageTable: MTLBuffer, pageTableOffset: Int = 0,
+                         out: MTLBuffer, outOffset: Int = 0,
+                         headDim: UInt32,
+                         numQHeads: UInt32,
+                         numKVHeads: UInt32,
+                         selTokens: UInt32,
+                         scale: Float? = nil) {
+        precondition(numQHeads % numKVHeads == 0,
+                     "numQHeads must be a multiple of numKVHeads for GQA")
+        precondition(headDim <= 512,
+                     "head_dim must be <= 512 (kernel scratch is sized for the full-attn case)")
+        precondition(selTokens > 0, "paged attention requires at least one selected token")
+        precondition(Int(numQHeads) <= Self.maxQHeads,
+                     "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
+        let sc = scale ?? Self.defaultScale(headDim: headDim)
+        let geometry = Self.splitGeometry(numQHeads: numQHeads,
+                                          numKVHeads: numKVHeads,
+                                          seqLen: selTokens,
+                                          kvStart: 0,
+                                          preferGQASWA: false)
+        let nChunks = geometry.numChunks
+        let partialPSO = pagedPartialPipeline(headDim: headDim,
+                                              numQHeads: numQHeads,
+                                              numKVHeads: numKVHeads,
+                                              numChunks: nChunks)
+        let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
+
+        guard let p1 = commandBuffer.makeComputeCommandEncoder() else { return }
+        p1.setComputePipelineState(partialPSO)
+        p1.setBuffer(q, offset: qOffset, index: 0)
+        p1.setBuffer(kPool, offset: 0, index: 1)
+        p1.setBuffer(vPool, offset: 0, index: 2)
+        p1.setBuffer(mPartial, offset: 0, index: 3)
+        p1.setBuffer(dPartial, offset: 0, index: 4)
+        p1.setBuffer(oPartial, offset: 0, index: 5)
+        var hd = headDim, nq = numQHeads, nkv = numKVHeads, st = selTokens
+        var cl = UInt32(geometry.chunkLength), nc = UInt32(nChunks), sc2 = sc
+        p1.setBytes(&hd,  length: MemoryLayout<UInt32>.size, index: 6)
+        p1.setBytes(&nq,  length: MemoryLayout<UInt32>.size, index: 7)
+        p1.setBytes(&nkv, length: MemoryLayout<UInt32>.size, index: 8)
+        p1.setBytes(&st,  length: MemoryLayout<UInt32>.size, index: 9)
+        p1.setBuffer(pageTable, offset: pageTableOffset, index: 10)
+        p1.setBytes(&cl,  length: MemoryLayout<UInt32>.size, index: 11)
+        p1.setBytes(&nc,  length: MemoryLayout<UInt32>.size, index: 12)
+        p1.setBytes(&sc2, length: MemoryLayout<Float>.size,  index: 13)
+        p1.dispatchThreadgroups(MTLSize(width: geometry.partialThreadgroups, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
+        p1.endEncoding()
+
+        guard let p2 = commandBuffer.makeComputeCommandEncoder() else { return }
+        let combinePSO = combinePipeline(headDim: headDim,
+                                         numQHeads: numQHeads,
+                                         numKVHeads: numKVHeads,
+                                         numChunks: nChunks)
+        p2.setComputePipelineState(combinePSO)
+        p2.setBuffer(mPartial, offset: 0, index: 0)
+        p2.setBuffer(dPartial, offset: 0, index: 1)
+        p2.setBuffer(oPartial, offset: 0, index: 2)
+        p2.setBuffer(out, offset: outOffset, index: 3)
+        var hd2 = headDim, nc2 = UInt32(nChunks)
+        p2.setBytes(&hd2, length: MemoryLayout<UInt32>.size, index: 4)
+        p2.setBytes(&nc2, length: MemoryLayout<UInt32>.size, index: 5)
+        let combineTGWidth = min(Self.threadsPerGroup,
+                                 Int(combinePSO.maxTotalThreadsPerThreadgroup))
+        p2.dispatchThreadgroups(MTLSize(width: Int(numQHeads), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: combineTGWidth, height: 1, depth: 1))
+        p2.endEncoding()
+    }
 
     /// Two-pass split-KV (Flash-Decoding) dispatch shared by SWA and full
     /// attention — they differ only by `kvStart`. Pass 1 fans the head's
@@ -424,6 +518,16 @@ final class Attention {
             return psoPartialFull
         }
         return useGQAPartial ? psoGQAPartial : psoPartial
+    }
+
+    private func pagedPartialPipeline(headDim: UInt32,
+                                      numQHeads: UInt32,
+                                      numKVHeads: UInt32,
+                                      numChunks: Int) -> MTLComputePipelineState {
+        if headDim == 256 && numQHeads == 24 && numKVHeads == 4 {
+            return numChunks == 16 ? psoPagedPartialQwen38Chunks16 : psoPagedPartialQwen38
+        }
+        return psoPagedPartial
     }
 
     private func combinePipeline(headDim: UInt32,
