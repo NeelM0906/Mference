@@ -4,35 +4,87 @@ public enum RangeCopyTransform: Sendable, Equatable {
     case identity
     case unpackInt2ToInt4
     case repeatBF16(count: Int, negated: Bool)
+    /// Quantize-in-flight (Workstream 2): BF16 source bytes to one component of
+    /// the MLX INT4 affine group-64 layout. The planner emits all three
+    /// components over the *same* source range, so the coalescer downloads
+    /// those bytes once and each destination transform re-derives its own slice
+    /// of the result. See `StreamingInt4Quantizer`.
+    case quantizeInt4G64(component: StreamingInt4Quantizer.Component)
+    /// A dense run of BF16 rows to a dense run of self-contained quantized row
+    /// records (`[packed | scales | biases]` per row). Used for the tail rows of
+    /// a PLE n-gram row-pool region.
+    case quantizeInt4G64Rows(rowSourceBytes: Int)
+    /// Whole page-aligned row blocks of a PLE n-gram row pool: `rowsPerBlock`
+    /// BF16 rows in, `blockStride` bytes out (records then zero padding).
+    case quantizeInt4G64RowBlocks(rowSourceBytes: Int,
+                                  rowsPerBlock: Int,
+                                  blockStride: UInt64)
+    /// Whole page-aligned row blocks of a pool whose rows stay BF16: the rows
+    /// are copied verbatim and the block is zero-padded to `blockStride`. Used
+    /// for the Flash-Next PLE table, whose 160-wide rows the group size does
+    /// not divide.
+    case bf16RowBlocks(rowSourceBytes: Int,
+                       rowsPerBlock: Int,
+                       blockStride: UInt64)
 
     var inputUnitBytes: UInt64 {
         switch self {
         case .identity: 1
         case .unpackInt2ToInt4: 4
         case .repeatBF16: 2
+        case .quantizeInt4G64: UInt64(StreamingInt4Quantizer.groupSourceBytes)
+        case .quantizeInt4G64Rows(let rowSourceBytes):
+            UInt64(max(rowSourceBytes, 1))
+        case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, _),
+             .bf16RowBlocks(let rowSourceBytes, let rowsPerBlock, _):
+            UInt64(max(rowSourceBytes, 1)) * UInt64(max(rowsPerBlock, 1))
         }
     }
 
     func destinationByteCount(for sourceByteCount: UInt64) throws -> UInt64 {
-        let multiplier: UInt64
         switch self {
         case .identity:
-            multiplier = 1
+            return sourceByteCount
         case .unpackInt2ToInt4:
-            multiplier = 2
+            return try scaled(sourceByteCount, by: 2)
         case .repeatBF16(let count, _):
             guard count > 0, let value = UInt64(exactly: count) else {
                 throw RepackError.configurationInvalid(
                     detail: "repeat-bf16 count must be positive")
             }
-            multiplier = value
+            return try scaled(sourceByteCount, by: value)
+        case .quantizeInt4G64(let component):
+            let unit = UInt64(StreamingInt4Quantizer.groupSourceBytes)
+            let groups = try unitCount(sourceByteCount, unit: unit)
+            return try scaled(groups, by: UInt64(component.destinationBytesPerGroup))
+        case .quantizeInt4G64Rows(let rowSourceBytes):
+            let rowDim = try validRowDim(rowSourceBytes)
+            let rows = try unitCount(sourceByteCount, unit: UInt64(rowSourceBytes))
+            return try scaled(
+                rows,
+                by: UInt64(StreamingInt4Quantizer.rowRecordBytes(rowDim: rowDim)))
+        case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
+            let rowDim = try validRowDim(rowSourceBytes)
+            guard rowsPerBlock > 0,
+                  blockStride > 0,
+                  blockStride >= UInt64(rowsPerBlock)
+                    * UInt64(StreamingInt4Quantizer.rowRecordBytes(rowDim: rowDim)) else {
+                throw RepackError.configurationInvalid(
+                    detail: "quantize-int4-g64-row-blocks geometry is invalid")
+            }
+            let unit = try scaled(UInt64(rowSourceBytes), by: UInt64(rowsPerBlock))
+            let blocks = try unitCount(sourceByteCount, unit: unit)
+            return try scaled(blocks, by: blockStride)
+        case .bf16RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
+            guard rowSourceBytes > 0, rowsPerBlock > 0, blockStride > 0,
+                  blockStride >= UInt64(rowsPerBlock) * UInt64(rowSourceBytes) else {
+                throw RepackError.configurationInvalid(
+                    detail: "bf16-row-blocks geometry is invalid")
+            }
+            let unit = try scaled(UInt64(rowSourceBytes), by: UInt64(rowsPerBlock))
+            let blocks = try unitCount(sourceByteCount, unit: unit)
+            return try scaled(blocks, by: blockStride)
         }
-        let (result, overflow) = sourceByteCount.multipliedReportingOverflow(by: multiplier)
-        guard !overflow else {
-            throw RepackError.configurationInvalid(
-                detail: "range transform output size overflows UInt64")
-        }
-        return result
     }
 
     var fingerprintDescription: String {
@@ -41,7 +93,43 @@ public enum RangeCopyTransform: Sendable, Equatable {
         case .unpackInt2ToInt4: "unpack-int2-to-int4"
         case .repeatBF16(let count, let negated):
             "repeat-bf16:\(count):\(negated ? 1 : 0)"
+        case .quantizeInt4G64(let component):
+            "quantize-int4-g64:\(component.rawValue)"
+        case .quantizeInt4G64Rows(let rowSourceBytes):
+            "quantize-int4-g64-rows:\(rowSourceBytes)"
+        case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
+            "quantize-int4-g64-row-blocks:\(rowSourceBytes):\(rowsPerBlock):\(blockStride)"
+        case .bf16RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
+            "bf16-row-blocks:\(rowSourceBytes):\(rowsPerBlock):\(blockStride)"
         }
+    }
+
+    private func validRowDim(_ rowSourceBytes: Int) throws -> Int {
+        guard rowSourceBytes > 0,
+              rowSourceBytes % StreamingInt4Quantizer.groupSourceBytes == 0 else {
+            throw RepackError.configurationInvalid(
+                detail: "quantize-int4-g64 row source \(rowSourceBytes) is not a positive "
+                    + "multiple of \(StreamingInt4Quantizer.groupSourceBytes)")
+        }
+        return rowSourceBytes / 2
+    }
+
+    private func unitCount(_ sourceByteCount: UInt64, unit: UInt64) throws -> UInt64 {
+        guard unit > 0, sourceByteCount % unit == 0 else {
+            throw RepackError.configurationInvalid(
+                detail: "range transform \(fingerprintDescription) requires "
+                    + "\(unit)-byte aligned source ranges, got \(sourceByteCount)")
+        }
+        return sourceByteCount / unit
+    }
+
+    private func scaled(_ value: UInt64, by multiplier: UInt64) throws -> UInt64 {
+        let (result, overflow) = value.multipliedReportingOverflow(by: multiplier)
+        guard !overflow else {
+            throw RepackError.configurationInvalid(
+                detail: "range transform output size overflows UInt64")
+        }
+        return result
     }
 }
 
@@ -179,7 +267,7 @@ public enum RangeCopyPlanner {
             }
         }
 
-        for layer in repackPlan.layers where layer.expertsPerLayer > 0 {
+        for layer in repackPlan.allExpertLayers {
             for expert in 0..<layer.expertsPerLayer {
                 let blobBase = try checkedProduct(
                     UInt64(layer.physicalRank(for: expert)),
@@ -188,14 +276,18 @@ public enum RangeCopyPlanner {
                 for slice in layer.subTensors {
                     let sourceStride = try checkedProduct(
                         UInt64(expert),
-                        slice.sourceOffsetPerExpert,
+                        slice.sourceStridePerExpert,
+                        detail: "expert source offset overflows UInt64")
+                    let slabBase = try checkedEnd(
+                        offset: slice.sourceTensor.absoluteOffset,
+                        size: sourceStride,
                         detail: "expert source offset overflows UInt64")
                     try appendCopy(
                         shardID: slice.sourceTensor.shardPath,
                         sourceOffset: checkedEnd(
-                            offset: slice.sourceTensor.absoluteOffset,
-                            size: sourceStride,
-                            detail: "expert source offset overflows UInt64"),
+                            offset: slabBase,
+                            size: slice.sourceSliceOffset,
+                            detail: "fused expert slice offset overflows UInt64"),
                         sourceSize: slice.sourceOffsetPerExpert,
                         destinationPath: layer.path,
                         destinationOffset: checkedEnd(
@@ -205,6 +297,67 @@ public enum RangeCopyPlanner {
                         destinationSize: slice.sizeInExpertBlob,
                         destinationLimit: layer.fileSize,
                         transform: slice.transform)
+                }
+            }
+        }
+
+        // Additive row-lookup pools. Each source shard owns a page-aligned
+        // region, so its rows need at most two copies: one covering every whole
+        // block (records plus the page slack the transform zeroes), and one for
+        // the trailing partial block, which is dense because it sits at the
+        // region's last block base.
+        for pool in repackPlan.plePools {
+            let rowSourceBytes = pool.rowSourceBytes
+            for shard in pool.shards {
+                if shard.fullBlocks > 0 {
+                    let rows = try checkedProduct(
+                        UInt64(shard.fullBlocks), UInt64(pool.rowsPerBlock),
+                        detail: "PLE full-block row count overflows UInt64")
+                    let sourceSize = try checkedProduct(
+                        rows, UInt64(rowSourceBytes),
+                        detail: "PLE full-block source size overflows UInt64")
+                    let destinationSize = try checkedProduct(
+                        UInt64(shard.fullBlocks), pool.blockStride,
+                        detail: "PLE full-block destination size overflows UInt64")
+                    try appendCopy(
+                        shardID: shard.sourceTensor.shardPath,
+                        sourceOffset: shard.sourceTensor.absoluteOffset,
+                        sourceSize: sourceSize,
+                        destinationPath: pool.path,
+                        destinationOffset: shard.regionOffset,
+                        destinationSize: destinationSize,
+                        destinationLimit: pool.fileSize,
+                        transform: pool.blockTransform)
+                }
+                if shard.tailRows > 0 {
+                    let consumedRows = try checkedProduct(
+                        UInt64(shard.fullBlocks), UInt64(pool.rowsPerBlock),
+                        detail: "PLE tail row offset overflows UInt64")
+                    let sourceSkip = try checkedProduct(
+                        consumedRows, UInt64(rowSourceBytes),
+                        detail: "PLE tail source offset overflows UInt64")
+                    let destinationSkip = try checkedProduct(
+                        UInt64(shard.fullBlocks), pool.blockStride,
+                        detail: "PLE tail destination offset overflows UInt64")
+                    try appendCopy(
+                        shardID: shard.sourceTensor.shardPath,
+                        sourceOffset: checkedEnd(
+                            offset: shard.sourceTensor.absoluteOffset,
+                            size: sourceSkip,
+                            detail: "PLE tail source offset overflows UInt64"),
+                        sourceSize: try checkedProduct(
+                            UInt64(shard.tailRows), UInt64(rowSourceBytes),
+                            detail: "PLE tail source size overflows UInt64"),
+                        destinationPath: pool.path,
+                        destinationOffset: checkedEnd(
+                            offset: shard.regionOffset,
+                            size: destinationSkip,
+                            detail: "PLE tail destination offset overflows UInt64"),
+                        destinationSize: try checkedProduct(
+                            UInt64(shard.tailRows), pool.rowStride,
+                            detail: "PLE tail destination size overflows UInt64"),
+                        destinationLimit: pool.fileSize,
+                        transform: pool.tailTransform)
                 }
             }
         }
@@ -420,6 +573,19 @@ public enum RangeCopyPlanner {
                     relativePath: "packed_experts/" + ($0.path as NSString).lastPathComponent,
                     size: $0.fileSize)
             })
+        for pool in plan.auxiliaryExpertPools {
+            outputs.append(contentsOf: pool.layers
+                .filter { $0.expertsPerLayer > 0 }
+                .map {
+                    RemoteExpectedOutput(
+                        relativePath: pool.directoryName + "/"
+                            + ($0.path as NSString).lastPathComponent,
+                        size: $0.fileSize)
+                })
+        }
+        outputs.append(contentsOf: plan.plePools.map {
+            RemoteExpectedOutput(relativePath: $0.relativePath, size: $0.fileSize)
+        })
         return outputs.sorted { $0.relativePath < $1.relativePath }
     }
 

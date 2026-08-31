@@ -6,7 +6,15 @@ import Foundation
 enum SyntheticSnapshot {
 
     struct Snapshot {
+        /// First (or only) shard. Single-shard fixtures use this directly.
         let shardPath: String
+        /// Every shard the fixture wrote, in index order.
+        let shardPaths: [String]
+
+        init(shardPath: String, shardPaths: [String]? = nil) {
+            self.shardPath = shardPath
+            self.shardPaths = shardPaths ?? [shardPath]
+        }
     }
 
     enum MapleTensorMutation {
@@ -1046,6 +1054,370 @@ enum SyntheticSnapshot {
         let indexPath = (dir as NSString).appendingPathComponent("model.safetensors.index.json")
         try indexData.write(to: URL(fileURLWithPath: indexPath))
         return Snapshot(shardPath: shardPath)
+    }
+
+    // MARK: - Qwen3.8-Flash-Next variant (original-repo BF16)
+
+    /// Tiny `qwen4_exp`-shaped architecture read the way the real checkpoint is
+    /// read: **unquantized BF16 across several shards, with no
+    /// `config.json -> quantization` block**, so the installer has to quantize
+    /// in flight.
+    ///
+    /// Two text layers (one gated-DeltaNet, one full-attention carrying the new
+    /// indexer tensors), four routed experts top-2 with the gate|up halves
+    /// fused into a single per-layer tensor, a tiny two-shard PLE n-gram table,
+    /// low-rank hyper-connections on both sub-blocks, plus an `mtp.*` draft
+    /// group and a `model.visual.*` tower for the sidecar policy to act on.
+    struct FlashNextArch {
+        let hidden: Int = 128
+        let moeIntermediate: Int = 64
+        let sharedIntermediate: Int = 64
+        let numHeads: Int = 2
+        let numKVHeads: Int = 1
+        let headDim: Int = 64
+        let vocab: Int = 256
+        let numLayers: Int = 2
+        let numExperts: Int = 4
+        let topK: Int = 2
+        let hcCount: Int = 4
+        let hcLowRank: Int = 64
+        let indexerNumHeads: Int = 2
+        let indexerHeadDim: Int = 64
+        let indexerNumKVHeads: Int = 1
+        let indexerBudget: Int = 128
+        let indexerCompressRatio: Int = 4
+        let linearNumKHeads: Int = 2
+        let linearNumVHeads: Int = 4
+        let linearKeyHeadDim: Int = 32
+        let linearValueHeadDim: Int = 32
+        let linearConvKernelSize: Int = 4
+        /// PLE lives on layer 1; two shards, deliberately sized so each one is
+        /// two whole 16 KB blocks plus a partial tail block.
+        let pleLayer: Int = 1
+        let pleShardCount: Int = 2
+        /// 130 rows per shard is two whole 16 KiB blocks (51 rows each) plus a
+        /// 28-row tail, so both the block and the tail copy paths run.
+        let pleRowsPerShard: Int = 130
+        /// Deliberately NOT a multiple of 64: the real table is 160 wide (16
+        /// n-gram heads x 160 = ple_embed_dim 2560), which group-64 cannot
+        /// quantize, so the pool must fall back to BF16 rows.
+        let pleNgramDim: Int = 160
+        /// n-gram heads; sizes the I64 head tables.
+        let pleNgramHeads: Int = 2
+        /// `ngram_vocab_size_base` is the PER-HEAD base vocab in the real
+        /// config, not the table's row count. Deliberately unequal to
+        /// `pleRows` here so the install cannot quietly start validating one
+        /// against the other.
+        let pleNgramVocabSizeBase: Int = 4_096
+        let pleConvKernelSize: Int = 4
+        // layer 0 = gated DeltaNet, layer 1 = full attention (+ indexer, PLE)
+        let layerTypes: [String] = ["linear_attention", "full_attention"]
+
+        var qkvDim: Int {
+            2 * linearNumKHeads * linearKeyHeadDim + linearNumVHeads * linearValueHeadDim
+        }
+        var valueDim: Int { linearNumVHeads * linearValueHeadDim }
+        var pleRows: Int { pleShardCount * pleRowsPerShard }
+    }
+
+    enum FlashNextMutation {
+        /// Give `gate_up_proj` a row count that is not twice the intermediate
+        /// size, breaking the fused axis order the planner assumes.
+        case brokenFusedExpertShape
+    }
+
+    static func buildQwen38FlashNext(at dir: String,
+                                     seed: UInt64 = 0xF1A5_4E47_0001_0001,
+                                     mutation: FlashNextMutation? = nil) throws
+        -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+        let arch = FlashNextArch()
+        var rng = SplitMix64(seed: seed)
+
+        // Shard 0: the resident text tower. Shard 1: the fused expert tensors.
+        // Shard 2: the PLE table, the MTP group and the vision tower. Splitting
+        // this way proves the planner resolves tensors across shards.
+        var tower: [(String, String, [Int], [UInt8])] = []
+        var experts: [(String, String, [Int], [UInt8])] = []
+        var extras: [(String, String, [Int], [UInt8])] = []
+
+        let text = "model.language_model."
+        appendBF16(name: text + "embed_tokens.weight",
+                   shape: [arch.vocab, arch.hidden], into: &tower, rng: &rng)
+        appendBF16(name: "lm_head.weight",
+                   shape: [arch.vocab, arch.hidden], into: &tower, rng: &rng)
+        appendBF16(name: text + "hyper_connection_mixer.hc_norm.weight",
+                   shape: [arch.hidden], into: &tower, rng: &rng)
+        appendBF16(name: text + "hyper_connection_mixer.input_mix_weight_down.weight",
+                   shape: [arch.hcLowRank, arch.hidden], into: &tower, rng: &rng)
+        appendBF16(name: text + "hyper_connection_mixer.input_mix_weight_up.weight",
+                   shape: [arch.hidden, arch.hcLowRank], into: &tower, rng: &rng)
+
+        for layer in 0..<arch.numLayers {
+            let prefix = text + "layers.\(layer)"
+            for site in ["attn_hyper_connection", "mlp_hyper_connection"] {
+                appendBF16(name: "\(prefix).\(site).hc_norm.weight",
+                           shape: [arch.hidden], into: &tower, rng: &rng)
+                appendBF16(name: "\(prefix).\(site).input_mix_weight_down.weight",
+                           shape: [arch.hcLowRank, arch.hidden], into: &tower, rng: &rng)
+                appendBF16(name: "\(prefix).\(site).input_mix_weight_up.weight",
+                           shape: [arch.hidden, arch.hcLowRank], into: &tower, rng: &rng)
+                appendBF16(name: "\(prefix).\(site).block_inject_weight.weight",
+                           shape: [arch.hcCount, arch.hidden], into: &tower, rng: &rng)
+            }
+            if arch.layerTypes[layer] == "full_attention" {
+                appendFlashNextAttention(prefix: prefix, arch: arch,
+                                         into: &tower, rng: &rng)
+            } else {
+                appendFlashNextLinearAttention(prefix: prefix, arch: arch,
+                                               into: &tower, rng: &rng)
+            }
+            // Router, gated shared expert.
+            appendBF16(name: "\(prefix).mlp.gate.weight",
+                       shape: [arch.numExperts, arch.hidden], into: &tower, rng: &rng)
+            appendBF16(name: "\(prefix).mlp.shared_expert_gate.weight",
+                       shape: [1, arch.hidden], into: &tower, rng: &rng)
+            appendBF16(name: "\(prefix).mlp.shared_expert.gate_proj.weight",
+                       shape: [arch.sharedIntermediate, arch.hidden], into: &tower, rng: &rng)
+            appendBF16(name: "\(prefix).mlp.shared_expert.up_proj.weight",
+                       shape: [arch.sharedIntermediate, arch.hidden], into: &tower, rng: &rng)
+            appendBF16(name: "\(prefix).mlp.shared_expert.down_proj.weight",
+                       shape: [arch.hidden, arch.sharedIntermediate], into: &tower, rng: &rng)
+            appendBF16(name: "\(prefix).input_layernorm.weight",
+                       shape: [arch.hidden], into: &tower, rng: &rng)
+            appendBF16(name: "\(prefix).post_attention_layernorm.weight",
+                       shape: [arch.hidden], into: &tower, rng: &rng)
+
+            // Fused routed experts: gate|up concatenated on the row axis.
+            appendBF16(name: "\(prefix).mlp.experts.gate_up_proj",
+                       shape: [arch.numExperts, 2 * arch.moeIntermediate, arch.hidden],
+                       into: &experts, rng: &rng)
+            appendBF16(name: "\(prefix).mlp.experts.down_proj",
+                       shape: [arch.numExperts, arch.hidden, arch.moeIntermediate],
+                       into: &experts, rng: &rng)
+        }
+        appendBF16(name: text + "norm.weight",
+                   shape: [arch.hidden], into: &tower, rng: &rng)
+
+        // PLE module on its layer: the small projections stay with the tower,
+        // the n-gram table shards go to their own shard file.
+        let plePrefix = text + "layers.\(arch.pleLayer).ple"
+        appendBF16(name: plePrefix + ".key_proj.weight",
+                   shape: [arch.hidden, arch.hidden], into: &tower, rng: &rng)
+        appendBF16(name: plePrefix + ".value_proj.weight",
+                   shape: [arch.hidden, arch.hidden], into: &tower, rng: &rng)
+        appendBF16(name: plePrefix + ".conv1d.weight",
+                   shape: [arch.hidden, arch.pleConvKernelSize, 1], into: &tower, rng: &rng)
+        for norm in ["norm_conv", "norm_key", "norm_query"] {
+            appendBF16(name: "\(plePrefix).\(norm).weight",
+                       shape: [arch.hidden], into: &tower, rng: &rng)
+        }
+        // I64 in the real checkpoint (layer_multipliers [3],
+        // ngram_heads_offsets / ngram_heads_vocab_sizes [16]); they must reach
+        // the install byte-for-byte at dtype I64, not coerced.
+        appendUnquantizedI64(name: plePrefix + ".ple_embedding.layer_multipliers",
+                             shape: [3], into: &tower, rng: &rng)
+        appendUnquantizedI64(name: plePrefix + ".ple_embedding.ngram_heads_offsets",
+                             shape: [arch.pleNgramHeads], into: &tower, rng: &rng)
+        appendUnquantizedI64(name: plePrefix + ".ple_embedding.ngram_heads_vocab_sizes",
+                             shape: [arch.pleNgramHeads], into: &tower, rng: &rng)
+        for shard in 0..<arch.pleShardCount {
+            appendBF16(name: "\(plePrefix).ple_embedding.ngram_embedding.shard_\(shard).weight",
+                       shape: [arch.pleRowsPerShard, arch.pleNgramDim],
+                       into: &extras, rng: &rng)
+        }
+
+        // MTP draft group: one hybrid layer with its own routed experts.
+        appendBF16(name: "mtp.fc_embedding.weight",
+                   shape: [arch.hidden, arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.fc_hidden.weight",
+                   shape: [arch.hidden, arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.pre_fc_norm_embedding.weight",
+                   shape: [arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.pre_fc_norm_hidden.weight",
+                   shape: [arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.hyper_connection_mixer.hc_norm.weight",
+                   shape: [arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.hyper_connection_mixer.input_mix_weight_down.weight",
+                   shape: [arch.hcLowRank, arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.hyper_connection_mixer.input_mix_weight_up.weight",
+                   shape: [arch.hidden, arch.hcLowRank], into: &extras, rng: &rng)
+        appendFlashNextAttention(prefix: "mtp.layers.0", arch: arch,
+                                 into: &extras, rng: &rng)
+        appendBF16(name: "mtp.layers.0.mlp.gate.weight",
+                   shape: [arch.numExperts, arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.layers.0.input_layernorm.weight",
+                   shape: [arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.layers.0.post_attention_layernorm.weight",
+                   shape: [arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "mtp.layers.0.mlp.experts.gate_up_proj",
+                   shape: [arch.numExperts, 2 * arch.moeIntermediate, arch.hidden],
+                   into: &extras, rng: &rng)
+        appendBF16(name: "mtp.layers.0.mlp.experts.down_proj",
+                   shape: [arch.numExperts, arch.hidden, arch.moeIntermediate],
+                   into: &extras, rng: &rng)
+
+        // Vision tower: always skipped, present so the skip is observable.
+        appendBF16(name: "model.visual.blocks.0.norm1.weight",
+                   shape: [arch.hidden], into: &extras, rng: &rng)
+        appendBF16(name: "model.visual.patch_embed.proj.weight",
+                   shape: [arch.hidden, arch.hidden], into: &extras, rng: &rng)
+
+        if mutation == .brokenFusedExpertShape {
+            let name = text + "layers.0.mlp.experts.gate_up_proj"
+            experts.removeAll { $0.0 == name }
+            appendBF16(name: name,
+                       shape: [arch.numExperts, 3 * arch.moeIntermediate, arch.hidden],
+                       into: &experts, rng: &rng)
+        }
+
+        let groups = [tower, experts, extras]
+        var shardPaths: [String] = []
+        var weightMap: [String: String] = [:]
+        for (index, group) in groups.enumerated() {
+            let shardName = String(format: "model-%05d-of-%05d.safetensors",
+                                   index + 1, groups.count)
+            let path = (dir as NSString).appendingPathComponent(shardName)
+            try writeShard(path: path, tensors: group)
+            shardPaths.append(path)
+            for (name, _, _, _) in group { weightMap[name] = shardName }
+        }
+
+        // No `quantization` block: this is the vendor's own BF16 upload.
+        let textConfig: [String: Any] = [
+            "hidden_size": arch.hidden,
+            "moe_intermediate_size": arch.moeIntermediate,
+            "shared_expert_intermediate_size": arch.sharedIntermediate,
+            "num_attention_heads": arch.numHeads,
+            "num_key_value_heads": arch.numKVHeads,
+            "head_dim": arch.headDim,
+            "vocab_size": arch.vocab,
+            "num_hidden_layers": arch.numLayers,
+            "num_experts": arch.numExperts,
+            "num_experts_per_tok": arch.topK,
+            "layer_types": arch.layerTypes,
+            "full_attention_interval": 2,
+            "rope_parameters": [
+                "rope_theta": 10_000_000.0,
+                "rope_type": "default",
+                "partial_rotary_factor": 0.25,
+            ],
+            "linear_num_key_heads": arch.linearNumKHeads,
+            "linear_num_value_heads": arch.linearNumVHeads,
+            "linear_key_head_dim": arch.linearKeyHeadDim,
+            "linear_value_head_dim": arch.linearValueHeadDim,
+            "linear_conv_kernel_dim": arch.linearConvKernelSize,
+            "attn_output_gate": true,
+            "output_gate_type": "sigmoid",
+            "tie_word_embeddings": false,
+            "rms_norm_eps": 1e-6,
+            "hidden_act": "silu",
+            "hc_count": arch.hcCount,
+            "hc_lowrank": arch.hcLowRank,
+            "indexer_n_heads": arch.indexerNumHeads,
+            "indexer_head_dim": arch.indexerHeadDim,
+            "indexer_kv_heads": arch.indexerNumKVHeads,
+            "indexer_budget": arch.indexerBudget,
+            "indexer_compress_ratio": arch.indexerCompressRatio,
+            "ple_layer_ids": [arch.pleLayer],
+            "split_ngram_parts": arch.pleShardCount,
+            "ngram_vocab_size_base": arch.pleNgramVocabSizeBase,
+            "ple_conv_kernel_size": arch.pleConvKernelSize,
+        ]
+        let config: [String: Any] = [
+            "architectures": ["Qwen4ExpForConditionalGeneration"],
+            "model_type": "qwen4_exp",
+            "text_config": textConfig,
+        ]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("config.json")))
+        try JSONSerialization.data(
+            withJSONObject: ["metadata": ["format": "pt"], "weight_map": weightMap],
+            options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("model.safetensors.index.json")))
+        return Snapshot(shardPath: shardPaths[0], shardPaths: shardPaths)
+    }
+
+    private static func appendFlashNextAttention(
+        prefix: String,
+        arch: FlashNextArch,
+        into tensors: inout [(String, String, [Int], [UInt8])],
+        rng: inout SplitMix64) {
+        // q_proj emits per-head [query ; gate] halves (sigmoid output gate).
+        appendBF16(name: "\(prefix).self_attn.q_proj.weight",
+                   shape: [2 * arch.numHeads * arch.headDim, arch.hidden],
+                   into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).self_attn.k_proj.weight",
+                   shape: [arch.numKVHeads * arch.headDim, arch.hidden],
+                   into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).self_attn.v_proj.weight",
+                   shape: [arch.numKVHeads * arch.headDim, arch.hidden],
+                   into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).self_attn.o_proj.weight",
+                   shape: [arch.hidden, arch.numHeads * arch.headDim],
+                   into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).self_attn.q_norm.weight",
+                   shape: [arch.headDim], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).self_attn.k_norm.weight",
+                   shape: [arch.headDim], into: &tensors, rng: &rng)
+        // The new attention indexer.
+        appendBF16(name: "\(prefix).self_attn.indexer.index_qk_proj.weight",
+                   shape: [arch.indexerNumHeads * arch.indexerHeadDim, arch.hidden],
+                   into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).self_attn.indexer.q_layernorm.weight",
+                   shape: [arch.indexerHeadDim], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).self_attn.indexer.k_layernorm.weight",
+                   shape: [arch.indexerHeadDim], into: &tensors, rng: &rng)
+    }
+
+    private static func appendFlashNextLinearAttention(
+        prefix: String,
+        arch: FlashNextArch,
+        into tensors: inout [(String, String, [Int], [UInt8])],
+        rng: inout SplitMix64) {
+        appendBF16(name: "\(prefix).linear_attn.in_proj_qkv.weight",
+                   shape: [arch.qkvDim, arch.hidden], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.in_proj_z.weight",
+                   shape: [arch.valueDim, arch.hidden], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.in_proj_a.weight",
+                   shape: [arch.linearNumVHeads, arch.hidden], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.in_proj_b.weight",
+                   shape: [arch.linearNumVHeads, arch.hidden], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.conv1d.weight",
+                   shape: [arch.qkvDim, arch.linearConvKernelSize, 1],
+                   into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.A_log",
+                   shape: [arch.linearNumVHeads], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.dt_bias",
+                   shape: [arch.linearNumVHeads], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.norm.weight",
+                   shape: [arch.linearValueHeadDim], into: &tensors, rng: &rng)
+        appendBF16(name: "\(prefix).linear_attn.out_proj.weight",
+                   shape: [arch.hidden, arch.valueDim], into: &tensors, rng: &rng)
+    }
+
+    /// Finite BF16 payload. Random *bit patterns* would inject NaN and Inf,
+    /// which have no defined group min/max, so values are drawn in [-2, 2] and
+    /// rounded to BF16 — exactly what the reference quantizer will later see.
+    static func appendBF16(name: String, shape: [Int],
+                           into tensors: inout [(String, String, [Int], [UInt8])],
+                           rng: inout SplitMix64) {
+        let elements = shape.reduce(1, *)
+        var bytes = [UInt8](repeating: 0, count: elements * 2)
+        for index in 0..<elements {
+            let unit = Float(rng.next() >> 40) / Float(1 << 24)
+            let value = (unit - 0.5) * 4.0
+            let bits = value.bitPattern
+            let lsb = (bits >> 16) & 1
+            let rounded = UInt16(truncatingIfNeeded: (bits &+ (0x7FFF &+ lsb)) >> 16)
+            bytes[index * 2] = UInt8(truncatingIfNeeded: rounded)
+            bytes[index * 2 + 1] = UInt8(truncatingIfNeeded: rounded >> 8)
+        }
+        tensors.append((name, "BF16", shape, bytes))
     }
 
     // MARK: - Tensor builders

@@ -802,6 +802,10 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case trustedReceiptInvalid(detail: String)
     case routedExpertPlanUnavailable(layer: Int)
     case eagerExpertFillFailed(layer: Int)
+    /// The repacker can install this family but no runner executes it yet.
+    /// Named rather than "unknown family" so the failure points at the missing
+    /// kernels instead of reading as a corrupt install.
+    case familyRunnerNotImplemented(family: String, missingAxes: [String])
 
     public var description: String {
         switch self {
@@ -837,6 +841,9 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "routed expert fetch plan unavailable for layer \(layer)"
         case .eagerExpertFillFailed(let layer):
             return "eager routed expert read failed for layer \(layer); decode step aborted"
+        case .familyRunnerNotImplemented(let family, let missingAxes):
+            return "family \(family) is installed but its runner is not implemented; "
+                + "missing axes: \(missingAxes.joined(separator: ", "))"
         }
     }
 }

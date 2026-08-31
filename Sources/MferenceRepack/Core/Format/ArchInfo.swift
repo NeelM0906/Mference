@@ -11,6 +11,47 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
     case maple = "maple"
+    /// Qwen3.8-Flash-Next. Installable today (repacked from the vendor's
+    /// original BF16 repo); the runtime has no runner for it yet, which
+    /// `ManifestReader.peekFamily` reports by name.
+    case qwen38flashnext = "qwen38flashnext"
+}
+
+/// Axes Qwen3.8-Flash-Next introduces that no shipped kernel covers. They are
+/// mirrored into `manifest.json -> arch` under these exact field names so the
+/// runtime's capability gate can refuse the install **by axis name** rather
+/// than guessing from dimensions.
+struct FlashNextAxes: Sendable, Equatable {
+    /// Low-rank hyper-connections: `hc_count` residual streams mixed through an
+    /// `hc_lowrank` factorization per sub-block.
+    let hcCount: Int
+    let hcLowRank: Int
+    /// DSA-style learned sparse-attention indexer.
+    let indexerNumHeads: Int
+    let indexerHeadDim: Int
+    let indexerNumKVHeads: Int
+    let indexerBudget: Int
+    let indexerCompressRatio: Int
+    /// Per-layer n-gram embedding (PLE / engram).
+    let pleLayerIDs: [Int]
+    /// `split_ngram_parts`: how many shards the n-gram table arrives in.
+    let pleNgramShardCount: Int
+    /// `ngram_vocab_size_base` **verbatim**. This is the PER-HEAD base vocab
+    /// (20,000,000 in production), *not* the table's row count: the real total
+    /// is the sum of `ngram_heads_vocab_sizes` (~320M). True row counts are
+    /// derived from the shard headers at plan time and published in
+    /// `manifest.plePool.layers[].rows` and `...shards[].rows`; nothing
+    /// validates against this field.
+    let pleNgramVocabSizeBase: Int
+    let pleConvKernelSize: Int
+
+    /// Axis names the runner must implement before this family can decode.
+    /// Published verbatim as `arch.requiredAxes`.
+    static let requiredAxisNames = [
+        "hyperConnectionsLowRank",
+        "attentionIndexer",
+        "pleNgramEmbedding",
+    ]
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
@@ -107,6 +148,10 @@ struct ArchInfo: Sendable, Equatable {
     let routerGlobalScale: Bool
     let unpaddedVocabSize: Int
 
+    /// Qwen3.8-Flash-Next's three new axes. Nil for every other family, so
+    /// their manifests are unchanged.
+    let flashNext: FlashNextAxes?
+
     init(hiddenSize: Int,
          intermediateSize: Int,
          moeIntermediateSize: Int,
@@ -177,7 +222,9 @@ struct ArchInfo: Sendable, Equatable {
          routerGateBias: Bool = false,
          routerNormAfterTopK: Bool = false,
          routerGlobalScale: Bool = false,
-         unpaddedVocabSize: Int = 0) {
+         unpaddedVocabSize: Int = 0,
+         flashNext: FlashNextAxes? = nil) {
+        self.flashNext = flashNext
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.moeIntermediateSize = moeIntermediateSize
@@ -272,6 +319,9 @@ struct ArchInfo: Sendable, Equatable {
         }
         if (root["model_type"] as? String) == "qwen3_5" {
             return try loadQwen38(configPath: configPath, tc: tc)
+        }
+        if (root["model_type"] as? String) == "qwen4_exp" {
+            return try loadQwen38FlashNext(configPath: configPath, tc: tc)
         }
         if (root["model_type"] as? String) == "inkling_mm_model" {
             return try loadInklingSmall(configPath: configPath, tc: tc)
@@ -953,6 +1003,117 @@ struct ArchInfo: Sendable, Equatable {
                 detail: "qwen3_5 config does not match the pinned "
                     + "Qwen3.8-27B architecture baseline")
         }
+    }
+
+    // MARK: - Qwen3.8-Flash-Next (`model_type == "qwen4_exp"`)
+
+    /// Text stack of the multimodal Qwen3.8-Flash-Next checkpoint. The hybrid
+    /// gated-DeltaNet / full-attention schedule, gated attention output,
+    /// partial NeoX RoPE, gated shared expert and untied head are all axes the
+    /// Qwen 3.6 path already carries at different values. The three genuinely
+    /// new axes — low-rank hyper-connections, the attention indexer and the
+    /// per-layer n-gram embedding — travel in `FlashNextAxes` and are published
+    /// by name so the runtime can gate on them.
+    ///
+    /// There is deliberately no production cross-check here (the shipped
+    /// families each pin one): the repacker has never seen this checkpoint's
+    /// real `config.json`, so asserting a baseline would encode a guess as a
+    /// contract. See `docs/families/QWEN38_FLASH_NEXT.md`.
+    private static func loadQwen38FlashNext(configPath: String,
+                                            tc: [String: Any]) throws -> ArchInfo {
+        func i(_ k: String) throws -> Int {
+            guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        func optionalInt(_ k: String, default fallback: Int) -> Int {
+            (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue ?? fallback
+        }
+        guard let layerTypes = tc["layer_types"] as? [String] else {
+            throw RepackError.configJsonInvalid(path: configPath, detail: "missing layer_types")
+        }
+        var mask: [UInt8] = []
+        mask.reserveCapacity(layerTypes.count)
+        for t in layerTypes {
+            switch t {
+            case "linear_attention": mask.append(2)
+            case "full_attention":   mask.append(1)
+            default:
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "unknown layer_types entry \"\(t)\"")
+            }
+        }
+        let rope = (tc["rope_parameters"] as? [String: Any]) ?? [:]
+        guard let theta = (rope["rope_theta"] as? Double)
+            ?? (rope["rope_theta"] as? NSNumber)?.doubleValue else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing rope_parameters.rope_theta")
+        }
+        guard let prf = (rope["partial_rotary_factor"] as? Double)
+            ?? (rope["partial_rotary_factor"] as? NSNumber)?.doubleValue else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing rope_parameters.partial_rotary_factor")
+        }
+        let headDim = try i("head_dim")
+        let pleLayerIDs = ((tc["ple_layer_ids"] as? [Any]) ?? []).compactMap {
+            ($0 as? Int) ?? ($0 as? NSNumber)?.intValue
+        }
+        let axes = FlashNextAxes(
+            hcCount: try i("hc_count"),
+            hcLowRank: try i("hc_lowrank"),
+            // Key names verified against the real config.json @ de4b8e4d
+            // (text_config): indexer_n_heads / indexer_kv_heads, and the
+            // n-gram table is described by split_ngram_parts (shard count)
+            // and ngram_vocab_size_base (per-head base vocab, not row count).
+            indexerNumHeads: optionalInt("indexer_n_heads", default: 0),
+            indexerHeadDim: optionalInt("indexer_head_dim", default: 0),
+            indexerNumKVHeads: optionalInt("indexer_kv_heads", default: 0),
+            indexerBudget: optionalInt("indexer_budget", default: 0),
+            indexerCompressRatio: optionalInt("indexer_compress_ratio", default: 0),
+            pleLayerIDs: pleLayerIDs,
+            pleNgramShardCount: optionalInt("split_ngram_parts", default: 0),
+            pleNgramVocabSizeBase: optionalInt("ngram_vocab_size_base", default: 0),
+            pleConvKernelSize: optionalInt("ple_conv_kernel_size", default: 0))
+
+        return ArchInfo(
+            hiddenSize: try i("hidden_size"),
+            intermediateSize: try i("shared_expert_intermediate_size"),
+            moeIntermediateSize: try i("moe_intermediate_size"),
+            numHeads: try i("num_attention_heads"),
+            numKVHeads: try i("num_key_value_heads"),
+            numFullKVHeads: try i("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: theta,
+            fullRopeTheta: theta,
+            partialRotaryFactor: prf,
+            numLayers: try i("num_hidden_layers"),
+            numExperts: try i("num_experts"),
+            topKExperts: try i("num_experts_per_tok"),
+            tieWordEmbeddings: (tc["tie_word_embeddings"] as? Bool) ?? false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: mask,
+            hiddenActivation: (tc["hidden_act"] as? String) ?? "silu",
+            family: .qwen38flashnext,
+            attnOutputGate: (tc["attn_output_gate"] as? Bool)
+                ?? ((tc["output_gate_type"] as? String) == "sigmoid"),
+            attentionScale: 1.0 / Double(headDim).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: true,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: try i("linear_num_key_heads"),
+            linearNumVHeads: try i("linear_num_value_heads"),
+            linearKeyHeadDim: try i("linear_key_head_dim"),
+            linearValueHeadDim: try i("linear_value_head_dim"),
+            linearConvKernelSize: try i("linear_conv_kernel_dim"),
+            unpaddedVocabSize: optionalInt("unpadded_vocab_size", default: 0),
+            flashNext: axes)
     }
 
     // MARK: - DeepSeek-V4-Flash (`model_type == "deepseek_v4"`)

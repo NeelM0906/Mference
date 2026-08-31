@@ -542,6 +542,17 @@ public enum ManifestReader {
                 detail: "manifest.json size \(size) exceeds metadata cap \(maxBytes)")
         }
         let data = try Data(contentsOf: manifestURL)
+        // The capability gate runs off a minimal decode, before the full
+        // `Manifest` shape is required. A family the runner cannot execute must
+        // say so by name even if its manifest carries fields (or omits ones)
+        // the strict decoder does not expect — otherwise the first thing the
+        // user sees is a decode error that reads like a corrupt install.
+        if let declared = try? JSONDecoder().decode(FamilyPeek.self, from: data),
+           let raw = declared.arch.family,
+           let missingAxes = familiesWithoutRunner[raw] {
+            throw ModelError.familyRunnerNotImplemented(family: raw,
+                                                        missingAxes: missingAxes)
+        }
         let manifest: Manifest
         do {
             manifest = try JSONDecoder().decode(Manifest.self, from: data)
@@ -554,4 +565,32 @@ public enum ManifestReader {
         }
         return family
     }
+
+    /// Just enough of `manifest.json` to read `arch.family`.
+    private struct FamilyPeek: Decodable {
+        struct Arch: Decodable { let family: String? }
+        let arch: Arch
+    }
+
+    /// Families `MferenceRepack` can install but `RealForwardRunner` cannot
+    /// execute, mapped to the axes whose kernels are missing.
+    ///
+    /// The gate lives here because `peekFamily` is the single funnel every
+    /// entry point uses — `Model.load`, the CLI, the loopback server, the Mac
+    /// app's installation probe and the tokenizer loader all call it — so one
+    /// check makes the failure named and actionable everywhere instead of
+    /// surfacing as "unknown arch.family" or, worse, matching some other
+    /// family's runner.
+    ///
+    /// The axis names are the runtime's own; the install also publishes them as
+    /// `manifest.arch.requiredAxes`, but this table is deliberately the
+    /// authority — a manifest does not get to tell the runtime what it can run.
+    /// Delete an entry only when the family's runner actually lands.
+    static let familiesWithoutRunner: [String: [String]] = [
+        "qwen38flashnext": [
+            "hyperConnectionsLowRank",
+            "attentionIndexer",
+            "pleNgramEmbedding",
+        ],
+    ]
 }

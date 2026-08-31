@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <gemma4|qwen36|qwen38|deepseekv4flash|inklingsmall|maple>] --output <model.gturbo> [--overwrite] [--resume] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <gemma4|qwen36|qwen38|deepseekv4flash|inklingsmall|maple|qwen38flashnext>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
@@ -12,6 +12,14 @@ Usage:
 --attach-mtp appends the Qwen 3.8 MTP draft-layer tensors from a local BF16
 safetensors shard to an existing install (projections quantized to INT4
 affine group-64), enabling speculative decoding.
+
+--skip-mtp drops the source checkpoint's own mtp.* draft-layer group instead
+of carrying it. Vision towers are always skipped. Either way the decision is
+recorded in manifest.json -> sidecars rather than left implicit.
+
+qwen38flashnext reads the model vendor's original BF16 repo and quantizes to
+INT4 affine group-64 during the install. It installs and verifies, but no
+runner executes it yet: loading it fails naming the missing axes.
 
 The installer streams the selected checkpoint (default: the supported Gemma 4
 checkpoint) from Hugging Face and repackages it without materializing the
@@ -31,6 +39,7 @@ private struct Arguments {
     var inputGTurbo: String?
     var baseURL: URL?
     var dryRun = false
+    var skipMTP = false
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -48,6 +57,9 @@ private struct Arguments {
                 index += 1
             case "--dry-run":
                 parsed.dryRun = true
+                index += 1
+            case "--skip-mtp":
+                parsed.skipMTP = true
                 index += 1
             case "--discard-partial":
                 parsed.discardPartial = true
@@ -105,7 +117,8 @@ private struct Arguments {
             guard parsed.output != nil else {
                 throw ParseError.missingRequired("--output")
             }
-            guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.verifyInstall else {
+            guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.verifyInstall,
+                  !parsed.skipMTP else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
             }
             return parsed
@@ -115,7 +128,7 @@ private struct Arguments {
                 throw ParseError.missingRequired("--output")
             }
             guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.resume,
-                  !parsed.verifyInstall, !parsed.dryRun else {
+                  !parsed.verifyInstall, !parsed.dryRun, !parsed.skipMTP else {
                 throw ParseError.invalidMode("--attach-mtp only accepts --output")
             }
             return parsed
@@ -124,7 +137,8 @@ private struct Arguments {
             guard parsed.inputGTurbo != nil else {
                 throw ParseError.missingRequired("--input-gturbo")
             }
-            guard parsed.output == nil, !parsed.overwrite, !parsed.resume else {
+            guard parsed.output == nil, !parsed.overwrite, !parsed.resume,
+                  !parsed.skipMTP else {
                 throw ParseError.invalidMode("verification accepts only --input-gturbo")
             }
         } else {
@@ -220,7 +234,8 @@ private func run(_ values: [String]) async -> Int32 {
         token: ProcessInfo.processInfo.environment["HF_TOKEN"],
         resume: arguments.resume,
         baseURL: arguments.baseURL,
-        dryRunSpaceCheck: arguments.dryRun)
+        dryRunSpaceCheck: arguments.dryRun,
+        sidecarPolicy: SidecarPolicy(carryMTP: !arguments.skipMTP))
     do {
         let result = try await RemoteStreamingRepacker(options: options).run()
         if result.dryRun {
