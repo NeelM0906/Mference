@@ -1,0 +1,82 @@
+{
+  "family": "qwen38flashnext",
+  "source": {
+    "repo": "Qwen/Qwen3.8-Flash-Next",
+    "revision": "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+    "format": "safetensors-bf16-sharded",
+    "shards": 131,
+    "total_bytes": 359999963128
+  },
+  "notes": [
+    "First draft of the Workstream-1 tensor-name mapping table (spec 2026-08-08, W1.2). Written as data at Day 0 of the qwen38flashnext rehearsal; the repacker does not read this file yet.",
+    "{L} = 0..47 text layers. GDN layers are all L with L % 4 != 3; full-attention layers are L % 4 == 3.",
+    "Expert tensors are fused across all 512 experts with gate|up concatenated; the repacker splits them into per-expert page-aligned blobs at install.",
+    "PLE tensors exist only at the single ple layer (config ple_layer_ids [2]; tensors observed at layers.1 — resolve the indexing convention against the reference implementation before repack).",
+    "model.visual.* (vision tower) and mtp.* (draft layer) are optional sidecar groups under the W2.4 sidecar policy: vision skipped, MTP carried when --attach-mtp semantics apply."
+  ],
+  "resident": {
+    "model.language_model.embed_tokens.weight": "embedding",
+    "lm_head.weight": "lmHead",
+    "model.language_model.hyper_connection_mixer.hc_norm.weight": "hcGlobalMixerNorm",
+    "model.language_model.hyper_connection_mixer.input_mix_weight_down.weight": "hcGlobalMixDown",
+    "model.language_model.hyper_connection_mixer.input_mix_weight_up.weight": "hcGlobalMixUp",
+    "model.language_model.layers.{L}.attn_hyper_connection.hc_norm.weight": "hcAttnNorm",
+    "model.language_model.layers.{L}.attn_hyper_connection.input_mix_weight_down.weight": "hcAttnMixDown",
+    "model.language_model.layers.{L}.attn_hyper_connection.input_mix_weight_up.weight": "hcAttnMixUp",
+    "model.language_model.layers.{L}.attn_hyper_connection.block_inject_weight.weight": "hcAttnInject",
+    "model.language_model.layers.{L}.mlp_hyper_connection.hc_norm.weight": "hcMlpNorm",
+    "model.language_model.layers.{L}.mlp_hyper_connection.input_mix_weight_down.weight": "hcMlpMixDown",
+    "model.language_model.layers.{L}.mlp_hyper_connection.input_mix_weight_up.weight": "hcMlpMixUp",
+    "model.language_model.layers.{L}.mlp_hyper_connection.block_inject_weight.weight": "hcMlpInject",
+    "model.language_model.layers.{L}.linear_attn.in_proj_qkv.weight": "linearInProjQKV",
+    "model.language_model.layers.{L}.linear_attn.in_proj_z.weight": "linearInProjZ",
+    "model.language_model.layers.{L}.linear_attn.in_proj_a.weight": "linearInProjA",
+    "model.language_model.layers.{L}.linear_attn.in_proj_b.weight": "linearInProjB",
+    "model.language_model.layers.{L}.linear_attn.conv1d.weight": "linearConv1d",
+    "model.language_model.layers.{L}.linear_attn.A_log": "linearALog",
+    "model.language_model.layers.{L}.linear_attn.dt_bias": "linearDtBias",
+    "model.language_model.layers.{L}.linear_attn.norm.weight": "linearNorm",
+    "model.language_model.layers.{L}.linear_attn.out_proj.weight": "linearOutProj",
+    "model.language_model.layers.{L}.self_attn.q_proj.weight": "attnQ (gated: 2*heads*dim rows)",
+    "model.language_model.layers.{L}.self_attn.k_proj.weight": "attnK",
+    "model.language_model.layers.{L}.self_attn.v_proj.weight": "attnV",
+    "model.language_model.layers.{L}.self_attn.o_proj.weight": "attnO",
+    "model.language_model.layers.{L}.self_attn.q_norm.weight": "attnQNorm",
+    "model.language_model.layers.{L}.self_attn.k_norm.weight": "attnKNorm",
+    "model.language_model.layers.{L}.self_attn.indexer.index_qk_proj.weight": "indexerQKProj (new axis)",
+    "model.language_model.layers.{L}.self_attn.indexer.q_layernorm.weight": "indexerQNorm (new axis)",
+    "model.language_model.layers.{L}.self_attn.indexer.k_layernorm.weight": "indexerKNorm (new axis)",
+    "model.language_model.layers.{L}.mlp.gate.weight": "router",
+    "model.language_model.layers.{L}.mlp.shared_expert.gate_proj.weight": "sharedExpertGateProj",
+    "model.language_model.layers.{L}.mlp.shared_expert.up_proj.weight": "sharedExpertUpProj",
+    "model.language_model.layers.{L}.mlp.shared_expert.down_proj.weight": "sharedExpertDownProj",
+    "model.language_model.layers.{L}.mlp.shared_expert_gate.weight": "sharedExpertGate",
+    "model.language_model.layers.{L}.ple.key_proj.weight": "pleKeyProj (new axis)",
+    "model.language_model.layers.{L}.ple.value_proj.weight": "pleValueProj (new axis)",
+    "model.language_model.layers.{L}.ple.conv1d.weight": "pleConv1d (new axis)",
+    "model.language_model.layers.{L}.ple.norm_conv.weight": "pleNormConv (new axis)",
+    "model.language_model.layers.{L}.ple.norm_key.weight": "pleNormKey (new axis)",
+    "model.language_model.layers.{L}.ple.norm_query.weight": "pleNormQuery (new axis)",
+    "model.language_model.layers.{L}.ple.ple_embedding.layer_multipliers": "pleLayerMultipliers (new axis)",
+    "model.language_model.layers.{L}.ple.ple_embedding.ngram_heads_offsets": "pleNgramHeadsOffsets (new axis)",
+    "model.language_model.layers.{L}.ple.ple_embedding.ngram_heads_vocab_sizes": "pleNgramHeadsVocabSizes (new axis)"
+  },
+  "streamed_expert_pool": {
+    "model.language_model.layers.{L}.mlp.experts.gate_up_proj": "routedExpertGateUp — fused [512, ...]; split per expert, gate|up halves, page-aligned blob per (layer, expert)",
+    "model.language_model.layers.{L}.mlp.experts.down_proj": "routedExpertDown — fused [512, ...]; split per expert"
+  },
+  "streamed_row_pool": {
+    "model.language_model.layers.{L}.ple.ple_embedding.ngram_embedding.shard_{S}.weight": "pleNgramTable — S = 0..127; 20M x 2560 total; repack to a page-aligned row-lookup pool with per-row reads (new pool kind)"
+  },
+  "sidecar_mtp": {
+    "mtp.fc_embedding.weight": "mtpFcEmbedding",
+    "mtp.fc_hidden.weight": "mtpFcHidden",
+    "mtp.pre_fc_norm_embedding.weight": "mtpPreFcNormEmbedding",
+    "mtp.pre_fc_norm_hidden.weight": "mtpPreFcNormHidden",
+    "mtp.hyper_connection_mixer.*": "mtpHcMixer group",
+    "mtp.layers.0.*": "one full hybrid draft layer: attn (+indexer), HC pairs, 512-expert MoE with shared expert — same role mapping as the main layer patterns above under the mtp. prefix"
+  },
+  "sidecar_vision_excluded": {
+    "model.visual.*": "SigLIP-style tower (27 blocks, merger, patch/pos embed) — skipped at repack per text-only policy"
+  }
+}
