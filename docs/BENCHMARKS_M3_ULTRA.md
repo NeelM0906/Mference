@@ -4,6 +4,13 @@ All four model families supported at the time (Maple landed later) installed,
 hash-verified, and benchmarked under the frozen community protocol. Every
 measured run reached a natural end of turn (36/36).
 
+> **2026-08-27:** a second full session on the same host at HEAD `d5552a0`,
+> covering all six families (Maple and Qwen 3.8 included), is recorded in
+> [Re-run at HEAD](#re-run-at-head-d5552a0-2026-08-27) below. Headlines:
+> Qwen 3.6 decode +63–85% on the 96-slot auto rung, Inkling streamed prefill
+> ~11× faster, DSV4 decode +5–10%, and the Inkling token-corruption defect
+> below verified fixed.
+
 ## Host
 
 | | |
@@ -206,6 +213,18 @@ off-by-one at that boundary, would explain a valid rare subword rendering as
 The runs do not loop or truncate early, so the throughput numbers above stand;
 this is a correctness issue, not a performance one.
 
+> **Resolved.** Commit `536266d` (2026-08-04) root-caused the defect: layer
+> 41's shared-expert down projection stored raw FP16 rows with no headroom for
+> its known outlier channel; one token clipped to −inf, poisoned the
+> `mlp_sconv` state for a K−1 = 3-token burst, turned the head's RMS norm into
+> NaN across all logits, and the CPU argmax (then seeded at index 0) returned
+> token id 0 — which this vocabulary decodes as `!`. The hypothesis above
+> (vocab-boundary truncation) was wrong; the truncation was fine on both head
+> paths. The [re-run at HEAD](#re-run-at-head-d5552a0-2026-08-27) verified the
+> fix on this host: the same seeded case renders "mangroves" intact, zero `!!`
+> bursts across all 18 output files, and all three repetitions are
+> byte-identical.
+
 ## What 256 GB does and does not buy
 
 Footprint held to the documented design targets on every model — 1.84 GB
@@ -226,6 +245,136 @@ pool, and its value scales with pool size:
 The headline is that the two largest models — 284B and 276B total parameters —
 run at 5–7 tok/s in under 9 GB of process memory, and this host is the smallest
 configuration that can keep their expert pools resident.
+
+## Re-run at HEAD `d5552a0` (2026-08-27)
+
+Same host, 248 commits later — after the Qwen slot-map/96-slot campaign, the
+Maple and Qwen 3.8 families, the Qwen 3.8 paged-KV SSD tier, and the Inkling
+streaming pipeline + speculative prefetch all landed. All six families
+installed (or reinstalled) from their pinned revisions and hash-verified with
+`--verify-install`; the four protocol-compatible families benchmarked under
+the same frozen protocol, three measured repetitions per case, every measured
+run in a fresh process on an otherwise idle machine. 27/27 measured runs
+reached a natural end of turn.
+
+Session facts: macOS 26.3 (25D125), Swift 6.2.4 (CommandLineTools),
+`swift build -c release` 120.8 s exit 0. The package test suite (1,093 tests,
+175 suites) passes, with one host note: CLT-only Macs need
+`./Scripts/test.sh -Xswiftc -Xfrontend -Xswiftc -disable-cross-import-overlays`
+because CLT 26.x ships `_Testing_Foundation.framework` with a dangling
+`Modules` symlink.
+
+### Protocol results (medians of 3; ranges are decode min–max)
+
+Prefill is reported raw, as the CLI prints it — for DeepSeek-V4-Flash and
+Inkling-Small that includes the one-time model load, exactly as in the raw
+figures behind the tables above (loads solved out below).
+
+**Gemma 4 26B-A4B**
+
+| Case | Prompt / generated | Prefill | Decode | Range | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| short-explanation | 61 / 507 | 5.34 s | 17.13 tok/s | 16.59–19.21 | 1,841 MiB |
+| medium-review | 430 / 681 | 5.78 s | 18.65 tok/s | 15.88–18.65 | 1,846 MiB |
+| long-synthesis | 3,015 / 618 | 10.81 s | 17.41 tok/s | 17.38–21.15 | 1,834 MiB |
+
+Long-prompt prefill halved (22.46 s → 10.81 s). Decode medians sit 3–13%
+below the first session with unusually wide in-case spread (15.9–21.2); these
+runs followed ~300 GB of installs through the page cache, and the first
+session recorded a fully-warm one-off at 24.15 vs its own 19.73 median, so
+read the decode delta as cache state pending a controlled re-run, not a
+regression.
+
+**Qwen 3.6 35B-A3B** — auto now selects the 96-slot rung on this host (the
+first session ran the then-default 16 slots):
+
+| Case | Prompt / generated | Prefill | Decode | Range | Peak RSS | vs 16-slot session |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | 62 / 507 | 7.41 s | 42.20 tok/s | 41.55–42.52 | 6,788 MiB | **+85%** |
+| medium-review | 426 / 830 | 7.96 s | 40.02 tok/s | 39.72–40.35 | 6,796 MiB | **+80%** |
+| long-synthesis | 2,940 / 585 | 10.09 s | 36.14 tok/s | 35.82–36.67 | 6,794 MiB | **+63%** |
+
+Long prefill 2.4× faster (24.40 s → 10.09 s). Peak RSS rises from ~1.37 GB to
+~6.8 GB — the rung spends this host's RAM for speed, as designed; memory-first
+surfaces keep 16 slots.
+
+**DeepSeek-V4-Flash 284B-A13B (2-bit DQ)** — shadow speculative prefetch now
+default:
+
+| Case | Prompt / generated | Prefill (incl. load) | Decode | Range | Peak RSS | vs first session |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | 51 / 360 | 40.7 s | 6.65 tok/s | 6.64–6.76 | 5,695 MiB | +10% |
+| medium-review | 429 / 931 | 71.7 s | 6.30 tok/s | 6.24–6.32 | 5,704 MiB | +7% |
+| long-synthesis | 3,039 / 533 | 374.7 s | 5.58 tok/s | 5.57–5.60 | 5,736 MiB | +5% |
+
+Two-point solve (short/long): load ≈ 35.0 s, marginal prefill ≈ 0.112 s/token
+— prefill essentially unchanged from the first session; the decode gain is the
+prefetch.
+
+**Inkling-Small 276B-A12B** — depth-1 pipelined streamed prefill, coalesced
+`preadv` misses, and ported speculative prefetch now default:
+
+| Case | Prompt / generated | Prefill (incl. load) | Decode | Range | Peak RSS | vs first session |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | 59 / 469 | 62.3 s | 7.11 tok/s | 7.08–7.12 | 8,954 MiB | +2.7% |
+| medium-review | 421 / 576 | 68.8 s | 6.21 tok/s | 6.17–6.21 | 8,955 MiB | +4.7% |
+| long-synthesis | 2,785 / 372 | 90.9 s | 5.30 tok/s | 5.30–5.33 | 8,964 MiB | 0% |
+
+Two-point solve (short/long): load ≈ 61.7 s, **marginal prefill
+≈ 0.0105 s/token vs 0.114–0.151 in the first session — the streamed prefill
+is ~11–14× faster**, taking the long case's prompt processing from ~7 minutes
+to ~29 seconds. Decode moved little because this host's page cache holds the
+145 GB expert pool either way; the same commits should matter far more where
+it does not fit. The install verified at 148,421,176,040 bytes across 48
+files — byte-identical to this document's first session.
+
+### Qwen 3.8 27B (dense) — outside the protocol
+
+The chat template opens a `<think>` block, so under the protocol's 1,024-token
+cap no run reaches a natural end of turn and `run-benchmark.sh` correctly
+aborts (a warmup measured 36.2 tok/s decode before rejection). Measured by the
+family's own documented method instead (`--temperature 0`, 128 new tokens,
+fresh processes, raw-completion prompt):
+
+| Configuration | M3 Ultra | M5 24 GB (family docs) |
+| --- | ---: | ---: |
+| Plain greedy decode | 38.4–39.4 tok/s | 7.9–8.0 |
+| MTP speculative, k=3 | 33.7–39.6 tok/s | 15.0–15.1 |
+| Paged KV + SSD spill, 10,611-token needle | 26.6 tok/s (dense control 27.1) | 5.9 (7.8) |
+| Blocked streamed prefill, same needle | 125 tok/s | 27 |
+
+- MTP attach: `model-00018-of-00018.safetensors` from `Qwen/Qwen3.8-27B`
+  (the checkpoint the pinned mlx conversion quantizes), +238,930,944 bytes in
+  place, byte-identical greedy output before/after and with `MFERENCE_MTP=0`.
+- **MTP gives no speedup on this host.** `MFERENCE_PHASES` confirms the
+  drafter works (49 rounds, 53.1% accept, ~2.6 tokens emitted per verify), but
+  a verify round costs ≈3× a plain decode step here, cancelling the gain. On
+  the bandwidth-starved M5 the same trade is 1.9×; speculation buys back
+  memory bandwidth this host does not lack. A host-aware default may be worth
+  considering.
+- Paged KV with the pool forced to 128 pages/layer (SSD spill active)
+  retrieved the passkey exactly and produced output byte-identical to the
+  dense control at ~2% decode cost — on the M5 the same scenario cost ~19%.
+
+Maple smoke (protocol short case, seed 20260721): 38.5 tok/s decode, coherent
+output, `stop=maxTokens` as expected for a think-block family (16 GB M4 doc:
+18.9–24.6 tok/s).
+
+### Installs and operations
+
+| Model | Revision | Bytes verified | Files |
+|---|---|---:|---:|
+| Gemma 4 | `0d77464e` | 14,291,915,755 | 37 |
+| Qwen 3.6 | pinned (hash-verified) | 19,551,394,758 | 47 |
+| Qwen 3.8 | `3e6447f0` | 15,152,930,920 | 7 |
+| DeepSeek-V4-Flash | `722bf559` | 96,689,373,952 | 50 |
+| Inkling-Small | `9d6e4720` | 148,421,176,040 | 48 |
+| Maple | pinned (hash-verified) | 6,587,805,726 | 32 |
+
+Hugging Face's CDN rate-limits large installs: two >90 GB streams in parallel
+drew HTTP 429 for both, and even a single stream is throttled every
+~50–130 GB. `--resume` in a retry loop with a few minutes of backoff completed
+both giants with zero corruption. Install the largest models one at a time.
 
 ## Reproducing
 
