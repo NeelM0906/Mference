@@ -205,6 +205,16 @@ public func run(args: Args,
             lines += "  draft: " + ms(spec.draftNanos) + " ms, verify: "
             lines += ms(spec.verifyNanos) + " ms, accept: "
             lines += ms(spec.acceptNanos) + " ms\n"
+            var profile: [String] = []
+            for (accepts, trials) in zip(spec.positionAccepts, spec.positionTrials)
+                where trials > 0 {
+                let rate: Double = 100.0 * Double(accepts) / Double(trials)
+                profile.append(String(format: "%.0f%%", rate))
+            }
+            if !profile.isEmpty {
+                lines += "  accept by draft position: "
+                lines += profile.joined(separator: " ") + "\n"
+            }
             stderr.write(Data(lines.utf8))
         }
         if !args.quiet {
