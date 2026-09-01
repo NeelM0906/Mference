@@ -8,9 +8,11 @@
 # SKIPPED stage does not. Each stage prints one result line and the script ends
 # with a single verdict line.
 #
-#   0  preflight          macOS 15+, Swift 6.1+, memory headroom, no other
-#                         model or installer process, release MferenceCLI and
-#                         MferenceRepack present.
+#   0  preflight          macOS 15+, Swift 6.1+, memory headroom, free disk on
+#                         the results volume (and the model volume when a
+#                         gturbo-dir is given), no other model or installer
+#                         process, release MferenceCLI and MferenceRepack
+#                         present.
 #   1  toy suite          Scripts/test.sh --filter <family regex>. SKIPPED when
 #                         the family has no suites registered yet.
 #   2  install verify     MferenceRepack --verify-install. Needs <gturbo-dir>.
@@ -20,6 +22,14 @@
 #   4  protocol scaffold  creates the results directory and prints the
 #                         run-benchmark.sh command to run next. It never runs
 #                         the benchmark: that stays a deliberate invocation.
+#
+# Every non-dry run writes <results>/bringup-report.txt with the provenance
+# AGENTS.md requires a run report to carry: commit (and dirty state), hardware
+# and RAM, macOS, Swift, the exact invocation, per-stage exit codes, and the
+# deviations (skipped stages). A PASS without that file is not a report.
+#
+# env: MIN_FREE_GB=5     minimum free disk required on the results volume
+#      MIN_FREE_PCT=20   minimum system-wide free memory percentage required
 #
 # Stage 1's per-family filter table is this kit's current seam for the future
 # manifest-driven toy generator (spec W3.1). Once one ToySynthetic emits
@@ -33,11 +43,46 @@ cd "$(dirname "$0")"
 
 fail() { echo "ABORT: $*" >&2; exit 1; }
 show() { printf '    $ %s\n' "$*"; }
-ok()   { echo "✔ stage ${1}: ${2}"; }
-skip() { echo "○ stage ${1}: SKIPPED -- ${2}"; skipped=$((skipped + 1)); }
-bad()  { echo "✘ stage ${1}: FAILED -- ${2}" >&2; echo "verdict: NOT SUPPORTED (${family}, stage ${1})" >&2; exit 1; }
+ok()   { echo "✔ stage ${1}: ${2}"; stage_log="${stage_log}✔ stage ${1}: ${2} (exit 0)"$'\n'; }
+skip() { echo "○ stage ${1}: SKIPPED -- ${2}"; skipped=$((skipped + 1)); stage_log="${stage_log}○ stage ${1}: SKIPPED -- ${2}"$'\n'; }
+bad()  {
+  echo "✘ stage ${1}: FAILED -- ${2}" >&2
+  stage_log="${stage_log}✘ stage ${1}: FAILED -- ${2} (exit 1)"$'\n'
+  write_report "NOT SUPPORTED (${family}, stage ${1})"
+  echo "verdict: NOT SUPPORTED (${family}, stage ${1})" >&2
+  exit 1
+}
 # passed <stage> <label> -- the OK line, tagged when nothing actually ran.
 passed() { if [ "${dry_run}" -eq 1 ]; then ok "$1" "$2 (dry run)"; else ok "$1" "$2"; fi; }
+
+# The provenance record AGENTS.md requires of any reported run: commit,
+# hardware and RAM, macOS, Swift, exact command, per-stage exit codes, and
+# every deviation (here: the skipped stages). Written for PASS and FAIL alike;
+# a dry run writes nothing because nothing ran.
+write_report() {
+  [ "${dry_run}" -eq 1 ] && return 0
+  mkdir -p "${out_root}"
+  report="${out_root}/bringup-report.txt"
+  {
+    echo "bringup-check ${family} -- ${1}"
+    echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "invocation: ${invocation}"
+    dirty=""
+    [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty=" (working tree dirty)"
+    echo "commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)${dirty}"
+    sw_vers 2>/dev/null
+    swift --version 2>&1 | head -1
+    system_profiler SPHardwareDataType 2>/dev/null |
+      awk -F': ' '/Model Name|Model Identifier|Chip|Total Number of Cores|Memory/ { print $1 ": " $2 }'
+    echo "free memory: ${free_pct:-unchecked}%  free disk: ${free_gb:-unchecked} GiB"
+    [ -n "${model_dir}" ] && [ -f "${model_dir}/manifest.json" ] \
+      && shasum -a 256 "${model_dir}/manifest.json"
+    echo "stages (each stage's own exit code; a skip is a protocol deviation):"
+    printf '%s' "${stage_log}"
+    echo "deviations: ${skipped} stage(s) skipped"
+  } > "${report}"
+  echo "report: ${report}"
+}
 
 usage() {
   cat <<'EOF'
@@ -88,6 +133,8 @@ case "${family}" in
 esac
 
 skipped=0
+stage_log=""
+invocation="./bringup-check.sh$([ "${dry_run}" -eq 1 ] && printf ' %s' --dry-run) ${family}${model_dir:+ ${model_dir}}"
 out_root="benchmark-results/${family}-bringup"
 [ "${dry_run}" -eq 1 ] && echo "(dry run: no command below is executed)"
 echo "bringup-check ${family}${model_dir:+ ${model_dir}}"
@@ -102,6 +149,8 @@ if [ "${dry_run}" -eq 1 ]; then
   show "sw_vers -productVersion   # require 15+"
   show "swift --version           # require 6.1+"
   show "memory_pressure -Q        # require \${MIN_FREE_PCT:-20}% free"
+  show "df -g .                   # require \${MIN_FREE_GB:-5} GiB free for run output"
+  [ -n "${model_dir}" ] && show "df -g ${model_dir}          # require 1 GiB free beside the model (verify receipt)"
   show "pgrep -fl '${pgrep_pattern}'"
   show "test -x .build/release/MferenceCLI -a -x .build/release/MferenceRepack"
   ok 0 "preflight (dry run)"
@@ -126,6 +175,19 @@ else
   [ "${free_pct}" -ge "${MIN_FREE_PCT:-20}" ] \
     || bad 0 "memory pressure too high: ${free_pct}% free, need ${MIN_FREE_PCT:-20}%"
 
+  # Disk, before any model executes: ladder outputs and the report land on this
+  # volume, and --verify-install writes its receipt beside the model. Same
+  # convention as run-benchmark.sh (MIN_FREE_GB, df -g).
+  free_gb=$(df -g . | awk 'NR==2 { print $4 }')
+  [ -n "${free_gb}" ] || bad 0 "could not determine free disk space"
+  [ "${free_gb}" -ge "${MIN_FREE_GB:-5}" ] \
+    || bad 0 "need at least ${MIN_FREE_GB:-5} GiB free for run output; found ${free_gb} GiB"
+  if [ -n "${model_dir}" ] && [ -d "${model_dir}" ]; then
+    model_free_gb=$(df -g "${model_dir}" | awk 'NR==2 { print $4 }')
+    [ -n "${model_free_gb}" ] && [ "${model_free_gb}" -ge 1 ] \
+      || bad 0 "need at least 1 GiB free on the model volume for the verify receipt; found ${model_free_gb:-unknown} GiB"
+  fi
+
   # Match only actual executables, not shells whose command line mentions them.
   live=$(pgrep -fl "${pgrep_pattern}" \
     | grep -v -e 'bringup-check.sh' -e '/bin/zsh' -e '/bin/bash' -e 'pgrep' || true)
@@ -136,7 +198,7 @@ ${live}"
     [ -x ".build/release/${product}" ] \
       || bad 0 "release ${product} missing; run: swift build -c release --product ${product}"
   done
-  ok 0 "preflight (macOS ${os_version}, Swift ${swift_version}, ${free_pct}% free)"
+  ok 0 "preflight (macOS ${os_version}, Swift ${swift_version}, ${free_pct}% mem free, ${free_gb} GiB disk free)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -227,4 +289,5 @@ Then fill in the family page from the template docs/families/TEMPLATE.md, and
 add the MFERENCE_PHASES=1 attribution run that docs/FAMILY_GATE.md step 6 wants.
 EOF
 
+write_report "PASS (${family}, ${skipped} stage(s) skipped)"
 echo "verdict: PASS (${family}, ${skipped} stage(s) skipped)"
