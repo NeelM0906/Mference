@@ -258,7 +258,18 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
 - [x] Sizing model closed against the shard index (±0.3%)
 - [x] W2 repack path: streamed BF16 read, quantize-in-flight, fused-expert
       split, PLE row pool, sidecar policy, synthetic end-to-end install test
-- [x] Repacker `ArchInfo` entry + runtime capability gate (named refusal)
+- [x] **Real install completed and verified** (2026-08-31): the full 359 GB
+      streamed from the vendor repo and quantized in flight in one attempt,
+      2 h 35 m, no CDN throttles; `--verify-install` green over 57 files /
+      175,173,302,167 bytes; the dry-run plan's weight accounting
+      (175,106,382,264 bytes) matched to 0.04% (the difference is manifest,
+      receipt and tokenizer files outside the plan). Layout on disk:
+      `model_weights.bin`, `packed_experts/`, `packed_experts_mtp/`, `ple/`.
+- [x] Repacker `ArchInfo` entry + runtime capability gate (named refusal) —
+      exercised against the real install: every entry point reports
+      `family qwen38flashnext is installed but its runner is not implemented;
+      missing axes: hyperConnectionsLowRank, attentionIndexer,
+      pleNgramEmbedding`.
 - [ ] **W2.1b quality gate OPEN** — greedy rollouts and KLD against the
       mlx-community Qwen 3.6 conversion have not been run (needs a ~70 GB
       download and a model run). Bit parity against the runtime reference
