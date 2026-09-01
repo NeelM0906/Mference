@@ -493,8 +493,43 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         model does not attenuate its blocks by 1000x. Settling this needs the
         real 175 GB install, which the gate currently blocks — an owner
         decision.
-- [ ] Real-model first light, `bringup-check.sh` green ×3, community protocol
-      page — all downstream of the gate lift.
+- [x] **Real-model first light — the toy hypothesis confirmed.** Measured
+      2026-09-01 on the 256 GB M3 Ultra via a measurement-only door
+      (`FlashNextRealGenerationMeasurement`, env-gated on
+      `MFERENCE_FLASHNEXT_GTURBO`; the production gate is **not** lifted — it
+      still refuses the family for CLI/server/app, asserted by
+      `productionDoorStillRefusesRealInstall`). The runner is
+      `FlashNextForwardRunner` on the real INT4 install, unmodified.
+      - *Greedy, "The capital of France is", 24 tokens:* **" Paris. The
+        capital of Germany is Berlin. The capital of Italy is Rome. The
+        capital of Spain is Madrid. The"** — coherent and correct. 11.6 tok/s
+        decode, **2.39 GB peak RSS**.
+      - *Chat, storm-surge explanation, 128 tokens:* a fluent, technically
+        accurate answer (frictional drag, vegetation roughness, energy
+        dissipation, vertical accretion). 10.7 tok/s decode, 5.84 s prefill
+        for 62 tokens, RSS 2.39 GB.
+      - *Long context, needle-in-haystack:* a passkey planted mid-body in a
+        **3,247-token prompt — beyond the 2,048 indexer budget** — is
+        retrieved **exactly** (`739215`), the model finishing at end-of-turn.
+        Decode holds at **12.3 tok/s** at that context (no long-context decode
+        penalty — the sparse indexer's whole purpose), prefill 310 s
+        (sequential, unoptimized). This exercises the QSA sparse-attention path
+        on real weights past its budget and confirms it attends correctly. (A
+        first probe capped generation at 16 tokens, too few for the model's
+        `<think>` block to finish; at a 320-token budget it answers cleanly.)
+      - The result settles the toy near-tie question: a **trained** model does
+        not attenuate its blocks 1000×, so the FP16 floor that flipped one toy
+        token does not surface — real output is coherent. **Caveat that
+        stands:** greedy token-exactness vs a reference cannot be checked at
+        180B scale (no reference rollout exists), so this is a *read* of the
+        kernels at scale, not a proof. **W2.1b (KLD vs a known-good
+        conversion) remains the missing quantitative quality gate**, and the
+        production gate stays down until it and a maintainer decision clear it.
+      - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
+        model** (~75× the resident set), the most extreme expression of the
+        working-set thesis in the project.
+- [ ] `bringup-check.sh` green ×3 and the community protocol page — downstream
+      of the gate lift, which awaits W2.1b and a maintainer decision.
 
 ## Reproduction of this dossier's facts
 
