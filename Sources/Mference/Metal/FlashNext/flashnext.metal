@@ -319,3 +319,24 @@ kernel void flashnext_hc_tile_embedding(
     hyper[ulong(gid.y) * ulong(bundle) + gid.x] =
         embedding[ulong(gid.y) * ulong(hidden) + d];
 }
+
+// ---------------------------------------------------------------------------
+// BF16 embedding row gather.
+//
+// The production install quantizes `embed_tokens.weight` to INT4 affine g64 and
+// the shipped `embed_lookup_int4` serves it. The parity install carries it as
+// dense BF16, so the runner needs the other half of the same dtype split it
+// already makes for every projection. There is no output scale: this family does
+// NOT scale the embedding by sqrt(hidden) — `hidden_states = embed(ids)` and then
+// the hyper-connection tile, nothing else.
+// ---------------------------------------------------------------------------
+kernel void flashnext_embed_row_bf16(
+    device const bfloat* table  [[buffer(0)]],   // [vocab, hidden] BF16
+    device       half*   out    [[buffer(1)]],   // [hidden] FP16
+    constant     uint&   row    [[buffer(2)]],
+    constant     uint&   hidden [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= hidden) return;
+    out[gid] = half(float(table[ulong(row) * ulong(hidden) + gid]));
+}

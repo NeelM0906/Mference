@@ -329,10 +329,31 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       router, tied back to it by `FlashNextRouterReferenceTieBackTests`), and
       the whole decode and prefill routers agreeing at the production
       `512 x 2560` INT8 shape.
-      Still open for top-10: the *expert compute* path. `MoE.maxStreamedExperts`
-      is 8, `RoutedBlobs` carries 8 blobs, and `moe_phase2_down_reduce_k{6,8}`
-      are the only reduce widths — a top-10 forward needs either a k10 reduce or
-      two passes. Router only, so far.
+- [x] **Expert compute widened to top-10.** `RoutedBlobs` now carries
+      `kRoutedBlobSlots = 10` pointers (`MoE.routedBlobSlots`) and
+      `moe_phase2_down_reduce_k10` is the k8 body with two more simdgroups and
+      two more terms in the same residual-first, rank-ordered FP32 accumulation.
+      `kMaxStreamedExperts` stays 8: it bounds the DeepSeek-V4 prefill tile's
+      `local_slot`, not the argument-buffer array, and every kernel indexes only
+      `slot < top_k`, so the widening is layout-only for the shipped families.
+      `MoEDeepseekV4` now points *every* unused slot at slot 0 rather than the
+      two it knew about.
+      A dense **BF16** expert path lands beside it in
+      `Sources/Mference/Metal/FlashNext/flashnext_moe.metal` +
+      `FlashNextMoE`: the parity install's `moe_intermediate_size` is 32, which
+      group-64 cannot quantize at all, so the same runner drives both dtypes —
+      the split `FlashNextWeightMatrix` already makes for resident projections.
+      Its reduce is general in `top_k` (<= 10) rather than one kernel per width.
+      New gate: `FlashNextExpertComputeTop10Tests` — at 512 experts / top-10,
+      with the selection coming from the real wide router, INT4 relative error
+      `2.8e-4` and BF16 `5.0e-4` against `FlashNextExpertReference` (the CPU
+      reference forward's own expert block, tied back to the runner bit-for-bit
+      by `FlashNextExpertReferenceTieBackTests`); the BF16 hit/miss split is
+      bit-identical to a full pass; and `moe_phase2_down_reduce_k10` with two
+      zero-weight ranks is **bit-identical** to `moe_phase2_down_reduce_k8` on
+      the same bytes, which is what makes the widening safe for Gemma 4 and
+      Qwen 3.6. `./bringup-check.sh qwen36` returns PASS with a byte-identical
+      16/32/auto ladder.
 - [x] **Toy fixtures + reference parity — CPU float32 reference GREEN**
       (`Tests/Mference/Core/Runtime/FlashNext/`). `FlashNextReferenceRunner` is a
       straight-line float32 CPU forward for the whole stack — hyper-connections,
@@ -374,7 +395,7 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       of the alternative: an INT4 g64 round-trip of exactly the tensors the
       planner would quantize puts SHORT logits `5.13e-2` max-abs off, with
       1402/1408 elements outside the gate.
-- [ ] **Metal kernels for the new axes — 2 of 5 landed.**
+- [x] **Metal kernels for the new axes — all 5 landed.**
       - [x] **Group RMSNorm** (`rmsnorm_bf16w_grouped`): `group_size = hidden`,
             one threadgroup per (row, stream), weight indexed by
             (stream, channel) over the whole 10240 bundle rather than shared per
@@ -394,15 +415,86 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
             exists for. The hash is gated directly against the reference
             runner's captured `ple_ngram_row_ids`, in prefill and through eight
             cached decode steps.
-      - [ ] QSA indexer (raw-key cache, incremental pooled block keys, scoring,
-            top-512 selection reproducing the reference's tie-breaking)
-      - [ ] Gated full attention over the indexer-selected KV subset
-      - [ ] GDN reuse from qwen38, with the gated norm's **sigmoid** activation
-            confirmed against what that port bakes
-- [ ] `FlashNextForwardRunner`: the production layer loop, expert streaming at
-      top-10, and removing `qwen38flashnext` from
-      `ManifestReader.familiesWithoutRunner`
-- [ ] `bringup-check.sh` green ×3 · community protocol page
+      - [x] **QSA indexer** (`flashnext_indexer.metal` + `FlashNextIndexer`):
+            append-only raw-key cache, pooled block keys written once when a
+            block's fourth token lands, per-(query, block) scores, and top-k on
+            the **CPU** through `FlashNextDescendingTopK` — the exact
+            `torch.topk` ordering, libc++ `nth_element` short-circuits included.
+            This path is **FP32 end to end**, breaking the runtime's FP16
+            convention on purpose: its output is a selection, not a tensor, and
+            relu-zero ties at the boundary are common enough that there is
+            nothing for a tolerance to absorb. Cost: 6 KiB/token raw keys +
+            1.5 KiB/token amortized block keys across the 12 layers, twice the
+            design doc's FP16 estimate, against a 24 KiB/token KV.
+            Gate (`FlashNextIndexerKernelTests`): selections **EXACT** against
+            both `FlashNextIndexerReference` and the reference runner's own
+            captures — every prefill position and every stepped decode step, on
+            both prompts, including four rows whose top-k boundary is a
+            bit-exact tie. No lag-one shortcut: prefill scores each row against
+            its own visible block count in one dispatch.
+      - [x] **Gated full attention over the selected KV subset**
+            (`FlashNextAttention`). Sparsity is applied by **gathering** the
+            selected rows into contiguous scratch, never by masking and never by
+            dropping KV: the selection is at most `budget + ratio` (2051)
+            positions whatever the context, so the shipped dense `attention_full`
+            decode kernel runs over the gathered run unchanged, and every
+            gathered position is at or before the query so no causal mask is
+            needed. Projections, `split_q_gate_fp16`, the fused per-head q/k norm
+            + partial NeoX RoPE epilogue and `sigmoid_gate_mul_fp16` are all the
+            shipped Qwen 3.8 kernels. Measured worst relative error against
+            `FlashNextAttentionReference`: `8.4e-4` (short) / `5.8e-4` (long).
+      - [x] **GDN**, with the gated norm's activation **parameterized**. The
+            shipped kernel hard-coded silu; `FC_GDN_GATE_SIGMOID`
+            (`GDN.OutputGate`) selects sigmoid, and an UNSET constant means silu
+            so every shipped pipeline — all built with no constants — compiles to
+            exactly the code it did before. `FlashNextGDNGateTests` measures the
+            sigmoid form against an FP32 reference at the production Hv=48
+            geometry, measures the silu default in the same run, asserts the two
+            differ (otherwise the constant never reached the compiler), and A/Bs
+            the fused `gdn_delta_gated_decode_qwen38` under sigmoid against the
+            unfused pair including the recurrent state.
+            `flashnext_gdn.metal` adds a **dimension-generic** fallback, because
+            `GDN.init` requires `key_head_dim % 32 == 0` and the parity toy's Dk
+            is 8. Real installs never take it; the runner branches on geometry.
+- [x] **`FlashNextForwardRunner`** — the production layer loop, both install
+      dtypes, expert streaming at top-10 through the real LFU slot cache
+      (`pread`, 16 slots — the default rung, and the lowest that can hold a
+      top-10 layer's working set), PLE row pool through `PleRowPool`, and the
+      global mixer standing in for the absent final norm. Prefill is
+      **sequential** (`PrefillRuntimeConfig.off`, `HeadlessSequentialPrefillRunner`),
+      which is the first thing a perf pass should take.
+- [ ] **The family gate stays DOWN.** `ManifestReader.familiesWithoutRunner`
+      still lists `qwen38flashnext`, and `FlashNextCapabilityGateTests` is
+      unchanged. The rule is token-exact-or-report, and the toy's long prompt is
+      7/8. What was measured (`FlashNextForwardRunnerParityTests`, both prompts,
+      prefill plus 8 cached decode steps):
+      - **PLE n-gram row ids exact at every position** — a pure 64-bit integer
+        hash, no float in the path.
+      - **Router and indexer exact until a near-tie flips.** SHORT: exact
+        through position 16, then one indexer selection flip at L3 (0 router
+        flips in 19x6). LONG: exact through position 10, then a router *rank*
+        swap at L5 that does not change the expert set; over 56x6 positions,
+        12 router rank flips of which 8 changed the set, and 2 indexer flips.
+      - **Greedy rollouts**: SHORT **8/8 token-exact**; LONG 7/8, diverging at
+        generated token 7 where the reference's own top-2 margin is `1.31e-4`
+        against a measured max-abs logit drift of `6.84e-3` — the argmax was
+        never determined at this precision, a 52x margin-to-noise deficit.
+      - **Attribution** (`FlashNextForwardRunnerAttributionTests`): fed the
+        runner's *own* input and routing, the GPU MoE block reproduces the CPU
+        oracle to `7.8e-7` over 354 (position, layer) pairs. The kernels are not
+        the source. At layer 0, where the stream reaching it is bit-exact, the
+        block inputs carry `7.9e-4` max-abs on a magnitude of `1.33` — 1.2 FP16
+        ULP, the storage floor and nothing more.
+      - **The amplifier is the toy.** Its block outputs are ~1e-3 against block
+        inputs of ~1.1 — three orders of magnitude of attenuation with an O(1)
+        Jacobian — so the FP16 input floor emerges as an output perturbation
+        comparable to the output itself, lands in a residual stream of magnitude
+        ~4e-2 as ~1% per layer, and reaches ~2.4% by the last layer. A trained
+        model does not attenuate its blocks by 1000x. Settling this needs the
+        real 175 GB install, which the gate currently blocks — an owner
+        decision.
+- [ ] Real-model first light, `bringup-check.sh` green ×3, community protocol
+      page — all downstream of the gate lift.
 
 ## Reproduction of this dossier's facts
 

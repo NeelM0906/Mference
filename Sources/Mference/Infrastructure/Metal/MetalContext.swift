@@ -80,6 +80,10 @@ public final class MetalContext: @unchecked Sendable {
         "dsv4",
         "inkling",
         "dflash2",
+        "flashnext",
+        "flashnext_moe",
+        "flashnext_indexer",
+        "flashnext_gdn",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -90,6 +94,9 @@ public final class MetalContext: @unchecked Sendable {
         "dflash2": "Metal/DFlash2",
         "dsv4": "Metal/DSV4",
         "flashnext": "Metal/FlashNext",
+        "flashnext_gdn": "Metal/FlashNext",
+        "flashnext_indexer": "Metal/FlashNext",
+        "flashnext_moe": "Metal/FlashNext",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
         "inkling": "Metal/Inkling",

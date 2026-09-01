@@ -40,6 +40,18 @@ public enum ForwardRunnerFactory {
                                       ? .chunked : .off,
                                   kvStorageMode: .fp16)
         }
+        if model.config.family == .qwen38flashnext {
+            // Sequential prefill: this runner does not implement
+            // `ChunkedPrefillRunner`, and `RawCompletion` throws rather than
+            // silently degrading if a chunked config reaches a runner that
+            // cannot serve it — so the config it gets is `.off`.
+            return ForwardRuntime(producer: try FlashNextForwardRunner(
+                model: model, context: context, maxContext: maxContext,
+                runtimeConfiguration: runtimeConfiguration),
+                                  prefillConfig: .off,
+                                  executedPrefillMode: .sequential,
+                                  kvStorageMode: .fp16)
+        }
         return ForwardRuntime(producer: try RealForwardRunner(
             model: model,
             context: context,

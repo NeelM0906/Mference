@@ -178,12 +178,16 @@ final class MoEDeepseekV4 {
         for (index, blob) in routedBlobs.enumerated() {
             routedArgEncoder.setBuffer(blob.buffer, offset: blob.offset, index: index)
         }
-        // The Metal-side RoutedBlobs struct carries 8 slots; point the two
-        // unused ones at a valid buffer so the argument buffer never holds a
-        // dangling reference.
+        // The Metal-side RoutedBlobs struct carries `MoE.routedBlobSlots` slots
+        // (10, for Flash-Next's top-10); DeepSeek V4 binds six. Point every
+        // unused slot at a valid buffer so the argument buffer never holds a
+        // dangling reference. The kernels index only `slot < top_k`, so what
+        // these carry never reaches the arithmetic.
         if let first = routedBlobs.first {
-            routedArgEncoder.setBuffer(first.buffer, offset: first.offset, index: 6)
-            routedArgEncoder.setBuffer(first.buffer, offset: first.offset, index: 7)
+            for index in routedBlobs.count..<MoE.routedBlobSlots {
+                routedArgEncoder.setBuffer(first.buffer, offset: first.offset,
+                                           index: index)
+            }
         }
         return reusableRoutedArgBuffer
     }

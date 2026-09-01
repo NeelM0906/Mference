@@ -31,6 +31,16 @@ public struct MoEExpertOffsets {
 final class MoE {
     static let maxStreamedExperts = 8
 
+    /// Slots in the `RoutedBlobs` argument buffer, mirroring `kRoutedBlobSlots`
+    /// in `moe.metal`. Flash-Next streams top-10; the shipped families bind a
+    /// 6- or 8-wide prefix and every kernel indexes only `slot < top_k`, so the
+    /// wider array is layout-only. `maxStreamedExperts` stays 8 because it means
+    /// something else — the width the shipped decode path plans and eager-fills.
+    static let routedBlobSlots = 10
+
+    /// Top-k widths the routed INT4 expert-compute path implements.
+    static let routedComputeWidths: Set<UInt32> = [6, 8, 10]
+
     /// The widest expert count the router path accepts. Bounded by the one-SIMD
     /// selection kernels' lane arrays (`kRouterWideMaxPerLane` = 16 over 32
     /// lanes) and by the router-logits staging buffer sized below. Flash-Next
@@ -68,6 +78,8 @@ final class MoE {
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     private let phase2ReduceK6PSO: MTLComputePipelineState
     private let phase2ReduceK6SpecializedPSO: MTLComputePipelineState
+    private let phase2ReduceK10PSO: MTLComputePipelineState
+    private let phase2ReduceK10SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
 
@@ -81,8 +93,9 @@ final class MoE {
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
          specializedTopK: UInt32 = 8) throws {
-        precondition(specializedTopK == 6 || specializedTopK == 8,
-                     "routed INT4 decode supports top-k 6 or 8")
+        precondition(Self.routedComputeWidths.contains(specializedTopK),
+                     "routed INT4 decode supports top-k "
+                     + "\(Self.routedComputeWidths.sorted())")
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeTopK = specializedTopK
@@ -150,6 +163,11 @@ final class MoE {
         self.phase2ReduceK6PSO = try context.pipeline("moe_phase2_down_reduce_k6")
         self.phase2ReduceK6SpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_k6",
+            constants: moeConstants)
+        // Flash-Next's top-10 width. The k6/k8 pipelines above are unchanged.
+        self.phase2ReduceK10PSO = try context.pipeline("moe_phase2_down_reduce_k10")
+        self.phase2ReduceK10SpecializedPSO = try context.pipeline(
+            "moe_phase2_down_reduce_k10",
             constants: moeConstants)
 
         guard let logits = context.device.makeBuffer(
@@ -444,10 +462,14 @@ final class MoE {
         var intermediate = f
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         let specialized = useRealDecodeConstants(d: d, f: f, topK: topK)
-        if topK == 6 {
+        switch topK {
+        case 6:
             encoder.setComputePipelineState(
                 specialized ? phase2ReduceK6SpecializedPSO : phase2ReduceK6PSO)
-        } else {
+        case 10:
+            encoder.setComputePipelineState(
+                specialized ? phase2ReduceK10SpecializedPSO : phase2ReduceK10PSO)
+        default:
             encoder.setComputePipelineState(
                 specialized ? phase2ReduceK8SpecializedPSO : phase2ReduceK8PSO)
         }
@@ -469,9 +491,13 @@ final class MoE {
     }
 
     private func validate(routedBlobs: [(buffer: MTLBuffer, offset: Int)], topK: UInt32) {
-        precondition(topK == 6 || topK == 8,
-                     "routed INT4 decode supports top-k 6 or 8")
+        precondition(Self.routedComputeWidths.contains(topK),
+                     "routed INT4 decode supports top-k "
+                     + "\(Self.routedComputeWidths.sorted())")
         precondition(routedBlobs.count == Int(topK))
+        precondition(routedBlobs.count <= Self.routedBlobSlots,
+                     "the RoutedBlobs argument buffer holds "
+                     + "\(Self.routedBlobSlots) slots")
     }
 
     private func encodeRoutedArgumentBuffer(_ buffer: MTLBuffer,

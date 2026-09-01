@@ -2,7 +2,14 @@
 using namespace metal;
 
 constant constexpr uint kMoEGroupSize = 64;
+// The widest routed tile the DeepSeek-V4 chunked-prefill kernels bind. Unchanged
+// at 8: it bounds `DSV4PrefillRoute.local_slot`, not the argument-buffer array.
 constant constexpr uint kMaxStreamedExperts = 8;
+// Slots in the `RoutedBlobs` argument buffer. Flash-Next routes top-10, so the
+// array is 10 wide; every shipped family binds a prefix of it (6 or 8) and every
+// kernel indexes only `slot < top_k`, so the widening is layout-only — the extra
+// pointers are never dereferenced by a family that does not set them.
+constant constexpr uint kRoutedBlobSlots = 10;
 constant constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kGeluCubicCoeff = 0.044715f;
 
@@ -96,7 +103,7 @@ struct ExpertOffsets {
 };
 
 struct RoutedBlobs {
-    device const uint8_t* blob[kMaxStreamedExperts];
+    device const uint8_t* blob[kRoutedBlobSlots];
 };
 
 static inline void router_gemv_gemma4_body(
@@ -1342,6 +1349,49 @@ kernel void moe_phase2_down_reduce_k8(
         float acc = float(residual[d]);
         acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
         acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+        y[d] = half(acc);
+    }
+}
+
+// Flash-Next's top-10 reduce. Byte-for-byte the `k8` body with two more
+// simdgroups and two more terms in the same residual-first, rank-ordered FP32
+// accumulation; the shipped k6/k8 kernels above are untouched, which is what
+// `MoEFusedFFNTests` and `RouterTopKParityTests` gate.
+kernel void moe_phase2_down_reduce_k10(
+    device const RoutedBlobs& routed [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half* acts [[buffer(2)]],
+    device const half* routing_w [[buffer(3)]],
+    device const half* residual [[buffer(4)]],
+    device half* y [[buffer(5)]],
+    constant uint& D [[buffer(6)]],
+    constant uint& F [[buffer(7)]],
+    uint d [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float partial[10];
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    if (d >= DD) return;
+
+    device const uint8_t* base = routed.blob[sg_idx];
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* dW = base + re.down_W_off;
+    device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
+    device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
+    device const half* act_slot = acts + sg_idx * FF;
+
+    const float value = moe_int4_gemv_row_simd_dev_vec(
+        dW, dS, dB, act_slot, d, FF, lane);
+    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg_idx == 0 && lane == 0) {
+        float acc = float(residual[d]);
+        acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
+        acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+        acc += partial[8]; acc += partial[9];
         y[d] = half(acc);
     }
 }
