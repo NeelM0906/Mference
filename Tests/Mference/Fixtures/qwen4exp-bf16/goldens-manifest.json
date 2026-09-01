@@ -16,8 +16,8 @@
   "seed": 1234
  },
  "dtype_policy": {
-  "model_weights": "float32",
-  "weight_dtype": "fp32",
+  "model_weights": "bfloat16 values held in float32 (every parameter rounded through bf16 before capture, so these goldens describe the weights the emitted checkpoint actually carries)",
+  "weight_dtype": "bf16",
   "forward": "float32",
   "checkpoint": "bfloat16",
   "rmsnorm": "Qwen3_5RMSNorm (and therefore every Qwen4ExpTextRMSNorm) UPCASTS to float32 internally: output = _norm(x.float()) * (1.0 + weight.float()), then .type_as(x). The (1 + w) zero-centered convention is confirmed; the port's `+1` weight bake is correct, but the fp32 upcast must be preserved for bf16 runtimes.",
@@ -213,15 +213,15 @@
    40,
    31,
    28,
-   48,
-   36,
-   14,
-   41,
-   87,
-   7,
-   34,
-   51,
-   32
+   2,
+   56,
+   43,
+   86,
+   124,
+   99,
+   79,
+   23,
+   114
   ]
  },
  "deviations_from_bringup_kit": [
@@ -248,22 +248,22 @@
  "golden_files": {
   "prefill_short.safetensors": {
    "bytes": 303864,
-   "sha256": "549391007dd1185ad8b883b14da8a08f327a85d2494bf9809df3036d99df6736",
+   "sha256": "a92135231a45c3faabb50da6cec92772d472525a83d06d7bc66ca749f6f9cc5c",
    "contents": "prefill float32 goldens for the SHORT (dense-equivalent) prompt: embed_out; per layer stream_out / attn_hc_{mixed,stream_in,inject} / mlp_hc_{mixed,stream_in,inject} / block_out / moe_out / router_weights; PLE layer ple_out + ple_ngram_embeds; last_hidden_state; logits."
   },
   "prefill_long.safetensors": {
    "bytes": 1307376,
-   "sha256": "a85602bf6b722e354e1b2137ee193b7d23028f2d5d727266cbb4795b7260ed76",
+   "sha256": "a1604fa06fb424a1344506c4175d86b73f8d62af9b34ed4a298ee30386ef5cc4",
    "contents": "prefill float32 goldens for the LONG (sparse) prompt: embed_out; per layer stream_out / attn_hc_{mixed,stream_in,inject} / mlp_hc_{mixed,stream_in,inject} / block_out / moe_out / router_weights; PLE layer ple_out + ple_ngram_embeds; last_hidden_state; logits."
   },
   "decode_short.safetensors": {
    "bytes": 412960,
-   "sha256": "96f62cf49eaa702bd2eefc85c7a7e7f44487e334fb55dbaeef84fb6226dd1cd7",
+   "sha256": "a04202c0e3d0124ce280e633824b569164ac4fb2fb233093b7bb7cf1807eb174",
    "contents": "decode float32 goldens for the SHORT (dense-equivalent) prompt: embed_out; per layer stream_out / attn_hc_{mixed,stream_in,inject} / mlp_hc_{mixed,stream_in,inject} / block_out / moe_out / router_weights; PLE layer ple_out + ple_ngram_embeds; last_hidden_state; logits."
   },
   "decode_long.safetensors": {
    "bytes": 412960,
-   "sha256": "5e0bbffa56c089d3a26c136cb61403d37a86dde4465dfa339c24957cfc08f8f8",
+   "sha256": "c276f396caaf095306a8a26d800d5998b84d116f011e85649696d5bdc12267cf",
    "contents": "decode float32 goldens for the LONG (sparse) prompt: embed_out; per layer stream_out / attn_hc_{mixed,stream_in,inject} / mlp_hc_{mixed,stream_in,inject} / block_out / moe_out / router_weights; PLE layer ple_out + ple_ngram_embeds; last_hidden_state; logits."
   },
   "integers_prefill_short.json": {
@@ -272,18 +272,18 @@
    "contents": "prefill integer goldens for the SHORT (dense-equivalent) prompt: per-attention-layer indexer selected/visible token index sets (sorted, per query position), per-MoE router top-k expert indices, PLE n-gram embedding row ids (16 per token), greedy token ids."
   },
   "integers_prefill_long.json": {
-   "bytes": 35891,
-   "sha256": "72a4ba26c9d5e00d9cdd3b3f81a0896c46fd20689eb36c63862fdc0bfe82da89",
+   "bytes": 35889,
+   "sha256": "b1dd23bf1ed03f6f46475a597a0c586428e51c8827aaacdc68534bce07ceb7b0",
    "contents": "prefill integer goldens for the LONG (sparse) prompt: per-attention-layer indexer selected/visible token index sets (sorted, per query position), per-MoE router top-k expert indices, PLE n-gram embedding row ids (16 per token), greedy token ids."
   },
   "integers_decode_short.json": {
    "bytes": 13479,
-   "sha256": "a7075ba5a55d2cbc1af0a80327e1c2f983c7794fea5d74759ba22a775532cec1",
+   "sha256": "5e953055e0ae6c67297f626ebe5c1a3262fbfe8d97c8e004298a56d929e82311",
    "contents": "decode integer goldens for the SHORT (dense-equivalent) prompt: per-attention-layer indexer selected/visible token index sets (sorted, per query position), per-MoE router top-k expert indices, PLE n-gram embedding row ids (16 per token), greedy token ids."
   },
   "integers_decode_long.json": {
-   "bytes": 22506,
-   "sha256": "f5e4d47c72b844e7697fb3702c8fb696b2a0f275ad0cb5c11e7055e8ad30b37c",
+   "bytes": 22495,
+   "sha256": "8f027e8617c8f22bac1435a41b244a61f1e3e7b90d3f5dd87a236822df9dd5b6",
    "contents": "decode integer goldens for the LONG (sparse) prompt: per-attention-layer indexer selected/visible token index sets (sorted, per query position), per-MoE router top-k expert indices, PLE n-gram embedding row ids (16 per token), greedy token ids."
   }
  },
@@ -363,8 +363,8 @@
   },
   "tolerances": {
    "dtype": "float32",
-   "eager_vs_sdpa_logits_max_abs": 7.450580596923828e-08,
-   "eager_vs_sdpa_logits_max_rel": 0.0006163042271509767,
+   "eager_vs_sdpa_logits_max_abs": 5.960464477539063e-08,
+   "eager_vs_sdpa_logits_max_rel": 0.0017313443822786212,
    "eager_vs_sdpa_argmax_identical": true,
    "recommended_swift_gate_fp32": {
     "atol": 0.0001,

@@ -7,7 +7,11 @@ Contract being pinned: [`docs/superpowers/specs/2026-09-01-qwen38flashnext-runti
 Family dossier: [`docs/families/QWEN38_FLASH_NEXT.md`](../../docs/families/QWEN38_FLASH_NEXT.md).
 
 - Generator: [`qwen4exp_make_goldens.py`](qwen4exp_make_goldens.py) (committed)
-- Goldens: `Tests/Mference/Fixtures/qwen4exp/` (committed, 2.5 MiB)
+- Goldens: `Tests/Mference/Fixtures/qwen4exp/` (committed, 2.5 MiB) — captured from the
+  float32 init weights
+- Goldens: `Tests/Mference/Fixtures/qwen4exp-bf16/` (committed, 2.5 MiB) — captured from the
+  same weights rounded to bfloat16, i.e. the ones the emitted checkpoint carries. **This is
+  the set a port gates on**; see "Two golden sets" below
 - Toy checkpoints: `scratch/qwen4exp-toy-ckpt{,-prodlayout}/` (**not** committed, regenerable)
 - venv: `scratch/qwen4exp-parity-venv/` (**not** committed)
 
@@ -78,6 +82,44 @@ find Tests/Mference/Fixtures/qwen4exp scratch/qwen4exp-toy-ckpt scratch/qwen4exp
 `--print-hashes` prints the golden hashes without writing them. Checkpoint emission is
 unconditional (the manifest embeds the checkpoints' tensor names, shapes and sha256), so
 `--emit-checkpoint` is retained for the documented interface rather than gating anything.
+
+## Two golden sets: `--weight-dtype fp32` and `--weight-dtype bf16`
+
+```bash
+# the original set, Tests/Mference/Fixtures/qwen4exp/           (default)
+./scratch/qwen4exp-parity-venv/bin/python Scripts/parity/qwen4exp_make_goldens.py
+# the checkpoint-faithful set, Tests/Mference/Fixtures/qwen4exp-bf16/
+./scratch/qwen4exp-parity-venv/bin/python Scripts/parity/qwen4exp_make_goldens.py \
+  --weight-dtype bf16
+```
+
+The default set is captured from the **float32 weights `Qwen4ExpForCausalLM(cfg)`
+initialized**. The checkpoint this harness emits is a **lossy bfloat16 copy** of those
+weights, so no consumer of the checkpoint can reproduce them. Measured by running the
+reference twice, once with each weight dtype:
+
+| | SHORT | LONG |
+|---|---|---|
+| logits max-abs, bf16 weights vs the fp32 goldens | `1.16e-3` | `3.09e-2` |
+
+against the `atol = rtol = 1e-4` gate this manifest recommends — 10x to 300x over. And it
+is not only a tolerance problem, because the discrete gates move too:
+
+* `layer02.router_indices` flips at LONG query 18 (`[2,1]` → `[1,2]`),
+* `layer03.indexer_selected` changes at LONG query 28 (`[8,9,10,11,…]` → `[0,1,2,3,…]`),
+* the LONG cached-decode greedy rollout diverges at token 7: `…28, 48, 36, 14, 41…`
+  becomes `…28, 2, 56, 43, 86…`.
+
+`--weight-dtype bf16` rounds every parameter through bfloat16 and back to float32 **before**
+any golden is captured, so the goldens describe the weights the checkpoint carries. The
+forward is float32 in both cases; only the stored weight values differ. Rounding is
+idempotent, so `emit_checkpoint` writes byte-identical checkpoints either way, and the
+eight fp32 golden files still reproduce byte-for-byte.
+
+Use the `fp32` set as the record of the reference's own arithmetic — it is what the design
+contract was read against. Use the `bf16` set to gate a port: it is the one
+`FlashNextReferenceParityTests` runs, because that suite loads an install built from the
+emitted checkpoint.
 
 The script **fails loudly** rather than writing bad goldens. It asserts, in-process:
 
@@ -253,3 +295,18 @@ Determined by reading the installed package, and reflected in `dtype_policy`:
 - Attention `q_proj` packs query and gate **per head**: the output is viewed as
   `(.., num_heads, 2 · head_dim)` and chunked in 2 on the last dim, so within each head the
   first `head_dim` is query and the second is gate. It is **not** a global half/half split.
+- **`torch.topk`'s tie-break is `std::nth_element`'s, and it is not lowest-index-first.**
+  PyTorch's CPU topk takes the `nth_element` branch whenever `k * 64 > n` (always, at indexer
+  widths), and libc++'s `__nth_element` short-circuits by length: `2` swaps if out of order,
+  `3` runs `__sort3`, `<= 7` runs `__selection_sort` (first maximum, swapped into place — the
+  swap displaces whatever was there), larger ranges run a median-of-3 quickselect. So for
+  block scores `[0, 0, 0.385, 0]` with `k = 2` it returns blocks `{2, 1}`, not `{2, 0}`.
+
+  This bites only on *bit-equal* scores. Across all four golden runs there are exactly **four**
+  boundary ties, all in the LONG prefill, all with the tied score exactly `0.0` after the ReLU:
+  `layer03 q11`, `layer05 q11`, `layer05 q17`, `layer05 q18` (3 and 4 candidate blocks). A
+  lowest-index-first port fails `layer05.indexer_selected` at query 17 and, through the
+  changed indexer key at token 11, cascades into `layer03`/`layer05` selections at queries 33,
+  40 and 47 and into `logits` at `3.6e-2`. `FlashNextReferenceRunner.descendingTopK`
+  reproduces the length-2/3/<=7 branches and records every boundary tie it sees, so a future
+  failure can be attributed rather than guessed at.

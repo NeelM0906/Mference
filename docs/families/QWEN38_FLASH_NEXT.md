@@ -313,7 +313,47 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       floats, and `moe.metal`'s `kRouterMaxPerLane = 8` derives from that
       bound over 32 lanes. Top-10 also needs a selection kernel wider than the
       shipped `router_topk_select_k8`.
-- [ ] Toy fixtures + reference parity
+- [x] **Toy fixtures + reference parity — CPU float32 reference GREEN**
+      (`Tests/Mference/Core/Runtime/FlashNext/`). `FlashNextReferenceRunner` is a
+      straight-line float32 CPU forward for the whole stack — hyper-connections,
+      PLE (int64 hashing, EOS-segmented shifts, dilated depthwise conv), the QSA
+      indexer, GDN, gated full attention and 8-expert top-2 MoE — reading every
+      weight through the real `Model` loader, `PleRowPool` and
+      `packed_experts/layout.json`. All six parity gates pass for both prompts,
+      prefill and cached decode: PLE row ids exact, indexer selected/visible sets
+      exact, router top-k exact with weights in tolerance, per-layer tensors in
+      tolerance (worst `2.9e-5` max-abs, LONG `layer05.mlp_hc_mixed`, against a
+      `1e-4` gate), both 16-token greedy rollouts exact, and cached decode equal
+      to the runner's own re-prefill.
+- [ ] **Goldens: the fp32 set is not reachable from the checkpoint.** The
+      committed `Tests/Mference/Fixtures/qwen4exp/` goldens were captured from
+      the float32 weights `Qwen4ExpForCausalLM(cfg)` initialized; the emitted
+      checkpoint is a lossy bfloat16 copy. Loading it moves the logits by
+      `1.16e-3` (SHORT) / `3.09e-2` (LONG) max-abs, flips router top-k and
+      indexer selections, and diverges the LONG greedy rollout at token 7. The
+      harness gained `--weight-dtype bf16` and a parallel
+      `Tests/Mference/Fixtures/qwen4exp-bf16/` set captured from the weights the
+      checkpoint carries; that is what the Swift gates run against. The fp32 set
+      is untouched and still reproduces byte-for-byte. **Decide** whether the
+      fp32 set stays as the record of the reference's arithmetic or is retired.
+- [ ] **The toy checkpoint cannot go through the production installer.** Three
+      refusals, pinned by `FlashNextToyRepackBlockerTests`: (1) the harness saves
+      the text-only config (`model_type: qwen4_exp_text`, no `text_config`),
+      (2) its `layer_types` carry the post-`__post_init__`
+      `"qwen_sparse_attention"` rather than the `"full_attention"` the vendor
+      config ships — both cosmetic, and repaired by
+      `FlashNextParity.productionShapedConfig()`; and (3) **structural**:
+      `moe_intermediate_size` is 32, and `FlashNextPlanner.planLayerFile`
+      requires the expert intermediate dim to be a multiple of the INT4 group
+      size (64) because every routed expert is quantized in flight. Removing (3)
+      needs either a wider toy (regenerating every golden) or a no-quantize mode
+      in the planner. Until then the parity install is written by
+      `FlashNextParity.installToyCheckpoint()` — the same `.gturbo` byte
+      contract, real resident index / layout / row pool / manifest, with every
+      tensor left at its source BF16 so the goldens are meetable. Measured cost
+      of the alternative: an INT4 g64 round-trip of exactly the tensors the
+      planner would quantize puts SHORT logits `5.13e-2` max-abs off, with
+      1402/1408 elements outside the gate.
 - [ ] Runner: covered axes wired, new axes implemented
 - [ ] `bringup-check.sh` green ×3 · community protocol page
 

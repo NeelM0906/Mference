@@ -43,6 +43,7 @@ from safetensors.torch import save_file  # noqa: E402
 SEED = 1234
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "Tests" / "Mference" / "Fixtures" / "qwen4exp"
+FIXTURES_BF16 = REPO_ROOT / "Tests" / "Mference" / "Fixtures" / "qwen4exp-bf16"
 CKPT_DIR = REPO_ROOT / "scratch" / "qwen4exp-toy-ckpt"
 CKPT_PROD_DIR = REPO_ROOT / "scratch" / "qwen4exp-toy-ckpt-prodlayout"
 
@@ -425,13 +426,39 @@ def build_config(attn_implementation: str = "eager"):
     return cfg
 
 
-def build_model(attn_implementation: str = "eager"):
+def build_model(attn_implementation: str = "eager", weight_dtype: str = "fp32"):
+    """The toy model, in float32.
+
+    ``weight_dtype="bf16"`` rounds every parameter through bfloat16 and back to
+    float32 **before** any golden is captured.  That is not a cosmetic option:
+    the checkpoint this harness emits is bfloat16, so with the default
+    ``fp32`` weights the goldens describe a model whose weights **no consumer
+    can obtain**.  A port that loads the emitted checkpoint sees the rounded
+    weights, and the resulting logit spread is 1.2e-3 (SHORT) / 3.1e-2 (LONG)
+    max-abs -- 10x to 300x the 1e-4 fp32 gate this manifest recommends.
+
+    So the two sets have distinct jobs:
+
+    * ``fp32`` (``Tests/Mference/Fixtures/qwen4exp``) pins the *reference's own*
+      arithmetic and is the artifact the design contract was read against.
+    * ``bf16`` (``Tests/Mference/Fixtures/qwen4exp-bf16``) pins what a port that
+      loads the shipped checkpoint must reproduce, and is the one a Swift
+      parity suite can actually gate on at 1e-4.
+
+    The forward is float32 in both cases; only the stored weight values differ.
+    Rounding is idempotent (bf16 -> fp32 -> bf16 is exact), so
+    ``emit_checkpoint`` writes byte-identical checkpoints either way.
+    """
     from transformers import Qwen4ExpForCausalLM
 
     cfg = build_config(attn_implementation)
     torch.manual_seed(SEED)
     model = Qwen4ExpForCausalLM(cfg)
     model = model.to(torch.float32).eval()
+    if weight_dtype == "bf16":
+        model = model.to(torch.bfloat16).to(torch.float32).eval()
+    elif weight_dtype != "fp32":
+        raise ValueError(f"unknown weight dtype {weight_dtype!r}")
     for p in model.parameters():
         p.requires_grad_(False)
     return model
@@ -714,8 +741,20 @@ def main() -> int:
         ),
     )
     ap.add_argument("--print-hashes", action="store_true", help="print sha256 of every output and exit non-writing")
-    ap.add_argument("--out", default=str(FIXTURES), help="fixture output directory")
+    ap.add_argument(
+        "--weight-dtype",
+        choices=["fp32", "bf16"],
+        default="fp32",
+        help=(
+            "storage dtype the weights are rounded to before capture (the forward is float32 "
+            "either way). fp32 pins the reference's own arithmetic; bf16 pins what a port "
+            "loading the emitted bfloat16 checkpoint must reproduce. See build_model."
+        ),
+    )
+    ap.add_argument("--out", default=None, help="fixture output directory")
     args = ap.parse_args()
+    if args.out is None:
+        args.out = str(FIXTURES if args.weight_dtype == "fp32" else FIXTURES_BF16)
 
     torch.set_num_threads(1)
     torch.manual_seed(SEED)
@@ -729,7 +768,7 @@ def main() -> int:
     import transformers
 
     report: dict = {}
-    model = build_model("eager")
+    model = build_model("eager", args.weight_dtype)
 
     short_ids = make_prompt(SHORT_LEN, rng_seed=11, eos_at=None)
     long_ids = make_prompt(LONG_LEN, rng_seed=48, eos_at=LONG_EOS_AT)
@@ -775,7 +814,7 @@ def main() -> int:
     report["cache_equivalence_in_reference"] = {"short": True, "long": True}
 
     # Tolerance observation: sdpa vs eager on identical fp32 inputs.
-    model_sdpa = build_model("sdpa")
+    model_sdpa = build_model("sdpa", args.weight_dtype)
     with torch.no_grad():
         ids = torch.tensor([long_ids], dtype=torch.long)
         lo_eager = model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=False).logits
@@ -851,7 +890,14 @@ def main() -> int:
             seed=SEED,
         ),
         dtype_policy=OrderedDict(
-            model_weights="float32",
+            model_weights=(
+                "float32"
+                if args.weight_dtype == "fp32"
+                else "bfloat16 values held in float32 (every parameter rounded through bf16 "
+                "before capture, so these goldens describe the weights the emitted checkpoint "
+                "actually carries)"
+            ),
+            weight_dtype=args.weight_dtype,
             forward="float32",
             checkpoint="bfloat16",
             rmsnorm=(
