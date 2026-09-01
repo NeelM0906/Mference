@@ -129,6 +129,12 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .deepseekV4Flash: return .deepseekV4Flash
         case .inklingSmall: return .inklingSmall
         case .maple: return .maple
+        // No app descriptor: Qwen3.8-Flash-Next is installed through
+        // `MferenceRepack --model qwen38flashnext` (a ~175 GB
+        // quantize-in-flight repack of the vendor's original repo, not a
+        // pre-converted download), and no runner executes it yet. `nil` keeps
+        // it out of the toolbar picker and its download list.
+        case .qwen38flashnext: return nil
         }
     }
 
@@ -141,6 +147,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .deepseekV4Flash: return "deepseekv4flash.gturbo"
         case .inklingSmall: return "inklingsmall.gturbo"
         case .maple: return "maple.gturbo"
+        case .qwen38flashnext: return "qwen38flashnext.gturbo"
         }
     }
 

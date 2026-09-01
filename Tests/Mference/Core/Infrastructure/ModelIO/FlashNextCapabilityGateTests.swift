@@ -76,13 +76,57 @@ import Testing
 
     /// The gate table is the authority, not the manifest, and it must not name
     /// a family the runtime already runs.
-    @Test func gateTableCoversOnlyFamiliesWithoutARunner() {
+    ///
+    /// "Has a runner" is not the same as "has a baseline". A gated family is
+    /// expected to grow an `ArchConfig` baseline, a `ModelFamily` case and
+    /// tensor accessors well before its kernels land — that is what the runner
+    /// is written against. So the invariant checked here is behavioral: a
+    /// family in the table must still be refused at the funnel, whatever
+    /// machinery has been built for it.
+    @Test func gateTableCoversOnlyFamiliesWithoutARunner() throws {
         for (raw, axes) in ManifestReader.familiesWithoutRunner {
             #expect(!axes.isEmpty, "\(raw) must name the axes it is missing")
-            if let family = ModelFamily(rawValue: raw) {
-                #expect(ArchConfig.knownArchitectures[family] == nil,
-                        "\(raw) has a baseline; remove it from the gate table")
+            let directory = try Self.writeManifest(family: raw)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var thrown: Error?
+            #expect(throws: (any Error).self) {
+                do { _ = try ManifestReader.peekFamily(directoryURL: directory) }
+                catch { thrown = error; throw error }
             }
+            #expect(thrown as? ModelError
+                    == .familyRunnerNotImplemented(family: raw, missingAxes: axes),
+                    "\(raw) is gated but peekFamily did not refuse it by name")
+        }
+    }
+
+    /// The families the runtime does run must never appear in the table: an
+    /// entry here disables a shipped family at every entry point.
+    @Test func shippedFamiliesAreNotGated() {
+        let shipped: [ModelFamily] = [
+            .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
+        ]
+        for family in shipped {
+            #expect(ManifestReader.familiesWithoutRunner[family.rawValue] == nil,
+                    "\(family.rawValue) has a runner; remove it from the gate table")
+        }
+    }
+
+    /// The regression the runtime skeleton has to not cause: `qwen38flashnext`
+    /// now has a compiled baseline (so its manifest can be validated and toy
+    /// fixtures built), and adding it must not have made the family loadable.
+    /// `Model.load`'s auto-detect path resolves the baseline only *after*
+    /// `peekFamily`, so the refusal still comes first.
+    @Test func aBaselineDoesNotMakeTheGatedFamilyLoadable() throws {
+        #expect(ArchConfig.knownArchitectures[.qwen38flashnext] != nil,
+                "the baseline the runner is being built against went missing")
+        let directory = try Self.writeManifest(family: "qwen38flashnext")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(throws: ModelError.familyRunnerNotImplemented(
+            family: "qwen38flashnext",
+            missingAxes: ["hyperConnectionsLowRank",
+                          "attentionIndexer",
+                          "pleNgramEmbedding"])) {
+            _ = try ManifestReader.peekFamily(directoryURL: directory)
         }
     }
 }

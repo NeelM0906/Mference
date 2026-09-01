@@ -39,9 +39,17 @@ documented as what has been exercised, not as what is permitted.
 | DSV4 | DeepSeek-V4-Flash 284B-A13B | `deepseekV4Flash` | `ArchConfig.deepseekV4Flash_284B_A13B` |
 | INK | Inkling-Small 276B-A12B | `inklingSmall` | `ArchConfig.inklingSmall_276B_A12B` |
 | MPL | Maple Preview | `maple` | `ArchConfig.maplePreview` |
+| FNX | Qwen3.8-Flash-Next 180B-A3.5B | `qwen38flashnext` | `ArchConfig.qwen38FlashNext_180B_A3_5B` |
 
 `ArchConfig.knownArchitectures` maps `arch.family` to the baseline used for
 auto-detection at load.
+
+A baseline in that registry means the install validates, **not** that the
+runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
+authoritative capability gate, and `peekFamily` consults it before any of this
+machinery is reached. FNX is in the registry and in that gate: its axes,
+tensor accessors and manifest validation exist so the runner can be built
+against them, and every load path still refuses it by name.
 
 ## Family identity
 
@@ -57,20 +65,25 @@ model carries both a sliding pair (`numKVHeads`, `headDim`) and a full pair
 mirrors the full values into the sliding slots, where they are never used
 to size storage.
 
-| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `hiddenSize` | `Int` | Residual width. | 2816 | 2048 | 5120 | 4096 | 4096 | 2048 |
-| `intermediateSize` | `Int` | Shared-expert FFN width. Mirrored as `ffnIntermediate` in the manifest. | 2112 | 512 | 17408 | 2048 | 2048 | 512 |
-| `moeIntermediateSize` | `Int` | Per-expert FFN width. | 704 | 512 | 0 | 2048 | 2048 | 512 |
-| `numLayers` | `Int` | Layer count; also the length of `fullAttentionLayerMask`. | 30 | 40 | 64 | 43 | 42 | 24 |
-| `numHeads` | `Int` | Query heads. | 16 | 16 | 24 | 64 | 32 | 16 |
-| `numKVHeads` | `Int` | KV heads on sliding-window layers. | 8 | 2 | 4 | 1 | 8 | 4 |
-| `numFullKVHeads` | `Int` | KV heads on full-attention layers. | 2 | 2 | 4 | 1 | 8 | 4 |
-| `headDim` | `Int` | Head width on sliding-window layers. | 256 | 256 | 256 | 512 | 128 | 128 |
-| `fullHeadDim` | `Int` | Head width on full-attention layers. | 512 | 256 | 256 | 512 | 128 | 128 |
+| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `hiddenSize` | `Int` | Residual width. | 2816 | 2048 | 5120 | 4096 | 4096 | 2048 | 2560 |
+| `intermediateSize` | `Int` | Shared-expert FFN width. Mirrored as `ffnIntermediate` in the manifest. | 2112 | 512 | 17408 | 2048 | 2048 | 512 | 640 |
+| `moeIntermediateSize` | `Int` | Per-expert FFN width. | 704 | 512 | 0 | 2048 | 2048 | 512 | 640 |
+| `numLayers` | `Int` | Layer count; also the length of `fullAttentionLayerMask`. | 30 | 40 | 64 | 43 | 42 | 24 | 48 |
+| `numHeads` | `Int` | Query heads. | 16 | 16 | 24 | 64 | 32 | 16 | 24 |
+| `numKVHeads` | `Int` | KV heads on sliding-window layers. | 8 | 2 | 4 | 1 | 8 | 4 | 2 |
+| `numFullKVHeads` | `Int` | KV heads on full-attention layers. | 2 | 2 | 4 | 1 | 8 | 4 | 2 |
+| `headDim` | `Int` | Head width on sliding-window layers. | 256 | 256 | 256 | 512 | 128 | 128 | 256 |
+| `fullHeadDim` | `Int` | Head width on full-attention layers. | 512 | 256 | 256 | 512 | 128 | 128 | 256 |
 
 DSV4's `numKVHeads` and `numFullKVHeads` are 1 because its attention is
 shared-KV MQA: one 512-dim KV head read as both K and V.
+
+`hiddenSize` is the width the *blocks* run at, which is the residual width
+only when the family has a single residual stream. FNX's residual is
+`flashNext.hcCount` parallel streams, so the value carried between blocks is
+`hcCount * hiddenSize` = 10 240 wide; the blocks themselves still run at 2560.
 
 ## Attention
 
@@ -78,20 +91,20 @@ shared-KV MQA: one 512-dim KV head read as both K and V.
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `fullAttentionLayerMask` | `[UInt8]` | Per-layer attention kind. 0 = sliding-window, 1 = full, 2 = gated-DeltaNet linear, 3 = compressed sparse attention (CSA), 4 = heavily compressed attention (HCA). Values 3 and 4 additionally include the sliding-window branch, because DeepSeek V4 concatenates compressed entries onto the window KV. | `1` on layers 5, 11, …, 29; `0` elsewhere (5 of 30 full). | Q36/Q38: `2` everywhere, `1` on every 4th layer. DSV4: `0` on layers 0–1, then `3` on even and `4` on odd layers. INK: `1` on layers 5, 11, …, 41; `0` elsewhere. MPL: `1` on every 4th layer, `0` elsewhere. |
-| `slidingWindow` | `Int` | Sliding-window width. | 1024 | Q36/Q38 `0` (no sliding layers). DSV4 `128`. INK `512`. MPL `512`. |
-| `attentionKEqV` | `Bool` | Full-attention K and V share the `k_proj` weight, so one dequant and GEMV produces the raw projection for both. The K and V cache slots stay separate regardless — they diverge at the norms and RoPE. | `true` | Q36, Q38, INK, MPL `false`. DSV4 `true` in the strongest sense: K and V are the same cache entry. |
-| `attnOutputGate` | `Bool` | Full-attention `q_proj` emits `2 * numHeads * fullHeadDim` rows as per-head [query ; gate] halves, and the attention output is multiplied by sigmoid(gate) before `o_proj`. | `false` | Q36, Q38 `true`. |
-| `attentionScale` | `Double` | Softmax scale for full attention. | 1.0 | Q36/Q38 0.0625 (256^-0.5). DSV4 0.044194173824159216 (512^-0.5). MPL 1/sqrt(128). INK 1/128 — it RMS-normalizes q and k per head, so the scale is 1/d, not 1/sqrt(d). |
+| `fullAttentionLayerMask` | `[UInt8]` | Per-layer attention kind. 0 = sliding-window, 1 = full, 2 = gated-DeltaNet linear, 3 = compressed sparse attention (CSA), 4 = heavily compressed attention (HCA). Values 3 and 4 additionally include the sliding-window branch, because DeepSeek V4 concatenates compressed entries onto the window KV. | `1` on layers 5, 11, …, 29; `0` elsewhere (5 of 30 full). | Q36/Q38: `2` everywhere, `1` on every 4th layer. DSV4: `0` on layers 0–1, then `3` on even and `4` on odd layers. INK: `1` on layers 5, 11, …, 41; `0` elsewhere. MPL: `1` on every 4th layer, `0` elsewhere. FNX: same 3:1 shape as Q36/Q38 over 48 layers (36 linear, 12 full). |
+| `slidingWindow` | `Int` | Sliding-window width. | 1024 | Q36/Q38/FNX `0` (no sliding layers). DSV4 `128`. INK `512`. MPL `512`. |
+| `attentionKEqV` | `Bool` | Full-attention K and V share the `k_proj` weight, so one dequant and GEMV produces the raw projection for both. The K and V cache slots stay separate regardless — they diverge at the norms and RoPE. | `true` | Q36, Q38, INK, MPL, FNX `false`. DSV4 `true` in the strongest sense: K and V are the same cache entry. |
+| `attnOutputGate` | `Bool` | Full-attention `q_proj` emits `2 * numHeads * fullHeadDim` rows as per-head [query ; gate] halves, and the attention output is multiplied by sigmoid(gate) before `o_proj`. | `false` | Q36, Q38, FNX `true` (FNX's `output_gate_type` is `sigmoid`). |
+| `attentionScale` | `Double` | Softmax scale for full attention. | 1.0 | Q36/Q38/FNX 0.0625 (256^-0.5). DSV4 0.044194173824159216 (512^-0.5). MPL 1/sqrt(128). INK 1/128 — it RMS-normalizes q and k per head, so the scale is 1/d, not 1/sqrt(d). |
 
 ### Rotary position
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `ropeTheta` | `Double` | RoPE base on sliding-window layers. | 10000.0 | Q36/Q38 1.0e7. DSV4 10000.0 (the `main` rope; CSA/HCA layers use `compressRopeTheta`). INK 0.0 — no RoPE at all. MPL 10000.0. |
-| `fullRopeTheta` | `Double` | RoPE base on full-attention layers. | 1000000.0 | Q36/Q38 1.0e7. DSV4 10000.0. INK 0.0. MPL 0.0 — its global layer is NoPE. |
-| `partialRotaryFactor` | `Double` | Fraction of each head's channels that rotate; the rotary width is `headDim * partialRotaryFactor`. | 0.25 | Q36/Q38 0.25. DSV4 0.125 (64 of 512). INK 0.0. MPL 0.5. |
-| `ropeNeoxSubdim` | `Bool` | Partial-RoPE convention. `false` (Gemma): pairs (i, `headDim`/2 + i) for i below the rotated-pair count, frequency divisor `headDim`. `true` (Qwen / NeoX sub-dim): rotation confined to the first `rotaryDim` elements, pairing (i, `rotaryDim`/2 + i), frequency divisor `rotaryDim`. | `false` | Q36, Q38, MPL `true`. DSV4 `false`, but with its own interleaved-trailing convention — neither Gemma's proportional nor Qwen's sub-dim layout; the family's kernels implement it. |
+| `ropeTheta` | `Double` | RoPE base on sliding-window layers. | 10000.0 | Q36/Q38/FNX 1.0e7. DSV4 10000.0 (the `main` rope; CSA/HCA layers use `compressRopeTheta`). INK 0.0 — no RoPE at all. MPL 10000.0. |
+| `fullRopeTheta` | `Double` | RoPE base on full-attention layers. | 1000000.0 | Q36/Q38/FNX 1.0e7. DSV4 10000.0. INK 0.0. MPL 0.0 — its global layer is NoPE. |
+| `partialRotaryFactor` | `Double` | Fraction of each head's channels that rotate; the rotary width is `headDim * partialRotaryFactor`. | 0.25 | Q36/Q38/FNX 0.25. DSV4 0.125 (64 of 512). INK 0.0. MPL 0.5. |
+| `ropeNeoxSubdim` | `Bool` | Partial-RoPE convention. `false` (Gemma): pairs (i, `headDim`/2 + i) for i below the rotated-pair count, frequency divisor `headDim`. `true` (Qwen / NeoX sub-dim): rotation confined to the first `rotaryDim` elements, pairing (i, `rotaryDim`/2 + i), frequency divisor `rotaryDim`. | `false` | Q36, Q38, MPL, FNX `true`. DSV4 `false`, but with its own interleaved-trailing convention — neither Gemma's proportional nor Qwen's sub-dim layout; the family's kernels implement it. |
 
 ### Short convolution
 
@@ -103,15 +116,15 @@ shared-KV MQA: one 512-dim KV head read as both K and V.
 
 Gated-DeltaNet dimensions for layers with mask value 2. `.none` (all
 fields zero) for architectures without linear-attention layers, which is
-every family except Qwen 3.6 and Qwen 3.8.
+every family except Qwen 3.6, Qwen 3.8 and Qwen3.8-Flash-Next.
 
-| Field | Type | Selects | Q36 | Q38 |
-| --- | --- | --- | --- | --- |
-| `numKHeads` | `Int` | Key heads. | 16 | 16 |
-| `numVHeads` | `Int` | Value heads. | 32 | 48 |
-| `keyHeadDim` | `Int` | Key head width. | 128 | 128 |
-| `valueHeadDim` | `Int` | Value head width. | 128 | 128 |
-| `convKernelSize` | `Int` | Depthwise conv width on the fused qkv stream. | 4 | 4 |
+| Field | Type | Selects | Q36 | Q38 | FNX |
+| --- | --- | --- | --- | --- | --- |
+| `numKHeads` | `Int` | Key heads. | 16 | 16 | 16 |
+| `numVHeads` | `Int` | Value heads. | 32 | 48 | 48 |
+| `keyHeadDim` | `Int` | Key head width. | 128 | 128 | 128 |
+| `valueHeadDim` | `Int` | Value head width. | 128 | 128 | 128 |
+| `convKernelSize` | `Int` | Depthwise conv width on the fused qkv stream. | 4 | 4 | 4 |
 
 Two derived widths follow from these and are not separate axes: `qkvDim`
 (`2 * K-dim + V-dim`, the fused qkv projection rows and the depthwise conv
@@ -174,13 +187,13 @@ backward distance. The bias is zero outside `0 ..< extent`.
 
 ### Expert inventory
 
-| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `numExperts` | `Int` | Routed experts per MoE layer. | 128 | 256 | 0 | 256 | 256 | 256 |
-| `topKExperts` | `Int` | Routed experts selected per token. | 8 | 8 | 0 | 6 | 6 | 8 |
-| `numSharedExperts` | `Int` | Shared experts active on every token. | 1 | 1 | 0 | 1 | 2 | 0 |
-| `numDenseLayers` | `Int` | Leading layers that use a plain dense FFN instead of the MoE block. | 0 | 0 | 64 | 0 | 2 | 0 |
-| `denseIntermediateSize` | `Int` | FFN width of those dense layers; 0 when `numDenseLayers` is 0. | 0 | 0 | 17408 | 0 | 16384 | 0 |
+| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `numExperts` | `Int` | Routed experts per MoE layer. | 128 | 256 | 0 | 256 | 256 | 256 | 512 |
+| `topKExperts` | `Int` | Routed experts selected per token. | 8 | 8 | 0 | 6 | 6 | 8 | 10 |
+| `numSharedExperts` | `Int` | Shared experts active on every token. | 1 | 1 | 0 | 1 | 2 | 0 | 1 |
+| `numDenseLayers` | `Int` | Leading layers that use a plain dense FFN instead of the MoE block. | 0 | 0 | 64 | 0 | 2 | 0 | 0 |
+| `denseIntermediateSize` | `Int` | FFN width of those dense layers; 0 when `numDenseLayers` is 0. | 0 | 0 | 17408 | 0 | 16384 | 0 | 0 |
 
 Qwen 3.8 has no routed experts at all: `numExperts` 0 with
 `numDenseLayers == numLayers` makes every layer one resident SwiGLU MLP,
@@ -190,37 +203,40 @@ and the expert streamer never opens a pool.
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `routerScaled` | `Bool` | Router carries `router.scale` (an input multiplier) and `per_expert_scale` tensors. `false` means a plain quantized linear router with renormalized top-k softmax weights and no auxiliary scale tensors. | `true` | Q36, Q38, DSV4, INK, MPL `false`. |
+| `routerScaled` | `Bool` | Router carries `router.scale` (an input multiplier) and `per_expert_scale` tensors. `false` means a plain quantized linear router with renormalized top-k softmax weights and no auxiliary scale tensors. | `true` | Q36, Q38, DSV4, INK, MPL, FNX `false`. |
 | `routerScoringFunc` | `String` | Score activation applied to the router logits before top-k selection. | `"softmax"` | DSV4 `"sqrtsoftplus"`. INK `"sigmoid"`. |
 | `routedScalingFactor` | `Double` | Multiplier applied to the renormalized top-k routing weights. | 1.0 | DSV4 1.5. INK 8.0 (`route_scale`). |
 | `routerNormAfterTopK` | `Bool` | Renormalize the top-k router weights after selection rather than before. | `false` | INK, MPL `true`. |
 | `routerGateBias` | `Bool` | Learned additive bias on the router logits, used for selection only. | `false` | INK `true`. |
 | `routerGlobalScale` | `Bool` | Per-layer learned scalar multiplying the router weights. | `false` | INK `true`. |
 | `numHashRoutedLayers` | `Int` | Leading MoE layers whose expert selection is a frozen token-id lookup (`tid2eid`) instead of a learned argmax. | 0 | DSV4 3. |
-| `sharedExpertGated` | `Bool` | Shared-expert output is gated by sigmoid(`shared_expert_gate(x)`). | `false` | Q36 `true`. |
+| `sharedExpertGated` | `Bool` | Shared-expert output is gated by sigmoid(`shared_expert_gate(x)`). | `false` | Q36, FNX `true`. |
 | `sharedExpertSink` | `Bool` | Shared experts occupy their own router logits as sinks, so the gate emits `numExperts + numSharedExperts` scores. | `false` | INK `true`. |
 
 ### Expert FFN
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `hiddenActivation` | `String` | FFN activation. | `"gelu_pytorch_tanh"` | Q36, Q38, DSV4, INK, MPL `"silu"`. |
+| `hiddenActivation` | `String` | FFN activation. | `"gelu_pytorch_tanh"` | Q36, Q38, DSV4, INK, MPL, FNX `"silu"`. |
 | `swigluLimit` | `Double` | Clamp for the expert gate (max) and up (±) pre-activations. 0 disables the clamp. | 0.0 | DSV4 10.0. MPL 7.0. |
 
 ## Normalization, residual, and scaling
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `ffnSandwichNorms` | `Bool` | Gemma's dual-branch FFN sandwich: pre- and post-feedforward norms plus a per-layer residual scalar. `false` is a plain pre-norm residual block. | `true` | Q36, Q38, DSV4, INK, MPL `false`. |
-| `embeddingScaledBySqrtHidden` | `Bool` | Embedding lookup is multiplied by sqrt(`hiddenSize`). | `true` | Q36, Q38, DSV4, INK, MPL `false`. |
+| `ffnSandwichNorms` | `Bool` | Gemma's dual-branch FFN sandwich: pre- and post-feedforward norms plus a per-layer residual scalar. `false` is a plain pre-norm residual block. | `true` | Q36, Q38, DSV4, INK, MPL, FNX `false`. FNX has no per-sublayer pre-norm at all: its hyper-connection sites carry the norm (see `flashNext`). |
+| `embeddingScaledBySqrtHidden` | `Bool` | Embedding lookup is multiplied by sqrt(`hiddenSize`). | `true` | Q36, Q38, DSV4, INK, MPL, FNX `false`. |
 | `embedNormEnabled` | `Bool` | RMS norm applied to the token embeddings before the first layer. | `false` | INK `true`. |
 | `logitsWidthMultiplier` | `Double` | muP output scaling divided into the logits. 1.0 disables. | 1.0 | INK 16.0. |
-| `finalLogitSoftcap` | `Double` | Soft cap applied to the final logits. 0 disables. | 30.0 | Q36, Q38, DSV4, INK, MPL 0.0. |
+| `finalLogitSoftcap` | `Double` | Soft cap applied to the final logits. 0 disables. | 30.0 | Q36, Q38, DSV4, INK, MPL, FNX 0.0. |
 
 ### `hyperConnections` — `HyperConnectionConfig`
 
 Manifold-Constrained Hyper-Connection (mHC) residual dimensions. `.none`
 means a plain single-stream residual, which is every family except DSV4.
+Qwen3.8-Flash-Next's residual streams are a different mechanism and live in
+`flashNext`, not here: they are mixed through a low-rank factorization with no
+combine matrix and no Sinkhorn projection.
 
 The residual is `mult` parallel streams. Each sublayer site owns a learned
 mix `fn: [(2 + mult) * mult, mult * hiddenSize]` — plus per-output `base`
@@ -234,13 +250,76 @@ matrix projected onto the doubly-stochastic manifold.
 | `sinkhornIters` | `Int` | Alternating row/column normalizations that project the combine matrix onto the doubly-stochastic manifold. | 20 |
 | `eps` | `Double` | Floor used by those normalizations. | 1.0e-6 |
 
+### `flashNext` — `FlashNextConfig`
+
+Qwen3.8-Flash-Next's three new axes. `.none` (all fields zero, `pleLayerIDs`
+empty) for every other family.
+
+**Low-rank hyper-connections.** The residual is `hcCount` parallel copies of
+`hiddenSize`, produced by repeating the embedding and staying that wide through
+all 48 layers. Each sub-block site (`attn_hyper_connection`,
+`mlp_hyper_connection`) owns a gated residual: `input_mix_weight_down`
+`[hcLowRank, hcCount * hidden]` and `input_mix_weight_up`
+`[hcCount * hidden, hcLowRank]` factorize the mix down to the 2560-wide block
+input, `block_inject_weight` `[hcCount, hcCount * hidden]` places the block
+output back into all streams, and `hc_norm` is a group RMSNorm with group size
+`hiddenSize`. One global `hyper_connection_mixer` collapses the bundle after the
+last layer — **this family has no final norm**; the mixer's output goes straight
+into `lm_head`. Distinct from `hyperConnections` (DSV4's mHC), which has a
+Sinkhorn-projected combine matrix and no low-rank factorization.
+
+Two facts about this family are established against the reference
+implementation rather than inferred, and constrain the kernels: every
+`Qwen4ExpTextRMSNorm` upcasts internally (`_norm(x.float()) * (1 + w.float())`,
+cast back), and the gated `q_proj` packs query and gate **per head** —
+`[heads, 2 * headDim]` split on the last dimension — which is already what
+`attnOutputGate` means in the shipped Qwen path, so that axis is reusable
+unchanged. The one RMSNorm in the stack that is *not* zero-centered is the GDN
+gated norm (`linear_attn.norm`), which is ones-initialized; the loader's
+`(1 + w)` bake excludes it by name.
+
+**QSA indexer.** Every full-attention layer carries one. It groups the visible
+prefix into blocks of `indexerCompressRatio` tokens, scores each block against
+the query's `indexerNumHeads` indexer heads, and keeps the top
+`indexerBudget / indexerCompressRatio` blocks plus the always-selected
+incomplete tail. The result is an attention mask: KV entries are never dropped.
+Below a context of about `indexerBudget` the selection is exhaustive and the
+layer is byte-identical to dense attention. The indexer does **not** guarantee
+that a query's own block is selected: there is no "always keep self" rule, only
+the top-k plus the tail.
+
+**PLE n-gram embedding.** At the layers named by `pleLayerIDs` a hashed n-gram
+lookup is added to the residual before attention. Its 320-million-row table does
+not sit resident: it streams from the row pool published as `manifest.plePool`
+(see `PleRowPool`), addressed by hashes computed from the installed
+`layer_multipliers` / `ngram_heads_offsets` / `ngram_heads_vocab_sizes` I64
+tables — which are loaded, never re-derived. The number of n-gram heads is
+derived from the pool's row width rather than stored as an axis
+(`hiddenSize / rowDim` = 2560/160 = 16), and is cross-checked against those
+tables' length when the pool is opened.
+
+| Field | Type | Selects | FNX |
+| --- | --- | --- | --- |
+| `hcCount` | `Int` | Parallel residual streams; the residual is `hcCount * hiddenSize` wide. | 4 |
+| `hcLowRank` | `Int` | Rank of the hyper-connection mix factorization. | 320 |
+| `indexerNumHeads` | `Int` | Indexer query heads scoring the prefix. | 4 |
+| `indexerHeadDim` | `Int` | Indexer head width, shared by query and key heads. | 128 |
+| `indexerNumKVHeads` | `Int` | Indexer key heads (one pooled key per block). | 1 |
+| `indexerBudget` | `Int` | Tokens kept visible per query before the always-selected tail. | 2048 |
+| `indexerCompressRatio` | `Int` | Consecutive tokens pooled into one block key. | 4 |
+| `pleLayerIDs` | `[Int]` | **One-indexed** layer ids carrying a PLE block: id `n` is `layers[n-1]`. | `[2]` (i.e. `layers[1]`) |
+| `pleNgramShardCount` | `Int` | Shards the source n-gram table arrives in, and page-aligned regions in the installed pool. | 128 |
+| `pleNgramVocabSizeBase` | `Int` | `ngram_vocab_size_base` verbatim: the PER-HEAD base vocab, not the row count. Row counts come from `manifest.plePool.layers[].rows`; nothing validates one against the other. | 20000000 |
+| `pleConvKernelSize` | `Int` | Depthwise causal conv width in the PLE mixer. | 4 |
+| `pleEosTokenID` | `Int` | Token id delimiting PLE n-gram segments; a shifted token stream must not read across it. **Not yet published by the installer**, so `validateArch` checks it only when the manifest carries it and otherwise trusts this constant — a mismatched checkpoint would violate it silently until the repacker emits `arch.pleEosTokenID`. | 248044 |
+
 ## Vocabulary and head
 
-| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `vocabSize` | `Int` | Embedding and `lm_head` rows. | 262144 | 248320 | 248320 | 129280 | 201024 | 151936 |
-| `unpaddedVocabSize` | `Int` | Real vocabulary size when the embedding matrix is padded for alignment. Logits beyond this are padding and must be dropped before sampling, or the model can emit ids the tokenizer cannot decode. 0 means no padding — `vocabSize` is the real vocabulary. | 0 | 0 | 0 | 0 | 200058 | 0 |
-| `tieWordEmbeddings` | `Bool` | `lm_head` reuses the embedding matrix. | `true` | `false` | `false` | `false` | `false` | `false` |
+| Field | Type | Selects | G4 | Q36 | Q38 | DSV4 | INK | MPL | FNX |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `vocabSize` | `Int` | Embedding and `lm_head` rows. | 262144 | 248320 | 248320 | 129280 | 201024 | 151936 | 248320 |
+| `unpaddedVocabSize` | `Int` | Real vocabulary size when the embedding matrix is padded for alignment. Logits beyond this are padding and must be dropped before sampling, or the model can emit ids the tokenizer cannot decode. 0 means no padding — `vocabSize` is the real vocabulary. | 0 | 0 | 0 | 0 | 200058 | 0 | 0 |
+| `tieWordEmbeddings` | `Bool` | `lm_head` reuses the embedding matrix. | `true` | `false` | `false` | `false` | `false` | `false` | `false` |
 
 ## How to add an axis
 

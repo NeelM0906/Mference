@@ -177,6 +177,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         case .deepseekV4Flash: return "deepseek-v4-flash-2bit-dq"
         case .inklingSmall: return "inkling-small-4bit"
         case .maple: return "maple-preview-2bit-mlx"
+        // Unreachable while the capability gate stands: `load` funnels through
+        // `ManifestReader.peekFamily`, which refuses this family by name.
+        case .qwen38flashnext: return "qwen3.8-flash-next-int4g64"
         }
     }
     private nonisolated let modelFamily: ModelFamily

@@ -87,6 +87,95 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let routerNormAfterTopK: Bool?
     public let routerGlobalScale: Bool?
     public let unpaddedVocabSize: Int?
+
+    // Qwen3.8-Flash-Next extensions. Optional for the same reason: absent
+    // values validate against the zeroed `FlashNextConfig.none`. Field names
+    // match what `MferenceRepack`'s `FlashNextAxes` publishes verbatim.
+    public let hcCount: Int?
+    public let hcLowRank: Int?
+    public let indexerNumHeads: Int?
+    public let indexerHeadDim: Int?
+    public let indexerNumKVHeads: Int?
+    public let indexerBudget: Int?
+    public let indexerCompressRatio: Int?
+    public let pleLayerIDs: [Int]?
+    public let pleNgramShardCount: Int?
+    public let pleNgramVocabSizeBase: Int?
+    public let pleConvKernelSize: Int?
+    /// Not emitted by installs predating this axis, so `validateArch` checks
+    /// it only when present. See `FlashNextConfig.pleEosTokenID`.
+    public let pleEosTokenID: Int?
+    /// Axis names the install claims a runner must implement. Advisory only —
+    /// `ManifestReader.familiesWithoutRunner` is the authority.
+    public let requiredAxes: [String]?
+}
+
+/// One page-aligned region of a row-lookup pool, mirroring one source shard.
+public struct ManifestPleShard: Decodable, Equatable, Sendable {
+    public let shard: Int
+    public let rows: Int
+    /// Byte offset of the region's first block within the pool file.
+    public let offset: UInt64
+    public let size: UInt64
+}
+
+/// One PLE n-gram row pool: the repacked, page-aligned form of a layer's
+/// hashed n-gram embedding table.
+///
+/// Row `i` of shard `s` lives at
+/// `shards[s].offset + (i / rowsPerBlock) * blockStride
+///  + (i % rowsPerBlock) * rowStride`, and a record never straddles a block,
+/// so one row costs one page fault and a cached page serves `rowsPerBlock`
+/// neighbours. `rows` is the pool-wide total; shard rows are consecutive in
+/// shard order.
+public struct ManifestPlePoolLayer: Decodable, Equatable, Sendable {
+    public let layer: Int
+    /// Path relative to the install directory, e.g. `ple/layer_01_ngram_rows.bin`.
+    public let file: String
+    public let rows: Int
+    public let rowDim: Int
+    /// `"bf16"` or `"int4AffineG64"`. Chosen from the row width at install:
+    /// group-64 needs `rowDim % 64 == 0`, which 160 does not satisfy.
+    public let storage: String
+    public let weightBits: Int
+    public let groupSize: Int
+    public let rowWeightBytes: Int
+    public let rowScaleBytes: Int
+    public let rowBiasBytes: Int
+    public let rowStride: Int
+    public let rowsPerBlock: Int
+    public let blockStride: Int
+    public let fileSize: UInt64
+    public let shards: [ManifestPleShard]
+}
+
+public struct ManifestPlePool: Decodable, Equatable, Sendable {
+    /// Pool format tag. Readers must refuse an unknown kind.
+    public let kind: String
+    public let layers: [ManifestPlePoolLayer]
+}
+
+/// An additive routed-expert pool outside `packed_experts/`, for a sidecar
+/// (today: the MTP draft layer's own 512 experts at `packed_experts_mtp/`).
+/// Kept out of `packed_experts/layout.json` so the shipped layout validator
+/// and the routed-expert reader are untouched.
+public struct ManifestAuxiliaryExpertPool: Decodable, Equatable, Sendable {
+    public struct Layer: Decodable, Equatable, Sendable {
+        public let layer: Int
+        public let file: String
+    }
+    public let name: String
+    public let directory: String
+    public let expertsPerLayer: Int
+    public let expertStride: UInt64
+    public let layers: [Layer]
+}
+
+/// Whether an optional tensor group from the source checkpoint was carried
+/// into the install (`mtp`) or skipped (`vision`).
+public struct ManifestSidecar: Decodable, Equatable, Sendable {
+    public let carried: Bool
+    public let tensorCount: Int
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -133,6 +222,24 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let expertsPerLayer: Int
     public let numLayers: Int
     public let expertStride: UInt64
+
+    // Additive install blocks. Every family that predates them emits none of
+    // these keys, so existing manifests decode byte-identically.
+
+    /// Streamed n-gram row pools, one per PLE layer.
+    public let plePool: ManifestPlePool?
+    /// Routed-expert pools outside `packed_experts/` (sidecar draft layers).
+    public let auxiliaryExpertPools: [ManifestAuxiliaryExpertPool]?
+    /// Optional source tensor groups and whether the install carried them.
+    public let sidecars: [String: ManifestSidecar]?
+    /// True when the installer has already folded the `+1` of the
+    /// zero-centered `(1 + w)` RMSNorm convention into the stored norm
+    /// weights. Absent means it has not: the loader applies the bake itself
+    /// for families whose norms are zero-centered
+    /// (`ZeroCenteredNormPolicy`). Deliberately outside `arch` — it describes
+    /// how the bytes were written, not what architecture they describe, so it
+    /// must not participate in the `archMismatch` field-by-field comparison.
+    public let zeroCenteredNormsBakedAtInstall: Bool?
 }
 
 public enum ManifestReader {
@@ -211,6 +318,12 @@ public enum ManifestReader {
         }
         if let flashHead = m.flashHead {
             try validateMapleFlashHead(flashHead, expected: expected)
+        }
+        if let plePool = m.plePool {
+            try validatePlePool(plePool, expected: expected)
+        } else if !expected.flashNext.pleLayerIDs.isEmpty {
+            throw ModelError.plePoolMissing(
+                layer: expected.flashNext.pleLayerIndices[0])
         }
         let pageSize = UInt64(getpagesize())
         guard m.expertStride % pageSize == 0 else {
@@ -315,6 +428,31 @@ public enum ManifestReader {
             }
             return
         }
+        if expected.family == .qwen38flashnext {
+            // Workstream-2 quantize-in-flight: every eligible resident and
+            // routed tensor is INT4 affine group-64, the router included
+            // (the shipped families keep an INT8 router because their source
+            // conversions did; this one is quantized by the repacker itself
+            // under one uniform policy).
+            let slots: [(String, ManifestQuantSlot)] = [
+                ("embedding", quant.embedding),
+                ("attention", quant.attention),
+                ("router", quant.router),
+                ("sharedExpert", quant.sharedExpert),
+                ("routedExpert", quant.routedExpert),
+            ]
+            for (name, slot) in slots {
+                guard slot.weightBits == 4,
+                      slot.scheme.lowercased() == "affine",
+                      slot.scaleType.lowercased() == "bf16",
+                      slot.biasType.lowercased() == "bf16",
+                      slot.groupSize == Quantization.groupSize else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported Qwen3.8-Flash-Next quantization for \(name)")
+                }
+            }
+            return
+        }
         // Routed experts additionally allow 2-bit: the DeepSeek-V4-Flash
         // dynamic-quant checkpoint ships Q2 experts under a Q4 core, and the
         // MoE runtime dispatches on `quant.routedExpert.weightBits`.
@@ -333,6 +471,27 @@ public enum ManifestReader {
                   slot.groupSize == Quantization.groupSize else {
                 throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
             }
+        }
+    }
+
+    /// Structural gate on `manifest.plePool`. The runtime refuses a pool whose
+    /// geometry cannot address its own file: every arithmetic assumption the
+    /// row reader makes (`PleRowPool`) is checked once here rather than being
+    /// rediscovered per row read.
+    static func validatePlePool(_ pool: ManifestPlePool,
+                                expected: ArchConfig) throws {
+        guard pool.kind == PleRowPool.supportedKind else {
+            throw ModelError.plePoolInvalid(
+                detail: "unknown kind \"\(pool.kind)\"; this runtime reads "
+                    + "\"\(PleRowPool.supportedKind)\"")
+        }
+        for layerIndex in expected.flashNext.pleLayerIndices {
+            guard pool.layers.contains(where: { $0.layer == layerIndex }) else {
+                throw ModelError.plePoolMissing(layer: layerIndex)
+            }
+        }
+        for layer in pool.layers {
+            _ = try PleRowPoolGeometry(layer: layer, hiddenSize: expected.hiddenSize)
         }
     }
 
@@ -526,6 +685,27 @@ public enum ManifestReader {
                   a.routerGlobalScale ?? false, e.routerGlobalScale)
         try check("unpaddedVocabSize",
                   a.unpaddedVocabSize ?? 0, e.unpaddedVocabSize)
+
+        let fn = e.flashNext
+        try check("hcCount",              a.hcCount ?? 0,              fn.hcCount)
+        try check("hcLowRank",            a.hcLowRank ?? 0,            fn.hcLowRank)
+        try check("indexerNumHeads",      a.indexerNumHeads ?? 0,      fn.indexerNumHeads)
+        try check("indexerHeadDim",       a.indexerHeadDim ?? 0,       fn.indexerHeadDim)
+        try check("indexerNumKVHeads",    a.indexerNumKVHeads ?? 0,    fn.indexerNumKVHeads)
+        try check("indexerBudget",        a.indexerBudget ?? 0,        fn.indexerBudget)
+        try check("indexerCompressRatio", a.indexerCompressRatio ?? 0, fn.indexerCompressRatio)
+        try check("pleLayerIDs",
+                  (a.pleLayerIDs ?? []).description, fn.pleLayerIDs.description)
+        try check("pleNgramShardCount",   a.pleNgramShardCount ?? 0,   fn.pleNgramShardCount)
+        try check("pleNgramVocabSizeBase",
+                  a.pleNgramVocabSizeBase ?? 0, fn.pleNgramVocabSizeBase)
+        try check("pleConvKernelSize",    a.pleConvKernelSize ?? 0,    fn.pleConvKernelSize)
+        // Checked only when the install publishes it: the shipped repack path
+        // predates this axis, and defaulting to the baseline would turn a real
+        // mismatch into silent agreement. See `FlashNextConfig.pleEosTokenID`.
+        if let published = a.pleEosTokenID {
+            try check("pleEosTokenID", published, fn.pleEosTokenID)
+        }
     }
 
     /// Decode just enough of `manifest.json` to identify the model family,
@@ -586,6 +766,12 @@ public enum ManifestReader {
     /// `manifest.arch.requiredAxes`, but this table is deliberately the
     /// authority — a manifest does not get to tell the runtime what it can run.
     /// Delete an entry only when the family's runner actually lands.
+    ///
+    /// A gated family may still carry an `ArchConfig` baseline, a `ModelFamily`
+    /// case, tensor accessors and manifest validation — that is what the
+    /// runner is built *against*. Presence in this table is the single fact
+    /// that decides whether it can be loaded, and it is checked in
+    /// `peekFamily` before any of that machinery is reached.
     static let familiesWithoutRunner: [String: [String]] = [
         "qwen38flashnext": [
             "hyperConnectionsLowRank",

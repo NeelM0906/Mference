@@ -29,6 +29,8 @@ weights/
 models/
 Model/
 !Tests/**/Model/
+# Committed parity goldens are small (KiB-scale) .safetensors test fixtures, not weights.
+!Tests/Mference/Fixtures/**/*.safetensors
 # Repacked .gturbo directories (manifest.json/layout.json inside aren't caught by *.bin)
 *.gturbo/
 

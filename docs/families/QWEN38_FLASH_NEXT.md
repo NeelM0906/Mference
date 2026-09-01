@@ -282,9 +282,37 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       install ~175 GB (not the Day-0 ~101 GB)
 - [ ] **Gate/up half order within the fused 1280 rows** still needs the
       reference implementation — a runner question, not a layout one.
-- [ ] Runtime `ArchConfig` baseline / `ModelFamily` case (deliberately absent:
-      adding one would force a dozen exhaustive switches to grow branches the
-      runner cannot honour)
+- [x] Runtime `ArchConfig` baseline (`qwen38FlashNext_180B_A3_5B`) and
+      `ModelFamily.qwen38flashnext`, with the `flashNext` axis group
+      (`hcCount`/`hcLowRank`, `indexer*`, `ple*`) documented in
+      [the family contract](../FAMILY_CONTRACT.md). Only five exhaustive
+      switches existed; the pre-norm accessors this family does not have
+      (`inputNorm`, `postAttnNorm`) route to the same named
+      `familyRunnerNotImplemented` refusal. The baseline validates
+      field-by-field against the real install's manifest, and the capability
+      gate is unchanged — a baseline means the install validates, not that the
+      runtime can run it.
+- [x] Runtime loading: `ManifestReader` parses the new arch axes, the
+      `plePool` / `auxiliaryExpertPools` / `sidecars` blocks and the uniform
+      INT4 quant slots; resident accessors cover the HC, indexer and PLE
+      tensor groups and the three I64 hash tables (typed `[Int64]`, loaded
+      never re-derived); `PleRowPool` reads the row pool with an LFU row cache.
+- [x] Zero-centered `(1 + w)` norm bake wired as a family-gated **load-time**
+      transform, since the W2 install still copies norms verbatim. A future
+      install that bakes at repack sets `manifest.zeroCenteredNormsBakedAtInstall`
+      and the loader stands down. The GDN gated norm (`linear_attn.norm`) is
+      excluded: it is ones-initialized, not zero-centered.
+- [ ] **Repacker follow-ups**: bake `+1` into the zero-centered norm set at
+      install (and set `zeroCenteredNormsBakedAtInstall`), and publish
+      `arch.pleEosTokenID` — until it is published, `validateArch` can only
+      check it when present and otherwise trusts the compiled 248044.
+- [ ] **Router kernels do not accept 512 experts.** The layout, streaming and
+      slot-cache layers do (regression-tested at 512 x 2 768 896 B), but
+      `MoE.encodeRouterGemma4` and `PrefillRouter.encode` assert
+      `numExperts <= 256`, `MoE`'s router-logits buffer is sized for 256
+      floats, and `moe.metal`'s `kRouterMaxPerLane = 8` derives from that
+      bound over 32 lanes. Top-10 also needs a selection kernel wider than the
+      shipped `router_topk_select_k8`.
 - [ ] Toy fixtures + reference parity
 - [ ] Runner: covered axes wired, new axes implemented
 - [ ] `bringup-check.sh` green ×3 · community protocol page
