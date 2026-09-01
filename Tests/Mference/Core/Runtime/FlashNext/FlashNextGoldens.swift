@@ -181,9 +181,16 @@ struct FlashNextGoldens {
                   offsets.count == 2 else { continue }
             precondition(dtype == "F32", "\(name) is \(dtype); goldens are float32")
             let bytes = [UInt8](data[(headerEnd + offsets[0])..<(headerEnd + offsets[1])])
-            let values = stride(from: 0, to: bytes.count, by: 4).map { i in
-                Float(bitPattern: UInt32(bytes[i]) | UInt32(bytes[i + 1]) << 8
-                        | UInt32(bytes[i + 2]) << 16 | UInt32(bytes[i + 3]) << 24)
+            let values = stride(from: 0, to: bytes.count, by: 4).map { i -> Float in
+                // Assemble the bit pattern in explicitly-typed steps: the single
+                // fused `UInt32(...) | ... << ...` expression times out the
+                // Swift type-checker on some toolchains (CI Xcode).
+                let b0 = UInt32(bytes[i])
+                let b1 = UInt32(bytes[i + 1])
+                let b2 = UInt32(bytes[i + 2])
+                let b3 = UInt32(bytes[i + 3])
+                let bits: UInt32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                return Float(bitPattern: bits)
             }
             out[name] = Tensor(shape: shape, values: values)
         }

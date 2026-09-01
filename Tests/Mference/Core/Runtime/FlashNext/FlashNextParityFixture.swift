@@ -600,13 +600,22 @@ struct Safetensors {
         let bytes = rawBytes(entry)
         switch entry.dtype {
         case "BF16":
-            return stride(from: 0, to: bytes.count, by: 2).map {
-                Quantization.bf16ToFloat(UInt16(bytes[$0]) | UInt16(bytes[$0 + 1]) << 8)
+            return stride(from: 0, to: bytes.count, by: 2).map { j -> Float in
+                let lo = UInt16(bytes[j])
+                let hi = UInt16(bytes[j + 1])
+                let bits: UInt16 = lo | (hi << 8)
+                return Quantization.bf16ToFloat(bits)
             }
         case "F32":
-            return stride(from: 0, to: bytes.count, by: 4).map { i in
-                Float(bitPattern: UInt32(bytes[i]) | UInt32(bytes[i + 1]) << 8
-                        | UInt32(bytes[i + 2]) << 16 | UInt32(bytes[i + 3]) << 24)
+            return stride(from: 0, to: bytes.count, by: 4).map { i -> Float in
+                // Explicitly-typed steps: the fused bit-OR expression times out
+                // the Swift type-checker on some toolchains (CI Xcode).
+                let b0 = UInt32(bytes[i])
+                let b1 = UInt32(bytes[i + 1])
+                let b2 = UInt32(bytes[i + 2])
+                let b3 = UInt32(bytes[i + 3])
+                let bits: UInt32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                return Float(bitPattern: bits)
             }
         default:
             preconditionFailure("\(name) is \(entry.dtype), not a float tensor")
