@@ -28,6 +28,10 @@ public struct PrefillTokenExpertPair: Equatable, Sendable {
 }
 
 final class PrefillRouter {
+    /// Mirrors `kPrefillRouterMaxExperts` in `prefill.metal`. Flash-Next routes
+    /// over 512; the shipped families use 128 or 256.
+    static let maxExperts: UInt32 = 512
+
     private let pso: MTLComputePipelineState
 
     init(context: MetalContext) throws {
@@ -57,7 +61,8 @@ final class PrefillRouter {
                                   topK: UInt32,
                                   hiddenStrideElements: UInt32) {
         precondition(queryCount > 0, "queryCount must be positive")
-        precondition(numExperts <= 256, "numExperts > 256 is not supported")
+        precondition(numExperts <= PrefillRouter.maxExperts,
+                     "numExperts > \(PrefillRouter.maxExperts) is not supported")
         precondition(topK > 0 && topK <= 64, "topK must be in 1...64")
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "D must be a multiple of \(Quantization.groupSize)")

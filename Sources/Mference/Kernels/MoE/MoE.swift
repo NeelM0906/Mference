@@ -31,6 +31,17 @@ public struct MoEExpertOffsets {
 final class MoE {
     static let maxStreamedExperts = 8
 
+    /// The widest expert count the router path accepts. Bounded by the one-SIMD
+    /// selection kernels' lane arrays (`kRouterWideMaxPerLane` = 16 over 32
+    /// lanes) and by the router-logits staging buffer sized below. Flash-Next
+    /// routes over 512; the shipped families use 128 or 256.
+    static let maxRouterExperts: UInt32 = 512
+
+    /// Top-k widths the router selection kernels implement. 8 is Gemma 4 /
+    /// Qwen 3.6; 10 is Flash-Next. (DeepSeek V4's 6 goes through its own
+    /// sqrtsoftplus kernels in `MoEDeepseekV4`.)
+    static let routerTopKWidths: Set<UInt32> = [8, 10]
+
     private let realDecodeD: UInt32
     private let realDecodeF: UInt32
     private let realDecodeTopK: UInt32
@@ -40,6 +51,8 @@ final class MoE {
     private let routerGemvSpecializedPSO: MTLComputePipelineState
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
+    private let routerSelectK10PSO: MTLComputePipelineState
+    private let routerSelectK10SpecializedPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
@@ -104,6 +117,12 @@ final class MoE {
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8_par",
             constants: routerConstants)
+        // Flash-Next's top-10 over 512 experts. Same selection body, wider K and
+        // a 16-deep lane array; see `router_topk_select_softmax_par`.
+        self.routerSelectK10PSO = try context.pipeline("router_topk_select_k10_par")
+        self.routerSelectK10SpecializedPSO = try context.pipeline(
+            "router_topk_select_k10_par",
+            constants: routerConstants)
         self.phase1U16PSO = try context.pipeline(
             "moe_phase1_gate_up_act_u16load", constants: activationConstants)
         self.phase1U16SpecializedPSO = try context.pipeline(
@@ -134,7 +153,7 @@ final class MoE {
             constants: moeConstants)
 
         guard let logits = context.device.makeBuffer(
-            length: 256 * MemoryLayout<Float>.stride,
+            length: Int(Self.maxRouterExperts) * MemoryLayout<Float>.stride,
             options: .storageModeShared),
               let phase1Function = context.library.makeFunction(
                 name: "moe_phase1_gate_up_act_u16load") else {
@@ -163,8 +182,10 @@ final class MoE {
                                    d: UInt32,
                                    topK: UInt32) {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
-        precondition(numExperts <= 256)
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(numExperts <= Self.maxRouterExperts,
+                     "router supports at most \(Self.maxRouterExperts) experts")
+        precondition(Self.routerTopKWidths.contains(topK),
+                     "router selection implements top-k \(Self.routerTopKWidths.sorted())")
 
         var expertCount = numExperts
         var dimension = d
@@ -188,8 +209,16 @@ final class MoE {
         }
 
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(
-                useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
+            let selectPSO: MTLComputePipelineState
+            switch topK {
+            case 10:
+                selectPSO = useSpecialized
+                    ? routerSelectK10SpecializedPSO : routerSelectK10PSO
+            default:
+                selectPSO = useSpecialized
+                    ? routerSelectK8SpecializedPSO : routerSelectK8PSO
+            }
+            encoder.setComputePipelineState(selectPSO)
             encoder.setBuffer(routerLogits, offset: 0, index: 0)
             encoder.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
             encoder.setBuffer(outIndices, offset: 0, index: 2)

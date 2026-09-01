@@ -9,7 +9,11 @@ using namespace mpp::tensor_ops;
 constant constexpr uint kPrefillGroupSize = 64;
 constant constexpr uint kPrefillRmsMaxSimdGroups = 8;
 constant constexpr uint kPrefillPostMaxD = 4096;
-constant constexpr uint kPrefillRouterMaxExperts = 256;
+// Flash-Next routes over 512 experts. The bound only sizes the threadgroup
+// score staging array (2 KiB at 512) and clamps `num_experts`; for the shipped
+// families (<= 256) the selection reads the same values in the same order, so
+// widening it is a capacity change, not a numerical one.
+constant constexpr uint kPrefillRouterMaxExperts = 512;
 constant constexpr uint kPrefillRouterMaxTopK = 64;
 constant constexpr uint kPrefillAttentionMaxSimdGroups = 16;
 constant constexpr uint kPrefillMaxTileExperts = 16;

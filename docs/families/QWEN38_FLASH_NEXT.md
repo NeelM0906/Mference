@@ -306,13 +306,33 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       install (and set `zeroCenteredNormsBakedAtInstall`), and publish
       `arch.pleEosTokenID` — until it is published, `validateArch` can only
       check it when present and otherwise trusts the compiled 248044.
-- [ ] **Router kernels do not accept 512 experts.** The layout, streaming and
-      slot-cache layers do (regression-tested at 512 x 2 768 896 B), but
-      `MoE.encodeRouterGemma4` and `PrefillRouter.encode` assert
-      `numExperts <= 256`, `MoE`'s router-logits buffer is sized for 256
-      floats, and `moe.metal`'s `kRouterMaxPerLane = 8` derives from that
-      bound over 32 lanes. Top-10 also needs a selection kernel wider than the
-      shipped `router_topk_select_k8`.
+- [x] **Router widened to 512 experts / top-10.** `MoE.maxRouterExperts` is 512
+      and the router-logits buffer is sized to it; `PrefillRouter.maxExperts`
+      and `kPrefillRouterMaxExperts` likewise (the prefill bound only sizes a
+      threadgroup staging array, so the shipped families read the same values in
+      the same order). Selection is now a template on `K`:
+      `router_topk_select_k8{,_par}` and `router_topk_select_k10{,_par}` share
+      one body, with `kRouterWideMaxPerLane = 16` giving the k10 form the
+      16-candidates-per-lane array 512 experts need across 32 lanes. The shipped
+      k6/k8 kernels keep their eight-element lane array and their arithmetic
+      unchanged — `RouterTopKParityTests` is their byte gate and passes
+      untouched, and `./bringup-check.sh qwen36` returns PASS with a
+      byte-identical 16/32/auto ladder.
+      Semantics note: the reference's softmax-over-all-experts → top-k of the
+      probs → renormalize (`norm_topk_prob`) is algebraically identical to the
+      shipped kernels' softmax over the k selected logits, because softmax is
+      strictly monotone in the logit. The port relies on that identity rather
+      than materializing a 512-wide prob vector.
+      New gate: `RouterWideTopK10Tests` — `_par` bit-identical to serial at
+      10…512 experts including tie-saturated logits, both k10 kernels exact
+      against `FlashNextRouterReference` (the CPU reference forward's own
+      router, tied back to it by `FlashNextRouterReferenceTieBackTests`), and
+      the whole decode and prefill routers agreeing at the production
+      `512 x 2560` INT8 shape.
+      Still open for top-10: the *expert compute* path. `MoE.maxStreamedExperts`
+      is 8, `RoutedBlobs` carries 8 blobs, and `moe_phase2_down_reduce_k{6,8}`
+      are the only reduce widths — a top-10 forward needs either a k10 reduce or
+      two passes. Router only, so far.
 - [x] **Toy fixtures + reference parity — CPU float32 reference GREEN**
       (`Tests/Mference/Core/Runtime/FlashNext/`). `FlashNextReferenceRunner` is a
       straight-line float32 CPU forward for the whole stack — hyper-connections,
@@ -354,7 +374,34 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       of the alternative: an INT4 g64 round-trip of exactly the tensors the
       planner would quantize puts SHORT logits `5.13e-2` max-abs off, with
       1402/1408 elements outside the gate.
-- [ ] Runner: covered axes wired, new axes implemented
+- [ ] **Metal kernels for the new axes — 2 of 5 landed.**
+      - [x] **Group RMSNorm** (`rmsnorm_bf16w_grouped`): `group_size = hidden`,
+            one threadgroup per (row, stream), weight indexed by
+            (stream, channel) over the whole 10240 bundle rather than shared per
+            head. Observed vs the CPU reference at `2560 x 4`: `9.8e-4` max-abs,
+            which is the FP16 store floor at these magnitudes.
+      - [x] **Low-rank hyper-connections** (`flashnext_hc_*` plus a BF16 mat-vec
+            the BF16-passthrough parity install needs): mix `4.5e-4` (BF16
+            weights) / `4.4e-4` (INT4 g64), inject `1.2e-4` / `1.4e-4`, inject
+            accumulate `2.0e-3`, embedding tile bit-exact. The pre-sigmoid mix
+            gate, the low-rank vector before its SiLU and the four injection
+            scalars stay FP32 through the chain; rounding a pre-activation to
+            FP16 costs more than the buffer saves.
+      - [x] **PLE** (`flashnext_ple_stream_gate` / `_apply_gate` / `_conv`, plus
+            the shipping `FlashNextPleHash`): output `2.3e-3`, stream `2.1e-3`.
+            Chunked and stepped decode are **bit-identical** at both `512 x 4`
+            and production `2560 x 4` — the property the nine-row conv state
+            exists for. The hash is gated directly against the reference
+            runner's captured `ple_ngram_row_ids`, in prefill and through eight
+            cached decode steps.
+      - [ ] QSA indexer (raw-key cache, incremental pooled block keys, scoring,
+            top-512 selection reproducing the reference's tie-breaking)
+      - [ ] Gated full attention over the indexer-selected KV subset
+      - [ ] GDN reuse from qwen38, with the gated norm's **sigmoid** activation
+            confirmed against what that port bakes
+- [ ] `FlashNextForwardRunner`: the production layer loop, expert streaming at
+      top-10, and removing `qwen38flashnext` from
+      `ManifestReader.familiesWithoutRunner`
 - [ ] `bringup-check.sh` green ×3 · community protocol page
 
 ## Reproduction of this dossier's facts
