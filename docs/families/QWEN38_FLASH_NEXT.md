@@ -270,14 +270,32 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       `family qwen38flashnext is installed but its runner is not implemented;
       missing axes: hyperConnectionsLowRank, attentionIndexer,
       pleNgramEmbedding`.
-- [ ] **W2.1b quality gate OPEN** — greedy rollouts and KLD against the
-      mlx-community Qwen 3.6 conversion have not been run (needs a ~70 GB
-      download and a model run). Bit parity against the runtime reference
-      (W2.1a) *is* enforced, including through the streaming path. Until W2.1b
+- [x] **W2.1b weight level PASSED** (2026-09-02,
+      [docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)) — this family
+      inherits it, because `Int4AffineEncoder.encodeGroup` is the same nucleus.
+      Measured against mlx-community's independent conversion of
+      `Qwen/Qwen3.6-35B-A3B`: our relative Frobenius error against the BF16
+      source is 0.09612 mean vs the control's 0.09648, better on 118 of 124
+      sampled tensors. Known deficit: no zero-point snapping, which costs up to
+      1.54× on tensors with a large mass of near-exact zeros inside live groups.
+- [ ] **W2.1b model level BLOCKED** — greedy rollouts and KLD have still not
+      been run, and the blocker is structural rather than a matter of finding
+      the time. The control conversion keeps INT8 routers; quantize-in-flight is
+      INT4-only by the W2 scope cut; the Qwen 3.6 router GEMV decodes one
+      `uint8` per weight. So `qwen36original` installs and verifies but is
+      refused at load, and the control experiment cannot execute. Harness
+      (`QuantizerQualityMeasurement`) and comparator
+      (`Scripts/quantizer-quality-compare.py`) are built and ready. Until it
       runs, weights this path produces are unvalidated at the model level.
 - [x] Source index SHA-256 pinned (`99e81524…c590de`, 170,726 bytes)
 - [x] Fused-expert axis order, gated `q_proj`, indexer, GDN, HC and MTP shapes
-      verified against ranged shard-header reads @ `de4b8e4d`
+      verified against ranged shard-header reads @ `de4b8e4d` — and the fused
+      axis order is now **independently confirmed** on a second vendor
+      checkpoint: `Qwen/Qwen3.6-35B-A3B` declares `gate_up_proj` as
+      `[256, 1024, 2048]` = `[E, 2·I, H]` and `down_proj` as `[256, 2048, 512]`
+      = `[E, H, I]`, and splitting at the halfway row reproduces
+      mlx-community's separately converted `switch_mlp.gate_proj`/`up_proj`, so
+      gate-first ordering is confirmed too.
 - [x] PLE geometry corrected: 128 × [2,500,012 × 160] BF16, pool stays BF16,
       install ~175 GB (not the Day-0 ~101 GB)
 - [ ] **Gate/up half order within the fused 1280 rows** still needs the
@@ -522,9 +540,15 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         token does not surface — real output is coherent. **Caveat that
         stands:** greedy token-exactness vs a reference cannot be checked at
         180B scale (no reference rollout exists), so this is a *read* of the
-        kernels at scale, not a proof. **W2.1b (KLD vs a known-good
-        conversion) remains the missing quantitative quality gate**, and the
-        production gate stays down until it and a maintainer decision clear it.
+        kernels at scale, not a proof. **W2.1b's model-level half (KLD vs a
+        known-good conversion) remains the missing quantitative quality gate**
+        — its weight-level half passed on 2026-09-02
+        ([docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)), which says each
+        tensor is individually faithful but not that 40 layers of accumulated
+        error leave the output distribution intact. The production gate stays
+        down until the model-level half and a maintainer decision clear it —
+        and note that gate refuses this family for **missing axes**, not for
+        quantizer quality, so closing W2.1b would not by itself lift it.
       - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
         model** (~75× the resident set), the most extreme expression of the
         working-set thesis in the project.

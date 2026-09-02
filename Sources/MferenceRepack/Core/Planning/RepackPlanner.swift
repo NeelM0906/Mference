@@ -332,11 +332,19 @@ enum RepackPlanner {
             for t in h.tensors { registry[t.name] = t }
         }
 
-        // Original-repo BF16 families are planned by their own planner: the
+        // Original-repo BF16 sources are planned by their own planner: the
         // tensor inventory, the fused-expert split and the row pool have no
         // counterpart in the pre-quantized path, and keeping them apart means
         // the shipped families cannot regress.
-        if arch.family == .qwen38flashnext {
+        //
+        // The condition is the *source shape*, not the family. A vendor upload
+        // and an MLX conversion of the same checkpoint differ in exactly the
+        // ways this planner handles — `model.language_model.` naming, fused
+        // `mlp.experts.*` tensors, no companion `.scales`/`.biases` — and they
+        // differ that way regardless of which family the config declares.
+        // Qwen 3.6 arrives on both paths for precisely that reason (see
+        // `SupportedModelSource.qwen36Original`).
+        if meta.sourceIsUnquantized {
             return try FlashNextPlanner.plan(meta: meta,
                                              arch: arch,
                                              registry: registry,

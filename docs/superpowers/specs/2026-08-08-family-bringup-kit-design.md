@@ -9,8 +9,16 @@ flagship drop four days old, which also forces W2 (no faithful community
 conversion exists). Day-0 dossier: [docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
 W2 deliverables 1-4 landed for `qwen38flashnext` (quantize-in-flight core,
 original-repo source kind, sharded BF16 reading, fused-expert split, PLE
-row-lookup pool, sidecar policy) with W2.1a bit parity enforced; **W2.1b, the
-model-level KLD gate, is still open** — see
+row-lookup pool, sidecar policy) with W2.1a bit parity enforced. **W2.1b split
+in two on 2026-09-02** ([docs/QUANTIZER_QUALITY.md](../../QUANTIZER_QUALITY.md)):
+the **weight-level** half PASSES — against mlx-community's independent
+conversion of Qwen 3.6, our quantizer is at least as faithful to the BF16 source
+(0.09612 mean relative error vs 0.09648, better on 118 of 124 sampled tensors) —
+while the **model-level KLD half is blocked**, not merely pending: the control
+conversion keeps INT8 routers, the repacker is INT4-only by this spec's own
+scope cut, and the Qwen 3.6 router GEMV decodes one `uint8` per weight, so
+`qwen36original` installs and verifies but is refused at load. The harness and
+comparator are built and ready. See also
 [docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
 Still open: W1.2 mapping-as-data (first data file written, repacker does not
 read it yet), W1.3 capability gate as a general mechanism (a named per-family
@@ -104,6 +112,16 @@ party's schedule.
 
 **Scope cut:** int4 group-64 only. 6/8-bit become axes later if a model
 demands them (the sibling NVMAI fork proves demand exists, but YAGNI now).
+
+**2026-09-02 — the scope cut has come due.** It is not only a future model that
+demands mixed widths: it is the *control* this workstream's own quality gate is
+measured against. mlx-community's Qwen 3.6 conversion carries 83 per-tensor
+overrides keeping every router and shared-expert gate at INT8, and the Qwen 3.6
+router kernel decodes one `uint8` per weight, so a uniformly-INT4 install of
+that checkpoint is refused at load. W2.1b's model-level half cannot run until
+the repacker can reproduce a per-tensor bit policy. See §6 of
+[docs/QUANTIZER_QUALITY.md](../../QUANTIZER_QUALITY.md) for the three options
+and their sizes.
 
 ## Workstream 3 — The conformance harness (one command to trust a port)
 

@@ -46,7 +46,16 @@ enum IndexLoader {
     /// `model_type` values whose repos are the vendor's own BF16 upload rather
     /// than an MLX conversion. Only these may omit `quantization`; for every
     /// other source a missing block still means a broken conversion.
-    static let unquantizedSourceModelTypes: Set<String> = ["qwen4_exp"]
+    ///
+    /// Membership is not "this family is always unquantized" — it is "for this
+    /// `model_type`, a missing `quantization` block is a legitimate original
+    /// upload rather than a broken conversion". `qwen3_5_moe` appears on both
+    /// sides: the mlx-community Qwen3.6 conversion declares `quantization` and
+    /// takes the pre-quantized path, while the vendor's own BF16 upload of the
+    /// same checkpoint omits it and is quantized in flight. That pairing is
+    /// deliberate — it is the control the W2.1b quality gate is measured
+    /// against (see docs/QUANTIZER_QUALITY.md).
+    static let unquantizedSourceModelTypes: Set<String> = ["qwen4_exp", "qwen3_5_moe"]
 
     static func load(snapshotDir: String) throws -> SourceMetadata {
         let indexPath  = (snapshotDir as NSString).appendingPathComponent("model.safetensors.index.json")

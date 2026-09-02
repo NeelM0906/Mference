@@ -11,12 +11,19 @@ struct AuxiliaryExpertPoolPlan: Sendable {
     let layers: [LayerFilePlan]
 }
 
-/// Planner for `qwen38flashnext` — the first family read from the model
-/// vendor's **original BF16 repo** rather than a pre-quantized MLX conversion.
+/// Planner for checkpoints read from the model vendor's **original BF16 repo**
+/// rather than from a pre-quantized MLX conversion. `qwen38flashnext` was the
+/// first; `qwen36original` — the same Qwen 3.6 checkpoint the `qwen36` entry
+/// installs from mlx-community — is the second, and it is what the W2.1b
+/// quantizer-quality gate measures (docs/QUANTIZER_QUALITY.md).
 ///
-/// Three things make it structurally different from every earlier family, and
-/// they are why it gets its own planner instead of more branches in
-/// `RepackPlanner`:
+/// `RepackPlanner.plan` routes here on `meta.sourceIsUnquantized`, not on the
+/// family: what this planner handles is a property of the *source*, and Qwen
+/// 3.6 proves the point by arriving on both paths.
+///
+/// Three things make an original-repo source structurally different from a
+/// conversion, and they are why it gets its own planner instead of more
+/// branches in `RepackPlanner`:
 ///
 /// 1. **Quantize-in-flight.** Nothing in the source is quantized. Two-dimensional
 ///    projection weights become INT4 affine group-64 through
@@ -33,17 +40,25 @@ struct AuxiliaryExpertPoolPlan: Sendable {
 ///    128 shards and is far too large to be resident; it becomes an additive
 ///    page-aligned row-lookup pool (`PleRowPoolPlan`).
 ///
-/// # Unverified assumption, stated plainly
+/// # Fused-expert axis order — now checked against a real vendor checkpoint
 ///
 /// The fused-expert axis order is taken to be `[experts, 2 * moeIntermediate,
 /// hidden]` for `gate_up_proj` (gate rows first, then up rows) and
 /// `[experts, hidden, moeIntermediate]` for `down_proj`. That is the only
 /// layout in which a pure byte-range split yields the per-expert `gate`, `up`
-/// and `down` matrices the existing kernels expect, and it matches the
-/// per-expert shapes of every other MoE family in the tree. It has **not** been
-/// checked against the real checkpoint's shard headers (that needs the 360 GB
-/// download). `planLayerFile` fails loudly on any other shape rather than
-/// producing a plausible-looking wrong install.
+/// and `down` matrices the existing kernels expect.
+///
+/// It was an assumption when only Flash-Next used this planner (verifying it
+/// needed the 360 GB download). It is no longer: `Qwen/Qwen3.6-35B-A3B`
+/// rev `995ad96e` — the same vendor, the same `mlp.experts.*` fused naming —
+/// declares `gate_up_proj` as `[256, 1024, 2048]` and `down_proj` as
+/// `[256, 2048, 512]` with `moe_intermediate_size` 512 and `hidden_size` 2048,
+/// which is exactly `[E, 2 * I, H]` and `[E, H, I]`. Splitting `gate_up_proj`
+/// at the halfway row also reproduces mlx-community's independently converted
+/// `switch_mlp.gate_proj` / `switch_mlp.up_proj` tensors, so the gate-first
+/// ordering is confirmed too, not just the shape. `planLayerFile` still fails
+/// loudly on any other shape rather than producing a plausible-looking wrong
+/// install.
 enum FlashNextPlanner {
 
     static let textPrefix = "model.language_model."
@@ -63,9 +78,10 @@ enum FlashNextPlanner {
         guard meta.sourceIsUnquantized else {
             throw RepackError.configJsonInvalid(
                 path: meta.configPath,
-                detail: "qwen38flashnext is an original-repo BF16 source, but this "
-                    + "config declares a quantization block; the quantize-in-flight "
-                    + "path would double-quantize already-packed weights")
+                detail: "\(arch.family.rawValue) reached the original-repo BF16 planner, "
+                    + "but this config declares a quantization block; the "
+                    + "quantize-in-flight path would double-quantize already-packed "
+                    + "weights")
         }
         guard !sidecarPolicy.carryVision else {
             throw RepackError.configurationInvalid(

@@ -17,14 +17,31 @@ import Foundation
 /// time (always a multiple of the transform's input unit) and each call
 /// rewrites that scratch in place.
 ///
-/// - TODO(W2.1b, spec 2026-08-08 "Quantizer quality"): the **model-level**
-///   quality gate is still OPEN. Gate W2.1a (bit parity against the runtime's
-///   reference quantizer, including through this streaming path) is enforced by
-///   `Int4AffineStreamingParityTests` and `Int4AffineEncoderParityTests`. Gate
-///   W2.1b — greedy rollouts and KLD against the mlx-community conversion of a
-///   checkpoint we already support (Qwen 3.6) — has NOT been run: it needs a
-///   ~70 GB download and a full model run, which the repack test suite must not
-///   do. Until it is run, weights produced by this path are unvalidated at the
+/// - TODO(W2.1b, spec 2026-08-08 "Quantizer quality"): the **model-level** half
+///   of the quality gate is still OPEN; the **weight-level** half now PASSES.
+///   Full method and numbers: `docs/QUANTIZER_QUALITY.md`.
+///
+///   Gate W2.1a (bit parity against the runtime's reference quantizer,
+///   including through this streaming path) is enforced by
+///   `Int4AffineStreamingParityTests` and `Int4AffineEncoderParityTests`.
+///
+///   W2.1b weight level, measured 2026-09-02 against mlx-community's
+///   independent conversion of `Qwen/Qwen3.6-35B-A3B`: over 124 sampled INT4
+///   tensors this encoder's relative Frobenius error against the BF16 source is
+///   0.09612 mean, versus the control's 0.09648 — better on 118 of 124. The
+///   packed bytes are *not* bit-identical and cannot be: MLX snaps its affine
+///   grid so 0.0 is exactly representable and anchors on the larger-magnitude
+///   endpoint, while this encoder uses a plain min/max grid. The one place that
+///   costs us is tensors carrying a large mass of near-exact zeros inside live
+///   groups (layer-0 routed `down_proj`, up to 1.54x worse).
+///   `Int4AffineEncoderConventionTests` locks the convention so adopting the
+///   snap has to be a decision.
+///
+///   W2.1b model level (greedy rollouts + KLD) has NOT been run, and is blocked
+///   rather than merely pending: the control conversion keeps INT8 routers,
+///   this path is INT4-only by the W2 scope cut, and the Qwen 3.6 router GEMV
+///   (`moe.metal:109`) decodes one `uint8` per weight. See §6 of the doc.
+///   Until it is run, weights produced by this path are unvalidated at the
 ///   model level; do not promote an installer entry that depends on them
 ///   without recording the KLD result in the family dossier.
 public enum StreamingInt4Quantizer {

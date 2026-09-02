@@ -122,6 +122,41 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 19_546_491_213,
         reserveBytes: 1_073_741_824)
 
+    /// The **same checkpoint as `qwen36`**, installed from the vendor's own
+    /// BF16 upload through our quantizer instead of copying mlx-community's
+    /// pre-quantized conversion. It exists so the two installs can be compared:
+    /// this is the control pair the W2.1b quantizer-quality gate is measured on
+    /// (docs/QUANTIZER_QUALITY.md), and the reason Qwen 3.6 was chosen is that
+    /// the runtime already has a runner for it, so the comparison can be made
+    /// at the model level and not just on bytes.
+    ///
+    /// Both pins recorded. Download bytes are the index's declared total
+    /// (71.9 GB across 26 shards); the planner actually reads 71.0 GB of that,
+    /// the difference being the dropped vision tower. Installed bytes are the
+    /// dry-run's own figure for the larger of the two sidecar policies:
+    /// 19,973,468,544 with the `mtp.*` draft group carried (19,498,342,656 with
+    /// `--skip-mtp`), rounded up for the receipt and lock files. Every
+    /// two-dimensional projection becomes INT4 affine group-64 — 0.5625 bytes
+    /// per weight against BF16's 2.0 — while norms, 1-D vectors and the conv
+    /// kernels ride through as BF16.
+    ///
+    /// `modelID` deliberately differs from `qwen36`'s: both entries carry a
+    /// pinned index hash, and `SourceFingerprint.knownFingerprints` is keyed by
+    /// model ID, so a shared ID would collide. The distinct ID also keeps the
+    /// two installs of one checkpoint tellable apart in a manifest.
+    public static let qwen36Original = SupportedModelSource(
+        name: "qwen36original",
+        displayName: "Qwen3.6 35B-A3B (quantized at install)",
+        repoID: "Qwen/Qwen3.6-35B-A3B",
+        revision: "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        sourceIndexSHA256:
+            "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        modelID: "qwen3.6-35b-a3b-int4g64",
+        approximateDownloadBytes: 71_903_645_408,
+        installedBytes: 20_000_000_000,
+        reserveBytes: 2_147_483_648,
+        kind: .originalRepoQuantize)
+
     /// Text stack of the multimodal Qwen3.8 checkpoint; the vision tower is
     /// excluded by the planner, so the download estimate is the repo total
     /// (16.05 GB) minus the ~0.9 GB tower. Installed bytes add the resident
@@ -217,7 +252,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     public static let `default` = gemma4
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, qwen38, deepseekV4Flash, inklingSmall, maple, qwen38FlashNext,
+        gemma4, qwen36, qwen36Original, qwen38, deepseekV4Flash, inklingSmall,
+        maple, qwen38FlashNext,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {
