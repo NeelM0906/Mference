@@ -29,9 +29,27 @@ final class GDN {
     /// input projection for the decode shape. Measured elsewhere in this
     /// package: an unspecialized INT4 GEMV runs ~102 GB/s against ~141 GB/s
     /// specialized, so the runtime path must not be the only one available.
+    /// The gated norm's activation on `z`, from `Qwen3_5RMSNormGated`'s
+    /// `output_gate_type`. Qwen 3.6 and Qwen 3.8 gate with silu; Flash-Next
+    /// gates with sigmoid. `silu` builds the pipelines with **no** function
+    /// constants, which is exactly what the shipped families already did.
+    enum OutputGate {
+        case silu
+        case sigmoid
+
+        /// `FC_GDN_GATE_SIGMOID` in `gdn.metal`. Unset means silu.
+        var constants: [MetalFunctionConstant] {
+            switch self {
+            case .silu: return []
+            case .sigmoid: return [MetalFunctionConstant(index: 99, value: .bool(true))]
+            }
+        }
+    }
+
     init(context: MetalContext, config: LinearAttentionConfig,
          specializedHiddenSize: Int? = nil,
-         useQwenDecodeSpecialization: Bool = true) throws {
+         useQwenDecodeSpecialization: Bool = true,
+         outputGate: OutputGate = .silu) throws {
         precondition(config.keyHeadDim > 0 && config.keyHeadDim % 32 == 0,
                      "keyHeadDim must be a positive multiple of 32")
         precondition(config.keyHeadDim / 32 <= 8,
@@ -63,13 +81,14 @@ final class GDN {
             self.qwenDeltaGatedDecodePSO = try context.pipeline(
                 isQwenGeometry ? "gdn_delta_gated_decode_qwen"
                                : "gdn_delta_gated_decode_qwen38",
-                constants: [],
+                constants: outputGate.constants,
                 maxTotalThreadsPerThreadgroup: 256)
         } else {
             self.qwenDeltaGatedDecodePSO = nil
         }
         self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
-        self.gatedNormPSO = try context.pipeline("gdn_gated_norm")
+        self.gatedNormPSO = try context.pipeline("gdn_gated_norm",
+                                                 constants: outputGate.constants)
         self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",
                                               constants: [],
                                               maxTotalThreadsPerThreadgroup: 512)

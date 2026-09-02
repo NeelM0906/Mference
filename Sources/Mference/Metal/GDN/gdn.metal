@@ -27,6 +27,13 @@ using namespace metal;
 
 constant constexpr float kGdnRmsEps = 1e-6f;
 
+// Gated-norm output activation. `Qwen3_5RMSNormGated` takes it from
+// `output_gate_type`: Qwen 3.6 and Qwen 3.8 gate with **silu**, Flash-Next with
+// **sigmoid**. An UNSET constant means silu, so every shipped pipeline — all of
+// which are built with no constants — compiles to exactly the code it did
+// before, and only a caller that asks for sigmoid gets a different kernel.
+constant bool FC_GDN_GATE_SIGMOID [[function_constant(99)]];
+
 constant uint FC_GDN_IN_QKV    [[function_constant(90)]];
 constant uint FC_GDN_IN_Z      [[function_constant(91)]];
 constant uint FC_GDN_IN_AB     [[function_constant(92)]];
@@ -59,6 +66,14 @@ static inline uint gdn_in_fc_n(constant uint& n) {
 
 static inline float gdn_silu(float x) {
     return x / (1.0f + exp(-x));
+}
+
+// The gated norm's activation on `z`. See `FC_GDN_GATE_SIGMOID`.
+static inline float gdn_output_gate(float x) {
+    if (is_function_constant_defined(FC_GDN_GATE_SIGMOID) && FC_GDN_GATE_SIGMOID) {
+        return 1.0f / (1.0f + exp(-x));
+    }
+    return gdn_silu(x);
 }
 
 static inline float gdn_softplus(float x) {
@@ -539,7 +554,7 @@ kernel void gdn_delta_gated_decode_qwen(
     if (simd_group < 4u) {
         const uint dv = simd_group * 32u + lane;
         const float normed = float(y_half[dv]) * inv_rms * float(weight[dv]);
-        const float gate = gdn_silu(float(z[h * Dv + dv]));
+        const float gate = gdn_output_gate(float(z[h * Dv + dv]));
         out[h * Dv + dv] = half(normed * gate);
     }
 }
@@ -633,7 +648,7 @@ kernel void gdn_delta_gated_decode_qwen38(
     if (simd_group < 4u) {
         const uint dv = simd_group * 32u + lane;
         const float normed = float(y_half[dv]) * inv_rms * float(weight[dv]);
-        const float gate = gdn_silu(float(z[h * Dv + dv]));
+        const float gate = gdn_output_gate(float(z[h * Dv + dv]));
         out[h * Dv + dv] = half(normed * gate);
     }
 }
@@ -761,7 +776,7 @@ kernel void gdn_gated_norm(
 
     for (uint i = tid; i < Dv; i += 128u) {
         const float normed = float(y[base + i]) * invRms * float(weight[i]);
-        const float gate = gdn_silu(float(z[base + i]));
+        const float gate = gdn_output_gate(float(z[base + i]));
         out[base + i] = half(normed * gate);
     }
 }

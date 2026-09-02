@@ -12,6 +12,11 @@ public enum ModelFamily: String, Sendable, Hashable {
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
     case maple = "maple"
+    /// Qwen3.8-Flash-Next. The repacker installs it and the runtime carries a
+    /// compiled baseline so the install validates, but no runner executes it:
+    /// `ManifestReader.familiesWithoutRunner` refuses it by name at every
+    /// entry point until the kernels for its three new axes land.
+    case qwen38flashnext = "qwen38flashnext"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -165,6 +170,133 @@ public struct RelativePositionConfig: Sendable, Equatable {
         dRel: 0, extent: 0, projDim: 0, logScalingFloor: 0, logScalingAlpha: 0)
 }
 
+/// Qwen3.8-Flash-Next's three new axes: low-rank hyper-connections, the QSA
+/// attention indexer, and the per-layer n-gram embedding (PLE). Zeroed
+/// (`.none`) for every family that carries none of them.
+///
+/// **Low-rank hyper-connections.** The residual stream is `hcCount` parallel
+/// copies of `hiddenSize`, i.e. `hcCount * hiddenSize` wide from the embedding
+/// through the last layer. Each sub-block site owns a `GatedResidual`:
+/// `input_mix_weight_down` `[hcLowRank, hcCount * hidden]` and
+/// `input_mix_weight_up` `[hcCount * hidden, hcLowRank]` factorize the mix,
+/// `block_inject_weight` `[hcCount, hcCount * hidden]` places the block output
+/// back into all streams, and `hc_norm` is a group RMSNorm with group size
+/// `hiddenSize`. This is a *different* mechanism from
+/// `HyperConnectionConfig` (DeepSeek V4's manifold-constrained mHC, which
+/// carries a Sinkhorn-projected combine matrix and no low-rank factorization),
+/// so the two configs are separate axes rather than one shared struct.
+///
+/// **QSA indexer.** Per full-attention layer, `index_qk_proj`
+/// `[indexerNumHeads * indexerHeadDim + indexerNumKVHeads * indexerHeadDim,
+/// hidden]` scores the visible prefix in blocks of `indexerCompressRatio`
+/// tokens; the top `indexerBudget / indexerCompressRatio` blocks (plus the
+/// incomplete tail, always selected) form the attention mask for that query.
+/// Selection sparsity is applied through the mask only — KV entries are never
+/// dropped.
+///
+/// **PLE.** At each layer id in `pleLayerIDs` (**one-indexed**, so id 2 is
+/// `layers[1]`) a hashed n-gram embedding is added to the residual stream
+/// before attention. Rows come from the streamed row pool described by
+/// `manifest.plePool`, not from the resident buffer. `pleEosTokenID` delimits
+/// the segments the n-gram shift must not cross.
+///
+/// Facts established against the reference implementation (2026-09-01 parity
+/// harness) that constrain any kernel built on these axes:
+///   * **RMSNorm upcasts.** Every `Qwen4ExpTextRMSNorm` computes
+///     `_norm(x.float()) * (1 + w.float())` and casts back, so the reduction
+///     and the scale are fp32 even when the operands are BF16.
+///   * **The n-gram mix has zero integer headroom.** The hash values are
+///     exactly 63 bits by construction, so the mix must be done in true
+///     64-bit integer arithmetic — never `Double` (53-bit significand) and
+///     never a 32-bit intermediate.
+///   * **The indexer does not guarantee a query selects its own block.**
+///     Nothing in this plumbing may assume a "keep self" entry; the visible
+///     set is whatever the top-k over block scores plus the incomplete tail
+///     produces.
+///   * **Gated `q_proj` packs per head.** The `2 * numHeads * fullHeadDim`
+///     rows are `[heads, 2 * headDim]` split on the last dimension, not a
+///     global query-half / gate-half row split — which is already the
+///     convention the shipped Qwen path implements (`split_q_gate_fp16`), so
+///     `attnOutputGate` is reusable here unchanged.
+public struct FlashNextConfig: Sendable, Equatable {
+    /// Parallel residual streams. The residual is `hcCount * hiddenSize` wide.
+    public let hcCount: Int
+    /// Rank of the hyper-connection mix factorization (`input_mix_weight_*`).
+    public let hcLowRank: Int
+    /// Indexer query heads.
+    public let indexerNumHeads: Int
+    /// Indexer head width, shared by the query heads and the single key head.
+    public let indexerHeadDim: Int
+    /// Indexer key heads; 1 in production (one pooled key per block).
+    public let indexerNumKVHeads: Int
+    /// Tokens the indexer keeps visible per query, before the always-selected
+    /// tail. `indexerBudget / indexerCompressRatio` blocks are selected.
+    public let indexerBudget: Int
+    /// Consecutive tokens pooled into one indexer block key.
+    public let indexerCompressRatio: Int
+    /// **One-indexed** layer ids carrying a PLE block: id `n` is `layers[n-1]`.
+    public let pleLayerIDs: [Int]
+    /// `split_ngram_parts`: how many shards the source n-gram table arrives
+    /// in, and how many page-aligned regions the installed row pool holds.
+    public let pleNgramShardCount: Int
+    /// `ngram_vocab_size_base` verbatim — the PER-HEAD base vocab, *not* the
+    /// table's row count. The true row count comes from the shard headers and
+    /// is published in `manifest.plePool.layers[].rows`; nothing validates one
+    /// against the other.
+    public let pleNgramVocabSizeBase: Int
+    /// Depthwise causal conv width in the PLE mixer (dilation is the n-gram
+    /// size, which is read from the installed `layer_multipliers` length).
+    public let pleConvKernelSize: Int
+    /// Token id that delimits PLE n-gram segments: a shifted token stream must
+    /// not read across it (`_shift_right_ignore_eos`, EOS inclusive).
+    ///
+    /// The installed manifests predating this axis do not publish it, so
+    /// `validateArch` checks it only when present and otherwise trusts this
+    /// compiled constant. Emitting `arch.pleEosTokenID` from the repacker is
+    /// an open follow-up; until it lands, a checkpoint with a different EOS
+    /// would violate the constant silently.
+    public let pleEosTokenID: Int
+
+    public init(hcCount: Int, hcLowRank: Int,
+                indexerNumHeads: Int, indexerHeadDim: Int,
+                indexerNumKVHeads: Int, indexerBudget: Int,
+                indexerCompressRatio: Int,
+                pleLayerIDs: [Int],
+                pleNgramShardCount: Int,
+                pleNgramVocabSizeBase: Int,
+                pleConvKernelSize: Int,
+                pleEosTokenID: Int) {
+        self.hcCount = hcCount
+        self.hcLowRank = hcLowRank
+        self.indexerNumHeads = indexerNumHeads
+        self.indexerHeadDim = indexerHeadDim
+        self.indexerNumKVHeads = indexerNumKVHeads
+        self.indexerBudget = indexerBudget
+        self.indexerCompressRatio = indexerCompressRatio
+        self.pleLayerIDs = pleLayerIDs
+        self.pleNgramShardCount = pleNgramShardCount
+        self.pleNgramVocabSizeBase = pleNgramVocabSizeBase
+        self.pleConvKernelSize = pleConvKernelSize
+        self.pleEosTokenID = pleEosTokenID
+    }
+
+    public static let none = FlashNextConfig(
+        hcCount: 0, hcLowRank: 0,
+        indexerNumHeads: 0, indexerHeadDim: 0, indexerNumKVHeads: 0,
+        indexerBudget: 0, indexerCompressRatio: 0,
+        pleLayerIDs: [], pleNgramShardCount: 0, pleNgramVocabSizeBase: 0,
+        pleConvKernelSize: 0, pleEosTokenID: 0)
+
+    /// Zero-indexed layer indices carrying a PLE block, derived from the
+    /// one-indexed `pleLayerIDs` the checkpoint publishes.
+    public var pleLayerIndices: [Int] { pleLayerIDs.map { $0 - 1 } }
+
+    /// Indexer blocks selected per query: `indexerBudget / compressRatio`.
+    public var indexerBlockBudget: Int {
+        indexerCompressRatio > 0 ? indexerBudget / indexerCompressRatio : 0
+    }
+}
+
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
 ///
@@ -269,6 +401,9 @@ public struct ArchConfig: Sendable, Equatable {
     public let routerNormAfterTopK: Bool
     /// Per-layer learned scalar multiplying the router weights.
     public let routerGlobalScale: Bool
+    /// Qwen3.8-Flash-Next's low-rank hyper-connections, QSA indexer and
+    /// per-layer n-gram embedding. `.none` for every other family.
+    public let flashNext: FlashNextConfig
 
     public init(
         hiddenSize: Int,
@@ -318,7 +453,8 @@ public struct ArchConfig: Sendable, Equatable {
         routerGateBias: Bool = false,
         routerNormAfterTopK: Bool = false,
         routerGlobalScale: Bool = false,
-        unpaddedVocabSize: Int = 0
+        unpaddedVocabSize: Int = 0,
+        flashNext: FlashNextConfig = .none
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -368,6 +504,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.routerNormAfterTopK = routerNormAfterTopK
         self.routerGlobalScale = routerGlobalScale
         self.unpaddedVocabSize = unpaddedVocabSize
+        self.flashNext = flashNext
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -701,7 +838,94 @@ public struct ArchConfig: Sendable, Equatable {
         (0..<42).map { $0 % 6 == 5 ? 1 : 0 }
     }
 
+    /// Canonical Qwen3.8-Flash-Next 180B-A3.5B baseline (text stack of the
+    /// multimodal `qwen4_exp` checkpoint; the vision tower is excluded at
+    /// repack). 48 layers in the same 3 : 1 hybrid as Qwen 3.6/3.8 — 36
+    /// gated-DeltaNet layers and 12 full-attention layers — with 512 routed
+    /// experts (top-10) of width 640 plus one sigmoid-gated shared expert,
+    /// gated attention output, per-head q/k norms, partial NeoX RoPE over 64
+    /// of 256 dims at θ 1e7, and an untied 248 320-row head.
+    ///
+    /// Three axes are new and carried in `flashNext`: the residual is 4
+    /// low-rank hyper-connected streams (so the stream is 10 240 wide and
+    /// there is **no** final norm — the global mixer collapses it before
+    /// `lm_head`), each full-attention layer carries a QSA indexer, and
+    /// layer id 2 (`layers[1]`) carries a PLE n-gram embedding whose 320M-row
+    /// table streams from `manifest.plePool` rather than sitting resident.
+    ///
+    /// Values are read from the installed manifest at
+    /// `scratch/qwen38flashnext.gturbo` (revision `de4b8e4d`); see
+    /// `docs/families/QWEN38_FLASH_NEXT.md`. The runner does not exist yet:
+    /// `ManifestReader.familiesWithoutRunner` refuses this family by name at
+    /// every load path. The baseline exists so the manifest can be validated
+    /// and toy fixtures built while the kernels are written.
+    public static let qwen38FlashNext_180B_A3_5B = ArchConfig(
+        hiddenSize: 2560,
+        intermediateSize: 640,
+        moeIntermediateSize: 640,
+        numHeads: 24,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 48,
+        numExperts: 512,
+        topKExperts: 10,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.qwen38FlashNextLayerMask(),
+        hiddenActivation: "silu",
+        family: .qwen38flashnext,
+        attnOutputGate: true,          // output_gate_type: sigmoid
+        attentionScale: 0.0625,        // 256^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: true,
+        ropeNeoxSubdim: true,
+        linearAttention: LinearAttentionConfig(
+            numKHeads: 16, numVHeads: 48,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4),
+        // The router path is Qwen 3.6's: softmax over the logits, top-k of the
+        // probabilities, then renormalize the selected k (`norm_topk_prob`).
+        // `routerNormAfterTopK` stays false because that flag selects
+        // Inkling's and Maple's *different* ordering, not this one.
+        numSharedExperts: 1,
+        flashNext: FlashNextConfig(
+            hcCount: 4,
+            hcLowRank: 320,
+            indexerNumHeads: 4,
+            indexerHeadDim: 128,
+            indexerNumKVHeads: 1,
+            indexerBudget: 2048,
+            indexerCompressRatio: 4,
+            pleLayerIDs: [2],
+            pleNgramShardCount: 128,
+            pleNgramVocabSizeBase: 20_000_000,
+            pleConvKernelSize: 4,
+            // config.json text_config.eos_token_id @ de4b8e4d.
+            pleEosTokenID: 248_044)
+    )
+
+    private static func qwen38FlashNextLayerMask() -> [UInt8] {
+        // Same 3:1 hybrid shape as Qwen 3.6/3.8 (full_attention_interval = 4).
+        var mask = [UInt8](repeating: 2, count: 48)
+        for i in stride(from: 3, to: 48, by: 4) { mask[i] = 1 }
+        return mask
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
+    ///
+    /// A family here has a validated baseline, not necessarily a runner:
+    /// `ManifestReader.familiesWithoutRunner` is the separate, authoritative
+    /// gate over whether the runtime can execute one.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
@@ -709,6 +933,7 @@ public struct ArchConfig: Sendable, Equatable {
         .deepseekV4Flash: .deepseekV4Flash_284B_A13B,
         .inklingSmall: .inklingSmall_276B_A12B,
         .maple: .maplePreview,
+        .qwen38flashnext: .qwen38FlashNext_180B_A3_5B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -782,6 +1007,25 @@ public struct ArchConfig: Sendable, Equatable {
     }
     /// Hash-routed MoE layer: expert selection is `tid2eid[token]`.
     public func layerIsHashRouted(_ layer: Int) -> Bool { layer < numHashRoutedLayers }
+
+    /// True when the residual is Flash-Next's low-rank hyper-connected bundle
+    /// of `flashNext.hcCount` streams rather than a single stream.
+    public var hasLowRankHyperConnections: Bool { flashNext.hcCount > 0 }
+    /// Width of the residual the layer graph carries between blocks. Blocks
+    /// themselves always run at `hiddenSize`; only the residual widens.
+    public var residualStreamWidth: Int {
+        hasLowRankHyperConnections ? flashNext.hcCount * hiddenSize : hiddenSize
+    }
+    /// True when this layer carries a PLE n-gram embedding block. `pleLayerIDs`
+    /// is one-indexed in the checkpoint, so id 2 answers true for layer 1.
+    public func layerIsPLE(_ layer: Int) -> Bool {
+        flashNext.pleLayerIDs.contains(layer + 1)
+    }
+    /// True when this layer carries a QSA indexer: full-attention layers of a
+    /// family that configures one.
+    public func layerHasAttentionIndexer(_ layer: Int) -> Bool {
+        flashNext.indexerNumHeads > 0 && layerIsFull(layer)
+    }
 }
 
 /// Failure modes for the validation gates in `Model.load`.
@@ -802,6 +1046,19 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case trustedReceiptInvalid(detail: String)
     case routedExpertPlanUnavailable(layer: Int)
     case eagerExpertFillFailed(layer: Int)
+    /// The repacker can install this family but no runner executes it yet.
+    /// Named rather than "unknown family" so the failure points at the missing
+    /// kernels instead of reading as a corrupt install.
+    case familyRunnerNotImplemented(family: String, missingAxes: [String])
+    /// The install declares no `manifest.plePool` block, or none for the layer
+    /// the arch says carries a PLE n-gram embedding.
+    case plePoolMissing(layer: Int)
+    /// The `manifest.plePool` block is present but self-inconsistent (unknown
+    /// kind, geometry that does not tile the file, shard rows that do not sum
+    /// to the declared total).
+    case plePoolInvalid(detail: String)
+    /// A row index outside the pool's declared row count.
+    case plePoolRowOutOfRange(row: Int, rows: Int)
 
     public var description: String {
         switch self {
@@ -837,6 +1094,15 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "routed expert fetch plan unavailable for layer \(layer)"
         case .eagerExpertFillFailed(let layer):
             return "eager routed expert read failed for layer \(layer); decode step aborted"
+        case .familyRunnerNotImplemented(let family, let missingAxes):
+            return "family \(family) is installed but its runner is not implemented; "
+                + "missing axes: \(missingAxes.joined(separator: ", "))"
+        case .plePoolMissing(let layer):
+            return "manifest.plePool has no row-lookup pool for PLE layer \(layer)"
+        case .plePoolInvalid(let detail):
+            return "manifest.plePool is invalid: \(detail)"
+        case .plePoolRowOutOfRange(let row, let rows):
+            return "PLE row \(row) is outside the pool's \(rows) rows"
         }
     }
 }

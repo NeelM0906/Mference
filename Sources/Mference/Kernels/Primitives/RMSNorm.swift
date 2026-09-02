@@ -22,6 +22,7 @@ final class RMSNorm {
     private let psoBF16PerHead512: MTLComputePipelineState
     private let psoNoScalePerHead256: MTLComputePipelineState
     private let psoNoScalePerHead512: MTLComputePipelineState
+    private let psoBF16Grouped: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
@@ -46,6 +47,39 @@ final class RMSNorm {
         self.psoNoScalePerHead512 = try Self.specializedPipeline(context,
                                                                  "rmsnorm_no_scale_perhead",
                                                                  d: 512)
+        self.psoBF16Grouped = try context.pipeline("rmsnorm_bf16w_grouped")
+    }
+
+    /// Qwen4-Exp group RMSNorm: `rows * groups` independent normalizations of
+    /// `groupSize` channels each, sharing one `[groups * groupSize]` BF16 weight.
+    ///
+    /// This is the `hc_norm` / `norm_key` / `norm_query` / `norm_conv` shape —
+    /// each of the 4 hyper-connection streams normalized over its own 2560
+    /// channels against its own slice of the 10240-wide weight. In-place safe:
+    /// each threadgroup touches only its own group.
+    func encodeBF16WGrouped(commandBuffer: MTLCommandBuffer,
+                            x: MTLBuffer, xOffset: Int = 0,
+                            weight: MTLBuffer, weightOffset: Int = 0,
+                            out: MTLBuffer, outOffset: Int = 0,
+                            groupSize: UInt32, groups: UInt32, rows: Int,
+                            eps: Float) {
+        precondition(rows > 0 && groups > 0 && groupSize > 0)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoBF16Grouped)
+        enc.setBuffer(x,      offset: xOffset,      index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out,    offset: outOffset,    index: 2)
+        var groupSizeVar = groupSize
+        var epsVar = eps
+        var groupsVar = groups
+        enc.setBytes(&groupSizeVar, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&epsVar,       length: MemoryLayout<Float>.size,  index: 4)
+        enc.setBytes(&groupsVar,    length: MemoryLayout<UInt32>.size, index: 5)
+        let w = min(Int(psoBF16Grouped.maxTotalThreadsPerThreadgroup), 256)
+        enc.dispatchThreadgroups(
+            MTLSize(width: rows * Int(groups), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     /// Encode the BF16-weight variant (Gemma 4 norms).

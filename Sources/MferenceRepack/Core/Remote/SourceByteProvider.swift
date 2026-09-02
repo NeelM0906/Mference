@@ -325,6 +325,29 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                     detail: "repeat-bf16 count must be positive")
             }
             capacity = scratchBytes / count / 2 * 2
+        case .quantizeInt4G64:
+            // Output is at most a quarter of the input, so the tile is bounded
+            // by the source side alone; groups must not be split.
+            let unit = StreamingInt4Quantizer.groupSourceBytes
+            capacity = scratchBytes / unit * unit
+        case .quantizeInt4G64Rows(let rowSourceBytes):
+            guard rowSourceBytes > 0 else {
+                throw RepackError.configurationInvalid(
+                    detail: "quantize-int4-g64-rows source row size must be positive")
+            }
+            capacity = scratchBytes / rowSourceBytes * rowSourceBytes
+        case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride),
+             .bf16RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
+            guard rowSourceBytes > 0, rowsPerBlock > 0,
+                  let stride = Int(exactly: blockStride), stride > 0,
+                  rowsPerBlock <= Int.max / rowSourceBytes else {
+                throw RepackError.configurationInvalid(
+                    detail: "row-block transform geometry is invalid")
+            }
+            // A mostly-padded block writes more than it reads, so the scratch
+            // must hold whichever side is larger.
+            let blockSourceBytes = rowsPerBlock * rowSourceBytes
+            capacity = scratchBytes / max(blockSourceBytes, stride) * blockSourceBytes
         }
         guard capacity >= Int(transform.inputUnitBytes) else {
             throw RepackError.configurationInvalid(
@@ -391,6 +414,28 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                 }
             }
             return outputCount
+        case .quantizeInt4G64(let component):
+            return try StreamingInt4Quantizer.quantizeComponentInPlace(
+                component, buffer: buffer, sourceCount: sourceCount)
+        case .quantizeInt4G64Rows(let rowSourceBytes):
+            return try StreamingInt4Quantizer.quantizeRowsInPlace(
+                buffer: buffer,
+                sourceCount: sourceCount,
+                rowSourceBytes: rowSourceBytes)
+        case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
+            return try StreamingInt4Quantizer.quantizeRowBlocksInPlace(
+                buffer: buffer,
+                sourceCount: sourceCount,
+                rowSourceBytes: rowSourceBytes,
+                rowsPerBlock: rowsPerBlock,
+                blockStride: blockStride)
+        case .bf16RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
+            return try StreamingInt4Quantizer.padRowBlocksInPlace(
+                buffer: buffer,
+                sourceCount: sourceCount,
+                rowSourceBytes: rowSourceBytes,
+                rowsPerBlock: rowsPerBlock,
+                blockStride: blockStride)
         }
     }
 

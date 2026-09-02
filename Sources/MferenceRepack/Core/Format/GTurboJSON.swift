@@ -130,6 +130,28 @@ enum GTurboJSON {
             archDict["numDenseLayers"] = arch.numDenseLayers
             archDict["denseIntermediateSize"] = arch.denseIntermediateSize
         }
+        // Qwen3.8-Flash-Next: the covered axes are value changes the non-Gemma
+        // block above already publishes. These are the three NEW axes, written
+        // under their own names plus a `requiredAxes` list, so a runtime that
+        // cannot execute them can say which ones it is missing instead of
+        // reporting an unrecognised family.
+        if arch.family == .qwen38flashnext, let axes = arch.flashNext {
+            archDict["numSharedExperts"] = arch.numSharedExperts
+            archDict["numDenseLayers"] = arch.numDenseLayers
+            archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
+            archDict["hcCount"] = axes.hcCount
+            archDict["hcLowRank"] = axes.hcLowRank
+            archDict["indexerNumHeads"] = axes.indexerNumHeads
+            archDict["indexerHeadDim"] = axes.indexerHeadDim
+            archDict["indexerNumKVHeads"] = axes.indexerNumKVHeads
+            archDict["indexerBudget"] = axes.indexerBudget
+            archDict["indexerCompressRatio"] = axes.indexerCompressRatio
+            archDict["pleLayerIDs"] = axes.pleLayerIDs
+            archDict["pleNgramShardCount"] = axes.pleNgramShardCount
+            archDict["pleNgramVocabSizeBase"] = axes.pleNgramVocabSizeBase
+            archDict["pleConvKernelSize"] = axes.pleConvKernelSize
+            archDict["requiredAxes"] = FlashNextAxes.requiredAxisNames
+        }
         if arch.family == .maple {
             archDict["routerScoringFunc"] = arch.routerScoringFunc
             archDict["routedScalingFactor"] = arch.routedScalingFactor
@@ -227,6 +249,51 @@ enum GTurboJSON {
             "expertStride": expertStride,
             "bitWidthOverridesHonored": plan.bitsOverrideCount
         ]
+        // --- Additive blocks. Every family that predates them emits none of
+        // these keys, so existing manifests stay byte-identical.
+        if plan.quantizedAtInstall {
+            manifest["quantizedAtInstall"] = [
+                "scheme": "affine",
+                "weightBits": 4,
+                "groupSize": StreamingInt4Quantizer.groupSize,
+                "sourceDtype": "BF16",
+                // Gate W2.1a is enforced in CI; W2.1b (model-level KLD against a
+                // known-good conversion) has not been run for this install.
+                "parityGate": "W2.1a-bit-parity",
+                "qualityGate": "W2.1b-kld-open",
+            ]
+        }
+        if !plan.sidecarOutcomes.isEmpty {
+            var sidecars: [String: Any] = [:]
+            for outcome in plan.sidecarOutcomes {
+                sidecars[outcome.group] = [
+                    "carried": outcome.carried,
+                    "tensorCount": outcome.tensorCount,
+                ]
+            }
+            manifest["sidecars"] = sidecars
+        }
+        if !plan.auxiliaryExpertPools.isEmpty {
+            manifest["auxiliaryExpertPools"] = plan.auxiliaryExpertPools.map { pool in
+                [
+                    "name": pool.name,
+                    "directory": pool.directoryName,
+                    "expertsPerLayer": pool.layers.first(where: { $0.expertsPerLayer > 0 })?
+                        .expertsPerLayer ?? 0,
+                    "expertStride": pool.layers.first(where: { $0.expertsPerLayer > 0 })?
+                        .expertStride ?? 0,
+                    "layers": pool.layers.filter { $0.expertsPerLayer > 0 }.map {
+                        [
+                            "layer": $0.layerIndex,
+                            "file": ($0.path as NSString).lastPathComponent,
+                        ] as [String: Any]
+                    },
+                ] as [String: Any]
+            }
+        }
+        if !plan.plePools.isEmpty {
+            manifest["plePool"] = encodePlePools(plan.plePools)
+        }
         if let flashHead = plan.flashHead {
             manifest["flashHead"] = [
                 "nClusters": flashHead.nClusters,
@@ -242,6 +309,52 @@ enum GTurboJSON {
         }
         return try JSONSerialization.data(withJSONObject: manifest,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    }
+
+    /// The additive `plePool` manifest block. `kind` names the pool format so a
+    /// future revision can be told apart; readers must refuse an unknown kind.
+    ///
+    /// Row `i` of shard `s` lives at
+    /// `shards[s].offset + (i / rowsPerBlock) * blockStride + (i % rowsPerBlock) * rowStride`.
+    /// A row's record is `[rowWeightBytes | rowScaleBytes | rowBiasBytes]` — for
+    /// a BF16 pool the companion sizes are 0 and the record is just the raw row.
+    /// Blocks are page-aligned and rows never straddle a page, so one row costs
+    /// one page fault and a cached page serves `rowsPerBlock` neighbours.
+    static func encodePlePools(_ pools: [PleRowPoolPlan]) -> [String: Any] {
+        [
+            "kind": "rowLookupPoolV1",
+            "layers": pools.map { pool in
+                let quantized = pool.storage == .int4AffineG64
+                return [
+                    "layer": pool.layerIndex,
+                    "file": pool.relativePath,
+                    "sourceTensor": pool.sourceTensorPrefix,
+                    "rows": pool.totalRows,
+                    "rowDim": pool.rowDim,
+                    "storage": pool.storage.rawValue,
+                    "weightBits": pool.bits,
+                    "scheme": quantized ? "affine" : "none",
+                    "scaleType": quantized ? "BF16" : "none",
+                    "biasType": quantized ? "BF16" : "none",
+                    "groupSize": pool.groupSize,
+                    "rowWeightBytes": pool.rowWeightBytes,
+                    "rowScaleBytes": pool.rowCompanionBytes,
+                    "rowBiasBytes": pool.rowCompanionBytes,
+                    "rowStride": pool.rowStride,
+                    "rowsPerBlock": pool.rowsPerBlock,
+                    "blockStride": pool.blockStride,
+                    "fileSize": pool.fileSize,
+                    "shards": pool.shards.map {
+                        [
+                            "shard": $0.shardIndex,
+                            "rows": $0.rows,
+                            "offset": $0.regionOffset,
+                            "size": $0.regionBytes,
+                        ] as [String: Any]
+                    },
+                ] as [String: Any]
+            },
+        ]
     }
 
     static func encodeLayout(plan: RepackPlan,

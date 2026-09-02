@@ -124,6 +124,43 @@ void rmsnorm_bf16w_perhead(
     }
 }
 
+// Qwen4-Exp (`qwen38flashnext`) group RMSNorm: `group_size = hidden`.
+//
+// The residual stream is `hc_count` copies of a `hidden`-wide vector laid end to
+// end. Each copy is normalized over its own `hidden` channels — like the
+// per-head kernel above — but the learned weight spans the WHOLE bundle, one
+// scale per (stream, channel), so it cannot be shared the way `q_norm` is. That
+// single indexing difference is the whole kernel.
+//
+// Dispatch: one threadgroup per (row, group); grid width = rows * groups. The
+// weight is reused across rows, so the group index is recovered modulo `groups`.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void rmsnorm_bf16w_grouped(
+    device const half*   x          [[buffer(0)]],   // [rows * groups * G] FP16
+    device const bfloat* weight     [[buffer(1)]],   // [groups * G] BF16
+    device       half*   out        [[buffer(2)]],   // [rows * groups * G] FP16
+    constant     uint&   groupSize  [[buffer(3)]],
+    constant     float&  eps        [[buffer(4)]],
+    constant     uint&   groups     [[buffer(5)]],
+    uint  slot             [[threadgroup_position_in_grid]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kRmsMaxSimdGroups];
+    const uint G = rms_fc_d(groupSize);
+    device const half*   xg = x      + slot * G;
+    device       half*   og = out    + slot * G;
+    device const bfloat* wg = weight + (slot % groups) * G;
+    const float inv = rms_block_inv(xg, G, eps, lid, lsize,
+                                    simd_lane_id, simd_group_id, simdgroups, partial);
+    for (uint i = lid; i < G; i += lsize) {
+        og[i] = half(float(xg[i]) * inv * float(wg[i]));
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void rmsnorm_no_scale_perhead(
     device const half*  x          [[buffer(0)]],   // [numHeads * headDim] FP16

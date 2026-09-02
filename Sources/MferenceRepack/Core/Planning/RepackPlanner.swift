@@ -81,8 +81,16 @@ struct PerExpertTensorSlice: Sendable {
     let logicalShape: [UInt64]         // per-expert logical shape
     let offsetInExpertBlob: UInt64     // within each expert blob
     let sizeInExpertBlob: UInt64
-    /// For each expert e (0..<expertsPerLayer): source byte offset & size.
-    let sourceOffsetPerExpert: UInt64  // stride per expert in source
+    /// Bytes read from the source for one expert.
+    let sourceOffsetPerExpert: UInt64
+    /// Byte stride between consecutive experts in the source tensor. Equals
+    /// `sourceOffsetPerExpert` for families whose source tensor holds exactly
+    /// one contiguous slab per expert and per role.
+    let sourceStridePerExpert: UInt64
+    /// Byte offset of this slice inside the expert's source slab. Non-zero only
+    /// for fused tensors — Qwen3.8-Flash-Next stores gate and up as one
+    /// `mlp.experts.gate_up_proj`, so `up` starts half a slab in.
+    let sourceSliceOffset: UInt64
     let sourceTensor: SourceTensor
     let bitsForWeights: Int?           // 4 for routed expert weight; nil for scales/biases
     let transform: RangeCopyTransform
@@ -91,7 +99,9 @@ struct PerExpertTensorSlice: Sendable {
          logicalShape: [UInt64], offsetInExpertBlob: UInt64,
          sizeInExpertBlob: UInt64, sourceOffsetPerExpert: UInt64,
          sourceTensor: SourceTensor, bitsForWeights: Int?,
-         transform: RangeCopyTransform = .identity) {
+         transform: RangeCopyTransform = .identity,
+         sourceStridePerExpert: UInt64? = nil,
+         sourceSliceOffset: UInt64 = 0) {
         self.role = role
         self.component = component
         self.dtype = dtype
@@ -99,6 +109,8 @@ struct PerExpertTensorSlice: Sendable {
         self.offsetInExpertBlob = offsetInExpertBlob
         self.sizeInExpertBlob = sizeInExpertBlob
         self.sourceOffsetPerExpert = sourceOffsetPerExpert
+        self.sourceStridePerExpert = sourceStridePerExpert ?? sourceOffsetPerExpert
+        self.sourceSliceOffset = sourceSliceOffset
         self.sourceTensor = sourceTensor
         self.bitsForWeights = bitsForWeights
         self.transform = transform
@@ -130,6 +142,31 @@ struct LayerFilePlan: Sendable {
     }
 }
 
+/// Which optional tensor groups the install carries (spec W2.4). Vision towers
+/// are always skipped — the runtime is text-only — but the draft-layer (MTP)
+/// group is a manifest flag rather than a silent drop.
+public struct SidecarPolicy: Sendable, Equatable {
+    /// Carry `mtp.*` draft-layer tensors into the install.
+    public let carryMTP: Bool
+    /// Carry vision-tower tensors. Always false today; present so the manifest
+    /// records the decision by name rather than by omission.
+    public let carryVision: Bool
+
+    public init(carryMTP: Bool = true, carryVision: Bool = false) {
+        self.carryMTP = carryMTP
+        self.carryVision = carryVision
+    }
+
+    public static let `default` = SidecarPolicy()
+}
+
+/// One optional tensor group and what the install did with it.
+struct SidecarGroupOutcome: Sendable, Equatable {
+    let group: String        // "mtp" | "vision"
+    let carried: Bool
+    let tensorCount: Int
+}
+
 struct RepackPlan: Sendable {
     let arch: ArchInfo
     let baseMode: String                  // "affine"
@@ -140,6 +177,52 @@ struct RepackPlan: Sendable {
     let matchedModelID: String?
     let excludedMultimodalTensorNames: [String]
     let flashHead: IndexLoader.MapleFlashHeadMetadata?
+    /// Additive row-lookup pools (Flash-Next PLE n-gram tables). Empty for
+    /// every family that predates the pool kind, so their manifests and output
+    /// trees are unchanged.
+    let plePools: [PleRowPoolPlan]
+    /// Optional tensor groups and the carry/skip decision made for each.
+    let sidecarOutcomes: [SidecarGroupOutcome]
+    /// Whether the source checkpoint was BF16 and quantized during the install
+    /// rather than copied from a pre-quantized conversion.
+    let quantizedAtInstall: Bool
+    /// Additive expert pools outside `packed_experts/` (the Flash-Next MTP
+    /// draft layer's own routed experts). Empty for every shipped family.
+    let auxiliaryExpertPools: [AuxiliaryExpertPoolPlan]
+
+    /// Every populated expert-blob layer the install writes, main pool first.
+    var allExpertLayers: [LayerFilePlan] {
+        layers.filter { $0.expertsPerLayer > 0 }
+            + auxiliaryExpertPools.flatMap { $0.layers.filter { $0.expertsPerLayer > 0 } }
+    }
+
+    init(arch: ArchInfo,
+         baseMode: String,
+         baseGroupSize: Int,
+         bitsOverrideCount: Int,
+         resident: ResidentFilePlan,
+         layers: [LayerFilePlan],
+         matchedModelID: String?,
+         excludedMultimodalTensorNames: [String],
+         flashHead: IndexLoader.MapleFlashHeadMetadata?,
+         plePools: [PleRowPoolPlan] = [],
+         sidecarOutcomes: [SidecarGroupOutcome] = [],
+         quantizedAtInstall: Bool = false,
+         auxiliaryExpertPools: [AuxiliaryExpertPoolPlan] = []) {
+        self.auxiliaryExpertPools = auxiliaryExpertPools
+        self.arch = arch
+        self.baseMode = baseMode
+        self.baseGroupSize = baseGroupSize
+        self.bitsOverrideCount = bitsOverrideCount
+        self.resident = resident
+        self.layers = layers
+        self.matchedModelID = matchedModelID
+        self.excludedMultimodalTensorNames = excludedMultimodalTensorNames
+        self.flashHead = flashHead
+        self.plePools = plePools
+        self.sidecarOutcomes = sidecarOutcomes
+        self.quantizedAtInstall = quantizedAtInstall
+    }
 }
 
 // MARK: - Planner
@@ -194,6 +277,10 @@ enum RepackPlanner {
             // text tower is exactly `model.llm.`; `model.visual.` and
             // `model.audio.` fall through to the multimodal exclusion.
             return name.hasPrefix("model.llm.")
+        case .qwen38flashnext:
+            // Planned by FlashNextPlanner; this path is never reached for it.
+            return name.hasPrefix(FlashNextPlanner.textPrefix)
+                || name == FlashNextPlanner.lmHeadName
         }
     }
 
@@ -210,6 +297,9 @@ enum RepackPlanner {
         // `.mlp.experts.` does not match the shared experts, which sit under
         // `.mlp.shared_experts.`.
         case .inklingSmall:    routedContainer = ".mlp.experts."
+        // Fused across experts and across the gate|up halves; split by
+        // FlashNextPlanner, which never consults this classifier.
+        case .qwen38flashnext: return nil
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -218,7 +308,7 @@ enum RepackPlanner {
         return nil
     }
 
-    private static func layerIndex(in name: String) -> Int? {
+    static func layerIndex(in name: String) -> Int? {
         // matches "...layers.<N>...."
         guard let r = name.range(of: ".layers.") else { return nil }
         let tail = name[r.upperBound...]
@@ -231,7 +321,8 @@ enum RepackPlanner {
     static func plan(meta: IndexLoader.SourceMetadata,
                             arch: ArchInfo,
                             shardHeaders: [Safetensors.Header],
-                            outputDir: String) throws -> RepackPlan {
+                            outputDir: String,
+                            sidecarPolicy: SidecarPolicy = .default) throws -> RepackPlan {
 
         // Companion tensors may live in different shards, so resolve them
         // through one global registry.
@@ -239,6 +330,18 @@ enum RepackPlanner {
         registry.reserveCapacity(meta.weightMap.count)
         for h in shardHeaders {
             for t in h.tensors { registry[t.name] = t }
+        }
+
+        // Original-repo BF16 families are planned by their own planner: the
+        // tensor inventory, the fused-expert split and the row pool have no
+        // counterpart in the pre-quantized path, and keeping them apart means
+        // the shipped families cannot regress.
+        if arch.family == .qwen38flashnext {
+            return try FlashNextPlanner.plan(meta: meta,
+                                             arch: arch,
+                                             registry: registry,
+                                             outputDir: outputDir,
+                                             sidecarPolicy: sidecarPolicy)
         }
 
         // Source allowlisting owns exact fingerprint validation. Preserve the
@@ -796,7 +899,7 @@ enum RepackPlanner {
                     shape: expectedMap, elementBytes: 4)
     }
 
-    private static func roundUpToPage(_ v: UInt64) -> UInt64 {
+    static func roundUpToPage(_ v: UInt64) -> UInt64 {
         let p = Layout.pageBytes
         return ((v + p - 1) / p) * p
     }
@@ -808,7 +911,7 @@ enum RepackPlanner {
                                   detail: detail)
     }
 
-    private static func padTo4(_ s: [UInt64]) -> [UInt32] {
+    static func padTo4(_ s: [UInt64]) -> [UInt32] {
         var out: [UInt32] = []
         out.reserveCapacity(4)
         for v in s.prefix(4) { out.append(UInt32(v)) }
@@ -926,6 +1029,8 @@ enum RepackPlanner {
                 if n == "model.llm.embed_norm.weight" { return (0, 0, 1, n) }
                 if n == "model.llm.norm.weight"       { return (3, 0, 0, n) }
                 if n == "model.llm.unembed.weight"    { return (4, 0, 0, n) }
+            case .qwen38flashnext:
+                break   // FlashNextPlanner owns this family's ordering.
             }
             if let li = layerIndex(in: n) {
                 let slot: Int
@@ -936,6 +1041,7 @@ enum RepackPlanner {
                 case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
                 case .inklingSmall:    slot = inklingSlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
+                case .qwen38flashnext: slot = 100
                 }
                 return (1, li, slot, n)
             }

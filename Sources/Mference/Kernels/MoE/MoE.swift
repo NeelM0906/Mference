@@ -31,6 +31,27 @@ public struct MoEExpertOffsets {
 final class MoE {
     static let maxStreamedExperts = 8
 
+    /// Slots in the `RoutedBlobs` argument buffer, mirroring `kRoutedBlobSlots`
+    /// in `moe.metal`. Flash-Next streams top-10; the shipped families bind a
+    /// 6- or 8-wide prefix and every kernel indexes only `slot < top_k`, so the
+    /// wider array is layout-only. `maxStreamedExperts` stays 8 because it means
+    /// something else — the width the shipped decode path plans and eager-fills.
+    static let routedBlobSlots = 10
+
+    /// Top-k widths the routed INT4 expert-compute path implements.
+    static let routedComputeWidths: Set<UInt32> = [6, 8, 10]
+
+    /// The widest expert count the router path accepts. Bounded by the one-SIMD
+    /// selection kernels' lane arrays (`kRouterWideMaxPerLane` = 16 over 32
+    /// lanes) and by the router-logits staging buffer sized below. Flash-Next
+    /// routes over 512; the shipped families use 128 or 256.
+    static let maxRouterExperts: UInt32 = 512
+
+    /// Top-k widths the router selection kernels implement. 8 is Gemma 4 /
+    /// Qwen 3.6; 10 is Flash-Next. (DeepSeek V4's 6 goes through its own
+    /// sqrtsoftplus kernels in `MoEDeepseekV4`.)
+    static let routerTopKWidths: Set<UInt32> = [8, 10]
+
     private let realDecodeD: UInt32
     private let realDecodeF: UInt32
     private let realDecodeTopK: UInt32
@@ -40,6 +61,8 @@ final class MoE {
     private let routerGemvSpecializedPSO: MTLComputePipelineState
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
+    private let routerSelectK10PSO: MTLComputePipelineState
+    private let routerSelectK10SpecializedPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
@@ -55,6 +78,8 @@ final class MoE {
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     private let phase2ReduceK6PSO: MTLComputePipelineState
     private let phase2ReduceK6SpecializedPSO: MTLComputePipelineState
+    private let phase2ReduceK10PSO: MTLComputePipelineState
+    private let phase2ReduceK10SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
 
@@ -68,8 +93,9 @@ final class MoE {
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
          specializedTopK: UInt32 = 8) throws {
-        precondition(specializedTopK == 6 || specializedTopK == 8,
-                     "routed INT4 decode supports top-k 6 or 8")
+        precondition(Self.routedComputeWidths.contains(specializedTopK),
+                     "routed INT4 decode supports top-k "
+                     + "\(Self.routedComputeWidths.sorted())")
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeTopK = specializedTopK
@@ -104,6 +130,12 @@ final class MoE {
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8_par",
             constants: routerConstants)
+        // Flash-Next's top-10 over 512 experts. Same selection body, wider K and
+        // a 16-deep lane array; see `router_topk_select_softmax_par`.
+        self.routerSelectK10PSO = try context.pipeline("router_topk_select_k10_par")
+        self.routerSelectK10SpecializedPSO = try context.pipeline(
+            "router_topk_select_k10_par",
+            constants: routerConstants)
         self.phase1U16PSO = try context.pipeline(
             "moe_phase1_gate_up_act_u16load", constants: activationConstants)
         self.phase1U16SpecializedPSO = try context.pipeline(
@@ -132,9 +164,14 @@ final class MoE {
         self.phase2ReduceK6SpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_k6",
             constants: moeConstants)
+        // Flash-Next's top-10 width. The k6/k8 pipelines above are unchanged.
+        self.phase2ReduceK10PSO = try context.pipeline("moe_phase2_down_reduce_k10")
+        self.phase2ReduceK10SpecializedPSO = try context.pipeline(
+            "moe_phase2_down_reduce_k10",
+            constants: moeConstants)
 
         guard let logits = context.device.makeBuffer(
-            length: 256 * MemoryLayout<Float>.stride,
+            length: Int(Self.maxRouterExperts) * MemoryLayout<Float>.stride,
             options: .storageModeShared),
               let phase1Function = context.library.makeFunction(
                 name: "moe_phase1_gate_up_act_u16load") else {
@@ -163,8 +200,10 @@ final class MoE {
                                    d: UInt32,
                                    topK: UInt32) {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
-        precondition(numExperts <= 256)
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(numExperts <= Self.maxRouterExperts,
+                     "router supports at most \(Self.maxRouterExperts) experts")
+        precondition(Self.routerTopKWidths.contains(topK),
+                     "router selection implements top-k \(Self.routerTopKWidths.sorted())")
 
         var expertCount = numExperts
         var dimension = d
@@ -188,8 +227,16 @@ final class MoE {
         }
 
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(
-                useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
+            let selectPSO: MTLComputePipelineState
+            switch topK {
+            case 10:
+                selectPSO = useSpecialized
+                    ? routerSelectK10SpecializedPSO : routerSelectK10PSO
+            default:
+                selectPSO = useSpecialized
+                    ? routerSelectK8SpecializedPSO : routerSelectK8PSO
+            }
+            encoder.setComputePipelineState(selectPSO)
             encoder.setBuffer(routerLogits, offset: 0, index: 0)
             encoder.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
             encoder.setBuffer(outIndices, offset: 0, index: 2)
@@ -415,10 +462,14 @@ final class MoE {
         var intermediate = f
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         let specialized = useRealDecodeConstants(d: d, f: f, topK: topK)
-        if topK == 6 {
+        switch topK {
+        case 6:
             encoder.setComputePipelineState(
                 specialized ? phase2ReduceK6SpecializedPSO : phase2ReduceK6PSO)
-        } else {
+        case 10:
+            encoder.setComputePipelineState(
+                specialized ? phase2ReduceK10SpecializedPSO : phase2ReduceK10PSO)
+        default:
             encoder.setComputePipelineState(
                 specialized ? phase2ReduceK8SpecializedPSO : phase2ReduceK8PSO)
         }
@@ -440,9 +491,13 @@ final class MoE {
     }
 
     private func validate(routedBlobs: [(buffer: MTLBuffer, offset: Int)], topK: UInt32) {
-        precondition(topK == 6 || topK == 8,
-                     "routed INT4 decode supports top-k 6 or 8")
+        precondition(Self.routedComputeWidths.contains(topK),
+                     "routed INT4 decode supports top-k "
+                     + "\(Self.routedComputeWidths.sorted())")
         precondition(routedBlobs.count == Int(topK))
+        precondition(routedBlobs.count <= Self.routedBlobSlots,
+                     "the RoutedBlobs argument buffer holds "
+                     + "\(Self.routedBlobSlots) slots")
     }
 
     private func encodeRoutedArgumentBuffer(_ buffer: MTLBuffer,

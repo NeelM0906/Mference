@@ -1,7 +1,21 @@
 # Family Bring-Up Kit — Phase A design
 
 **Date:** 2026-08-08
-**Status:** Draft for owner review
+**Status:** Phase A in progress (2026-08-31): W1.1 (FAMILY_CONTRACT.md +
+rot-check test), W3.3 (`bringup-check.sh`, PASS on qwen36 end-to-end), and
+W3.4 (`docs/families/TEMPLATE.md`) landed. W4's rehearsal target changed
+from LFM2.5-8B-A1B to **Qwen3.8-Flash-Next** by owner decision — a real
+flagship drop four days old, which also forces W2 (no faithful community
+conversion exists). Day-0 dossier: [docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
+W2 deliverables 1-4 landed for `qwen38flashnext` (quantize-in-flight core,
+original-repo source kind, sharded BF16 reading, fused-expert split, PLE
+row-lookup pool, sidecar policy) with W2.1a bit parity enforced; **W2.1b, the
+model-level KLD gate, is still open** — see
+[docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
+Still open: W1.2 mapping-as-data (first data file written, repacker does not
+read it yet), W1.3 capability gate as a general mechanism (a named per-family
+refusal exists in `ManifestReader.familiesWithoutRunner`), W2.1b, W3.1 toy
+generator, W3.2 parity harness.
 **Strategic context:** Mference's trajectory is "the standard way to run
 flagship MoE models on the Macs people own." That requires supporting each
 major MoE release within about a week of its drop. Today a family port is

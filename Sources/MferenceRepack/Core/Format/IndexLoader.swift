@@ -36,7 +36,17 @@ enum IndexLoader {
         let shardFilenames: [String]
         /// Optional Maple FlashHead metadata from `config.json`.
         let flashHead: MapleFlashHeadMetadata?
+        /// The source ships unquantized BF16 weights and carries no
+        /// `config.json -> quantization` block; the installer quantizes in
+        /// flight, so `baseBits`/`baseGroupSize`/`baseMode` describe the
+        /// *output* rather than the input.
+        let sourceIsUnquantized: Bool
     }
+
+    /// `model_type` values whose repos are the vendor's own BF16 upload rather
+    /// than an MLX conversion. Only these may omit `quantization`; for every
+    /// other source a missing block still means a broken conversion.
+    static let unquantizedSourceModelTypes: Set<String> = ["qwen4_exp"]
 
     static func load(snapshotDir: String) throws -> SourceMetadata {
         let indexPath  = (snapshotDir as NSString).appendingPathComponent("model.safetensors.index.json")
@@ -69,7 +79,30 @@ enum IndexLoader {
                 throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
             }
             guard let quant = root["quantization"] as? [String: Any] else {
-                throw RepackError.configJsonInvalid(path: configPath, detail: "no quantization slot")
+                // An original-repo BF16 checkpoint has nothing to declare. The
+                // installer quantizes it (INT4 affine group-64, the only
+                // supported target), so the recorded base describes the output.
+                guard let modelType = root["model_type"] as? String,
+                      unquantizedSourceModelTypes.contains(modelType) else {
+                    throw RepackError.configJsonInvalid(path: configPath,
+                                                        detail: "no quantization slot")
+                }
+                var shards: [String] = []
+                var seenShards = Set<String>()
+                for key in weightMap.keys.sorted() {
+                    let shard = weightMap[key]!
+                    if seenShards.insert(shard).inserted { shards.append(shard) }
+                }
+                return SourceMetadata(indexPath: indexPath, configPath: configPath,
+                                      indexSha256Hex: indexSha,
+                                      weightMap: weightMap,
+                                      baseBits: 4,
+                                      baseGroupSize: StreamingInt4Quantizer.groupSize,
+                                      baseMode: "affine",
+                                      bitsOverrides: [:],
+                                      shardFilenames: shards,
+                                      flashHead: nil,
+                                      sourceIsUnquantized: true)
             }
             let isMaple = (root["model_type"] as? String) == "maple"
             if isMaple {
@@ -143,7 +176,8 @@ enum IndexLoader {
                               baseMode: baseMode,
                               bitsOverrides: overrides,
                               shardFilenames: shards,
-                              flashHead: flashHead)
+                              flashHead: flashHead,
+                              sourceIsUnquantized: false)
     }
 
     /// Resolves the bits/group for one tensor name (with or without `.weight`).

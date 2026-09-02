@@ -6,10 +6,22 @@ import Foundation
 /// installs trust-on-first-use: the installer resolves HEAD's commit and
 /// reports the computed index hash for pinning instead of failing on it.
 public struct SupportedModelSource: Sendable, Equatable {
+    /// How the installer consumes the source repo.
+    public enum Kind: String, Sendable, Equatable {
+        /// A pre-quantized MLX community conversion: the installer only
+        /// re-lays-out already-packed INT4/INT2 tensors.
+        case preQuantized
+        /// The model vendor's own BF16 upload: the installer quantizes to INT4
+        /// affine group-64 in flight (Workstream 2). Pinning and SHA discipline
+        /// are identical — only the byte transform differs.
+        case originalRepoQuantize
+    }
+
     /// CLI selector value (`--model <name>`).
     public let name: String
     public let displayName: String
     public let repoID: String
+    public let kind: Kind
     /// Pinned commit; nil resolves HEAD's `X-Repo-Commit` at install time.
     public let revision: String?
     /// Pinned `model.safetensors.index.json` SHA-256; nil accepts any index
@@ -21,6 +33,28 @@ public struct SupportedModelSource: Sendable, Equatable {
     public let installedBytes: UInt64
     public let reserveBytes: UInt64
 
+    public init(name: String,
+                displayName: String,
+                repoID: String,
+                revision: String?,
+                sourceIndexSHA256: String?,
+                modelID: String,
+                approximateDownloadBytes: UInt64,
+                installedBytes: UInt64,
+                reserveBytes: UInt64,
+                kind: Kind = .preQuantized) {
+        self.name = name
+        self.displayName = displayName
+        self.repoID = repoID
+        self.kind = kind
+        self.revision = revision
+        self.sourceIndexSHA256 = sourceIndexSHA256
+        self.modelID = modelID
+        self.approximateDownloadBytes = approximateDownloadBytes
+        self.installedBytes = installedBytes
+        self.reserveBytes = reserveBytes
+    }
+
     /// Both pins recorded; unpinned sources install trust-on-first-use.
     public var isPinned: Bool { revision != nil && sourceIndexSHA256 != nil }
 
@@ -29,7 +63,8 @@ public struct SupportedModelSource: Sendable, Equatable {
                                token: String?,
                                resume: Bool = false,
                                baseURL: URL? = nil,
-                               dryRunSpaceCheck: Bool = false)
+                               dryRunSpaceCheck: Bool = false,
+                               sidecarPolicy: SidecarPolicy = .default)
         -> RemoteStreamingRepackOptions {
         if let baseURL {
             return RemoteStreamingRepackOptions(
@@ -42,7 +77,8 @@ public struct SupportedModelSource: Sendable, Equatable {
                 overwrite: overwrite,
                 resume: resume,
                 dryRunSpaceCheck: dryRunSpaceCheck,
-                baseURL: baseURL)
+                baseURL: baseURL,
+                sidecarPolicy: sidecarPolicy)
         }
         return RemoteStreamingRepackOptions(
             repoID: repoID,
@@ -53,7 +89,8 @@ public struct SupportedModelSource: Sendable, Equatable {
             minFreeReserveBytes: reserveBytes,
             overwrite: overwrite,
             resume: resume,
-            dryRunSpaceCheck: dryRunSpaceCheck)
+            dryRunSpaceCheck: dryRunSpaceCheck,
+            sidecarPolicy: sidecarPolicy)
     }
 
     public static let gemma4 = SupportedModelSource(
@@ -148,11 +185,39 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 6_650_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// The first `originalRepoQuantize` entry: no faithful pre-quantized MLX
+    /// conversion of Qwen3.8-Flash-Next exists (checked 2026-08-31, see
+    /// docs/families/QWEN38_FLASH_NEXT.md), so the installer reads the vendor's
+    /// 131 BF16 shards and quantizes to INT4 group-64 in flight.
+    ///
+    /// Both pins recorded. Download bytes are the index's declared total
+    /// (360.0 GB). Installed bytes are ~175 GB: routed experts ~68 GB (INT4
+    /// g64), the PLE n-gram table ~102.8 GB (**BF16** — its rows are 160 wide,
+    /// which the group size does not divide, so they cannot be quantized), the
+    /// resident core ~2.5 GB, the MTP draft pool ~1.4 GB, plus page rounding
+    /// and the PLE pool's 0.4% per-block slack. The Day-0 dossier's ~101 GB
+    /// figure assumed an INT4 n-gram table and is superseded.
+    ///
+    /// The runtime has no runner for this family yet: installing it succeeds,
+    /// loading it fails by name (see `ManifestReader.peekFamily`).
+    public static let qwen38FlashNext = SupportedModelSource(
+        name: "qwen38flashnext",
+        displayName: "Qwen3.8-Flash-Next 180B-A3.5B (quantized at install)",
+        repoID: "Qwen/Qwen3.8-Flash-Next",
+        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+        sourceIndexSHA256:
+            "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
+        modelID: "qwen3.8-flash-next-int4g64",
+        approximateDownloadBytes: 359_999_963_128,
+        installedBytes: 180_000_000_000,
+        reserveBytes: 8_589_934_592,
+        kind: .originalRepoQuantize)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, qwen38, deepseekV4Flash, inklingSmall, maple,
+        gemma4, qwen36, qwen38, deepseekV4Flash, inklingSmall, maple, qwen38FlashNext,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {
