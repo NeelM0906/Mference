@@ -252,6 +252,18 @@ private func run(_ values: [String]) async -> Int32 {
             print("Expert layers: \(result.expertLayerCount)")
             print("Excluded multimodal tensors: "
                 + "\(result.excludedMultimodalTensorCount)")
+            // The per-tensor width mixture. Printed as a census of what the
+            // plan will actually write rather than as the policy's rule list,
+            // so a dry run can be diffed against a control conversion's own
+            // mixture before committing to a multi-hour install.
+            let byBits = result.residentWeightWidthCensus
+            let census = byBits.keys.sorted()
+                .map { "INT\($0) \(byBits[$0]!)" }
+                .joined(separator: ", ")
+            print("Resident weight widths: "
+                + (census.isEmpty ? "none quantized" : census)
+                + " (unquantized \(result.residentUnquantizedCount))")
+            print("Bit-width overrides: \(result.bitWidthOverrideCount)")
             return 0
         }
         print("Installed \(source.displayName)")

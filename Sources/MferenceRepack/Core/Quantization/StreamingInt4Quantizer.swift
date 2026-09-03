@@ -17,33 +17,41 @@ import Foundation
 /// time (always a multiple of the transform's input unit) and each call
 /// rewrites that scratch in place.
 ///
-/// - TODO(W2.1b, spec 2026-08-08 "Quantizer quality"): the **model-level** half
-///   of the quality gate is still OPEN; the **weight-level** half now PASSES.
-///   Full method and numbers: `docs/QUANTIZER_QUALITY.md`.
+/// # Quality gates
 ///
-///   Gate W2.1a (bit parity against the runtime's reference quantizer,
-///   including through this streaming path) is enforced by
-///   `Int4AffineStreamingParityTests` and `Int4AffineEncoderParityTests`.
+/// Gate **W2.1a** (bit parity against the runtime's reference quantizer,
+/// including through this streaming path) is enforced by
+/// `Int4AffineStreamingParityTests` and `Int4AffineEncoderParityTests`. Its
+/// INT8 sibling is `Int8AffineStreamingParityTests`.
 ///
-///   W2.1b weight level, measured 2026-09-02 against mlx-community's
-///   independent conversion of `Qwen/Qwen3.6-35B-A3B`: over 124 sampled INT4
-///   tensors this encoder's relative Frobenius error against the BF16 source is
-///   0.09612 mean, versus the control's 0.09648 — better on 118 of 124. The
-///   packed bytes are *not* bit-identical and cannot be: MLX snaps its affine
-///   grid so 0.0 is exactly representable and anchors on the larger-magnitude
-///   endpoint, while this encoder uses a plain min/max grid. The one place that
-///   costs us is tensors carrying a large mass of near-exact zeros inside live
-///   groups (layer-0 routed `down_proj`, up to 1.54x worse).
-///   `Int4AffineEncoderConventionTests` locks the convention so adopting the
-///   snap has to be a decision.
+/// Gate **W2.1b is CLOSED on both halves as of 2026-09-02**, measured against
+/// mlx-community's independent conversion of `Qwen/Qwen3.6-35B-A3B`. Full
+/// method and numbers: `docs/QUANTIZER_QUALITY.md`.
 ///
-///   W2.1b model level (greedy rollouts + KLD) has NOT been run, and is blocked
-///   rather than merely pending: the control conversion keeps INT8 routers,
-///   this path is INT4-only by the W2 scope cut, and the Qwen 3.6 router GEMV
-///   (`moe.metal:109`) decodes one `uint8` per weight. See §6 of the doc.
-///   Until it is run, weights produced by this path are unvalidated at the
-///   model level; do not promote an installer entry that depends on them
-///   without recording the KLD result in the family dossier.
+/// * **Weight level.** Over 124 sampled INT4 tensors this encoder's relative
+///   Frobenius error against the BF16 source is 0.09612 mean, versus the
+///   control's 0.09648 — better on 118 of 124. The packed bytes are *not*
+///   bit-identical and cannot be: MLX snaps its affine grid so 0.0 is exactly
+///   representable and anchors on the larger-magnitude endpoint, while this
+///   encoder uses a plain min/max grid. The one place that costs us is tensors
+///   carrying a large mass of near-exact zeros inside live groups (layer-0
+///   routed `down_proj`, up to 1.54x worse). `Int4AffineEncoderConventionTests`
+///   locks the convention so adopting the snap has to be a decision.
+/// * **Model level.** Against a noise floor of *exactly zero* (temperature-0
+///   decode is deterministic; the repeat dumps are byte-identical), the two
+///   installs agree on 86.3 % of top-1 tokens and 81.3 % of top-5 sets over
+///   882 teacher-forced positions, at a median per-position KL of 0.036 nats.
+///   Every greedy divergence lands at a control-side top-2 margin below the
+///   median inter-install logit difference.
+///
+/// Weights produced by this path are therefore validated at both levels for a
+/// family whose install reproduces its control's *whole* configuration — not
+/// the quantizer alone. Closing W2.1b surfaced two defects that had nothing to
+/// do with quantization and that every other check passed: resident tensor
+/// naming, and a missing RMSNorm `1 + w` fold. Both are documented in §7 of
+/// `docs/QUANTIZER_QUALITY.md`, and the lesson generalises — a new family on
+/// this path inherits the *quantizer's* validation, not a guarantee that its
+/// own conventions match its runner's.
 public enum StreamingInt4Quantizer {
 
     public static let groupSize = Int4AffineEncoder.groupSize          // 64

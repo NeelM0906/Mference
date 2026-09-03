@@ -10,20 +10,25 @@ conversion exists). Day-0 dossier: [docs/families/QWEN38_FLASH_NEXT.md](../../fa
 W2 deliverables 1-4 landed for `qwen38flashnext` (quantize-in-flight core,
 original-repo source kind, sharded BF16 reading, fused-expert split, PLE
 row-lookup pool, sidecar policy) with W2.1a bit parity enforced. **W2.1b split
-in two on 2026-09-02** ([docs/QUANTIZER_QUALITY.md](../../QUANTIZER_QUALITY.md)):
-the **weight-level** half PASSES — against mlx-community's independent
-conversion of Qwen 3.6, our quantizer is at least as faithful to the BF16 source
-(0.09612 mean relative error vs 0.09648, better on 118 of 124 sampled tensors) —
-while the **model-level KLD half is blocked**, not merely pending: the control
-conversion keeps INT8 routers, the repacker is INT4-only by this spec's own
-scope cut, and the Qwen 3.6 router GEMV decodes one `uint8` per weight, so
-`qwen36original` installs and verifies but is refused at load. The harness and
-comparator are built and ready. See also
+in two on 2026-09-02, and BOTH HALVES NOW PASS**
+([docs/QUANTIZER_QUALITY.md](../../QUANTIZER_QUALITY.md)). The **weight-level**
+half: against mlx-community's independent conversion of Qwen 3.6, our quantizer
+is at least as faithful to the BF16 source (0.09612 mean relative error vs
+0.09648, better on 118 of 124 sampled INT4 tensors; and better on 10 of 10
+INT8 router tensors at 0.00763 vs 0.01068). The **model-level KLD** half was
+unblocked the same day by building the per-tensor bit policy the scope cut had
+deferred, then run: against a noise floor of exactly zero, the two installs
+agree on 86.3 % of top-1 tokens over 882 teacher-forced positions at a median
+KL of 0.036 nats, with every greedy divergence landing at a control-side top-2
+margin below the median inter-install logit difference. Clearing the blocker
+also surfaced **two defects nothing else in the kit could see** — resident
+tensor naming, and a missing RMSNorm `1 + w` fold that made every norm wrong by
+one in an install that still verified, validated and loaded. See also
 [docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
 Still open: W1.2 mapping-as-data (first data file written, repacker does not
 read it yet), W1.3 capability gate as a general mechanism (a named per-family
-refusal exists in `ManifestReader.familiesWithoutRunner`), W2.1b, W3.1 toy
-generator, W3.2 parity harness.
+refusal exists in `ManifestReader.familiesWithoutRunner`), W3.1 toy
+generator, W3.2 parity harness. **W2.1b is closed** (both halves, 2026-09-02).
 **Strategic context:** Mference's trajectory is "the standard way to run
 flagship MoE models on the Macs people own." That requires supporting each
 major MoE release within about a week of its drop. Today a family port is
@@ -113,15 +118,26 @@ party's schedule.
 **Scope cut:** int4 group-64 only. 6/8-bit become axes later if a model
 demands them (the sibling NVMAI fork proves demand exists, but YAGNI now).
 
-**2026-09-02 — the scope cut has come due.** It is not only a future model that
-demands mixed widths: it is the *control* this workstream's own quality gate is
-measured against. mlx-community's Qwen 3.6 conversion carries 83 per-tensor
-overrides keeping every router and shared-expert gate at INT8, and the Qwen 3.6
-router kernel decodes one `uint8` per weight, so a uniformly-INT4 install of
-that checkpoint is refused at load. W2.1b's model-level half cannot run until
-the repacker can reproduce a per-tensor bit policy. See §6 of
-[docs/QUANTIZER_QUALITY.md](../../QUANTIZER_QUALITY.md) for the three options
-and their sizes.
+**2026-09-02 — the scope cut came due, and was paid.** It was not only a future
+model that demanded mixed widths: it was the *control* this workstream's own
+quality gate is measured against. mlx-community's Qwen 3.6 conversion carries
+**80** per-tensor overrides (40 layers x `mlp.gate` + `mlp.shared_expert_gate`)
+keeping every router and shared-expert gate at INT8, and the Qwen 3.6 router
+kernel decodes one `uint8` per weight, so a uniformly-INT4 install of that
+checkpoint was refused at load.
+
+*(An earlier revision of this line said 83. The figure is 80, confirmed from the
+control's own `config.json` and its installed resident index.)*
+
+The repacker now has INT8 affine group-64 (`Int8AffineEncoder`,
+`StreamingInt8Quantizer`, `RangeCopyTransform.quantizeInt8G64`) behind its own
+W2.1a-style bit-parity gate, plus a general per-tensor `QuantBitPolicy` —
+one base width and a table of name-suffix overrides resolved per family, so
+adding a family adds rows rather than branches. `qwen36original` now reproduces
+the control's mixture exactly (INT4 312 / INT8 80 / unquantized 221, override
+set identical) and loads. **The scope cut is lifted for 8-bit; 2/3/6-bit remain
+YAGNI.** See §6 of
+[docs/QUANTIZER_QUALITY.md](../../QUANTIZER_QUALITY.md).
 
 ## Workstream 3 — The conformance harness (one command to trust a port)
 

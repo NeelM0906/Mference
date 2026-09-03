@@ -98,6 +98,62 @@ def compare(root, ref, cand, tag):
             "maxdlogit": all_dl, "identical": identical}
 
 
+def sanity(root, label, teacher_label=None):
+    """Prove the dump holds REAL logits before any number is read off it.
+
+    This is not paranoia. The default fused head skips the logits write
+    entirely and leaves only a greedy argmax in `lastGreedyToken`
+    (`RealForwardRunner.swift`), so a harness built without
+    `RuntimeConfiguration(forceLogitsHead: true)` dumps never-written memory
+    and every KL number computed from it is confident nonsense. Two
+    independent checks catch that:
+
+      1. **Distribution shape.** log-sum-exp must be finite and within a few
+         tens of nats of the max logit; a real distribution over 248k tokens
+         has an entropy that keeps those close. Uninitialized memory gives
+         NaN/inf, a zero page gives logsumexp = log(vocab) with max = 0.
+      2. **Argmax agrees with the greedy token.** The dump teacher-forces a
+         sequence whose continuation IS the trusted run's own greedy output,
+         so within the continuation the argmax at position p must equal
+         sequence[p+1]. Memory that was never written cannot satisfy that.
+    """
+    meta = load_meta(root, label)
+    tokens_path = os.path.join(root, teacher_label or label, "tokens.json")
+    seqs = {}
+    if os.path.exists(tokens_path):
+        with open(tokens_path) as f:
+            seqs = {i["name"]: i for i in json.load(f)["items"]}
+    print(f"\n=== dump sanity: {label} ===")
+    ok = True
+    for item in meta["items"]:
+        a = logits(root, label, item)
+        head = np.asarray(a[: min(64, a.shape[0])], dtype=np.float32)
+        finite = np.isfinite(head).all()
+        mx = head.max(axis=1)
+        lse = mx + np.log(np.exp(head - mx[:, None]).sum(axis=1))
+        gap = float(np.max(lse - mx))
+        degenerate = bool(np.allclose(head, 0))
+        agree = float("nan")
+        info = seqs.get(item["name"])
+        if info is not None:
+            seq = info["sequence"]
+            cs = item["continuationStart"]
+            # Position p predicts sequence[p+1]; score the continuation only.
+            lo, hi = max(cs - 1, 0), min(item["positions"] - 1, len(seq) - 1)
+            if hi > lo:
+                block = np.asarray(a[lo:hi], dtype=np.float32)
+                pred = block.argmax(axis=1)
+                want = np.asarray(seq[lo + 1:hi + 1], dtype=np.int64)
+                agree = float((pred == want).mean())
+        bad = (not finite) or degenerate or not (0.0 <= gap < 60.0)
+        ok = ok and not bad
+        print(f"  {item['name']:20} finite={finite} all-zero={degenerate} "
+              f"logsumexp-max gap={gap:.4g} argmax==greedy={agree:.4f}"
+              + ("   <-- SUSPECT" if bad else ""))
+    print(f"  dump looks real: {ok}")
+    return ok
+
+
 def rollouts(root, ref, cand):
     def read(label, name):
         with open(os.path.join(root, label, name)) as f:
@@ -136,6 +192,16 @@ def main():
                          "from the reference is the floor every other number is "
                          "read against")
     args = ap.parse_args()
+
+    # Authenticity first: a KL number computed from never-written memory is
+    # worse than no number at all.
+    real = sanity(args.root, args.reference)
+    real &= sanity(args.root, args.candidate, teacher_label=args.reference)
+    if args.noise:
+        real &= sanity(args.root, args.noise, teacher_label=args.reference)
+    if not real:
+        print("\nAT LEAST ONE DUMP IS SUSPECT — check forceLogitsHead before "
+              "reading any number below.")
 
     floor = None
     if args.noise:

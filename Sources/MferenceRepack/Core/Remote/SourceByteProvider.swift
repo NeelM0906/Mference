@@ -325,10 +325,19 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                     detail: "repeat-bf16 count must be positive")
             }
             capacity = scratchBytes / count / 2 * 2
+        case .addOneBF16:
+            // Width-preserving; a BF16 value must not be split across a tile.
+            capacity = scratchBytes / 2 * 2
         case .quantizeInt4G64:
             // Output is at most a quarter of the input, so the tile is bounded
             // by the source side alone; groups must not be split.
             let unit = StreamingInt4Quantizer.groupSourceBytes
+            capacity = scratchBytes / unit * unit
+        case .quantizeInt8G64:
+            // Output is at most half the input (one byte per BF16 weight), so
+            // the tile is still bounded by the source side alone; groups must
+            // not be split.
+            let unit = StreamingInt8Quantizer.groupSourceBytes
             capacity = scratchBytes / unit * unit
         case .quantizeInt4G64Rows(let rowSourceBytes):
             guard rowSourceBytes > 0 else {
@@ -414,8 +423,31 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                 }
             }
             return outputCount
+        case .addOneBF16:
+            guard sourceCount % 2 == 0 else {
+                throw RepackError.configurationInvalid(
+                    detail: "add-one-bf16 needs 2-byte aligned source chunks, "
+                        + "got \(sourceCount)")
+            }
+            guard sourceCount <= buffer.count else {
+                throw RepackError.scratchExceeded(
+                    requested: sourceCount, limit: buffer.count)
+            }
+            let bytes = buffer.baseAddress!.assumingMemoryBound(to: UInt8.self)
+            for value in 0..<(sourceCount / 2) {
+                let p = bytes.advanced(by: value * 2)
+                let bits = UInt16(p[0]) | UInt16(p[1]) << 8
+                let folded = Int4AffineEncoder.bf16Bits(
+                    Int4AffineEncoder.bf16ToFloat(bits) + 1)
+                p[0] = UInt8(truncatingIfNeeded: folded)
+                p[1] = UInt8(truncatingIfNeeded: folded >> 8)
+            }
+            return sourceCount
         case .quantizeInt4G64(let component):
             return try StreamingInt4Quantizer.quantizeComponentInPlace(
+                component, buffer: buffer, sourceCount: sourceCount)
+        case .quantizeInt8G64(let component):
+            return try StreamingInt8Quantizer.quantizeComponentInPlace(
                 component, buffer: buffer, sourceCount: sourceCount)
         case .quantizeInt4G64Rows(let rowSourceBytes):
             return try StreamingInt4Quantizer.quantizeRowsInPlace(

@@ -4,12 +4,29 @@ public enum RangeCopyTransform: Sendable, Equatable {
     case identity
     case unpackInt2ToInt4
     case repeatBF16(count: Int, negated: Bool)
+    /// Add 1.0 to every BF16 value, in BF16. Same bytes in, same bytes out.
+    ///
+    /// This is the RMSNorm weight convention. Qwen 3.6 applies its norms as
+    /// `(1 + w) * x̂`, and mlx-lm's conversion folds the `+1` into the stored
+    /// weight so the kernel can simply multiply. The Mference runtime inherited
+    /// that convention from the conversion it was built against, so an install
+    /// read from the vendor's original repo — which stores the bare `w` — has
+    /// to fold it too, or every norm in the model is wrong by one and the
+    /// output is confident nonsense. See `FlashNextPlanner.foldsNormBias`.
+    case addOneBF16
     /// Quantize-in-flight (Workstream 2): BF16 source bytes to one component of
     /// the MLX INT4 affine group-64 layout. The planner emits all three
     /// components over the *same* source range, so the coalescer downloads
     /// those bytes once and each destination transform re-derives its own slice
     /// of the result. See `StreamingInt4Quantizer`.
     case quantizeInt4G64(component: StreamingInt4Quantizer.Component)
+    /// The INT8 sibling of `quantizeInt4G64`, over the same three co-planned
+    /// components and the same 128-byte source group. It exists because a
+    /// community conversion is commonly mixed-width: mlx-community's Qwen 3.6
+    /// keeps the MoE router and the shared-expert gate at INT8 group-64, and
+    /// the per-tensor bit policy in the original-repo planner selects between
+    /// the two cases. See `StreamingInt8Quantizer`.
+    case quantizeInt8G64(component: StreamingInt4Quantizer.Component)
     /// A dense run of BF16 rows to a dense run of self-contained quantized row
     /// records (`[packed | scales | biases]` per row). Used for the tail rows of
     /// a PLE n-gram row-pool region.
@@ -32,7 +49,9 @@ public enum RangeCopyTransform: Sendable, Equatable {
         case .identity: 1
         case .unpackInt2ToInt4: 4
         case .repeatBF16: 2
+        case .addOneBF16: 2
         case .quantizeInt4G64: UInt64(StreamingInt4Quantizer.groupSourceBytes)
+        case .quantizeInt8G64: UInt64(StreamingInt8Quantizer.groupSourceBytes)
         case .quantizeInt4G64Rows(let rowSourceBytes):
             UInt64(max(rowSourceBytes, 1))
         case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, _),
@@ -53,10 +72,21 @@ public enum RangeCopyTransform: Sendable, Equatable {
                     detail: "repeat-bf16 count must be positive")
             }
             return try scaled(sourceByteCount, by: value)
+        case .addOneBF16:
+            // Elementwise and width-preserving: the only constraint is that a
+            // BF16 value is never split across a tile boundary.
+            _ = try unitCount(sourceByteCount, unit: 2)
+            return sourceByteCount
         case .quantizeInt4G64(let component):
             let unit = UInt64(StreamingInt4Quantizer.groupSourceBytes)
             let groups = try unitCount(sourceByteCount, unit: unit)
             return try scaled(groups, by: UInt64(component.destinationBytesPerGroup))
+        case .quantizeInt8G64(let component):
+            let unit = UInt64(StreamingInt8Quantizer.groupSourceBytes)
+            let groups = try unitCount(sourceByteCount, unit: unit)
+            return try scaled(
+                groups,
+                by: UInt64(StreamingInt8Quantizer.destinationBytesPerGroup(component)))
         case .quantizeInt4G64Rows(let rowSourceBytes):
             let rowDim = try validRowDim(rowSourceBytes)
             let rows = try unitCount(sourceByteCount, unit: UInt64(rowSourceBytes))
@@ -93,8 +123,11 @@ public enum RangeCopyTransform: Sendable, Equatable {
         case .unpackInt2ToInt4: "unpack-int2-to-int4"
         case .repeatBF16(let count, let negated):
             "repeat-bf16:\(count):\(negated ? 1 : 0)"
+        case .addOneBF16: "add-one-bf16"
         case .quantizeInt4G64(let component):
             "quantize-int4-g64:\(component.rawValue)"
+        case .quantizeInt8G64(let component):
+            "quantize-int8-g64:\(component.rawValue)"
         case .quantizeInt4G64Rows(let rowSourceBytes):
             "quantize-int4-g64-rows:\(rowSourceBytes)"
         case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):

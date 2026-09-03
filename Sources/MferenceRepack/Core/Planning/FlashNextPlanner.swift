@@ -144,10 +144,31 @@ enum FlashNextPlanner {
         visionNames.sort()
         skippedMTPNames.sort()
 
+        // Per-tensor width. The policy is consulted for resident tensors only:
+        // the fused expert pools are quantized at the base width, and a rule
+        // that reached into them would half-apply silently, so any rule that
+        // matches an expert tensor is a configuration error rather than a
+        // partially-honoured policy.
+        let policy = try QuantBitPolicy.originalRepo(family: arch.family)
+            .validated(for: arch.family)
+        for bundle in [fusedByLayer, fusedMTPByLayer] {
+            for tensors in bundle.values {
+                for tensor in tensors.values where policy.overrides(tensor.name) {
+                    throw RepackError.configurationInvalid(
+                        detail: "quantization bit policy overrides the fused expert "
+                            + "tensor \(tensor.name) to \(policy.bits(forTensorNamed: tensor.name))"
+                            + " bits, but the expert pools are planned at the base "
+                            + "width \(policy.defaultBits)")
+                }
+            }
+        }
+
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             names: residentNames + mtpResidentNames,
-                                            registry: registry)
+                                            registry: registry,
+                                            policy: policy,
+                                            family: arch.family)
 
         let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
         var layers: [LayerFilePlan] = []
@@ -208,11 +229,23 @@ enum FlashNextPlanner {
                                                 tensorCount: visionNames.count))
         }
 
+        // An original-repo source declares no quantization block, so
+        // `meta.bitsOverrides` is always empty here and the honest audit value
+        // is what the *policy* actually produced. Counting the planned entries
+        // rather than the policy's rule count makes the number directly
+        // comparable to a community conversion's own `bitWidthOverridesHonored`
+        // — mlx-community's Qwen 3.6 records 80, one `mlp.gate` and one
+        // `mlp.shared_expert_gate` per layer.
+        let bitsOverrideCount = resident.entries.filter {
+            guard let spec = $0.quantSpec else { return false }
+            return spec.bits != policy.defaultBits
+        }.count
+
         return RepackPlan(
             arch: arch,
             baseMode: "affine",
             baseGroupSize: StreamingInt4Quantizer.groupSize,
-            bitsOverrideCount: meta.bitsOverrides.count,
+            bitsOverrideCount: bitsOverrideCount,
             resident: resident,
             layers: layers,
             matchedModelID: SourceFingerprint.modelID(forIndexSha256: meta.indexSha256Hex),
@@ -258,6 +291,109 @@ enum FlashNextPlanner {
         table[layer] = bundle
     }
 
+    // MARK: - Resident naming
+
+    /// The name a resident tensor is *written under*, which is not always the
+    /// name the source shipped it under.
+    ///
+    /// A `.gturbo` resident index is looked up by exact name
+    /// (`Model.resident(name:)` is a dictionary hit or `tensorNotFound`), and
+    /// each family's runner asks for one fixed spelling — for Qwen 3.6,
+    /// `Model.trunkPrefix` is `language_model.model.` and the head is
+    /// `language_model.lm_head.weight`. The pre-quantized path inherits those
+    /// names for free because mlx-lm's conversion already uses them. A vendor's
+    /// original repo does not: `Qwen/Qwen3.6-35B-A3B` ships the trunk as
+    /// `model.language_model.` and the head as a top-level `lm_head.weight`.
+    ///
+    /// So the two orderings have to be reconciled somewhere, and the install is
+    /// the right place: it happens once, it is what makes an original-repo
+    /// install a drop-in replacement for a conversion of the same checkpoint,
+    /// and the alternative — teaching every runtime accessor a second spelling —
+    /// would spread the source's naming accident across the runtime forever.
+    ///
+    /// This is a *renaming*, not a remapping: `quantizer-mixture-compare.py`
+    /// checks that the two installs' resident sets are identical under
+    /// normalization, so every name has exactly one counterpart.
+    ///
+    /// Flash-Next is deliberately identity. It has no runner to satisfy
+    /// (`ManifestReader.familiesWithoutRunner` refuses it on missing axes), and
+    /// renaming would change every byte of an install that already ships.
+    static func residentName(for sourceName: String,
+                             family: RepackModelFamily) -> String {
+        switch family {
+        case .qwen38flashnext:
+            return sourceName
+        case .qwen36, .qwen38, .gemma4:
+            if sourceName == lmHeadName {
+                return "language_model.lm_head.weight"
+            }
+            if sourceName.hasPrefix(textPrefix) {
+                return "language_model.model."
+                    + sourceName.dropFirst(textPrefix.count)
+            }
+            return sourceName
+        case .deepseekV4Flash, .maple, .inklingSmall:
+            // No original-repo entry exists for these, so no runner contract
+            // has been checked. Passing the source name through unchanged
+            // fails loudly at load (`tensorNotFound`) rather than quietly
+            // installing something a runner cannot address.
+            return sourceName
+        }
+    }
+
+    // MARK: - RMSNorm weight convention
+
+    /// `true` when this tensor is an RMSNorm gain vector.
+    static func isNormWeight(_ name: String) -> Bool {
+        name.contains("norm") && name.hasSuffix(".weight")
+    }
+
+    /// `true` when the stored weight must be `1 + w` rather than the vendor's
+    /// bare `w`.
+    ///
+    /// Qwen 3.6 applies most of its RMSNorms as `(1 + w) * x̂`. mlx-lm's
+    /// conversion folds that `+1` into the stored weight so the kernel can just
+    /// multiply, and the Mference runtime — built against that conversion —
+    /// multiplies by the stored weight directly. An install read from the
+    /// vendor's original repo therefore has to fold it too. It is not a
+    /// cosmetic difference: without it every norm in the model is off by one,
+    /// the install still verifies and still *loads*, and the model emits
+    /// confident nonsense.
+    ///
+    /// This is exactly the class of defect the model-level half of W2.1b exists
+    /// to catch. The weight-level half cannot see it — norms are not quantized,
+    /// so they are not in its sample — and neither `--verify-install` nor
+    /// `ManifestReader` has any opinion about the numeric convention of a
+    /// passthrough tensor.
+    ///
+    /// **The exception is the gated-DeltaNet block's own norm.**
+    /// `linear_attn.norm` is a different module with a different convention and
+    /// is stored bare on both sides. Measured against mlx-community's
+    /// conversion of the same checkpoint: folding `bf16(w + 1)` reproduces the
+    /// control's stored bytes **bit-exactly on all 101** folded tensors (40
+    /// `input_layernorm`, 40 `post_attention_layernorm`, 10 `self_attn.q_norm`,
+    /// 10 `self_attn.k_norm`, and the final `norm`), while all 30
+    /// `linear_attn.norm` tensors are already byte-identical unfolded.
+    ///
+    /// Flash-Next is deliberately excluded: it has no community conversion to
+    /// mirror, its first-light run produced coherent output with the bare
+    /// weights, and folding would change every byte of an install that ships.
+    static func foldsNormBias(_ sourceName: String,
+                              family: RepackModelFamily) -> Bool {
+        switch family {
+        case .qwen38flashnext:
+            return false
+        case .qwen36:
+            return isNormWeight(sourceName)
+                && !sourceName.hasSuffix(".linear_attn.norm.weight")
+        case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple:
+            // No original-repo entry exists for these, so no conversion has
+            // been compared and no fold can be justified. A family arriving
+            // here must check its own norm convention first.
+            return false
+        }
+    }
+
     // MARK: - Resident planning
 
     /// A source tensor becomes INT4 affine group-64 only when it is a genuine
@@ -287,12 +423,22 @@ enum FlashNextPlanner {
 
     private static func planResidentFile(path: String,
                                          names: [String],
-                                         registry: [String: SourceTensor]) throws
+                                         registry: [String: SourceTensor],
+                                         policy: QuantBitPolicy,
+                                         family: RepackModelFamily) throws
         -> ResidentFilePlan {
+        // `names` are the source's own; the index is written under the names
+        // the family's runner looks up. See `residentName(for:family:)`.
+        let emitted = names.map { residentName(for: $0, family: family) }
+        guard Set(emitted).count == emitted.count else {
+            throw RepackError.configurationInvalid(
+                detail: "resident renaming collided: two source tensors map to "
+                    + "the same emitted name")
+        }
         var stringTable: [UInt8] = []
         var offsets: [UInt32] = []
         offsets.reserveCapacity(names.count)
-        for name in names {
+        for name in emitted {
             offsets.append(UInt32(stringTable.count))
             stringTable.append(contentsOf: name.utf8)
         }
@@ -303,24 +449,47 @@ enum FlashNextPlanner {
 
         var cursor = indexSize
         var entries: [ResidentEntry] = []
+        var foldedNormCount = 0
         entries.reserveCapacity(names.count)
-        for name in names {
+        for (index, name) in names.enumerated() {
             guard let tensor = registry[name] else {
                 throw RepackError.missingTensor(name: name)
             }
+            let entryName = emitted[index]
             if quantizesResident(tensor) {
+                let bits = policy.bits(forTensorNamed: entryName)
                 let rows = tensor.shape[0]
                 let columns = tensor.shape[1]
                 let groups = columns / UInt64(StreamingInt4Quantizer.groupSize)
-                let weightBytes = rows * columns / 2
+                // The width changes the weight-side byte count and nothing
+                // else: the companion arrays are one BF16 scale and one BF16
+                // bias per group at either width.
+                let weightBytes = rows * columns * UInt64(bits) / 8
                 let companionBytes = rows * groups
                     * UInt64(StreamingInt4Quantizer.companionBytesPerGroup)
+                let transform: (RangeCopyTransform, RangeCopyTransform, RangeCopyTransform)
+                switch bits {
+                case 4:
+                    transform = (.quantizeInt4G64(component: .weights),
+                                 .quantizeInt4G64(component: .scales),
+                                 .quantizeInt4G64(component: .biases))
+                case 8:
+                    transform = (.quantizeInt8G64(component: .weights),
+                                 .quantizeInt8G64(component: .scales),
+                                 .quantizeInt8G64(component: .biases))
+                default:
+                    // `QuantBitPolicy.validated(for:)` runs before planning, so
+                    // this is unreachable; it is here so a future width cannot
+                    // be added to the policy without adding its transform.
+                    throw RepackError.configurationInvalid(
+                        detail: "no streaming quantizer for \(bits)-bit \(name)")
+                }
                 let weightOffset = cursor
                 let scaleOffset = weightOffset + weightBytes
                 let biasOffset = scaleOffset + companionBytes
                 cursor = biasOffset + companionBytes
                 entries.append(ResidentEntry(
-                    name: name,
+                    name: entryName,
                     dtype: 0,
                     logicalShape4: RepackPlanner.padTo4(tensor.shape),
                     fileOffset: weightOffset,
@@ -329,19 +498,32 @@ enum FlashNextPlanner {
                     scaleSize: companionBytes,
                     biasOffset: biasOffset,
                     biasSize: companionBytes,
-                    quantSpec: QuantSpec(bits: 4,
+                    quantSpec: QuantSpec(bits: bits,
                                          groupSize: StreamingInt4Quantizer.groupSize),
                     sourceWeight: tensor,
                     sourceScales: tensor,
                     sourceBiases: tensor,
-                    weightTransform: .quantizeInt4G64(component: .weights),
-                    scaleTransform: .quantizeInt4G64(component: .scales),
-                    biasTransform: .quantizeInt4G64(component: .biases)))
+                    weightTransform: transform.0,
+                    scaleTransform: transform.1,
+                    biasTransform: transform.2))
             } else {
+                // Passthrough — but not always verbatim. An RMSNorm gain that
+                // the runtime expects as `1 + w` is folded in flight; see
+                // `foldsNormBias`. Everything else rides through untouched.
+                let fold = foldsNormBias(name, family: family)
+                if fold {
+                    guard tensor.dtype == .bf16 else {
+                        throw RepackError.dtypeMismatch(
+                            name: name,
+                            detail: "the RMSNorm +1 fold is defined for BF16 "
+                                + "weights, got \(tensor.dtype)")
+                    }
+                    foldedNormCount += 1
+                }
                 let offset = cursor
                 cursor += tensor.sizeBytes
                 entries.append(ResidentEntry(
-                    name: name,
+                    name: entryName,
                     dtype: dtypeCode(tensor.dtype),
                     logicalShape4: RepackPlanner.padTo4(tensor.shape),
                     fileOffset: offset,
@@ -350,8 +532,13 @@ enum FlashNextPlanner {
                     biasOffset: 0, biasSize: 0,
                     quantSpec: nil,
                     sourceWeight: tensor,
-                    sourceScales: nil, sourceBiases: nil))
+                    sourceScales: nil, sourceBiases: nil,
+                    weightTransform: fold ? .addOneBF16 : .identity))
             }
+        }
+        if foldedNormCount > 0 {
+            FileHandle.standardError.write(Data(
+                "[repack] folded +1 into \(foldedNormCount) RMSNorm weights\n".utf8))
         }
         return ResidentFilePlan(path: path,
                                 entries: entries,

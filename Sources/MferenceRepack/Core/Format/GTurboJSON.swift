@@ -252,16 +252,29 @@ enum GTurboJSON {
         // --- Additive blocks. Every family that predates them emits none of
         // these keys, so existing manifests stay byte-identical.
         if plan.quantizedAtInstall {
-            manifest["quantizedAtInstall"] = [
+            var quantized: [String: Any] = [
                 "scheme": "affine",
+                // The base width. A mixed-width install records its overrides
+                // below rather than changing this, so the field keeps meaning
+                // the same thing it always did.
                 "weightBits": 4,
                 "groupSize": StreamingInt4Quantizer.groupSize,
                 "sourceDtype": "BF16",
-                // Gate W2.1a is enforced in CI; W2.1b (model-level KLD against a
-                // known-good conversion) has not been run for this install.
+                // Gate W2.1a is enforced in CI. W2.1b now records BOTH halves;
+                // the string names the control, the method and the date so an
+                // install carries its own provenance rather than a bare "pass".
+                // Both halves are measured on the shared
+                // `Int4AffineEncoder.encodeGroup` nucleus every original-repo
+                // family funnels through, which is why the stamp is not
+                // per-family. Method and numbers: docs/QUANTIZER_QUALITY.md.
                 "parityGate": "W2.1a-bit-parity",
-                "qualityGate": "W2.1b-kld-open",
+                "qualityGate": "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36",
             ]
+            if plan.bitsOverrideCount > 0 {
+                quantized["overrideWeightBits"] = 8
+                quantized["overriddenTensorCount"] = plan.bitsOverrideCount
+            }
+            manifest["quantizedAtInstall"] = quantized
         }
         if !plan.sidecarOutcomes.isEmpty {
             var sidecars: [String: Any] = [:]

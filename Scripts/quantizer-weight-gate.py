@@ -95,9 +95,21 @@ def bf16_to_f32(bits):
             << np.uint32(16)).view(np.float32)
 
 
+def _pack(q, n_bins):
+    """Nibble-pack at INT4; INT8 is already one byte per weight."""
+    if n_bins == 15:
+        return (q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8)
+    return q.astype(np.uint8)
+
+
 def encode_ours(vals, n_bins=15):
-    """Int4AffineEncoder.encodeGroup: plain min/max affine, scale and bias
-    rounded through BF16 *before* index quantization, no zero-point snap."""
+    """Int4AffineEncoder.encodeGroup, and — at n_bins=255 — Int8AffineEncoder's
+    identical grid: plain min/max affine, scale and bias rounded through BF16
+    *before* index quantization, no zero-point snap.
+
+    One function serves both widths on purpose. The two Swift encoders are
+    deliberately the same convention (`Int8AffineEncoderConventionTests` locks
+    that), so a second transcription here could only drift."""
     wmin, wmax = vals.min(axis=1), vals.max(axis=1)
     const = wmax == wmin
     s_bits = bf16_bits(np.where(const, np.float32(1), (wmax - wmin) / np.float32(n_bins)))
@@ -107,7 +119,7 @@ def encode_ours(vals, n_bins=15):
     t = ((vals - b[:, None]) * inv[:, None]).astype(np.float32)
     # Swift's Float.rounded() is round-half-away-from-zero.
     q = np.clip(np.trunc(t + np.copysign(np.float32(0.5), t)), 0, n_bins).astype(np.uint8)
-    return (q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8), s_bits, b_bits, q
+    return _pack(q, n_bins), s_bits, b_bits, q
 
 
 def encode_mlx_model(vals, n_bins=15):
@@ -127,10 +139,12 @@ def encode_mlx_model(vals, n_bins=15):
     inv = np.where(s == 0, np.float32(0), np.float32(1) / s)
     q = np.clip(np.rint(((vals - b[:, None]) * inv[:, None]).astype(np.float32)),
                 0, n_bins).astype(np.uint8)
-    return (q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8), s_bits, b_bits, q
+    return _pack(q, n_bins), s_bits, b_bits, q
 
 
-def unpack(packed):
+def unpack(packed, n_bins=15):
+    if n_bins != 15:
+        return packed
     out = np.empty((packed.shape[0], GROUP), dtype=np.uint8)
     out[:, 0::2] = packed & 0x0F
     out[:, 1::2] = packed >> 4
@@ -167,8 +181,14 @@ def sample_plan():
         for t in ("gate_proj", "up_proj", "down_proj"):
             add(f"l{l}_se_{t}", f"{O}layers.{l}.mlp.shared_expert.{t}.weight",
                 f"{M}layers.{l}.mlp.shared_expert.{t}", 0, 0, 32)
+        # The two INT8 tensors of the control's mixture. The router is
+        # [numExperts, hidden] = [256, 2048]; the shared-expert gate is the
+        # single row [1, 2048], which is also the narrowest shape the streaming
+        # path ever sees.
         add(f"l{l}_router", f"{O}layers.{l}.mlp.gate.weight",
             f"{M}layers.{l}.mlp.gate", 0, 0, 32)
+        add(f"l{l}_segate", f"{O}layers.{l}.mlp.shared_expert_gate.weight",
+            f"{M}layers.{l}.mlp.shared_expert_gate", 0, 0, 1)
         # Routed experts. gate_up_proj is [E, 2*I, H] with the gate half first,
         # so expert e's gate rows start at e*2I and its up rows at e*2I + I.
         for e in (0, 5, 137, 255):
@@ -181,6 +201,73 @@ def sample_plan():
     return plan
 
 
+# ------------------------------------------------------------- comparison
+
+def compare(item, opath, mpath, mlx, n_bins):
+    """One sampled tensor: our encoder vs the control's stored bytes, both
+    measured against the same BF16 source rows.
+
+    Identical methodology at either width (§3-§5 of docs/QUANTIZER_QUALITY.md).
+    Neither grid is 'the' right answer, so the only meaningful score is
+    reconstruction error against the BF16 source; bit-identity is reported but
+    is not expected and is not a gate."""
+    spath, _, _, _ = mlx.rows(item["mlx"] + ".scales", item["mlx_row"],
+                              item["rows"], "s_" + item["tag"])
+    bpath, _, _, _ = mlx.rows(item["mlx"] + ".biases", item["mlx_row"],
+                              item["rows"], "b_" + item["tag"])
+    src = bf16_to_f32(np.fromfile(opath, dtype=np.uint16)).reshape(-1, GROUP)
+    keep = ~degenerate(src, n_bins)
+    op, os_, ob, qo = encode_ours(src, n_bins)
+    width = GROUP if n_bins == 255 else GROUP // 2
+    tp = np.fromfile(mpath, dtype=np.uint8).reshape(-1, width)
+    ts = np.fromfile(spath, dtype=np.uint16)
+    tb = np.fromfile(bpath, dtype=np.uint16)
+    qt = unpack(tp, n_bins)
+    mp, _, _, _ = encode_mlx_model(src, n_bins)
+
+    do = bf16_to_f32(os_)[:, None] * qo.astype(np.float32) + bf16_to_f32(ob)[:, None]
+    dt = bf16_to_f32(ts)[:, None] * qt.astype(np.float32) + bf16_to_f32(tb)[:, None]
+    G, EO, ET = src[keep], (do - src)[keep], (dt - src)[keep]
+    den = np.sqrt((G ** 2).sum())
+    return dict(
+        tag=item["tag"],
+        rel_ours=float(np.sqrt((EO ** 2).sum()) / den),
+        rel_mlx=float(np.sqrt((ET ** 2).sum()) / den),
+        max_ours=float(np.abs(EO).max()), max_mlx=float(np.abs(ET).max()),
+        bitid=bool((op == tp).all() and (os_ == ts).all() and (ob == tb).all()),
+        nibble_diff=float((qo[keep] != qt[keep]).mean()),
+        attributed=float((mp[keep] == tp[keep]).mean()),
+        degenerate=float(np.mean(~keep)))
+
+
+def summarize(rows, label):
+    if not rows:
+        return
+    print(f"\n{'tensor':22} {'bitid':>5} {'codeDiff':>8} {'relOurs':>8} {'relMLX':>8} "
+          f"{'ratio':>6} {'maxOurs':>9} {'maxMLX':>9} {'attrib':>7}")
+    for r in rows:
+        print(f"{r['tag']:22} {str(r['bitid']):>5} {r['nibble_diff']:8.4f} "
+              f"{r['rel_ours']:8.5f} {r['rel_mlx']:8.5f} "
+              f"{r['rel_ours']/r['rel_mlx']:6.4f} {r['max_ours']:9.6f} "
+              f"{r['max_mlx']:9.6f} {r['attributed']:7.4f}")
+    ro = np.array([r["rel_ours"] for r in rows])
+    rm = np.array([r["rel_mlx"] for r in rows])
+    mo = np.array([r["max_ours"] for r in rows])
+    mm = np.array([r["max_mlx"] for r in rows])
+    print(f"\n{len(rows)} {label} tensors compared (degenerate groups excluded)")
+    print(f"  bit-identical to the control: {sum(r['bitid'] for r in rows)}/{len(rows)}")
+    print(f"  relative Frobenius error  ours mean {ro.mean():.6f} median {np.median(ro):.6f}")
+    print(f"  relative Frobenius error   mlx mean {rm.mean():.6f} median {np.median(rm):.6f}")
+    print(f"  ours strictly better on {(ro < rm).sum()}/{len(rows)}; "
+          f"worst ratio {(ro/rm).max():.4f} on "
+          f"{rows[int(np.argmax(ro/rm))]['tag']}")
+    print(f"  max-abs error  ours better on {(mo < mm).sum()}/{len(rows)}; "
+          f"mean ratio {np.mean(mo/mm):.4f} worst {np.max(mo/mm):.4f}")
+    print(f"  attribution: the MLX-convention model reproduces "
+          f"{np.mean([r['attributed'] for r in rows]):.4f} of the control's "
+          f"packed bytes in non-degenerate groups")
+
+
 # ------------------------------------------------------------------- main
 
 def main():
@@ -190,7 +277,7 @@ def main():
     os.makedirs(args.cache, exist_ok=True)
     orig, mlx = Repo(ORIG, args.cache, "orig"), Repo(MLX, args.cache, "mlx")
 
-    rows, skipped = [], []
+    rows, rows8, skipped = [], [], []
     for item in sample_plan():
         opath, _, _, cols = orig.rows(item["orig"], item["orig_row"], item["rows"],
                                       "o_" + item["tag"])
@@ -198,58 +285,20 @@ def main():
         mpath, mshape, _, mlast = mlx.rows(wname, item["mlx_row"], item["rows"],
                                            "w_" + item["tag"])
         bits = (mlast * 4 * 8) // cols
+        if bits == 8:
+            rows8.append(compare(item, opath, mpath, mlx, n_bins=255))
+            continue
         if bits != 4:
             skipped.append((item["tag"], bits, item["mlx"]))
             continue
-        spath, _, _, _ = mlx.rows(item["mlx"] + ".scales", item["mlx_row"],
-                                  item["rows"], "s_" + item["tag"])
-        bpath, _, _, _ = mlx.rows(item["mlx"] + ".biases", item["mlx_row"],
-                                  item["rows"], "b_" + item["tag"])
+        rows.append(compare(item, opath, mpath, mlx, n_bins=15))
 
-        src = bf16_to_f32(np.fromfile(opath, dtype=np.uint16)).reshape(-1, GROUP)
-        keep = ~degenerate(src)
-        op, os_, ob, qo = encode_ours(src)
-        tp = np.fromfile(mpath, dtype=np.uint8).reshape(-1, 32)
-        ts = np.fromfile(spath, dtype=np.uint16)
-        tb = np.fromfile(bpath, dtype=np.uint16)
-        qt = unpack(tp)
-        mp, ms, mb, _ = encode_mlx_model(src)
-
-        do = bf16_to_f32(os_)[:, None] * qo.astype(np.float32) + bf16_to_f32(ob)[:, None]
-        dt = bf16_to_f32(ts)[:, None] * qt.astype(np.float32) + bf16_to_f32(tb)[:, None]
-        G, EO, ET = src[keep], (do - src)[keep], (dt - src)[keep]
-        den = np.sqrt((G ** 2).sum())
-        rows.append(dict(
-            tag=item["tag"],
-            rel_ours=float(np.sqrt((EO ** 2).sum()) / den),
-            rel_mlx=float(np.sqrt((ET ** 2).sum()) / den),
-            max_ours=float(np.abs(EO).max()), max_mlx=float(np.abs(ET).max()),
-            bitid=bool((op == tp).all() and (os_ == ts).all() and (ob == tb).all()),
-            nibble_diff=float((qo[keep] != qt[keep]).mean()),
-            attributed=float((mp[keep] == tp[keep]).mean()),
-            degenerate=float(np.mean(~keep))))
-
-    print(f"{'tensor':22} {'bitid':>5} {'nibDiff':>8} {'relOurs':>8} {'relMLX':>8} "
-          f"{'ratio':>6} {'attrib':>7}")
-    for r in rows:
-        print(f"{r['tag']:22} {str(r['bitid']):>5} {r['nibble_diff']:8.4f} "
-              f"{r['rel_ours']:8.5f} {r['rel_mlx']:8.5f} "
-              f"{r['rel_ours']/r['rel_mlx']:6.4f} {r['attributed']:7.4f}")
-    ro = np.array([r["rel_ours"] for r in rows])
-    rm = np.array([r["rel_mlx"] for r in rows])
-    print(f"\n{len(rows)} INT4 tensors compared (degenerate groups excluded)")
-    print(f"  bit-identical to the control: {sum(r['bitid'] for r in rows)}/{len(rows)}")
-    print(f"  relative Frobenius error  ours mean {ro.mean():.5f} median {np.median(ro):.5f}")
-    print(f"  relative Frobenius error   mlx mean {rm.mean():.5f} median {np.median(rm):.5f}")
-    print(f"  ours strictly better on {(ro < rm).sum()}/{len(rows)}; "
-          f"worst ratio {(ro/rm).max():.4f} on "
-          f"{rows[int(np.argmax(ro/rm))]['tag']}")
-    print(f"  attribution: the MLX-convention model reproduces "
-          f"{np.mean([r['attributed'] for r in rows]):.4f} of the control's "
-          f"packed bytes in non-degenerate groups")
+    summarize(rows, "INT4")
+    summarize(rows8, "INT8 (the control's per-tensor overrides: routers and "
+                     "shared-expert gates)")
     if skipped:
-        print("\n  not 4-bit on the control side (mlx per-tensor override, so no "
-              "bitwise comparison is possible):")
+        print("\n  neither 4- nor 8-bit on the control side (no bitwise "
+              "comparison is possible):")
         for tag, bits, name in skipped:
             print(f"    {tag:22} control is {bits}-bit  ({name})")
 

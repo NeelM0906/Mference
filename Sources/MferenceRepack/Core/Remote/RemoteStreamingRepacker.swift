@@ -81,6 +81,27 @@ public struct RemoteStreamingRepackResult: Sendable {
     public var excludedMultimodalTensorCount: Int {
         plan.excludedMultimodalTensorNames.count
     }
+
+    /// How many resident tensors the plan quantizes at each width, keyed by
+    /// bits. A census of what will actually be written rather than of the
+    /// policy's rules, so a `--dry-run` can be diffed against a control
+    /// conversion's own mixture before committing to a multi-hour install.
+    public var residentWeightWidthCensus: [Int: Int] {
+        var census: [Int: Int] = [:]
+        for entry in plan.resident.entries {
+            guard let spec = entry.quantSpec else { continue }
+            census[spec.bits, default: 0] += 1
+        }
+        return census
+    }
+    /// Resident tensors that ride through at their source dtype (norms, 1-D
+    /// vectors, conv kernels, integer lookup tables).
+    public var residentUnquantizedCount: Int {
+        plan.resident.entries.filter { $0.quantSpec == nil }.count
+    }
+    /// Tensors quantized at something other than the base width — directly
+    /// comparable to a community conversion's `bitWidthOverridesHonored`.
+    public var bitWidthOverrideCount: Int { plan.bitsOverrideCount }
 }
 
 public final class RemoteStreamingRepacker {

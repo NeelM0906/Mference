@@ -1,9 +1,20 @@
 # Quantizer quality — the W2.1b gate
 
-**Status (2026-09-02): weight level PASSED. Model level BLOCKED — not failed,
-blocked, by a production gap named in [§6](#6-the-blocker-why-the-model-level-half-could-not-be-run).
-`manifest.quantizedAtInstall.qualityGate` therefore still reads
-`W2.1b-kld-open`.**
+**Status (2026-09-02): BOTH HALVES PASSED.** The weight level passed first
+([§4](#4-result)). The model level was then unblocked — by giving the repacker
+a per-tensor bit policy, [§6](#6-the-blocker-and-how-it-was-cleared) — run, and
+passed ([§8](#8-the-model-level-result)). `manifest.quantizedAtInstall.qualityGate`
+now reads `W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36`.
+
+**Clearing the blocker turned up two further defects that nothing else in the
+kit could see, and the second is the reason this half of the gate exists.**
+Fixing the manifest gate only revealed the next one: the resident index named
+every tensor the vendor's way, so no runner accessor could find any of them.
+And once the model finally loaded, the gate's first run reported **zero** top-1
+agreement — which turned out to be a missing RMSNorm `1 + w` fold that made
+every norm in the model wrong by one. That install verified, validated and
+loaded, and generated fluent nonsense at full speed. See
+[§7](#7-two-defects-the-model-level-half-caught).
 
 This is the reusable quality gate for `MferenceRepack`'s quantize-in-flight
 path. Every family installed from a vendor's original BF16 repo goes through the
@@ -17,7 +28,13 @@ as a trusted control.
 |---|---|---|
 | W2.1a | The repacker's quantizer is bit-identical to the runtime's own reference quantizer, including through the streaming path | Enforced in CI (`Int4AffineEncoderParityTests`, `Int4AffineStreamingParityTests`) |
 | W2.1b weight level | Our quantized weights are as faithful to the BF16 source as an independent, trusted quantizer's | **Passed** — [§4](#4-result) |
-| W2.1b model level | Greedy rollouts and KLD against the control, end to end | **Blocked** — [§6](#6-the-blocker-why-the-model-level-half-could-not-be-run) |
+| W2.1b model level | Greedy rollouts and KLD against the control, end to end | **Passed** — [§8](#8-the-model-level-result) |
+
+The two halves answer different questions, and the second is not implied by the
+first. The weight level says each tensor is individually faithful. The model
+level asks whether 40 layers of accumulated error leave the output distribution
+intact — and, as it turned out, whether the install is *correct at all* in ways
+that have nothing to do with quantization ([§7](#7-two-defects-the-model-level-half-caught)).
 
 ---
 
@@ -148,13 +165,19 @@ current convention so that the choice cannot drift silently.
 
 ## 5. The model-level harness
 
-Built, compiling, and ready to run the moment [§6](#6-the-blocker-why-the-model-level-half-could-not-be-run)
-is cleared.
+Run on 2026-09-02; results in [§8](#8-the-model-level-result).
 
 * `Tests/Mference/Core/Runtime/Quantizer/QuantizerQualityMeasurement.swift` —
   env-gated, skips without an install. Each model runs **alone** and dumps to
   disk; nothing ever loads two models, per AGENTS.md.
-* `Scripts/quantizer-quality-compare.py` — offline comparator.
+* `Scripts/quantizer-quality-compare.py` — offline comparator. It now checks
+  **dump authenticity** before reporting any number: finite, non-degenerate, a
+  sane log-sum-exp, and an argmax matching the known greedy token. That is the
+  `forceLogitsHead` trap below, turned from a warning into an assertion.
+* `Scripts/gturbo-tensor-diff.py` — not part of the measurement, but the tool
+  that diagnosed it when the first run came back wrong. Dequantizes every
+  resident tensor of two installs on disk and reports the relative difference;
+  no GPU, no model load. See [§7b](#7b-the-rmsnorm-1-w-convention-found-by-the-first-run).
 
 Three design points that make the measurement valid:
 
@@ -212,42 +235,113 @@ if it is not, that non-determinism is itself a finding and every KL number has t
 be read against it. The comparator reports it first for that reason, and
 `METH-01` applies to the rollout comparison: a top-1 flip at a top-2 logit margin
 below the measured noise is not evidence of damage, which is why the harness
-records that margin at every position.
+records that margin at every position. Both mattered in practice: the floor came
+back at exactly zero, and every observed rollout divergence sat at a control-side
+margin below the median inter-install logit difference ([§8](#8-the-model-level-result)).
 
-## 6. The blocker: why the model-level half could not be run
+## 6. The blocker, and how it was cleared
 
-**The control install is not uniformly INT4. Ours is. The Qwen 3.6 runner only
-accepts the control's mixture.**
+**The control install was not uniformly INT4. Ours was. The Qwen 3.6 runner
+only accepts the control's mixture.**
 
-mlx-community's conversion carries 83 per-tensor overrides in its `config.json`:
-every layer's `mlp.gate` (the router) and `mlp.shared_expert_gate` is **INT8**
-group-64, while everything else is INT4. Its manifest records
-`quant.router.weightBits = 8`.
+mlx-community's conversion carries **80** per-tensor overrides in its
+`config.json`: every layer's `mlp.gate` (the router) and
+`mlp.shared_expert_gate` is **INT8** group-64, while everything else is INT4.
+Its manifest records `quant.router.weightBits = 8`, and its own
+`bitWidthOverridesHonored` is 80.
 
-Our quantize-in-flight path has exactly one target. That was a deliberate W2
+> *Correction, 2026-09-02:* earlier revisions of this document, and the
+> bring-up spec, said **83**. The figure is 80 — 40 layers x 2 gating tensors —
+> confirmed independently from the control's source `config.json` (80 override
+> keys, all `bits: 8`) and from its installed resident index (80 tensors whose
+> stored width is 8). Nothing depended on the wrong number; the policy derives
+> the set from a rule rather than from a count.
+
+Our quantize-in-flight path had exactly one target. That was a deliberate W2
 scope cut — *"int4 group-64 only"* — and it is harmless for Flash-Next, whose
-runner drives the router through the generic INT4 matvec. On Qwen 3.6 it is
-fatal, in two independent places:
+runner drives the router through the generic INT4 matvec. On Qwen 3.6 it was
+fatal in two independent places:
 
-1. **`ManifestReader.validateQuant`** (`Sources/Mference/Infrastructure/ModelIO/ManifestReader.swift:462`)
-   admits `("router", quant.router, [8])` for every non-Flash-Next family. Our
-   install reports 4 and is refused at load. This is observed, not predicted —
-   `qwen36original` was installed and verified (47 files, 19,533,682,725 bytes,
-   against the control's 19,551,394,758) and loading it through the harness
-   fails immediately with:
-
-   ```
-   resident index is corrupt: unsupported quantization for router
-   ```
+1. **`ManifestReader.validateQuant`** admits `("router", quant.router, [8])` for
+   every non-Flash-Next family. Our install reported 4 and was refused at load
+   with `resident index is corrupt: unsupported quantization for router`.
 2. Even bypassed, the kernel could not decode it. `router_gemv_gemma4_body`
-   (`Sources/Mference/Metal/MoE/moe.metal:109`) reads `W_row[idx]` as **one
-   `uint8` per weight**. There is no nibble unpacking on that path at all; a
-   4-bit router would be read as garbage routing over 256 experts, which would
-   not be a quality measurement of anything.
+   (`Sources/Mference/Metal/MoE/moe.metal:109`) reads `W_row[idx]` as one
+   `uint8` per weight. There is no nibble unpacking on that path at all.
 
-The refusal is the right behaviour — it fails loudly rather than silently
-mis-routing — but it means `qwen36original` installs and verifies and cannot be
-*run*, so the KLD half of the gate cannot be measured on this control.
+### What was built
+
+**Option (A) of the three sized below.** The repacker gained an INT8 affine
+group-64 mode and a general per-tensor bit policy:
+
+* `Int8AffineEncoder` — the INT8 twin of `Int4AffineEncoder`, deliberately the
+  *same* affine convention (plain min/max grid, `scale = (max - min) / 255`,
+  bias `= min`, both rounded through BF16 before the indices are computed, no
+  zero-point snap). `Int8AffineEncoderConventionTests` locks that, because two
+  widths disagreeing about what an affine grid means would make the comparison
+  below confound a width effect with a convention effect.
+* `StreamingInt8Quantizer` — the bounded-scratch component transform, plus a
+  `RangeCopyTransform.quantizeInt8G64` case and its tile capacity.
+* `QuantBitPolicy` — one base width plus a table of name-suffix overrides,
+  matched longest-suffix-first, resolved per family. The mechanism is general
+  (adding a family adds rows, not branches); the table's *contents* are
+  necessarily family-specific because they mirror a particular community
+  conversion's overrides.
+
+**Its own bootstrap gate came first.** New production quantization math is not
+trusted on assertion, so `Int8AffineStreamingParityTests` — the W2.1a-style
+bit-parity gate — proves `Int8AffineEncoder` and the streaming path reproduce
+the runtime's `Quantization.quantizeInt8Affine` reference **bit for bit**:
+packed bytes, BF16 scale bits, BF16 bias bits, across single-row, wide-row and
+coprime-row-count shapes and tile sizes down to one group per tile. It passes.
+
+### Weight-level fidelity of the new INT8 encoder
+
+The control install contains mlx-community's *actual INT8 router tensors*, so
+the ideal fixture already existed. `Scripts/quantizer-weight-gate.py` — which
+previously skipped these tensors as "not 4-bit on the control side" — now
+quantizes the same BF16 source rows with `Int8AffineEncoder` and scores both
+against the BF16 source, by the identical methodology §3-§5 used for INT4:
+
+```
+10 INT8 tensors compared (routers and shared-expert gates, layers 0/7/19/27/39)
+  bit-identical to the control: 0/10
+  relative Frobenius error  ours mean 0.007629 median 0.007840
+  relative Frobenius error   mlx mean 0.010683 median 0.010779
+  ours strictly better on 10/10; worst ratio 0.7633 on l27_segate
+  max-abs error  ours better on 10/10; mean ratio 0.5769 worst 0.7840
+```
+
+Not bit-identical, exactly as at INT4 and for the same documented reason (§4).
+What matters is fidelity, and **ours is better on 10 of 10**, by a wider margin
+than at INT4 (ratio ~0.70-0.76 rather than ~0.99). That is the expected
+direction: MLX's zero-point snap buys exact-zero representability at the cost
+of step size, and that trade pays off least on router tensors, which carry no
+dead-zero mass for it to redeem.
+
+The INT4 numbers re-ran unchanged (0.096123 vs 0.096479, better on 118/124),
+confirming the extension did not perturb the existing gate.
+
+### The mixture reproduces the control exactly
+
+`qwen36original` now installs 613 resident tensors as INT4 312 / INT8 80 /
+unquantized 221 — the control's mixture, tensor for tensor.
+`Scripts/quantizer-mixture-compare.py` derives each side's width from its own
+resident index (`8 * sizeBytes / prod(shape)`, trusting neither installer's
+manifest) and reports:
+
+```
+shared tensors: 613
+width mismatches: 0
+INT8 override set: control 80, ours 80
+  identical
+MIXTURES MATCH
+```
+
+The set is produced by a rule, not a hardcoded list: the policy overrides
+`.mlp.gate.weight` and `.mlp.shared_expert_gate.weight`, so a 40-layer
+checkpoint yields 80 and a checkpoint of another depth yields the right number
+without the policy being edited.
 
 ### The router really does need those extra bits
 
@@ -297,14 +391,179 @@ original-repo family, and its runner happens to accept a uniform-INT4 router.
   shipped family. Largest, buys the least, and — per the table above — would
   produce a measurement of the wrong thing even once it worked.
 
-**(A) is the recommendation.** It is the only option that leaves the control
-experiment honest, the router table shows the extra bits are load-bearing rather
-than ceremonial, and a per-tensor bit policy is something the bring-up kit will
-need anyway the first time a vendor ships a checkpoint whose community
-conversion mixes widths — which is now known to be the common case, not the
-exotic one.
+**(A) was chosen and built** (see [What was built](#what-was-built)). It is the
+only option that leaves the control experiment honest, the router table shows
+the extra bits are load-bearing rather than ceremonial, and a per-tensor bit
+policy is something the bring-up kit needed anyway the first time a vendor
+shipped a checkpoint whose community conversion mixes widths — which is now
+known to be the common case, not the exotic one.
 
-## 7. Verdict
+## 7. Two defects the model-level half caught
+
+Neither of these is a quantizer defect. Both would have shipped. Both are the
+argument for running this half of the gate rather than reasoning about it.
+
+### 7a. Resident tensor naming, found before the first run
+
+`Model.resident(name:)` is an exact dictionary lookup — a miss is
+`tensorNotFound`, with no aliasing anywhere — and each family's runner asks for
+one fixed spelling. Qwen 3.6's is `Model.trunkPrefix` = `language_model.model.`
+with the head at `language_model.lm_head.weight`. The pre-quantized path
+inherits those names for free, because that is what mlx-lm's conversion writes.
+The vendor's own repo does not agree: it ships the trunk as
+`model.language_model.` and a bare top-level `lm_head.weight`.
+
+So the first mixed-width install — which cleared `validateQuant` exactly as
+intended — failed one step later with
+
+```
+no IndexEntry named language_model.model.layers.0.mlp.shared_expert.gate_proj.weight
+```
+
+**0 of 12** sampled runner-expected names were present. `FlashNextPlanner`
+now renames resident tensors to the family's own spelling at install time
+(`residentName(for:family:)`), which is what makes an original-repo install a
+drop-in replacement for a conversion of the same checkpoint. Flash-Next is
+deliberately identity: its `trunkPrefix` *is* `model.language_model.`, it has no
+runner to satisfy, and renaming would change every byte of an install that
+already ships.
+
+This was invisible for as long as Flash-Next was the only original-repo family,
+because Flash-Next had no runner to disagree with.
+
+### 7b. The RMSNorm 1 + w convention, found by the first run
+
+With the naming fixed, `qwen36original` loaded, ran at full speed, and produced
+fluent, confident text. The gate's first run then reported:
+
+```
+top-1 agreement 0.000000   top-5 overlap 0.000000
+KL (nats)  mean=13.2386 median=13.5546 p99=17.0182 max=17.9177
+```
+
+Zero top-1 agreement at *every one* of 882 positions, and a mean KL larger than
+`ln(248320) = 12.4` — the entropy of a *uniform* distribution over the whole
+vocabulary. A quantizer measured better than the control on 128 of 134 sampled
+tensors cannot do that. It had to be structural.
+
+`Scripts/gturbo-tensor-diff.py` (written for this, and kept) dequantizes every
+resident tensor from both installs on disk and reports the relative difference.
+It localized the defect in one pass: **100 tensors at relative difference ~1.0,
+every one of them an RMSNorm gain** — unquantized BF16 passthrough, where
+quantization cannot account for any difference at all. Everything else sat at
+the ~0.13 that two legitimate INT4 grids produce.
+
+The cause: Qwen 3.6 applies most of its RMSNorms as `(1 + w) * x̂`. mlx-lm's
+conversion folds the `+1` into the stored weight so the kernel can just
+multiply, and the Mference runtime — built against that conversion — multiplies
+by the stored weight directly. The vendor's repo stores the bare `w`. Every norm
+in the model was therefore off by one.
+
+The fold is exact and its scope was measured, not guessed:
+
+| | count | treatment |
+|---|---|---|
+| `input_layernorm`, `post_attention_layernorm` | 40 + 40 | fold `1 + w` |
+| `self_attn.q_norm`, `self_attn.k_norm` (full-attention layers) | 10 + 10 | fold `1 + w` |
+| final `norm` | 1 | fold `1 + w` |
+| `linear_attn.norm` (gated DeltaNet's own) | 30 | **bare** |
+
+Computing `bf16(w + 1)` reproduces the control's stored bytes **bit-exactly on
+all 101** folded tensors, and all 30 `linear_attn.norm` tensors are already
+byte-identical unfolded. `RangeCopyTransform.addOneBF16` applies it in flight;
+`FlashNextPlanner.foldsNormBias` decides which tensors get it;
+`NormBiasFoldTests` locks the set. After the fix the tensor diff reports **0**
+tensors above 0.5 relative difference, median 0.127, max 0.177 — all pure
+quantization.
+
+**Why nothing else could have caught this.** Norms are not quantized, so the
+weight-level half never samples them. `--verify-install` checks SHA-256 against
+the manifest the same installer wrote. `ManifestReader` has no opinion about the
+numeric convention of a passthrough tensor. The install verified, validated,
+loaded, and generated fluent nonsense at full speed. Only a measurement against
+an independent conversion of the same checkpoint could see it.
+
+## 8. The model-level result
+
+Three sequential model processes (never two at once, per AGENTS.md), each
+loading one install alone and dumping full-vocab FP16 logits to disk;
+comparison offline. Corpus: the three frozen prompts in
+`docs/benchmark-prompts/real-generation-v1/` (`long-synthesis`,
+`medium-review`, `short-explanation`, content clipped to 900 characters before
+templating) plus three short raw prompts (`2 + 2 =`, `The capital of France is`,
+`Three primary colors are red, blue, and`) — 882 teacher-forced positions in
+total, 64 greedy tokens per prompt.
+
+### The noise floor, first
+
+```
+=== NOISE FLOOR: D_KL(trusted || trusted-repeat) ===
+  KL (nats)     n=882 mean=0 median=0 p99=0 max=0
+  max |dlogit|  n=882 mean=0 median=0 p99=0 max=0
+  top-1 agreement 1.000000   top-5 overlap 1.000000
+  dumps byte-identical: True
+```
+
+**Exactly zero, and byte-identical.** Decode at temperature 0 is deterministic,
+so every part of the signal below is attributable to the quantizer rather than
+to run-to-run variation.
+
+### Dump authenticity
+
+The documented trap is that the default fused head skips the logits write
+entirely, leaving only a greedy argmax in `lastGreedyToken`, so a harness
+missing `RuntimeConfiguration(forceLogitsHead: true)` dumps never-written memory
+and reports confident nonsense. The harness sets it; the comparator now
+*verifies* it. Every dump is finite, non-degenerate, has a log-sum-exp within a
+few nats of its max, and — for the trusted runs — an argmax matching the known
+greedy token at **1.0000** of continuation positions.
+
+### Signal
+
+```
+=== SIGNAL: D_KL(trusted || ours) ===
+  prompt              pos    KL mean    KL p99   KL max   cont-only   top1    top5   max|dlogit|
+  long-synthesis      296    0.399139   5.53767  13.0931  0.106566    0.8514  0.7831  17.77
+  medium-review       249    0.161318   1.89319   2.93985 0.072429    0.8474  0.8217  10.09
+  short-explanation   126    0.188333   2.73216   8.92035 0.098430    0.8968  0.8127  16.18
+  raw-arith            69    0.084103   0.691951  1.62742 0.058405    0.8116  0.8232   7.797
+  raw-capital          69    0.065858   0.722751  1.71196 0.037273    0.8986  0.8609   9.67
+  raw-list             73    0.042676   0.432077  0.620617 0.028832   0.9178  0.8466   8.758
+
+  KL (nats)       n=882  mean=0.221662  median=0.0362621  p99=3.2663   max=13.0931
+  max |dlogit|    n=882  mean=3.6687    median=3.16296    p99=13.3839  max=17.7676
+  top-1 agreement 0.862812   top-5 overlap 0.812698
+```
+
+### Greedy rollouts (METH-01)
+
+| prompt | first divergence | control's top-2 margin there |
+|---|---|---|
+| `raw-arith` | token 1 | **0.015625** |
+| `raw-capital` | token 1 | 0.2969 |
+| `raw-list` | token 3 | 1.578 |
+| `short-explanation` | token 6 | 1.484 |
+| `medium-review` | token 19 | 0.4844 |
+| `long-synthesis` | token 25 | 0.7969 |
+
+Every divergence lands where the control is itself close to indifferent, and
+all six margins are at or below the **median inter-install logit difference of
+3.16** — that is, smaller than the ordinary difference between the two
+quantizations. The extreme case is worth spelling out: at `2 + 2 =` the
+control's top two logits are `4` at 18.0625 and `5` at 18.0469. The margin,
+0.015625, is *exactly one FP16 ulp* at that magnitude — the control has no
+preference at all, and which one it picks is decided by the last representable
+bit. Ours picks `5` (by 1.47, itself below the median inter-install difference)
+and then reasons coherently about the statement being false.
+
+Both installs produce fluent, on-topic, factually correct text: both answer
+`Paris`, both complete the primary colours with `yellow`, and both give a
+substantively equivalent account of coastal wetlands. Their entropy profiles
+match too — log-sum-exp-minus-max of 2.65-3.84 for ours against 1.69-3.65 for
+the control — so there is no blurring, which is what a damaged model shows (the
+broken install of §7b sat at a near-constant 8.1 regardless of prompt).
+
+## 9. Verdict
 
 * **Weight level: PASS.** Our INT4 affine group-64 quantizer reconstructs the
   BF16 source at least as faithfully as an independent trusted implementation —
@@ -312,16 +571,76 @@ exotic one.
   124 sampled tensors. The one deficit (layer-0 `down_proj`, up to 1.54×) is
   fully attributed to the absence of zero-point snapping and is confined to
   tensors with a large mass of near-exact zeros.
-* **Model level: NOT MEASURED.** Blocked by §6. No threshold is proposed here,
-  because proposing one without the measurement behind it would be inventing a
-  passing number.
-* **The stamp stays.** `manifest.quantizedAtInstall.qualityGate` remains
-  `W2.1b-kld-open`. It is not honest to promote it on the weight-level half
-  alone: the weight gate says each tensor is individually faithful, which is not
-  the same claim as 40 layers of accumulated error leaving the output
-  distribution intact.
-* **Flash-Next.** Closing W2.1b would *not* by itself lift
-  `ManifestReader.familiesWithoutRunner`. That gate refuses Flash-Next for
-  missing **axes** (`hyperConnectionsLowRank`, `attentionIndexer`,
-  `pleNgramEmbedding`), not for quantizer quality. W2.1b is one of the blockers
-  behind the eventual lift decision, not the lift itself.
+* **INT8, weight level: PASS.** Better on 10 of 10 sampled router and
+  shared-expert-gate tensors, by both relative Frobenius and max-abs error.
+* **Model level: PASS.** Against a zero noise floor, the two installs agree on
+  86.3 % of top-1 tokens and 81.3 % of top-5 sets across 882 teacher-forced
+  positions, at a median per-position KL of 0.036 nats and a mean of 0.222 —
+  a small fraction of the distribution's own entropy. Every greedy divergence
+  occurs at a control-side top-2 margin below the median inter-install logit
+  difference. Behaviour, factual accuracy and output entropy are preserved.
+
+### What this does and does not claim
+
+`D_KL(control ‖ ours)` measures how far apart two quantizations are. It does
+**not** say which is closer to the BF16 original — for that you would need a
+BF16 forward pass, which requires the 72 GB checkpoint resident and was not run.
+The *direction* comes from the weight level, which is measured against the BF16
+source directly and puts us at least on par (better on 128 of the 134 tensors
+sampled across both widths).
+
+So the model-level claim is precisely this: **40 layers of accumulated,
+comparably-sized quantization error do not compound into behavioural damage.**
+The two installs are different — they must be, since 0 of 124 tensors are
+bit-identical and cannot be (§3) — and they are different by an amount
+consistent with two independent INT4 grids of the same checkpoint driving a
+top-8-of-256 router.
+
+### The threshold, and why it is this one
+
+The gate now has a measured failure and a measured pass on the same harness and
+the same corpus:
+
+| | broken (§7b, missing norm fold) | healthy (§8) |
+|---|---|---|
+| top-1 agreement | 0.000 | 0.863 |
+| KL mean / median (nats) | 13.24 / 13.55 | 0.222 / 0.036 |
+| top-5 overlap | 0.000 | 0.813 |
+| max \|Δlogit\| mean | 23.0 | 3.67 |
+
+**Proposed gate: noise floor exactly zero (byte-identical repeat dumps), top-1
+agreement ≥ 0.50, and median per-position KL ≤ 0.50 nats.**
+
+These sit between two *measured* populations rather than being fitted to the
+observed pass: they are ~1.7× away from the healthy point and ~14× away from the
+broken one on the KL axis, and equidistant in the wrong direction on top-1. A
+threshold drawn to just-clear 0.863 would be tuning; one drawn at 0.50 would
+still have caught the only real defect this harness has ever seen, with room to
+spare, and would not fail a healthy install that happened to be somewhat noisier
+than this one.
+
+The zero-noise-floor requirement is not a quality threshold at all — it is a
+correctness precondition. If temperature-0 decode is not deterministic, every
+number above is uninterpretable and the run must be investigated rather than
+scored.
+
+**Calibration is thin and should be widened.** This is one healthy sample and
+one broken sample, on one checkpoint. The second original-repo family to reach
+a runner should re-run this gate and the thresholds revisited with two healthy
+points rather than one.
+
+### Flash-Next
+
+Closing W2.1b does **not** by itself lift `ManifestReader.familiesWithoutRunner`.
+That gate refuses Flash-Next for missing **axes**
+(`hyperConnectionsLowRank`, `attentionIndexer`, `pleNgramEmbedding`), not for
+quantizer quality. What W2.1b's closure does do is remove the *quality*
+objection: the quantizer nucleus Flash-Next shares is now validated at both the
+weight and model level. The remaining blockers to an eventual lift are the axes
+and a maintainer decision, not this gate.
+
+Two caveats are worth carrying into that decision. Flash-Next is uniform INT4
+by policy and folds no norm bias — both correct for it today, and both now
+*explicit* per-family choices rather than defaults nobody had examined. Neither
+has been checked against an independent conversion of Flash-Next, because none
+exists. §7 is the record of what that kind of unchecked assumption costs.
