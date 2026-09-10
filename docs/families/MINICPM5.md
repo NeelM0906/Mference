@@ -326,8 +326,30 @@ validate without being loadable.
       larger-magnitude endpoint and snaps a bin to zero, and that convention
       reproduces 98.0% of the control's packed nibbles. Same signature as the
       Qwen 3.6 result in [QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md) §4.
-- [ ] **W2.1b model level** — `QuantizerQualityMeasurement` vs
-      `scratch/minicpm5-mlx.gturbo`; needs the runner
+- [x] **W2.1b model level PASSED** (2026-09-10) — `QuantizerQualityMeasurement`
+      run three times, one process each (control `minicpm5-mlx.gturbo` →
+      `minicpm5.gturbo` teacher-forced on the control's own sequences → control
+      again), then `Scripts/quantizer-quality-compare.py`; 869 teacher-forced
+      positions over the six corpus prompts, 64-token continuations.
+      **Noise floor exactly zero** (the repeat dumps are byte-identical, so
+      decode is deterministic and every difference is the quantizer).
+      **Signal, D_KL(control ‖ ours): top-1 agreement 0.718, top-5 overlap
+      0.717, KL median 0.178 / mean 0.448 nats (p99 3.96, max 13.2),
+      max |Δlogit| mean 6.2.** Both gate criteria hold (top-1 ≥ 0.50, median
+      KL ≤ 0.50). Greedy rollouts diverge early on every prompt (first
+      divergence at token 0–7; the control's top-2 margin at the flip ranges
+      from 0 to 2.8), so the METH-01 rollout comparison is uninformative here,
+      as the method section predicts for two INT4 grids. This is a noisier
+      pair than Qwen 3.6's healthy point (0.863 / 0.036): every tensor of this
+      family is INT4, including the 130,560-row embedding and head, and a 2B
+      dense model spends its whole logit budget on those grids. It is recorded
+      as the second healthy calibration point the quality document asked for,
+      not tuned toward. `Scripts/gturbo-tensor-diff.py` over the two installs:
+      381 tensors, median relative difference 0.126, worst 0.207
+      (`layers.0.self_attn.k_proj`), none above 0.5, norms identical — two
+      independent INT4 grids of the same weights and nothing else.
+      `manifest.quantizedAtInstall.qualityGate` is stamped
+      `W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX`.
 - [x] **Goldens committed** — `Scripts/parity/minicpm5_make_goldens.py`
       (torch 2.14.0 CPU, `transformers` 5.6.2 pinned): toy `LlamaForCausalLM`
       (hidden 64, 4 layers, 4 heads / 2 KV heads of 16, intermediate 128,
@@ -431,6 +453,29 @@ Decode rate excludes model installation, model loading, and prompt prefill.
   written only after the family gate is green.
 - Optional or approximate features: none.
 - Untested: everything below the "Port status" checkboxes that is not ticked.
+
+## Merge-compatibility note
+
+Base branch: `neel/qwen-flash-benchmarks-frontend-3d297b` (main + the three
+W2.1b commits). Two other branches were active on the same base while this was
+written; the overlap, file by file:
+
+| File | This branch | Flash-Next gate lift | Server library mode |
+|---|---|---|---|
+| `ManifestReader.familiesWithoutRunner` | **net unchanged** (an entry was added at the contract step and removed when the runner landed) | edits (drops the Flash-Next entry) | — |
+| `FlashNextCapabilityGateTests.swift` | adds `.minicpm5` to the shipped list | edits | — |
+| `bringup-check.sh` | one usage word + one `case` line | edits | — |
+| `THIRD_PARTY_NOTICES.md` | one appended paragraph + "one of five" → "one of the checkpoints below" | edits | — |
+| `docs/families/QWEN38_FLASH_NEXT.md` | untouched | edits | — |
+| `Sources/MferenceServer/Core/ServerInference.swift` | one `case .minicpm5` line in `defaultModelID` | — | edits |
+| `Sources/MferenceServer/*` otherwise | untouched (validation tests added in `Tests/MferenceServer`) | — | edits |
+| Exhaustive `switch` sites (`Model.swift`, `ForwardRunnerFactory`, `AppModelInstallDescriptor`, `RepackPlanner`, `FlashNextPlanner`, `QuantBitPolicy`, `GTurboJSON`) | one additive `case` each, nothing reordered | may touch the same switches | — |
+
+Every shared file was edited additively (one case, one line, one paragraph), so
+the expected conflicts are trivial context conflicts. Suggested land order: the
+Flash-Next lift first (it removes a table entry this branch no longer touches),
+then this branch, then library mode (its `ServerInference` edits are wider than
+this branch's one line).
 
 ## Reproduction
 

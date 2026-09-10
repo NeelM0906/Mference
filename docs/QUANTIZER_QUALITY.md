@@ -629,6 +629,34 @@ one broken sample, on one checkpoint. The second original-repo family to reach
 a runner should re-run this gate and the thresholds revisited with two healthy
 points rather than one.
 
+### MiniCPM5 — the second calibration point (2026-09-10)
+
+The "widen the calibration" request above has its first answer. MiniCPM5-2B
+([docs/families/MINICPM5.md](families/MINICPM5.md)) is the second original-repo
+family with a runner, and unlike Qwen 3.6 its control is the **vendor's own**
+MLX conversion (`openbmb/MiniCPM5-2B-MLX`, uniform INT4 group-64 including the
+embedding and head, no overrides). Same harness, same corpus, same thresholds:
+
+| | Qwen 3.6 (§8) | MiniCPM5-2B |
+|---|---|---|
+| noise floor | exactly zero | exactly zero (byte-identical repeats) |
+| top-1 agreement | 0.863 | 0.718 |
+| top-5 overlap | 0.813 | 0.717 |
+| KL median / mean (nats) | 0.036 / 0.222 | 0.178 / 0.448 |
+| max \|Δlogit\| mean | 3.67 | 6.22 |
+| weight level, rel. Frobenius ours / control | 0.0961 / 0.0965 (118 of 124 better) | 0.0950 / 0.0965 (38 of 39 better) |
+
+Both halves pass, and the weight level looks just like Qwen 3.6's: our grid
+reconstructs the BF16 rows slightly better than the vendor's on almost every
+tensor. The model level is noisier by about 2× on top-1 disagreement and 5× on
+median KL. The weight-level parity says this is not our encoder being worse; it
+is two comparable INT4 grids compounding through a 2B dense stack whose
+embedding and 130,560-row head are INT4 on both sides, with no INT8 anywhere to
+anchor a routing decision. The thresholds — drawn between a measured failure
+and a measured pass — still separate this healthy point from the §7b failure by
+a wide margin (0.718 vs 0.000 on top-1; 0.178 vs 13.5 on median KL). They stay
+where they are.
+
 ### Flash-Next
 
 Closing W2.1b does **not** by itself lift `ManifestReader.familiesWithoutRunner`.
