@@ -222,6 +222,18 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
 
+    /// Decode attribution for `MFERENCE_PHASES=1`. A dense family has no
+    /// expert I/O and one command buffer per token, so the only phases are
+    /// CPU encode + commit and the GPU's own execution span (from the command
+    /// buffer's `gpuStartTime` / `gpuEndTime`); everything else is the wait.
+    public struct PhaseStats: Sendable {
+        public var decodeSteps: Int = 0
+        public var encodeNanos: UInt64 = 0
+        public var gpuNanos: UInt64 = 0
+        public var waitNanos: UInt64 = 0
+    }
+    public private(set) var phaseStats = PhaseStats()
+
     /// Reference-parity capture for the sequential decode path. When set, the
     /// decode step blits, per layer, the attention-branch output (after
     /// `o_proj`), the MLP-branch output and the layer's residual output — the
@@ -1068,6 +1080,7 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
             }
         }
 
+        let stepStart = DispatchTime.now().uptimeNanoseconds
         if let paged = pagedKV {
             try paged.prepareSelections(position: position)
         }
@@ -1163,7 +1176,17 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
             }
         }
 
+        let encodeStart = DispatchTime.now().uptimeNanoseconds
         try finish(cb)
+        let finished = DispatchTime.now().uptimeNanoseconds
+        let gpuSeconds = max(0, cb.gpuEndTime - cb.gpuStartTime)
+        let gpuNanos = UInt64(gpuSeconds * 1e9)
+        let wall = finished - stepStart
+        phaseStats.decodeSteps += 1
+        phaseStats.encodeNanos += encodeStart - stepStart
+        phaseStats.gpuNanos += gpuNanos
+        phaseStats.waitNanos += wall > (encodeStart - stepStart) + gpuNanos
+            ? wall - (encodeStart - stepStart) - gpuNanos : 0
         if emitHead, !emitLogitsHead {
             lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
         }

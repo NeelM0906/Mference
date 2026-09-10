@@ -22,6 +22,20 @@ enum GTurboJSON {
         var routedExpert: Int
     }
 
+    /// The W2.1b provenance an original-repo install carries. The quantizer
+    /// nucleus is shared, so the qwen36 measurement covers every family that
+    /// has no control of its own; a family measured against its own vendor
+    /// control records that measurement instead (docs/QUANTIZER_QUALITY.md).
+    static func qualityGateStamp(for family: RepackModelFamily) -> String {
+        switch family {
+        case .minicpm5:
+            return "W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX"
+        case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
+             .qwen38flashnext:
+            return "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36"
+        }
+    }
+
     static func encodeManifest(plan: RepackPlan,
                                       modelID: String,
                                       sourceSnapshotHash: String,
@@ -277,7 +291,7 @@ enum GTurboJSON {
                 // family funnels through, which is why the stamp is not
                 // per-family. Method and numbers: docs/QUANTIZER_QUALITY.md.
                 "parityGate": "W2.1a-bit-parity",
-                "qualityGate": "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36",
+                "qualityGate": qualityGateStamp(for: arch.family),
             ]
             if plan.bitsOverrideCount > 0 {
                 quantized["overrideWeightBits"] = 8
