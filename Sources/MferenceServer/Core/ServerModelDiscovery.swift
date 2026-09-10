@@ -43,13 +43,15 @@ public enum ServerLibraryProbeResult: Equatable, Sendable {
 
 /// Completeness probe for one candidate directory.
 ///
-/// Mirrors `AppModelInstallationProbe` — manifest, family, arch baseline,
-/// `packed_experts/layout.json`, and a receipt bound to the manifest — with one
-/// deliberate omission: it does not compare `sourceSnapshotHash` against a
-/// pinned descriptor. The server has always taken an explicit `--model` path
-/// and never pinned a checkpoint, and a locally requantized repack
-/// (`qwen36-ourquant.gturbo`) carries a different snapshot hash while being
-/// exactly the thing an operator wants to serve.
+/// Checks manifest, family, arch baseline, `packed_experts/layout.json`, and a
+/// receipt bound to the manifest, with one deliberate omission: it does not
+/// compare `sourceSnapshotHash` against a pinned descriptor. The server has
+/// always taken an explicit `--model` path and never pinned a checkpoint, and a
+/// locally requantized repack (`qwen36-ourquant.gturbo`) carries a different
+/// snapshot hash while being exactly the thing an operator wants to serve.
+///
+/// Self-contained on purpose: this is the only install probe left, and it reads
+/// nothing but files the installer writes.
 public enum ServerLibraryProbe {
     /// `gatedFamilies` overrides the runtime's capability gate table; tests use
     /// it to exercise the not-runnable branch now that the table ships empty.
@@ -228,9 +230,10 @@ public enum ServerLibraryDiscovery {
     /// Environment equivalent, for a shell that cannot reach user defaults.
     public static let libraryRootEnvironmentKey = "MFERENCE_LIBRARY_ROOT"
 
-    /// The roots the Mac app scans, in the same order: the `Mference.libraryRoot`
-    /// default if set, the package checkout's `scratch/`, then
-    /// `~/Library/Application Support/Mference`.
+    /// The default library roots, in order: the `Mference.libraryRoot` default
+    /// if set, the package checkout's `scratch/`, then
+    /// `~/Library/Application Support/Mference` — the three places
+    /// `MferenceRepack` is pointed at in practice.
     public static func defaultRoots(
         userDefaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -270,7 +273,7 @@ public enum ServerLibraryDiscovery {
     /// Walks `roots` and returns the installs worth advertising.
     ///
     /// Each root contributes itself plus its immediate children, so a root may
-    /// be either a directory of `.gturbo` installs (what the Mac app scans) or a
+    /// be either a directory of `.gturbo` installs (what `scratch/` is) or a
     /// single install. `explicitModelDirectory` — a `--model` passed alongside
     /// `--library` — is probed too, so preloading a directory outside every root
     /// still advertises it.
@@ -378,17 +381,25 @@ public enum ServerLibraryDiscovery {
         return String(name.dropLast(".gturbo".count))
     }
 
-    /// Mirrors `AppModelLocation.packageRoot`: the server core cannot import
-    /// `MferenceAppCore`, so the walk is duplicated rather than shared.
+    /// Nearest ancestor that is this package's checkout: `Package.swift` beside
+    /// the two source trees the server is itself built from.
+    ///
+    /// The marker is deliberately not `Sources/MferenceApp`. The browser UI is
+    /// the frontend now and the Mac app is gone, so a checkout has to be
+    /// recognized — and its `scratch/` still scanned — with no app sources on
+    /// disk. Two markers rather than one keep an unrelated Swift package that
+    /// happens to be an ancestor from being taken for this checkout.
     private static func packageRoot(startingAt start: URL,
                                     fileExists: (String) -> Bool) -> URL? {
         var candidatePath = start.standardizedFileURL.path
         while true {
             let candidate = URL(fileURLWithPath: candidatePath, isDirectory: true)
             let package = candidate.appendingPathComponent("Package.swift").path
-            let appSources = candidate.appendingPathComponent(
-                "Sources/MferenceApp/Mac", isDirectory: true).path
-            if fileExists(package), fileExists(appSources) {
+            let runtimeSources = candidate.appendingPathComponent(
+                "Sources/Mference", isDirectory: true).path
+            let serverSources = candidate.appendingPathComponent(
+                "Sources/MferenceServer", isDirectory: true).path
+            if fileExists(package), fileExists(runtimeSources), fileExists(serverSources) {
                 return candidate
             }
             let parentPath = (candidatePath as NSString).deletingLastPathComponent

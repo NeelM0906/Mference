@@ -6,12 +6,16 @@ Tailscale IPv4 address with `--bind tailnet`. It has no application-level
 authentication or TLS; do not expose it through a wildcard interface, proxy,
 or tunnel.
 
-The opt-in `--library` mode serves every installed model from this one process,
-listing them all in `/v1/models` and swapping the resident model in place when a
-request names a different one. It changes nothing about the mode described here,
-which is what runs whenever `--library` is absent. See
-[Open WebUI as an Mference frontend](OPEN_WEBUI.md) for library mode, its model
-identifiers, the cost of a swap, and the browser frontend it exists for.
+This document is the API: one model per process, named by `--model`. If you want
+the **user interface** — a browser, a model picker, chats that persist — start
+at [The Mference UI (Open WebUI)](OPEN_WEBUI.md) and run `./mference-ui.sh`,
+which does everything below for you.
+
+The `--library` mode that UI runs on serves every installed model from this one
+process, listing them all in `/v1/models` and swapping the resident model in
+place when a request names a different one. It changes nothing about the mode
+described here, which is what runs whenever `--library` is absent. The UI guide
+covers library mode, its model identifiers, and the cost of a swap.
 
 ## Start the server
 

@@ -16,23 +16,34 @@ public struct ServerArguments: Equatable, Sendable {
     /// nil when `--library` was absent, which keeps single-model mode exactly
     /// as it was.
     public let library: ServerLibraryOption?
+    /// `--list-models`: run discovery, print what library mode would serve, and
+    /// exit without binding a port or loading a model.
+    public let listModels: Bool
 
     public static let usage = """
     usage: MferenceServer --model <completed .gturbo directory> [options]
            MferenceServer --library [dir] [options]
+           MferenceServer --library [dir] --list-models
 
       --model <dir>          Model directory. Required unless --library is
                              given, where it preloads one install instead.
       --library [dir]        Serve every completed install found under <dir>,
-                             repeatable. With no value, scans the roots the Mac
-                             app scans: the Mference.libraryRoot default (or
+                             repeatable. With no value, scans the default
+                             roots: the Mference.libraryRoot default (or
                              MFERENCE_LIBRARY_ROOT), the package checkout's
                              scratch/, and
                              ~/Library/Application Support/Mference.
+                             Starting with nothing installed is fine: the
+                             model list is then empty.
                              GET /v1/models lists them all; a request naming a
                              model that is not resident unloads the current one
                              and loads it in place. One model is loaded at a
                              time and no second process is ever started.
+      --list-models          With --library: print the installs discovery found
+                             — identifier, family, installed bytes, and path —
+                             then exit 0 without binding a port or loading a
+                             model. This is what `./mference-ui.sh models`
+                             reports.
       --port <1...65535>     Listening port (default 8080).
       --bind <mode>          loopback or tailnet (default loopback). tailnet
                              binds only the machine's Tailscale IPv4 address
@@ -59,10 +70,16 @@ public struct ServerArguments: Equatable, Sendable {
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
         var libraryRoots: [String] = []
         var wantsDefaultLibraryRoots = false
+        var listModels = false
         var index = 0
         while index < input.count {
             let flag = input[index]
             if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
+            if flag == "--list-models" {
+                listModels = true
+                index += 1
+                continue
+            }
             // The only flag whose value is optional: bare `--library` means the
             // default roots, so a following `--flag` or the end of the argument
             // list terminates it rather than being eaten as a path.
@@ -132,6 +149,12 @@ public struct ServerArguments: Equatable, Sendable {
             library = nil
         }
         if library == nil {
+            // Listing is a property of the library, so there is nothing to list
+            // without one; single-model mode already names its model on the
+            // command line.
+            guard !listModels else {
+                throw ServerArgumentError.invalid("--list-models requires --library")
+            }
             guard model != nil else {
                 throw ServerArgumentError.invalid("--model is required")
             }
@@ -147,12 +170,13 @@ public struct ServerArguments: Equatable, Sendable {
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
-                               library: library)
+                               library: library,
+                               listModels: listModels)
     }
 }
 
-/// How `--library` was requested. Explicit roots and the Mac app's default
-/// roots combine: `--library a --library` scans `a` and the defaults.
+/// How `--library` was requested. Explicit roots and the default roots
+/// combine: `--library a --library` scans `a` and the defaults.
 public struct ServerLibraryOption: Equatable, Sendable {
     public let roots: [String]
     public let includesDefaultRoots: Bool
