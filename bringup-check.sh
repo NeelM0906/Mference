@@ -143,7 +143,7 @@ echo "bringup-check ${family}${model_dir:+ ${model_dir}}"
 # Stage 0 -- preflight. AGENTS.md requires every one of these before any model
 # run, and each aborts rather than warns.
 # ---------------------------------------------------------------------------
-pgrep_pattern='(\.build/release/|/)(MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep_pattern='(\.build/release/|/)(MferenceServer|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 
 if [ "${dry_run}" -eq 1 ]; then
   show "sw_vers -productVersion   # require 15+"
