@@ -154,7 +154,7 @@ class Repo:
         last = info["shape"][-1]
         row_bytes = last * esz
         start = data_base + info["data_offsets"][0] + row_start * row_bytes
-        out = os.path.join(self.cache, f"{tag}.bin")
+        out = os.path.join(self.cache, f"{self.tag}.{tag}.bin")
         if not os.path.exists(out):
             curl(f"{self.base}/{shard}", out,
                  rng=f"{start}-{start + row_count * row_bytes - 1}")
@@ -459,7 +459,8 @@ def open_repos(args):
     ctrl_spec = args.control or fam["control"]
     cache = args.cache
     os.makedirs(cache, exist_ok=True)
-    # Cache tags carry the repo so two families never share a header file.
+    # Cache tags carry the repo so two families, or two --orig/--control
+    # overrides, never share an index, header or row-slice file.
     def tag(kind, spec):
         return kind + "_" + re.sub(r"[^A-Za-z0-9]+", "_", spec)[:80]
     orig = Repo(resolve_url(orig_spec), cache, "orig" if args.family == "qwen36"
