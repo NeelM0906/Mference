@@ -108,7 +108,10 @@ the install command if `uv` is missing). Behind it, `MferenceServer` runs in
 library mode: it lists every installed model it finds in the checkout's
 `scratch/`, in `~/Library/Application Support/Mference`, or under the
 `Mference.libraryRoot` default, and swaps the loaded model in-process when
-you pick a different one. Exactly one model is ever resident. Chats, prompts,
+you pick a different one. Exactly one model is ever resident. The launcher also
+registers each model in Open WebUI with its builtin tool schemas switched off,
+since Open WebUI otherwise attaches them to every request and a one-line
+question costs thousands of prompt tokens. Chats, prompts,
 documents, and settings live in Open WebUI's local data directory; both
 processes bind to loopback only and Open WebUI runs with authentication off,
 so do not expose either port. Details, model switching cost, and

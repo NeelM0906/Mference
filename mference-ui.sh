@@ -134,6 +134,7 @@ webui_environment=(
   "ENABLE_AUTOCOMPLETE_GENERATION=false"
   "ENABLE_RETRIEVAL_QUERY_GENERATION=false"
   "ENABLE_SEARCH_QUERY_GENERATION=false"
+  "ENABLE_EVALUATION_ARENA_MODELS=false"
   "DATA_DIR=$data_directory"
 )
 
@@ -294,6 +295,7 @@ cmd_run() {
     echo "would wait:  http://127.0.0.1:$server_port/health"
     echo "would read:  http://127.0.0.1:$server_port/v1/models"
     echo "would run:   $(open_webui_binary) serve --host 127.0.0.1 --port $webui_port"
+    echo "would run:   Scripts/openwebui-configure-models.py --webui http://127.0.0.1:$webui_port  (builtin tools off per Mference model)"
     echo "with env:"
     local entry
     for entry in "${webui_environment[@]}"; do
@@ -322,6 +324,7 @@ cmd_run() {
     "$webui_binary" serve --host 127.0.0.1 --port "$webui_port" &
   webui_pid=$!
   wait_for_webui
+  configure_models
   open "http://127.0.0.1:$webui_port" || note "open the UI yourself: http://127.0.0.1:$webui_port"
 
   note "Control-C stops both."
@@ -349,6 +352,23 @@ stop_children() {
       wait "$pid" 2>/dev/null || true
     fi
   done
+}
+
+configure_models() {
+  # Open WebUI 0.11 attaches its builtin tool schemas to every request by
+  # default (native function calling), which the server must render into the
+  # prompt: a 27-token question became 5,445 tokens and a 45-second prefill.
+  # There is no environment variable for it, only a per-model capability, so
+  # register every Mference model with builtin tools off on every launch —
+  # idempotent, and it picks up newly installed models. Non-fatal: chat works
+  # without it, just slowly, and the script says what failed.
+  local python="$(dirname "$webui_binary")/python"
+  [[ -x "$python" ]] || python="python3"
+  if ! "$python" "$repository_root/Scripts/openwebui-configure-models.py" \
+      --webui "http://127.0.0.1:$webui_port"; then
+    note "warning: could not switch builtin tools off for the Mference models;"
+    note "         answers will be slow until you uncheck 'Builtin Tools' per model in Admin > Models."
+  fi
 }
 
 wait_for_server() {

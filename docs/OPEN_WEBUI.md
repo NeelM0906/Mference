@@ -137,6 +137,32 @@ single-model mode `/health` is unchanged: `{"status":"ok"}`.
 Switching back and forth costs a full reload each way. Keep a conversation on
 one model when you can, and use `--model` to preload the one you start with.
 
+## Builtin tools are off for Mference models
+
+Open WebUI 0.11 defaults every model to "native function calling" and attaches
+its own builtin tool schemas — web search, code interpreter, memory, notes,
+time, ask-user and more — to every chat request. `MferenceServer` does what an
+OpenAI-compatible server must and renders those tools into the prompt. Measured
+on this host with Gemma 4, the same one-line question cost 27 prompt tokens
+sent to the server directly and 5,445 tokens sent through the UI, turning a
+2-second answer into a 45-second prefill.
+
+Open WebUI 0.11.3 has no environment variable for this; it is a per-model
+capability. So the launcher runs
+`Scripts/openwebui-configure-models.py` after Open WebUI is up, on every
+launch: it signs in with the no-auth admin session, lists the models the
+Mference server advertises, and registers each one with the `Builtin Tools`
+capability unchecked. The step is idempotent, picks up newly installed models,
+and is non-fatal — if it cannot reach Open WebUI it says so and chat still
+works, just slowly. After the fix the same question costs 17 prompt tokens and
+answers in 1.2 s.
+
+To use Open WebUI's own web search or code interpreter with a model, re-enable
+its `Builtin Tools` capability in **Admin > Models**; the launcher only sets
+the capability when the model has no entry yet or the flag is not already off,
+so it will not undo a deliberate change. If you turn authentication on, pass
+the admin API token to the script with `OPEN_WEBUI_TOKEN` (or `--token`).
+
 ## Where your chats live
 
 Open WebUI keeps its database, uploads, and settings under `DATA_DIR`, which the
