@@ -28,7 +28,7 @@
 </p>
 
 <p align="center">
-  <strong>Qwen3.8-Flash-Next, a 180B-parameter MoE, generating coherent text from 2.4 GB of process memory</strong><br>
+  <strong>Qwen3.8-Flash-Next, a 180B-parameter MoE: 11–12 tok/s from 2.4 GB of process memory</strong><br>
   <strong>Qwen 3.6 on a 24 GB M5: 23.5–29.3 tok/s decode · on a 256 GB M3 Ultra: 36.1–42.2 tok/s</strong><br>
   <strong>Inkling-Small 276B on a 24 GB M5: 3.0–3.7 tok/s · Qwen 3.8 27B dense on an M3 Ultra: 38.4–39.4 tok/s</strong>
 </p>
@@ -76,12 +76,13 @@ Mference currently runs seven pinned instruction checkpoints:
   top-10 routing, gated DeltaNet plus sparse-indexed full attention,
   hyper-connections, and a hashed n-gram embedding table that is 102 GB of
   the checkpoint and is read by row lookup. Installed from the vendor's BF16
-  repo (359 GB streamed, ~175 GB on disk, quantized in flight). First light on
-  a 256 GB M3 Ultra: **2.39 GB peak process memory**, 11–12 tok/s decode,
-  and an exact passkey retrieval from a 3,247-token prompt, beyond the
-  indexer's 2,048-token budget. Runs from the CLI, the server, and the UI.
-  Community-protocol numbers are pending, and prefill is still sequential.
-  See the [bring-up dossier](docs/families/QWEN38_FLASH_NEXT.md).
+  repo (359 GB streamed, ~175 GB on disk, quantized in flight; routers at
+  INT8 after a measured routing check). Under the frozen protocol on a 256 GB
+  M3 Ultra: **11.8 / 11.7 / 11.1 tok/s decode at ~2.36 GB peak process
+  memory**, byte-identical across runs, and an exact passkey retrieval from a
+  3,247-token prompt, beyond the indexer's 2,048-token budget. Runs from the
+  CLI, the server, and the UI. Prefill is still sequential (~10 tok/s). See
+  the [bring-up dossier](docs/families/QWEN38_FLASH_NEXT.md).
 
 The runtime, streaming installer, CLI, and loopback OpenAI-compatible server
 are written in Swift and Metal; the UI is Open WebUI, driven through that
@@ -144,7 +145,7 @@ The server alone, for other OpenAI-compatible clients, is documented in
 | --- | --- |
 | Models | Gemma 4 26B-A4B IT · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B (new) |
 | Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts; vendor BF16 quantized in flight to INT4/INT8 group 64 for Qwen 3.6 and Flash-Next |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **2.39 GB (Flash-Next)** |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB (Flash-Next)** |
 | Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) · ~15 GB (Qwen 3.8) · ~175 GB (Flash-Next) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
@@ -154,7 +155,7 @@ The server alone, for other OpenAI-compatible clients, is documented in
 | Measured decode, Inkling-Small | 3.0–3.7 tok/s (24 GB M5, native top-6 path) · 5.3–7.1 tok/s (256 GB M3 Ultra) at a ~8.95 GB peak footprint |
 | Measured, Maple Preview | Exact head: 18.9–24.6 tok/s decode, 25.1–44.9 tok/s prefill, and 491–1,211 MiB peak process footprint on 128-8192 context (16 GB M4) · 38.5 tok/s decode (M3 Ultra) |
 | Measured, Qwen 3.8 27B | 15.0 tok/s decode (MTP speculative, byte-identical; 7.9 plain) · ~60 tok/s prefill (24 GB M5); mlx-vlm on the same checkpoint: 6.41 decode / 40.5 prefill · 38.4–39.4 tok/s plain decode (M3 Ultra, where MTP gives no gain) · passkey exact at 10.6k tokens through the paged KV + SSD tier |
-| Measured, Qwen3.8-Flash-Next | First light (M3 Ultra, not yet under the frozen protocol): 11.6 tok/s decode at 2.39 GB peak RSS; 12.3 tok/s at 3,247 tokens of context with the needle retrieved exactly; prefill sequential and unoptimized |
+| Measured, Qwen3.8-Flash-Next | Frozen protocol (256 GB M3 Ultra, INT8-router install): 11.81 / 11.71 / 11.11 tok/s decode on the short / medium / long cases at 2,355–2,367 MiB peak RSS, 9/9 runs to end of turn, outputs byte-identical across runs · 12.3 tok/s at 3,247 tokens of context with the needle retrieved exactly · prefill sequential, ~10 tok/s marginal |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed

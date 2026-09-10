@@ -544,9 +544,8 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       Neither caveat has been checked against an *independent conversion of
       Flash-Next*, because none exists — that remains true, and those are
       exactly the two kinds of defect W2.1b caught on Qwen 3.6 (§7).
-- [ ] **INT8 routers: fix built, install pending.** The adverse caveat above is
-      answered in code as of 2026-09-10; what is outstanding is the reinstall
-      that produces the bytes.
+- [x] **INT8 routers: fix built, installed and measured (2026-09-10).** The
+      adverse caveat above is answered in code and in bytes.
       - *The measured deficit.* The shipped install's INT4 g64
         `.mlp.gate.weight` (`[512, 2560]`, top-10 of 512) and
         `.mlp.shared_expert_gate.weight` change **~14 % of the selected expert
@@ -565,14 +564,27 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         loading unchanged**. No new Metal: the INT8 branch of `FlashNextMatVec`
         dispatches the shipped `router_gemv_gemma4_r4`, which `RouterWideTopK10Tests`
         already gates against a CPU reference at exactly this geometry.
-      - *Install pending.* See
-        [docs/QUANTIZER_QUALITY.md §6](../QUANTIZER_QUALITY.md#6-the-blocker-and-how-it-was-cleared)
-        for the shared policy, and the command below. Expected size
-        **+32,175,360 bytes** over the 175,173,302,167-byte INT4 install
-        (49 routers x 655,360 + 49 scalar gates x 1,280; the BF16 scale and bias
-        companions are one per group of 64 at either width, so only the weight
-        bytes move), i.e. ~175,205,477,527 bytes. Nothing else in the layout
-        changes: same 57 files, same expert stride, same PLE pool.
+      - *The install.* `MferenceRepack --model qwen38flashnext --output
+        scratch/qwen38flashnext-r8.gturbo` on 2026-09-10: 360 GB streamed and
+        quantized in flight in **2 h 44 m**, no throttling; `--verify-install`
+        green over **57 files / 175,205,477,629 bytes** — 102 bytes off the
+        predicted 175,205,477,527 (manifest text), the +32,175,360 weight bytes
+        exactly as derived (49 routers x 655,360 + 49 scalar gates x 1,280).
+        The manifest reads `quant.router.weightBits 8` and
+        `quantizedAtInstall.overriddenTensorCount 98`. The uniform-INT4 install
+        is kept alongside as the "before" side of every comparison. Shared
+        policy: [docs/QUANTIZER_QUALITY.md §6](../QUANTIZER_QUALITY.md#6-the-blocker-and-how-it-was-cleared).
+      - *The measurement, repeated on the new bytes* (same 12 layers, 4,096
+        Gaussian probes, seed; script taught to decode either width from the
+        resident index the way the runtime does): **24/24 tensors bit-identical
+        to the re-encoded BF16 source**; router relative Frobenius error
+        **0.0066** (INT4 install 0.1128, control 0.0094); exact top-10 set
+        agreement with BF16 **0.896** (INT4 0.132, control 0.855); top-1
+        **0.986** (0.774 / 0.977); **0.10 experts swapped per token** (1.40 /
+        0.146); KL over the selected set 0.0000 mean / 0.0002 p99. The routing
+        deficit is closed and the routers are now more faithful than the
+        control's, consistent with the Qwen 3.6 INT8 result. Full table:
+        [the experiment note](../experiments/2026-09-10-flashnext-router-int4-check.md#result-on-the-int8-router-install-2026-09-10-qwen38flashnext-r8gturbo).
 
       ```bash
       # ~360 GB of streaming reads; budget the ~2 h 35 m the first install took.
@@ -667,26 +679,75 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         caveats carried into that decision — uniform INT4 (routers included,
         where the Qwen 3.6 control uses INT8 routers) and no RMSNorm bias fold.
         Both were measured the same day; see the gate-lift item above for the
-        results. The router one is adverse and recommends an INT8 reinstall of
-        the two gating tensors — now built, install pending; the norm-fold one
-        came back clean.
+        results. The router one was adverse and led to the INT8 reinstall of
+        the two gating tensors, now installed and re-measured (agreement 0.896
+        vs 0.132); the norm-fold one came back clean.
       - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
         model** (~75× the resident set), the most extreme expression of the
         working-set thesis in the project.
-- [ ] **Benchmarks — pending.** Decode tok/s, prefill and RSS on the ladder,
-      measured per [docs/COMMUNITY_BENCHMARKS.md](../COMMUNITY_BENCHMARKS.md)
-      and recorded in [docs/BENCHMARKS.md](../BENCHMARKS.md). Owned by the
-      benchmark pass that follows the gate lift; the first-light numbers above
-      are a measurement harness read, not a protocol run.
-- [ ] **`bringup-check.sh qwen38flashnext` green ×3 — pending.** The family is
-      registered in the script (suite filter `FlashNext`); the three green runs
-      and the community protocol page are the benchmark owner's to fill in.
-- [ ] **`MFERENCE_PHASES=1` phase attribution — pending.** The runner now
-      carries expert-I/O, indexer CPU top-k, PLE row-fetch and GPU busy/span
-      counters, and `MferenceCLI` prints them. The numbers they produce, and the
-      consolidation work they are meant to direct (the ~60 CPU round trips per
-      token, the unoverlapped expert reads, sequential prefill), are pending
-      that same pass.
+- [x] **Community protocol — measured 2026-09-10 on the INT8-router install.**
+      `./run-benchmark.sh qwen38flashnext scratch/qwen38flashnext-r8.gturbo 3`
+      then `./summarize-benchmarks.sh qwen38flashnext`, exactly per
+      [docs/COMMUNITY_BENCHMARKS.md](../COMMUNITY_BENCHMARKS.md): the three
+      frozen `real-generation-v1` cases, one discarded warmup each, three
+      fresh-process measured runs each, `--max-new 1024 --max-context 4096
+      --temperature 0.2 --top-k 64 --top-p 0.95`, seeds 20260721/22/23.
+      **Every footer `stop=endOfTurn` (9/9)** — the closed `<think>` block the
+      ChatML render emits means this family needs none of the Qwen 3.8 / Maple
+      deviation notation. Host: Mac Studio `Mac15,14`, Apple M3 Ultra (24P+8E),
+      256 GB, macOS 26.3 (25D125), Swift 6.2.4, MSL 3.2 path, release build at
+      `9ee8502` on the `neel/ui-launch` integration branch.
+
+      | Case | Prompt / generated | Prefill | Decode median | Range | Peak RSS |
+      | --- | --- | ---: | ---: | ---: | ---: |
+      | short-explanation | 62 / 480 | 30.85 s | **11.81 tok/s** | 11.79–11.85 | 2,355 MiB |
+      | medium-review | 426 / 598 | 61.53 s | **11.71 tok/s** | 11.68–11.72 | 2,358 MiB |
+      | long-synthesis | 2,940 / 593 | 281.46 s | **11.11 tok/s** | 11.08–11.12 | 2,367 MiB |
+
+      Read as the protocol intends: decode holds within 6 % from a 62-token to
+      a 2,940-token context, at **~2.36 GB peak RSS for a 180B-parameter
+      model** in every case. All three cases produced **byte-identical output
+      across their three runs**, and every output was read: the wetlands
+      explanation names frictional drag, sediment accretion and the inundation
+      / width limits; the code review finds the shared-slot race, the unbounded
+      buffer, the poisoned-on-failure key and the missing deduplication, then
+      proposes fixes; the long synthesis restates the TurboFieldfare design
+      accurately and ends with sensible methodology advice. The prefill column
+      is the CLI's raw `prefill=` figure and, as for Inkling and DeepSeek on
+      this host, includes the fresh process's first-touch verification of the
+      install (~26 s for 175 GB, see the ladder smoke's 5-token prompt at
+      26.0–26.1 s); the marginal cost is ~10 tok/s of **sequential, unoptimized
+      prefill**, the family's one open performance item.
+- [x] **`bringup-check.sh qwen38flashnext` — PASS** on the INT8-router install
+      (2026-09-10): stage 0 preflight; stage 1 toy suite 96 tests / 23 suites
+      green (2 known issues: the toy parity checkpoint is not present on this
+      host); stage 2 install verify; stage 3 ladder smoke **byte-identical at
+      16 / 32 / auto slots** (12.7 / 13.3 / 12.4 tok/s on a 24-token probe);
+      stage 4 protocol scaffold. The full package suite ran green on the merged
+      tree (1,067 tests / 191 suites, plus both CI runners); the gate's "×3
+      consecutive" count is recorded in the PR.
+- [x] **`MFERENCE_PHASES=1` phase attribution — measured 2026-09-10** on the
+      INT8-router install, short-explanation case, protocol settings, seed
+      20260721 (footer `stop=endOfTurn prefill=62tok/31.43s new=480tok
+      decode=42.42s tok/s=11.315`):
+
+      | Phase (480 decode tokens) | Time | Share of decode |
+      | --- | ---: | ---: |
+      | expert I/O, all exposed | 11,415 ms | 27 % |
+      | indexer CPU top-k | 54 ms | 0.1 % |
+      | PLE row fetch | 22 ms | 0.05 % |
+      | GPU busy | 11,297 ms | 27 % |
+      | GPU span | 42,417 ms | — |
+      | GPU gap (idle inside the span) | 31,121 ms | 73 % |
+      | unaccounted (CPU encode + GPU waits) | 30,931 ms | 73 % |
+
+      This is the baseline every optimization A/B is judged against. It says
+      the two cheap-sounding CPU paths (indexer top-k, PLE row fetch) cost
+      nothing, that expert reads are fully exposed rather than overlapped with
+      compute, and that the GPU is idle for nearly three quarters of the decode
+      span — the ~60 CPU round trips per token in the layer loop. Consolidating
+      those (batching the dense work per layer, overlapping expert reads as
+      Inkling does, then pipelined prefill) is the follow-on performance PR.
 
 ## Reproduction of this dossier's facts
 
