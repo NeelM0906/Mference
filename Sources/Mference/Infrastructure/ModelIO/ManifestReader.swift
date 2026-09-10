@@ -752,6 +752,18 @@ public enum ManifestReader {
         let arch: Arch
     }
 
+    /// The axes a raw `arch.family` string is missing a runner for, or nil when
+    /// the runtime can execute it.
+    ///
+    /// `peekFamily` refuses a gated family by throwing, which is right for a
+    /// load but not for a caller enumerating a library: it has to tell "this
+    /// install has no runner yet" from "this install is broken" without
+    /// matching on error text. `familiesWithoutRunner` stays the authority;
+    /// this only reads it.
+    public static func missingRunnerAxes(forRawFamily raw: String) -> [String]? {
+        familiesWithoutRunner[raw]
+    }
+
     /// Families `MferenceRepack` can install but `RealForwardRunner` cannot
     /// execute, mapped to the axes whose kernels are missing.
     ///
