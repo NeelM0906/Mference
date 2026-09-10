@@ -58,6 +58,9 @@ default.
 
 Follow the [server guide](docs/OPENAI_SERVER.md) for launch commands, health
 checks, client setup, prompt reuse, tool loops, and supported API behavior.
+Its opt-in `--library` mode serves every installed model from that one process,
+swapping the resident model in place; see the
+[Open WebUI guide](docs/OPEN_WEBUI.md).
 Apply the model-process checks below first; never start a second model process
 or terminate an existing one.
 

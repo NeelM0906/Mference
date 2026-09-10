@@ -19,6 +19,7 @@
 <p align="center">
   <a href="#try-it">Quick start</a> ·
   <a href="docs/OPENAI_SERVER.md">Local server</a> ·
+  <a href="docs/OPEN_WEBUI.md">Open WebUI</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
   <a href="docs/COMMUNITY_BENCHMARKS.md">Contribute results</a> ·
   <a href="docs/SYSTEM_DESIGN.md">How it works</a> ·
@@ -169,6 +170,11 @@ Only one model-owning product should run at a time. The server selects the
 installed model's native dialect automatically, including Gemma's chat format,
 Qwen's ChatML template with `<tool_call>` function calls, and Maple's ChatML
 template with hidden reasoning.
+
+For a browser frontend, `MferenceServer --library` serves every installed model
+from one process and swaps the resident one on request, which makes
+[Open WebUI](docs/OPEN_WEBUI.md) a full model picker over the local library.
+`Scripts/openwebui.sh` starts both on loopback.
 
 ### Requirements
 
