@@ -118,6 +118,13 @@ CASES = [
         ], TOOLS, {"enable_thinking": True}),
 ]
 
+# The three frozen community-protocol prompts, so the byte-exact check also
+# covers the real inputs the benchmark and the phases snapshot are run with.
+_bench = Path(__file__).resolve().parents[2] / "docs/benchmark-prompts/real-generation-v1"
+for _case in ["short-explanation", "medium-review", "long-synthesis"]:
+    CASES.append((f"protocol_{_case}", json.loads((_bench / f"{_case}.json").read_text()),
+                  None, {"enable_thinking": True}))
+
 renders = []
 for name, messages, tools, kwargs in CASES:
     text = tok.apply_chat_template(messages, tools=tools, add_generation_prompt=True,

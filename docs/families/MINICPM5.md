@@ -422,25 +422,118 @@ measured. An independent HF-reference greedy decode of the real checkpoint was
 **not** run: the BF16 shard is streamed at install and never staged, and
 re-downloading 5 GB for a diagnostic is exactly what AGENTS.md forbids.
 
+## Server round trip (2026-09-10)
+
+`MferenceServer --model scratch/minicpm5.gturbo --port 8095 --max-context 8192`
+(release build at `806b046`), one server process, requests with
+`temperature 0.2`, `seed 20260721`, `max_completion_tokens 1024`:
+
+1. `GET /v1/models` → `minicpm5-2b-int4g64`.
+2. A `tools` request ("What is the weather in Paris right now? Use the tool.",
+   `get_weather` schema) → `finish_reason: "tool_calls"`, one call parsed from
+   the model's XML: `get_weather` with arguments `{"city":"Paris"}`;
+   232 completion tokens (the think block included), content `"\n\n"`.
+3. The same history plus the assistant call and a `role: tool` result
+   (`{"temp_c": 21, "sky": "clear"}`) → `finish_reason: "stop"`, content
+   "The current weather in Paris is 21°C with a clear sky."
+4. A streamed request with `stream_options.include_usage` → 6 SSE events, the
+   last content chunk followed by a `finish_reason: "stop"` chunk, the usage
+   chunk, and `[DONE]`; the generation ended on `<|im_end|>` (an EOS id).
+
+### Install determinism and the quality stamp
+
+The install was produced three times on this host (first install, then twice
+with `--overwrite` while adding the family-specific `qualityGate` stamp).
+`model_weights.bin` hashed to the same SHA-256 each time
+(`ed1e9f57…eb41aa`, 1,415,974,912 bytes): quantize-in-flight is
+byte-deterministic. The shipped manifest now carries
+`quantizedAtInstall.qualityGate =
+W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX` and verifies at
+8 files / 1,425,981,882 bytes. A byte comparison of every BF16 passthrough
+tensor against the control install (85 norm vectors) found all 85 identical,
+and the two installs' resident indexes carry the same 381 names.
+
 ## Measured results
 
-Host: recorded with the first measurement. Protocol:
+Host: MacBook Pro (`Mac17,2`), Apple M5 (10 cores), 24 GB, macOS 26.5,
+Swift 6.3.3, Mference commit `b70ac36` (release build). Protocol:
 [`COMMUNITY_BENCHMARKS.md`](../COMMUNITY_BENCHMARKS.md), 3 measured
-repetitions per case after one discarded warmup, each run a fresh process.
+repetitions per case after one discarded warmup, each run a fresh process,
+`--max-new 1024 --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95`
+with the frozen seeds. Medians across the measured repetitions; peak RSS is
+the maximum.
 
 | Case | Prompt / generated | Prefill | Decode | Range | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: |
-| short-explanation | | | | | |
-| medium-review | | | | | |
-| long-synthesis | | | | | |
+| short-explanation | 57 / 761, `stop=endOfTurn` 3/3 | 0.20 s | **65.56 tok/s** | 65.50–65.80 | 123 MiB (summarizer's figure) |
+| medium-review | 431 / 1024, **`stop=maxTokens`** | 0.74 s | (rejected by the protocol) | — | — |
+| long-synthesis | 2929 / —, not reached | — | (aborted after medium-review) | — | — |
 
-Decode rate excludes model installation, model loading, and prompt prefill.
+**Deviation, stated as Qwen 3.8 did in
+[`BENCHMARKS_M3_ULTRA.md`](../BENCHMARKS_M3_ULTRA.md).** The chat template
+opens a `<think>` block (the family default, see "Tokenizer and chat
+template"), and for medium-review the model does not leave it within the
+protocol's 1,024 tokens, so `run-benchmark.sh` correctly rejects that warmup
+and aborts (`ABORT: warmup medium-review did not reach a natural end of turn`,
+footer `stop=maxTokens prefill=431tok/0.74s new=1024tok decode=18.28s
+tok/s=56.011`). The short-explanation row above is the protocol proper, run
+alone (`BENCH_CASES=short-explanation ./run-benchmark.sh minicpm5 … 3`). The
+other two cases were then measured **outside the protocol** with only the
+token cap changed — identical prompts, sampling, seeds, fresh processes, one
+discarded warmup, `--max-new 4096 --max-context 8192`:
+
+| Case (deviation) | Prompt / generated | Prefill | Decode | Range | Stop |
+| --- | --- | ---: | ---: | ---: | --- |
+| medium-review | 431 / 4096 | 0.74 s (583 tok/s) | 37.63 tok/s | 37.63–37.81 | **`stop=maxTokens` in all 3 + warmup** — still inside the think block at 4,096 tokens |
+| long-synthesis | 2929 / 573 | 11.96 s (245 tok/s) | 34.72 tok/s | 34.72–34.82 | `stop=endOfTurn` 3/3 + warmup |
+
+The medium-review think block at temperature 0.2 does not terminate within
+4,096 tokens on this host; the output is not reported as a speed result. It is
+not a rendering defect: HF `apply_chat_template` and the Swift dialect produce
+the same 431 token ids for that prompt (57 and 2,929 for the other two), and
+the three protocol renders are now part of the byte-exact fixture set. It is,
+however, a one-newline-sensitive behaviour: the same prompt fed as a raw
+completion with the render's trailing `\n` after `<think>` stripped (a
+`$(cat …)` artefact, 430 tokens) reasoned for 820 tokens, closed the think
+block, and wrote a coherent review at the same seed
+(`stop=endOfTurn prefill=430tok/0.74s new=820tok decode=13.99s tok/s=58.632`).
+The exact template is what ships; the sensitivity is recorded, not worked
+around. Rows
+here are not comparable with [`BENCHMARKS.md`](../BENCHMARKS.md) unless the
+case, prompt and generated token counts, settings and stop reason all match.
 
 ### Phases attribution
 
+One `MFERENCE_PHASES=1` run of the short-explanation case at the protocol
+settings (release CLI, commit `806b046`+docs; `stop=endOfTurn`, 761 tokens,
+`decode=11.49s tok/s=66.239`), the baseline later optimization A/Bs are judged
+against. A dense family has no expert I/O; one command buffer per token.
+
 | Phase | ms/token | Share |
 |---|---:|---:|
-| (not yet measured) | | |
+| GPU execution (command-buffer `gpuStartTime`→`gpuEndTime`) | 13.89 | 91.9 % |
+| CPU encode + commit | 0.15 | 1.0 % |
+| wait / readback (fused greedy token) | 0.19 | 1.2 % |
+| unaccounted (loop, sampling, detokenize) | 0.89 | 5.9 % |
+| **decode step** | **15.12** | 100 % |
+
+Decode is GPU-bound at 92 %; the 1.42 GB of INT4 weights read per token put the
+achieved bandwidth at ~102 GB/s on this M5.
+
+### Family gate (`FAMILY_GATE.md`)
+
+| Step | Result |
+|---|---|
+| 1 full suite ×3 | see "Suite runs" below |
+| 2 release build | clean (all products) |
+| 3 static checks | `git diff --check` clean; markdown link checker clean under `LC_ALL=en_US.UTF-8` |
+| 4 pinned install + smoke | `minicpm5` from `cd199ce3` with strict verification; raw and chat CLI smoke with normal footers (first light above) |
+| 5 protocol page | short-explanation 3/3 `stop=endOfTurn`; medium-review and long-synthesis recorded as the stated deviation |
+| 6 phases snapshot | above |
+| 7 optional features | none; nothing approximate on the default path |
+| 8 provenance | `THIRD_PARTY_NOTICES.md` updated; no reference code imported; no credentials or private paths in fixtures |
+| 9 merge-compatibility | note below |
+| `bringup-check.sh minicpm5 scratch/minicpm5.gturbo` | **PASS, 0 stages skipped** (preflight; toy suite `[Mm]iniCPM5`; install verify 8 files / 1,425,981,882 bytes; ladder smoke 16 / 32 / auto byte-identical at 85.9 / 85.4 / 83.3 tok/s; protocol scaffold) — `benchmark-results/minicpm5-bringup/bringup-report.txt` |
 
 ## Known limits
 
