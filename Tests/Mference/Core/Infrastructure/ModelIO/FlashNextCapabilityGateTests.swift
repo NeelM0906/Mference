@@ -175,7 +175,7 @@ import Testing
     @Test func shippedFamiliesAreNotGated() {
         let shipped: [ModelFamily] = [
             .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-            .qwen38flashnext,
+            .qwen38flashnext, .minicpm5,
         ]
         for family in shipped {
             #expect(ManifestReader.familiesWithoutRunner[family.rawValue] == nil,

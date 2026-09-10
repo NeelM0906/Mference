@@ -410,6 +410,55 @@ struct OpenAIValidationTests {
         #expect(validated.messages.first?.content == "guidance")
     }
 
+    /// MiniCPM has no `developer` role either (its template renders only
+    /// system / user / assistant / tool), and its XML tool calls carry
+    /// free-form parameter names, so the ChatML rules apply verbatim.
+    @Test func developerGuidanceBecomesSystemForMiniCPM() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[
+          {"role":"system","content":"system"},
+          {"role":"developer","content":"developer"},
+          {"role":"user","content":"hello"}
+        ]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .minicpm)
+        #expect(validated.messages.map(\.role) == [.system, .user])
+        #expect(validated.messages.first?.content == "system\n\ndeveloper")
+    }
+
+    @Test func nonIdentifierParameterKeysAreAcceptedForMiniCPM() throws {
+        let data = Data(#"""
+        {
+          "model":"m",
+          "messages":[{"role":"user","content":"lookup"}],
+          "tools":[{
+            "type":"function",
+            "function":{
+              "name":"lookup",
+              "parameters":{
+                "type":"object",
+                "properties":{
+                  "$id":{"type":"string"},
+                  "file-path":{"type":"string"}
+                }
+              }
+            }
+          }]
+        }
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .minicpm)
+        #expect(validated.tools.map(\.name) == ["lookup"])
+        let parsed = try MiniCPMToolCallParser().parse(
+            #" name="lookup"><param name="$id">item</param><param name="file-path">/tmp/x</param>"#,
+            allowedTools: ["lookup"], id: "call_0")
+        #expect(parsed.arguments.objectValue?["$id"] == .string("item"))
+        #expect(parsed.arguments.objectValue?["file-path"] == .string("/tmp/x"))
+    }
+
     @Test func developerGuidanceBecomesSystemForDeepseek() throws {
         let data = Data(#"""
         {"model":"m","messages":[
@@ -648,9 +697,12 @@ struct ServerArgumentTests {
         for modelID in [
             "gemma-4-26b-a4b-it",
             "qwen3.6-35b-a3b",
+            "qwen3.8-27b-4bit",
             "deepseek-v4-flash-2bit-dq",
             "inkling-small-4bit",
             "maple-preview-2bit-mlx",
+            "qwen3.8-flash-next-int4g64",
+            "minicpm5-2b-int4g64",
         ] {
             #expect(ServerArguments.usage.contains(modelID))
         }

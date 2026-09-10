@@ -178,6 +178,7 @@ public actor ServerModelSession: ServerLoadedModel {
         case .inklingSmall: return "inkling-small-4bit"
         case .maple: return "maple-preview-2bit-mlx"
         case .qwen38flashnext: return "qwen3.8-flash-next-int4g64"
+        case .minicpm5: return "minicpm5-2b-int4g64"
         }
     }
     private nonisolated let modelFamily: ModelFamily

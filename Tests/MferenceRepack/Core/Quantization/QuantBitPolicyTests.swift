@@ -176,10 +176,15 @@ import Testing
         }
     }
 
-    @Test("both original-repo families share one policy; nobody else has one")
+    @Test("the MoE original-repo families share one policy; everyone else is uniform INT4")
     func bothOriginalRepoFamiliesShareOnePolicy() {
         #expect(QuantBitPolicy.originalRepo(family: .qwen36) == .moeRouterInt8)
         #expect(QuantBitPolicy.originalRepo(family: .qwen38flashnext) == .moeRouterInt8)
+        // MiniCPM5 also has an original-repo entry, and its answer is uniform
+        // INT4 on purpose rather than by default: the vendor's own MLX
+        // conversion carries no per-tensor overrides, and a dense llama has no
+        // router to keep wider.
+        #expect(QuantBitPolicy.originalRepo(family: .minicpm5) == .uniformInt4)
         // Every family without an original-repo installer entry still has no
         // examined conversion, so none of them may carry a table.
         for family in [RepackModelFamily.gemma4, .qwen38, .deepseekV4Flash,

@@ -220,6 +220,21 @@ public func run(args: Args,
             stderr.write(Data(lines.utf8))
         }
         if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let m5 = runner as? MiniCPM5ForwardRunner, m5.phaseStats.decodeSteps > 0 {
+            // Dense, one command buffer per token: no expert I/O phases exist.
+            let p = m5.phaseStats
+            let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
+            let per = { (n: UInt64) in
+                String(format: "%.2f", Double(n) / 1e6 / Double(p.decodeSteps)) }
+            var lines = "\n[phases over \(p.decodeSteps) decode steps, decode "
+            lines += String(format: "%.0f", stats.decodeSeconds * 1000) + " ms]\n"
+            lines += "  cpu encode+commit: " + ms(p.encodeNanos) + " ms (" + per(p.encodeNanos) + " ms/token)\n"
+            lines += "  gpu execution:     " + ms(p.gpuNanos) + " ms (" + per(p.gpuNanos) + " ms/token)\n"
+            lines += "  wait/readback:     " + ms(p.waitNanos) + " ms (" + per(p.waitNanos) + " ms/token)\n"
+            lines += "  expert io: none (dense family)\n"
+            stderr.write(Data(lines.utf8))
+        }
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
            let q38 = runner as? Qwen38ForwardRunner,
            let spec = q38.mtpSpecStats, spec.rounds > 0 {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }

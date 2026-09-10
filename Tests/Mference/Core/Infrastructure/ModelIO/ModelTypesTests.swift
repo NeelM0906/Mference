@@ -78,6 +78,79 @@ import Foundation
         #expect(a.fullAttentionLayerMask.reduce(0) { $0 + Int($1) } == 7)
     }
 
+    /// Pins the baseline against `openbmb/MiniCPM5-2B` revision `cd199ce3`
+    /// `config.json` (a flat `LlamaForCausalLM` config) and the attention
+    /// conventions read from `transformers` v5.6.2 `modeling_llama.py`; see
+    /// `docs/families/MINICPM5.md`.
+    @Test func archConfigMiniCPM5BaselineMatchesCheckpoint() {
+        let a = ArchConfig.miniCPM5_2B
+        #expect(a.family == .minicpm5)
+        #expect(a.hiddenSize == 2048)
+        #expect(a.intermediateSize == 6144)
+        #expect(a.denseIntermediateSize == 6144)
+        #expect(a.moeIntermediateSize == 0)
+        #expect(a.numLayers == 42)
+        #expect(a.numDenseLayers == 42)
+        #expect(a.numHeads == 16)
+        #expect(a.numKVHeads == 2)
+        #expect(a.numFullKVHeads == 2)
+        #expect(a.headDim == 128)
+        #expect(a.fullHeadDim == 128)
+        #expect(a.vocabSize == 130_560)
+        #expect(a.unpaddedVocabSize == 0)
+        #expect(a.tieWordEmbeddings == false)
+        #expect(a.attentionKEqV == false)
+        #expect(a.hiddenActivation == "silu")
+        #expect(a.finalLogitSoftcap == 0.0)
+        #expect(a.slidingWindow == 0)
+        // Plain-llama attention: no experts, no router, no shared expert, no
+        // output gate, no q/k norm, 1/sqrt(head_dim) softmax scale.
+        #expect(a.numExperts == 0)
+        #expect(a.topKExperts == 0)
+        #expect(a.numSharedExperts == 0)
+        #expect(a.attnOutputGate == false)
+        #expect(a.qkNorm == false)
+        // `LlamaAttention.scaling = head_dim ** -0.5`; `pow` reproduces that
+        // value bit-exactly, `1 / sqrt` lands one ulp away, and the manifest
+        // check is exact.
+        #expect(a.attentionScale == pow(128.0, -0.5))
+        #expect(a.embeddingScaledBySqrtHidden == false)
+        #expect(a.routerScaled == false)
+        #expect(a.ffnSandwichNorms == false)
+        #expect(a.sharedExpertGated == false)
+        // `rope_theta` 5e6, `rope_scaling` null, rotate_half over the whole
+        // 128-wide head: NeoX sub-dim convention with rotaryDim == headDim.
+        #expect(a.ropeTheta == 5_000_000.0)
+        #expect(a.fullRopeTheta == 5_000_000.0)
+        #expect(a.partialRotaryFactor == 1.0)
+        #expect(a.ropeNeoxSubdim == true)
+        #expect(a.linearAttention == .none)
+        #expect(a.compressedAttention == .none)
+        #expect(a.hyperConnections == .none)
+        #expect(a.relativePosition == .none)
+        #expect(a.flashNext == .none)
+        // Every layer is full attention.
+        #expect(a.fullAttentionLayerMask.count == 42)
+        #expect(a.fullAttentionLayerMask.allSatisfy { $0 == 1 })
+        #expect(!a.hasLinearAttentionLayers)
+        #expect(!a.hasCompressedAttentionLayers)
+        #expect(!a.hasLowRankHyperConnections)
+    }
+
+    /// `qkNorm` defaults to the Gemma behavior so every existing baseline —
+    /// and every manifest that omits the key — keeps its meaning.
+    @Test func qkNormDefaultsToTrueForEveryShippedFamily() {
+        for (family, config) in ArchConfig.knownArchitectures where family != .minicpm5 {
+            #expect(config.qkNorm, "\(family.rawValue) should keep q/k norms")
+        }
+        #expect(ArchConfig.knownArchitectures[.minicpm5]?.qkNorm == false)
+    }
+
+    @Test func miniCPM5IsRegisteredForAutoDetection() {
+        #expect(ArchConfig.knownArchitectures[.minicpm5]?.family == .minicpm5)
+        #expect(ModelFamily(rawValue: "minicpm5") == .minicpm5)
+    }
+
     @Test func inklingSmallIsRegisteredForAutoDetection() {
         #expect(ArchConfig.knownArchitectures[.inklingSmall]?.family
                 == .inklingSmall)

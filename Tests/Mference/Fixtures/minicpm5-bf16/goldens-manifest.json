@@ -1,0 +1,553 @@
+{
+ "schema": "mference.minicpm5.goldens/1",
+ "generated_by": "Scripts/parity/minicpm5_make_goldens.py",
+ "family": "minicpm5",
+ "reference": {
+  "package": "transformers",
+  "version": "5.6.2",
+  "model_class": "LlamaForCausalLM",
+  "model_type": "llama",
+  "torch_version": "2.14.0",
+  "device": "cpu",
+  "attn_implementation": "eager",
+  "deterministic_algorithms": true,
+  "num_threads": 1,
+  "seed": 20260910
+ },
+ "dtype_policy": {
+  "weights": "bfloat16-rounded, then float32",
+  "forward": "float32",
+  "checkpoint": "bfloat16 (Tests/Mference/Fixtures/minicpm5/toy-ckpt)",
+  "rmsnorm": "LlamaRMSNorm: weight * (x.float() * rsqrt(mean(x^2) + eps)).to(input_dtype); plain w, no (1 + w) fold",
+  "rope": "rotate_half over the whole head_dim; inv_freq = 1/theta^(arange(0, head_dim, 2)/head_dim); rope_theta 5e6; rope_scaling null",
+  "attention": "eager, scaling = head_dim ** -0.5, no q/k norm, no output gate, GQA repeat_kv",
+  "int4": "Int4AffineEncoder.encodeGroup transcription: min/max affine over 64-groups, BF16 scale/bias, round-half-away-from-zero, reconstruction q*scale+bias in float32"
+ },
+ "config": {
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 0,
+  "eos_token_id": [
+   1,
+   3
+  ],
+  "head_dim": 16,
+  "hidden_act": "silu",
+  "hidden_size": 64,
+  "initializer_range": 0.08,
+  "intermediate_size": 128,
+  "max_position_embeddings": 512,
+  "mlp_bias": false,
+  "model_type": "llama",
+  "num_attention_heads": 4,
+  "num_hidden_layers": 4,
+  "num_key_value_heads": 2,
+  "pad_token_id": 1,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-06,
+  "rope_parameters": {
+   "rope_theta": 5000000.0,
+   "rope_type": "default"
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.6.2",
+  "use_cache": true,
+  "vocab_size": 128
+ },
+ "prompts": {
+  "short": {
+   "ids": [
+    36,
+    4,
+    95,
+    116,
+    64,
+    125,
+    16,
+    100,
+    103,
+    5,
+    20,
+    43
+   ],
+   "length": 12
+  },
+  "long": {
+   "ids": [
+    55,
+    62,
+    24,
+    115,
+    64,
+    51,
+    63,
+    58,
+    104,
+    72,
+    79,
+    87,
+    10,
+    115,
+    106,
+    29,
+    12,
+    7,
+    95,
+    34,
+    106,
+    58,
+    56,
+    105,
+    96,
+    47,
+    33,
+    10,
+    10,
+    97,
+    73,
+    106,
+    107,
+    15,
+    64,
+    7,
+    50,
+    93,
+    17,
+    76,
+    18,
+    60,
+    37,
+    29,
+    15,
+    72,
+    66,
+    26
+   ],
+   "length": 48
+  }
+ },
+ "decode_steps": 16,
+ "decode_row_convention": "row i of a decode_* per-layer tensor is decode step i+1; step_logits has DECODE_STEPS rows, row 0 from the cached prefill leg",
+ "golden_files": {
+  "prefill_short.safetensors": {
+   "tensors": [
+    "embed_out",
+    "final_norm_out",
+    "layer00.attn_out",
+    "layer00.hidden_out",
+    "layer00.mlp_out",
+    "layer01.attn_out",
+    "layer01.hidden_out",
+    "layer01.mlp_out",
+    "layer02.attn_out",
+    "layer02.hidden_out",
+    "layer02.mlp_out",
+    "layer03.attn_out",
+    "layer03.hidden_out",
+    "layer03.mlp_out",
+    "logits"
+   ],
+   "shapes": {
+    "embed_out": [
+     12,
+     64
+    ],
+    "final_norm_out": [
+     12,
+     64
+    ],
+    "layer00.attn_out": [
+     12,
+     64
+    ],
+    "layer00.hidden_out": [
+     12,
+     64
+    ],
+    "layer00.mlp_out": [
+     12,
+     64
+    ],
+    "layer01.attn_out": [
+     12,
+     64
+    ],
+    "layer01.hidden_out": [
+     12,
+     64
+    ],
+    "layer01.mlp_out": [
+     12,
+     64
+    ],
+    "layer02.attn_out": [
+     12,
+     64
+    ],
+    "layer02.hidden_out": [
+     12,
+     64
+    ],
+    "layer02.mlp_out": [
+     12,
+     64
+    ],
+    "layer03.attn_out": [
+     12,
+     64
+    ],
+    "layer03.hidden_out": [
+     12,
+     64
+    ],
+    "layer03.mlp_out": [
+     12,
+     64
+    ],
+    "logits": [
+     12,
+     128
+    ]
+   },
+   "size": 50368,
+   "sha256": "1e641a9f5e19d06a0cb4ad311dc26b4506c05790585e5b443e5c2c6e5aa0ccbf"
+  },
+  "decode_short.safetensors": {
+   "tensors": [
+    "embed_out",
+    "final_norm_out",
+    "layer00.attn_out",
+    "layer00.hidden_out",
+    "layer00.mlp_out",
+    "layer01.attn_out",
+    "layer01.hidden_out",
+    "layer01.mlp_out",
+    "layer02.attn_out",
+    "layer02.hidden_out",
+    "layer02.mlp_out",
+    "layer03.attn_out",
+    "layer03.hidden_out",
+    "layer03.mlp_out",
+    "step_logits"
+   ],
+   "shapes": {
+    "embed_out": [
+     15,
+     64
+    ],
+    "final_norm_out": [
+     15,
+     64
+    ],
+    "layer00.attn_out": [
+     15,
+     64
+    ],
+    "layer00.hidden_out": [
+     15,
+     64
+    ],
+    "layer00.mlp_out": [
+     15,
+     64
+    ],
+    "layer01.attn_out": [
+     15,
+     64
+    ],
+    "layer01.hidden_out": [
+     15,
+     64
+    ],
+    "layer01.mlp_out": [
+     15,
+     64
+    ],
+    "layer02.attn_out": [
+     15,
+     64
+    ],
+    "layer02.hidden_out": [
+     15,
+     64
+    ],
+    "layer02.mlp_out": [
+     15,
+     64
+    ],
+    "layer03.attn_out": [
+     15,
+     64
+    ],
+    "layer03.hidden_out": [
+     15,
+     64
+    ],
+    "layer03.mlp_out": [
+     15,
+     64
+    ],
+    "step_logits": [
+     16,
+     128
+    ]
+   },
+   "size": 63176,
+   "sha256": "e2025d4ab0ed5c64e28d83a9917f4da22a32ed76ee75fbc51900df342f3e1709"
+  },
+  "integers_prefill_short.json": {
+   "keys": [
+    "argmax_all_positions",
+    "next_token"
+   ],
+   "size": 123,
+   "sha256": "5edeefb8210a11611765785bc528cf8f6a8f1ecc3ef12667cedd157846ea2bbf"
+  },
+  "integers_decode_short.json": {
+   "keys": [
+    "generated_token_ids",
+    "top2_margin_per_step",
+    "uncached_rollout_token_ids"
+   ],
+   "size": 642,
+   "sha256": "9a113b2eb211fda7bd88f7b99f260d5364d33dd3f90dd27f42cf6b56f2a9773b"
+  },
+  "prefill_long.safetensors": {
+   "tensors": [
+    "embed_out",
+    "final_norm_out",
+    "layer00.attn_out",
+    "layer00.hidden_out",
+    "layer00.mlp_out",
+    "layer01.attn_out",
+    "layer01.hidden_out",
+    "layer01.mlp_out",
+    "layer02.attn_out",
+    "layer02.hidden_out",
+    "layer02.mlp_out",
+    "layer03.attn_out",
+    "layer03.hidden_out",
+    "layer03.mlp_out",
+    "logits"
+   ],
+   "shapes": {
+    "embed_out": [
+     48,
+     64
+    ],
+    "final_norm_out": [
+     48,
+     64
+    ],
+    "layer00.attn_out": [
+     48,
+     64
+    ],
+    "layer00.hidden_out": [
+     48,
+     64
+    ],
+    "layer00.mlp_out": [
+     48,
+     64
+    ],
+    "layer01.attn_out": [
+     48,
+     64
+    ],
+    "layer01.hidden_out": [
+     48,
+     64
+    ],
+    "layer01.mlp_out": [
+     48,
+     64
+    ],
+    "layer02.attn_out": [
+     48,
+     64
+    ],
+    "layer02.hidden_out": [
+     48,
+     64
+    ],
+    "layer02.mlp_out": [
+     48,
+     64
+    ],
+    "layer03.attn_out": [
+     48,
+     64
+    ],
+    "layer03.hidden_out": [
+     48,
+     64
+    ],
+    "layer03.mlp_out": [
+     48,
+     64
+    ],
+    "logits": [
+     48,
+     128
+    ]
+   },
+   "size": 197848,
+   "sha256": "9d67e30c87965fab7c596e0714df5e6304f3c991ca2f0bbc36aabcf20c2d2b32"
+  },
+  "decode_long.safetensors": {
+   "tensors": [
+    "embed_out",
+    "final_norm_out",
+    "layer00.attn_out",
+    "layer00.hidden_out",
+    "layer00.mlp_out",
+    "layer01.attn_out",
+    "layer01.hidden_out",
+    "layer01.mlp_out",
+    "layer02.attn_out",
+    "layer02.hidden_out",
+    "layer02.mlp_out",
+    "layer03.attn_out",
+    "layer03.hidden_out",
+    "layer03.mlp_out",
+    "step_logits"
+   ],
+   "shapes": {
+    "embed_out": [
+     15,
+     64
+    ],
+    "final_norm_out": [
+     15,
+     64
+    ],
+    "layer00.attn_out": [
+     15,
+     64
+    ],
+    "layer00.hidden_out": [
+     15,
+     64
+    ],
+    "layer00.mlp_out": [
+     15,
+     64
+    ],
+    "layer01.attn_out": [
+     15,
+     64
+    ],
+    "layer01.hidden_out": [
+     15,
+     64
+    ],
+    "layer01.mlp_out": [
+     15,
+     64
+    ],
+    "layer02.attn_out": [
+     15,
+     64
+    ],
+    "layer02.hidden_out": [
+     15,
+     64
+    ],
+    "layer02.mlp_out": [
+     15,
+     64
+    ],
+    "layer03.attn_out": [
+     15,
+     64
+    ],
+    "layer03.hidden_out": [
+     15,
+     64
+    ],
+    "layer03.mlp_out": [
+     15,
+     64
+    ],
+    "step_logits": [
+     16,
+     128
+    ]
+   },
+   "size": 63176,
+   "sha256": "ef653457258231310586b058a45c685bf4905969ef1753928cb766c5992484ea"
+  },
+  "integers_prefill_long.json": {
+   "keys": [
+    "argmax_all_positions",
+    "next_token"
+   ],
+   "size": 327,
+   "sha256": "0bee923a8aae04c38c62586d3c0ee99c1caa2fc8fac36dbb7add2b4294329d4c"
+  },
+  "integers_decode_long.json": {
+   "keys": [
+    "generated_token_ids",
+    "top2_margin_per_step",
+    "uncached_rollout_token_ids"
+   ],
+   "size": 645,
+   "sha256": "4b8a5df581dd4a4dda07c8e903c331d38361d75005416707b43ffc5cfe88f823"
+  }
+ },
+ "findings": {
+  "rollout_margins": {
+   "short": {
+    "min": 0.011056900024414062,
+    "per_step": [
+     0.09976816177368164,
+     0.5439469814300537,
+     0.6464221477508545,
+     0.7684628963470459,
+     0.3863459825515747,
+     0.011056900024414062,
+     0.23642289638519287,
+     0.5330314636230469,
+     0.7547570466995239,
+     0.2549600601196289,
+     0.6100349426269531,
+     0.7337327003479004,
+     0.6055232286453247,
+     0.20328891277313232,
+     0.22593116760253906,
+     0.5950350761413574
+    ]
+   },
+   "long": {
+    "min": 0.007312774658203125,
+    "per_step": [
+     0.3942134380340576,
+     0.2734959125518799,
+     0.22257590293884277,
+     0.05791771411895752,
+     0.03372478485107422,
+     0.12964236736297607,
+     0.20133578777313232,
+     0.04822111129760742,
+     0.2671031951904297,
+     0.1119464635848999,
+     0.007312774658203125,
+     0.9264435768127441,
+     0.17901980876922607,
+     0.8656266927719116,
+     0.051308274269104004,
+     0.6473873853683472
+    ]
+   }
+  },
+  "cache_equivalence": {
+   "short": "cached == uncached rollout, asserted",
+   "long": "cached == uncached rollout, asserted"
+  },
+  "tolerances": {
+   "note": "The gate set is compared against a Metal runner that computes activations in FP16 with FP32 accumulation; the tolerance tiers are stated per gate in MiniCPM5ReferenceParityTests and recorded on docs/families/MINICPM5.md.",
+   "min_rollout_margin_asserted": 0.005
+  }
+ }
+}

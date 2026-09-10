@@ -265,12 +265,54 @@ public struct SupportedModelSource: Sendable, Equatable {
         reserveBytes: 8_589_934_592,
         kind: .originalRepoQuantize)
 
+    /// MiniCPM5-2B from the vendor's own BF16 upload, quantized to INT4
+    /// affine group-64 in flight — the project's first plain-llama family and
+    /// the second original-repo family with a runner, so it re-runs the W2.1b
+    /// quantizer gate against its own control (`minicpm5mlx`).
+    ///
+    /// Both pins recorded (2026-09-10). Download bytes are the single shard
+    /// (5,033,557,096 B; the index's `total_size` is 5,033,512,960 of tensor
+    /// data plus the 44,128-byte header). Installed bytes are the INT4 g64
+    /// resident set — 1,415,925,760 B, to the byte the control's own
+    /// `total_size` — plus the page-rounded index, ~10 MB of tokenizer
+    /// sidecars, manifest and receipt. See docs/families/MINICPM5.md.
+    public static let minicpm5 = SupportedModelSource(
+        name: "minicpm5",
+        displayName: "MiniCPM5-2B (quantized at install)",
+        repoID: "openbmb/MiniCPM5-2B",
+        revision: "cd199ce3ee67549c42ef7372f809f2c63599a3e9",
+        sourceIndexSHA256:
+            "6d839cd76e8395de548a0e6cc310386f66d1ecbb2c75d198a8dfd3d70892b756",
+        modelID: "minicpm5-2b-int4g64",
+        approximateDownloadBytes: 5_033_557_096,
+        installedBytes: 1_430_000_000,
+        reserveBytes: 1_073_741_824,
+        kind: .originalRepoQuantize)
+
+    /// The **same checkpoint as `minicpm5`**, from the vendor's own MLX INT4
+    /// group-64 affine conversion through the pre-quantized path. It exists
+    /// as the trusted control the W2.1b quantizer-quality gate measures
+    /// `minicpm5` against (docs/QUANTIZER_QUALITY.md); its `modelID` differs
+    /// because the fingerprint table is keyed by it. Download bytes are the
+    /// single `model.safetensors` (1,416,035,216 B).
+    public static let minicpm5MLX = SupportedModelSource(
+        name: "minicpm5mlx",
+        displayName: "MiniCPM5-2B MLX 4-bit (W2.1b control)",
+        repoID: "openbmb/MiniCPM5-2B-MLX",
+        revision: "35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3",
+        sourceIndexSHA256:
+            "ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045",
+        modelID: "minicpm5-2b-mlx-4bit",
+        approximateDownloadBytes: 1_416_035_216,
+        installedBytes: 1_430_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
     public static let all: [SupportedModelSource] = [
         gemma4, qwen36, qwen36Original, qwen38, deepseekV4Flash, inklingSmall,
-        maple, qwen38FlashNext,
+        maple, qwen38FlashNext, minicpm5, minicpm5MLX,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

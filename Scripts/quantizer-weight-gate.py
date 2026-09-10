@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""W2.1b weight-level gate: our INT4 affine group-64 encoder vs the
-mlx-community conversion of the SAME BF16 source rows.
+"""W2.1b weight-level gate: our INT4 affine group-64 encoder vs a trusted
+pre-quantized conversion of the SAME BF16 source rows.
 
 Both sides quantize one vendor BF16 checkpoint. Group quantization never
 straddles a row (every quantizable last dimension is a multiple of the group),
 so a *row slice* is self-contained: the BF16 rows fully determine the packed
 nibbles, scales and biases for those same rows. That is what makes this gate
-cheap — a few MB of HTTP range requests instead of a 72 GB download — and it is
-why it can be re-run for any future family before committing to an install.
+cheap — a few MB of HTTP range requests instead of a full download — and it is
+why it can be re-run for any family before committing to an install.
 
     # The W2.1b result in docs/QUANTIZER_QUALITY.md (Qwen 3.6, default):
     Scripts/quantizer-weight-gate.py --cache <dir>
+
+    # A family with its own built-in sample plan:
+    Scripts/quantizer-weight-gate.py --cache <dir> --family minicpm5
 
     # Any other family, any tensors: sample every tensor whose vendor name
     # matches PATTERN (a regex), full rows unless --rows caps them.
@@ -20,6 +23,19 @@ why it can be re-run for any future family before committing to an install.
     # Or name the repos yourself (REPO[@REV]; REV defaults to main):
     Scripts/quantizer-weight-gate.py --orig Qwen/Qwen3.8-Flash-Next@de4b8e4d \
         --control mlx-community/Qwen3.8-Flash-Next-4bit --tensors '...'
+
+`--family` selects a pinned (vendor repo, control repo, name mapping) triple
+from FAMILIES; `--orig` / `--control` override either resolve URL for an
+unpinned rehearsal. Two families carry a built-in sample plan, the rest are
+driven by `--tensors`:
+
+  qwen36    `Qwen/Qwen3.6-35B-A3B` rev 995ad96e vs mlx-community's conversion
+            rev 38740b84 — the first control, and the plan behind
+            docs/QUANTIZER_QUALITY.md §4/§5.
+  minicpm5  `openbmb/MiniCPM5-2B` rev cd199ce3 vs the vendor's own MLX INT4
+            conversion `openbmb/MiniCPM5-2B-MLX` rev 35ac38ee — the second
+            calibration point (docs/QUANTIZER_QUALITY.md §9,
+            docs/families/MINICPM5.md).
 
 The encoder here is a transcription of
 `Sources/MferenceRepack/Core/Quantization/Int4AffineEncoder.swift:encodeGroup`;
@@ -49,6 +65,15 @@ FAMILIES = {
         orig="Qwen/Qwen3.8-Flash-Next@de4b8e4d",
         control="mlx-community/Qwen3.8-Flash-Next-4bit@main",
         prefixes=("model.language_model.", "language_model.model.")),
+    "minicpm5": dict(
+        # The first control that is not a community conversion: the vendor's
+        # own MLX INT4 g64 affine build of the same checkpoint. A dense llama,
+        # so both repos spell the trunk `model.` and the head `lm_head`, and
+        # the two sides' names differ only by the `.weight` /
+        # `.weight+.scales+.biases` split.
+        orig="openbmb/MiniCPM5-2B@cd199ce3ee67549c42ef7372f809f2c63599a3e9",
+        control="openbmb/MiniCPM5-2B-MLX@35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3",
+        prefixes=("model.", "model.")),
 }
 
 def resolve_url(spec):
@@ -238,7 +263,12 @@ def control_name(orig_name, prefixes):
     o, c = prefixes
     base = orig_name[:-len(".weight")] if orig_name.endswith(".weight") else orig_name
     if base == "lm_head":
-        return "language_model.lm_head"
+        # The head sits outside the trunk on both sides, so it is named from
+        # the control's module root rather than its trunk prefix:
+        # `language_model.model.` -> `language_model.lm_head`, and a bare
+        # `model.` -> `lm_head`.
+        root = c[:-len("model.")] if c.endswith("model.") else c
+        return root + "lm_head"
     if base.startswith(o):
         return c + base[len(o):]
     return base
@@ -288,6 +318,33 @@ def sample_plan():
             add(f"l{l}_e{e}_down", f"{O}layers.{l}.mlp.experts.down_proj",
                 f"{M}layers.{l}.mlp.switch_mlp.down_proj", e * 2048, e * 2048, 16)
     return plan
+
+
+def sample_plan_minicpm5():
+    """MiniCPM5-2B: 42 dense llama layers, every projection INT4 g64 on the
+    control (embedding and head included), so every sampled tensor compares at
+    INT4. Both repos spell the trunk `model.` and the head `lm_head`."""
+    plan = []
+
+    def add(tag, base, row, rc):
+        plan.append(dict(tag=tag, orig=base + ".weight", mlx=base,
+                         orig_row=row, mlx_row=row, rows=rc))
+
+    add("embed", "model.embed_tokens", 0, 64)
+    add("embed_mid", "model.embed_tokens", 65000, 64)
+    add("lmhead", "lm_head", 0, 64)
+    add("lmhead_tail", "lm_head", 130000, 64)
+    for l in (0, 10, 20, 30, 41):
+        for t in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            add(f"l{l}_{t}", f"model.layers.{l}.self_attn.{t}", 0, 8)
+        for t in ("gate_proj", "up_proj", "down_proj"):
+            add(f"l{l}_{t}", f"model.layers.{l}.mlp.{t}", 0, 32)
+    return plan
+
+
+# Families whose tensor names a built-in plan knows. Anything else needs
+# `--tensors PATTERN`, because a plan cannot be guessed from a repo.
+BUILTIN_PLANS = {"qwen36": sample_plan, "minicpm5": sample_plan_minicpm5}
 
 
 def pattern_plan(orig, mlx, pattern, prefixes, max_rows):
@@ -418,14 +475,15 @@ def main():
     ap.add_argument("--cache", default="/tmp/mference-quant-gate")
     ap.add_argument("--family", choices=sorted(FAMILIES), default="qwen36",
                     help="repo pins and name mapping (default: qwen36, the "
-                         "W2.1b result)")
+                         "W2.1b result). qwen36 and minicpm5 have built-in "
+                         "sample plans; others need --tensors")
     ap.add_argument("--orig", help="vendor BF16 repo as owner/repo[@rev]; "
                                    "overrides the family pin")
     ap.add_argument("--control", help="control conversion as owner/repo[@rev]; "
                                       "overrides the family pin")
     ap.add_argument("--tensors", help="regex over VENDOR tensor names; when "
-                    "given, sample these (full rows) instead of the built-in "
-                    "Qwen 3.6 plan")
+                    "given, sample these (full rows) instead of the family's "
+                    "built-in plan")
     ap.add_argument("--rows", type=int, default=0,
                     help="with --tensors: cap rows per tensor (0 = all)")
     args = ap.parse_args()
@@ -443,11 +501,19 @@ def main():
                 print(f"    ... {len(unquantized) - 12} more")
         if not plan:
             raise SystemExit("no quantized tensor matched --tensors")
-    elif args.family != "qwen36" or args.orig or args.control:
-        raise SystemExit("the built-in sample plan is Qwen 3.6-specific; pass "
-                         "--tensors PATTERN for other repos")
+    elif args.family in BUILTIN_PLANS:
+        if args.orig or args.control:
+            # The plan's tensor names come from the family, not the repos, so
+            # an override only makes sense against the same architecture.
+            print(f"note: sampling the built-in {args.family} plan against "
+                  f"an overridden repo; its tensor names still come from "
+                  f"that plan")
+        plan = BUILTIN_PLANS[args.family]()
     else:
-        plan = sample_plan()
+        raise SystemExit(f"no built-in sample plan for {args.family} "
+                         f"(there are plans for "
+                         f"{', '.join(sorted(BUILTIN_PLANS))}); pass "
+                         f"--tensors PATTERN")
 
     rows, rows8, skipped = [], [], []
     for item in plan:

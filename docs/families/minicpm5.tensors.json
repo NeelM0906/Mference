@@ -1,0 +1,149 @@
+{
+  "family": "minicpm5",
+  "source": {
+    "repo": "openbmb/MiniCPM5-2B",
+    "revision": "cd199ce3ee67549c42ef7372f809f2c63599a3e9",
+    "format": "safetensors-bf16-single-shard",
+    "shards": 1,
+    "shard": "model-00000-of-00001.safetensors",
+    "shard_bytes": 5033557096,
+    "shard_header_bytes": 44128,
+    "index_total_size": 5033512960,
+    "index_sha256": "6d839cd76e8395de548a0e6cc310386f66d1ecbb2c75d198a8dfd3d70892b756",
+    "index_bytes": 31378,
+    "config_sha256": "59613157e5357d62bcb121e04cb90f2170b43d789b142380c12c3d4277d95180",
+    "chat_template_sha256": "cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c",
+    "chat_template_bytes": 9060,
+    "tokenizer_json_sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+    "tokenizer_json_bytes": 9894271,
+    "tokenizer_config_sha256": "e9b1064649e771d7a8e15637c68b2d2749724877ba3648bd74a4ece31c26303b",
+    "special_tokens_map_sha256": "82d96d7a9e6ced037f12394b7ea6a5b02e6ca87e0d11edaa8d60d9be857ce7db",
+    "tensor_count": 381,
+    "total_params": 2516756480,
+    "non_embedding_params": 1981982720
+  },
+  "control": {
+    "repo": "openbmb/MiniCPM5-2B-MLX",
+    "revision": "35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3",
+    "format": "mlx-int4-affine-g64-single-file",
+    "file": "model.safetensors",
+    "file_bytes": 1416035216,
+    "index_total_size": 1415925760,
+    "index_sha256": "ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045",
+    "index_bytes": 68721,
+    "config_sha256": "deb9ca33e863cbc84a9ab7209cd924fc05505dc33270c807d47f1b78fbd53a50",
+    "quantization": {
+      "group_size": 64,
+      "bits": 4,
+      "mode": "affine"
+    },
+    "tensor_count": 973,
+    "chat_template_and_tokenizer_json": "byte-identical to the BF16 repo (cmp verified 2026-09-10)"
+  },
+  "notes": [
+    "Day-0 tensor-name map for the minicpm5 family (bring-up kit W1.2). SHAPES VERIFIED against the single shard's safetensors header read by HTTP range request at revision cd199ce3 on 2026-09-10; the index's weight_map key set equals the header's key set (381 tensors). The repacker does not read this file; ArchInfo.loadMiniCPM5 and the generic planners carry the same contract in code.",
+    "{L} = 0..41. Every layer is full attention (fullAttentionLayerMask all 1): no sliding window, no linear attention, no MoE, no router, no shared expert. The tensor names are the plain HF LlamaForCausalLM layout: bare `model.` trunk prefix and a top-level `lm_head.weight`, the same spelling the runtime already uses for deepseekV4Flash and maple, so both the pre-quantized path (control) and the quantize-in-flight path (this family) write the names the runner looks up without renaming.",
+    "Norms: transformers v5.6.2 modeling_llama.py LlamaRMSNorm.forward computes `weight * (x * rsqrt(mean(x^2) + eps))` with the reduction in fp32 and the weight multiply in the input dtype. There is NO (1 + w) fold (contrast Qwen 3.6 / Flash-Next). FlashNextPlanner.foldsNormBias must return false for this family; all 85 norm vectors ride through as BF16 passthrough.",
+    "RoPE: LlamaRotaryEmbedding.compute_default_rope_parameters uses dim = head_dim (128) and inv_freq = 1 / theta^(arange(0, dim, 2)/dim) with theta 5e6, applied via rotate_half (NeoX half rotation over the full head). In ArchConfig terms: ropeNeoxSubdim true, partialRotaryFactor 1.0 (rotaryDim == headDim == 128), ropeTheta == fullRopeTheta == 5000000.0, rope_scaling null.",
+    "Attention: scaling = head_dim ** -0.5 = 0.08838834764831845; attention_bias false and mlp_bias false (config defaults; no bias tensors are present in the header); NO q_norm / k_norm tensors exist -> the new `qkNorm` axis is false for this family; no attention output gate (q_proj is [2048, 2048] = numHeads * headDim rows, not 2x).",
+    "Vocabulary: vocab_size 130560 == embedding rows == lm_head rows; tokenizer.json holds 130072 BPE ids (0..130071) plus added tokens up to id 130559, so unpaddedVocabSize stays 0 (every row is addressable). tie_word_embeddings false: lm_head.weight is its own 534,773,760-byte tensor.",
+    "Quantization policy (matches the vendor MLX control exactly): every rank-2 BF16 .weight whose last dim is a multiple of 64 -> INT4 affine group-64 (embed_tokens, lm_head, q/k/v/o, gate/up/down); norms BF16 passthrough. The control's model.safetensors.index.json declares total_size 1,415,925,760, which is exactly (2,516,756,480 - 174,080 norm params) * 0.5625 + 174,080 * 2 = 1,415,577,600 + 348,160 -- the same byte count this plan produces, so the two installs carry byte-comparable resident sets.",
+    "The MLX control is the first pre-quantized control whose repo is the vendor's own (openbmb), not mlx-community. Its config carries the same `quantization {group_size 64, bits 4, mode affine}` block as the pinned qwen36 source, no per-tensor overrides, and packs U32 [rows, cols/8] weights with BF16 [rows, cols/64] scales and biases -- the repacker's generic pre-quantized path (IndexLoader + RepackPlanner) needs only the family case, not a new planner.",
+    "Sidecars: none. There is no vision tower, no MTP group, no PLE table in either repo. The vendor's DSpark drafter (openbmb/MiniCPM5-2B-DSpark) is a separate repo and out of scope for this bring-up (see the family page's follow-on note)."
+  ],
+  "dtype_policy": {
+    "resident_quantized": "INT4 affine group-64: 0.5 B/weight nibbles + 2 B BF16 scale + 2 B BF16 bias per 64-group (0.5625 B/weight)",
+    "resident_passthrough": "BF16 norms, verbatim (no fold)",
+    "kv_cache": "FP16 runtime format; 2 KV heads x 128 x 2 B x 2 (K,V) = 1,024 B/token/layer, 43,008 B/token over 42 layers"
+  },
+  "resident": {
+    "model.embed_tokens.weight": {
+      "role": "embedding",
+      "policy": "BF16 [130560, 2048] -> INT4 affine g64 (weights 133693440 B + scales 8355840 B + biases 8355840 B)",
+      "count": 1
+    },
+    "model.layers.{L}.input_layernorm.weight": {
+      "role": "inputNorm",
+      "policy": "BF16 [2048] passthrough, no (1+w) fold (4096 B)",
+      "count": 42
+    },
+    "model.layers.{L}.mlp.down_proj.weight": {
+      "role": "mlpDown (served by Model.sharedExpertDown)",
+      "policy": "BF16 [2048, 6144] -> INT4 affine g64 (weights 6291456 B + scales 393216 B + biases 393216 B)",
+      "count": 42
+    },
+    "model.layers.{L}.mlp.gate_proj.weight": {
+      "role": "mlpGate (served by Model.sharedExpertGate)",
+      "policy": "BF16 [6144, 2048] -> INT4 affine g64 (weights 6291456 B + scales 393216 B + biases 393216 B)",
+      "count": 42
+    },
+    "model.layers.{L}.mlp.up_proj.weight": {
+      "role": "mlpUp (served by Model.sharedExpertUp)",
+      "policy": "BF16 [6144, 2048] -> INT4 affine g64 (weights 6291456 B + scales 393216 B + biases 393216 B)",
+      "count": 42
+    },
+    "model.layers.{L}.post_attention_layernorm.weight": {
+      "role": "postAttnNorm",
+      "policy": "BF16 [2048] passthrough, no (1+w) fold (4096 B)",
+      "count": 42
+    },
+    "model.layers.{L}.self_attn.k_proj.weight": {
+      "role": "kProj",
+      "policy": "BF16 [256, 2048] -> INT4 affine g64 (weights 262144 B + scales 16384 B + biases 16384 B)",
+      "count": 42
+    },
+    "model.layers.{L}.self_attn.o_proj.weight": {
+      "role": "oProj",
+      "policy": "BF16 [2048, 2048] -> INT4 affine g64 (weights 2097152 B + scales 131072 B + biases 131072 B)",
+      "count": 42
+    },
+    "model.layers.{L}.self_attn.q_proj.weight": {
+      "role": "qProj",
+      "policy": "BF16 [2048, 2048] -> INT4 affine g64 (weights 2097152 B + scales 131072 B + biases 131072 B)",
+      "count": 42
+    },
+    "model.layers.{L}.self_attn.v_proj.weight": {
+      "role": "vProj",
+      "policy": "BF16 [256, 2048] -> INT4 affine g64 (weights 262144 B + scales 16384 B + biases 16384 B)",
+      "count": 42
+    },
+    "lm_head.weight": {
+      "role": "lmHead",
+      "policy": "BF16 [130560, 2048] -> INT4 affine g64 (weights 133693440 B + scales 8355840 B + biases 8355840 B)",
+      "count": 1
+    },
+    "model.norm.weight": {
+      "role": "finalNorm",
+      "policy": "BF16 [2048] passthrough, no (1+w) fold (4096 B)",
+      "count": 1
+    }
+  },
+  "control_resident_naming": {
+    "pattern": "<same base name>.weight (U32 [rows, cols/8]) + .scales (BF16 [rows, cols/64]) + .biases (BF16 [rows, cols/64]); norms BF16 [2048] unchanged",
+    "example": "model.layers.0.self_attn.q_proj.weight U32 [2048, 256]; .scales BF16 [2048, 32]; .biases BF16 [2048, 32]"
+  },
+  "sizing": {
+    "params": {
+      "embed_tokens": 267386880,
+      "lm_head": 267386880,
+      "attention_42_layers": 396361728,
+      "mlp_42_layers": 1585446912,
+      "norms_85_vectors": 174080,
+      "total": 2516756480
+    },
+    "bf16_source_bytes": 5033512960,
+    "int4_g64_install_bytes": {
+      "quantized_params": 2516582400,
+      "quantized_bytes": 1415577600,
+      "norm_bytes": 348160,
+      "tensor_data_total": 1415925760,
+      "resident_index_estimate": "<= 65,536 (381 entries + string table, page-rounded)",
+      "sidecars": "tokenizer.json 9,894,271 + tokenizer_config.json 94,391 + chat_template.jinja 9,060 + special_tokens_map.json 551 + manifest + receipt",
+      "install_estimate_bytes": 1426500000
+    },
+    "kv_bytes_per_token": 43008,
+    "kv_at_4096": 176160768,
+    "kv_at_32768": 1409286144,
+    "kv_at_131072": 5637144576
+  }
+}

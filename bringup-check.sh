@@ -93,7 +93,7 @@ Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
   <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple
-                qwen38flashnext
+                qwen38flashnext minicpm5
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
@@ -131,6 +131,9 @@ case "${family}" in
   inklingsmall)    suite_filter='Inkling' ;;
   maple)           suite_filter='Maple' ;;
   qwen38flashnext) suite_filter='FlashNext' ;;
+  # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
+  # the fake-remote installs (test names start lower-case in the remote suite).
+  minicpm5)        suite_filter='[Mm]iniCPM5' ;;
   *) usage >&2; fail "unknown family: ${family}" ;;
 esac
 

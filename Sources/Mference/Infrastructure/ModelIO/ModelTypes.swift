@@ -17,6 +17,11 @@ public enum ModelFamily: String, Sendable, Hashable {
     /// CLI, the loopback server and the UI behind it; the install is a ~175 GB
     /// quantize-in-flight repack rather than a pre-converted download.
     case qwen38flashnext = "qwen38flashnext"
+    /// MiniCPM5-2B: a plain-llama dense family (`LlamaForCausalLM`), the
+    /// project's first, installed from the vendor's BF16 upload through the
+    /// quantize-in-flight path. Bare `model.` trunk prefix and a top-level
+    /// `lm_head.weight`; no q/k norms, no output gate, no experts.
+    case minicpm5 = "minicpm5"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -404,6 +409,12 @@ public struct ArchConfig: Sendable, Equatable {
     /// Qwen3.8-Flash-Next's low-rank hyper-connections, QSA indexer and
     /// per-layer n-gram embedding. `.none` for every other family.
     public let flashNext: FlashNextConfig
+    /// Full-attention layers carry per-head RMSNorm gains on the query and
+    /// key projections (`self_attn.q_norm.weight` / `k_norm.weight`), applied
+    /// before RoPE. `false` is plain-llama attention: the projections go
+    /// straight to RoPE and the fused QKV epilogues, which require the
+    /// weights, are bypassed for the standalone RoPE kernels.
+    public let qkNorm: Bool
 
     public init(
         hiddenSize: Int,
@@ -454,7 +465,8 @@ public struct ArchConfig: Sendable, Equatable {
         routerNormAfterTopK: Bool = false,
         routerGlobalScale: Bool = false,
         unpaddedVocabSize: Int = 0,
-        flashNext: FlashNextConfig = .none
+        flashNext: FlashNextConfig = .none,
+        qkNorm: Bool = true
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -505,6 +517,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.routerGlobalScale = routerGlobalScale
         self.unpaddedVocabSize = unpaddedVocabSize
         self.flashNext = flashNext
+        self.qkNorm = qkNorm
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -920,6 +933,55 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Canonical MiniCPM5-2B baseline: 42 plain pre-norm dense layers of
+    /// `LlamaForCausalLM` attention (16 query heads over 2 KV heads of 128,
+    /// full NeoX RoPE at theta 5e6, no q/k norm, no output gate) and one
+    /// SwiGLU MLP per layer; untied 130,560-row `lm_head`; no experts, no
+    /// router, no shared expert, no logit softcap. Values are read from
+    /// `config.json` of `openbmb/MiniCPM5-2B` at revision `cd199ce3` and
+    /// checked against `transformers` v5.6.2 `modeling_llama.py`; see
+    /// `docs/families/MINICPM5.md`.
+    ///
+    /// The sliding-window slots mirror the full-attention values: every layer
+    /// is full attention, so they never size storage. `rms_norm_eps` (1e-6)
+    /// is not an axis; the repacker refuses a config that sets it to anything
+    /// else, because the runners hard-code that epsilon.
+    public static let miniCPM5_2B = ArchConfig(
+        hiddenSize: 2048,
+        intermediateSize: 6144,
+        moeIntermediateSize: 0,
+        numHeads: 16,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 130_560,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 5_000_000.0,
+        fullRopeTheta: 5_000_000.0,
+        partialRotaryFactor: 1.0,
+        numLayers: 42,
+        numExperts: 0,
+        topKExperts: 0,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: [UInt8](repeating: 1, count: 42),
+        hiddenActivation: "silu",
+        family: .minicpm5,
+        attnOutputGate: false,
+        attentionScale: 0.08838834764831845,   // pow(128, -0.5) == head_dim ** -0.5 in transformers; 1/sqrt(128) is one ulp off
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        numSharedExperts: 0,
+        numDenseLayers: 42,
+        denseIntermediateSize: 6144,
+        qkNorm: false
+    )
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     ///
     /// A family here has a validated baseline, not necessarily a runner:
@@ -935,6 +997,7 @@ public struct ArchConfig: Sendable, Equatable {
         .inklingSmall: .inklingSmall_276B_A12B,
         .maple: .maplePreview,
         .qwen38flashnext: .qwen38FlashNext_180B_A3_5B,
+        .minicpm5: .miniCPM5_2B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for

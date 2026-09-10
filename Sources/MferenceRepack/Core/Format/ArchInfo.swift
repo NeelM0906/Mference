@@ -16,6 +16,11 @@ enum RepackModelFamily: String, Sendable, Equatable {
     /// 2026-09-10, so `ManifestReader.peekFamily` resolves it like any other
     /// shipped family.
     case qwen38flashnext = "qwen38flashnext"
+    /// MiniCPM5-2B: plain-llama dense. Installed from the vendor's BF16 repo
+    /// (quantize-in-flight) and, as the W2.1b control, from the vendor's own
+    /// MLX INT4 conversion (pre-quantized path). Bare `model.` prefix and a
+    /// top-level `lm_head.weight` on both.
+    case minicpm5 = "minicpm5"
 }
 
 /// Axes Qwen3.8-Flash-Next introduces beyond the shipped families' geometry.
@@ -153,6 +158,9 @@ struct ArchInfo: Sendable, Equatable {
     /// Qwen3.8-Flash-Next's three new axes. Nil for every other family, so
     /// their manifests are unchanged.
     let flashNext: FlashNextAxes?
+    /// Per-head q/k RMSNorm gains on full-attention layers. Defaults to the
+    /// Gemma behavior; only plain-llama families (MiniCPM5) set it false.
+    let qkNorm: Bool
 
     init(hiddenSize: Int,
          intermediateSize: Int,
@@ -225,8 +233,10 @@ struct ArchInfo: Sendable, Equatable {
          routerNormAfterTopK: Bool = false,
          routerGlobalScale: Bool = false,
          unpaddedVocabSize: Int = 0,
-         flashNext: FlashNextAxes? = nil) {
+         flashNext: FlashNextAxes? = nil,
+         qkNorm: Bool = true) {
         self.flashNext = flashNext
+        self.qkNorm = qkNorm
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.moeIntermediateSize = moeIntermediateSize
@@ -312,6 +322,14 @@ struct ArchInfo: Sendable, Equatable {
         }
         if (root["model_type"] as? String) == "maple" {
             return try loadMaple(configPath: configPath, tc: root)
+        }
+        // MiniCPM5 is a flat `LlamaForCausalLM` config. The loader is keyed on
+        // the llama model type because that is all a config carries; the
+        // production cross-check below refuses any llama config that is not
+        // the pinned MiniCPM5-2B shape, and the installer's source
+        // fingerprint refuses any repo that is not the pinned one.
+        if (root["model_type"] as? String) == "llama" {
+            return try loadMiniCPM5(configPath: configPath, root: root)
         }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
@@ -1004,6 +1022,159 @@ struct ArchInfo: Sendable, Equatable {
                 path: configPath,
                 detail: "qwen3_5 config does not match the pinned "
                     + "Qwen3.8-27B architecture baseline")
+        }
+    }
+
+    // MARK: - MiniCPM5 (`model_type == "llama"`, `LlamaForCausalLM`)
+
+    /// Plain-llama dense stack read from a flat `config.json`: every layer is
+    /// full attention (no `layer_types`), one SwiGLU MLP per layer, no
+    /// experts, no q/k norm, no output gate, full-head NeoX RoPE. Everything
+    /// the runner hard-codes is checked here rather than assumed:
+    /// `rms_norm_eps` must be the runtime's compile-time 1e-6, `rope_scaling`
+    /// must be null, and `attention_bias` / `mlp_bias` must be off (the
+    /// tensor contract has no bias tensors).
+    private static func loadMiniCPM5(configPath: String,
+                                     root: [String: Any]) throws -> ArchInfo {
+        func i(_ k: String) throws -> Int {
+            guard let n = (root[k] as? Int) ?? (root[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        func d(_ k: String) throws -> Double {
+            guard let n = (root[k] as? Double) ?? (root[k] as? NSNumber)?.doubleValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        guard (root["architectures"] as? [String]) == ["LlamaForCausalLM"] else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "llama config must declare architectures [\"LlamaForCausalLM\"]")
+        }
+        guard root["rope_scaling"] is NSNull || root["rope_scaling"] == nil else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "rope_scaling must be null for minicpm5")
+        }
+        guard try d("rms_norm_eps") == 1e-6 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "rms_norm_eps must be 1e-6: the runtime hard-codes that epsilon")
+        }
+        for bias in ["attention_bias", "mlp_bias"] {
+            guard (root[bias] as? Bool ?? false) == false else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "\(bias) must be false for minicpm5")
+            }
+        }
+        let numLayers = try i("num_hidden_layers")
+        let hidden = try i("hidden_size")
+        let numHeads = try i("num_attention_heads")
+        let numKV = try i("num_key_value_heads")
+        let headDim = (root["head_dim"] as? Int) ?? hidden / numHeads
+        let intermediate = try i("intermediate_size")
+        let theta = try d("rope_theta")
+        let tie = (root["tie_word_embeddings"] as? Bool) ?? false
+        let act = (root["hidden_act"] as? String) ?? "silu"
+
+        let arch = ArchInfo(
+            hiddenSize: hidden,
+            intermediateSize: intermediate,
+            moeIntermediateSize: 0,
+            numHeads: numHeads,
+            numKVHeads: numKV,
+            numFullKVHeads: numKV,
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: theta,
+            fullRopeTheta: theta,
+            partialRotaryFactor: 1.0,
+            numLayers: numLayers,
+            numExperts: 0,
+            topKExperts: 0,
+            tieWordEmbeddings: tie,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [UInt8](repeating: 1, count: numLayers),
+            hiddenActivation: act,
+            family: .minicpm5,
+            attnOutputGate: false,
+            // `LlamaAttention.scaling = head_dim ** -0.5`; `pow` reproduces it
+            // bit-exactly (1 / sqrt is one ulp off, and the manifest check is
+            // an exact Double comparison against the runtime baseline).
+            attentionScale: pow(Double(headDim), -0.5),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            numSharedExperts: 0,
+            numDenseLayers: numLayers,
+            denseIntermediateSize: intermediate,
+            qkNorm: false)
+        try crossCheckProductionMiniCPM5(arch, configPath: configPath)
+        return arch
+    }
+
+    /// Production MiniCPM5-2B baseline (mirrors the runtime's
+    /// `ArchConfig.miniCPM5_2B`). A config that matches the production shape
+    /// (hidden 2048, 42 layers) must agree on every field; toy configs are
+    /// exempt.
+    private static func crossCheckProductionMiniCPM5(_ a: ArchInfo,
+                                                     configPath: String) throws {
+        guard a.hiddenSize == 2048, a.numLayers == 42 else { return }
+        let expected = ArchInfo(
+            hiddenSize: 2048,
+            intermediateSize: 6144,
+            moeIntermediateSize: 0,
+            numHeads: 16,
+            numKVHeads: 2,
+            numFullKVHeads: 2,
+            headDim: 128,
+            fullHeadDim: 128,
+            vocabSize: 130_560,
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 5_000_000.0,
+            fullRopeTheta: 5_000_000.0,
+            partialRotaryFactor: 1.0,
+            numLayers: 42,
+            numExperts: 0,
+            topKExperts: 0,
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [UInt8](repeating: 1, count: 42),
+            hiddenActivation: "silu",
+            family: .minicpm5,
+            attnOutputGate: false,
+            attentionScale: 0.08838834764831845,   // pow(128, -0.5)
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            numSharedExperts: 0,
+            numDenseLayers: 42,
+            denseIntermediateSize: 6144,
+            qkNorm: false)
+        guard a == expected else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "llama config does not match the pinned MiniCPM5-2B "
+                    + "architecture baseline")
         }
     }
 

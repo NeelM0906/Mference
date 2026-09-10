@@ -40,6 +40,15 @@ public enum ForwardRunnerFactory {
                                       ? .chunked : .off,
                                   kvStorageMode: .fp16)
         }
+        if model.config.family == .minicpm5 {
+            return ForwardRuntime(producer: try MiniCPM5ForwardRunner(
+                model: model, context: context, maxContext: maxContext,
+                runtimeConfiguration: runtimeConfiguration),
+                                  prefillConfig: runtimeConfiguration.prefillConfig,
+                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
+                                      ? .chunked : .off,
+                                  kvStorageMode: .fp16)
+        }
         if model.config.family == .qwen38flashnext {
             // Sequential prefill: this runner does not implement
             // `ChunkedPrefillRunner`, and `RawCompletion` throws rather than

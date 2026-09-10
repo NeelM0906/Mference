@@ -131,6 +131,14 @@ public struct QuantBitPolicy: Sendable, Equatable {
             // and `FlashNextWeightMatrix` reads each tensor's width from its own
             // index entry rather than from a family-wide assumption.
             return .moeRouterInt8
+        case .minicpm5:
+            // Uniform INT4, mirroring the vendor's own MLX conversion
+            // (`openbmb/MiniCPM5-2B-MLX` rev `35ac38ee`): its config carries
+            // the base `{bits 4, group_size 64, mode affine}` block and no
+            // per-tensor overrides — every projection including
+            // `embed_tokens` and `lm_head` is INT4 g64, and a dense llama has
+            // no router to keep wider.
+            return .uniformInt4
         case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple:
             // None of these has an original-repo installer entry today, so no
             // conversion has been examined and no table can be honest. Uniform

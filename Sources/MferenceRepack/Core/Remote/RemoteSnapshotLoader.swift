@@ -38,7 +38,15 @@ enum RemoteSnapshotLoader {
                                             .appendingPathComponent("config.json"),
                                         audit: audit)
 
-        let metadata = try IndexLoader.load(snapshotDir: metadataDirectory)
+        // A missing `quantization` block is legitimate only for the vendor
+        // BF16 uploads the installer knows by repo id as
+        // `originalRepoQuantize` entries; the fingerprint check below still
+        // pins the exact revision.
+        let quantizesInFlight = SupportedModelSource.all.contains {
+            $0.repoID == remote.repoID && $0.kind == .originalRepoQuantize
+        }
+        let metadata = try IndexLoader.load(snapshotDir: metadataDirectory,
+                                            acceptsUnquantizedSource: quantizesInFlight)
         if requireKnownSource && SourceFingerprint.modelID(forIndexSha256: metadata.indexSha256Hex) == nil {
             // A supported source without a pinned index hash installs
             // trust-on-first-use: report the computed hash for pinning

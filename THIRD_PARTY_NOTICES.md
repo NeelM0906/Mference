@@ -11,9 +11,10 @@ Mikhaylov and contributors, licensed under the
 [Apache License 2.0](LICENSE-APACHE). The derived portions remain governed by
 that license. Significant changes from the original include: the Mference
 rebrand throughout; support for Qwen 3.6, DeepSeek-V4-Flash, Inkling-Small,
-Maple, and Qwen3.8-Flash-Next across architecture configuration, streaming installation, Metal
-kernels, forward runners, tokenization, and products; model-derived kernel
-specialization; and expanded validation and performance documentation.
+Maple, Qwen3.8-Flash-Next, and MiniCPM5-2B across architecture configuration,
+streaming installation, Metal kernels, forward runners, tokenization, and
+products; model-derived kernel specialization; and expanded validation and
+performance documentation.
 
 This file records the dependency review performed on 2026-08-09. It is an
 attribution aid, not legal advice. Anyone distributing a compiled product must
@@ -32,9 +33,9 @@ are preserved in [`LICENSE-MLX`](LICENSE-MLX).
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a
-pinned revision of one of six checkpoints and repacks it locally. Five are
-pre-quantized community conversions; Qwen3.8-Flash-Next is read from the
-vendor's own BF16 repository and quantized in flight.
+pinned revision of one of seven checkpoints and repacks it locally. Five are
+pre-quantized community conversions; Qwen3.8-Flash-Next and MiniCPM5-2B are
+read from their vendors' own BF16 repositories and quantized in flight.
 
 Gemma 4: revision `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` of
 [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit).
@@ -85,6 +86,21 @@ Assistant" business as that license defines them. The license text governs;
 this summary is an attribution aid, not legal advice. No reference code from
 that repository is imported into Mference — the runner, kernels and repack path
 are written against the published architecture, not copied from it.
+
+MiniCPM5-2B: revision `cd199ce3ee67549c42ef7372f809f2c63599a3e9` of
+[`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B), the
+vendor's own BF16 upload, quantized to INT4 affine group-64 at install; the
+installer verifies its source-index SHA-256
+`6d839cd76e8395de548a0e6cc310386f66d1ecbb2c75d198a8dfd3d70892b756`. OpenBMB
+publishes the model and its weights under the
+[Apache License 2.0](https://github.com/OpenBMB/MiniCPM/blob/main/LICENSE)
+(`license: apache-2.0` in the model card). The W2.1b quantizer-quality control,
+revision `35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3` of
+[`openbmb/MiniCPM5-2B-MLX`](https://huggingface.co/openbmb/MiniCPM5-2B-MLX)
+(index SHA-256 `ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045`),
+is the vendor's own conversion under the same license. No reference code was
+imported for this family: its architecture was read from
+`transformers` v5.6.2 (Apache-2.0) and nothing was copied from it.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.
