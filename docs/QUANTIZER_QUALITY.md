@@ -644,3 +644,10 @@ by policy and folds no norm bias — both correct for it today, and both now
 *explicit* per-family choices rather than defaults nobody had examined. Neither
 has been checked against an independent conversion of Flash-Next, because none
 exists. §7 is the record of what that kind of unchecked assumption costs.
+
+**Update 2026-09-10:** the decision was taken and the gate lifted.
+`ManifestReader.familiesWithoutRunner` is now empty and Flash-Next loads through
+the ordinary funnel for the CLI and the loopback server. The two caveats above
+did not block the lift; they are carried forward as *under measurement* in
+[docs/families/QWEN38_FLASH_NEXT.md](families/QWEN38_FLASH_NEXT.md) and belong
+in any result published for this family.

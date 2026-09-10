@@ -244,11 +244,12 @@ and a `requiredAxes` list. `pleNgramVocabSizeBase` is `ngram_vocab_size_base`
 **verbatim** — the per-head base vocab (20,000,000), *not* the row count. True
 row counts are derived from the shard headers and published in
 `plePool.layers[].rows` and `...shards[].rows`; nothing validates one against
-the other. The runtime gate is
-`ManifestReader.familiesWithoutRunner`, which is the authority (a manifest does
-not get to tell the runtime what it can run): loading this family fails with
-`family qwen38flashnext is installed but its runner is not implemented; missing
-axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
+the other. `requiredAxes` stays advisory: `ManifestReader.familiesWithoutRunner`
+is the authority (a manifest does not get to tell the runtime what it can run),
+and since the 2026-09-10 gate lift it no longer lists this family, so the
+install loads. Before the lift every entry point refused it with `family
+qwen38flashnext is installed but its runner is not implemented; missing axes:
+hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
 
 ## Port status
 
@@ -494,11 +495,36 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       global mixer standing in for the absent final norm. Prefill is
       **sequential** (`PrefillRuntimeConfig.off`, `HeadlessSequentialPrefillRunner`),
       which is the first thing a perf pass should take.
-- [ ] **The family gate stays DOWN.** `ManifestReader.familiesWithoutRunner`
-      still lists `qwen38flashnext`, and `FlashNextCapabilityGateTests` is
-      unchanged. The rule is token-exact-or-report, and the toy's long prompt is
-      7/8. What was measured (`FlashNextForwardRunnerParityTests`, both prompts,
-      prefill plus 8 cached decode steps):
+- [x] **The family gate is LIFTED** (2026-09-10, owner decision).
+      `ManifestReader.familiesWithoutRunner` no longer lists `qwen38flashnext` —
+      the table is now empty — so `peekFamily` resolves this family and the CLI
+      and the loopback server load it through the ordinary funnel.
+      `FlashNextCapabilityGateTests` was flipped accordingly and gained a test
+      that exercises the gate mechanism against an injected entry, since there
+      is no gated family left to prove it with.
+      **Basis for the decision:** W2.1b closed on both halves on 2026-09-02
+      (below), which removed the quantizer-quality objection, plus the real-model
+      first light of 2026-09-01 (below) — coherent output, a passkey retrieved
+      beyond the indexer budget, 2.39 GB RSS. The toy near-tie recorded in the
+      next bullet was reported, attributed to the toy's 1000x block attenuation,
+      and explicitly *not* treated as a blocker.
+      **v1 scope is CLI + server.** The Mac app has no install descriptor for
+      this family (`AppModelInstallDescriptor.swift` returns nil for
+      `.qwen38flashnext`), so it stays out of the toolbar picker and the download
+      list. That is deliberate and unchanged by the lift: this is a ~175 GB
+      quantize-in-flight repack driven from
+      `MferenceRepack --model qwen38flashnext`, not a pre-converted download the
+      app can offer. Adding an app descriptor is separate work.
+      **Two caveats stand, under measurement, and belong in any result
+      published for this family:** (1) uniform INT4 quantization including the
+      routers, where mlx-community's Qwen 3.6 control uses INT8 routers, and (2)
+      no RMSNorm bias fold. Neither has been checked against an independent
+      conversion of Flash-Next, because none exists — and those are exactly the
+      two kinds of defect W2.1b caught on Qwen 3.6 (§7).
+- [x] **Toy parity: reported, not tuned away.** The rule is
+      token-exact-or-report, and the toy's long prompt is 7/8. What was measured
+      (`FlashNextForwardRunnerParityTests`, both prompts, prefill plus 8 cached
+      decode steps):
       - **PLE n-gram row ids exact at every position** — a pure 64-bit integer
         hash, no float in the path.
       - **Router and indexer exact until a near-tie flips.** SHORT: exact
@@ -521,16 +547,18 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         Jacobian — so the FP16 input floor emerges as an output perturbation
         comparable to the output itself, lands in a residual stream of magnitude
         ~4e-2 as ~1% per layer, and reaches ~2.4% by the last layer. A trained
-        model does not attenuate its blocks by 1000x. Settling this needs the
-        real 175 GB install, which the gate currently blocks — an owner
-        decision.
+        model does not attenuate its blocks by 1000x. Settling this needed the
+        real 175 GB install; the first-light run below did it, and the gate lift
+        followed.
 - [x] **Real-model first light — the toy hypothesis confirmed.** Measured
-      2026-09-01 on the 256 GB M3 Ultra via a measurement-only door
-      (`FlashNextRealGenerationMeasurement`, env-gated on
-      `MFERENCE_FLASHNEXT_GTURBO`; the production gate is **not** lifted — it
-      still refuses the family for CLI/server/app, asserted by
-      `productionDoorStillRefusesRealInstall`). The runner is
-      `FlashNextForwardRunner` on the real INT4 install, unmodified.
+      2026-09-01 on the 256 GB M3 Ultra through
+      `FlashNextRealGenerationMeasurement` (env-gated on
+      `MFERENCE_FLASHNEXT_GTURBO`). At the time this ran, the production gate
+      was still down and the suite reached the model through the internal
+      `expecting:` load overload; since the 2026-09-10 lift the production door
+      loads the same install directly, asserted by
+      `productionDoorLoadsRealInstall`. The runner is `FlashNextForwardRunner`
+      on the real INT4 install, unmodified.
       - *Greedy, "The capital of France is", 24 tokens:* **" Paris. The
         capital of Germany is Berlin. The capital of Italy is Rome. The
         capital of Spain is Madrid. The"** — coherent and correct. 11.6 tok/s
@@ -559,19 +587,32 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         level says 40 layers of accumulated error leave the output distribution
         intact (86.3 % top-1 agreement against a zero noise floor, median KL
         0.036 nats). That **removes the quantizer-quality objection** to lifting
-        this family's gate. It does not lift it: `familiesWithoutRunner` refuses
-        Flash-Next for **missing axes** (`hyperConnectionsLowRank`,
-        `attentionIndexer`, `pleNgramEmbedding`), which is a separate maintainer
-        decision. Two residual caveats belong in that decision: Flash-Next is
-        uniform INT4 and folds no RMSNorm bias, and neither choice has been
-        checked against an independent conversion of Flash-Next because none
-        exists — the two defects W2.1b caught on Qwen 3.6 (§7) were exactly of
-        that kind.
+        this family's gate. It did not by itself lift it — the axes refusal
+        (`hyperConnectionsLowRank`, `attentionIndexer`, `pleNgramEmbedding`) was
+        a separate maintainer decision, taken on 2026-09-10. Two residual
+        caveats carried into that decision and remain **under measurement**:
+        Flash-Next is uniform INT4 (routers included, where the Qwen 3.6 control
+        uses INT8 routers) and folds no RMSNorm bias, and neither choice has
+        been checked against an independent conversion of Flash-Next because
+        none exists — the two defects W2.1b caught on Qwen 3.6 (§7) were exactly
+        of that kind.
       - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
         model** (~75× the resident set), the most extreme expression of the
         working-set thesis in the project.
-- [ ] `bringup-check.sh` green ×3 and the community protocol page — downstream
-      of the gate lift, which awaits W2.1b and a maintainer decision.
+- [ ] **Benchmarks — pending.** Decode tok/s, prefill and RSS on the ladder,
+      measured per [docs/COMMUNITY_BENCHMARKS.md](../COMMUNITY_BENCHMARKS.md)
+      and recorded in [docs/BENCHMARKS.md](../BENCHMARKS.md). Owned by the
+      benchmark pass that follows the gate lift; the first-light numbers above
+      are a measurement harness read, not a protocol run.
+- [ ] **`bringup-check.sh qwen38flashnext` green ×3 — pending.** The family is
+      registered in the script (suite filter `FlashNext`); the three green runs
+      and the community protocol page are the benchmark owner's to fill in.
+- [ ] **`MFERENCE_PHASES=1` phase attribution — pending.** The runner now
+      carries expert-I/O, indexer CPU top-k, PLE row-fetch and GPU busy/span
+      counters, and `MferenceCLI` prints them. The numbers they produce, and the
+      consolidation work they are meant to direct (the ~60 CPU round trips per
+      token, the unoverlapped expert reads, sequential prefill), are pending
+      that same pass.
 
 ## Reproduction of this dossier's facts
 

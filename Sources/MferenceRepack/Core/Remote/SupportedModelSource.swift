@@ -233,8 +233,11 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// and the PLE pool's 0.4% per-block slack. The Day-0 dossier's ~101 GB
     /// figure assumed an INT4 n-gram table and is superseded.
     ///
-    /// The runtime has no runner for this family yet: installing it succeeds,
-    /// loading it fails by name (see `ManifestReader.peekFamily`).
+    /// `FlashNextForwardRunner` executes this family and its capability gate
+    /// was lifted on 2026-09-10, so an install made here loads through the
+    /// ordinary `ManifestReader.peekFamily` funnel. It has no Mac app install
+    /// descriptor: this is a quantize-in-flight repack driven from
+    /// `MferenceRepack --model qwen38flashnext`, not a download the app offers.
     public static let qwen38FlashNext = SupportedModelSource(
         name: "qwen38flashnext",
         displayName: "Qwen3.8-Flash-Next 180B-A3.5B (quantized at install)",

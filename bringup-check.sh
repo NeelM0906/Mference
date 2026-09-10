@@ -93,6 +93,7 @@ Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
   <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple
+                qwen38flashnext
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
@@ -129,6 +130,7 @@ case "${family}" in
   deepseekv4flash) suite_filter='(DSV4|Deepseek)' ;;
   inklingsmall)    suite_filter='Inkling' ;;
   maple)           suite_filter='Maple' ;;
+  qwen38flashnext) suite_filter='FlashNext' ;;
   *) usage >&2; fail "unknown family: ${family}" ;;
 esac
 
