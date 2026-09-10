@@ -104,24 +104,11 @@ import Testing
     @Test func shippedFamiliesAreNotGated() {
         let shipped: [ModelFamily] = [
             .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
+            .minicpm5,
         ]
         for family in shipped {
             #expect(ManifestReader.familiesWithoutRunner[family.rawValue] == nil,
                     "\(family.rawValue) has a runner; remove it from the gate table")
-        }
-    }
-
-    /// MiniCPM5 follows the same discipline: its baseline, accessors and the
-    /// `qkNorm` axis exist so the runner can be written against them, and
-    /// every load path refuses the family by name until that runner lands.
-    @Test func miniCPM5IsGatedByNameUntilItsRunnerLands() throws {
-        #expect(ArchConfig.knownArchitectures[.minicpm5] != nil)
-        let directory = try Self.writeManifest(family: "minicpm5")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        #expect(throws: ModelError.familyRunnerNotImplemented(
-            family: "minicpm5",
-            missingAxes: ["qkNormFreeAttention"])) {
-            _ = try ManifestReader.peekFamily(directoryURL: directory)
         }
     }
 

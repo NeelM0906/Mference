@@ -827,10 +827,5 @@ public enum ManifestReader {
             "attentionIndexer",
             "pleNgramEmbedding",
         ],
-        // MiniCPM5 installs and validates (`qkNorm` is an axis now) but no
-        // runner takes the q/k-norm-free attention branch yet.
-        "minicpm5": [
-            "qkNormFreeAttention",
-        ],
     ]
 }
