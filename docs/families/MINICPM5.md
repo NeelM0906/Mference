@@ -22,7 +22,7 @@ implemented unless the "Port status" list says so.
 | Control index SHA-256 | `ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045` (68,721 bytes) |
 | Parameters | 2.517B total, 2.517B active (dense); 1.982B non-embedding |
 | Install size | 1,425,981,879 bytes verified (8 files); `model_weights.bin` 1,415,974,912 |
-| Status | **in port** (runner and tokenizer landed with green parity gates; first light and the family gate in progress) |
+| Status | **supported** — family gate green 2026-09-10 (`bringup-check.sh` PASS, full suite ×3, protocol run with the stated deviation) |
 
 ## Checkpoint selection
 
@@ -392,9 +392,12 @@ validate without being loadable.
       ids in `stopTokenIDs`; 16 HF renders byte-identical; the installed real
       tokenizer's encodings match `transformers` 5.6.2 on every probe and every
       render (`MFERENCE_MINICPM5_TOKENIZER_DIR` run)
-- [ ] **Ladder** — 16 / 32 / auto byte-identical greedy output
-- [ ] **Gate** — [`FAMILY_GATE.md`](../FAMILY_GATE.md) steps 1–9
-- [ ] **Protocol bench** — three frozen `real-generation-v1` cases
+- [x] **Ladder** — 16 / 32 / auto byte-identical greedy output
+      (`bringup-check.sh` stage 3)
+- [x] **Gate** — [`FAMILY_GATE.md`](../FAMILY_GATE.md) steps 1–9 (table under
+      "Measured results")
+- [x] **Protocol bench** — short-explanation 3/3 `stop=endOfTurn`; the other
+      two cases recorded as the stated think-block deviation
 
 ## First light (real install, 2026-09-10)
 
@@ -537,13 +540,18 @@ achieved bandwidth at ~102 GB/s on this M5.
 
 ## Known limits
 
-- Not yet loadable: the family is in `ManifestReader.familiesWithoutRunner`
-  until the runner lands and its parity gates pass.
 - The vendor's DSpark drafter (`openbmb/MiniCPM5-2B-DSpark`: 5-layer
   qwen3-architecture block-diffusion draft model, block_size 7, target layers
-  `[1, 10, 20, 30, 39]`, confidence head) is **not** part of this bring-up. A
-  one-page scoping note on plugging it into a `RoundDrafter`-style protocol is
-  written only after the family gate is green.
+  `[1, 10, 20, 30, 39]`, confidence head) is **not** part of this bring-up.
+  Scoping note, written after the gate went green:
+  [2026-09-10-minicpm5-dspark-drafter-scoping.md](../superpowers/specs/2026-09-10-minicpm5-dspark-drafter-scoping.md).
+- Greedy decoding (`--temperature 0`) can loop inside the think block on
+  short chat prompts, and at the protocol's 0.2 the medium-review case does not
+  leave its think block within 4,096 tokens; the vendor recommends
+  `temperature 1.0`. Recorded under "First light" and "Measured results".
+- Chunked prefill is FP16-tier equal to sequential decode on the batched INT4
+  QMM path (max-abs 3.2e-3, argmax identical), bit-exact only on the per-row
+  path (chunks under 32 tokens).
 - Optional or approximate features: none.
 - Untested: everything below the "Port status" checkboxes that is not ticked.
 
