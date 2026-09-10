@@ -149,7 +149,6 @@ webui_environment=(
   "ENABLE_SEARCH_QUERY_GENERATION=false"
   "ENABLE_EVALUATION_ARENA_MODELS=false"
   "DATA_DIR=$data_directory"
-  "WEBUI_SECRET_KEY=$(webui_secret_key)"
 )
 
 # --- checks and prerequisites ------------------------------------------------
@@ -313,8 +312,9 @@ cmd_run() {
     echo "with env:"
     local entry
     for entry in "${webui_environment[@]}"; do
-      case "$entry" in WEBUI_SECRET_KEY=*) echo "  WEBUI_SECRET_KEY=<from $data_directory/webui-secret-key>" ;; *) echo "  $entry" ;; esac
+      echo "  $entry"
     done
+    echo "  WEBUI_SECRET_KEY=<created on launch at $data_directory/webui-secret-key>"
     echo "would wait:  http://127.0.0.1:$webui_port"
     echo "would open:  http://127.0.0.1:$webui_port"
     exit 0
@@ -334,7 +334,9 @@ cmd_run() {
   wait_for_server
 
   note "starting Open WebUI on http://127.0.0.1:$webui_port"
-  env "${webui_environment[@]}" \
+  # The secret is created here, on a real launch only, so --dry-run, install
+  # and models never touch the data directory.
+  env "${webui_environment[@]}" "WEBUI_SECRET_KEY=$(webui_secret_key)" \
     "$webui_binary" serve --host 127.0.0.1 --port "$webui_port" &
   webui_pid=$!
   wait_for_webui
