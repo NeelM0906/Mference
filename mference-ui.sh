@@ -123,6 +123,19 @@ list_arguments+=(--list-models)
 # two query rewrites per turn. They seed Open WebUI's persisted defaults, so
 # they take effect on a fresh DATA_DIR and are overridden by anything already
 # toggled in its admin settings.
+# Open WebUI signs sessions with WEBUI_SECRET_KEY. Left unset, `open-webui
+# serve` generates one and writes it to `.webui_secret_key` in the *current
+# directory* — the checkout — where it once got committed. Keep it in the data
+# directory instead, created on first launch, readable only by the user.
+webui_secret_key() {
+  local file="$data_directory/webui-secret-key"
+  if [[ ! -s "$file" ]]; then
+    mkdir -p "$data_directory"
+    (umask 077; openssl rand -hex 32 > "$file") || fail "could not create $file"
+  fi
+  cat "$file"
+}
+
 webui_environment=(
   "OPENAI_API_BASE_URL=http://127.0.0.1:$server_port/v1"
   "OPENAI_API_KEY=local"
@@ -301,6 +314,7 @@ cmd_run() {
     for entry in "${webui_environment[@]}"; do
       echo "  $entry"
     done
+    echo "  WEBUI_SECRET_KEY=<created on launch at $data_directory/webui-secret-key>"
     echo "would wait:  http://127.0.0.1:$webui_port"
     echo "would open:  http://127.0.0.1:$webui_port"
     exit 0
@@ -320,7 +334,9 @@ cmd_run() {
   wait_for_server
 
   note "starting Open WebUI on http://127.0.0.1:$webui_port"
-  env "${webui_environment[@]}" \
+  # The secret is created here, on a real launch only, so --dry-run, install
+  # and models never touch the data directory.
+  env "${webui_environment[@]}" "WEBUI_SECRET_KEY=$(webui_secret_key)" \
     "$webui_binary" serve --host 127.0.0.1 --port "$webui_port" &
   webui_pid=$!
   wait_for_webui
