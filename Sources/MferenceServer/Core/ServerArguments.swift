@@ -1,7 +1,9 @@
 import Foundation
 
 public struct ServerArguments: Equatable, Sendable {
-    public let model: String
+    /// Model directory. Required in single-model mode; optional in library
+    /// mode, where it preloads one install instead of loading lazily.
+    public let model: String?
     public let port: Int
     public let bindMode: ServerBindMode
     /// Explicit --model-id value; nil defers to the loaded model's family
@@ -11,11 +13,26 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    /// nil when `--library` was absent, which keeps single-model mode exactly
+    /// as it was.
+    public let library: ServerLibraryOption?
 
     public static let usage = """
     usage: MferenceServer --model <completed .gturbo directory> [options]
+           MferenceServer --library [dir] [options]
 
-      --model <dir>          Required model directory.
+      --model <dir>          Model directory. Required unless --library is
+                             given, where it preloads one install instead.
+      --library [dir]        Serve every completed install found under <dir>,
+                             repeatable. With no value, scans the roots the Mac
+                             app scans: the Mference.libraryRoot default (or
+                             MFERENCE_LIBRARY_ROOT), the package checkout's
+                             scratch/, and
+                             ~/Library/Application Support/Mference.
+                             GET /v1/models lists them all; a request naming a
+                             model that is not resident unloads the current one
+                             and loads it in place. One model is loaded at a
+                             time and no second process is ever started.
       --port <1...65535>     Listening port (default 8080).
       --bind <mode>          loopback or tailnet (default loopback). tailnet
                              binds only the machine's Tailscale IPv4 address
@@ -24,6 +41,7 @@ public struct ServerArguments: Equatable, Sendable {
                              installed model: gemma-4-26b-a4b-it,
                              qwen3.6-35b-a3b, deepseek-v4-flash-2bit-dq,
                              inkling-small-4bit, or maple-preview-2bit-mlx).
+                             Single-model mode only.
       --max-context <tokens> 4096, 8192, 16384, 32768, 65536, or 128000 (default 16384).
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
@@ -39,10 +57,29 @@ public struct ServerArguments: Equatable, Sendable {
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var libraryRoots: [String] = []
+        var wantsDefaultLibraryRoots = false
         var index = 0
         while index < input.count {
             let flag = input[index]
             if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
+            // The only flag whose value is optional: bare `--library` means the
+            // default roots, so a following `--flag` or the end of the argument
+            // list terminates it rather than being eaten as a path.
+            if flag == "--library" {
+                let next = index + 1 < input.count ? input[index + 1] : nil
+                if let next, !next.hasPrefix("--") {
+                    guard !next.isEmpty else {
+                        throw ServerArgumentError.invalid("--library must not be empty")
+                    }
+                    libraryRoots.append(next)
+                    index += 2
+                } else {
+                    wantsDefaultLibraryRoots = true
+                    index += 1
+                }
+                continue
+            }
             guard index + 1 < input.count else {
                 throw ServerArgumentError.invalid("\(flag) requires a value")
             }
@@ -87,14 +124,62 @@ public struct ServerArguments: Equatable, Sendable {
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
         }
-        guard let model else { throw ServerArgumentError.invalid("--model is required") }
+        let library: ServerLibraryOption?
+        if wantsDefaultLibraryRoots || !libraryRoots.isEmpty {
+            library = ServerLibraryOption(roots: libraryRoots,
+                                          includesDefaultRoots: wantsDefaultLibraryRoots)
+        } else {
+            library = nil
+        }
+        if library == nil {
+            guard model != nil else {
+                throw ServerArgumentError.invalid("--model is required")
+            }
+        } else if modelIDOverride != nil {
+            // Library mode derives one identifier per install; a single
+            // override could only ever name one of them.
+            throw ServerArgumentError.invalid("--model-id cannot be combined with --library")
+        }
         return ServerArguments(model: model,
                                port: port,
                                bindMode: bindMode,
                                modelIDOverride: modelIDOverride,
                                maxContext: maxContext,
                                queueLimit: queueLimit,
-                               promptCacheMode: promptCacheMode)
+                               promptCacheMode: promptCacheMode,
+                               library: library)
+    }
+}
+
+/// How `--library` was requested. Explicit roots and the Mac app's default
+/// roots combine: `--library a --library` scans `a` and the defaults.
+public struct ServerLibraryOption: Equatable, Sendable {
+    public let roots: [String]
+    public let includesDefaultRoots: Bool
+
+    public init(roots: [String], includesDefaultRoots: Bool) {
+        self.roots = roots
+        self.includesDefaultRoots = includesDefaultRoots
+    }
+
+    /// Resolved roots, explicit ones first and relative paths made absolute
+    /// against `currentDirectoryURL`.
+    public func resolvedRoots(
+        currentDirectoryURL: URL = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true),
+        defaultRoots: () -> [URL] = { ServerLibraryDiscovery.defaultRoots() }
+    ) -> [URL] {
+        var resolved = roots.map { path -> URL in
+            if path.hasPrefix("/") {
+                return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            }
+            return currentDirectoryURL.appendingPathComponent(path, isDirectory: true)
+                .standardizedFileURL
+        }
+        if includesDefaultRoots { resolved.append(contentsOf: defaultRoots()) }
+        var seen = Set<String>()
+        return resolved.filter { seen.insert($0.path).inserted }
     }
 }
 

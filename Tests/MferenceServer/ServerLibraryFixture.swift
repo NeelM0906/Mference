@@ -1,0 +1,149 @@
+import Darwin
+import Foundation
+import Mference
+
+/// Builds installs on disk that `ServerLibraryProbe` accepts, so the probe runs
+/// against real manifests and receipts. Nothing here is loadable — the weight
+/// files are absent and no test ever asks a runtime to open one.
+enum ServerLibraryFixture {
+    static func makeRoot(_ tag: String) throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mference-library-\(tag)-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root.standardizedFileURL
+    }
+
+    /// A complete Gemma 4 install named `<name>.gturbo` under `root`.
+    @discardableResult
+    static func makeCompleteInstall(in root: URL, named name: String) throws -> URL {
+        let directory = root.appendingPathComponent("\(name).gturbo", isDirectory: true)
+            .standardizedFileURL
+        let experts = directory.appendingPathComponent("packed_experts", isDirectory: true)
+        try FileManager.default.createDirectory(at: experts, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: experts.appendingPathComponent("layout.json"))
+
+        let arch = ArchConfig.gemma4_26B_A4B
+        var files: [String: Any] = [
+            "model_weights.bin": ["size": 0, "sha256": String(repeating: "0", count: 64)],
+            "packed_experts/layout.json": ["size": 2,
+                                           "sha256": String(repeating: "0", count: 64)],
+        ]
+        for layer in 0..<arch.numLayers {
+            files[String(format: "packed_experts/layer_%02d.bin", layer)] = [
+                "size": 0,
+                "sha256": String(repeating: "0", count: 64),
+            ]
+        }
+        let manifest: [String: Any] = [
+            "magic": "GTURBO",
+            "versionMajor": 1,
+            "versionMinor": 0,
+            "flags": ["streamingPresent": true],
+            "modelID": "test/\(name)",
+            "sourceSnapshotHash": "sha256:" + String(repeating: "a", count: 64),
+            "quant": [
+                "embedding": quantSlot(4),
+                "attention": quantSlot(4),
+                "router": quantSlot(8),
+                "sharedExpert": quantSlot(4),
+                "routedExpert": quantSlot(4),
+            ],
+            "arch": [
+                "family": ModelFamily.gemma4.rawValue,
+                "hiddenSize": arch.hiddenSize,
+                "ffnIntermediate": arch.intermediateSize,
+                "moeIntermediateSize": arch.moeIntermediateSize,
+                "numHeads": arch.numHeads,
+                "numKVHeads": arch.numKVHeads,
+                "numFullKVHeads": arch.numFullKVHeads,
+                "headDim": arch.headDim,
+                "fullHeadDim": arch.fullHeadDim,
+                "vocabSize": arch.vocabSize,
+                "slidingWindow": arch.slidingWindow,
+                "finalLogitSoftcap": arch.finalLogitSoftcap,
+                "ropeTheta": arch.ropeTheta,
+                "fullRopeTheta": arch.fullRopeTheta,
+                "partialRotaryFactor": arch.partialRotaryFactor,
+                "numLayers": arch.numLayers,
+                "numExperts": arch.numExperts,
+                "topKExperts": arch.topKExperts,
+                "tieWordEmbeddings": arch.tieWordEmbeddings,
+                "attentionKEqV": arch.attentionKEqV,
+                "hiddenActivation": arch.hiddenActivation,
+                "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
+            ],
+            "files": files,
+            "expertsPerLayer": arch.numExperts,
+            "numLayers": arch.numLayers,
+            "expertStride": UInt64(getpagesize()),
+        ]
+        try writeManifestAndReceipt(manifest, in: directory)
+        return directory
+    }
+
+    /// A directory whose manifest names a family the runtime installs but has
+    /// no runner for. Deliberately minimal: the probe classifies it from
+    /// `arch.family` alone, before any strict decode.
+    @discardableResult
+    static func makeGatedInstall(in root: URL,
+                                 named name: String,
+                                 family: String = ModelFamily.qwen38flashnext.rawValue)
+        throws -> URL {
+        let directory = root.appendingPathComponent("\(name).gturbo", isDirectory: true)
+            .standardizedFileURL
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        let manifest: [String: Any] = ["arch": ["family": family]]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+        try data.write(to: directory.appendingPathComponent("manifest.json"))
+        return directory
+    }
+
+    /// A directory with a manifest that decodes to nothing usable.
+    @discardableResult
+    static func makeCorruptInstall(in root: URL, named name: String) throws -> URL {
+        let directory = root.appendingPathComponent("\(name).gturbo", isDirectory: true)
+            .standardizedFileURL
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        try Data("{\"arch\":{}}".utf8)
+            .write(to: directory.appendingPathComponent("manifest.json"))
+        return directory
+    }
+
+    /// Marks `<name>.gturbo` as an install in progress, the way `InstallLock`
+    /// does: a sibling lock file next to the directory being written.
+    static func holdInstallLock(in root: URL, named name: String) throws {
+        try Data().write(to: root.appendingPathComponent("\(name).gturbo.install.lock"))
+    }
+
+    private static func writeManifestAndReceipt(_ manifest: [String: Any],
+                                                in directory: URL) throws {
+        let manifestData = try JSONSerialization.data(withJSONObject: manifest,
+                                                      options: [.sortedKeys])
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        try manifestData.write(to: manifestURL)
+        let receipt: [String: Any] = [
+            "schemaVersion": 1,
+            "manifestSha256": Sha256Verifier.hashData(manifestData),
+            "modelDirectoryPath": directory.standardizedFileURL.path,
+            "verificationTimestamp": "2026-09-10T00:00:00Z",
+            "toolVersion": "MferenceServerTests",
+            "files": [:],
+        ]
+        let receiptData = try JSONSerialization.data(withJSONObject: receipt,
+                                                     options: [.sortedKeys])
+        try receiptData.write(to: directory.appendingPathComponent("verified-install.json"))
+    }
+
+    private static func quantSlot(_ weightBits: Int) -> [String: Any] {
+        [
+            "weightBits": weightBits,
+            "scheme": "affine",
+            "scaleType": "bf16",
+            "biasType": "bf16",
+            "groupSize": Quantization.groupSize,
+        ]
+    }
+}

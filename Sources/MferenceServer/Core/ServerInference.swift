@@ -165,7 +165,7 @@ public actor ServerCoordinator {
     public var isActive: Bool { active }
 }
 
-public actor ServerModelSession: ServerInferenceBackend {
+public actor ServerModelSession: ServerLoadedModel {
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
     public nonisolated let chatDialect: ChatDialect
     /// Family-derived API model identifier used when --model-id is absent.

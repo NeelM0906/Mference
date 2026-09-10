@@ -6,6 +6,13 @@ Tailscale IPv4 address with `--bind tailnet`. It has no application-level
 authentication or TLS; do not expose it through a wildcard interface, proxy,
 or tunnel.
 
+The opt-in `--library` mode serves every installed model from this one process,
+listing them all in `/v1/models` and swapping the resident model in place when a
+request names a different one. It changes nothing about the mode described here,
+which is what runs whenever `--library` is absent. See
+[Open WebUI as an Mference frontend](OPEN_WEBUI.md) for library mode, its model
+identifiers, the cost of a swap, and the browser frontend it exists for.
+
 ## Start the server
 
 First, install the model with the Mac app or `MferenceRepack`. Then check

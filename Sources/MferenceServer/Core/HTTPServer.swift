@@ -5,13 +5,19 @@ import NIOPosix
 import Synchronization
 import Mference
 
+/// Which models the server serves. `.single` is the original one-model-per-
+/// process shape; `.library` serves whatever the library found and swaps the
+/// resident model in place.
+enum ServerModelMode: Sendable {
+    case single(modelID: String, chatDialect: ChatDialect, backend: any ServerInferenceBackend)
+    case library(ServerModelLibrary)
+}
+
 public actor MferenceHTTPServer {
     public static let maximumBodyBytes = 1_048_576
 
     private let group: MultiThreadedEventLoopGroup
-    private let modelID: String
-    private let chatDialect: ChatDialect
-    private let backend: any ServerInferenceBackend
+    private let mode: ServerModelMode
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let childChannels = ChildChannelRegistry()
@@ -25,17 +31,23 @@ public actor MferenceHTTPServer {
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
-        self.modelID = modelID
-        self.chatDialect = chatDialect
-        self.backend = backend
+        self.mode = .single(modelID: modelID, chatDialect: chatDialect, backend: backend)
+        self.coordinator = ServerCoordinator(queueLimit: queueLimit)
+        self.heartbeatInterval = heartbeatInterval
+    }
+
+    public init(library: ServerModelLibrary,
+                queueLimit: Int,
+                heartbeatInterval: TimeAmount = .seconds(5),
+                group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
+        self.group = group
+        self.mode = .library(library)
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
     }
 
     public func start(host: String = "127.0.0.1", port: Int) async throws -> Channel {
-        let modelID = self.modelID
-        let chatDialect = self.chatDialect
-        let backend = self.backend
+        let mode = self.mode
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
         let childChannels = self.childChannels
@@ -49,9 +61,7 @@ public actor MferenceHTTPServer {
                     withErrorHandling: true
                 ).flatMap {
                     channel.pipeline.addHandler(ServerHTTPHandler(
-                        modelID: modelID,
-                        chatDialect: chatDialect,
-                        backend: backend,
+                        mode: mode,
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
                         childChannels: childChannels))
@@ -118,9 +128,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
-    private let modelID: String
-    private let chatDialect: ChatDialect
-    private let backend: any ServerInferenceBackend
+    private let mode: ServerModelMode
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let childChannels: ChildChannelRegistry
@@ -129,15 +137,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private var oversized = false
     private var activeTask: Task<Void, Never>?
 
-    init(modelID: String,
-         chatDialect: ChatDialect = .gemma,
-         backend: any ServerInferenceBackend,
+    init(mode: ServerModelMode,
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
          childChannels: ChildChannelRegistry) {
-        self.modelID = modelID
-        self.chatDialect = chatDialect
-        self.backend = backend
+        self.mode = mode
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
         self.childChannels = childChannels
@@ -182,15 +186,32 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         let path = String(head.uri.prefix { $0 != "?" })
         switch (head.method, path) {
         case (.GET, "/health"):
-            writeJSON(context, status: .ok, object: ["status": "ok"])
+            switch mode {
+            case .single:
+                writeJSON(context, status: .ok, object: ["status": "ok"])
+            case .library(let library):
+                // Answered off a lock-protected snapshot, so the probe stays
+                // responsive through a load that holds the library actor for
+                // minutes.
+                let health = library.snapshot.health
+                writeJSON(context, status: .ok, object: [
+                    "status": health.status,
+                    "model": health.model.map { $0 as Any } ?? NSNull(),
+                ])
+            }
         case (.GET, "/v1/models"):
-            let response = OpenAIModelList(
-                object: "list",
-                data: [.init(id: modelID,
-                             object: "model",
-                             created: 0,
-                             ownedBy: "mference")])
-            writeCodable(context, status: .ok, response)
+            switch mode {
+            case .single(let modelID, _, _):
+                let response = OpenAIModelList(
+                    object: "list",
+                    data: [.init(id: modelID,
+                                 object: "model",
+                                 created: 0,
+                                 ownedBy: "mference")])
+                writeCodable(context, status: .ok, response)
+            case .library(let library):
+                writeCodable(context, status: .ok, library.snapshot.modelList)
+            }
         case (.POST, "/v1/chat/completions"):
             guard head.headers.first(name: "content-type")?
                 .lowercased().hasPrefix("application/json") == true else {
@@ -199,7 +220,16 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                                code: "unsupported_media_type"))
                 return
             }
-            handleCompletion(body: body, context: context)
+            switch mode {
+            case .single(let modelID, let chatDialect, let backend):
+                handleCompletion(modelID: modelID,
+                                 chatDialect: chatDialect,
+                                 backend: backend,
+                                 body: body,
+                                 context: context)
+            case .library(let library):
+                handleLibraryCompletion(library, body: body, context: context)
+            }
         case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"):
             writeError(context, status: .methodNotAllowed,
                        OpenAIErrorEnvelope(message: "method not allowed",
@@ -211,7 +241,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
-    private func handleCompletion(body: ByteBuffer,
+    private func handleCompletion(modelID: String,
+                                  chatDialect: ChatDialect,
+                                  backend: any ServerInferenceBackend,
+                                  body: ByteBuffer,
                                   context: ChannelHandlerContext) {
         do {
             let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
@@ -232,7 +265,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 self.beginStream(contextBox.value)
                 self.writeStreamChunk(
                     contextBox.value,
-                    self.chunk(id: responseID, created: created,
+                    self.chunk(id: responseID, created: created, model: modelID,
                                delta: ["role": "assistant"],
                                finishReason: nil))
             }
@@ -248,22 +281,24 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     // bound for a 429 is never rendered at all.
                     let completion = try await self.coordinator.run(
                         onQueued: startStream,
-                        render: { try await self.backend.prepare(request) }
+                        render: { try await backend.prepare(request) }
                     ) { prepared in
                         startStream()
-                        return try await self.backend.generate(prepared) { event in
+                        return try await backend.generate(prepared) { event in
                             guard request.stream else { return }
                             switch event {
                             case .content(let text):
                                 self.writeStreamChunk(
                                     contextBox.value,
                                     self.chunk(id: responseID, created: created,
+                                               model: modelID,
                                                delta: ["content": text],
                                                finishReason: nil))
                             case .toolCall(let call):
                                 self.writeToolCall(contextBox.value,
                                                    id: responseID,
                                                    created: created,
+                                                   model: modelID,
                                                    toolIndex: streamState.nextToolIndex(),
                                                    call: call)
                             }
@@ -276,13 +311,150 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         self.finishStream(contextBox.value,
                                           id: responseID,
                                           created: created,
+                                          model: modelID,
                                           completion: completion,
                                           includeUsage: request.includeUsage)
                     } else {
                         self.writeCompletion(contextBox.value,
                                              id: responseID,
                                              created: created,
+                                             model: modelID,
                                              completion: completion)
+                    }
+                } catch {
+                    self.handleAsyncError(error,
+                                          context: contextBox.value,
+                                          id: responseID,
+                                          stream: streamState.isStarted)
+                }
+            }
+        } catch let error as ServerRequestError {
+            writeError(context,
+                       status: error == .unknownModel ? .notFound : .badRequest,
+                       error.envelope)
+        } catch {
+            writeError(context, status: .badRequest,
+                       OpenAIErrorEnvelope(message: "malformed JSON request",
+                                           code: "invalid_json"))
+        }
+    }
+
+    /// What the library-mode turn produces. `includeUsage` and the resolved
+    /// model identifier are only known after the swap, because validation runs
+    /// against the dialect of the model that was loaded.
+    private struct LibraryOutcome: Sendable {
+        let modelID: String
+        let completion: ServerCompletion
+        let includeUsage: Bool
+    }
+
+    /// Library mode. Differs from single-model mode in exactly one respect:
+    /// resolution (which may unload one model and load another), validation,
+    /// and rendering all happen inside the coordinator's turn, because the
+    /// tokenizer that renders the prompt and the dialect that validates the
+    /// request belong to the model being swapped in.
+    ///
+    /// Status codes therefore split by whether the request had to wait:
+    ///
+    /// - First in line — nothing is on the wire yet, so an unknown model is
+    ///   `404`, an unsupported parameter or overlong prompt is `400`, and a
+    ///   failed load is `500`, exactly as in single-model mode.
+    /// - Queued behind another generation — `onQueued` has already committed
+    ///   `200` and the SSE head, so the same envelope is reported in-band as
+    ///   one `error` frame followed by `[DONE]`. This is the mechanism
+    ///   `docs/OPENAI_SERVER.md` already describes for post-commit failures.
+    ///
+    /// The unknown-model check is the exception: it needs no load, so it runs
+    /// synchronously against the library snapshot and always gets its `404`
+    /// before a queue place is claimed.
+    private func handleLibraryCompletion(_ library: ServerModelLibrary,
+                                         body: ByteBuffer,
+                                         context: ChannelHandlerContext) {
+        do {
+            let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
+            let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
+            guard let entry = library.snapshot.entry(for: decoded.model) else {
+                throw ServerRequestError.unknownModel
+            }
+            let requestedModelID = entry.modelID
+            let streaming = decoded.stream ?? false
+            let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+            let created = Int(Date().timeIntervalSince1970)
+            let contextBox = SendableContext(context)
+            let streamState = StreamState()
+            let startStream: @Sendable () -> Void = {
+                guard streaming,
+                      streamState.start(eventLoop: contextBox.value.eventLoop,
+                                        interval: self.heartbeatInterval,
+                                        ping: {
+                          self.writeHeartbeat(contextBox.value)
+                      }) else { return }
+                self.beginStream(contextBox.value)
+                self.writeStreamChunk(
+                    contextBox.value,
+                    self.chunk(id: responseID, created: created, model: requestedModelID,
+                               delta: ["role": "assistant"],
+                               finishReason: nil))
+            }
+            activeTask = childChannels.startTask {
+                defer { streamState.stop() }
+                let started = ContinuousClock.now
+                ServerLog.requestStarted(id: responseID, streaming: streaming)
+                do {
+                    let outcome = try await self.coordinator.run(
+                        onQueued: startStream
+                    ) { () -> LibraryOutcome in
+                        // Inside the turn: the generation that was running when
+                        // this request arrived has drained, and nothing else can
+                        // start until this request releases, so the swap sees no
+                        // live KV or expert cache belonging to the old model.
+                        let resolved = try await library.resolve(modelID: requestedModelID)
+                        let request = try OpenAIRequestValidator.validate(
+                            decoded,
+                            modelID: resolved.modelID,
+                            dialect: resolved.backend.chatDialect)
+                        let prepared = try await resolved.backend.prepare(request)
+                        startStream()
+                        let completion = try await resolved.backend
+                            .generate(prepared) { event in
+                                guard request.stream else { return }
+                                switch event {
+                                case .content(let text):
+                                    self.writeStreamChunk(
+                                        contextBox.value,
+                                        self.chunk(id: responseID, created: created,
+                                                   model: resolved.modelID,
+                                                   delta: ["content": text],
+                                                   finishReason: nil))
+                                case .toolCall(let call):
+                                    self.writeToolCall(contextBox.value,
+                                                       id: responseID,
+                                                       created: created,
+                                                       model: resolved.modelID,
+                                                       toolIndex: streamState.nextToolIndex(),
+                                                       call: call)
+                                }
+                            }
+                        return LibraryOutcome(modelID: resolved.modelID,
+                                              completion: completion,
+                                              includeUsage: request.includeUsage)
+                    }
+                    ServerLog.requestCompleted(id: responseID,
+                                               duration: started.duration(to: .now),
+                                               completion: outcome.completion)
+                    if streaming {
+                        self.finishStream(contextBox.value,
+                                          id: responseID,
+                                          created: created,
+                                          model: outcome.modelID,
+                                          completion: outcome.completion,
+                                          includeUsage: outcome.includeUsage)
+                    } else {
+                        self.writeCompletion(contextBox.value,
+                                             id: responseID,
+                                             created: created,
+                                             model: outcome.modelID,
+                                             completion: outcome.completion)
                     }
                 } catch {
                     self.handleAsyncError(error,
@@ -305,6 +477,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func writeCompletion(_ context: ChannelHandlerContext,
                                  id: String,
                                  created: Int,
+                                 model: String,
                                  completion: ServerCompletion) {
         let encodedContent: Any =
             completion.content.isEmpty && !completion.toolCalls.isEmpty
@@ -321,7 +494,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion",
             "created": created,
-            "model": modelID,
+            "model": model,
             "choices": [[
                 "index": 0,
                 "message": message,
@@ -349,6 +522,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func writeToolCall(_ context: ChannelHandlerContext,
                                id: String,
                                created: Int,
+                               model: String,
                                toolIndex: Int,
                                call: ParsedToolCall) {
         let fragments = utf8Fragments(call.argumentsJSON, maximumBytes: 1024)
@@ -363,7 +537,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
             writeStreamChunk(
                 context,
-                chunk(id: id, created: created,
+                chunk(id: id, created: created, model: model,
                       delta: ["tool_calls": [tool]],
                       finishReason: nil))
         }
@@ -372,11 +546,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func finishStream(_ context: ChannelHandlerContext,
                               id: String,
                               created: Int,
+                              model: String,
                               completion: ServerCompletion,
                               includeUsage: Bool) {
         writeStreamChunk(
             context,
-            chunk(id: id, created: created,
+            chunk(id: id, created: created, model: model,
                   delta: [:],
                   finishReason: completion.finishReason))
         if includeUsage {
@@ -384,7 +559,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 "id": id,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": modelID,
+                "model": model,
                 "choices": [],
                 "usage": usageObject(completion.usage),
             ])
@@ -399,6 +574,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     private func chunk(id: String,
                        created: Int,
+                       model: String,
                        delta: [String: Any],
                        finishReason: String?) -> [String: Any] {
         let encodedReason: Any = finishReason.map { $0 as Any } ?? NSNull()
@@ -406,7 +582,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": modelID,
+            "model": model,
             "choices": [[
                 "index": 0,
                 "delta": delta,
