@@ -83,6 +83,11 @@ enum ServerLibraryFixture {
     }
 
     /// A directory whose manifest names a family the runtime installs but has
+    /// A stand-in capability gate table for tests: the runtime's own table is
+    /// empty since the Flash-Next lift, so the not-runnable branch needs an
+    /// injected entry to be exercised.
+    static let gate: [String: [String]] = ["not-yet-family": ["someAxis"]]
+
     /// no runner for. Deliberately minimal: the probe classifies it from
     /// `arch.family` alone, before any strict decode.
     @discardableResult

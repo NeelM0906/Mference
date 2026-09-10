@@ -207,14 +207,28 @@ struct ServerLibraryProbeTests {
     /// such, not as a corrupt install, so the skip line names the real reason.
     @Test func gatedFamilyIsReportedAsNotRunnable() throws {
         let root = try ServerLibraryFixture.makeRoot("gated")
-        let directory = try ServerLibraryFixture.makeGatedInstall(in: root, named: "flashnext")
+        let directory = try ServerLibraryFixture.makeGatedInstall(
+            in: root, named: "future", family: "not-yet-family")
         guard case .notRunnable(let family, let detail) =
-            ServerLibraryProbe.probe(directory: directory) else {
+            ServerLibraryProbe.probe(directory: directory,
+                                     gatedFamilies: ServerLibraryFixture.gate) else {
             Issue.record("a gated family must be reported as not runnable")
             return
         }
-        #expect(family == ModelFamily.qwen38flashnext.rawValue)
+        #expect(family == "not-yet-family")
         #expect(detail.contains("no runner"))
+        #expect(detail.contains("someAxis"))
+    }
+
+    /// The runtime's gate table ships empty since the Flash-Next lift, so a
+    /// `qwen38flashnext` manifest is no longer "not runnable"; it falls through
+    /// to the strict probe like any other family.
+    @Test func liftedFamilyIsNotReportedAsGated() throws {
+        let root = try ServerLibraryFixture.makeRoot("lifted")
+        let directory = try ServerLibraryFixture.makeGatedInstall(in: root, named: "flashnext")
+        if case .notRunnable = ServerLibraryProbe.probe(directory: directory) {
+            Issue.record("qwen38flashnext has a runner and must not be reported as gated")
+        }
     }
 
     @Test func corruptManifestIsPartial() throws {
@@ -363,12 +377,16 @@ struct ServerLibraryDiscoveryTests {
     @Test func realRootAdvertisesOnlyCompleteInstalls() throws {
         let root = try ServerLibraryFixture.makeRoot("discovery")
         let complete = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
-        try ServerLibraryFixture.makeGatedInstall(in: root, named: "flashnext")
+        try ServerLibraryFixture.makeGatedInstall(in: root, named: "future",
+                                                  family: "not-yet-family")
         try ServerLibraryFixture.makeCorruptInstall(in: root, named: "broken")
         let notes = root.appendingPathComponent("notes", isDirectory: true)
         try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
 
-        let index = ServerLibraryDiscovery.discover(roots: [root])
+        let index = ServerLibraryDiscovery.discover(
+            roots: [root],
+            probe: { ServerLibraryProbe.probe(directory: $0,
+                                              gatedFamilies: ServerLibraryFixture.gate) })
         #expect(index.entries.map(\.modelID) == ["gemma-4-26b-a4b-it"])
         #expect(index.entries[0].directory == complete)
         #expect(index.skipped.count == 2)

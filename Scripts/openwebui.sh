@@ -184,5 +184,8 @@ echo "starting Open WebUI on http://127.0.0.1:$webui_port"
 env "${webui_environment[@]}" "$webui_binary" serve --host 127.0.0.1 --port "$webui_port" &
 webui_pid=$!
 
-# Exit when either child does, then stop the other through the trap.
-wait -n "$server_pid" "$webui_pid"
+# Exit when either child does, then stop the other through the trap. macOS
+# ships bash 3.2, which has no `wait -n`, so poll both children instead.
+while kill -0 "$server_pid" 2>/dev/null && kill -0 "$webui_pid" 2>/dev/null; do
+  sleep 1
+done

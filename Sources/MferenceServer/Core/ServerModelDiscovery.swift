@@ -51,7 +51,10 @@ public enum ServerLibraryProbeResult: Equatable, Sendable {
 /// (`qwen36-ourquant.gturbo`) carries a different snapshot hash while being
 /// exactly the thing an operator wants to serve.
 public enum ServerLibraryProbe {
-    public static func probe(directory: URL) -> ServerLibraryProbeResult {
+    /// `gatedFamilies` overrides the runtime's capability gate table; tests use
+    /// it to exercise the not-runnable branch now that the table ships empty.
+    public static func probe(directory: URL,
+                             gatedFamilies: [String: [String]]? = nil) -> ServerLibraryProbeResult {
         let fileManager = FileManager.default
         let directory = directory.standardizedFileURL
         let name = directory.lastPathComponent
@@ -77,7 +80,8 @@ public enum ServerLibraryProbe {
         // family's gate lifts its entry disappears and the install simply falls
         // through to `peekFamily` and gets listed.
         if let raw = rawFamily(manifestURL: manifestURL),
-           let missingAxes = ManifestReader.missingRunnerAxes(forRawFamily: raw) {
+           let missingAxes = gatedFamilies.map({ $0[raw] })
+               ?? ManifestReader.missingRunnerAxes(forRawFamily: raw) {
             return .notRunnable(
                 family: raw,
                 detail: "no runner for \(raw); missing axes "
@@ -281,7 +285,7 @@ public enum ServerLibraryDiscovery {
         roots: [URL],
         explicitModelDirectory: URL? = nil,
         childDirectories: (URL) -> [URL] = ServerLibraryDiscovery.childDirectories(of:),
-        probe: (URL) -> ServerLibraryProbeResult = ServerLibraryProbe.probe(directory:)
+        probe: (URL) -> ServerLibraryProbeResult = { ServerLibraryProbe.probe(directory: $0) }
     ) -> ServerLibraryIndex {
         var candidates: [URL] = []
         var seen = Set<String>()
