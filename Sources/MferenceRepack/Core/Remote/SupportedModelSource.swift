@@ -223,7 +223,20 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// The first `originalRepoQuantize` entry: no faithful pre-quantized MLX
     /// conversion of Qwen3.8-Flash-Next exists (checked 2026-08-31, see
     /// docs/families/QWEN38_FLASH_NEXT.md), so the installer reads the vendor's
-    /// 131 BF16 shards and quantizes to INT4 group-64 in flight.
+    /// 131 BF16 shards and quantizes to INT4 group-64 in flight — except the
+    /// two MoE gating tensors per layer, which `QuantBitPolicy.moeRouterInt8`
+    /// keeps at INT8 group-64 (98 tensors: 48 text layers plus the MTP draft
+    /// layer, `.mlp.gate.weight` and `.mlp.shared_expert_gate.weight` each).
+    ///
+    /// That mixture postdates the install currently on disk, which is uniform
+    /// INT4 and records `bitWidthOverridesHonored: 0`. `modelID` is unchanged
+    /// because it names the *base* width, exactly as `qwen36original`'s
+    /// `qwen3.6-35b-a3b-int4g64` does while installing 80 INT8 tensors; the two
+    /// Flash-Next installs are told apart by `bitWidthOverridesHonored` (0 vs
+    /// 98) and `quant.router.weightBits` (4 vs 8). A second entry for the same
+    /// repo and revision is not an option: `SourceFingerprint.knownFingerprints`
+    /// is searched by index hash, so two entries sharing one would resolve
+    /// nondeterministically.
     ///
     /// Both pins recorded. Download bytes are the index's declared total
     /// (360.0 GB). Installed bytes are ~175 GB: routed experts ~68 GB (INT4
@@ -231,7 +244,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// which the group size does not divide, so they cannot be quantized), the
     /// resident core ~2.5 GB, the MTP draft pool ~1.4 GB, plus page rounding
     /// and the PLE pool's 0.4% per-block slack. The Day-0 dossier's ~101 GB
-    /// figure assumed an INT4 n-gram table and is superseded.
+    /// figure assumed an INT4 n-gram table and is superseded. The INT8 routers
+    /// add 32,175,360 bytes on top, which the headroom already covers.
     ///
     /// `FlashNextForwardRunner` executes this family and its capability gate
     /// was lifted on 2026-09-10, so an install made here loads through the
