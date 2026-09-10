@@ -215,7 +215,15 @@ extension RemotePayloadCopyTests {
         #expect(quantized["weightBits"] as? Int == 4)
         #expect(quantized["groupSize"] as? Int == 64)
         #expect(quantized["sourceDtype"] as? String == "BF16")
-        #expect(quantized["qualityGate"] as? String == "W2.1b-kld-open")
+        // W2.1b is closed on both halves as of 2026-09-02. The stamp is not
+        // per-family: both halves were measured on the shared
+        // `Int4AffineEncoder.encodeGroup` nucleus that every original-repo
+        // family funnels through, and Flash-Next inherits that validation the
+        // same way it inherits W2.1a. See docs/QUANTIZER_QUALITY.md.
+        #expect(quantized["qualityGate"] as? String
+            == "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36")
+        // Flash-Next is uniform INT4 by policy, so it records no overrides.
+        #expect(quantized["overriddenTensorCount"] == nil)
 
         // The MTP draft layer's own routed experts land in their own additive
         // pool, outside packed_experts/ so the shipped layout is untouched.

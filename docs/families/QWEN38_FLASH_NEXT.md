@@ -270,14 +270,45 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       `family qwen38flashnext is installed but its runner is not implemented;
       missing axes: hyperConnectionsLowRank, attentionIndexer,
       pleNgramEmbedding`.
-- [ ] **W2.1b quality gate OPEN** — greedy rollouts and KLD against the
-      mlx-community Qwen 3.6 conversion have not been run (needs a ~70 GB
-      download and a model run). Bit parity against the runtime reference
-      (W2.1a) *is* enforced, including through the streaming path. Until W2.1b
-      runs, weights this path produces are unvalidated at the model level.
+- [x] **W2.1b weight level PASSED** (2026-09-02,
+      [docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)) — this family
+      inherits it, because `Int4AffineEncoder.encodeGroup` is the same nucleus.
+      Measured against mlx-community's independent conversion of
+      `Qwen/Qwen3.6-35B-A3B`: our relative Frobenius error against the BF16
+      source is 0.09612 mean vs the control's 0.09648, better on 118 of 124
+      sampled tensors. Known deficit: no zero-point snapping, which costs up to
+      1.54× on tensors with a large mass of near-exact zeros inside live groups.
+- [x] **W2.1b model level PASSED** (2026-09-02,
+      [docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)) — this family
+      inherits it on the same grounds as the weight level: the nucleus is
+      shared. The blocker was cleared by giving the repacker INT8 affine
+      group-64 and a general per-tensor bit policy, so `qwen36original`
+      reproduces the control's mixture exactly (INT4 312 / INT8 80 /
+      unquantized 221) and loads. Result: against a noise floor of **exactly
+      zero** (byte-identical repeat dumps), the two installs agree on 86.3 % of
+      top-1 tokens and 81.3 % of top-5 sets over 882 teacher-forced positions,
+      median per-position KL 0.036 nats (mean 0.222), with every greedy
+      divergence at a control-side top-2 margin below the median inter-install
+      logit difference.
+      **Two caveats specific to this family.** Clearing the gate surfaced two
+      defects that only a model-level comparison against an independent
+      conversion could see: resident tensor naming, and a missing RMSNorm
+      `1 + w` fold that made every norm wrong by one in an install that still
+      verified, validated and loaded. Flash-Next is uniform INT4 and folds no
+      norm bias. Both are now *explicit* per-family choices rather than
+      unexamined defaults — and neither has been checked against an independent
+      conversion of Flash-Next, because none exists. Its first-light run
+      produced coherent output and retrieved a passkey, which is evidence but
+      not the same evidence.
 - [x] Source index SHA-256 pinned (`99e81524…c590de`, 170,726 bytes)
 - [x] Fused-expert axis order, gated `q_proj`, indexer, GDN, HC and MTP shapes
-      verified against ranged shard-header reads @ `de4b8e4d`
+      verified against ranged shard-header reads @ `de4b8e4d` — and the fused
+      axis order is now **independently confirmed** on a second vendor
+      checkpoint: `Qwen/Qwen3.6-35B-A3B` declares `gate_up_proj` as
+      `[256, 1024, 2048]` = `[E, 2·I, H]` and `down_proj` as `[256, 2048, 512]`
+      = `[E, H, I]`, and splitting at the halfway row reproduces
+      mlx-community's separately converted `switch_mlp.gate_proj`/`up_proj`, so
+      gate-first ordering is confirmed too.
 - [x] PLE geometry corrected: 128 × [2,500,012 × 160] BF16, pool stays BF16,
       install ~175 GB (not the Day-0 ~101 GB)
 - [ ] **Gate/up half order within the fused 1280 rows** still needs the
@@ -522,9 +553,20 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         token does not surface — real output is coherent. **Caveat that
         stands:** greedy token-exactness vs a reference cannot be checked at
         180B scale (no reference rollout exists), so this is a *read* of the
-        kernels at scale, not a proof. **W2.1b (KLD vs a known-good
-        conversion) remains the missing quantitative quality gate**, and the
-        production gate stays down until it and a maintainer decision clear it.
+        kernels at scale, not a proof. **W2.1b is now closed on both halves**
+        (2026-09-02, [docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)): the
+        weight level says each tensor is individually faithful, and the model
+        level says 40 layers of accumulated error leave the output distribution
+        intact (86.3 % top-1 agreement against a zero noise floor, median KL
+        0.036 nats). That **removes the quantizer-quality objection** to lifting
+        this family's gate. It does not lift it: `familiesWithoutRunner` refuses
+        Flash-Next for **missing axes** (`hyperConnectionsLowRank`,
+        `attentionIndexer`, `pleNgramEmbedding`), which is a separate maintainer
+        decision. Two residual caveats belong in that decision: Flash-Next is
+        uniform INT4 and folds no RMSNorm bias, and neither choice has been
+        checked against an independent conversion of Flash-Next because none
+        exists — the two defects W2.1b caught on Qwen 3.6 (§7) were exactly of
+        that kind.
       - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
         model** (~75× the resident set), the most extreme expression of the
         working-set thesis in the project.
