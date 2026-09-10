@@ -255,3 +255,42 @@ roughly one expert in seven per token; any quality comparison against the
 mlx-community conversion made with it will be measuring routing divergence
 rather than the weight quantizer, exactly the failure mode QUANTIZER_QUALITY.md
 §6 describes.
+
+## Result on the INT8-router install (2026-09-10, `qwen38flashnext-r8.gturbo`)
+
+The reinstall recommended above was run the same day: `MferenceRepack --model
+qwen38flashnext --output scratch/qwen38flashnext-r8.gturbo` (2 h 44 m, 360 GB
+streamed, no throttling), landing 175,205,477,629 verified bytes in 57 files —
+102 bytes off the prediction, all manifest. The manifest reports
+`quant.router.weightBits 8`, `quantizedAtInstall.overriddenTensorCount 98`
+(48 text routers + 48 shared-expert gates + the MTP layer's pair). The script
+was taught to decode either width from the resident index (dtype 0 at both
+widths; width derived from the byte size, as the runtime does) and re-run with
+the same 12 layers, 4,096 Gaussian probes, seed and cache:
+
+| Metric (12 layers, Gaussian probes) | INT4 install (before) | **INT8 install (now)** | control (mlx-community INT8 g64) |
+|---|---:|---:|---:|
+| install bytes == re-encoded BF16 | 21/24 (3 rounding ties) | **24/24** | — |
+| router rel. Frobenius error vs BF16 | 0.1128 | **0.00661** | 0.00940 |
+| router max-abs error | — | **0.00384** | 0.00729 |
+| exact top-10 set agreement vs BF16 | 0.132 | **0.896** [0.887, 0.912] | 0.855 [0.837, 0.877] |
+| mean Jaccard | 0.764 | **0.981** | 0.974 |
+| top-1 agreement | 0.774 | **0.986** | 0.977 |
+| swapped experts per token (of 10) | 1.40 | **0.104** | 0.146 |
+| KL(BF16‖X) over the selected set, mean / p99 | 0.0123 / 0.070 | **0.0000 / 0.0002** | 0.0001 / 0.0009 |
+| shared-expert gate mean \|Δsigmoid\| | 0.0067 | **0.00040** | 0.00053 |
+
+Verdict: the routing deficit is closed. Our INT8 group-64 routers reconstruct
+the BF16 source more faithfully than the control's (0.70× the relative error,
+better on every sampled layer, consistent with the Qwen 3.6 INT8 result in
+`docs/QUANTIZER_QUALITY.md`) and select the same experts as BF16 more often
+than the control does. The norm-fold byte check is unchanged: 18/18 install
+bytes are the vendor's bare `w`, as are the control's; the `(1 + w)` bake at
+load remains the correct treatment. The uniform-INT4 install is kept alongside
+as the "before" side of this table; nothing else about the two installs
+differs (same 57 files, expert stride and PLE pool; +32,175,360 weight bytes).
+
+```bash
+python3 Scripts/flashnext-router-int4-check.py --cache $C/fn-router \
+    --install scratch/qwen38flashnext-r8.gturbo --json r8-router-check.json
+```

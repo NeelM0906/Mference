@@ -85,17 +85,31 @@ class Install:
             f.seek(off)
             return np.frombuffer(f.read(size), dtype=dtype)
 
-    def int4(self, name):
-        """Decode an INT4 affine g64 resident tensor -> (float32 [R, C],
-        packed bytes, scale bits, bias bits)."""
+    def quant(self, name):
+        """Decode an INT4 or INT8 affine g64 resident tensor -> (float32 [R, C],
+        packed bytes, scale bits, bias bits, weight bits). The resident index
+        stores dtype 0 at both widths; the width is derived from the byte size,
+        exactly as `FlashNextWeightMatrix.from` does at load."""
         e = self.entries[name]
-        assert e["dtype"] == 0, f"{name} is dtype {e['dtype']}, not INT4 affine"
+        assert e["dtype"] == 0, f"{name} is dtype {e['dtype']}, not affine-quantized"
         rows, cols = e["shape"]
-        packed = self.raw(e["offset"], e["size"], np.uint8).reshape(-1, GROUP // 2)
+        bits = e["size"] * 8 // (rows * cols)
+        assert bits in (4, 8), f"{name}: {e['size']} bytes for {rows}x{cols} is neither INT4 nor INT8"
         s = self.raw(e["scale_offset"], e["scale_size"], np.uint16)
         b = self.raw(e["bias_offset"], e["bias_size"], np.uint16)
+        if bits == 4:
+            packed = self.raw(e["offset"], e["size"], np.uint8).reshape(-1, GROUP // 2)
+            q = wg.unpack(packed)
+        else:
+            packed = self.raw(e["offset"], e["size"], np.uint8).reshape(-1, GROUP)
+            q = packed
         assert packed.shape[0] == s.size == b.size == rows * cols // GROUP
-        w = wg.dequant(wg.unpack(packed), s, b).reshape(rows, cols)
+        w = wg.dequant(q, s, b).reshape(rows, cols)
+        return w, packed, s, b, bits
+
+    def int4(self, name):
+        w, packed, s, b, bits = self.quant(name)
+        assert bits == 4, f"{name} is INT{bits}; use quant()"
         return w, packed, s, b
 
     def bf16(self, name):
@@ -230,16 +244,16 @@ def main():
             cname = wg.control_name(oname, FAMILY["prefixes"])
             tag = f"L{L}_{short}"
             ref = wg.bf16_to_f32(orig.tensor(oname, "o_" + tag)).astype(np.float32)
-            ours, packed, s, b = install.int4(oname)
+            ours, packed, s, b, bits = install.quant(oname)
             ctrl = control_int8(mlx, cname, tag)
             assert ref.shape == ours.shape == ctrl.shape, (ref.shape, ours.shape, ctrl.shape)
             # Decode proof: the install's bytes are exactly what the transcribed
-            # encoder produces from this BF16 source.
-            ep, es, eb, _ = wg.encode_ours(ref.reshape(-1, GROUP), 15)
+            # encoder produces from this BF16 source, at the install's own width.
+            ep, es, eb, _ = wg.encode_ours(ref.reshape(-1, GROUP), 255 if bits == 8 else 15)
             bitid = bool((ep == packed).all() and (es == s).all() and (eb == b).all())
             ro, mo = recon(ref, ours)
             rc, mc = recon(ref, ctrl)
-            row[short] = dict(bitid=bitid, rel_ours=ro, rel_ctrl=rc, max_ours=mo,
+            row[short] = dict(bitid=bitid, bits=bits, rel_ours=ro, rel_ctrl=rc, max_ours=mo,
                               max_ctrl=mc, shape=list(ref.shape))
             if short == "gate":
                 for pname, X in probes.items():
@@ -257,7 +271,7 @@ def main():
                         ctrl_max=float(np.abs(sigmoid(X @ ctrl[0]) - g_ref).max()))
         results["layers"].append(row)
         g = row["gate"]["gaussian"]
-        print(f"layer {L:2d}  router rel {row['gate']['rel_ours']:.4f}/"
+        print(f"layer {L:2d}  router INT{row['gate']['bits']} rel {row['gate']['rel_ours']:.4f}/"
               f"{row['gate']['rel_ctrl']:.4f}  bitid {row['gate']['bitid']}  "
               f"top10 exact {g['ours']['exact']:.3f}/{g['ctrl']['exact']:.3f}  "
               f"top1 {g['ours']['top1']:.3f}/{g['ctrl']['top1']:.3f}  "
