@@ -28,11 +28,15 @@ do {
             roots: roots,
             explicitModelDirectory: explicitModelURL)
         index.logDiscovery()
-        guard !index.entries.isEmpty else {
-            let searched = roots.map(\.path).joined(separator: ", ")
-            throw ServerArgumentError.invalid(
-                "--library found no completed installs under: \(searched)")
+        if arguments.listModels {
+            // Discovery is the whole job: nothing is loaded, no port is bound,
+            // and the skip lines above already went to stderr.
+            print(ServerLibraryListing.text(for: index))
+            exit(0)
         }
+        // An empty library is a normal startup state, not a failure: the UI is
+        // meant to come up before the first model is installed and show an
+        // empty picker rather than refusing to launch.
         let maxContext = arguments.maxContext
         let promptCacheMode = arguments.promptCacheMode
         let library = ServerModelLibrary(index: index) { directory in
