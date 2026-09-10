@@ -208,21 +208,16 @@ import Foundation
 
     /// Integration check against the real 175 GB install. Reads
     /// `manifest.json` only — never the weights, never a `Model.load` — so it
-    /// stays cheap and cannot disturb an install that must keep failing the
-    /// capability gate. Skipped unless `MFERENCE_FLASHNEXT_GTURBO` points at
-    /// one.
+    /// stays cheap. Skipped unless `MFERENCE_FLASHNEXT_GTURBO` points at one.
     @Test func installedManifestValidatesAgainstTheBaseline() throws {
         guard let path = ProcessInfo.processInfo
             .environment["MFERENCE_FLASHNEXT_GTURBO"] else { return }
         let url = URL(fileURLWithPath: path)
 
-        // The gate is still the authority, whatever the baseline says.
-        #expect(throws: ModelError.familyRunnerNotImplemented(
-            family: "qwen38flashnext",
-            missingAxes: ["hyperConnectionsLowRank", "attentionIndexer",
-                          "pleNgramEmbedding"])) {
-            _ = try ManifestReader.peekFamily(directoryURL: url)
-        }
+        // Since the 2026-09-10 gate lift the funnel resolves the real install
+        // rather than refusing it by name.
+        #expect(try ManifestReader.peekFamily(directoryURL: url)
+                == .qwen38flashnext)
 
         let expected = try #require(ArchConfig.knownArchitectures[.qwen38flashnext])
         let manifest = try ManifestReader.load(directoryURL: url, expecting: expected)
