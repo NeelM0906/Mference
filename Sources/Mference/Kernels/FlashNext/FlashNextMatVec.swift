@@ -1,35 +1,83 @@
 import Foundation
 import Metal
 
-/// A resident Flash-Next projection matrix, in whichever of the two dtypes the
-/// install carries it.
+/// A resident Flash-Next projection matrix, in whichever of the three dtypes an
+/// install may carry it.
 ///
 /// The production `qwen38flashnext` install quantizes every rank-2 BF16
-/// `.weight` whose row length the group size divides to INT4 affine group-64;
-/// norms, conv kernels and any row width 64 does not divide ride through as
-/// BF16. The parity install is BF16 for *everything*, so the same runner has to
-/// drive both — hence one type that carries the dtype with the buffer rather
-/// than a runner-wide assumption.
+/// `.weight` whose row length the group size divides to affine group-64 —
+/// INT4 for everything except the two MoE gating tensors (`mlp.gate`, the
+/// top-10-of-512 router, and `mlp.shared_expert_gate`), which the repacker's
+/// `QuantBitPolicy` keeps at INT8. Norms, conv kernels and any row width 64
+/// does not divide ride through as BF16. The parity install is BF16 for
+/// *everything*, so the same runner has to drive all three — hence one type
+/// that carries the dtype with the buffer rather than a runner-wide assumption.
+///
+/// # Why the width is derived rather than read
+///
+/// The resident index has one dtype byte, and it says `0` — "packed integer
+/// weights with BF16 scale and bias companions" — at both INT4 and INT8. The
+/// writer has always emitted it that way, so a mixed-width install cannot be
+/// told apart by dtype and there is no spare field to widen without breaking
+/// every install on disk.
+///
+/// The entry already carries the answer implicitly: `sizeBytes` is exactly
+/// `rows * columns * bits / 8`, so the width falls out of bytes and shape.
+/// Deriving it that way is not a workaround, it is the same rule
+/// `Scripts/quantizer-mixture-compare.py` uses to audit an install's mixture
+/// against a control conversion's, and it deliberately trusts neither the
+/// manifest's coarse per-slot summary nor the family. It is also what lets the
+/// uniform-INT4 install predating the 2026-09-10 router measurement keep
+/// loading unchanged: nothing about it says "INT4 family", each tensor simply
+/// answers for itself.
 enum FlashNextWeightMatrix {
     case int4(weights: MTLBuffer, weightsOffset: Int,
               scales: MTLBuffer, scalesOffset: Int,
               biases: MTLBuffer, biasesOffset: Int)
+    case int8(weights: MTLBuffer, weightsOffset: Int,
+              scales: MTLBuffer, scalesOffset: Int,
+              biases: MTLBuffer, biasesOffset: Int)
     case bf16(buffer: MTLBuffer, offset: Int)
 
-    /// Build from a loaded tensor view. Dtype 0 is INT4 affine with companion
-    /// scale/bias slices; dtype 1 is dense BF16.
+    /// Build from a loaded tensor view. Dtype 0 is affine-packed with companion
+    /// scale/bias slices, at the width `sizeBytes` implies; dtype 1 is dense
+    /// BF16.
     static func from(_ view: TensorView) -> FlashNextWeightMatrix {
         switch view.dtype {
         case 0:
-            return .int4(weights: view.buffer, weightsOffset: Int(view.offset),
-                         scales: view.buffer, scalesOffset: Int(view.scaleOffset),
-                         biases: view.buffer, biasesOffset: Int(view.biasOffset))
+            switch packedWeightBits(view) {
+            case 4:
+                return .int4(weights: view.buffer, weightsOffset: Int(view.offset),
+                             scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                             biases: view.buffer, biasesOffset: Int(view.biasOffset))
+            case 8:
+                return .int8(weights: view.buffer, weightsOffset: Int(view.offset),
+                             scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                             biases: view.buffer, biasesOffset: Int(view.biasOffset))
+            case let bits:
+                preconditionFailure(
+                    "Flash-Next packed projections are INT4 or INT8 affine group-64; "
+                        + "this entry's \(view.length) bytes over shape "
+                        + "[\(view.shape.0), \(view.shape.1)] imply \(bits) bits")
+            }
         case 1:
             return .bf16(buffer: view.buffer, offset: Int(view.offset))
         default:
             preconditionFailure(
-                "Flash-Next projections are INT4 affine or BF16, got dtype \(view.dtype)")
+                "Flash-Next projections are affine-packed or BF16, got dtype \(view.dtype)")
         }
+    }
+
+    /// `sizeBytes * 8 / (rows * columns)`, or 0 when the shape cannot carry a
+    /// width (which `from` turns into the same loud failure as a bad one).
+    static func packedWeightBits(_ view: TensorView) -> Int {
+        let rows = Int(view.shape.0)
+        let columns = Int(view.shape.1)
+        guard rows > 0, columns > 0 else { return 0 }
+        let weights = rows * columns
+        let bits = Int(view.length) * 8
+        guard bits % weights == 0 else { return 0 }
+        return bits / weights
     }
 }
 
@@ -39,24 +87,81 @@ enum FlashNextWeightMatrix {
 /// own `flashnext_gemv_bf16`. Both have an FP32-output form, which the
 /// hyper-connection path uses wherever a value is about to be pushed through a
 /// sigmoid — rounding a pre-activation to FP16 costs more than the buffer saves.
+///
+/// INT8 goes through `router_gemv_gemma4_r4` — the shipped Gemma/Qwen router
+/// GEMV, reused verbatim. It is the right kernel rather than a near-enough one:
+/// it decodes one `uint8` per weight against one BF16 scale and one BF16 bias
+/// per group of 64, which is byte-for-byte the layout `Int8AffineEncoder`
+/// writes, and it already accumulates and stores in FP32, which is what both
+/// INT8 call sites in this family want. Its one extra input is a per-element
+/// `effective_scale` on the activation, which Gemma uses and this family does
+/// not; binding a vector of ones makes it inert, exactly as DeepSeek V4 already
+/// does with the BF16 sibling `router_gemv_bf16_r4`.
+///
+/// **No new Metal was written for the INT8 path, and none was needed.** The
+/// dispatch below is the same unspecialized pipeline, threadgroup shape and
+/// buffer binding that `MoE.encodeRouterGemma4` uses, which
+/// `RouterWideTopK10Tests.decodeRouterAt512TopK10MatchesTheReference` already
+/// gates against a CPU reference at this family's exact production geometry —
+/// 512 x 2560, INT8 affine group-64, top-10. So the router logits are produced
+/// by an already-parity-tested path rather than by a new one needing its own
+/// gate. `FlashNextMatVecInt8Tests` adds the one thing that test cannot cover:
+/// that *this* wrapper binds it correctly.
 final class FlashNextMatVec {
 
     private let int4: DequantInt4GEMV
     private let bf16PSO: MTLComputePipelineState
     private let bf16F32PSO: MTLComputePipelineState
+    private let int8PSO: MTLComputePipelineState
+    /// A BF16 vector of ones, `int8Columns` long: the identity value for
+    /// `router_gemv_gemma4_r4`'s activation scale. Sized once at init rather
+    /// than grown on demand so the INT8 path allocates nothing per token and a
+    /// row wider than the runner declared fails loudly instead of reading past
+    /// the end.
+    private let onesActivationScale: MTLBuffer?
+    private let int8Columns: Int
 
     /// Rows per threadgroup; mirrors `kFlashNextGemvRowsPerThreadgroup`.
     private static let rowsPerThreadgroup = 8
+    /// Rows per threadgroup in `router_gemv_gemma4_r4` — the `_r4` in its name.
+    private static let int8RowsPerThreadgroup = 4
 
-    init(context: MetalContext, int4: DequantInt4GEMV) throws {
+    /// `int8Columns` is the widest row the caller will ever hand to the INT8
+    /// path (the hidden size, for this family: both INT8 tensors are
+    /// `[*, hidden]`). Zero — the default — declares that this instance sees no
+    /// INT8 tensors, which is what every kernel-level test and the BF16 parity
+    /// install want.
+    init(context: MetalContext, int4: DequantInt4GEMV, int8Columns: Int = 0) throws {
         self.int4 = int4
+        self.int8Columns = int8Columns
         self.bf16PSO = try context.pipeline("flashnext_gemv_bf16",
                                             constants: [],
                                             maxTotalThreadsPerThreadgroup: 256)
         self.bf16F32PSO = try context.pipeline("flashnext_gemv_bf16_f32out",
                                                constants: [],
                                                maxTotalThreadsPerThreadgroup: 256)
+        // Unspecialized and 512-thread-capable: the same pipeline
+        // `MoE.encodeRouterGemma4` falls back to for any shape that is not
+        // Gemma's, which is the one `RouterWideTopK10Tests` drives at 512x2560.
+        self.int8PSO = try context.pipeline("router_gemv_gemma4_r4",
+                                            constants: [],
+                                            maxTotalThreadsPerThreadgroup: 512)
+        if int8Columns > 0 {
+            let ones = [UInt16](repeating: Self.bf16One, count: int8Columns)
+            guard let buffer = context.device.makeBuffer(
+                    bytes: ones,
+                    length: ones.count * MemoryLayout<UInt16>.stride,
+                    options: .storageModeShared) else {
+                throw MetalError.noDevice
+            }
+            self.onesActivationScale = buffer
+        } else {
+            self.onesActivationScale = nil
+        }
     }
+
+    /// BF16 `1.0` — the top 16 bits of FP32 `1.0` (`0x3F80_0000`).
+    private static let bf16One: UInt16 = 0x3F80
 
     func encode(commandBuffer: MTLCommandBuffer,
                 matrix: FlashNextWeightMatrix,
@@ -75,6 +180,14 @@ final class FlashNextMatVec {
                         x: x, xOffset: xOffset, y: y, yOffset: yOffset,
                         m: UInt32(rows), n: UInt32(cols),
                         outputFloat32: outputFloat32)
+        case let .int8(weights, weightsOffset, scales, scalesOffset,
+                       biases, biasesOffset):
+            encodeInt8(commandBuffer: commandBuffer,
+                       weights: weights, weightsOffset: weightsOffset,
+                       scales: scales, scalesOffset: scalesOffset,
+                       biases: biases, biasesOffset: biasesOffset,
+                       x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                       rows: rows, cols: cols, outputFloat32: outputFloat32)
         case let .bf16(buffer, offset):
             guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
             let pso = outputFloat32 ? bf16F32PSO : bf16PSO
@@ -93,5 +206,54 @@ final class FlashNextMatVec {
                                                height: 1, depth: 1))
             enc.endEncoding()
         }
+    }
+
+    private func encodeInt8(commandBuffer: MTLCommandBuffer,
+                            weights: MTLBuffer, weightsOffset: Int,
+                            scales: MTLBuffer, scalesOffset: Int,
+                            biases: MTLBuffer, biasesOffset: Int,
+                            x: MTLBuffer, xOffset: Int,
+                            y: MTLBuffer, yOffset: Int,
+                            rows: Int, cols: Int,
+                            outputFloat32: Bool) {
+        // The kernel stores FP32 unconditionally. Every INT8 tensor this family
+        // has is a gating tensor whose consumer wants FP32 — the router logits
+        // feed `router_topk_select_k10_par`, the shared-expert gate feeds a
+        // sigmoid — so an FP16 request here means a tensor got an INT8 width it
+        // was never meant to have, and silently writing FP32 into an FP16
+        // buffer would corrupt twice the bytes asked for.
+        precondition(outputFloat32,
+                     "the INT8 router GEMV stores FP32; a caller asking for FP16 "
+                         + "output has bound a tensor this path does not serve")
+        precondition(cols.isMultiple(of: Quantization.groupSize),
+                     "INT8 affine group-64 needs a row length \(Quantization.groupSize) "
+                         + "divides, got \(cols)")
+        guard let effectiveScale = onesActivationScale else {
+            preconditionFailure(
+                "this FlashNextMatVec was built with int8Columns: 0, so it holds no "
+                    + "activation-scale vector — an INT8 tensor reached a runner that "
+                    + "did not declare one")
+        }
+        precondition(cols <= int8Columns,
+                     "INT8 row length \(cols) exceeds the declared int8Columns "
+                         + "\(int8Columns)")
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        var rowsVar = UInt32(rows)
+        var colsVar = UInt32(cols)
+        enc.setComputePipelineState(int8PSO)
+        enc.setBuffer(weights, offset: weightsOffset, index: 0)
+        enc.setBuffer(scales, offset: scalesOffset, index: 1)
+        enc.setBuffer(biases, offset: biasesOffset, index: 2)
+        enc.setBuffer(x, offset: xOffset, index: 3)
+        enc.setBuffer(effectiveScale, offset: 0, index: 4)
+        enc.setBuffer(y, offset: yOffset, index: 5)
+        enc.setBytes(&rowsVar, length: MemoryLayout<UInt32>.stride, index: 6)
+        enc.setBytes(&colsVar, length: MemoryLayout<UInt32>.stride, index: 7)
+        let groups = (rows + Self.int8RowsPerThreadgroup - 1) / Self.int8RowsPerThreadgroup
+        enc.dispatchThreadgroups(
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32 * Self.int8RowsPerThreadgroup,
+                                           height: 1, depth: 1))
+        enc.endEncoding()
     }
 }
