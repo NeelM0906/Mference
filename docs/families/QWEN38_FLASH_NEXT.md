@@ -515,12 +515,32 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       quantize-in-flight repack driven from
       `MferenceRepack --model qwen38flashnext`, not a pre-converted download the
       app can offer. Adding an app descriptor is separate work.
-      **Two caveats stand, under measurement, and belong in any result
-      published for this family:** (1) uniform INT4 quantization including the
-      routers, where mlx-community's Qwen 3.6 control uses INT8 routers, and (2)
-      no RMSNorm bias fold. Neither has been checked against an independent
-      conversion of Flash-Next, because none exists — and those are exactly the
-      two kinds of defect W2.1b caught on Qwen 3.6 (§7).
+      **Both caveats were measured on 2026-09-10, and one of them fired.**
+      They belong in any result published for this family.
+      - **(1) Uniform INT4 including the routers — ADVERSE, action recommended.**
+        [docs/experiments/2026-09-10-flashnext-router-int4-check.md](../experiments/2026-09-10-flashnext-router-int4-check.md)
+        decoded the installed INT4 g64 router and shared-expert gate straight
+        out of `qwen38flashnext.gturbo` and scored routing against the vendor
+        BF16 and mlx-community's INT8 g64 control over 12 layers: relative
+        weight error 0.113 vs the control's 0.009 (12×), exact top-10 set
+        agreement with BF16 0.132 vs 0.855, top-1 0.774 vs 0.977, 1.40 vs 0.146
+        experts swapped per token. Verdict (B): reinstall with
+        `.mlp.gate.weight` and `.mlp.shared_expert_gate.weight` at INT8
+        (`QuantBitPolicy.moeRouterInt8`), which also needs `ManifestReader`'s
+        Flash-Next `validateQuant` and `FlashNextWeightMatrix` to accept the
+        width. Stated caveat on that measurement: the probes are isotropic and
+        real router inputs are not, which inflates both sides' disagreement —
+        what it establishes robustly is the ~10× *ratio*, at every layer. **This
+        is open work against the shipped install, not against the gate:** the
+        runner is dtype-agnostic and the lift does not depend on it.
+      - **(2) No RMSNorm bias fold — checked, no defect.** Same experiment's
+        byte check: 18/18 install bytes equal the vendor's bare `w`, 18/18
+        control bytes equal the vendor's bare `w`, and 0/18 control bytes equal
+        `bf16(1 + w)`. The control does not fold either, so the install matches
+        it.
+      Neither caveat has been checked against an *independent conversion of
+      Flash-Next*, because none exists — that remains true, and those are
+      exactly the two kinds of defect W2.1b caught on Qwen 3.6 (§7).
 - [x] **Toy parity: reported, not tuned away.** The rule is
       token-exact-or-report, and the toy's long prompt is 7/8. What was measured
       (`FlashNextForwardRunnerParityTests`, both prompts, prefill plus 8 cached
@@ -590,12 +610,11 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         this family's gate. It did not by itself lift it — the axes refusal
         (`hyperConnectionsLowRank`, `attentionIndexer`, `pleNgramEmbedding`) was
         a separate maintainer decision, taken on 2026-09-10. Two residual
-        caveats carried into that decision and remain **under measurement**:
-        Flash-Next is uniform INT4 (routers included, where the Qwen 3.6 control
-        uses INT8 routers) and folds no RMSNorm bias, and neither choice has
-        been checked against an independent conversion of Flash-Next because
-        none exists — the two defects W2.1b caught on Qwen 3.6 (§7) were exactly
-        of that kind.
+        caveats carried into that decision — uniform INT4 (routers included,
+        where the Qwen 3.6 control uses INT8 routers) and no RMSNorm bias fold.
+        Both were measured the same day; see the gate-lift item above for the
+        results. The router one is adverse and recommends an INT8 reinstall of
+        the two gating tensors; the norm-fold one came back clean.
       - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
         model** (~75× the resident set), the most extreme expression of the
         working-set thesis in the project.
