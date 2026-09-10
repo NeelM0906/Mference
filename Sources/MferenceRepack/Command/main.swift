@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <gemma4|qwen36|qwen36original|qwen38|deepseekv4flash|inklingsmall|maple|qwen38flashnext>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <gemma4|qwen36|qwen36original|qwen38|deepseekv4flash|inklingsmall|maple|qwen38flashnext|minicpm5|minicpm5mlx>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
@@ -24,6 +24,10 @@ the missing axes. qwen36original is the same checkpoint qwen36 installs from
 mlx-community's pre-quantized conversion, put through our own quantizer
 instead; installing both and comparing them is the W2.1b quantizer-quality
 gate (docs/QUANTIZER_QUALITY.md).
+
+minicpm5 reads openbmb/MiniCPM5-2B's BF16 upload and quantizes to INT4 affine
+group-64 during the install (~5 GB read, ~1.4 GB written); minicpm5mlx is the
+vendor's own MLX INT4 conversion of the same checkpoint, the W2.1b control.
 
 The installer streams the selected checkpoint (default: the supported Gemma 4
 checkpoint) from Hugging Face and repackages it without materializing the

@@ -107,7 +107,7 @@ import Testing
     @Test("Qwen 3.6 is the only original-repo family with a mixture today")
     func onlyQwen36IsMixed() {
         for family in [RepackModelFamily.gemma4, .qwen38, .deepseekV4Flash,
-                       .inklingSmall, .maple, .qwen38flashnext] {
+                       .inklingSmall, .maple, .qwen38flashnext, .minicpm5] {
             #expect(QuantBitPolicy.originalRepo(family: family) == .uniformInt4,
                     "\(family.rawValue)")
         }

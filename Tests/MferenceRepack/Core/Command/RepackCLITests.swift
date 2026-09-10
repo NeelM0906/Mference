@@ -81,6 +81,21 @@ struct RepackCLITests {
         #expect(result.stderr.contains("no resumable install state exists"))
     }
 
+    @Test func miniCPM5ModelSelectorsAreAccepted() throws {
+        for selector in ["minicpm5", "minicpm5mlx"] {
+            let output = temporaryOutput("\(selector)-model")
+            defer { clean(output) }
+            let result = try run([
+                "--model", selector,
+                "--output", output,
+                "--resume",
+            ])
+            #expect(result.status == 1, Comment(rawValue: selector))
+            #expect(result.stderr.contains("no resumable install state exists"),
+                    Comment(rawValue: selector))
+        }
+    }
+
     @Test func mapleModelSelectorIsAccepted() throws {
         let output = temporaryOutput("maple-model")
         defer { clean(output) }

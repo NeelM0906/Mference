@@ -57,7 +57,14 @@ enum IndexLoader {
     /// against (see docs/QUANTIZER_QUALITY.md).
     static let unquantizedSourceModelTypes: Set<String> = ["qwen4_exp", "qwen3_5_moe"]
 
-    static func load(snapshotDir: String) throws -> SourceMetadata {
+    /// `acceptsUnquantizedSource` is set by the caller when the repo being
+    /// installed is a pinned `SupportedModelSource` of kind
+    /// `originalRepoQuantize`. It is the second way a missing `quantization`
+    /// block is legitimate, and the one that does not key on `model_type`:
+    /// MiniCPM5's `model_type` is the generic `"llama"`, which must never be
+    /// allowlisted on its own or any llama repo would be claimed.
+    static func load(snapshotDir: String,
+                     acceptsUnquantizedSource: Bool = false) throws -> SourceMetadata {
         let indexPath  = (snapshotDir as NSString).appendingPathComponent("model.safetensors.index.json")
         let configPath = (snapshotDir as NSString).appendingPathComponent("config.json")
 
@@ -91,8 +98,9 @@ enum IndexLoader {
                 // An original-repo BF16 checkpoint has nothing to declare. The
                 // installer quantizes it (INT4 affine group-64, the only
                 // supported target), so the recorded base describes the output.
-                guard let modelType = root["model_type"] as? String,
-                      unquantizedSourceModelTypes.contains(modelType) else {
+                guard acceptsUnquantizedSource
+                        || ((root["model_type"] as? String).map(
+                            unquantizedSourceModelTypes.contains) ?? false) else {
                     throw RepackError.configJsonInvalid(path: configPath,
                                                         detail: "no quantization slot")
                 }

@@ -686,7 +686,7 @@ public final class RemoteStreamingRepacker {
         }
         // The dense Qwen 3.8 family has no router, shared expert or routed
         // experts; report the slots absent rather than the 8-bit defaults.
-        if plan.arch.family == .qwen38 {
+        if plan.arch.family == .qwen38 || plan.arch.family == .minicpm5 {
             bits.router = 0
             bits.sharedExpert = 0
             bits.routedExpert = 0

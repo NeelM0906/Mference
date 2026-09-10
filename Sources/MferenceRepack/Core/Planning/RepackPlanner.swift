@@ -281,6 +281,10 @@ enum RepackPlanner {
             // Planned by FlashNextPlanner; this path is never reached for it.
             return name.hasPrefix(FlashNextPlanner.textPrefix)
                 || name == FlashNextPlanner.lmHeadName
+        case .minicpm5:
+            // The MLX control (pre-quantized path) uses the plain llama
+            // spelling; the BF16 source is planned by FlashNextPlanner.
+            return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
         }
     }
 
@@ -300,6 +304,8 @@ enum RepackPlanner {
         // Fused across experts and across the gate|up halves; split by
         // FlashNextPlanner, which never consults this classifier.
         case .qwen38flashnext: return nil
+        // Dense llama: every `.mlp.*_proj` is the layer's own FFN, resident.
+        case .minicpm5:        return nil
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -1039,6 +1045,10 @@ enum RepackPlanner {
                 if n == "model.llm.unembed.weight"    { return (4, 0, 0, n) }
             case .qwen38flashnext:
                 break   // FlashNextPlanner owns this family's ordering.
+            case .minicpm5:
+                if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
+                if n == "model.norm.weight"          { return (3, 0, 0, n) }
+                if n == "lm_head.weight"             { return (4, 0, 0, n) }
             }
             if let li = layerIndex(in: n) {
                 let slot: Int
@@ -1050,6 +1060,7 @@ enum RepackPlanner {
                 case .inklingSmall:    slot = inklingSlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
                 case .qwen38flashnext: slot = 100
+                case .minicpm5:        slot = miniCPM5SlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -1146,6 +1157,22 @@ enum RepackPlanner {
     /// attention and gated-DeltaNet ranks unchanged, then the layer's own
     /// SwiGLU MLP where the router/shared-expert bundle would sit, then the
     /// two layer norms.
+    /// Plain-llama block order: the four attention projections, the SwiGLU
+    /// MLP, then the two layer norms. Shared with `FlashNextPlanner`'s
+    /// original-repo ordering so both install paths lay the layer out alike.
+    static func miniCPM5SlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight")   { return 0 }
+        if n.contains(".self_attn.k_proj.weight")   { return 1 }
+        if n.contains(".self_attn.v_proj.weight")   { return 2 }
+        if n.contains(".self_attn.o_proj.weight")   { return 3 }
+        if n.contains(".mlp.gate_proj.weight")      { return 4 }
+        if n.contains(".mlp.up_proj.weight")        { return 5 }
+        if n.contains(".mlp.down_proj.weight")      { return 6 }
+        if n.hasSuffix(".input_layernorm.weight")   { return 7 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 8 }
+        return 100
+    }
+
     private static func qwen38SlotRank(in n: String) -> Int {
         if n.contains(".self_attn.q_proj.weight")   { return 0 }
         if n.contains(".self_attn.k_proj.weight")   { return 1 }

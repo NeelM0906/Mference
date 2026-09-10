@@ -1420,6 +1420,185 @@ enum SyntheticSnapshot {
         tensors.append((name, "BF16", shape, bytes))
     }
 
+    // MARK: - MiniCPM5 variants
+
+    /// Tiny plain-llama shape: four full-attention layers, 2 query heads over
+    /// 2 KV heads of 64, one SwiGLU MLP per layer, untied `lm_head`, no q/k
+    /// norm, no experts. `attentionScale` is exactly 0.125 (= pow(64, -0.5)).
+    struct MiniCPM5Arch {
+        let hidden: Int = 128
+        let intermediate: Int = 64
+        let numHeads: Int = 2
+        let numKVHeads: Int = 2
+        let headDim: Int = 64
+        let vocab: Int = 256
+        let numLayers: Int = 4
+        let groupSize: Int = 64
+        let ropeTheta: Double = 5_000_000.0
+    }
+
+    /// The flat `LlamaForCausalLM` config both MiniCPM5 repos share, minus
+    /// the `quantization` block the MLX control adds.
+    private static func miniCPM5Config(_ arch: MiniCPM5Arch) -> [String: Any] {
+        [
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "hidden_size": arch.hidden,
+            "intermediate_size": arch.intermediate,
+            "num_attention_heads": arch.numHeads,
+            "num_key_value_heads": arch.numKVHeads,
+            "head_dim": arch.headDim,
+            "vocab_size": arch.vocab,
+            "num_hidden_layers": arch.numLayers,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": arch.ropeTheta,
+            "rope_scaling": NSNull(),
+            "tie_word_embeddings": false,
+            "hidden_act": "silu",
+            "attention_bias": false,
+            "mlp_bias": false,
+            "bos_token_id": 0,
+            "eos_token_id": [1, 3],
+        ]
+    }
+
+    /// The vendor's BF16 upload shape: bare `model.` trunk, top-level
+    /// `lm_head.weight`, one shard named as the real repo names it, no
+    /// `quantization` block. Every tensor is finite BF16 so the in-flight
+    /// quantizer sees the same value range the real checkpoint has.
+    static func buildMiniCPM5(at dir: String,
+                              seed: UInt64 = 0x5C9B_0001_2B00_CD19) throws -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+        let arch = MiniCPM5Arch()
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+
+        appendBF16(name: "model.embed_tokens.weight",
+                   shape: [arch.vocab, arch.hidden], into: &tensors, rng: &rng)
+        for li in 0..<arch.numLayers {
+            let prefix = "model.layers.\(li)"
+            appendBF16(name: prefix + ".self_attn.q_proj.weight",
+                       shape: [arch.numHeads * arch.headDim, arch.hidden],
+                       into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".self_attn.k_proj.weight",
+                       shape: [arch.numKVHeads * arch.headDim, arch.hidden],
+                       into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".self_attn.v_proj.weight",
+                       shape: [arch.numKVHeads * arch.headDim, arch.hidden],
+                       into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".self_attn.o_proj.weight",
+                       shape: [arch.hidden, arch.numHeads * arch.headDim],
+                       into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".mlp.gate_proj.weight",
+                       shape: [arch.intermediate, arch.hidden], into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".mlp.up_proj.weight",
+                       shape: [arch.intermediate, arch.hidden], into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".mlp.down_proj.weight",
+                       shape: [arch.hidden, arch.intermediate], into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".input_layernorm.weight",
+                       shape: [arch.hidden], into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".post_attention_layernorm.weight",
+                       shape: [arch.hidden], into: &tensors, rng: &rng)
+        }
+        appendBF16(name: "model.norm.weight", shape: [arch.hidden],
+                   into: &tensors, rng: &rng)
+        appendBF16(name: "lm_head.weight", shape: [arch.vocab, arch.hidden],
+                   into: &tensors, rng: &rng)
+
+        let shardName = "model-00000-of-00001.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+
+        try JSONSerialization.data(withJSONObject: miniCPM5Config(arch),
+                                   options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("config.json")))
+        var weightMap: [String: String] = [:]
+        for (name, _, _, _) in tensors { weightMap[name] = shardName }
+        try JSONSerialization.data(
+            withJSONObject: ["metadata": ["total_size": tensors.reduce(0) { $0 + $1.3.count }],
+                             "weight_map": weightMap],
+            options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("model.safetensors.index.json")))
+        return Snapshot(shardPath: shardPath)
+    }
+
+    /// The vendor's MLX control shape: the same names, every projection
+    /// (embedding and head included) packed U32 INT4 group-64 with BF16
+    /// `.scales` / `.biases` companions, BF16 norms, and the base
+    /// `quantization` block with no per-tensor overrides.
+    static func buildMiniCPM5MLX(at dir: String,
+                                 seed: UInt64 = 0x5C9B_0002_2B00_35AC) throws -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+        let arch = MiniCPM5Arch()
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+
+        appendQuantizedWeight(name: "model.embed_tokens",
+                              outerShape: [arch.vocab], innerLogical: arch.hidden, bits: 4,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        for li in 0..<arch.numLayers {
+            let prefix = "model.layers.\(li)"
+            appendQuantizedWeight(name: prefix + ".self_attn.q_proj",
+                                  outerShape: [arch.numHeads * arch.headDim],
+                                  innerLogical: arch.hidden, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".self_attn.k_proj",
+                                  outerShape: [arch.numKVHeads * arch.headDim],
+                                  innerLogical: arch.hidden, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".self_attn.v_proj",
+                                  outerShape: [arch.numKVHeads * arch.headDim],
+                                  innerLogical: arch.hidden, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".self_attn.o_proj",
+                                  outerShape: [arch.hidden],
+                                  innerLogical: arch.numHeads * arch.headDim, bits: 4,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".mlp.gate_proj",
+                                  outerShape: [arch.intermediate], innerLogical: arch.hidden,
+                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".mlp.up_proj",
+                                  outerShape: [arch.intermediate], innerLogical: arch.hidden,
+                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendQuantizedWeight(name: prefix + ".mlp.down_proj",
+                                  outerShape: [arch.hidden], innerLogical: arch.intermediate,
+                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".input_layernorm.weight",
+                       shape: [arch.hidden], into: &tensors, rng: &rng)
+            appendBF16(name: prefix + ".post_attention_layernorm.weight",
+                       shape: [arch.hidden], into: &tensors, rng: &rng)
+        }
+        appendBF16(name: "model.norm.weight", shape: [arch.hidden],
+                   into: &tensors, rng: &rng)
+        appendQuantizedWeight(name: "lm_head",
+                              outerShape: [arch.vocab], innerLogical: arch.hidden, bits: 4,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+
+        let shardName = "model.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+
+        var config = miniCPM5Config(arch)
+        config["quantization"] = ["bits": 4, "group_size": arch.groupSize, "mode": "affine"]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("config.json")))
+        var weightMap: [String: String] = [:]
+        for (name, _, _, _) in tensors { weightMap[name] = shardName }
+        try JSONSerialization.data(
+            withJSONObject: ["metadata": ["format": "mlx"], "weight_map": weightMap],
+            options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("model.safetensors.index.json")))
+        return Snapshot(shardPath: shardPath)
+    }
+
     // MARK: - Tensor builders
 
     private static func appendQuantizedWeight(name: String,

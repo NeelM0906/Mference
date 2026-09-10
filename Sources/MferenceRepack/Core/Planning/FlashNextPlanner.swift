@@ -63,6 +63,13 @@ enum FlashNextPlanner {
 
     static let textPrefix = "model.language_model."
     static let lmHeadName = "lm_head.weight"
+
+    /// The trunk prefix the vendor's original repo uses. Qwen ships inside a
+    /// multimodal container (`model.language_model.`); a plain
+    /// `LlamaForCausalLM` upload uses the bare `model.`.
+    static func trunkPrefix(for family: RepackModelFamily) -> String {
+        family == .minicpm5 ? "model." : textPrefix
+    }
     static let visionPrefix = "model.visual."
     static let mtpPrefix = "mtp."
     static let expertsSegment = ".mlp.experts."
@@ -118,7 +125,7 @@ enum FlashNextPlanner {
                 mtpResidentNames.append(name)
                 continue
             }
-            guard name.hasPrefix(textPrefix) || name == lmHeadName else {
+            guard name.hasPrefix(trunkPrefix(for: arch.family)) || name == lmHeadName else {
                 throw RepackError.unknownTensorPrefix(name: name)
             }
             if let shard = ngramShardIndex(in: name) {
@@ -139,7 +146,8 @@ enum FlashNextPlanner {
             residentNames.append(name)
         }
 
-        residentNames.sort(by: residentOrdering)
+        let family = arch.family
+        residentNames.sort { residentOrdering($0, $1, family: family) }
         mtpResidentNames.sort()
         visionNames.sort()
         skippedMTPNames.sort()
@@ -323,6 +331,10 @@ enum FlashNextPlanner {
         switch family {
         case .qwen38flashnext:
             return sourceName
+        case .minicpm5:
+            // The vendor already spells the trunk `model.` and the head
+            // `lm_head.weight`, which is what the runner looks up.
+            return sourceName
         case .qwen36, .qwen38, .gemma4:
             if sourceName == lmHeadName {
                 return "language_model.lm_head.weight"
@@ -386,6 +398,11 @@ enum FlashNextPlanner {
         case .qwen36:
             return isNormWeight(sourceName)
                 && !sourceName.hasSuffix(".linear_attn.norm.weight")
+        case .minicpm5:
+            // `LlamaRMSNorm` (transformers v5.6.2) is plain `w * x_hat`, and
+            // the vendor's own MLX conversion stores the bare weights. No
+            // fold. See docs/families/MINICPM5.md.
+            return false
         case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple:
             // No original-repo entry exists for these, so no conversion has
             // been compared and no fold can be justified. A family arriving
@@ -741,20 +758,30 @@ enum FlashNextPlanner {
     /// mixer, then per-layer groups in pipeline order, then the final norm and
     /// the untied head.
     static func residentOrdering(_ lhs: String, _ rhs: String) -> Bool {
-        let a = orderKey(lhs), b = orderKey(rhs)
+        residentOrdering(lhs, rhs, family: .qwen38flashnext)
+    }
+
+    static func residentOrdering(_ lhs: String, _ rhs: String,
+                                 family: RepackModelFamily) -> Bool {
+        let a = orderKey(lhs, family: family), b = orderKey(rhs, family: family)
         if a.0 != b.0 { return a.0 < b.0 }
         if a.1 != b.1 { return a.1 < b.1 }
         if a.2 != b.2 { return a.2 < b.2 }
         return a.3 < b.3
     }
 
-    private static func orderKey(_ name: String) -> (Int, Int, Int, String) {
-        if name == textPrefix + "embed_tokens.weight" { return (0, 0, 0, name) }
-        if name.hasPrefix(textPrefix + "hyper_connection_mixer.") { return (0, 0, 1, name) }
-        if name == textPrefix + "norm.weight" { return (3, 0, 0, name) }
+    private static func orderKey(_ name: String,
+                                 family: RepackModelFamily) -> (Int, Int, Int, String) {
+        let prefix = trunkPrefix(for: family)
+        if name == prefix + "embed_tokens.weight" { return (0, 0, 0, name) }
+        if name.hasPrefix(prefix + "hyper_connection_mixer.") { return (0, 0, 1, name) }
+        if name == prefix + "norm.weight" { return (3, 0, 0, name) }
         if name == lmHeadName { return (4, 0, 0, name) }
         if let layer = RepackPlanner.layerIndex(in: name) {
-            return (1, layer, slotRank(in: name), name)
+            let slot = family == .minicpm5
+                ? RepackPlanner.miniCPM5SlotRank(in: name)
+                : slotRank(in: name)
+            return (1, layer, slot, name)
         }
         return (2, 0, 0, name)
     }
