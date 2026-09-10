@@ -371,6 +371,31 @@ ordering, not as exact rates.
 This tension was invisible until now because Flash-Next was the only
 original-repo family, and its runner happens to accept a uniform-INT4 router.
 
+> **Update, 2026-09-10 — Flash-Next takes the same policy.** "Its runner happens
+> to accept a uniform-INT4 router" turned out to be the wrong thing to take
+> comfort from. Measuring the shipped `qwen38flashnext.gturbo` install's own
+> routers against the vendor BF16 —
+> [docs/experiments/2026-09-10-flashnext-router-int4-check.md](experiments/2026-09-10-flashnext-router-int4-check.md)
+> — reproduced the table above on a different checkpoint at a different width:
+> relative weight error 0.113 against an INT8 control's 0.009, exact top-10
+> agreement with BF16 **0.132 vs 0.855**, 1.40 vs 0.146 experts swapped per
+> token. So `QuantBitPolicy.originalRepo(family:)` now returns `.moeRouterInt8`
+> for `.qwen38flashnext` as well, over its 48 text layers *and* its MTP draft
+> layer — 98 overrides. The mechanism needed no change at all, which is the
+> claim `QuantBitPolicy`'s own "why it is a general mechanism rather than a
+> Qwen 3.6 branch" note made, and this is the first test of it: adding the
+> family added rows, not branches. Two consumer-side changes were needed, both admitting a width rather
+> than assuming one — `ManifestReader.validateQuant` accepts 4 or 8 on the
+> Flash-Next router slot, and `FlashNextWeightMatrix` derives each tensor's
+> width from `sizeBytes * 8 / prod(shape)` instead of from the family, so the
+> uniform-INT4 install already on disk keeps loading. The runtime needed **no
+> new Metal**: the INT8 branch dispatches the shipped `router_gemv_gemma4_r4`,
+> which `RouterWideTopK10Tests` already gates against a CPU reference at
+> Flash-Next's production 512 x 2560 INT8 group-64 geometry. Status and the
+> install command:
+> [docs/families/QWEN38_FLASH_NEXT.md](families/QWEN38_FLASH_NEXT.md) port
+> status.
+
 ### Options, sized
 
 * **(A) Give the repacker an INT8 affine group-64 mode and a per-family

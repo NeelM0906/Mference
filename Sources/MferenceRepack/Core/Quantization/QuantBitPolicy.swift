@@ -6,9 +6,7 @@ import Foundation
 /// # Why this exists
 ///
 /// Workstream 2 shipped quantize-in-flight with exactly one target — INT4
-/// affine group-64 — as a deliberate scope cut. That was invisible while
-/// Flash-Next was the only original-repo family, because its runner drives the
-/// router through the generic INT4 matvec. Qwen 3.6 made it visible: the
+/// affine group-64 — as a deliberate scope cut. Qwen 3.6 made that visible: the
 /// independent mlx-community conversion of the same checkpoint keeps every
 /// layer's `mlp.gate` (the MoE router) and `mlp.shared_expert_gate` at **INT8**
 /// group-64, its manifest therefore records `quant.router.weightBits = 8`, and
@@ -21,6 +19,13 @@ import Foundation
 /// merely refused, it would be *wrong* — and it would make a quantizer-quality
 /// comparison against that control measure routing divergence rather than
 /// weight fidelity.
+///
+/// Flash-Next looked like the counter-example for a while: it has no community
+/// conversion to disagree with, its runner accepted a uniform-INT4 router, and
+/// it shipped one. Measuring it settled the matter the other way — the deficit
+/// is the same size on the real install, so the "no conversion to mirror"
+/// argument turned out to be an absence of evidence rather than evidence of
+/// absence. Both original-repo families now carry the same two overrides.
 ///
 /// # Why it is a general mechanism rather than a Qwen 3.6 branch
 ///
@@ -80,6 +85,22 @@ public struct QuantBitPolicy: Sendable, Equatable {
     /// whose output is fed through a softmax/sigmoid and then *compared*, which
     /// is why quantization noise there costs far more than the same noise in a
     /// projection.
+    ///
+    /// It is now the policy for **both** original-repo families. Qwen 3.6
+    /// adopted it because a trusted conversion had already made that choice;
+    /// Flash-Next adopted it because the same measurement was made directly on
+    /// its own shipped install and came out worse
+    /// (`docs/experiments/2026-09-10-flashnext-router-int4-check.md`): its
+    /// INT4 top-10-of-512 routers change ~14 % of the selected expert set per
+    /// token against BF16, and agree exactly with the BF16 selection on only
+    /// 13.2 % of tokens, where mlx-community's INT8 routers manage ~1.5 % and
+    /// 85.5 %. The suffixes are the same because Flash-Next is the same MoE
+    /// block shape, one vendor generation on — including the MTP draft layer,
+    /// whose `mtp.layers.0.mlp.gate.weight` and
+    /// `mtp.layers.0.mlp.shared_expert_gate.weight` are matched by the same two
+    /// rules and get the same width. That is deliberate: the draft layer routes
+    /// over the same 512 experts and a draft that routes differently from the
+    /// target wastes verification, so it is not a tensor to economize on.
     public static let moeRouterInt8 = QuantBitPolicy(defaultBits: 4, rules: [
         Rule(suffix: ".mlp.gate.weight", bits: 8),
         Rule(suffix: ".mlp.shared_expert_gate.weight", bits: 8),
@@ -94,13 +115,21 @@ public struct QuantBitPolicy: Sendable, Equatable {
     // Internal rather than public: `RepackModelFamily` is internal.
     static func originalRepo(family: RepackModelFamily) -> QuantBitPolicy {
         switch family {
-        case .qwen38flashnext:
-            // Uniform INT4 on purpose. Flash-Next has no independent community
-            // conversion to mirror, and its runner drives the router through
-            // the generic INT4 matvec, so nothing here is INT8. Changing this
-            // would change every byte that family has ever installed.
-            return .uniformInt4
-        case .qwen36:
+        case .qwen38flashnext, .qwen36:
+            // Qwen 3.6 mirrors mlx-community's conversion of the same
+            // checkpoint. Flash-Next has no community conversion to mirror, so
+            // the same question was answered by measuring its own shipped
+            // INT4 install against the BF16 source: ~14 % of the selected
+            // top-10-of-512 experts change per token, and exact top-10
+            // agreement is 0.132. Both gating tensors therefore keep INT8, on
+            // the text layers and on the MTP draft layer alike.
+            //
+            // This changes the bytes of a `qwen38flashnext` install relative to
+            // the uniform-INT4 one already on disk. That is the intent, and it
+            // is why the old install stays readable rather than reproducible:
+            // `ManifestReader.validateQuant` accepts 4 or 8 on the router slot,
+            // and `FlashNextWeightMatrix` reads each tensor's width from its own
+            // index entry rather than from a family-wide assumption.
             return .moeRouterInt8
         case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple:
             // None of these has an original-repo installer entry today, so no

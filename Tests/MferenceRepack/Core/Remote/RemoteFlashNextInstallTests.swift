@@ -63,6 +63,61 @@ extension RemotePayloadCopyTests {
         #expect(try flashNextSlice(resident, q.scaleOffset, q.scaleSize) == qExpected.scales)
         #expect(try flashNextSlice(resident, q.biasOffset, q.biasSize) == qExpected.biases)
 
+        // --- The two MoE gating tensors keep INT8; everything around them
+        // keeps the INT4 base. This is the whole point of the bit policy, and
+        // the assertion is on emitted BYTES rather than on the policy object,
+        // because the policy being right and the planner honouring it are two
+        // different claims. The synthetic checkpoint has 2 text layers plus the
+        // MTP draft layer, so the override set is 6 tensors.
+        //
+        // Widths are derived the way the runtime derives them —
+        // `sizeBytes * 8 / prod(shape)` — so a planner that wrote the right
+        // number of bytes under the wrong companion layout would still fail
+        // below on the byte comparison.
+        func widthBits(_ entry: FlashNextResidentEntry) -> Int {
+            let weights = Int(entry.shape[0]) * Int(entry.shape[1])
+            guard weights > 0 else { return 0 }
+            return Int(entry.size) * 8 / weights
+        }
+        var int8Names: [String] = []
+        for layer in 0..<2 {
+            int8Names += ["model.language_model.layers.\(layer).mlp.gate.weight",
+                          "model.language_model.layers.\(layer).mlp.shared_expert_gate.weight"]
+        }
+        int8Names += ["mtp.layers.0.mlp.gate.weight",
+                      "mtp.layers.0.mlp.shared_expert_gate.weight"]
+        for name in int8Names {
+            let entry = try #require(entries[name], "missing resident entry \(name)")
+            #expect(entry.dtype == 0, "\(name) dtype")
+            #expect(widthBits(entry) == 8, "\(name) width")
+            // One BF16 scale and one BF16 bias per group of 64, exactly as at
+            // INT4: the width changes the weight bytes and nothing else.
+            let groups = UInt64(entry.shape[1]) / 64
+            #expect(entry.scaleSize == UInt64(entry.shape[0]) * groups * 2, "\(name) scales")
+            #expect(entry.biasSize == entry.scaleSize, "\(name) biases")
+
+            let tensor = try #require(source[name], "missing source tensor \(name)")
+            let expected = flashNextReference(
+                bytes: try flashNextBytes(at: tensor.path, offset: tensor.offset,
+                                          count: tensor.size),
+                rowLength: Int(entry.shape[1]), bits: 8)
+            #expect(try flashNextSlice(resident, entry.offset, entry.size)
+                == expected.packed, "\(name) packed")
+            #expect(try flashNextSlice(resident, entry.scaleOffset, entry.scaleSize)
+                == expected.scales, "\(name) scales")
+            #expect(try flashNextSlice(resident, entry.biasOffset, entry.biasSize)
+                == expected.biases, "\(name) biases")
+        }
+        // Every other quantized resident tensor stays at the base width — in
+        // particular the shared expert's projections, which sit one segment
+        // away from the gate the policy does override.
+        let int8Set = Set(int8Names)
+        for (name, entry) in entries where entry.dtype == 0 && !int8Set.contains(name) {
+            #expect(widthBits(entry) == 4, "\(name) should be INT4")
+        }
+        #expect(entries.values.filter { $0.dtype == 0 && $0.size > 0 }.count > int8Names.count,
+                "the install must contain INT4 tensors as well as the INT8 gates")
+
         // --- Norms, 1-D vectors, conv kernels and the I64 n-gram head tables
         // ride through untouched at their source dtype. dtype codes: 1 = BF16,
         // 4 = I64. Getting I64 wrong would silently corrupt the tables the PLE
@@ -222,8 +277,21 @@ extension RemotePayloadCopyTests {
         // same way it inherits W2.1a. See docs/QUANTIZER_QUALITY.md.
         #expect(quantized["qualityGate"] as? String
             == "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36")
-        // Flash-Next is uniform INT4 by policy, so it records no overrides.
-        #expect(quantized["overriddenTensorCount"] == nil)
+        // The base width is still 4; the mixture is recorded as overrides
+        // rather than by moving the base, so `weightBits` above keeps meaning
+        // what it always did. Two gating tensors on each of 2 text layers plus
+        // the MTP draft layer.
+        #expect(quantized["overrideWeightBits"] as? Int == 8)
+        #expect(quantized["overriddenTensorCount"] as? Int == 6)
+        #expect(manifest["bitWidthOverridesHonored"] as? Int == 6)
+        // The coarse per-slot summary follows the per-tensor truth: the router
+        // slot reads 8, and the shared-expert slot — which describes
+        // `shared_expert.gate_proj`, not the scalar gate — stays 4.
+        let quantSlots = try #require(manifest["quant"] as? [String: Any])
+        #expect((quantSlots["router"] as? [String: Any])?["weightBits"] as? Int == 8)
+        #expect((quantSlots["sharedExpert"] as? [String: Any])?["weightBits"] as? Int == 4)
+        #expect((quantSlots["embedding"] as? [String: Any])?["weightBits"] as? Int == 4)
+        #expect((quantSlots["routedExpert"] as? [String: Any])?["weightBits"] as? Int == 4)
 
         // The MTP draft layer's own routed experts land in their own additive
         // pool, outside packed_experts/ so the shipped layout is untouched.
@@ -536,18 +604,28 @@ private func flashNextResidentEntries(in data: Data) throws
 
 /// The reference result for a `[rows, rowLength]` BF16 tensor, produced by the
 /// whole-tensor encoder the streaming path is locked to.
-private func flashNextReference(bytes: Data, rowLength: Int)
+private func flashNextReference(bytes: Data, rowLength: Int, bits: Int = 4)
     -> (packed: Data, scales: Data, biases: Data) {
     var values = [Float]()
     values.reserveCapacity(bytes.count / 2)
     for index in stride(from: 0, to: bytes.count, by: 2) {
-        let bits = UInt32(bytes[bytes.startIndex + index])
+        let raw = UInt32(bytes[bytes.startIndex + index])
             | UInt32(bytes[bytes.startIndex + index + 1]) << 8
-        values.append(Float(bitPattern: bits << 16))
+        values.append(Float(bitPattern: raw << 16))
     }
-    let encoded = values.withUnsafeBufferPointer {
-        Int4AffineEncoder.encodeTensor($0, rowLength: rowLength)
-    }
+    // The two encoders have distinct `EncodedRows` types — deliberately, since
+    // a packed INT4 buffer and a packed INT8 buffer of the same row count are
+    // different lengths — so the components are pulled out separately rather
+    // than through a conditional expression.
+    let encoded: (packed: [UInt8], scales: [UInt16], biases: [UInt16])
+        = values.withUnsafeBufferPointer { buffer in
+            if bits == 8 {
+                let rows = Int8AffineEncoder.encodeTensor(buffer, rowLength: rowLength)
+                return (rows.packed, rows.scales, rows.biases)
+            }
+            let rows = Int4AffineEncoder.encodeTensor(buffer, rowLength: rowLength)
+            return (rows.packed, rows.scales, rows.biases)
+        }
     func widen(_ companions: [UInt16]) -> Data {
         var out = Data(capacity: companions.count * 2)
         for value in companions {

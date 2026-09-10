@@ -64,13 +64,17 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 ///
 /// Norms upcast to FP32 internally, as the reference does. The KV cache is FP16.
 ///
-/// # Both install dtypes
+/// # Every install dtype
 ///
 /// Every projection goes through `FlashNextWeightMatrix`, which carries the
-/// stored dtype with the buffer: INT4 affine group-64 for the production install,
-/// dense BF16 for the parity install (whose `moe_intermediate_size` of 32
-/// group-64 cannot quantize at all). The routed experts, the embedding and
-/// `lm_head` split the same way. Nothing in this file assumes a quantization.
+/// stored dtype with the buffer: affine group-64 for the production install —
+/// INT4 for everything but the two MoE gating tensors, which the install policy
+/// keeps at INT8 — and dense BF16 for the parity install (whose
+/// `moe_intermediate_size` of 32 group-64 cannot quantize at all). The routed
+/// experts, the embedding and `lm_head` split the same way. Nothing in this file
+/// assumes a quantization, and in particular nothing assumes a *uniform* one:
+/// each tensor's width comes from its own resident index entry, so the
+/// uniform-INT4 install predating the router change loads unchanged.
 ///
 /// # Prefill
 ///
@@ -379,7 +383,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
         let int4 = try DequantInt4GEMV(context: context,
                                        additionalShapes: cfg.decodeInt4GEMVShapes)
-        self.matVec = try FlashNextMatVec(context: context, int4: int4)
+        // Both tensors the install policy may keep at INT8 — the router
+        // `[numExperts, hidden]` and the shared-expert scalar gate
+        // `[1, hidden]` — are `hidden` wide, so that is the widest INT8 row
+        // this runner can ask for.
+        self.matVec = try FlashNextMatVec(context: context, int4: int4,
+                                          int8Columns: cfg.hiddenSize)
         self.rms = try RMSNorm(context: context)
         self.elementwise = try Elementwise(context: context)
         self.hc = try FlashNextHyperConnections(
@@ -959,6 +968,15 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                              biasesOffset: Int(embedding.biasOffset),
                              out: embedRow, tokenId: token,
                              d: UInt32(hidden), outScale: 1.0)
+        case .int8:
+            // The bit policy overrides two MoE gating suffixes and nothing
+            // else, so no install reaches here with an INT8 embedding table.
+            // There is no INT8 row-gather kernel to fall back to, and quietly
+            // decoding the row as INT4 would emit a plausible wrong embedding
+            // for every token, so this refuses instead.
+            preconditionFailure(
+                "the embedding table is INT8; Flash-Next has no INT8 embedding "
+                    + "gather and the install policy never produces one")
         case let .bf16(buffer, offset):
             guard let enc = cb.makeComputeCommandEncoder() else { return }
             enc.setComputePipelineState(embedBF16PSO)

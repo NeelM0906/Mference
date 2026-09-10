@@ -295,8 +295,9 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       defects that only a model-level comparison against an independent
       conversion could see: resident tensor naming, and a missing RMSNorm
       `1 + w` fold that made every norm wrong by one in an install that still
-      verified, validated and loaded. Flash-Next is uniform INT4 and folds no
-      norm bias. Both are now *explicit* per-family choices rather than
+      verified, validated and loaded. Flash-Next folds no norm bias, and its
+      install on disk is uniform INT4 (the policy that supersedes it is below).
+      Both are now *explicit* per-family choices rather than
       unexamined defaults — and neither has been checked against an independent
       conversion of Flash-Next, because none exists. Its first-light run
       produced coherent output and retrieved a passkey, which is evidence but
@@ -533,6 +534,8 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         what it establishes robustly is the ~10× *ratio*, at every layer. **This
         is open work against the shipped install, not against the gate:** the
         runner is dtype-agnostic and the lift does not depend on it.
+        *All three code changes landed the same day; the reinstall has not been
+        run. See the INT8-routers item below.*
       - **(2) No RMSNorm bias fold — checked, no defect.** Same experiment's
         byte check: 18/18 install bytes equal the vendor's bare `w`, 18/18
         control bytes equal the vendor's bare `w`, and 0/18 control bytes equal
@@ -541,6 +544,57 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       Neither caveat has been checked against an *independent conversion of
       Flash-Next*, because none exists — that remains true, and those are
       exactly the two kinds of defect W2.1b caught on Qwen 3.6 (§7).
+- [ ] **INT8 routers: fix built, install pending.** The adverse caveat above is
+      answered in code as of 2026-09-10; what is outstanding is the reinstall
+      that produces the bytes.
+      - *The measured deficit.* The shipped install's INT4 g64
+        `.mlp.gate.weight` (`[512, 2560]`, top-10 of 512) and
+        `.mlp.shared_expert_gate.weight` change **~14 % of the selected expert
+        set per token** against the BF16 source — exact top-10 agreement 0.132,
+        top-1 0.774, 1.40 experts swapped per token — where mlx-community's INT8
+        g64 routers on the sibling checkpoint manage ~1.5 %, 0.855 and 0.146.
+        Full method and the isotropic-probe caveat:
+        [docs/experiments/2026-09-10-flashnext-router-int4-check.md](../experiments/2026-09-10-flashnext-router-int4-check.md).
+      - *The fix.* `QuantBitPolicy.originalRepo(family: .qwen38flashnext)` now
+        returns `.moeRouterInt8`, so the two gating suffixes install at INT8 g64
+        on all 48 text layers **and on the MTP draft layer** — 98 overrides,
+        against the uniform install's 0. `ManifestReader.validateQuant` accepts
+        4 or 8 on the Flash-Next router slot, and `FlashNextWeightMatrix` reads
+        each tensor's width from its own index entry (`sizeBytes * 8 / prod(shape)`)
+        rather than from the family, so the **uniform-INT4 install on disk keeps
+        loading unchanged**. No new Metal: the INT8 branch of `FlashNextMatVec`
+        dispatches the shipped `router_gemv_gemma4_r4`, which `RouterWideTopK10Tests`
+        already gates against a CPU reference at exactly this geometry.
+      - *Install pending.* See
+        [docs/QUANTIZER_QUALITY.md §6](../QUANTIZER_QUALITY.md#6-the-blocker-and-how-it-was-cleared)
+        for the shared policy, and the command below. Expected size
+        **+32,175,360 bytes** over the 175,173,302,167-byte INT4 install
+        (49 routers x 655,360 + 49 scalar gates x 1,280; the BF16 scale and bias
+        companions are one per group of 64 at either width, so only the weight
+        bytes move), i.e. ~175,205,477,527 bytes. Nothing else in the layout
+        changes: same 57 files, same expert stride, same PLE pool.
+
+      ```bash
+      # ~360 GB of streaming reads; budget the ~2 h 35 m the first install took.
+      # A NEW directory: the uniform-INT4 install must stay in place, because it
+      # is the only thing the routing comparison can be re-measured against.
+      swift run -c release MferenceRepack \
+        --model qwen38flashnext \
+        --output scratch/qwen38flashnext-r8.gturbo \
+        --resume
+      ```
+
+      `--model qwen38flashnext` is unchanged and now means the INT8-router
+      layout: the policy is keyed on the family, not on the label, and a second
+      `SupportedModelSource` entry for the same repo and revision would make
+      `SourceFingerprint.modelID(forIndexSha256:)` ambiguous. `modelID` stays
+      `qwen3.8-flash-next-int4g64` for the same reason `qwen36original` keeps
+      `qwen3.6-35b-a3b-int4g64` while installing 80 INT8 tensors: it names the
+      **base** width, and the mixture is reported by
+      `bitWidthOverridesHonored` (0 for the old install, 98 for the new one) and
+      by `quant.router.weightBits` (4 vs 8). Those two fields are how the two
+      directories are told apart.
+
 - [x] **Toy parity: reported, not tuned away.** The rule is
       token-exact-or-report, and the toy's long prompt is 7/8. What was measured
       (`FlashNextForwardRunnerParityTests`, both prompts, prefill plus 8 cached
@@ -614,7 +668,8 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         where the Qwen 3.6 control uses INT8 routers) and no RMSNorm bias fold.
         Both were measured the same day; see the gate-lift item above for the
         results. The router one is adverse and recommends an INT8 reinstall of
-        the two gating tensors; the norm-fold one came back clean.
+        the two gating tensors — now built, install pending; the norm-fold one
+        came back clean.
       - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
         model** (~75× the resident set), the most extreme expression of the
         working-set thesis in the project.
