@@ -40,6 +40,12 @@ TOOLS = [
                        "required": ["code"]}}},
 ]
 
+# Swift's JSONValue objects are unordered and render their keys sorted, so the
+# fixtures give every schema and argument dict in sorted key order: that is the
+# one order both renderers can agree on byte for byte.
+TOOLS = json.loads(json.dumps(TOOLS, sort_keys=True))
+
+
 def call(name, args, id_):
     return {"id": id_, "type": "function", "function": {"name": name, "arguments": args}}
 

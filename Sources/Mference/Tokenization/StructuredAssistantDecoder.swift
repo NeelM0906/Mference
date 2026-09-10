@@ -63,6 +63,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenizer.dialect == .deepseek {
             return try consumeDeepseek(tokenID: tokenID, delta: delta)
         }
+        if tokenizer.dialect == .minicpm {
+            return try consumeMiniCPM(tokenID: tokenID, delta: delta)
+        }
         if tokenID == tokenizer.channelStartID {
             label = ""
             channel = .label
@@ -194,6 +197,59 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
         return try QwenToolCallParser().parse(
             text, allowedTools: allowedTools, id: idGenerator())
+    }
+
+    /// MiniCPM transitions: `<think>`…`</think>` (ids 8 / 9, added tokens
+    /// that are not flagged special but still arrive as single ids) suppress
+    /// thought text, and `<function`…`</function>` (special tokens) buffer
+    /// the XML tool-call body for `MiniCPMToolCallParser`. The `<param`
+    /// special token inside the body decodes to its text and is parsed as
+    /// part of the XML.
+    private func consumeMiniCPM(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        if tokenID == tokenizer.toolCallStartID {
+            guard toolTokens == nil else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = []
+            return []
+        }
+        if tokenID == tokenizer.toolCallEndID {
+            guard let tokens = toolTokens else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = nil
+            let text = tokenizer.decode(tokens, skipSpecialTokens: false)
+            do {
+                let call = try MiniCPMToolCallParser().parse(
+                    text, allowedTools: allowedTools, id: idGenerator())
+                emittedCalls += 1
+                return [.toolCall(call)]
+            } catch {
+                failed = true
+                throw error
+            }
+        }
+        if var tokens = toolTokens {
+            tokens.append(tokenID)
+            guard tokens.count * MemoryLayout<Int32>.size <= MiniCPMToolCallParser.maximumBytes else {
+                failed = true
+                throw ToolCallParserError.oversized
+            }
+            toolTokens = tokens
+            return []
+        }
+        if tokenID == tokenizer.thinkStartID {
+            channel = .thought
+            return []
+        }
+        if tokenID == tokenizer.thinkEndID {
+            channel = .visible
+            return []
+        }
+        guard channel != .thought else { return [] }
+        return delta.isEmpty ? [] : [.content(delta)]
     }
 
     /// DeepSeek transitions: `<think>`…`</think>` suppress thought text like
