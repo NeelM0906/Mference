@@ -330,6 +330,66 @@ import Foundation
         }
     }
 
+    /// A manifest that omits `qkNorm` validates against the default (`true`),
+    /// so every install predating the axis loads unchanged; an explicit
+    /// `false` against a q/k-norm baseline is an arch mismatch.
+    @Test func qkNormAbsentMeansTrueAndExplicitFalseMismatches() throws {
+        let (absent, toy) = try Self.writeToyManifest()
+        defer { try? FileManager.default.removeItem(at: absent) }
+        _ = try ManifestReader.load(directoryURL: absent, expecting: toy)
+
+        let (explicit, _) = try Self.writeToyManifest(archOverrides: ["qkNorm": true])
+        defer { try? FileManager.default.removeItem(at: explicit) }
+        _ = try ManifestReader.load(directoryURL: explicit, expecting: toy)
+
+        let (wrong, _) = try Self.writeToyManifest(archOverrides: ["qkNorm": false])
+        defer { try? FileManager.default.removeItem(at: wrong) }
+        #expect {
+            _ = try ManifestReader.load(directoryURL: wrong, expecting: toy)
+        } throws: { error in
+            guard case let ModelError.archMismatch(field, _, _) = error else { return false }
+            return field == "qkNorm"
+        }
+    }
+
+    /// The MiniCPM5 baseline is the one family whose manifest must carry
+    /// `qkNorm: false`; omitting it would validate as `true` and mismatch.
+    @Test func miniCPM5ManifestCarriesQKNormFalse() throws {
+        let toy = ArchConfig.miniCPM5Toy()
+        let archOverrides: [String: Any] = [
+            "family": "minicpm5",
+            "attnOutputGate": false,
+            "attentionScale": 0.25,
+            "embeddingScaledBySqrtHidden": false,
+            "routerScaled": false,
+            "ffnSandwichNorms": false,
+            "sharedExpertGated": false,
+            "ropeNeoxSubdim": true,
+            "numSharedExperts": 0,
+            "numDenseLayers": 4,
+            "denseIntermediateSize": 128,
+            "qkNorm": false,
+        ]
+        let (dir, _) = try Self.writeToyManifest(archOverrides: archOverrides,
+                                                 config: toy)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: toy)
+        #expect(manifest.arch.family == "minicpm5")
+        #expect(manifest.arch.qkNorm == false)
+
+        var withoutAxis = archOverrides
+        withoutAxis["qkNorm"] = nil
+        let (missing, _) = try Self.writeToyManifest(archOverrides: withoutAxis,
+                                                     config: toy)
+        defer { try? FileManager.default.removeItem(at: missing) }
+        #expect {
+            _ = try ManifestReader.load(directoryURL: missing, expecting: toy)
+        } throws: { error in
+            guard case let ModelError.archMismatch(field, _, _) = error else { return false }
+            return field == "qkNorm"
+        }
+    }
+
     @Test func nonPageAlignedExpertStrideThrows() throws {
         let (dir, toy) = try Self.writeToyManifest(["expertStride": 1024])
         defer { try? FileManager.default.removeItem(at: dir) }

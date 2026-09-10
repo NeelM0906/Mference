@@ -108,6 +108,10 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     /// Axis names the install claims a runner must implement. Advisory only —
     /// `ManifestReader.familiesWithoutRunner` is the authority.
     public let requiredAxes: [String]?
+    /// Per-head q/k RMSNorm gains on full-attention layers. Optional so every
+    /// manifest predating the axis decodes unchanged; absent validates against
+    /// the Gemma default (`true`).
+    public let qkNorm: Bool?
 }
 
 /// One page-aligned region of a row-lookup pool, mirroring one source shard.
@@ -360,6 +364,13 @@ public enum ManifestReader {
 
     private static func validateQuant(_ quant: ManifestQuant,
                                       expected: ArchConfig) throws {
+        if expected.family == .minicpm5 {
+            // Dense, like Qwen 3.8: INT4 affine group-64 embedding and
+            // attention slots (the MLP shares the attention slot), and the
+            // router / shared-expert / routed-expert slots marked absent.
+            try validateDenseInt4Quant(quant, familyName: "MiniCPM5")
+            return
+        }
         if expected.family == .qwen38 {
             let affine: [(String, ManifestQuantSlot)] = [
                 ("embedding", quant.embedding),
@@ -511,6 +522,41 @@ public enum ManifestReader {
         }
     }
 
+    /// The dense-family quant contract: INT4 affine group-64 `embedding` and
+    /// `attention` slots, and every MoE slot marked absent.
+    private static func validateDenseInt4Quant(_ quant: ManifestQuant,
+                                               familyName: String) throws {
+        let affine: [(String, ManifestQuantSlot)] = [
+            ("embedding", quant.embedding),
+            ("attention", quant.attention),
+        ]
+        for (name, slot) in affine {
+            guard slot.weightBits == 4,
+                  slot.scheme.lowercased() == "affine",
+                  slot.scaleType.lowercased() == "bf16",
+                  slot.biasType.lowercased() == "bf16",
+                  slot.groupSize == Quantization.groupSize else {
+                throw ModelError.indexCorrupt(
+                    detail: "unsupported \(familyName) quantization for \(name)")
+            }
+        }
+        let absent: [(String, ManifestQuantSlot)] = [
+            ("router", quant.router),
+            ("sharedExpert", quant.sharedExpert),
+            ("routedExpert", quant.routedExpert),
+        ]
+        for (name, slot) in absent {
+            guard slot.weightBits == 0,
+                  slot.scheme.lowercased() == "none",
+                  slot.scaleType.lowercased() == "none",
+                  slot.biasType.lowercased() == "none",
+                  slot.groupSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "\(familyName) manifest must mark \(name) absent")
+            }
+        }
+    }
+
     private static func validateArch(_ a: ManifestArch,
                                      expected e: ArchConfig) throws {
         func check<T: Equatable & CustomStringConvertible>(
@@ -600,6 +646,9 @@ public enum ManifestReader {
         try check("ropeNeoxSubdim",
                   a.ropeNeoxSubdim ?? gemmaDefaults.ropeNeoxSubdim,
                   e.ropeNeoxSubdim)
+        try check("qkNorm",
+                  a.qkNorm ?? gemmaDefaults.qkNorm,
+                  e.qkNorm)
         try check("linearNumKHeads",
                   a.linearNumKHeads ?? 0, e.linearAttention.numKHeads)
         try check("linearNumVHeads",
@@ -777,6 +826,11 @@ public enum ManifestReader {
             "hyperConnectionsLowRank",
             "attentionIndexer",
             "pleNgramEmbedding",
+        ],
+        // MiniCPM5 installs and validates (`qkNorm` is an axis now) but no
+        // runner takes the q/k-norm-free attention branch yet.
+        "minicpm5": [
+            "qkNormFreeAttention",
         ],
     ]
 }

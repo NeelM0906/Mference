@@ -180,6 +180,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         // Unreachable while the capability gate stands: `load` funnels through
         // `ManifestReader.peekFamily`, which refuses this family by name.
         case .qwen38flashnext: return "qwen3.8-flash-next-int4g64"
+        case .minicpm5: return "minicpm5-2b-int4g64"
         }
     }
     private nonisolated let modelFamily: ModelFamily

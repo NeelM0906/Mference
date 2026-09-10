@@ -135,6 +135,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         // pre-converted download), and no runner executes it yet. `nil` keeps
         // it out of the toolbar picker and its download list.
         case .qwen38flashnext: return nil
+        // No app descriptor either: MiniCPM5 is installed through
+        // `MferenceRepack --model minicpm5` (a quantize-in-flight repack of
+        // the vendor's BF16 repo), and no runner executes it yet.
+        case .minicpm5: return nil
         }
     }
 
@@ -148,6 +152,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .inklingSmall: return "inklingsmall.gturbo"
         case .maple: return "maple.gturbo"
         case .qwen38flashnext: return "qwen38flashnext.gturbo"
+        case .minicpm5: return "minicpm5.gturbo"
         }
     }
 

@@ -111,6 +111,20 @@ import Testing
         }
     }
 
+    /// MiniCPM5 follows the same discipline: its baseline, accessors and the
+    /// `qkNorm` axis exist so the runner can be written against them, and
+    /// every load path refuses the family by name until that runner lands.
+    @Test func miniCPM5IsGatedByNameUntilItsRunnerLands() throws {
+        #expect(ArchConfig.knownArchitectures[.minicpm5] != nil)
+        let directory = try Self.writeManifest(family: "minicpm5")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(throws: ModelError.familyRunnerNotImplemented(
+            family: "minicpm5",
+            missingAxes: ["qkNormFreeAttention"])) {
+            _ = try ManifestReader.peekFamily(directoryURL: directory)
+        }
+    }
+
     /// The regression the runtime skeleton has to not cause: `qwen38flashnext`
     /// now has a compiled baseline (so its manifest can be validated and toy
     /// fixtures built), and adding it must not have made the family loadable.
