@@ -192,6 +192,33 @@ public func run(args: Args,
             lines += String(format: "%.1f", total - accounted) + " ms\n"
             stderr.write(Data(lines.utf8))
         }
+        // Qwen3.8-Flash-Next accounts a different set of phases: it has no
+        // cb1/cb2 split (no early router signal, no expert-I/O overlap — the
+        // whole read is exposed), and it adds two costs no other family pays,
+        // the indexer's CPU top-k round trip and the PLE row-pool gather.
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let runner = runner as? FlashNextForwardRunner {
+            let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
+            let total = stats.decodeSeconds * 1000
+            let accounted = Double(runner.totalIoNanos
+                                   + runner.totalIndexerTopKNanos
+                                   + runner.totalPleRowNanos) / 1e6
+            var lines = "\n[phases over \(stats.newTokens) tokens, decode "
+            lines += String(format: "%.0f", total) + " ms]\n"
+            lines += "  expert io (all exposed): " + ms(runner.totalIoNanos) + " ms\n"
+            lines += "  indexer cpu top-k:       "
+            lines += ms(runner.totalIndexerTopKNanos) + " ms\n"
+            lines += "  ple row fetch:           "
+            lines += ms(runner.totalPleRowNanos) + " ms\n"
+            let gpuBusy = runner.totalGpuBusyNanos
+            let gpuSpan = runner.totalGpuSpanNanos
+            lines += "  gpu busy: " + ms(gpuBusy) + " ms, span: "
+            lines += ms(gpuSpan) + " ms, gap: "
+            lines += ms(gpuSpan > gpuBusy ? gpuSpan - gpuBusy : 0) + " ms\n"
+            lines += "  unaccounted (CPU encode + GPU waits): "
+            lines += String(format: "%.1f", total - accounted) + " ms\n"
+            stderr.write(Data(lines.utf8))
+        }
         if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
            let q38 = runner as? Qwen38ForwardRunner,
            let spec = q38.mtpSpecStats, spec.rounds > 0 {
