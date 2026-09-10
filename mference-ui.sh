@@ -123,6 +123,19 @@ list_arguments+=(--list-models)
 # two query rewrites per turn. They seed Open WebUI's persisted defaults, so
 # they take effect on a fresh DATA_DIR and are overridden by anything already
 # toggled in its admin settings.
+# Open WebUI signs sessions with WEBUI_SECRET_KEY. Left unset, `open-webui
+# serve` generates one and writes it to `.webui_secret_key` in the *current
+# directory* — the checkout — where it once got committed. Keep it in the data
+# directory instead, created on first launch, readable only by the user.
+webui_secret_key() {
+  local file="$data_directory/webui-secret-key"
+  if [[ ! -s "$file" ]]; then
+    mkdir -p "$data_directory"
+    (umask 077; openssl rand -hex 32 > "$file") || fail "could not create $file"
+  fi
+  cat "$file"
+}
+
 webui_environment=(
   "OPENAI_API_BASE_URL=http://127.0.0.1:$server_port/v1"
   "OPENAI_API_KEY=local"
@@ -136,6 +149,7 @@ webui_environment=(
   "ENABLE_SEARCH_QUERY_GENERATION=false"
   "ENABLE_EVALUATION_ARENA_MODELS=false"
   "DATA_DIR=$data_directory"
+  "WEBUI_SECRET_KEY=$(webui_secret_key)"
 )
 
 # --- checks and prerequisites ------------------------------------------------
@@ -299,7 +313,7 @@ cmd_run() {
     echo "with env:"
     local entry
     for entry in "${webui_environment[@]}"; do
-      echo "  $entry"
+      case "$entry" in WEBUI_SECRET_KEY=*) echo "  WEBUI_SECRET_KEY=<from $data_directory/webui-secret-key>" ;; *) echo "  $entry" ;; esac
     done
     echo "would wait:  http://127.0.0.1:$webui_port"
     echo "would open:  http://127.0.0.1:$webui_port"

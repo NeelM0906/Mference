@@ -294,6 +294,15 @@ grep -o 'ENABLE_[A-Z_]*GENERATION\|WEBUI_AUTH\|OPENAI_API_BASE_URL\|ENABLE_OLLAM
   sort -u
 ```
 
+Open WebUI's session-signing secret lives at
+`~/Library/Application Support/Mference/open-webui/webui-secret-key`
+(created by the launcher on first run, mode 600, passed as
+`WEBUI_SECRET_KEY`). Without that variable, `open-webui serve` writes a
+`.webui_secret_key` file into the current directory, which is the checkout;
+that file is now ignored by git, and a key that was briefly committed on
+2026-09-10 has been rotated. Delete the data-directory file to rotate again;
+every browser session is signed out.
+
 ## Security posture
 
 Both processes bind `127.0.0.1`. Open WebUI's authentication is **disabled**, so

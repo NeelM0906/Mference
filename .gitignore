@@ -61,3 +61,7 @@ notes/
 __pycache__/
 *.pyc
 .venv/
+
+# Open WebUI writes its session-signing secret into the working directory when
+# WEBUI_SECRET_KEY is not set; the launcher sets it from the data directory.
+.webui_secret_key
