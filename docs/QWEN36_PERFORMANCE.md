@@ -18,8 +18,7 @@ The production CLI and server resolve their expert-cache default by model
 family and physical memory; at this record's date Qwen used 32 slots per layer
 on hosts with at least 16 GiB and 16 slots on smaller hosts (the ≥24 GiB rung
 has since moved to 96 slots — see round 3 below). An explicit
-`--expert-cache-slots 16` keeps the lower-memory path. The Mac app keeps 16 as
-its explicit default and offers every allowed slot count in the inspector.
+`--expert-cache-slots 16` keeps the lower-memory path.
 
 On the M5/24 GB host, the exact community protocol at commit `3d6996b` produced:
 

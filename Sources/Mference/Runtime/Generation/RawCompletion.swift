@@ -70,7 +70,7 @@ extension GenerationConfig {
 
 }
 
-/// Raw-completion prefill + decode loop shared by the CLI and the Mac app.
+/// Raw-completion prefill + decode loop shared by the CLI and the server.
 /// Consumes pre-encoded `promptIds` (BOS + verbatim encode upstream — no chat
 /// template). Stop handling, detokenizer flush ordering, and history append
 /// ordering are shared by both front ends.

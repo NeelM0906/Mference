@@ -37,8 +37,12 @@ import Testing
 /// holds — exact agreement up to the first near-tie flip, and where that flip
 /// is — which makes them regression gates rather than aspirations.
 ///
-/// **The family gate stays down on the strength of this.** The port's rule is
-/// token-exact or report; the long prompt is 7/8.
+/// **The family gate did not turn on this.** The port's rule is token-exact or
+/// report, and the long prompt is 7/8 — so the toy near-tie was reported rather
+/// than tuned away, and the gate lift (2026-09-10, owner decision) rests on the
+/// real-model evidence instead: `FlashNextRealGenerationMeasurement` on the 175
+/// GB install, plus W2.1b closed on both halves. These gates keep their job
+/// either way, which is to fail if a flip moves *earlier* than measured.
 ///
 /// The install is opened in `pread` streaming mode with 16 slots, so the routed
 /// experts go through the real LFU slot cache rather than a resident mapping.
@@ -420,5 +424,56 @@ import Testing
         #expect(agreed >= Self.expectedAgreement(prompt),
                 Comment(rawValue: "\(prompt.rawValue) greedy rollout agreement "
                             + "fell to \(agreed)/\(oracleTokens.count)"))
+    }
+
+    // MARK: - Gate 4: phase counters stay off the hot path
+
+    /// `MFERENCE_PHASES=1` is what wires the phase counters up; with it unset
+    /// the forward pass must do no timing work at all, and every counter must
+    /// still read zero after a real forward. That is the contract
+    /// `RealForwardRunner` holds (`phaseInstrumentationEnabled`) and the reason
+    /// the counters can sit in the layer loop at all.
+    ///
+    /// The test suite does not set `MFERENCE_PHASES`, so the zero side is what
+    /// is assertable here; the reset seam is checked for idempotence alongside
+    /// it, mirroring `DecodeOverlapTests.beginDecodePhaseWindow_zeroesCounters`.
+    @Test func phaseCountersStayZeroWithoutTheEnvGate() async throws {
+        #expect(ProcessInfo.processInfo.environment["MFERENCE_PHASES"] != "1",
+                "this gate describes the default; run it without MFERENCE_PHASES")
+        guard let h = try Self.make(.short, maxContext: 32) else { return }
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+
+        func expectAllZero(_ label: String) {
+            #expect(h.runner.totalIoNanos == 0, Comment(rawValue: label))
+            #expect(h.runner.totalPleRowNanos == 0, Comment(rawValue: label))
+            #expect(h.runner.totalIndexerTopKNanos == 0, Comment(rawValue: label))
+            #expect(h.runner.totalGpuBusyNanos == 0, Comment(rawValue: label))
+            #expect(h.runner.totalGpuSpanNanos == 0, Comment(rawValue: label))
+        }
+
+        expectAllZero("counters must start at zero")
+        // A prompt token through the headless path, then one that produces
+        // logits — the prefill/decode boundary, which resets the window — then
+        // a decode step. Every phase site in the layer loop is exercised: the
+        // PLE layer, all 12 indexer round trips and every routed-expert fetch.
+        for (offset, token) in h.tokens.enumerated() {
+            if offset + 1 < h.tokens.count {
+                try await h.runner.produceWithoutLogits(token: Int32(token),
+                                                        position: offset)
+            } else {
+                try await h.runner.produce(token: Int32(token), position: offset,
+                                           into: h.logits)
+            }
+        }
+        expectAllZero("a full sequential prefill must not have timed anything")
+
+        try await h.runner.produce(token: Int32(h.tokens[0]),
+                                   position: h.tokens.count, into: h.logits)
+        expectAllZero("a decode step must not have timed anything")
+
+        h.runner.beginDecodePhaseWindow()
+        expectAllZero("explicit reset")
+        h.runner.beginDecodePhaseWindow()
+        expectAllZero("explicit reset is idempotent")
     }
 }

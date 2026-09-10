@@ -165,7 +165,7 @@ public actor ServerCoordinator {
     public var isActive: Bool { active }
 }
 
-public actor ServerModelSession: ServerInferenceBackend {
+public actor ServerModelSession: ServerLoadedModel {
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
     public nonisolated let chatDialect: ChatDialect
     /// Family-derived API model identifier used when --model-id is absent.
@@ -177,8 +177,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         case .deepseekV4Flash: return "deepseek-v4-flash-2bit-dq"
         case .inklingSmall: return "inkling-small-4bit"
         case .maple: return "maple-preview-2bit-mlx"
-        // Unreachable while the capability gate stands: `load` funnels through
-        // `ManifestReader.peekFamily`, which refuses this family by name.
         case .qwen38flashnext: return "qwen3.8-flash-next-int4g64"
         }
     }

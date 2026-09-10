@@ -238,9 +238,9 @@ flowchart LR
 
 ## Instruction framing
 
-The Mac app and CLI `--messages-file` mode use the pinned text-only Gemma 4 chat
-format. The app wraps one user prompt. `--messages-file` accepts user and
-assistant messages plus optional leading system guidance. Assistant messages
+The CLI's `--messages-file` mode uses the pinned text-only Gemma 4 chat
+format. It accepts user and assistant messages plus optional leading system
+guidance. Assistant messages
 render with Gemma's `model` role. The separate loopback server uses the pinned
 upstream Jinja template for developer messages, function declarations,
 assistant tool calls, and tool results.
@@ -466,8 +466,8 @@ needs about 19.6 GB of disk against Gemma's 14.3 GB. Acceptance evidence covers
 4K context. See [Qwen 3.6 performance notes](QWEN36_PERFORMANCE.md) and
 [Benchmarks](BENCHMARKS.md#qwen-36-35b-a3b-measured-decode).
 
-The Mac app offers 4K, 8K, 16K, 32K, 64K, and 128K context lengths. Maple's
-runtime, CLI, and server accept up to 128,000 tokens, but no final acceptance
+The CLI and server offer 4K, 8K, 16K, 32K, 64K, and 128K context lengths.
+Maple's runtime, CLI, and server accept up to 128,000 tokens, but no final acceptance
 run establishes that boundary. Vision input, training, fine-tuning, server
 batching, and generic model discovery are outside the current scope. Each of
 the five architectures is explicitly enumerated with its own pinned checkpoint,
@@ -477,8 +477,8 @@ warm model, serializes generation, and retains one verified conversational KV
 prefix by default. It binds to loopback unless the user explicitly selects the
 machine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).
 
-Mference is a research system. The Mac app exposes a small set of typed runtime
-controls. Existing families use FP16 KV and their family-specific prefill
+Mference is a research system. The CLI and server expose a small set of typed
+runtime controls. Existing families use FP16 KV and their family-specific prefill
 paths; Maple uses native BF16 KV and layer-major chunked prefill with a
 token-ordered cache/attention sweep. Its exact full head remains the default;
 the CLI can explicitly select the approximate singleton-decode FlashHead when

@@ -132,6 +132,68 @@ import Foundation
         }
     }
 
+    // MARK: - Quantization slots
+
+    /// Two `qwen38flashnext` installs exist and both are correct for what they
+    /// claim. The uniform-INT4 one on disk predates the 2026-09-10 router
+    /// measurement and records `quant.router.weightBits = 4`; the INT8-router
+    /// one records 8. Refusing either would strand a real install, so the slot
+    /// is read as a declaration.
+    ///
+    /// Only the router slot widened. `sharedExpert` describes the shared
+    /// expert's `gate_proj` — a projection the bit policy never overrides — and
+    /// letting it drift to 8 would hide a policy that had started reaching into
+    /// the shared FFN.
+    @Test("the router slot accepts INT4 and INT8, and only the router slot",
+          arguments: [("router", 8, true), ("router", 4, true),
+                      ("sharedExpert", 8, false), ("embedding", 8, false),
+                      ("attention", 8, false), ("routedExpert", 8, false),
+                      ("router", 2, false), ("router", 16, false),
+                      ("router", 3, false)])
+    func routerSlotAcceptsBothWidths(slot: String, bits: Int, accepted: Bool) throws {
+        let dir = try FlashNextToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Self.patchQuant(dir, slot: slot, weightBits: bits)
+        if accepted {
+            let manifest = try ManifestReader.load(directoryURL: dir,
+                                                   expecting: .qwen38FlashNextToy())
+            #expect(manifest.quant?.router.weightBits == bits)
+        } else {
+            var thrown: Error?
+            #expect(throws: (any Error).self) {
+                do {
+                    _ = try ManifestReader.load(directoryURL: dir,
+                                                expecting: .qwen38FlashNextToy())
+                } catch { thrown = error; throw error }
+            }
+            let error = try #require(thrown as? ModelError)
+            guard case .indexCorrupt(let detail) = error else {
+                Issue.record("\(slot)=\(bits) produced \(error)")
+                return
+            }
+            #expect(detail.contains("Qwen3.8-Flash-Next quantization for \(slot)"))
+        }
+    }
+
+    /// The width is not the only thing the slot declares. An INT8 router still
+    /// has to be affine group-64 with BF16 companions — the layout
+    /// `Int8AffineEncoder` writes and `router_gemv_gemma4_r4` decodes — so
+    /// widening the bit set must not have widened anything else.
+    @Test func anInt8RouterStillHasToBeAffineGroup64() throws {
+        let variants: [(String, Any)] = [("scheme", "mlx"), ("scaleType", "FP16"),
+                                         ("biasType", "FP16"), ("groupSize", 32)]
+        for (field, value) in variants {
+            let dir = try FlashNextToySynthetic.write()
+            defer { try? FileManager.default.removeItem(at: dir) }
+            try Self.patchQuant(dir, slot: "router", weightBits: 8,
+                                extra: [field: value])
+            #expect(throws: ModelError.self) {
+                _ = try ManifestReader.load(directoryURL: dir,
+                                            expecting: .qwen38FlashNextToy())
+            }
+        }
+    }
+
     /// `pleLayerIDs` is a list, and a manifest that moves the PLE block to a
     /// different layer describes a different model.
     @Test func aDivergentPleLayerListIsRefused() throws {
@@ -208,21 +270,16 @@ import Foundation
 
     /// Integration check against the real 175 GB install. Reads
     /// `manifest.json` only — never the weights, never a `Model.load` — so it
-    /// stays cheap and cannot disturb an install that must keep failing the
-    /// capability gate. Skipped unless `MFERENCE_FLASHNEXT_GTURBO` points at
-    /// one.
+    /// stays cheap. Skipped unless `MFERENCE_FLASHNEXT_GTURBO` points at one.
     @Test func installedManifestValidatesAgainstTheBaseline() throws {
         guard let path = ProcessInfo.processInfo
             .environment["MFERENCE_FLASHNEXT_GTURBO"] else { return }
         let url = URL(fileURLWithPath: path)
 
-        // The gate is still the authority, whatever the baseline says.
-        #expect(throws: ModelError.familyRunnerNotImplemented(
-            family: "qwen38flashnext",
-            missingAxes: ["hyperConnectionsLowRank", "attentionIndexer",
-                          "pleNgramEmbedding"])) {
-            _ = try ManifestReader.peekFamily(directoryURL: url)
-        }
+        // Since the 2026-09-10 gate lift the funnel resolves the real install
+        // rather than refusing it by name.
+        #expect(try ManifestReader.peekFamily(directoryURL: url)
+                == .qwen38flashnext)
 
         let expected = try #require(ArchConfig.knownArchitectures[.qwen38flashnext])
         let manifest = try ManifestReader.load(directoryURL: url, expecting: expected)
@@ -231,11 +288,33 @@ import Foundation
         #expect(manifest.expertStride == 2_768_896)
         #expect(manifest.numLayers == 48)
         let quant = try #require(manifest.quant)
-        for slot in [quant.embedding, quant.attention, quant.router,
-                     quant.sharedExpert, quant.routedExpert] {
+        for slot in [quant.embedding, quant.attention, quant.sharedExpert,
+                     quant.routedExpert] {
             #expect(slot.weightBits == 4)
             #expect(slot.groupSize == 64)
             #expect(slot.scheme.lowercased() == "affine")
+        }
+        // The router is the one slot that differs between the two installs of
+        // this family, so it is checked against the directory's own
+        // `bitWidthOverridesHonored` rather than against a constant: 0
+        // overrides means the uniform-INT4 install and a 4-bit router, and
+        // 98 (48 text layers + the MTP draft layer, two gating tensors each)
+        // means the INT8-router install. Anything else is a mixture nothing
+        // produces.
+        let raw = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: url.appendingPathComponent("manifest.json")))
+            as! [String: Any]
+        let overrides = raw["bitWidthOverridesHonored"] as? Int
+        #expect(quant.router.groupSize == 64)
+        #expect(quant.router.scheme.lowercased() == "affine")
+        switch overrides {
+        case 0: #expect(quant.router.weightBits == 4)
+        case 98: #expect(quant.router.weightBits == 8)
+        default:
+            let detail = "bitWidthOverridesHonored is "
+                + "\(String(describing: overrides)); expected 0 (uniform INT4) "
+                + "or 98 (INT8 routers)"
+            Issue.record(Comment(rawValue: detail))
         }
         let pool = try #require(manifest.plePool)
         #expect(pool.kind == "rowLookupPoolV1")
@@ -265,6 +344,32 @@ import Foundation
         #expect(manifest.sidecars?["vision"]?.carried == false)
         // The repacker has not been taught the bake yet, so the loader owns it.
         #expect(manifest.zeroCenteredNormsBakedAtInstall == nil)
+    }
+
+    /// Write a whole `quant` block with every slot at INT4 affine group-64,
+    /// then move one slot to `weightBits` (and optionally change one other
+    /// field of it). The toy baseline is not a production arch, so it carries
+    /// no `quant` of its own and this is what puts one there.
+    private static func patchQuant(_ dir: URL, slot: String, weightBits: Int,
+                                   extra: [String: Any] = [:]) throws {
+        let base: [String: Any] = ["weightBits": 4, "scheme": "affine",
+                                   "scaleType": "BF16", "biasType": "BF16",
+                                   "groupSize": 64]
+        var quant: [String: Any] = [:]
+        for name in ["embedding", "attention", "router", "sharedExpert",
+                     "routedExpert"] {
+            quant[name] = base
+        }
+        var patched = base
+        patched["weightBits"] = weightBits
+        for (field, value) in extra { patched[field] = value }
+        quant[slot] = patched
+        let manifestURL = dir.appendingPathComponent("manifest.json")
+        var root = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: manifestURL)) as! [String: Any]
+        root["quant"] = quant
+        try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+            .write(to: manifestURL)
     }
 
     private static func patchArch(_ dir: URL, _ field: String, _ value: Any) throws {

@@ -122,6 +122,41 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 19_546_491_213,
         reserveBytes: 1_073_741_824)
 
+    /// The **same checkpoint as `qwen36`**, installed from the vendor's own
+    /// BF16 upload through our quantizer instead of copying mlx-community's
+    /// pre-quantized conversion. It exists so the two installs can be compared:
+    /// this is the control pair the W2.1b quantizer-quality gate is measured on
+    /// (docs/QUANTIZER_QUALITY.md), and the reason Qwen 3.6 was chosen is that
+    /// the runtime already has a runner for it, so the comparison can be made
+    /// at the model level and not just on bytes.
+    ///
+    /// Both pins recorded. Download bytes are the index's declared total
+    /// (71.9 GB across 26 shards); the planner actually reads 71.0 GB of that,
+    /// the difference being the dropped vision tower. Installed bytes are the
+    /// dry-run's own figure for the larger of the two sidecar policies:
+    /// 19,973,468,544 with the `mtp.*` draft group carried (19,498,342,656 with
+    /// `--skip-mtp`), rounded up for the receipt and lock files. Every
+    /// two-dimensional projection becomes INT4 affine group-64 — 0.5625 bytes
+    /// per weight against BF16's 2.0 — while norms, 1-D vectors and the conv
+    /// kernels ride through as BF16.
+    ///
+    /// `modelID` deliberately differs from `qwen36`'s: both entries carry a
+    /// pinned index hash, and `SourceFingerprint.knownFingerprints` is keyed by
+    /// model ID, so a shared ID would collide. The distinct ID also keeps the
+    /// two installs of one checkpoint tellable apart in a manifest.
+    public static let qwen36Original = SupportedModelSource(
+        name: "qwen36original",
+        displayName: "Qwen3.6 35B-A3B (quantized at install)",
+        repoID: "Qwen/Qwen3.6-35B-A3B",
+        revision: "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        sourceIndexSHA256:
+            "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
+        modelID: "qwen3.6-35b-a3b-int4g64",
+        approximateDownloadBytes: 71_903_645_408,
+        installedBytes: 20_000_000_000,
+        reserveBytes: 2_147_483_648,
+        kind: .originalRepoQuantize)
+
     /// Text stack of the multimodal Qwen3.8 checkpoint; the vision tower is
     /// excluded by the planner, so the download estimate is the repo total
     /// (16.05 GB) minus the ~0.9 GB tower. Installed bytes add the resident
@@ -188,7 +223,20 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// The first `originalRepoQuantize` entry: no faithful pre-quantized MLX
     /// conversion of Qwen3.8-Flash-Next exists (checked 2026-08-31, see
     /// docs/families/QWEN38_FLASH_NEXT.md), so the installer reads the vendor's
-    /// 131 BF16 shards and quantizes to INT4 group-64 in flight.
+    /// 131 BF16 shards and quantizes to INT4 group-64 in flight — except the
+    /// two MoE gating tensors per layer, which `QuantBitPolicy.moeRouterInt8`
+    /// keeps at INT8 group-64 (98 tensors: 48 text layers plus the MTP draft
+    /// layer, `.mlp.gate.weight` and `.mlp.shared_expert_gate.weight` each).
+    ///
+    /// That mixture postdates the install currently on disk, which is uniform
+    /// INT4 and records `bitWidthOverridesHonored: 0`. `modelID` is unchanged
+    /// because it names the *base* width, exactly as `qwen36original`'s
+    /// `qwen3.6-35b-a3b-int4g64` does while installing 80 INT8 tensors; the two
+    /// Flash-Next installs are told apart by `bitWidthOverridesHonored` (0 vs
+    /// 98) and `quant.router.weightBits` (4 vs 8). A second entry for the same
+    /// repo and revision is not an option: `SourceFingerprint.knownFingerprints`
+    /// is searched by index hash, so two entries sharing one would resolve
+    /// nondeterministically.
     ///
     /// Both pins recorded. Download bytes are the index's declared total
     /// (360.0 GB). Installed bytes are ~175 GB: routed experts ~68 GB (INT4
@@ -196,10 +244,14 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// which the group size does not divide, so they cannot be quantized), the
     /// resident core ~2.5 GB, the MTP draft pool ~1.4 GB, plus page rounding
     /// and the PLE pool's 0.4% per-block slack. The Day-0 dossier's ~101 GB
-    /// figure assumed an INT4 n-gram table and is superseded.
+    /// figure assumed an INT4 n-gram table and is superseded. The INT8 routers
+    /// add 32,175,360 bytes on top, which the headroom already covers.
     ///
-    /// The runtime has no runner for this family yet: installing it succeeds,
-    /// loading it fails by name (see `ManifestReader.peekFamily`).
+    /// `FlashNextForwardRunner` executes this family and its capability gate
+    /// was lifted on 2026-09-10, so an install made here loads through the
+    /// ordinary `ManifestReader.peekFamily` funnel. It is a quantize-in-flight
+    /// repack driven from `MferenceRepack --model qwen38flashnext` (or
+    /// `./mference-ui.sh install qwen38flashnext`).
     public static let qwen38FlashNext = SupportedModelSource(
         name: "qwen38flashnext",
         displayName: "Qwen3.8-Flash-Next 180B-A3.5B (quantized at install)",
@@ -217,7 +269,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     public static let `default` = gemma4
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, qwen38, deepseekV4Flash, inklingSmall, maple, qwen38FlashNext,
+        gemma4, qwen36, qwen36Original, qwen38, deepseekV4Flash, inklingSmall,
+        maple, qwen38FlashNext,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

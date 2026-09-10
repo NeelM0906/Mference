@@ -244,11 +244,12 @@ and a `requiredAxes` list. `pleNgramVocabSizeBase` is `ngram_vocab_size_base`
 **verbatim** — the per-head base vocab (20,000,000), *not* the row count. True
 row counts are derived from the shard headers and published in
 `plePool.layers[].rows` and `...shards[].rows`; nothing validates one against
-the other. The runtime gate is
-`ManifestReader.familiesWithoutRunner`, which is the authority (a manifest does
-not get to tell the runtime what it can run): loading this family fails with
-`family qwen38flashnext is installed but its runner is not implemented; missing
-axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
+the other. `requiredAxes` stays advisory: `ManifestReader.familiesWithoutRunner`
+is the authority (a manifest does not get to tell the runtime what it can run),
+and since the 2026-09-10 gate lift it no longer lists this family, so the
+install loads. Before the lift every entry point refused it with `family
+qwen38flashnext is installed but its runner is not implemented; missing axes:
+hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
 
 ## Port status
 
@@ -270,14 +271,46 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       `family qwen38flashnext is installed but its runner is not implemented;
       missing axes: hyperConnectionsLowRank, attentionIndexer,
       pleNgramEmbedding`.
-- [ ] **W2.1b quality gate OPEN** — greedy rollouts and KLD against the
-      mlx-community Qwen 3.6 conversion have not been run (needs a ~70 GB
-      download and a model run). Bit parity against the runtime reference
-      (W2.1a) *is* enforced, including through the streaming path. Until W2.1b
-      runs, weights this path produces are unvalidated at the model level.
+- [x] **W2.1b weight level PASSED** (2026-09-02,
+      [docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)) — this family
+      inherits it, because `Int4AffineEncoder.encodeGroup` is the same nucleus.
+      Measured against mlx-community's independent conversion of
+      `Qwen/Qwen3.6-35B-A3B`: our relative Frobenius error against the BF16
+      source is 0.09612 mean vs the control's 0.09648, better on 118 of 124
+      sampled tensors. Known deficit: no zero-point snapping, which costs up to
+      1.54× on tensors with a large mass of near-exact zeros inside live groups.
+- [x] **W2.1b model level PASSED** (2026-09-02,
+      [docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)) — this family
+      inherits it on the same grounds as the weight level: the nucleus is
+      shared. The blocker was cleared by giving the repacker INT8 affine
+      group-64 and a general per-tensor bit policy, so `qwen36original`
+      reproduces the control's mixture exactly (INT4 312 / INT8 80 /
+      unquantized 221) and loads. Result: against a noise floor of **exactly
+      zero** (byte-identical repeat dumps), the two installs agree on 86.3 % of
+      top-1 tokens and 81.3 % of top-5 sets over 882 teacher-forced positions,
+      median per-position KL 0.036 nats (mean 0.222), with every greedy
+      divergence at a control-side top-2 margin below the median inter-install
+      logit difference.
+      **Two caveats specific to this family.** Clearing the gate surfaced two
+      defects that only a model-level comparison against an independent
+      conversion could see: resident tensor naming, and a missing RMSNorm
+      `1 + w` fold that made every norm wrong by one in an install that still
+      verified, validated and loaded. Flash-Next folds no norm bias, and its
+      install on disk is uniform INT4 (the policy that supersedes it is below).
+      Both are now *explicit* per-family choices rather than
+      unexamined defaults — and neither has been checked against an independent
+      conversion of Flash-Next, because none exists. Its first-light run
+      produced coherent output and retrieved a passkey, which is evidence but
+      not the same evidence.
 - [x] Source index SHA-256 pinned (`99e81524…c590de`, 170,726 bytes)
 - [x] Fused-expert axis order, gated `q_proj`, indexer, GDN, HC and MTP shapes
-      verified against ranged shard-header reads @ `de4b8e4d`
+      verified against ranged shard-header reads @ `de4b8e4d` — and the fused
+      axis order is now **independently confirmed** on a second vendor
+      checkpoint: `Qwen/Qwen3.6-35B-A3B` declares `gate_up_proj` as
+      `[256, 1024, 2048]` = `[E, 2·I, H]` and `down_proj` as `[256, 2048, 512]`
+      = `[E, H, I]`, and splitting at the halfway row reproduces
+      mlx-community's separately converted `switch_mlp.gate_proj`/`up_proj`, so
+      gate-first ordering is confirmed too.
 - [x] PLE geometry corrected: 128 × [2,500,012 × 160] BF16, pool stays BF16,
       install ~175 GB (not the Day-0 ~101 GB)
 - [ ] **Gate/up half order within the fused 1280 rows** still needs the
@@ -463,11 +496,121 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       global mixer standing in for the absent final norm. Prefill is
       **sequential** (`PrefillRuntimeConfig.off`, `HeadlessSequentialPrefillRunner`),
       which is the first thing a perf pass should take.
-- [ ] **The family gate stays DOWN.** `ManifestReader.familiesWithoutRunner`
-      still lists `qwen38flashnext`, and `FlashNextCapabilityGateTests` is
-      unchanged. The rule is token-exact-or-report, and the toy's long prompt is
-      7/8. What was measured (`FlashNextForwardRunnerParityTests`, both prompts,
-      prefill plus 8 cached decode steps):
+- [x] **The family gate is LIFTED** (2026-09-10, owner decision).
+      `ManifestReader.familiesWithoutRunner` no longer lists `qwen38flashnext` —
+      the table is now empty — so `peekFamily` resolves this family and the CLI
+      and the loopback server load it through the ordinary funnel.
+      `FlashNextCapabilityGateTests` was flipped accordingly and gained a test
+      that exercises the gate mechanism against an injected entry, since there
+      is no gated family left to prove it with.
+      **Basis for the decision:** W2.1b closed on both halves on 2026-09-02
+      (below), which removed the quantizer-quality objection, plus the real-model
+      first light of 2026-09-01 (below) — coherent output, a passkey retrieved
+      beyond the indexer budget, 2.39 GB RSS. The toy near-tie recorded in the
+      next bullet was reported, attributed to the toy's 1000x block attenuation,
+      and explicitly *not* treated as a blocker.
+      **v1 scope is CLI + server.** The Mac app has no install descriptor for
+      this family (`AppModelInstallDescriptor.swift` returns nil for
+      `.qwen38flashnext`), so it stays out of the toolbar picker and the download
+      list. That is deliberate and unchanged by the lift: this is a ~175 GB
+      quantize-in-flight repack driven from
+      `MferenceRepack --model qwen38flashnext`, not a pre-converted download the
+      app can offer. Adding an app descriptor is separate work.
+      **Both caveats were measured on 2026-09-10, and one of them fired.**
+      They belong in any result published for this family.
+      - **(1) Uniform INT4 including the routers — ADVERSE, action recommended.**
+        [docs/experiments/2026-09-10-flashnext-router-int4-check.md](../experiments/2026-09-10-flashnext-router-int4-check.md)
+        decoded the installed INT4 g64 router and shared-expert gate straight
+        out of `qwen38flashnext.gturbo` and scored routing against the vendor
+        BF16 and mlx-community's INT8 g64 control over 12 layers: relative
+        weight error 0.113 vs the control's 0.009 (12×), exact top-10 set
+        agreement with BF16 0.132 vs 0.855, top-1 0.774 vs 0.977, 1.40 vs 0.146
+        experts swapped per token. Verdict (B): reinstall with
+        `.mlp.gate.weight` and `.mlp.shared_expert_gate.weight` at INT8
+        (`QuantBitPolicy.moeRouterInt8`), which also needs `ManifestReader`'s
+        Flash-Next `validateQuant` and `FlashNextWeightMatrix` to accept the
+        width. Stated caveat on that measurement: the probes are isotropic and
+        real router inputs are not, which inflates both sides' disagreement —
+        what it establishes robustly is the ~10× *ratio*, at every layer. **This
+        is open work against the shipped install, not against the gate:** the
+        runner is dtype-agnostic and the lift does not depend on it.
+        *All three code changes landed the same day; the reinstall has not been
+        run. See the INT8-routers item below.*
+      - **(2) No RMSNorm bias fold — checked, no defect.** Same experiment's
+        byte check: 18/18 install bytes equal the vendor's bare `w`, 18/18
+        control bytes equal the vendor's bare `w`, and 0/18 control bytes equal
+        `bf16(1 + w)`. The control does not fold either, so the install matches
+        it.
+      Neither caveat has been checked against an *independent conversion of
+      Flash-Next*, because none exists — that remains true, and those are
+      exactly the two kinds of defect W2.1b caught on Qwen 3.6 (§7).
+- [x] **INT8 routers: fix built, installed and measured (2026-09-10).** The
+      adverse caveat above is answered in code and in bytes.
+      - *The measured deficit.* The shipped install's INT4 g64
+        `.mlp.gate.weight` (`[512, 2560]`, top-10 of 512) and
+        `.mlp.shared_expert_gate.weight` change **~14 % of the selected expert
+        set per token** against the BF16 source — exact top-10 agreement 0.132,
+        top-1 0.774, 1.40 experts swapped per token — where mlx-community's INT8
+        g64 routers on the sibling checkpoint manage ~1.5 %, 0.855 and 0.146.
+        Full method and the isotropic-probe caveat:
+        [docs/experiments/2026-09-10-flashnext-router-int4-check.md](../experiments/2026-09-10-flashnext-router-int4-check.md).
+      - *The fix.* `QuantBitPolicy.originalRepo(family: .qwen38flashnext)` now
+        returns `.moeRouterInt8`, so the two gating suffixes install at INT8 g64
+        on all 48 text layers **and on the MTP draft layer** — 98 overrides,
+        against the uniform install's 0. `ManifestReader.validateQuant` accepts
+        4 or 8 on the Flash-Next router slot, and `FlashNextWeightMatrix` reads
+        each tensor's width from its own index entry (`sizeBytes * 8 / prod(shape)`)
+        rather than from the family, so the **uniform-INT4 install on disk keeps
+        loading unchanged**. No new Metal: the INT8 branch of `FlashNextMatVec`
+        dispatches the shipped `router_gemv_gemma4_r4`, which `RouterWideTopK10Tests`
+        already gates against a CPU reference at exactly this geometry.
+      - *The install.* `MferenceRepack --model qwen38flashnext --output
+        scratch/qwen38flashnext-r8.gturbo` on 2026-09-10: 360 GB streamed and
+        quantized in flight in **2 h 44 m**, no throttling; `--verify-install`
+        green over **57 files / 175,205,477,629 bytes** — 102 bytes off the
+        predicted 175,205,477,527 (manifest text), the +32,175,360 weight bytes
+        exactly as derived (49 routers x 655,360 + 49 scalar gates x 1,280).
+        The manifest reads `quant.router.weightBits 8` and
+        `quantizedAtInstall.overriddenTensorCount 98`. The uniform-INT4 install
+        is kept alongside as the "before" side of every comparison. Shared
+        policy: [docs/QUANTIZER_QUALITY.md §6](../QUANTIZER_QUALITY.md#6-the-blocker-and-how-it-was-cleared).
+      - *The measurement, repeated on the new bytes* (same 12 layers, 4,096
+        Gaussian probes, seed; script taught to decode either width from the
+        resident index the way the runtime does): **24/24 tensors bit-identical
+        to the re-encoded BF16 source**; router relative Frobenius error
+        **0.0066** (INT4 install 0.1128, control 0.0094); exact top-10 set
+        agreement with BF16 **0.896** (INT4 0.132, control 0.855); top-1
+        **0.986** (0.774 / 0.977); **0.10 experts swapped per token** (1.40 /
+        0.146); KL over the selected set 0.0000 mean / 0.0002 p99. The routing
+        deficit is closed and the routers are now more faithful than the
+        control's, consistent with the Qwen 3.6 INT8 result. Full table:
+        [the experiment note](../experiments/2026-09-10-flashnext-router-int4-check.md#result-on-the-int8-router-install-2026-09-10-qwen38flashnext-r8gturbo).
+
+      ```bash
+      # ~360 GB of streaming reads; budget the ~2 h 35 m the first install took.
+      # A NEW directory: the uniform-INT4 install must stay in place, because it
+      # is the only thing the routing comparison can be re-measured against.
+      swift run -c release MferenceRepack \
+        --model qwen38flashnext \
+        --output scratch/qwen38flashnext-r8.gturbo \
+        --resume
+      ```
+
+      `--model qwen38flashnext` is unchanged and now means the INT8-router
+      layout: the policy is keyed on the family, not on the label, and a second
+      `SupportedModelSource` entry for the same repo and revision would make
+      `SourceFingerprint.modelID(forIndexSha256:)` ambiguous. `modelID` stays
+      `qwen3.8-flash-next-int4g64` for the same reason `qwen36original` keeps
+      `qwen3.6-35b-a3b-int4g64` while installing 80 INT8 tensors: it names the
+      **base** width, and the mixture is reported by
+      `bitWidthOverridesHonored` (0 for the old install, 98 for the new one) and
+      by `quant.router.weightBits` (4 vs 8). Those two fields are how the two
+      directories are told apart.
+
+- [x] **Toy parity: reported, not tuned away.** The rule is
+      token-exact-or-report, and the toy's long prompt is 7/8. What was measured
+      (`FlashNextForwardRunnerParityTests`, both prompts, prefill plus 8 cached
+      decode steps):
       - **PLE n-gram row ids exact at every position** — a pure 64-bit integer
         hash, no float in the path.
       - **Router and indexer exact until a near-tie flips.** SHORT: exact
@@ -490,16 +633,18 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         Jacobian — so the FP16 input floor emerges as an output perturbation
         comparable to the output itself, lands in a residual stream of magnitude
         ~4e-2 as ~1% per layer, and reaches ~2.4% by the last layer. A trained
-        model does not attenuate its blocks by 1000x. Settling this needs the
-        real 175 GB install, which the gate currently blocks — an owner
-        decision.
+        model does not attenuate its blocks by 1000x. Settling this needed the
+        real 175 GB install; the first-light run below did it, and the gate lift
+        followed.
 - [x] **Real-model first light — the toy hypothesis confirmed.** Measured
-      2026-09-01 on the 256 GB M3 Ultra via a measurement-only door
-      (`FlashNextRealGenerationMeasurement`, env-gated on
-      `MFERENCE_FLASHNEXT_GTURBO`; the production gate is **not** lifted — it
-      still refuses the family for CLI/server/app, asserted by
-      `productionDoorStillRefusesRealInstall`). The runner is
-      `FlashNextForwardRunner` on the real INT4 install, unmodified.
+      2026-09-01 on the 256 GB M3 Ultra through
+      `FlashNextRealGenerationMeasurement` (env-gated on
+      `MFERENCE_FLASHNEXT_GTURBO`). At the time this ran, the production gate
+      was still down and the suite reached the model through the internal
+      `expecting:` load overload; since the 2026-09-10 lift the production door
+      loads the same install directly, asserted by
+      `productionDoorLoadsRealInstall`. The runner is `FlashNextForwardRunner`
+      on the real INT4 install, unmodified.
       - *Greedy, "The capital of France is", 24 tokens:* **" Paris. The
         capital of Germany is Berlin. The capital of Italy is Rome. The
         capital of Spain is Madrid. The"** — coherent and correct. 11.6 tok/s
@@ -522,14 +667,87 @@ axes: hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         token does not surface — real output is coherent. **Caveat that
         stands:** greedy token-exactness vs a reference cannot be checked at
         180B scale (no reference rollout exists), so this is a *read* of the
-        kernels at scale, not a proof. **W2.1b (KLD vs a known-good
-        conversion) remains the missing quantitative quality gate**, and the
-        production gate stays down until it and a maintainer decision clear it.
+        kernels at scale, not a proof. **W2.1b is now closed on both halves**
+        (2026-09-02, [docs/QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md)): the
+        weight level says each tensor is individually faithful, and the model
+        level says 40 layers of accumulated error leave the output distribution
+        intact (86.3 % top-1 agreement against a zero noise floor, median KL
+        0.036 nats). That **removes the quantizer-quality objection** to lifting
+        this family's gate. It did not by itself lift it — the axes refusal
+        (`hyperConnectionsLowRank`, `attentionIndexer`, `pleNgramEmbedding`) was
+        a separate maintainer decision, taken on 2026-09-10. Two residual
+        caveats carried into that decision — uniform INT4 (routers included,
+        where the Qwen 3.6 control uses INT8 routers) and no RMSNorm bias fold.
+        Both were measured the same day; see the gate-lift item above for the
+        results. The router one was adverse and led to the INT8 reinstall of
+        the two gating tensors, now installed and re-measured (agreement 0.896
+        vs 0.132); the norm-fold one came back clean.
       - Footprint headline: **~2.39 GB of process memory for a 180B-parameter
         model** (~75× the resident set), the most extreme expression of the
         working-set thesis in the project.
-- [ ] `bringup-check.sh` green ×3 and the community protocol page — downstream
-      of the gate lift, which awaits W2.1b and a maintainer decision.
+- [x] **Community protocol — measured 2026-09-10 on the INT8-router install.**
+      `./run-benchmark.sh qwen38flashnext scratch/qwen38flashnext-r8.gturbo 3`
+      then `./summarize-benchmarks.sh qwen38flashnext`, exactly per
+      [docs/COMMUNITY_BENCHMARKS.md](../COMMUNITY_BENCHMARKS.md): the three
+      frozen `real-generation-v1` cases, one discarded warmup each, three
+      fresh-process measured runs each, `--max-new 1024 --max-context 4096
+      --temperature 0.2 --top-k 64 --top-p 0.95`, seeds 20260721/22/23.
+      **Every footer `stop=endOfTurn` (9/9)** — the closed `<think>` block the
+      ChatML render emits means this family needs none of the Qwen 3.8 / Maple
+      deviation notation. Host: Mac Studio `Mac15,14`, Apple M3 Ultra (24P+8E),
+      256 GB, macOS 26.3 (25D125), Swift 6.2.4, MSL 3.2 path, release build at
+      `9ee8502` on the `neel/ui-launch` integration branch.
+
+      | Case | Prompt / generated | Prefill | Decode median | Range | Peak RSS |
+      | --- | --- | ---: | ---: | ---: | ---: |
+      | short-explanation | 62 / 480 | 30.85 s | **11.81 tok/s** | 11.79–11.85 | 2,355 MiB |
+      | medium-review | 426 / 598 | 61.53 s | **11.71 tok/s** | 11.68–11.72 | 2,358 MiB |
+      | long-synthesis | 2,940 / 593 | 281.46 s | **11.11 tok/s** | 11.08–11.12 | 2,367 MiB |
+
+      Read as the protocol intends: decode holds within 6 % from a 62-token to
+      a 2,940-token context, at **~2.36 GB peak RSS for a 180B-parameter
+      model** in every case. All three cases produced **byte-identical output
+      across their three runs**, and every output was read: the wetlands
+      explanation names frictional drag, sediment accretion and the inundation
+      / width limits; the code review finds the shared-slot race, the unbounded
+      buffer, the poisoned-on-failure key and the missing deduplication, then
+      proposes fixes; the long synthesis restates the TurboFieldfare design
+      accurately and ends with sensible methodology advice. The prefill column
+      is the CLI's raw `prefill=` figure and, as for Inkling and DeepSeek on
+      this host, includes the fresh process's first-touch verification of the
+      install (~26 s for 175 GB, see the ladder smoke's 5-token prompt at
+      26.0–26.1 s); the marginal cost is ~10 tok/s of **sequential, unoptimized
+      prefill**, the family's one open performance item.
+- [x] **`bringup-check.sh qwen38flashnext` — PASS** on the INT8-router install
+      (2026-09-10): stage 0 preflight; stage 1 toy suite 96 tests / 23 suites
+      green (2 known issues: the toy parity checkpoint is not present on this
+      host); stage 2 install verify; stage 3 ladder smoke **byte-identical at
+      16 / 32 / auto slots** (12.7 / 13.3 / 12.4 tok/s on a 24-token probe);
+      stage 4 protocol scaffold. The full package suite ran green on the merged
+      tree (1,067 tests / 191 suites, plus both CI runners); the gate's "×3
+      consecutive" count is recorded in the PR.
+- [x] **`MFERENCE_PHASES=1` phase attribution — measured 2026-09-10** on the
+      INT8-router install, short-explanation case, protocol settings, seed
+      20260721 (footer `stop=endOfTurn prefill=62tok/31.43s new=480tok
+      decode=42.42s tok/s=11.315`):
+
+      | Phase (480 decode tokens) | Time | Share of decode |
+      | --- | ---: | ---: |
+      | expert I/O, all exposed | 11,415 ms | 27 % |
+      | indexer CPU top-k | 54 ms | 0.1 % |
+      | PLE row fetch | 22 ms | 0.05 % |
+      | GPU busy | 11,297 ms | 27 % |
+      | GPU span | 42,417 ms | — |
+      | GPU gap (idle inside the span) | 31,121 ms | 73 % |
+      | unaccounted (CPU encode + GPU waits) | 30,931 ms | 73 % |
+
+      This is the baseline every optimization A/B is judged against. It says
+      the two cheap-sounding CPU paths (indexer top-k, PLE row fetch) cost
+      nothing, that expert reads are fully exposed rather than overlapped with
+      compute, and that the GPU is idle for nearly three quarters of the decode
+      span — the ~60 CPU round trips per token in the layer loop. Consolidating
+      those (batching the dense work per layer, overlapping expert reads as
+      Inkling does, then pipelined prefill) is the follow-on performance PR.
 
 ## Reproduction of this dossier's facts
 

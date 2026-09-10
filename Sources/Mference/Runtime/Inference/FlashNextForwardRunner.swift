@@ -18,6 +18,12 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 
 /// The production forward runner for `qwen38flashnext` (upstream `qwen4_exp`).
 ///
+/// Reached through `ForwardRunnerFactory.make` for every caller: the family's
+/// capability gate was lifted on 2026-09-10 (owner decision), so
+/// `ManifestReader.familiesWithoutRunner` no longer lists it and the CLI and the
+/// loopback server (and therefore the UI behind it) load this family like any
+/// other.
+///
 /// # Shape of the model
 ///
 /// The residual stream is `hc_count(4) x hidden(2560) = 10240` wide from the
@@ -57,13 +63,17 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 ///
 /// Norms upcast to FP32 internally, as the reference does. The KV cache is FP16.
 ///
-/// # Both install dtypes
+/// # Every install dtype
 ///
 /// Every projection goes through `FlashNextWeightMatrix`, which carries the
-/// stored dtype with the buffer: INT4 affine group-64 for the production install,
-/// dense BF16 for the parity install (whose `moe_intermediate_size` of 32
-/// group-64 cannot quantize at all). The routed experts, the embedding and
-/// `lm_head` split the same way. Nothing in this file assumes a quantization.
+/// stored dtype with the buffer: affine group-64 for the production install —
+/// INT4 for everything but the two MoE gating tensors, which the install policy
+/// keeps at INT8 — and dense BF16 for the parity install (whose
+/// `moe_intermediate_size` of 32 group-64 cannot quantize at all). The routed
+/// experts, the embedding and `lm_head` split the same way. Nothing in this file
+/// assumes a quantization, and in particular nothing assumes a *uniform* one:
+/// each tensor's width comes from its own resident index entry, so the
+/// uniform-INT4 install predating the router change loads unchanged.
 ///
 /// # Prefill
 ///
@@ -79,6 +89,13 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 /// expert ids, ~60 per token before any expert I/O. `RealForwardRunner`'s
 /// event-signalled overlap, its eager fill and its GPU slot map all apply here
 /// and none of them are wired yet.
+///
+/// `MFERENCE_PHASES=1` splits a decode window into the four costs that pass
+/// touches — expert I/O (all of it exposed, since nothing overlaps it yet), the
+/// indexer's CPU top-k, the PLE row-pool gather, and GPU busy versus span. See
+/// the counters under "Phase counters" below and the report in
+/// `MferenceCLI/Run.swift`. Unset, none of it is wired and every counter is
+/// zero.
 public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                            ContextWindowReporting,
                                            HeadlessSequentialPrefillRunner,
@@ -250,6 +267,97 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
     public var continuationPosition: Int { position }
 
+    // MARK: - Phase counters (MFERENCE_PHASES=1)
+
+    /// Phase probes cost a completion handler per command buffer and two clock
+    /// reads per accounted region, so every counter below is wired up only when
+    /// the phase report is going to be printed. Same gate, same reason, as
+    /// `RealForwardRunner.phaseInstrumentationEnabled`: with the variable unset
+    /// the forward pass does no timing work at all and every counter stays zero.
+    private static let phaseInstrumentationEnabled =
+        ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1"
+
+    /// Wall time inside `fetchExperts` — the top-10 routed expert blobs read
+    /// from SSD through the LFU slot cache, per layer, per token. Sequential
+    /// prefill and decode both pay it. This runner has no expert-I/O overlap
+    /// yet, so unlike `RealForwardRunner.totalIoNanos` all of it is exposed.
+    public private(set) var totalIoNanos: UInt64 = 0
+    /// Wall time gathering one PLE n-gram row set through `PleRowPool` (its LFU
+    /// row cache, then the FP16 staging copy). One layer per token, and the
+    /// pool it reads from is ~102 GB on disk.
+    public private(set) var totalPleRowNanos: UInt64 = 0
+    /// Wall time in the indexer's CPU top-k: the score readback plus the exact
+    /// `torch.topk` ordering in `FlashNextDescendingTopK`. One round trip per
+    /// full-attention layer (12 of 48), and it is a hard CPU/GPU serialization
+    /// point — the attention it gates cannot be encoded until it lands.
+    public private(set) var totalIndexerTopKNanos: UInt64 = 0
+    private let gpuTimeLock = NSLock()
+    /// GPU busy time summed over tracked command buffers, and the wall span
+    /// they cover. `span - busy` is scheduling gap: this runner commits ~4
+    /// buffers per layer with two CPU round trips per attention layer, so the
+    /// gap is the headline number for a consolidation pass.
+    public private(set) var totalGpuBusyNanos: UInt64 = 0
+    private var gpuSpanFirstStart: Double = .infinity
+    private var gpuSpanLastEnd: Double = 0
+
+    public var totalGpuSpanNanos: UInt64 {
+        gpuTimeLock.lock()
+        defer { gpuTimeLock.unlock() }
+        guard gpuSpanLastEnd > gpuSpanFirstStart else { return 0 }
+        return UInt64((gpuSpanLastEnd - gpuSpanFirstStart) * 1e9)
+    }
+
+    /// Set by `produceWithoutLogits`, cleared by the `produce` that follows it.
+    /// That `produce` is sequential prefill's final prompt token, so clearing
+    /// the flag is also where the phase window resets — see
+    /// `beginDecodePhaseWindow`.
+    private var inSequentialPrefill = false
+
+    /// Zeroes the per-phase counters. Prompt prefill runs through the same
+    /// per-token code path as decode here (`PrefillRuntimeConfig.off`), so
+    /// without a reset at the prefill/decode boundary the phase report prints
+    /// prompt-time nanoseconds against a decode-only wall clock and the
+    /// unaccounted remainder goes negative.
+    ///
+    /// The runner resets itself at that boundary. A one-token prompt is the
+    /// exception: nothing calls `produceWithoutLogits`, so that single prefill
+    /// token stays in the window.
+    public func beginDecodePhaseWindow() {
+        totalIoNanos = 0
+        totalPleRowNanos = 0
+        totalIndexerTopKNanos = 0
+        gpuTimeLock.lock()
+        totalGpuBusyNanos = 0
+        gpuSpanFirstStart = .infinity
+        gpuSpanLastEnd = 0
+        gpuTimeLock.unlock()
+    }
+
+    /// `clock_gettime_nsec_np(CLOCK_UPTIME_RAW)` when the phase report is on,
+    /// 0 otherwise — so a disabled counter costs one static Bool read.
+    @inline(__always)
+    private static func phaseClock() -> UInt64 {
+        guard phaseInstrumentationEnabled else { return 0 }
+        return clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+    }
+
+    /// Attribute one command buffer's GPU interval. Must be called before the
+    /// buffer is committed.
+    @inline(__always)
+    private func trackGpuInterval(_ cb: MTLCommandBuffer) {
+        guard Self.phaseInstrumentationEnabled else { return }
+        cb.addCompletedHandler { [self] done in
+            let start = done.gpuStartTime
+            let end = done.gpuEndTime
+            guard end > start else { return }
+            gpuTimeLock.lock()
+            totalGpuBusyNanos &+= UInt64((end - start) * 1e9)
+            gpuSpanFirstStart = min(gpuSpanFirstStart, start)
+            gpuSpanLastEnd = max(gpuSpanLastEnd, end)
+            gpuTimeLock.unlock()
+        }
+    }
+
     // MARK: - Init
 
     public init(model: Model, context: MetalContext, maxContext: Int,
@@ -274,7 +382,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
         let int4 = try DequantInt4GEMV(context: context,
                                        additionalShapes: cfg.decodeInt4GEMVShapes)
-        self.matVec = try FlashNextMatVec(context: context, int4: int4)
+        // Both tensors the install policy may keep at INT8 — the router
+        // `[numExperts, hidden]` and the shared-expert scalar gate
+        // `[1, hidden]` — are `hidden` wide, so that is the widest INT8 row
+        // this runner can ask for.
+        self.matVec = try FlashNextMatVec(context: context, int4: int4,
+                                          int8Columns: cfg.hiddenSize)
         self.rms = try RMSNorm(context: context)
         self.elementwise = try Elementwise(context: context)
         self.hc = try FlashNextHyperConnections(
@@ -587,6 +700,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
     public func reset() {
         position = 0
+        inSequentialPrefill = false
         try? joinPendingMoE()
         gdnState?.reset()
         if let generic = genericGDN, let cb = ctx.queue.makeCommandBuffer() {
@@ -619,9 +733,18 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     public func produce(token: Int32, position p: Int,
                         into logits: MTLBuffer) async throws {
         try await produceToken(token: token, position: p, into: logits)
+        // Sequential prefill runs `produceWithoutLogits` for every prompt token
+        // but the last, so the first `produce` after one of those *is* that last
+        // prompt token — the prefill/decode boundary, and where the phase window
+        // has to start over. Every later `produce` is a decode step.
+        if inSequentialPrefill {
+            inSequentialPrefill = false
+            beginDecodePhaseWindow()
+        }
     }
 
     func produceWithoutLogits(token: Int32, position p: Int) async throws {
+        inSequentialPrefill = true
         try await produceToken(token: token, position: p, into: nil)
     }
 
@@ -653,6 +776,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         try captureFloats(&head, "embed_out", embedRow, count: hidden)
         hc.encodeTileEmbedding(commandBuffer: head, embedding: embedRow,
                                hyper: hyper, rows: 1)
+        trackGpuInterval(head)
         head.commit()
 
         for L in 0..<cfg.numLayers {
@@ -723,8 +847,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             // Selection is CPU work by design: exact `torch.topk` ordering over
             // a few thousand FP32 scores, read back while the attention it gates
             // is still much larger.
+            let tTopKStart = Self.phaseClock()
             let selected = indexer.selections(scratch: indexerScratch, rows: 1,
                                               startPosition: p)[0]
+            if Self.phaseInstrumentationEnabled {
+                totalIndexerTopKNanos &+= Self.phaseClock() - tTopKStart
+            }
             if capture != nil {
                 capture?.integers[key + "indexer_selected"] = [selected]
                 capture?.integers[key + "indexer_visible"] = [Array(0...p)]
@@ -790,7 +918,11 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 Self.readFP16(routerWeights, count: topK)
         }
         try checkSlotBudget(layer: L)
+        let tIoStart = Self.phaseClock()
         let blobs = try await fetchExperts(layer: L, experts: experts)
+        if Self.phaseInstrumentationEnabled {
+            totalIoNanos &+= Self.phaseClock() - tIoStart
+        }
 
         guard var moeCB = ctx.queue.makeCommandBuffer() else {
             throw FlashNextForwardRunnerError.commandFailed("no command buffer")
@@ -804,6 +936,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         try captureFloats(&moeCB, key + "moe_out", moeOut, count: hidden)
         hc.encodeInjectAccumulate(commandBuffer: moeCB, scratch: hcScratch,
                                   hyper: hyper, block: moeOut, rows: 1)
+        trackGpuInterval(moeCB)
         moeCB.commit()
         pendingMoECommand = moeCB
         try captureAfterDrain(key + "stream_out", hyper, count: bundle)
@@ -834,6 +967,15 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                              biasesOffset: Int(embedding.biasOffset),
                              out: embedRow, tokenId: token,
                              d: UInt32(hidden), outScale: 1.0)
+        case .int8:
+            // The bit policy overrides two MoE gating suffixes and nothing
+            // else, so no install reaches here with an INT8 embedding table.
+            // There is no INT8 row-gather kernel to fall back to, and quietly
+            // decoding the row as INT4 would emit a plausible wrong embedding
+            // for every token, so this refuses instead.
+            preconditionFailure(
+                "the embedding table is INT8; Flash-Next has no INT8 embedding "
+                    + "gather and the install policy never produces one")
         case let .bf16(buffer, offset):
             guard let enc = cb.makeComputeCommandEncoder() else { return }
             enc.setComputePipelineState(embedBF16PSO)
@@ -863,11 +1005,15 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         let window = pleHistory + [token]
         guard let rowIDs = hash.rowIDs(window: window).last else { return }
         if capture != nil { capture?.integers[key + "ple_ngram_row_ids"] = [rowIDs] }
+        let tRowStart = Self.phaseClock()
         let embedding = try pool.readEmbedding(rows: rowIDs)
         precondition(embedding.count == hidden,
                      "PLE gather produced \(embedding.count) values, expected \(hidden)")
         let base = staging.contents().bindMemory(to: Float16.self, capacity: hidden)
         for i in 0..<hidden { base[i] = Float16(embedding[i]) }
+        if Self.phaseInstrumentationEnabled {
+            totalPleRowNanos &+= Self.phaseClock() - tRowStart
+        }
         pleHistory = Array(window.suffix(hash.historyLength))
 
         guard let cb = ctx.queue.makeCommandBuffer(),
@@ -880,6 +1026,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         blit.endEncoding()
         ple.encode(commandBuffer: cb, weights: weights, scratch: scratch,
                    hyper: hyper, rows: 1)
+        trackGpuInterval(cb)
         cb.commit()
     }
 
@@ -1103,6 +1250,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     // MARK: - Command helpers
 
     private func finish(_ cb: MTLCommandBuffer) throws {
+        trackGpuInterval(cb)
         cb.commit()
         cb.waitUntilCompleted()
         if let error = cb.error {
