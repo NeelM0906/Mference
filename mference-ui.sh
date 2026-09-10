@@ -26,7 +26,7 @@ install_family=""
 repack_arguments=()
 
 # AGENTS.md's model-process check, minus the two names that went away with the
-# Mac app. Anything matching owns a model already, and this script starts
+# UI. Anything matching owns a model already, and this script starts
 # nothing while one exists — and never terminates one.
 model_process_pattern='(^|/)(MferenceServer|MferenceCLI|MferenceRepack|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm)( |$)'
 
