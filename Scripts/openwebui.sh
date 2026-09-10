@@ -95,7 +95,10 @@ if [[ -z "$webui_binary" && -x "$HOME/.local/bin/open-webui" ]]; then
   webui_binary="$HOME/.local/bin/open-webui"
 fi
 
-model_process_pattern='MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+# Anchored on the executable path so a shell whose command line merely quotes
+# these names (a poll loop, an editor, this script's own dry run) does not
+# count as a model process.
+model_process_pattern='(^|/)(MferenceServer|MferenceCLI|MferenceRepack|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm)( |$)'
 
 check_no_model_process() {
   # AGENTS.md: one model-owning process at a time. Never terminate one that is
