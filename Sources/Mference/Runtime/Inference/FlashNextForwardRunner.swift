@@ -21,9 +21,8 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 /// Reached through `ForwardRunnerFactory.make` for every caller: the family's
 /// capability gate was lifted on 2026-09-10 (owner decision), so
 /// `ManifestReader.familiesWithoutRunner` no longer lists it and the CLI and the
-/// loopback server load this family like any other. The Mac app does not offer
-/// it — `AppModelInstallDescriptor` has no descriptor for a ~175 GB
-/// quantize-in-flight repack — which is a v1 scope choice, not a gate.
+/// loopback server (and therefore the UI behind it) load this family like any
+/// other.
 ///
 /// # Shape of the model
 ///

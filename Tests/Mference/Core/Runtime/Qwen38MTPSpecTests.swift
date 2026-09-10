@@ -87,9 +87,9 @@ import Testing
     @Test func attachProducesLoadableInstall() throws {
         let dir = try Self.makeAttachedDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        // The attach must leave a fresh install receipt behind — the Mac app
-        // gates "installed" on verified-install.json, so a stale or missing
-        // receipt strands an otherwise valid install on the download screen.
+        // The attach must leave a fresh install receipt behind — the server's
+        // library probe gates "installed" on verified-install.json, so a stale
+        // or missing receipt hides an otherwise valid install from the picker.
         let receiptURL = dir.appendingPathComponent("verified-install.json")
         let receiptData = try Data(contentsOf: receiptURL)
         let receipt = try JSONSerialization.jsonObject(with: receiptData) as? [String: Any]

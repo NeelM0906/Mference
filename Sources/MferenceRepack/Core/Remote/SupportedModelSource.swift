@@ -249,9 +249,9 @@ public struct SupportedModelSource: Sendable, Equatable {
     ///
     /// `FlashNextForwardRunner` executes this family and its capability gate
     /// was lifted on 2026-09-10, so an install made here loads through the
-    /// ordinary `ManifestReader.peekFamily` funnel. It has no Mac app install
-    /// descriptor: this is a quantize-in-flight repack driven from
-    /// `MferenceRepack --model qwen38flashnext`, not a download the app offers.
+    /// ordinary `ManifestReader.peekFamily` funnel. It is a quantize-in-flight
+    /// repack driven from `MferenceRepack --model qwen38flashnext` (or
+    /// `./mference-ui.sh install qwen38flashnext`).
     public static let qwen38FlashNext = SupportedModelSource(
         name: "qwen38flashnext",
         displayName: "Qwen3.8-Flash-Next 180B-A3.5B (quantized at install)",

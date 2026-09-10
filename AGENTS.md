@@ -102,4 +102,4 @@ launches `MferenceServer` in library mode and points Open WebUI at it;
 `./mference-ui.sh install <family>` runs an install. The server is the only
 model owner behind the UI — never start a second model process alongside it.
 Generation and runtime controls, and their defaults, are documented in
-`docs/OPEN_WEBUI.md` and [Runtime controls](docs/RUNTIME_CONTROLS.md).
+[The Mference UI](docs/OPEN_WEBUI.md) and [Runtime controls](docs/RUNTIME_CONTROLS.md).

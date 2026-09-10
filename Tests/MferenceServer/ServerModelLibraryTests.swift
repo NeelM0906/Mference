@@ -537,7 +537,7 @@ struct ServerLibraryArgumentTests {
         }
     }
 
-    /// Bare `--library` means the Mac app's roots; it must not swallow the
+    /// Bare `--library` means the default library roots; it must not swallow the
     /// flag that follows it.
     @Test func bareLibraryRequestsDefaultRootsWithoutEatingTheNextFlag() throws {
         let arguments = try ServerArguments.parse(["--library", "--port", "9001"])

@@ -13,10 +13,9 @@ public enum ModelFamily: String, Sendable, Hashable {
     case inklingSmall = "inklingSmall"
     case maple = "maple"
     /// Qwen3.8-Flash-Next. The repacker installs it and `FlashNextForwardRunner`
-    /// executes it; its capability gate was lifted on 2026-09-10. v1 reaches the
-    /// CLI and the loopback server — the Mac app has no install descriptor for
-    /// this family (`AppModelInstallDescriptor` returns nil), because it is a
-    /// ~175 GB quantize-in-flight repack rather than a pre-converted download.
+    /// executes it; its capability gate was lifted on 2026-09-10. It reaches the
+    /// CLI, the loopback server and the UI behind it; the install is a ~175 GB
+    /// quantize-in-flight repack rather than a pre-converted download.
     case qwen38flashnext = "qwen38flashnext"
 }
 

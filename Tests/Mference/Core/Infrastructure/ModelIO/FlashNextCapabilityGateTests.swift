@@ -108,8 +108,8 @@ import Testing
             ManifestReader.capabilityRefusal(family: "a-future-family", in: table))
         #expect(refusal == .familyRunnerNotImplemented(family: "a-future-family",
                                                        missingAxes: axes))
-        // The message has to be actionable on its own: it is what the CLI, the
-        // server and the Mac app all surface.
+        // The message has to be actionable on its own: it is what the CLI and
+        // the server both surface.
         let text = refusal.description
         #expect(text.contains("a-future-family"))
         #expect(text.contains("runner is not implemented"))
