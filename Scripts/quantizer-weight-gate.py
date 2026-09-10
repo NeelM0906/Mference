@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""W2.1b weight-level gate: our INT4 affine group-64 encoder vs the
-mlx-community conversion of the SAME BF16 source rows.
+"""W2.1b weight-level gate: our INT4 affine group-64 encoder vs a trusted
+pre-quantized conversion of the SAME BF16 source rows.
 
-Both sides quantize `Qwen/Qwen3.6-35B-A3B` rev 995ad96e. Group-64 quantization
-never straddles a row (every quantizable last dimension is a multiple of 64),
-so a *row slice* is self-contained: the BF16 rows fully determine the packed
-nibbles, scales and biases for those same rows. That is what makes this gate
-cheap — ~11 MB of HTTP range requests instead of a 72 GB download — and it is
-why it can be re-run for any future family before committing to an install.
+Both sides quantize the same rows. Group-64 quantization never straddles a row
+(every quantizable last dimension is a multiple of 64), so a *row slice* is
+self-contained: the BF16 rows fully determine the packed nibbles, scales and
+biases for those same rows. That is what makes this gate cheap — a few MB of
+HTTP range requests instead of a full download — and it is why it can be re-run
+for any family before committing to an install.
 
-    Scripts/quantizer-weight-gate.py --cache <dir>
+    Scripts/quantizer-weight-gate.py --cache <dir>                    # qwen36 (default)
+    Scripts/quantizer-weight-gate.py --family minicpm5 --cache <dir>
+
+`--family` selects a pinned (original repo, control repo, sample plan) triple
+from FAMILIES; `--orig` / `--control` override the two resolve URLs for an
+unpinned rehearsal. Families:
+
+  qwen36    `Qwen/Qwen3.6-35B-A3B` rev 995ad96e vs mlx-community's conversion
+            rev 38740b84 (the first control, docs/QUANTIZER_QUALITY.md).
+  minicpm5  `openbmb/MiniCPM5-2B` rev cd199ce3 vs the vendor's own MLX INT4
+            conversion `openbmb/MiniCPM5-2B-MLX` rev 35ac38ee
+            (docs/families/MINICPM5.md).
 
 The encoder here is a transcription of
 `Sources/MferenceRepack/Core/Quantization/Int4AffineEncoder.swift:encodeGroup`;
@@ -19,10 +30,18 @@ properties this script relies on. See docs/QUANTIZER_QUALITY.md.
 import argparse, json, os, struct, subprocess, time
 import numpy as np
 
-ORIG = ("https://huggingface.co/Qwen/Qwen3.6-35B-A3B/resolve/"
-        "995ad96eacd98c81ed38be0c5b274b04031597b0")
-MLX = ("https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit/resolve/"
-       "38740b847e4cb78f352aba30aa41c76e08e6eb46")
+FAMILIES = {
+    "qwen36": dict(
+        orig="https://huggingface.co/Qwen/Qwen3.6-35B-A3B/resolve/"
+             "995ad96eacd98c81ed38be0c5b274b04031597b0",
+        control="https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit/resolve/"
+                "38740b847e4cb78f352aba30aa41c76e08e6eb46"),
+    "minicpm5": dict(
+        orig="https://huggingface.co/openbmb/MiniCPM5-2B/resolve/"
+             "cd199ce3ee67549c42ef7372f809f2c63599a3e9",
+        control="https://huggingface.co/openbmb/MiniCPM5-2B-MLX/resolve/"
+                "35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3"),
+}
 GROUP = 64
 EPS = np.float32(1e-7)
 DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "U32": 4, "I32": 4, "U8": 1, "I8": 1}
@@ -157,7 +176,9 @@ def degenerate(vals, n_bins=15):
 
 # ------------------------------------------------------------ sample plan
 
-def sample_plan():
+def sample_plan(family="qwen36"):
+    if family == "minicpm5":
+        return sample_plan_minicpm5()
     O, M = "model.language_model.", "language_model.model."
     plan = []
 
@@ -198,6 +219,28 @@ def sample_plan():
                 f"{M}layers.{l}.mlp.switch_mlp.up_proj", e * 1024 + 512, e * 512, 16)
             add(f"l{l}_e{e}_down", f"{O}layers.{l}.mlp.experts.down_proj",
                 f"{M}layers.{l}.mlp.switch_mlp.down_proj", e * 2048, e * 2048, 16)
+    return plan
+
+
+def sample_plan_minicpm5():
+    """MiniCPM5-2B: 42 dense llama layers, every projection INT4 g64 on the
+    control (embedding and head included), so every sampled tensor compares at
+    INT4. Both repos spell the trunk `model.` and the head `lm_head`."""
+    plan = []
+
+    def add(tag, base, row, rc):
+        plan.append(dict(tag=tag, orig=base + ".weight", mlx=base,
+                         orig_row=row, mlx_row=row, rows=rc))
+
+    add("embed", "model.embed_tokens", 0, 64)
+    add("embed_mid", "model.embed_tokens", 65000, 64)
+    add("lmhead", "lm_head", 0, 64)
+    add("lmhead_tail", "lm_head", 130000, 64)
+    for l in (0, 10, 20, 30, 41):
+        for t in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            add(f"l{l}_{t}", f"model.layers.{l}.self_attn.{t}", 0, 8)
+        for t in ("gate_proj", "up_proj", "down_proj"):
+            add(f"l{l}_{t}", f"model.layers.{l}.mlp.{t}", 0, 32)
     return plan
 
 
@@ -273,12 +316,18 @@ def summarize(rows, label):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default="/tmp/mference-quant-gate")
+    ap.add_argument("--family", choices=sorted(FAMILIES), default="qwen36")
+    ap.add_argument("--orig", help="override the original-repo resolve URL")
+    ap.add_argument("--control", help="override the control-repo resolve URL")
     args = ap.parse_args()
     os.makedirs(args.cache, exist_ok=True)
-    orig, mlx = Repo(ORIG, args.cache, "orig"), Repo(MLX, args.cache, "mlx")
+    urls = FAMILIES[args.family]
+    orig = Repo(args.orig or urls["orig"], args.cache, f"{args.family}.orig")
+    mlx = Repo(args.control or urls["control"], args.cache, f"{args.family}.mlx")
+    print(f"family {args.family}\n  orig    {orig.base}\n  control {mlx.base}")
 
     rows, rows8, skipped = [], [], []
-    for item in sample_plan():
+    for item in sample_plan(args.family):
         opath, _, _, cols = orig.rows(item["orig"], item["orig_row"], item["rows"],
                                       "o_" + item["tag"])
         wname = item["mlx"] + ".weight"

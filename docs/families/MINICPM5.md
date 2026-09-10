@@ -21,8 +21,8 @@ implemented unless the "Port status" list says so.
 | Control revision | `35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3` |
 | Control index SHA-256 | `ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045` (68,721 bytes) |
 | Parameters | 2.517B total, 2.517B active (dense); 1.982B non-embedding |
-| Install size | ~1.43 GB estimated (see Memory budget); measured value recorded below once installed |
-| Status | **in port** (Day-0 dossier) |
+| Install size | 1,425,981,879 bytes verified (8 files); `model_weights.bin` 1,415,974,912 |
+| Status | **in port** (installed and W2.1b weight-level passed; runner pending) |
 
 ## Checkpoint selection
 
@@ -190,10 +190,22 @@ bytes once it exists.
 | norms (85 BF16 vectors) | 174,080 | 348,160 |
 | **Resident total** | **2,516,756,480** | **1,415,925,760** |
 | routed experts | 0 | 0 |
-| **On disk** (+ index ≤ 64 KiB, tokenizer 10.0 MB, manifest, receipt) | | **~1,426 MB** |
+| **On disk** (measured, 2026-09-10) | | **1,425,981,879 bytes** |
 
 The resident total equals the control's `model.safetensors.index.json`
 `total_size` (1,415,925,760) to the byte: same tensor set, same format.
+
+**Plan vs. actual (2026-09-10).** `MferenceRepack --dry-run --model minicpm5`
+against the pinned repo: source bytes to read 5,033,512,960 (= the index's
+`total_size`), output bytes 1,415,974,912 (the resident total plus a 49,152-byte
+page-rounded index for 381 entries), 296 INT4 tensors + 85 unquantized norms, 0
+bit-width overrides. The real install wrote `model_weights.bin` at exactly
+1,415,974,912 bytes — a 0-byte delta from the plan — in 3 min 59 s on this host,
+and `--verify-install` reported 8 files / 1,425,981,879 bytes (the difference is
+the tokenizer sidecars, `layout.json`, manifest and receipt). The control
+(`minicpm5mlx`, pre-quantized path) installed in 1 min 11 s and verified at
+7 files / 1,425,887,156 bytes with an identical 1,415,974,912-byte resident
+file.
 
 ### KV cache
 
@@ -295,10 +307,41 @@ validate without being loadable.
       control's index `total_size` (bytes exact)
 - [ ] **Contract** — `ModelFamily.minicpm5`, `ArchConfig.miniCPM5_2B`, `qkNorm`
       axis, registry, switches, FAMILY_CONTRACT rows; capability gate up
-- [ ] **Repack** — `SupportedModelSource` entries pinned; synthetic install;
-      dry run vs real bytes; `--verify-install` green
-- [ ] **W2.1b** — weight level and model level vs the vendor MLX control
-- [ ] **Toy parity** — goldens committed; per-module, forward, rollout, cache gates
+- [x] **Contract** — `ModelFamily.minicpm5`, `ArchConfig.miniCPM5_2B`, `qkNorm`
+      axis, registry, 13 switch sites, FAMILY_CONTRACT rows; capability gate up
+      (`familiesWithoutRunner["minicpm5"] = ["qkNormFreeAttention"]`)
+- [x] **Repack** — both `SupportedModelSource` entries pinned; synthetic
+      end-to-end installs through both paths; dry run closed against the real
+      repo to the byte; real install + control install `--verify-install` green
+- [x] **W2.1b weight level PASSED** (2026-09-10) —
+      `Scripts/quantizer-weight-gate.py --family minicpm5` (generalized to take
+      `--family` / `--orig` / `--control`): 39 INT4 tensors sampled by HTTP
+      range request (embedding rows 0 and 65,000; `lm_head` rows 0 and 130,000;
+      q/k/v/o and gate/up/down on layers 0, 10, 20, 30, 41), ~1 min 40 s of
+      transfer. Relative Frobenius error against the BF16 source: **ours mean
+      0.095035 / median 0.091632 vs the control's 0.096476 / 0.092975**; ours
+      strictly better on 38 of 39 (worst ratio 1.0014, `l0_q_proj`); max-abs
+      error better on 39 of 39 (mean ratio 0.7486). Bit-identical to the
+      control on 0 of 39, as expected: the MLX affine grid anchors on the
+      larger-magnitude endpoint and snaps a bin to zero, and that convention
+      reproduces 98.0% of the control's packed nibbles. Same signature as the
+      Qwen 3.6 result in [QUANTIZER_QUALITY.md](../QUANTIZER_QUALITY.md) §4.
+- [ ] **W2.1b model level** — `QuantizerQualityMeasurement` vs
+      `scratch/minicpm5-mlx.gturbo`; needs the runner
+- [x] **Goldens committed** — `Scripts/parity/minicpm5_make_goldens.py`
+      (torch 2.14.0 CPU, `transformers` 5.6.2 pinned): toy `LlamaForCausalLM`
+      (hidden 64, 4 layers, 4 heads / 2 KV heads of 16, intermediate 128,
+      vocab 128, theta 5e6, untied head), two prompts (12 and 48 tokens), 16
+      greedy steps, per-layer attention / MLP / hidden captures, cached ==
+      uncached rollout asserted. Two sets: `Fixtures/minicpm5-bf16/` (the
+      bf16-rounded weights the checkpoint carries) and `Fixtures/minicpm5/`
+      (the **gate set**: every projection replaced by its INT4 g64
+      reconstruction under the `Int4AffineEncoder` transcription, so a Metal
+      forward measures the port, not the quantizer). The 333 KB toy checkpoint
+      is committed alongside so the Swift gates never skip. Byte-reproducible
+      (20 files, re-run and diffed). Minimum top-1/top-2 rollout margin on the
+      gate set: 0.022 (short), 0.053 (long); asserted ≥ 5e-3.
+- [ ] **Toy parity** — per-module, forward, rollout, cache gates in Swift
 - [ ] **Runner** — `MiniCPM5ForwardRunner`; capability gate lifted; first light
 - [ ] **Tokenizer** — dialect, XML parser, two EOS ids, fixtures byte-identical
 - [ ] **Ladder** — 16 / 32 / auto byte-identical greedy output
