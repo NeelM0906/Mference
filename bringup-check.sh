@@ -92,7 +92,8 @@ Runs the family bring-up conformance stages in order and prints a verdict.
 Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
-  <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple minicpm5
+  <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple
+                qwen38flashnext minicpm5
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
@@ -129,6 +130,7 @@ case "${family}" in
   deepseekv4flash) suite_filter='(DSV4|Deepseek)' ;;
   inklingsmall)    suite_filter='Inkling' ;;
   maple)           suite_filter='Maple' ;;
+  qwen38flashnext) suite_filter='FlashNext' ;;
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).
   minicpm5)        suite_filter='[Mm]iniCPM5' ;;
@@ -146,7 +148,7 @@ echo "bringup-check ${family}${model_dir:+ ${model_dir}}"
 # Stage 0 -- preflight. AGENTS.md requires every one of these before any model
 # run, and each aborts rather than warns.
 # ---------------------------------------------------------------------------
-pgrep_pattern='(\.build/release/|/)(MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep_pattern='(\.build/release/|/)(MferenceServer|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 
 if [ "${dry_run}" -eq 1 ]; then
   show "sw_vers -productVersion   # require 15+"

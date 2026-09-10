@@ -106,7 +106,9 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     /// it only when present. See `FlashNextConfig.pleEosTokenID`.
     public let pleEosTokenID: Int?
     /// Axis names the install claims a runner must implement. Advisory only —
-    /// `ManifestReader.familiesWithoutRunner` is the authority.
+    /// `ManifestReader.familiesWithoutRunner` is the authority, and it is empty
+    /// today, so an install publishing this field does not make the family
+    /// unloadable.
     public let requiredAxes: [String]?
     /// Per-head q/k RMSNorm gains on full-attention layers. Optional so every
     /// manifest predating the axis decodes unchanged; absent validates against
@@ -441,19 +443,34 @@ public enum ManifestReader {
         }
         if expected.family == .qwen38flashnext {
             // Workstream-2 quantize-in-flight: every eligible resident and
-            // routed tensor is INT4 affine group-64, the router included
-            // (the shipped families keep an INT8 router because their source
-            // conversions did; this one is quantized by the repacker itself
-            // under one uniform policy).
-            let slots: [(String, ManifestQuantSlot)] = [
-                ("embedding", quant.embedding),
-                ("attention", quant.attention),
-                ("router", quant.router),
-                ("sharedExpert", quant.sharedExpert),
-                ("routedExpert", quant.routedExpert),
+            // routed tensor is INT4 affine group-64 — except the MoE gating
+            // tensors, which the install policy may keep at INT8.
+            //
+            // Both widths are admitted on the router slot on purpose, and the
+            // set is not a courtesy: two installs of this family exist. The
+            // uniform-INT4 one (`bitWidthOverridesHonored` 0) predates the
+            // 2026-09-10 router measurement and records 4; the INT8-router one
+            // records 8 and 98 overrides. Refusing either would strand an
+            // install that is on disk and correct for what it claims to be, so
+            // the manifest slot is read as a declaration rather than as a
+            // constant, and `FlashNextWeightMatrix` dispatches per tensor on
+            // the width its own index entry implies.
+            //
+            // `sharedExpert` stays INT4-only because that slot describes the
+            // shared expert's `gate_proj`, a projection the policy never
+            // overrides. The `mlp.shared_expert_gate` scalar gate, which the
+            // policy *does* override, has no slot of its own in the manifest
+            // schema; its width lives only in the resident index, which is the
+            // authority for every per-tensor width anyway.
+            let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
+                ("embedding", quant.embedding, [4]),
+                ("attention", quant.attention, [4]),
+                ("router", quant.router, [4, 8]),
+                ("sharedExpert", quant.sharedExpert, [4]),
+                ("routedExpert", quant.routedExpert, [4]),
             ]
-            for (name, slot) in slots {
-                guard slot.weightBits == 4,
+            for (name, slot, allowedBits) in slots {
+                guard allowedBits.contains(slot.weightBits),
                       slot.scheme.lowercased() == "affine",
                       slot.scaleType.lowercased() == "bf16",
                       slot.biasType.lowercased() == "bf16",
@@ -778,9 +795,8 @@ public enum ManifestReader {
         // user sees is a decode error that reads like a corrupt install.
         if let declared = try? JSONDecoder().decode(FamilyPeek.self, from: data),
            let raw = declared.arch.family,
-           let missingAxes = familiesWithoutRunner[raw] {
-            throw ModelError.familyRunnerNotImplemented(family: raw,
-                                                        missingAxes: missingAxes)
+           let refusal = capabilityRefusal(family: raw) {
+            throw refusal
         }
         let manifest: Manifest
         do {
@@ -801,8 +817,31 @@ public enum ManifestReader {
         let arch: Arch
     }
 
-    /// Families `MferenceRepack` can install but `RealForwardRunner` cannot
-    /// execute, mapped to the axes whose kernels are missing.
+    /// The axes a raw `arch.family` string is missing a runner for, or nil when
+    /// the runtime can execute it.
+    ///
+    /// `peekFamily` refuses a gated family by throwing, which is right for a
+    /// load but not for a caller enumerating a library: it has to tell "this
+    /// install has no runner yet" from "this install is broken" without
+    /// matching on error text. `familiesWithoutRunner` stays the authority;
+    /// this only reads it.
+    public static func missingRunnerAxes(forRawFamily raw: String) -> [String]? {
+        familiesWithoutRunner[raw]
+    }
+
+    /// Families `MferenceRepack` can install but no forward runner can execute,
+    /// mapped to the axes whose kernels are missing.
+    ///
+    /// **Empty: every family the repacker installs now has a runner.** The last
+    /// entry, `qwen38flashnext`, was removed on 2026-09-10 when
+    /// `FlashNextForwardRunner` landed and the owner lifted its gate. The table
+    /// and the `peekFamily` check stay because the next family port needs them
+    /// on day one, not because anything is gated today.
+    ///
+    /// Add an entry the moment a new family gains an `ArchInfo` install path,
+    /// keyed by its `manifest.arch.family` string and valued with the axis
+    /// names whose kernels are still missing. Remove it only when that family's
+    /// runner actually lands and `ForwardRunnerFactory` dispatches to it.
     ///
     /// The gate lives here because `peekFamily` is the single funnel every
     /// entry point uses — `Model.load`, the CLI, the loopback server, the Mac
@@ -814,18 +853,25 @@ public enum ManifestReader {
     /// The axis names are the runtime's own; the install also publishes them as
     /// `manifest.arch.requiredAxes`, but this table is deliberately the
     /// authority — a manifest does not get to tell the runtime what it can run.
-    /// Delete an entry only when the family's runner actually lands.
     ///
     /// A gated family may still carry an `ArchConfig` baseline, a `ModelFamily`
     /// case, tensor accessors and manifest validation — that is what the
     /// runner is built *against*. Presence in this table is the single fact
     /// that decides whether it can be loaded, and it is checked in
     /// `peekFamily` before any of that machinery is reached.
-    static let familiesWithoutRunner: [String: [String]] = [
-        "qwen38flashnext": [
-            "hyperConnectionsLowRank",
-            "attentionIndexer",
-            "pleNgramEmbedding",
-        ],
-    ]
+    static let familiesWithoutRunner: [String: [String]] = [:]
+
+    /// The gate lookup, factored out of `peekFamily` so it can be exercised
+    /// against an injected table: with `familiesWithoutRunner` empty there is
+    /// no shipped family left to prove the mechanism with, and the mechanism is
+    /// what the next family port depends on.
+    ///
+    /// Returns the named refusal for a gated family, or nil for one the runtime
+    /// can execute.
+    static func capabilityRefusal(family raw: String,
+                                  in table: [String: [String]] = familiesWithoutRunner)
+        -> ModelError? {
+        guard let missingAxes = table[raw] else { return nil }
+        return .familyRunnerNotImplemented(family: raw, missingAxes: missingAxes)
+    }
 }

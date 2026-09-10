@@ -3,23 +3,26 @@ import Foundation
 import Metal
 @testable import Mference
 
-/// First-light **measurement** harness for the `qwen38flashnext` production
-/// runner (`FlashNextForwardRunner`) against the REAL install. This is a
-/// measurement-only entry point, not a gate lift: it never touches
-/// `ManifestReader.familiesWithoutRunner`, and the production capability gate
-/// (`peekFamily`) still refuses this family for the CLI, server and app — see
-/// `productionDoorStillRefusesRealInstall` below and
-/// `FlashNextCapabilityGateTests`.
+/// **Measurement** harness for the `qwen38flashnext` production runner
+/// (`FlashNextForwardRunner`) against the REAL install: greedy continuation,
+/// chat, and a needle-in-haystack probe past the indexer's 2,048 budget, each
+/// reporting decode tok/s and peak RSS.
 ///
-/// How the gate is bypassed *only here* (option (b): a test-target, env-gated
-/// measurement, exactly like the `MFERENCE_INKLING_GTURBO` real-model suites):
+/// It is a measurement harness, not a gate: the capability gate was lifted for
+/// this family on 2026-09-10 (`ManifestReader.familiesWithoutRunner` is empty),
+/// so the CLI, the server and `Model.load`'s auto-detect overload all load this
+/// install through the ordinary production funnel —
+/// `productionDoorLoadsRealInstall` below asserts exactly that, and
+/// `FlashNextCapabilityGateTests` covers the gate itself.
+///
+/// Two entry points here predate the lift and are kept deliberately, because
+/// they pin the baseline and tokenizer this suite measures against rather than
+/// whatever auto-detection resolves:
 ///   * `Model.load(directoryURL:device:expecting:)` — the overload that takes an
-///     explicit `ArchConfig` baseline and does NOT funnel through
-///     `ManifestReader.peekFamily`. This is the same internal door the FlashNext
-///     reference/parity tie-back tests already use.
-///   * `MFTokenizer.load(from:family:)` on the sidecar `tokenizer/` folder —
-///     the non-gating tokenizer path (`load(forModelDirectory:)` would call
-///     `peekFamily` and be refused).
+///     explicit `ArchConfig` baseline. The same internal door the FlashNext
+///     reference/parity tie-back tests use, so a baseline drift shows up as a
+///     validation failure here instead of a silent re-detect.
+///   * `MFTokenizer.load(from:family:)` on the sidecar `tokenizer/` folder.
 /// Everything downstream (`ForwardRunnerFactory.make`, `runRawCompletion`,
 /// sampling, the timing footer) is the production generation machinery,
 /// unmodified.
@@ -34,8 +37,12 @@ import Metal
 /// Quality caveat carried in every report: greedy token-exactness vs a
 /// reference rollout cannot be checked at 180B scale (no reference rollout
 /// exists), so coherent output is a *read* of the kernels at scale, not a
-/// proof. W2.1b (KLD vs a known-good conversion) remains the missing
-/// quantitative quality gate.
+/// proof. W2.1b — the quantitative quality gate — closed on both halves on
+/// 2026-09-02 (docs/QUANTIZER_QUALITY.md) against Qwen 3.6, which this family
+/// inherits through the shared quantizer nucleus; the two caveats it leaves
+/// specific to Flash-Next (uniform INT4 routers, no norm-bias fold, neither
+/// checked against an independent conversion because none exists) are recorded
+/// as under measurement in docs/families/QWEN38_FLASH_NEXT.md.
 @Suite(.serialized) struct FlashNextRealGenerationMeasurement {
 
     private struct Harness {
@@ -52,7 +59,7 @@ import Metal
         ProcessInfo.processInfo.environment["MFERENCE_FLASHNEXT_GTURBO"]
     }
 
-    /// Load the real install through the internal (ungated) door and build the
+    /// Load the real install against an explicitly pinned baseline and build the
     /// production `FlashNextForwardRunner` via the real factory. Returns nil when
     /// the env gate is absent so the suite skips cleanly.
     private static func loadHarness(maxContext: Int) async throws -> Harness? {
@@ -72,8 +79,9 @@ import Metal
                                            forceLogitsHead: false)
 
         let loadStart = Date()
-        // BYPASS DOOR: the `expecting:` overload skips `peekFamily`, so the gate
-        // that refuses this family everywhere else is not consulted here.
+        // The `expecting:` overload pins the baseline this suite measures
+        // against instead of letting auto-detect resolve it, so a baseline
+        // drift fails validation here rather than silently re-detecting.
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
@@ -83,8 +91,8 @@ import Metal
             integrityPolicy: integrity)
         let firstLoadSeconds = Date().timeIntervalSince(loadStart)
 
-        // NON-GATING tokenizer path: resolve the sidecar folder directly and
-        // load with the family hint. `load(forModelDirectory:)` would peek.
+        // Resolve the sidecar folder directly and load with the family hint,
+        // matching the pinned baseline above rather than re-peeking.
         let tokenizerFolder = try #require(
             MFTokenizer.tokenizerFolder(forModelDirectory: modelURL),
             "install has no tokenizer/ sidecar with tokenizer.json")
@@ -98,7 +106,7 @@ import Metal
             runtimeConfiguration: runtime)
 
         FileHandle.standardError.write(Data(
-            "[flashnext-firstlight] WARNING: loading gated family qwen38flashnext through the internal ungated door for MEASUREMENT ONLY; the production gate is unchanged.\n".utf8))
+            "[flashnext-firstlight] loading qwen38flashnext against the pinned baseline; the production gate was lifted 2026-09-10.\n".utf8))
 
         return Harness(context: context, model: model, tokenizer: tokenizer,
                        forwardRuntime: forwardRuntime,
@@ -270,26 +278,23 @@ import Metal
         // 180B scale. The captured YES/NO and tok/s are the measurement.
     }
 
-    /// The gate stays DOWN: the production door (`peekFamily`, reached by
-    /// `Model.load(directoryURL:device:)` and every CLI/server/app entry) still
-    /// refuses the REAL installed directory by name. Env-gated on the install
-    /// path but cheap — it only reads `manifest.json`, no weights.
-    @Test func productionDoorStillRefusesRealInstall() throws {
+    /// The gate is UP: the production door now resolves the REAL installed
+    /// directory instead of refusing it by name. Env-gated on the install path
+    /// and deliberately cheap — it reads `manifest.json` only, no weights.
+    ///
+    /// Both steps `Model.load(directoryURL:device:)` takes before it touches a
+    /// byte of weights are checked here: `peekFamily` (the funnel every
+    /// CLI/server/app entry point goes through) and the baseline lookup that
+    /// follows it. The load itself is not run — with the default integrity
+    /// policy it would SHA-256 the whole ~163 GiB install — and the
+    /// measurements in this suite exercise the real load anyway.
+    @Test func productionDoorLoadsRealInstall() throws {
         guard let path = Self.installPath() else { return }
         let modelURL = URL(fileURLWithPath: path)
-        // peekFamily — the funnel.
-        #expect(throws: ModelError.familyRunnerNotImplemented(
-            family: "qwen38flashnext",
-            missingAxes: ["hyperConnectionsLowRank",
-                          "attentionIndexer",
-                          "pleNgramEmbedding"])) {
-            _ = try ManifestReader.peekFamily(directoryURL: modelURL)
-        }
-        // The auto-detect Model.load overload must refuse it too, before any
-        // baseline resolution — the production load path the CLI uses.
-        let ctx = try MetalContext()
-        #expect(throws: (any Error).self) {
-            _ = try Model.load(directoryURL: modelURL, device: ctx.device)
-        }
+        let family = try ManifestReader.peekFamily(directoryURL: modelURL)
+        #expect(family == .qwen38flashnext)
+        #expect(ArchConfig.knownArchitectures[family] != nil,
+                "auto-detect resolved \(family.rawValue) with no baseline to load it")
+        #expect(ManifestReader.familiesWithoutRunner[family.rawValue] == nil)
     }
 }

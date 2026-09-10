@@ -24,7 +24,7 @@ swift build -c release --product MferenceCLI
 Confirm that no other model process is running:
 
 ```bash
-pgrep -fl 'MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 Continue only when that command prints nothing.

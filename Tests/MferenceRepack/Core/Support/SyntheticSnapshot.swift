@@ -1248,6 +1248,21 @@ enum SyntheticSnapshot {
                                  into: &extras, rng: &rng)
         appendBF16(name: "mtp.layers.0.mlp.gate.weight",
                    shape: [arch.numExperts, arch.hidden], into: &extras, rng: &rng)
+        // The draft layer has the same MoE block as a text layer, shared expert
+        // and all (docs/families/qwen38flashnext.tensors.json, `sidecar_mtp`).
+        // Both of its gating tensors are here because the install policy gives
+        // them the same width as the text stack's, and a fixture missing the
+        // scalar gate would leave that half of the policy uncovered end to end.
+        appendBF16(name: "mtp.layers.0.mlp.shared_expert_gate.weight",
+                   shape: [1, arch.hidden], into: &extras, rng: &rng)
+        for proj in ["gate_proj", "up_proj"] {
+            appendBF16(name: "mtp.layers.0.mlp.shared_expert.\(proj).weight",
+                       shape: [arch.sharedIntermediate, arch.hidden],
+                       into: &extras, rng: &rng)
+        }
+        appendBF16(name: "mtp.layers.0.mlp.shared_expert.down_proj.weight",
+                   shape: [arch.hidden, arch.sharedIntermediate],
+                   into: &extras, rng: &rng)
         appendBF16(name: "mtp.layers.0.input_layernorm.weight",
                    shape: [arch.hidden], into: &extras, rng: &rng)
         appendBF16(name: "mtp.layers.0.post_attention_layernorm.weight",

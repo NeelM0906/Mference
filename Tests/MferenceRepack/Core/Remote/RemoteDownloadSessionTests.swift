@@ -61,7 +61,7 @@ struct RemoteDownloadSessionTests {
         }
     }
 
-    /// Options as the CLI, the Mac app installer client and every pinned source
+    /// Options as the CLI, the repacker and every pinned source
     /// build them: no explicit session, no explicit retry tuning.
     private func installEntryPointOptions() -> [RemoteStreamingRepackOptions] {
         let outputDirectory = URL(fileURLWithPath: "/tmp/mference-install")

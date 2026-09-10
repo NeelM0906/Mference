@@ -8,9 +8,17 @@ import Testing
 /// reproduces the mixture a trusted community conversion chose — for Qwen 3.6
 /// that is mlx-community's, which overrides every layer's `mlp.gate` and
 /// `mlp.shared_expert_gate` to INT8 group-64 and leaves the rest at INT4. The
-/// second, and the one more likely to be broken by accident, is that
-/// Flash-Next stays **uniform INT4**: it is a shipped original-repo family, and
-/// a policy leaking into it would silently change every byte of its install.
+/// second is that the *same two suffixes* resolve against Flash-Next's real
+/// tensor names, which are the vendor's own and are never rewritten by the
+/// planner — including the `mtp.` draft layer's, which share no prefix with the
+/// text stack at all and would be quietly missed by a rule keyed on anything
+/// but a suffix.
+///
+/// Flash-Next used to be the negative case here: it shipped uniform INT4 and
+/// this suite asserted that it stayed that way. The 2026-09-10 measurement on
+/// its own install reversed that (see `QuantBitPolicy.moeRouterInt8`), so the
+/// assertions are inverted rather than deleted — the property is still that the
+/// override set is exactly the gating tensors and nothing adjacent to them.
 @Suite struct QuantBitPolicyTests {
 
     /// Qwen 3.6's real resident inventory, per layer, abbreviated to the
@@ -90,28 +98,100 @@ import Testing
         }
     }
 
-    // MARK: - Regression guard for the shipped family
+    // MARK: - Flash-Next's real tensor names
 
-    @Test("Flash-Next stays uniform INT4")
-    func flashNextIsUniform() {
+    /// The exact names `docs/families/qwen38flashnext.tensors.json` records for
+    /// the MoE block, at the exact prefix the planner emits. Flash-Next's
+    /// `residentName(for:family:)` is the identity, so these are simultaneously
+    /// the vendor's source names and the installed index's names — which is why
+    /// getting them wrong here would not be caught anywhere downstream.
+    private static func flashNextMoENames(layers: Int) -> [String] {
+        var names: [String] = []
+        for layer in 0..<layers {
+            let base = "model.language_model.layers.\(layer)."
+            names += [
+                base + "mlp.gate.weight",
+                base + "mlp.shared_expert_gate.weight",
+                base + "mlp.shared_expert.gate_proj.weight",
+                base + "mlp.shared_expert.up_proj.weight",
+                base + "mlp.shared_expert.down_proj.weight",
+                base + "self_attn.q_proj.weight",
+                base + "linear_attn.in_proj_qkv.weight",
+                base + "attn_hyper_connection.input_mix_weight_down.weight",
+                base + "mlp_hyper_connection.input_mix_weight_up.weight",
+                base + "ple.key_proj.weight",
+            ]
+        }
+        // The MTP draft layer's own MoE block. Its names sit under an `mtp.`
+        // prefix with no `model.language_model.` in sight; only the suffix is
+        // shared with the text stack.
+        names += ["mtp.layers.0.mlp.gate.weight",
+                  "mtp.layers.0.mlp.shared_expert_gate.weight",
+                  "mtp.layers.0.mlp.shared_expert.gate_proj.weight",
+                  "mtp.fc_embedding.weight",
+                  "mtp.fc_hidden.weight"]
+        return names
+    }
+
+    @Test("Flash-Next keeps both gating tensors at INT8, on 48 layers + MTP")
+    func flashNextKeepsBothGatingTensorsAtInt8() {
         let policy = QuantBitPolicy.originalRepo(family: .qwen38flashnext)
-        #expect(policy == .uniformInt4)
-        #expect(policy.rules.isEmpty)
-        // Including on the very names Qwen 3.6 overrides: Flash-Next's runner
-        // drives its router through the generic INT4 matvec.
-        for name in Self.residentNames(layers: 3) {
+        #expect(policy == .moeRouterInt8)
+        let names = Self.flashNextMoENames(layers: 48)
+        let overridden = names.filter { policy.overrides($0) }
+        // 48 text layers + the MTP draft layer, two gating tensors each. This
+        // is the number the install's `bitWidthOverridesHonored` must report.
+        #expect(overridden.count == 98)
+        for name in overridden { #expect(policy.bits(forTensorNamed: name) == 8) }
+        for name in names where !policy.overrides(name) {
             #expect(policy.bits(forTensorNamed: name) == 4, "\(name)")
         }
     }
 
-    @Test("Qwen 3.6 is the only original-repo family with a mixture today")
-    func onlyQwen36IsMixed() {
+    /// The draft layer routes over the same 512 experts as the layers it drafts
+    /// for. A rule that reached the text stack but not `mtp.` would give the two
+    /// routers different fidelity and quietly cost verification acceptances —
+    /// exactly the kind of miss no install-time check would report.
+    @Test("the MTP draft layer's router gets the same width")
+    func theMTPDraftLayerGetsTheSameTreatment() {
+        let policy = QuantBitPolicy.originalRepo(family: .qwen38flashnext)
+        #expect(policy.bits(forTensorNamed: "mtp.layers.0.mlp.gate.weight") == 8)
+        #expect(policy.bits(
+            forTensorNamed: "mtp.layers.0.mlp.shared_expert_gate.weight") == 8)
+        #expect(policy.bits(
+            forTensorNamed: "mtp.layers.0.mlp.shared_expert.gate_proj.weight") == 4)
+    }
+
+    /// A rule matching a fused expert tensor is a configuration error the
+    /// planner throws on — the expert pools are planned at the base width — so
+    /// the policy must not come near them, under either prefix.
+    @Test("the fused expert tensors keep the base width")
+    func flashNextFusedExpertTensorsKeepTheBaseWidth() {
+        let policy = QuantBitPolicy.originalRepo(family: .qwen38flashnext)
+        for name in ["model.language_model.layers.0.mlp.experts.gate_up_proj",
+                     "model.language_model.layers.0.mlp.experts.down_proj",
+                     "mtp.layers.0.mlp.experts.gate_up_proj",
+                     "mtp.layers.0.mlp.experts.down_proj"] {
+            #expect(!policy.overrides(name), "\(name)")
+        }
+    }
+
+    @Test("the MoE original-repo families share one policy; everyone else is uniform INT4")
+    func bothOriginalRepoFamiliesShareOnePolicy() {
+        #expect(QuantBitPolicy.originalRepo(family: .qwen36) == .moeRouterInt8)
+        #expect(QuantBitPolicy.originalRepo(family: .qwen38flashnext) == .moeRouterInt8)
+        // MiniCPM5 also has an original-repo entry, and its answer is uniform
+        // INT4 on purpose rather than by default: the vendor's own MLX
+        // conversion carries no per-tensor overrides, and a dense llama has no
+        // router to keep wider.
+        #expect(QuantBitPolicy.originalRepo(family: .minicpm5) == .uniformInt4)
+        // Every family without an original-repo installer entry still has no
+        // examined conversion, so none of them may carry a table.
         for family in [RepackModelFamily.gemma4, .qwen38, .deepseekV4Flash,
-                       .inklingSmall, .maple, .qwen38flashnext, .minicpm5] {
+                       .inklingSmall, .maple] {
             #expect(QuantBitPolicy.originalRepo(family: family) == .uniformInt4,
                     "\(family.rawValue)")
         }
-        #expect(QuantBitPolicy.originalRepo(family: .qwen36) == .moeRouterInt8)
     }
 
     // MARK: - Mechanism
@@ -141,6 +221,7 @@ import Testing
         }
         #expect(throws: Never.self) {
             _ = try QuantBitPolicy.moeRouterInt8.validated(for: .qwen36)
+            _ = try QuantBitPolicy.moeRouterInt8.validated(for: .qwen38flashnext)
             _ = try QuantBitPolicy.uniformInt4.validated(for: .qwen38flashnext)
         }
     }

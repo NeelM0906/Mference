@@ -10,10 +10,11 @@ Mference's runtime, installer, and application code are derived from
 Mikhaylov and contributors, licensed under the
 [Apache License 2.0](LICENSE-APACHE). The derived portions remain governed by
 that license. Significant changes from the original include: the Mference
-rebrand throughout; support for Qwen 3.6, DeepSeek-V4-Flash, Inkling-Small, and
-Maple across architecture configuration, streaming installation, Metal
-kernels, forward runners, tokenization, and products; model-derived kernel
-specialization; and expanded validation and performance documentation.
+rebrand throughout; support for Qwen 3.6, DeepSeek-V4-Flash, Inkling-Small,
+Maple, Qwen3.8-Flash-Next, and MiniCPM5-2B across architecture configuration,
+streaming installation, Metal kernels, forward runners, tokenization, and
+products; model-derived kernel specialization; and expanded validation and
+performance documentation.
 
 This file records the dependency review performed on 2026-08-09. It is an
 attribution aid, not legal advice. Anyone distributing a compiled product must
@@ -32,7 +33,9 @@ are preserved in [`LICENSE-MLX`](LICENSE-MLX).
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a
-pinned revision of one of the checkpoints below and repacks it locally.
+pinned revision of one of seven checkpoints and repacks it locally. Five are
+pre-quantized community conversions; Qwen3.8-Flash-Next and MiniCPM5-2B are
+read from their vendors' own BF16 repositories and quantized in flight.
 
 Gemma 4: revision `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` of
 [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit).
@@ -63,6 +66,26 @@ weights in a model card, LICENSE file, or Hub license tag. Downloading, using,
 or redistributing those weights therefore requires separately establishing
 that the necessary rights have been obtained; Mference makes no grant of
 rights to them.
+
+Qwen3.8-Flash-Next: revision `de4b8e4d43b917e7706784d8bb445c9af86a3540` of
+[`Qwen/Qwen3.8-Flash-Next`](https://huggingface.co/Qwen/Qwen3.8-Flash-Next),
+Alibaba's own BF16 checkpoint rather than a community conversion — the
+installer reads its 131 shards and quantizes to INT4 group-64 in flight. The
+installer verifies its source-index SHA-256
+`99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de`.
+That revision carries a Hub `license: other` tag and a
+[LICENSE](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE)
+file naming the **Qwen Community License 1.0** (Copyright (c) 2026 Qwen). It is
+a permissive grant to use, modify, distribute, sublicense, sell, host,
+fine-tune, and create derivative works from the weights, subject to two
+conditions that a redistributor must check for itself: attribution of the model
+name on the user interface of any commercial product or service exceeding 100
+million monthly active users or US$20 million monthly revenue, and a separate
+license from Qwen before commercial use in a "Model as a Service" or "AI Work
+Assistant" business as that license defines them. The license text governs;
+this summary is an attribution aid, not legal advice. No reference code from
+that repository is imported into Mference — the runner, kernels and repack path
+are written against the published architecture, not copied from it.
 
 MiniCPM5-2B: revision `cd199ce3ee67549c42ef7372f809f2c63599a3e9` of
 [`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B), the

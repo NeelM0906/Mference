@@ -343,7 +343,7 @@ public enum MTPAttachTool {
         try Posix.atomicWrite(newManifest, to: manifestPath,
                               durableIn: gturboDirectory)
         // The attach invalidated the old receipt; regenerate it so installs
-        // that gate on verified-install.json (the Mac app) keep working
+        // that gate on verified-install.json (the server's library probe) keep working
         // without a manual --verify-install pass. The attach itself is
         // complete at this point, so a receipt failure must say so and point
         // at the retryable step rather than reading as a failed attach.

@@ -6,13 +6,25 @@ Tailscale IPv4 address with `--bind tailnet`. It has no application-level
 authentication or TLS; do not expose it through a wildcard interface, proxy,
 or tunnel.
 
+This document is the API: one model per process, named by `--model`. If you want
+the **user interface** — a browser, a model picker, chats that persist — start
+at [The Mference UI (Open WebUI)](OPEN_WEBUI.md) and run `./mference-ui.sh`,
+which does everything below for you.
+
+The `--library` mode that UI runs on serves every installed model from this one
+process, listing them all in `/v1/models` and swapping the resident model in
+place when a request names a different one. It changes nothing about the mode
+described here, which is what runs whenever `--library` is absent. The UI guide
+covers library mode, its model identifiers, and the cost of a swap.
+
 ## Start the server
 
-First, install the model with the Mac app or `MferenceRepack`. Then check
-that no other Mference model process is running:
+First, install the model with `MferenceRepack` or
+`./mference-ui.sh install <family>`. Then check that no other Mference model
+process is running:
 
 ```bash
-pgrep -fl 'MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If the command prints a match, do not start the server.

@@ -43,8 +43,7 @@ public struct Args: Equatable, Sendable {
     /// Model-integrity policy. `.fullSha256` re-hashes every routed-expert
     /// file on first touch — 145 GB for Inkling-Small, ~59 s inside the first
     /// prefill. `.sizeCheckTrustedReceipt` checks sizes against the receipt
-    /// written at install time instead. Mirrors the Mac app's existing
-    /// verification control.
+    /// written at install time instead.
     public var verification: ModelIntegrityPolicy
     /// Paged KV cache with SSD spill + sparse decode (Qwen 3.8):
     /// "on" / "off" / "auto" (auto enables it above 32k context).

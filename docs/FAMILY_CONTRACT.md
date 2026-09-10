@@ -49,11 +49,17 @@ auto-detection at load.
 A baseline in that registry means the install validates, **not** that the
 runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
 authoritative capability gate, and `peekFamily` consults it before any of this
-machinery is reached. FNX is in the registry and in that gate: its axes,
-tensor accessors and manifest validation exist so the runner can be built
-against them, and every load path still refuses it by name. MC5 sits in the
-same gate while its runner is written
-([MiniCPM5](families/MINICPM5.md)).
+machinery is reached.
+
+That table is **empty today**: every family in the registry has a runner. FNX
+was the last entry, and its gate was lifted on 2026-09-10 once
+`FlashNextForwardRunner` landed. MC5 never entered the gate: its baseline and
+`MiniCPM5ForwardRunner` arrived together
+([MiniCPM5](families/MINICPM5.md)). Keep the two facts separate anyway — a new
+port earns its `ArchConfig` baseline, `ModelFamily` case, tensor accessors and
+manifest validation well before its kernels do, and it belongs in the gate for
+that whole stretch so every load path refuses it by axis name rather than
+guessing.
 
 ## Family identity
 

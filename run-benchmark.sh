@@ -84,7 +84,7 @@ for case_seed in short-explanation:x medium-review:x long-synthesis:x; do
 done
 
 # Match only actual executables, not shells whose command line mentions them.
-live=$(pgrep -fl '(\.build/release/|/)(MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' \
+live=$(pgrep -fl '(\.build/release/|/)(MferenceServer|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' \
   | grep -v -e 'run-benchmark.sh' -e '/bin/zsh' -e '/bin/bash' -e 'pgrep' || true)
 [ -z "${live}" ] || fail "another model or installer process is running:
 ${live}"

@@ -152,15 +152,22 @@ public struct Model {
         }
     }
 
-    /// Named refusal for an accessor a family's runner would need but that
-    /// this runtime cannot serve yet. Keeps the failure pointing at the
-    /// missing kernels instead of reading as a corrupt install, and matches
-    /// what `ManifestReader.peekFamily` reports at the load path.
-    private func runnerNotImplemented() -> ModelError {
-        .familyRunnerNotImplemented(
-            family: config.family.rawValue,
-            missingAxes: ManifestReader.familiesWithoutRunner[config.family.rawValue]
-                ?? ["runner"])
+    /// Named refusal for an accessor this family has no tensor for.
+    ///
+    /// The name is reported verbatim, so the failure points at the accessor a
+    /// runner asked for rather than reading as a corrupt install. It is
+    /// deliberately independent of `ManifestReader.familiesWithoutRunner`: that
+    /// table is empty now that every installable family has a runner, and an
+    /// accessor a family structurally lacks must still refuse by name — the
+    /// family's own runner never calls it, and a runner written for a different
+    /// family that does is the bug being reported.
+    ///
+    /// For `qwen38flashnext` the two callers are `inputNorm` and
+    /// `postAttnNorm`: the hyper-connection sites carry those norms, so no
+    /// `input_layernorm` / `post_attention_layernorm` tensor exists to return.
+    private func accessorNotAvailable(_ accessor: String) -> ModelError {
+        .familyRunnerNotImplemented(family: config.family.rawValue,
+                                    missingAxes: [accessor])
     }
 
     public var embedding: TensorView {
@@ -254,6 +261,7 @@ public struct Model {
     /// Pre-attention norm. Qwen3.8-Flash-Next has none: the attention
     /// hyper-connection's group norm stands in its place, so a caller asking
     /// for one is a runner that has not been written for this family.
+    /// `FlashNextForwardRunner` never calls it.
     public func inputNorm(layer L: Int) throws -> TensorView {
         switch config.family {
         case .gemma4, .qwen36, .qwen38, .maple:
@@ -261,7 +269,7 @@ public struct Model {
         case .deepseekV4Flash, .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
         case .qwen38flashnext:
-            throw runnerNotImplemented()
+            throw accessorNotAvailable("inputNorm")
         case .minicpm5:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
         }
@@ -277,7 +285,7 @@ public struct Model {
         case .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp_norm.weight")
         case .qwen38flashnext:
-            throw runnerNotImplemented()
+            throw accessorNotAvailable("postAttnNorm")
         case .minicpm5:
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
         }

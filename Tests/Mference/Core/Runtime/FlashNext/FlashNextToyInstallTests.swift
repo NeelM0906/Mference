@@ -24,10 +24,9 @@ import Testing
         let dir = try FlashNextParity.installToyCheckpoint()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // `Model.load(directoryURL:device:expecting:)` does not funnel through
-        // `ManifestReader.peekFamily`, so the capability gate that refuses this
-        // family at the auto-detect entry points is untouched: the reference
-        // runner names its architecture instead of asking the manifest to.
+        // The toy's 6-layer geometry is not the shipped baseline, so this load
+        // pins the architecture explicitly rather than letting auto-detect
+        // resolve `ArchConfig.qwen38FlashNext_180B_A3_5B` and fail validation.
         let model = try Model.load(directoryURL: dir,
                                    device: device,
                                    expecting: FlashNextParity.archConfig(),
@@ -35,10 +34,10 @@ import Testing
         #expect(model.config.family == .qwen38flashnext)
         #expect(model.config.numLayers == 6)
 
-        // The gate itself must still refuse the same directory by name.
-        #expect(throws: ModelError.self) {
-            _ = try ManifestReader.peekFamily(directoryURL: dir)
-        }
+        // The funnel identifies the same directory by family. It refused it by
+        // name until the 2026-09-10 gate lift; now it resolves.
+        #expect(try ManifestReader.peekFamily(directoryURL: dir)
+                == .qwen38flashnext)
 
         // Resident accessors resolve across all three tensor groups.
         #expect(try model.hcNorm(site: .attention, layer: 0).length == 256 * 2)

@@ -89,24 +89,31 @@ import Metal
     }
 
     /// This family carries no pre-norms and no final norm: the hyper-connection
-    /// sites hold them. Asking for one is a runner that was not written for
-    /// this family, and must say so by name rather than reading as corruption.
+    /// sites hold them. `FlashNextForwardRunner` never asks for one; a caller
+    /// that does is a runner written for another family, and the refusal must
+    /// name the accessor rather than reading as corruption.
+    ///
+    /// The refusal no longer quotes the capability gate's axis list — that
+    /// table is empty since the 2026-09-10 gate lift — so each accessor reports
+    /// its own name instead.
     @Test func absentPerSublayerNormsRefuseByName() throws {
         let (model, dir) = try Self.loadToy()
         defer { try? FileManager.default.removeItem(at: dir) }
 
         #expect(!model.hasFinalNorm)
-        for accessor in [model.inputNorm, model.postAttnNorm] {
+        let accessors: [(String, (Int) throws -> TensorView)] = [
+            ("inputNorm", model.inputNorm),
+            ("postAttnNorm", model.postAttnNorm),
+        ]
+        for (name, accessor) in accessors {
             var thrown: Error?
             #expect(throws: (any Error).self) {
                 do { _ = try accessor(0) } catch { thrown = error; throw error }
             }
             let error = try #require(thrown as? ModelError)
             #expect(error == .familyRunnerNotImplemented(
-                family: "qwen38flashnext",
-                missingAxes: ["hyperConnectionsLowRank",
-                              "attentionIndexer",
-                              "pleNgramEmbedding"]))
+                family: "qwen38flashnext", missingAxes: [name]))
+            #expect(error.description.contains(name))
         }
     }
 
