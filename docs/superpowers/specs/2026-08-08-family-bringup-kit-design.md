@@ -25,9 +25,16 @@ also surfaced **two defects nothing else in the kit could see** — resident
 tensor naming, and a missing RMSNorm `1 + w` fold that made every norm wrong by
 one in an install that still verified, validated and loaded. See also
 [docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
+**The `qwen38flashnext` gate was lifted on 2026-09-10** by owner decision, on
+the strength of the closed W2.1b plus the real-model measurements: the runner
+`FlashNextForwardRunner` ships, and the rehearsal family now loads through the
+ordinary CLI and server funnel. Benchmarks and the community protocol page are
+downstream of that lift and still pending.
 Still open: W1.2 mapping-as-data (first data file written, repacker does not
-read it yet), W1.3 capability gate as a general mechanism (a named per-family
-refusal exists in `ManifestReader.familiesWithoutRunner`), W3.1 toy
+read it yet), W1.3 capability gate as a general mechanism — the named
+per-family refusal exists in `ManifestReader.familiesWithoutRunner`, and with
+the Flash-Next entry removed that table is now empty, so the mechanism is
+exercised against an injected entry until the next port needs it — W3.1 toy
 generator, W3.2 parity harness. **W2.1b is closed** (both halves, 2026-09-02).
 **Strategic context:** Mference's trajectory is "the standard way to run
 flagship MoE models on the Macs people own." That requires supporting each

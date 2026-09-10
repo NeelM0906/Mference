@@ -315,8 +315,8 @@ enum FlashNextPlanner {
     /// checks that the two installs' resident sets are identical under
     /// normalization, so every name has exactly one counterpart.
     ///
-    /// Flash-Next is deliberately identity. It has no runner to satisfy
-    /// (`ManifestReader.familiesWithoutRunner` refuses it on missing axes), and
+    /// Flash-Next is deliberately identity: `FlashNextForwardRunner` and the
+    /// resident accessors were written against the vendor's own names, and
     /// renaming would change every byte of an install that already ships.
     static func residentName(for sourceName: String,
                              family: RepackModelFamily) -> String {

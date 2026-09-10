@@ -11,16 +11,18 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
     case maple = "maple"
-    /// Qwen3.8-Flash-Next. Installable today (repacked from the vendor's
-    /// original BF16 repo); the runtime has no runner for it yet, which
-    /// `ManifestReader.peekFamily` reports by name.
+    /// Qwen3.8-Flash-Next. Repacked from the vendor's original BF16 repo and
+    /// executed by `FlashNextForwardRunner`; its capability gate was lifted on
+    /// 2026-09-10, so `ManifestReader.peekFamily` resolves it like any other
+    /// shipped family.
     case qwen38flashnext = "qwen38flashnext"
 }
 
-/// Axes Qwen3.8-Flash-Next introduces that no shipped kernel covers. They are
-/// mirrored into `manifest.json -> arch` under these exact field names so the
-/// runtime's capability gate can refuse the install **by axis name** rather
-/// than guessing from dimensions.
+/// Axes Qwen3.8-Flash-Next introduces beyond the shipped families' geometry.
+/// They are mirrored into `manifest.json -> arch` under these exact field names
+/// so the runtime validates them field by field against its own baseline — and
+/// so a capability gate, in the era before a family's kernels land, can refuse
+/// an install **by axis name** rather than guessing from dimensions.
 struct FlashNextAxes: Sendable, Equatable {
     /// Low-rank hyper-connections: `hc_count` residual streams mixed through an
     /// `hc_lowrank` factorization per sub-block.

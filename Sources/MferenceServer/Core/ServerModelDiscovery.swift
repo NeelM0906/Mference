@@ -63,7 +63,7 @@ public enum ServerLibraryProbe {
         }
         let lock = directory.deletingLastPathComponent()
             .appendingPathComponent(name + ".install.lock")
-        if fileManager.fileExists(atPath: lock.path) {
+        if installLockIsHeld(at: lock) {
             return .partial("\(name).install.lock is held by a running install")
         }
         let manifestURL = directory.appendingPathComponent("manifest.json")
@@ -125,6 +125,24 @@ public enum ServerLibraryProbe {
               let data = try? Data(contentsOf: manifestURL) else { return nil }
         return (try? JSONDecoder().decode(FamilyPeek.self, from: data))?.arch.family
     }
+
+    /// Whether a repacker currently holds the sibling install lock.
+    ///
+    /// `InstallLock` takes `flock(LOCK_EX | LOCK_NB)` on the file and leaves
+    /// the file behind when it is done, so every completed install has a
+    /// stale zero-byte lock file next to it. Only the advisory lock itself
+    /// says an install is running; the file's existence says nothing.
+    static func installLockIsHeld(at lock: URL) -> Bool {
+        let descriptor = open(lock.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(descriptor, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK
+    }
+
 }
 
 /// One completed, runnable install the library can serve.

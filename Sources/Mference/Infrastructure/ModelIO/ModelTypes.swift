@@ -12,10 +12,11 @@ public enum ModelFamily: String, Sendable, Hashable {
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
     case maple = "maple"
-    /// Qwen3.8-Flash-Next. The repacker installs it and the runtime carries a
-    /// compiled baseline so the install validates, but no runner executes it:
-    /// `ManifestReader.familiesWithoutRunner` refuses it by name at every
-    /// entry point until the kernels for its three new axes land.
+    /// Qwen3.8-Flash-Next. The repacker installs it and `FlashNextForwardRunner`
+    /// executes it; its capability gate was lifted on 2026-09-10. v1 reaches the
+    /// CLI and the loopback server — the Mac app has no install descriptor for
+    /// this family (`AppModelInstallDescriptor` returns nil), because it is a
+    /// ~175 GB quantize-in-flight repack rather than a pre-converted download.
     case qwen38flashnext = "qwen38flashnext"
 }
 
@@ -855,10 +856,9 @@ public struct ArchConfig: Sendable, Equatable {
     ///
     /// Values are read from the installed manifest at
     /// `scratch/qwen38flashnext.gturbo` (revision `de4b8e4d`); see
-    /// `docs/families/QWEN38_FLASH_NEXT.md`. The runner does not exist yet:
-    /// `ManifestReader.familiesWithoutRunner` refuses this family by name at
-    /// every load path. The baseline exists so the manifest can be validated
-    /// and toy fixtures built while the kernels are written.
+    /// `docs/families/QWEN38_FLASH_NEXT.md`. This is the baseline
+    /// `FlashNextForwardRunner` runs against, and since the 2026-09-10 gate lift
+    /// it is also what `Model.load` auto-detection resolves for the family.
     public static let qwen38FlashNext_180B_A3_5B = ArchConfig(
         hiddenSize: 2560,
         intermediateSize: 640,
@@ -925,7 +925,9 @@ public struct ArchConfig: Sendable, Equatable {
     ///
     /// A family here has a validated baseline, not necessarily a runner:
     /// `ManifestReader.familiesWithoutRunner` is the separate, authoritative
-    /// gate over whether the runtime can execute one.
+    /// gate over whether the runtime can execute one. That table is empty
+    /// today — every family in this registry has a runner — but the two facts
+    /// stay separate, because a new port earns its baseline first.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,

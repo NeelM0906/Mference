@@ -113,8 +113,22 @@ enum ServerLibraryFixture {
     }
 
     /// Marks `<name>.gturbo` as an install in progress, the way `InstallLock`
-    /// does: a sibling lock file next to the directory being written.
-    static func holdInstallLock(in root: URL, named name: String) throws {
+    /// does: an exclusive `flock` on a sibling lock file next to the directory
+    /// being written. The returned descriptor holds the lock; close it to
+    /// release.
+    static func holdInstallLock(in root: URL, named name: String) throws -> Int32 {
+        let lock = root.appendingPathComponent("\(name).gturbo.install.lock")
+        try Data().write(to: lock)
+        let descriptor = open(lock.path, O_RDWR)
+        guard descriptor >= 0, flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return descriptor
+    }
+
+    /// The file `InstallLock` leaves behind after a completed install: present,
+    /// empty, and held by nobody.
+    static func leaveStaleInstallLock(in root: URL, named name: String) throws {
         try Data().write(to: root.appendingPathComponent("\(name).gturbo.install.lock"))
     }
 

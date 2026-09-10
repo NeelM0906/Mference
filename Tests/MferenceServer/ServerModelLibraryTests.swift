@@ -151,12 +151,23 @@ struct ServerLibraryProbeTests {
     @Test func heldInstallLockRejectsTheDirectory() throws {
         let root = try ServerLibraryFixture.makeRoot("locked")
         let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
-        try ServerLibraryFixture.holdInstallLock(in: root, named: "gemma4")
+        let held = try ServerLibraryFixture.holdInstallLock(in: root, named: "gemma4")
+        defer { close(held) }
         guard case .partial(let reason) = ServerLibraryProbe.probe(directory: directory) else {
             Issue.record("a locked install must not be advertised")
             return
         }
         #expect(reason.contains("install.lock"))
+    }
+
+    /// `InstallLock` leaves its zero-byte lock file behind after every
+    /// completed install, so the file alone must not hide a complete install;
+    /// only a held `flock` does.
+    @Test func staleInstallLockFileIsIgnored() throws {
+        let root = try ServerLibraryFixture.makeRoot("stale-lock")
+        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
+        try ServerLibraryFixture.leaveStaleInstallLock(in: root, named: "gemma4")
+        #expect(ServerLibraryProbe.probe(directory: directory) == .complete(family: .gemma4))
     }
 
     @Test func stagingDirectoryIsRejected() throws {
