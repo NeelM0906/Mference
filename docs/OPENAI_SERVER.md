@@ -8,11 +8,12 @@ or tunnel.
 
 ## Start the server
 
-First, install the model with the Mac app or `MferenceRepack`. Then check
-that no other Mference model process is running:
+First, install the model with `MferenceRepack` or
+`./mference-ui.sh install <family>`. Then check that no other Mference model
+process is running:
 
 ```bash
-pgrep -fl 'MferenceServer|MferenceMac|MferenceDecodeService|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If the command prints a match, do not start the server.
