@@ -432,19 +432,34 @@ public enum ManifestReader {
         }
         if expected.family == .qwen38flashnext {
             // Workstream-2 quantize-in-flight: every eligible resident and
-            // routed tensor is INT4 affine group-64, the router included
-            // (the shipped families keep an INT8 router because their source
-            // conversions did; this one is quantized by the repacker itself
-            // under one uniform policy).
-            let slots: [(String, ManifestQuantSlot)] = [
-                ("embedding", quant.embedding),
-                ("attention", quant.attention),
-                ("router", quant.router),
-                ("sharedExpert", quant.sharedExpert),
-                ("routedExpert", quant.routedExpert),
+            // routed tensor is INT4 affine group-64 — except the MoE gating
+            // tensors, which the install policy may keep at INT8.
+            //
+            // Both widths are admitted on the router slot on purpose, and the
+            // set is not a courtesy: two installs of this family exist. The
+            // uniform-INT4 one (`bitWidthOverridesHonored` 0) predates the
+            // 2026-09-10 router measurement and records 4; the INT8-router one
+            // records 8 and 98 overrides. Refusing either would strand an
+            // install that is on disk and correct for what it claims to be, so
+            // the manifest slot is read as a declaration rather than as a
+            // constant, and `FlashNextWeightMatrix` dispatches per tensor on
+            // the width its own index entry implies.
+            //
+            // `sharedExpert` stays INT4-only because that slot describes the
+            // shared expert's `gate_proj`, a projection the policy never
+            // overrides. The `mlp.shared_expert_gate` scalar gate, which the
+            // policy *does* override, has no slot of its own in the manifest
+            // schema; its width lives only in the resident index, which is the
+            // authority for every per-tensor width anyway.
+            let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
+                ("embedding", quant.embedding, [4]),
+                ("attention", quant.attention, [4]),
+                ("router", quant.router, [4, 8]),
+                ("sharedExpert", quant.sharedExpert, [4]),
+                ("routedExpert", quant.routedExpert, [4]),
             ]
-            for (name, slot) in slots {
-                guard slot.weightBits == 4,
+            for (name, slot, allowedBits) in slots {
+                guard allowedBits.contains(slot.weightBits),
                       slot.scheme.lowercased() == "affine",
                       slot.scaleType.lowercased() == "bf16",
                       slot.biasType.lowercased() == "bf16",
