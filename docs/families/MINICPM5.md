@@ -557,26 +557,26 @@ achieved bandwidth at ~102 GB/s on this M5.
 
 ## Merge-compatibility note
 
-Base branch: `neel/qwen-flash-benchmarks-frontend-3d297b` (main + the three
-W2.1b commits). Two other branches were active on the same base while this was
-written; the overlap, file by file:
+**Landed after #25 (2026-09-10).** This branch was written against
+`neel/qwen-flash-benchmarks-frontend-3d297b` (main plus the three W2.1b
+commits) while two other branches were in flight, and both of those merged
+first as PR #25: the Flash-Next capability-gate lift and Open WebUI plus
+`MferenceServer --library` mode, which also deleted the native Mac app. The
+suggested land order in the original note was followed. What the integration
+merge actually had to resolve:
 
-| File | This branch | Flash-Next gate lift | Server library mode |
-|---|---|---|---|
-| `ManifestReader.familiesWithoutRunner` | **net unchanged** (an entry was added at the contract step and removed when the runner landed) | edits (drops the Flash-Next entry) | — |
-| `FlashNextCapabilityGateTests.swift` | adds `.minicpm5` to the shipped list | edits | — |
-| `bringup-check.sh` | one usage word + one `case` line | edits | — |
-| `THIRD_PARTY_NOTICES.md` | one appended paragraph + "one of five" → "one of the checkpoints below" | edits | — |
-| `docs/families/QWEN38_FLASH_NEXT.md` | untouched | edits | — |
-| `Sources/MferenceServer/Core/ServerInference.swift` | one `case .minicpm5` line in `defaultModelID` | — | edits |
-| `Sources/MferenceServer/*` otherwise | untouched (validation tests added in `Tests/MferenceServer`) | — | edits |
-| Exhaustive `switch` sites (`Model.swift`, `ForwardRunnerFactory`, `AppModelInstallDescriptor`, `RepackPlanner`, `FlashNextPlanner`, `QuantBitPolicy`, `GTurboJSON`) | one additive `case` each, nothing reordered | may touch the same switches | — |
-
-Every shared file was edited additively (one case, one line, one paragraph), so
-the expected conflicts are trivial context conflicts. Suggested land order: the
-Flash-Next lift first (it removes a table entry this branch no longer touches),
-then this branch, then library mode (its `ServerInference` edits are wider than
-this branch's one line).
+| File | Resolution |
+|---|---|
+| `ManifestReader.familiesWithoutRunner` | no conflict — this branch is net-unchanged there, and the table now ships empty |
+| `Model.swift` | both sides' cases kept: `.qwen38flashnext` throws the post-#25 `accessorNotAvailable(_:)` (the old `runnerNotImplemented()` helper is gone), `.minicpm5` returns its `input_layernorm` / `post_attention_layernorm` |
+| `FlashNextCapabilityGateTests.swift` | `shippedFamiliesAreNotGated` lists both `.qwen38flashnext` and `.minicpm5`; the rest of the suite is #25's lifted-gate form |
+| `QuantBitPolicyTests.swift` | #25's `.moeRouterInt8` tests kept; `minicpm5`'s uniform-INT4 answer asserted on its own line rather than in the no-entry loop |
+| `Scripts/quantizer-weight-gate.py` | one script: #25's `--family/--orig/--control/--tensors/--rows`, g32 awareness and 429 backoff (the importable surface `Scripts/flashnext-router-int4-check.py` depends on) plus this branch's `minicpm5` pins and sample plan. `control_name` now derives the head's control name from the control prefix instead of hard-coding Qwen's `language_model.lm_head` |
+| `bringup-check.sh` | both `case` lines and both usage labels; #25's `pgrep` pattern |
+| `THIRD_PARTY_NOTICES.md` | both notices; "one of six checkpoints" became seven, with Flash-Next and MiniCPM5 named as the two vendor-BF16 installs |
+| `docs/FAMILY_CONTRACT.md` | both the MC5 column and #25's empty-gate prose, which now records that MC5 never entered the gate |
+| `Sources/MferenceApp/Core/Installation/AppModelInstallDescriptor.swift` | deleted. The whole app went with #25; the UI discovers installs through `MferenceServer --library` (`Sources/MferenceServer/Core/ServerModelDiscovery.swift`), which needs no per-family descriptor |
+| `Sources/MferenceServer/Core/ServerModelDiscovery.swift` | not a text conflict but a build break: `ServerFamilyModelID.modelID(for:)` is a deliberately exhaustive `switch` over `ModelFamily`, so `.minicpm5` was added there with the same `minicpm5-2b-int4g64` id `ServerModelSession.defaultModelID` uses |
 
 ## Reproduction
 

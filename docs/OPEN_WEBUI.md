@@ -67,17 +67,18 @@ To run the two halves by hand, start the server yourself and give Open WebUI the
 The install runs `MferenceRepack` into `scratch/<family>.gturbo`, which is one
 of the roots library mode scans, so a model installed this way appears in the
 picker the next time the UI starts. Supported families are `gemma4`, `qwen36`,
-`qwen38`, `deepseekv4flash`, `inklingsmall`, `maple`, and `qwen38flashnext`;
-the launcher reads that list out of `MferenceRepack`'s own help, so it cannot
-drift.
+`qwen38`, `deepseekv4flash`, `inklingsmall`, `maple`, `qwen38flashnext`, and
+`minicpm5`, plus the two quantizer-control installs `qwen36original` and
+`minicpm5mlx`; the launcher reads that list out of `MferenceRepack`'s own help,
+so it cannot drift.
 
-Downloads range from ~15 GB (Gemma 4) to ~148 GB (Inkling-Small). Check disk
-first, and read [docs/DEEPSEEK_V4_FLASH.md](DEEPSEEK_V4_FLASH.md) or
+Downloads range from ~5 GB (MiniCPM5-2B) to ~360 GB read for Flash-Next.
+Check disk first, and read [docs/DEEPSEEK_V4_FLASH.md](DEEPSEEK_V4_FLASH.md) or
 [docs/INKLING_SMALL.md](INKLING_SMALL.md) before installing either of those two.
 A cancelled download continues with `--resume`.
 
-`qwen38flashnext` installs and verifies but has no runner yet, so it is
-deliberately **not** listed in the picker; see
+Every family above has a runner, so every complete install of one is listed.
+An install the runtime cannot execute is skipped rather than listed; see
 [Installs that are not listed](#installs-that-are-not-listed).
 
 ## Listing what the picker will show
@@ -214,7 +215,8 @@ next time the launcher runs.
 
 An install alone in its family is advertised under that family's identifier —
 `gemma-4-26b-a4b-it`, `qwen3.6-35b-a3b`, `qwen3.8-27b-4bit`,
-`deepseek-v4-flash-2bit-dq`, `inkling-small-4bit`, `maple-preview-2bit-mlx`.
+`deepseek-v4-flash-2bit-dq`, `inkling-small-4bit`, `maple-preview-2bit-mlx`,
+`qwen3.8-flash-next-int4g64`, `minicpm5-2b-int4g64`.
 
 When two installs share a family, **both** are suffixed with their directory
 basename minus `.gturbo`, and neither keeps the bare identifier. So
@@ -239,7 +241,10 @@ A family the repacker can install but no runner can execute yet is **skipped**,
 not listed as unusable. Listing it would put a permanently failing entry in the
 model picker. The skip line names it, and the moment its capability gate lifts
 the install is listed with no code change and no configuration — library mode
-lists whatever the runtime accepts. `qwen3.8-flash-next` is the current example.
+lists whatever the runtime accepts. There is no such family today —
+`ManifestReader.familiesWithoutRunner` ships empty, and `qwen38flashnext` was
+the last entry, lifted on 2026-09-10. The skip line above is the format the
+next port will produce; the mechanism is kept for it.
 
 ### Error statuses in library mode
 

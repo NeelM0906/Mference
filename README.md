@@ -41,7 +41,7 @@ aperture now covers three kinds of tensor: routed experts stream into a slot
 cache, long-context KV pages spill to SSD, and Flash-Next's 320-million-row
 n-gram embedding table is read a few rows per token.
 
-Mference currently runs seven pinned instruction checkpoints:
+Mference currently runs eight pinned instruction checkpoints:
 
 - **[Gemma 4 26B-A4B](https://ai.google.dev/gemma/docs/core/model_card_4)** —
   26B total, ~3.88B active per token, in ~2 GB of memory.
@@ -83,6 +83,18 @@ Mference currently runs seven pinned instruction checkpoints:
   3,247-token prompt, beyond the indexer's 2,048-token budget. Runs from the
   CLI, the server, and the UI. Prefill is still sequential (~10 tok/s). See
   the [bring-up dossier](docs/families/QWEN38_FLASH_NEXT.md).
+- **[MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B)** *(new)* — the
+  first plain-llama dense family: 2B total, all active, 42 layers with no
+  expert routing, no q/k norms, and no output gate. Installed from the
+  vendor's BF16 upload (~5 GB read, quantized in flight to INT4 group-64,
+  1.43 GB on disk), and the second calibration point for the
+  [W2.1b quality gate](docs/QUANTIZER_QUALITY.md) — measured against the
+  vendor's own MLX conversion rather than a community one. On a 24 GB M5 the
+  protocol's short-explanation case decodes at **65.56 tok/s**. Its chat
+  template opens a live `<think>` block that the other two protocol cases do
+  not leave within the 1,024-token cap, so those are reported as a stated
+  deviation at a raised cap. See the
+  [bring-up dossier](docs/families/MINICPM5.md).
 
 The runtime, streaming installer, CLI, and loopback OpenAI-compatible server
 are written in Swift and Metal; the UI is Open WebUI, driven through that
@@ -143,10 +155,10 @@ The server alone, for other OpenAI-compatible clients, is documented in
 
 | Metric | Value |
 | --- | --- |
-| Models | Gemma 4 26B-A4B IT · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B (new) |
-| Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts; vendor BF16 quantized in flight to INT4/INT8 group 64 for Qwen 3.6 and Flash-Next |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB (Flash-Next)** |
-| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) · ~15 GB (Qwen 3.8) · ~175 GB (Flash-Next) |
+| Models | Gemma 4 26B-A4B IT · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B · MiniCPM5-2B (dense, plain llama) (new) |
+| Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts; vendor BF16 quantized in flight to INT4/INT8 group 64 for Qwen 3.6, Flash-Next, and MiniCPM5 |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB (Flash-Next)** · 123 MiB (MiniCPM5-2B, short-explanation case) |
+| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) · ~15 GB (Qwen 3.8) · ~175 GB (Flash-Next) · 1.43 GB (MiniCPM5-2B; 1,425,981,882 bytes over 8 files) |
 | Hardware | Apple Silicon Mac; 8 GB of RAM |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) · 17.1–18.7 tok/s (256 GB M3 Ultra) |
@@ -156,6 +168,7 @@ The server alone, for other OpenAI-compatible clients, is documented in
 | Measured, Maple Preview | Exact head: 18.9–24.6 tok/s decode, 25.1–44.9 tok/s prefill, and 491–1,211 MiB peak process footprint on 128-8192 context (16 GB M4) · 38.5 tok/s decode (M3 Ultra) |
 | Measured, Qwen 3.8 27B | 15.0 tok/s decode (MTP speculative, byte-identical; 7.9 plain) · ~60 tok/s prefill (24 GB M5); mlx-vlm on the same checkpoint: 6.41 decode / 40.5 prefill · 38.4–39.4 tok/s plain decode (M3 Ultra, where MTP gives no gain) · passkey exact at 10.6k tokens through the paged KV + SSD tier |
 | Measured, Qwen3.8-Flash-Next | Frozen protocol (256 GB M3 Ultra, INT8-router install): 11.81 / 11.71 / 11.11 tok/s decode on the short / medium / long cases at 2,355–2,367 MiB peak RSS, 9/9 runs to end of turn, outputs byte-identical across runs · 12.3 tok/s at 3,247 tokens of context with the needle retrieved exactly · prefill sequential, ~10 tok/s marginal |
+| Measured, MiniCPM5-2B | Protocol proper (24 GB M5): **65.56 tok/s** decode on short-explanation, 65.50–65.80 across 3 runs, 3/3 to end of turn, 123 MiB peak RSS · as the stated deviation, with only the token cap raised: 37.63 tok/s (medium-review, still inside its think block at 4,096 tokens) and 34.72 tok/s (long-synthesis) · passkey exact at 8,692 prompt tokens through the paged KV cache |
 
 Qwen 3.6 numbers follow the frozen
 [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — three fixed
@@ -300,8 +313,6 @@ engine are in [System design](docs/SYSTEM_DESIGN.md) and the
 
 - Flash-Next: frozen-protocol numbers, pipelined prefill, INT8 routers, and
   the MTP sidecar
-- MiniCPM5-2B, the first plain-llama dense family, installed through the
-  quantize-in-flight path
 - Extend resident-expert compute/I/O overlap to every model family and prefill
 - Longer contexts, vision towers, and a hardware benchmark matrix
 - More explicitly pinned architectures without a generic-model fallback
@@ -320,7 +331,9 @@ Model weights remain subject to their own terms: the
 [Gemma 4 license](https://ai.google.dev/gemma/apache_2), the
 [Qwen license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE)
 for Qwen 3.6, Qwen 3.8, and Qwen3.8-Flash-Next, and each pinned repository's
-own terms for DeepSeek-V4-Flash and Inkling-Small. Maple's pinned checkpoint
+own terms for DeepSeek-V4-Flash and Inkling-Small. MiniCPM5-2B is
+[Apache-2.0](https://github.com/OpenBMB/MiniCPM/blob/main/LICENSE) from
+OpenBMB. Maple's pinned checkpoint
 declares no license; establish the necessary rights before downloading, using,
 or redistributing it. Maple's MLX-derived kernel work is covered by
 [LICENSE-MLX](LICENSE-MLX); see

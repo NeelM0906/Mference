@@ -18,12 +18,13 @@ of carrying it. Vision towers are always skipped. Either way the decision is
 recorded in manifest.json -> sidecars rather than left implicit.
 
 qwen38flashnext and qwen36original read the model vendor's original BF16 repo
-and quantize to INT4 affine group-64 during the install. qwen38flashnext
-installs and verifies, but no runner executes it yet: loading it fails naming
-the missing axes. qwen36original is the same checkpoint qwen36 installs from
-mlx-community's pre-quantized conversion, put through our own quantizer
-instead; installing both and comparing them is the W2.1b quantizer-quality
-gate (docs/QUANTIZER_QUALITY.md).
+and quantize to INT4 affine group-64 during the install. qwen38flashnext keeps
+its two gating tensors per layer at INT8; its capability gate was lifted on
+2026-09-10, so an install loads through the ordinary funnel. qwen36original is
+the same checkpoint qwen36 installs from mlx-community's pre-quantized
+conversion, put through our own quantizer instead; installing both and
+comparing them is the W2.1b quantizer-quality gate
+(docs/QUANTIZER_QUALITY.md).
 
 minicpm5 reads openbmb/MiniCPM5-2B's BF16 upload and quantizes to INT4 affine
 group-64 during the install (~5 GB read, ~1.4 GB written); minicpm5mlx is the

@@ -1,9 +1,11 @@
 # Mference
 
-Swift and Metal inference for pinned mixture-of-experts checkpoints on Apple
-Silicon: Gemma 4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, and
-Inkling-Small 276B-A12B. The shared core and KV cache stay resident; routed
-experts stream from SSD per token.
+Swift and Metal inference for pinned checkpoints on Apple Silicon: Gemma 4
+26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, Inkling-Small
+276B-A12B, Maple Preview, Qwen 3.8 27B, Qwen3.8-Flash-Next 180B-A3.5B, and
+MiniCPM5-2B. The shared core and KV cache stay resident; routed experts stream
+from SSD per token. Qwen 3.8 27B and MiniCPM5-2B are dense and fully
+resident.
 
 ## Scope
 
@@ -41,9 +43,10 @@ remove them with `--discard-partial`.
 
 ## Models and the library
 
-Install directories are named `gemma4.gturbo`, `qwen36.gturbo`,
-`deepseekv4flash.gturbo`, and `inklingsmall.gturbo`, but detection goes by
-each directory's own manifest, not its name. `MferenceServer --library`
+Install directories take the family's own label (`gemma4.gturbo`,
+`qwen36.gturbo`, `minicpm5.gturbo`, and so on for the labels
+`MferenceRepack --help` lists), but detection goes by each directory's own
+manifest, not its name. `MferenceServer --library`
 scans the library roots — the `Mference.libraryRoot` default if set, the
 package checkout's `scratch/`, and `~/Library/Application Support/Mference` —
 and serves every model it finds there to the UI. The CLI and a non-library
@@ -85,8 +88,9 @@ Run only one server, CLI, or model-using test at a time.
 
 For performance results, build release once and follow the [community
 benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable
-experimental controls or profiling. Measured baselines for all four families
-are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+experimental controls or profiling. Measured baselines are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and each family's own page under
+[docs/families/](docs/families/) carries its bring-up numbers.
 
 Do not download a full checkpoint, duplicate a `.gturbo` model, create a
 worktree, or purge caches just to run tests.

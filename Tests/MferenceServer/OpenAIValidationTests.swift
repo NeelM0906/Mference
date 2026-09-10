@@ -697,9 +697,12 @@ struct ServerArgumentTests {
         for modelID in [
             "gemma-4-26b-a4b-it",
             "qwen3.6-35b-a3b",
+            "qwen3.8-27b-4bit",
             "deepseek-v4-flash-2bit-dq",
             "inkling-small-4bit",
             "maple-preview-2bit-mlx",
+            "qwen3.8-flash-next-int4g64",
+            "minicpm5-2b-int4g64",
         ] {
             #expect(ServerArguments.usage.contains(modelID))
         }

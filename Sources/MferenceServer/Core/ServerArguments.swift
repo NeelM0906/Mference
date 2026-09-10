@@ -50,9 +50,11 @@ public struct ServerArguments: Equatable, Sendable {
                              and fails when Tailscale is unavailable.
       --model-id <id>        API model identifier (default derived from the
                              installed model: gemma-4-26b-a4b-it,
-                             qwen3.6-35b-a3b, deepseek-v4-flash-2bit-dq,
-                             inkling-small-4bit, or maple-preview-2bit-mlx).
-                             Single-model mode only.
+                             qwen3.6-35b-a3b, qwen3.8-27b-4bit,
+                             deepseek-v4-flash-2bit-dq, inkling-small-4bit,
+                             maple-preview-2bit-mlx,
+                             qwen3.8-flash-next-int4g64, or
+                             minicpm5-2b-int4g64). Single-model mode only.
       --max-context <tokens> 4096, 8192, 16384, 32768, 65536, or 128000 (default 16384).
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
