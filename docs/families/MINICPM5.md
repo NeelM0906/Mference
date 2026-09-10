@@ -22,7 +22,7 @@ implemented unless the "Port status" list says so.
 | Control index SHA-256 | `ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045` (68,721 bytes) |
 | Parameters | 2.517B total, 2.517B active (dense); 1.982B non-embedding |
 | Install size | 1,425,981,879 bytes verified (8 files); `model_weights.bin` 1,415,974,912 |
-| Status | **in port** (installed and W2.1b weight-level passed; runner pending) |
+| Status | **in port** (runner and tokenizer landed with green parity gates; first light and the family gate in progress) |
 
 ## Checkpoint selection
 
@@ -341,12 +341,64 @@ validate without being loadable.
       is committed alongside so the Swift gates never skip. Byte-reproducible
       (20 files, re-run and diffed). Minimum top-1/top-2 rollout margin on the
       gate set: 0.022 (short), 0.053 (long); asserted ≥ 5e-3.
-- [ ] **Toy parity** — per-module, forward, rollout, cache gates in Swift
-- [ ] **Runner** — `MiniCPM5ForwardRunner`; capability gate lifted; first light
-- [ ] **Tokenizer** — dialect, XML parser, two EOS ids, fixtures byte-identical
+- [x] **Toy parity PASSED** (2026-09-10, `MiniCPM5ReferenceParityTests`, the
+      Metal runner loaded from a real INT4 install of the toy checkpoint):
+      - *Gate 1–2, per-module and full forward at every position of both
+        prompts* — `numpy.allclose` at **atol = rtol = 1e-2** (the
+        FP16-activation tier). Observed worst max-abs: `attn_out` 1.0e-3,
+        `mlp_out` 1.5e-3, `hidden_out` 3.4e-3, logits 3.2e-3; argmax exact at
+        every position.
+      - *Gate 3, greedy rollouts* — **token-exact** for 16 steps on both prompts
+        through chunked prefill + the fused greedy head, and again through the
+        exact logits head (step logits inside the same tier). The goldens'
+        smallest top-1/top-2 margin is 0.022, so a flip would be a defect.
+      - *Gate 4, cached decode == recompute* — the runner's cached rollout
+        equals its own uncached re-prefill rollout, and both equal the
+        reference's (which asserts cached == uncached in-script).
+      - Chunked prefill vs sequential decode: **bit-exact** on the per-row path
+        (chunks under 32 tokens); on the batched INT4 QMM path the logits differ
+        by at most 3.2e-3 with identical argmax — the batched MLP's summation
+        order differs from the decode GEMV. Recorded as a known limit (the
+        INT8 Qwen 3.8 toy never exercised this path).
+      - Paged KV: full-selection paged decode is byte-identical to dense across
+        page boundaries and through prefill + decode; blocked streamed prefill
+        under a 5-page pool agrees with dense on the greedy head.
+- [x] **Runner** — `MiniCPM5ForwardRunner` (`ForwardRunnerFactory` dispatches
+      on the family); `familiesWithoutRunner` no longer lists `minicpm5` and
+      `shippedFamiliesAreNotGated` covers it
+- [x] **Tokenizer** — `ChatDialect.minicpm`, `MiniCPMToolCallParser`, both EOS
+      ids in `stopTokenIDs`; 16 HF renders byte-identical; the installed real
+      tokenizer's encodings match `transformers` 5.6.2 on every probe and every
+      render (`MFERENCE_MINICPM5_TOKENIZER_DIR` run)
 - [ ] **Ladder** — 16 / 32 / auto byte-identical greedy output
 - [ ] **Gate** — [`FAMILY_GATE.md`](../FAMILY_GATE.md) steps 1–9
 - [ ] **Protocol bench** — three frozen `real-generation-v1` cases
+
+## First light (real install, 2026-09-10)
+
+Host: Mac with Apple silicon, 24 GB, macOS 26.5, Swift 6.3.3, release
+`MferenceCLI` at commit `5758e6a`; `scratch/minicpm5.gturbo` (the
+quantize-in-flight install). One process at a time; `--temperature 0`.
+
+| Run | Command (abridged) | Footer | Output |
+|---|---|---|---|
+| raw | `--prompt "The capital of France is" --max-new 48` | `stop=maxTokens prefill=6tok/0.37s new=48tok decode=0.61s tok/s=78.452` | coherent English, evades the answer (" a well-known fact, but the question of what constitutes a capital can be more nuanced…") |
+| chat | `--messages-file chat.json --max-new 512` ("Explain in two sentences why the sky is blue.") | `stop=maxTokens prefill=21tok/0.33s new=512tok decode=7.17s tok/s=71.382` | **empty**: all 512 tokens stayed inside the think block; at 2048 tokens the same (`decode=37.35s tok/s=54.826`) |
+| chat, think exposed | the rendered chat prompt via `--prompt` (no decoder) `--max-new 400` | `stop=maxTokens … tok/s=72.204` | coherent but looping: "We need to answer: … The user wants it in two sentences. So we need to produce a response that is exactly two sentences." repeated |
+| needle, paged | `--messages-file needle.json --max-new 96 --max-context 16384 --kv-paged on --kv-pool-pages 96` (8,692 prompt tokens, passkey at 45 %) | `stop=endOfTurn prefill=8692tok/139.58s new=94tok decode=5.33s tok/s=17.646` | **`4917`** — the passkey, exactly, after a think block that closed on its own |
+
+Reading: the runner is coherent at real shape, and the needle run is the strong
+evidence — 8,692 tokens against a 96-page (6,144-token) pool means the sealed
+past spilled to SSD and streamed back through the blocked prefill, Quest
+selection ran over 136 pages per layer during decode, and the model still
+produced the exact passkey and closed its own think block (`stop=endOfTurn`).
+The greedy think-loop on the short chat prompt is a temperature-0 behaviour of
+a 2B thinking model (the vendor recommends `temperature 1.0`), not a runner
+defect the toy gates or the needle would have missed; the community protocol
+below samples at 0.2 / top-k 64 / top-p 0.95 and is where end-of-turn is
+measured. An independent HF-reference greedy decode of the real checkpoint was
+**not** run: the BF16 shard is streamed at install and never staged, and
+re-downloading 5 GB for a diagnostic is exactly what AGENTS.md forbids.
 
 ## Measured results
 

@@ -32,7 +32,7 @@ are preserved in [`LICENSE-MLX`](LICENSE-MLX).
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a
-pinned revision of one of five checkpoints and repacks it locally.
+pinned revision of one of the checkpoints below and repacks it locally.
 
 Gemma 4: revision `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` of
 [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit).
@@ -63,6 +63,21 @@ weights in a model card, LICENSE file, or Hub license tag. Downloading, using,
 or redistributing those weights therefore requires separately establishing
 that the necessary rights have been obtained; Mference makes no grant of
 rights to them.
+
+MiniCPM5-2B: revision `cd199ce3ee67549c42ef7372f809f2c63599a3e9` of
+[`openbmb/MiniCPM5-2B`](https://huggingface.co/openbmb/MiniCPM5-2B), the
+vendor's own BF16 upload, quantized to INT4 affine group-64 at install; the
+installer verifies its source-index SHA-256
+`6d839cd76e8395de548a0e6cc310386f66d1ecbb2c75d198a8dfd3d70892b756`. OpenBMB
+publishes the model and its weights under the
+[Apache License 2.0](https://github.com/OpenBMB/MiniCPM/blob/main/LICENSE)
+(`license: apache-2.0` in the model card). The W2.1b quantizer-quality control,
+revision `35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3` of
+[`openbmb/MiniCPM5-2B-MLX`](https://huggingface.co/openbmb/MiniCPM5-2B-MLX)
+(index SHA-256 `ccf202e0a06fe3c7eb8f354cfb29412a5e64956ad895413d4d9267ae4b3a6045`),
+is the vendor's own conversion under the same license. No reference code was
+imported for this family: its architecture was read from
+`transformers` v5.6.2 (Apache-2.0) and nothing was copied from it.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.
