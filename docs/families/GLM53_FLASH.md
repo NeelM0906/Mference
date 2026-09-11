@@ -269,8 +269,55 @@ Release CLI after both fixes (commit `7e0821d`, `MFERENCE_PHASES=1`):
 | chat short-explanation, greedy, 1,024 new (Max effort, still thinking at the cap) | `prefill=60tok/2.73s new=1024tok decode=40.90s tok/s=25.039` |
 | chat short-explanation, greedy, low effort (harness) | `stop=endOfTurn prefill=60tok/2.71s new=668tok decode=26.29s tok/s=25.412` |
 
-Prefill is the per-token path, so it runs at decode speed (~22 tok/s); a
-batched prefill is the open perf item (see "Known limits").
+Prefill at that commit was the per-token path (decode speed, ~22 tok/s);
+the batched prefill below replaced it.
+
+## Batched prefill
+
+`Glm53PrefillEngine` walks a chunk of up to 256 prompt tokens layer by layer
+with every weight read once per chunk: INT8 projections on the simdgroup
+matrix units (`glm53p_int8_gemm_mma`, fp32 operands so the dequantized
+weight is the GEMV's, one 64-column group per barrier), BF16 GEMMs for the
+router and pooling gate, the mHC maps per token, GDN's batched conv with the
+tail update, a KDA chunk kernel that carries the head's state in registers
+across the tokens (bit-identical to the same number of decode steps), the
+indexer's keys / gates / pooled keys for the chunk, and the routed experts
+grouped by expert over the chunk (one router readback per MoE layer; the
+resident slab addressed by expert index; measured 511 GB/s on the real
+~2-routes-per-expert distribution). Queries at or below `index_topk` attend
+densely and causally; later queries score every visible pool on the GPU and
+the CPU picks each query's set with the decode path's rule (one readback per
+sparse layer). `MFERENCE_GLM53_BATCHED_PREFILL=0` keeps the per-token path,
+`MFERENCE_GLM53_PREFILL_CHUNK=n` caps the chunk, `MFERENCE_GLM53_GEMM=scalar`
+swaps the scalar GEMM in, `MFERENCE_GLM53_PREFILL_TRACE=1` prints a line per
+chunk.
+
+Numerics: on the toy, the whole 48-token prompt (44 queries past
+`index_topk` 4) lands within 2e-3 of the per-token path with 6/6 greedy
+steps agreeing; on the real install every A/B so far agreed on all 32 greedy
+tokens and the next-token argmax (short-explanation, medium-review,
+long-synthesis), with prompt-logit deltas up to ~1.0 on top logits of ~19.
+A one-token-chunk run reproduces the 128-token chunk's logits exactly, so
+that gap is accumulation order (the GEMM sums in a different order than the
+GEMV and the batched RMSNorm kernel differs from the decode one), not chunk
+size. An fp16-operand GEMM variant was tried and dropped: its weight rounding
+moved logits by 1.4 and flipped a 0.6-margin next token.
+
+| Prompt | Per-token prefill | Batched prefill |
+|---|---:|---:|
+| short-explanation, 60 tokens | 2.03 s (29.6 tok/s) | 0.67 s (89 tok/s, one 60-token chunk incl. first-use setup) |
+| medium-review, 420 tokens | 14.5 s (28.9 tok/s) | 3.48 s (121 tok/s) |
+| long-synthesis, 2,792 tokens | 116.6 s (23.9 tok/s, release CLI) | 33.6 s (83 tok/s, release CLI) |
+
+Per-chunk trace on long-synthesis (release CLI, `MFERENCE_GLM53_PREFILL_TRACE=1`):
+chunks of 256 run 2.7 s at position 0 rising to 3.7 s at position 2,048 and
+beyond — the latent attention's cost grows with the visible rows (dense) or
+the 2,048 + tail selected rows, and the selection chunks cost the same as the
+last dense ones. The remaining prefill levers, in order: a multi-query latent
+attention kernel (queries of a chunk share the key rows they load; today each
+query re-reads them), the INT8 GEMM (about 4x above its instruction floor)
+and the grouped expert kernels (weight-bound at ~500 GB/s, amortized by chunk
+size).
 
 ## Measured results
 
@@ -326,6 +373,11 @@ token puts the memory-bandwidth floor near 15 ms.
 
 ## Known limits
 
+- **Prefill numerics are FP16-tier, not bit-identical to decode.** The
+  batched prefill and the per-token path are two valid FP16 executions of the
+  model that differ in accumulation order (see "Batched prefill"); greedy
+  continuations can differ at near-ties. The per-token path remains
+  available (`MFERENCE_GLM53_BATCHED_PREFILL=0`).
 - **256 GB-class hosts.** The family's runner is built for the whole expert
   set resident in memory (`auto` picks `.resident` when pool + core + 20 GiB
   fit physical memory); the slot-cache mode works on smaller hosts but reads

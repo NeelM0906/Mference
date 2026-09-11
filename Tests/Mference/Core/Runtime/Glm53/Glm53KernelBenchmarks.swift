@@ -161,6 +161,34 @@ import Testing
                                pairToken: pairToken, segStart: segStart, activeExperts: active, activeCount: 16,
                                routePair: routePair, weights: weights, residual: x, y: y, d: hidden, f: 2048, topK: K, tokens: T)
         }
+        // The real distribution: T x 8 routes spread over ~250 of 288 experts
+        // (about two routes per expert), 16 distinct slab experts cycled.
+        do {
+            let pairsR = T * K
+            var pr = 0
+            let perExpert = max(1, pairsR / 250)
+            var e = 0
+            let pt2 = pairToken.contents().bindMemory(to: UInt32.self, capacity: pairsR)
+            let rp2 = routePair.contents().bindMemory(to: UInt32.self, capacity: pairsR)
+            let seg2 = device.makeBuffer(length: 251 * 4, options: .storageModeShared)!
+            let act2 = device.makeBuffer(length: 250 * 4, options: .storageModeShared)!
+            let sp2 = seg2.contents().bindMemory(to: UInt32.self, capacity: 251)
+            let ap2 = act2.contents().bindMemory(to: UInt32.self, capacity: 250)
+            var count = 0
+            while pr < pairsR && count < 250 {
+                ap2[count] = UInt32(e % 16); sp2[count] = UInt32(pr)
+                for _ in 0..<perExpert where pr < pairsR { pt2[pr] = UInt32(pr / K); rp2[pr] = UInt32(pr); pr += 1 }
+                e += 1; count += 1
+            }
+            while pr < pairsR { pt2[pr] = UInt32(pr / K); rp2[pr] = UInt32(pr); pr += 1 }
+            sp2[count] = UInt32(pairsR)
+            try Self.time(ctx, label: "grouped moe \(count) experts x ~\(perExpert) routes (\(pairsR) routes)",
+                          bytes: count * stride) { cb in
+                k.encodeGroupedMoE(commandBuffer: cb, slab: slab, offsets: offsets, x: x, acts: acts, partial: partial,
+                                   pairToken: pairToken, segStart: seg2, activeExperts: act2, activeCount: count,
+                                   routePair: routePair, weights: weights, residual: x, y: y, d: hidden, f: 2048, topK: K, tokens: T)
+            }
+        }
         try Self.time(ctx, label: "router select batched x T", bytes: T * 288 * 4) { cb in
             k.encodeRouterSelect(commandBuffer: cb, logits: logits, bias: f32(288), outIndices: routePair,
                                  outWeights: weights, numExperts: 288, routeScale: 2.5, tokens: T)

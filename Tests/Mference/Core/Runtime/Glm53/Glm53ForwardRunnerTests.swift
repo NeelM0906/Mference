@@ -436,11 +436,11 @@ import Testing
         }
     }
 
-    /// The batched prefill covers positions below `index_topk` (4 on the toy):
-    /// its logits for the fourth token must be FP16-close to the per-token
-    /// path's, with the same argmax, and the decode that follows must carry
-    /// the same state (greedy continuation agrees).
-    @Test func batchedPrefillMatchesThePerTokenPathBelowIndexTopK() async throws {
+    /// The batched prefill over the whole long prompt (dense below index_topk,
+    /// per-query selection past it): its logits for the last prompt token must
+    /// be FP16-close to the per-token path's with the same argmax, and the
+    /// decode that follows must carry the same state (greedy continuation).
+    @Test func batchedPrefillMatchesThePerTokenPath() async throws {
         let h = try Self.makeHarness()
         defer { h.cleanup() }
         let resident = try Glm53Parity.loadModel(at: h.dir, device: h.ctx.device, mode: .resident)
@@ -451,8 +451,10 @@ import Testing
         #expect(batched.expertsResident && batched.batchedPrefillEnabled)
         let logitsB = try #require(h.ctx.device.makeBuffer(
             length: h.config.vocabSize * MemoryLayout<Float16>.stride, options: .storageModeShared))
+        // The whole long prompt: 48 tokens against index_topk 4, so most
+        // queries go through the batched indexer scoring and selection.
         let tokens = try Glm53Goldens.promptTokens(.long).map { Int32($0) }
-        let n = h.config.compressedAttention.indexTopK
+        let n = tokens.count
         let prefix = tokens[0..<n]
         _ = try await batched.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
                                              config: .production(chunkTokens: 32), into: logitsB, onProgress: { _ in })

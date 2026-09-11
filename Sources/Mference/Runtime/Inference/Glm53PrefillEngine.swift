@@ -5,10 +5,11 @@ import Metal
 /// `capacity` prompt tokens walks the layers with every weight read once per
 /// chunk (`glm53_prefill.metal`, the grouped expert kernels in `moe.metal`).
 ///
-/// Valid while the chunk ends at or below `index_topk`: there the pooled
-/// indexer's selection is exhaustive, so the sparse layers attend densely and
-/// causally with no CPU decision in the loop. The one readback per MoE layer
-/// is the router's chunk of indices, which the CPU groups by expert.
+/// Queries at or below `index_topk` attend densely and causally (the pooled
+/// indexer's selection is exhaustive there); later queries score every
+/// visible pool on the GPU and the CPU picks each query's set with the decode
+/// path's rule, one readback per sparse layer. The one readback per MoE
+/// layer is the router's chunk of indices, which the CPU groups by expert.
 ///
 /// State handoff is the decode path's: conv tails (GDN tail update), the KDA
 /// state (written back by `glm53p_kda_chunk`), latent and indexer caches at
@@ -18,7 +19,7 @@ import Metal
 /// (`Glm53ForwardRunnerTests` measures the gap; the per-token path stays the
 /// exactness reference and serves everything past `index_topk`).
 final class Glm53PrefillEngine {
-    static let capacity = 128
+    static let capacity = 256
 
     private unowned let r: Glm53ForwardRunner
     private let k: Glm53PrefillKernels
@@ -43,6 +44,13 @@ final class Glm53PrefillEngine {
     private let attnOutC: MTLBuffer
     private let qrC: MTLBuffer, qC: MTLBuffer, qLatC: MTLBuffer, oLatC: MTLBuffer
     private let idxKRawC: MTLBuffer
+    private let idxQC: MTLBuffer               // [C][idxHeads*idxDim]
+    private let idxWC: MTLBuffer               // [C][idxHeads]
+    private let scoresC: MTLBuffer             // fp32 [C][maxPools]
+    private let selectedC: MTLBuffer           // u32 [C][selStride]
+    private let countsC: MTLBuffer             // u32 [C]
+    private let maxPools: Int
+    private let selStride: Int
     private let routerLogitsC: MTLBuffer      // fp32 [C][E]
     private let routerIdxC: MTLBuffer         // u32 [C][K]
     private let routerWC: MTLBuffer           // fp16 [C][K]
@@ -97,6 +105,13 @@ final class Glm53PrefillEngine {
         qLatC = try buf(C * runner.numHeads * runner.kvRank * 2)
         oLatC = try buf(C * runner.numHeads * runner.kvRank * 2)
         idxKRawC = try buf(C * runner.idxDim * 2)
+        idxQC = try buf(C * runner.idxHeads * runner.idxDim * 2)
+        idxWC = try buf(C * runner.idxHeads * 2)
+        maxPools = runner.maxContext / max(runner.kPool, 1) + 1
+        selStride = runner.idxTopK + runner.kPool
+        scoresC = try buf(C * maxPools * 4)
+        selectedC = try buf(C * selStride * 4)
+        countsC = try buf(C * 4)
         routerLogitsC = try buf(C * runner.numExperts * 4)
         routerIdxC = try buf(C * K * 4)
         routerWC = try buf(C * K * 2)
@@ -112,12 +127,26 @@ final class Glm53PrefillEngine {
         mlpOutC = try buf(C * h * 2)
     }
 
-    /// Runs `tokens` (at most `capacity`) at positions `p0...`; the chunk must
-    /// end at or below `index_topk`. Writes the last token's logits when asked.
+    /// Runs `tokens` (at most `capacity`) at positions `p0...`. Queries at or
+    /// below `index_topk` attend densely; later ones through the pooled
+    /// indexer's per-query selection (scored on the GPU, chosen on the CPU
+    /// with `Glm53Selection.selectTokens`, one readback per sparse layer).
+    /// Writes the last token's logits when asked.
+    /// `MFERENCE_GLM53_PREFILL_TRACE=1` prints one line per chunk with its
+    /// wall time and, when the phase clock is on, the GPU time.
+    private static let trace = ProcessInfo.processInfo.environment["MFERENCE_GLM53_PREFILL_TRACE"] == "1"
+
     func run(tokens: ArraySlice<Int32>, startPosition p0: Int, into logits: MTLBuffer?) throws {
         let T = tokens.count
         precondition(T > 0 && T <= Self.capacity)
-        precondition(p0 + T <= r.idxTopK, "batched prefill is only the model below index_topk")
+        let start = Self.trace ? Date() : nil
+        defer {
+            if let start {
+                let dt = Date().timeIntervalSince(start)
+                FileHandle.standardError.write(Data(String(format: "[glm53 prefill] chunk p0=%d T=%d %.3f s (%.1f tok/s)\n",
+                                                          p0, T, dt, Double(T) / dt).utf8))
+            }
+        }
         let ids = tokenIDs.contents().bindMemory(to: UInt32.self, capacity: T)
         for (i, t) in tokens.enumerated() { ids[i] = UInt32(t) }
         let h = r.hidden, hc = r.hc, eps = r.eps
@@ -142,7 +171,7 @@ final class Glm53PrefillEngine {
             if r.cfg.layerIsKDA(L) {
                 try encodeKDA(cb, layer: layer, index: L, tokens: T)
             } else {
-                try encodeSparse(cb, layer: layer, index: L, p0: p0, tokens: T)
+                cb = try encodeSparse(cb, layer: layer, index: L, p0: p0, tokens: T)
             }
             k.encodeHCPlaceMix(commandBuffer: cb, streams: streamsA, sub: attnOutC, post: postA, comb: combA,
                                outStreams: streamsB, hcMult: hc, hidden: h, tokens: T)
@@ -176,6 +205,7 @@ final class Glm53PrefillEngine {
             try r.sync()
         } else {
             try r.flush()
+            if Self.trace { try r.waitForCommitted() }
         }
     }
 
@@ -215,7 +245,7 @@ final class Glm53PrefillEngine {
     }
 
     private func encodeSparse(_ cb: MTLCommandBuffer, layer: Glm53ForwardRunner.LayerTensors, index L: Int,
-                              p0: Int, tokens T: Int) throws {
+                              p0: Int, tokens T: Int) throws -> MTLCommandBuffer {
         guard let qA = layer.qA, let qANorm = layer.qANorm, let qB = layer.qB, let kvA = layer.kvA,
               let kvANorm = layer.kvANorm, let embedQ = layer.embedQ, let unembed = layer.unembedOut,
               let wk = layer.idxK, let kw = layer.idxKNormWeight, let kb = layer.idxKNormBias, let ape = layer.idxApe,
@@ -252,12 +282,56 @@ final class Glm53PrefillEngine {
         }
         k.encodeHeadedGEMV(commandBuffer: cb, weights: embedQ, x: qC, y: qLatC, heads: heads, m: kvRank, n: r.qkDim,
                            tokens: T)
-        k.encodeLatentAttentionCausal(commandBuffer: cb, qLatent: qLatC, latents: latents, out: oLatC, heads: heads,
-                                      latentDim: kvRank, base: p0, tokens: T, scale: Float(r.cfg.attentionScale))
-        k.encodeHeadedGEMV(commandBuffer: cb, weights: unembed, x: oLatC, y: attnHeadsC, heads: heads, m: r.vDim,
+        var stream = cb
+        if p0 + T <= r.idxTopK {
+            // Every query sees at most index_topk tokens: the selection is exhaustive.
+            k.encodeLatentAttentionCausal(commandBuffer: stream, qLatent: qLatC, latents: latents, out: oLatC, heads: heads,
+                                          latentDim: kvRank, base: p0, tokens: T, scale: Float(r.cfg.attentionScale))
+        } else {
+            guard let wqB = layer.idxQB, let wproj = layer.idxWeights else {
+                throw Glm53ForwardRunnerError.invalidConfiguration("layer \(L) has no indexer query")
+            }
+            // Scores for every complete pool the chunk's last query can see.
+            let pools = (p0 + T) / r.kPool
+            precondition(pools <= maxPools)
+            k.encodeInt8GEMM(commandBuffer: stream, weights: wqB, x: qrC, xStride: qRank, y: idxQC,
+                             yStride: r.idxHeads * r.idxDim, m: r.idxHeads * r.idxDim, n: qRank, tokens: T)
+            k.encodeInt8GEMM(commandBuffer: stream, weights: wproj, x: normedC, xStride: h, y: idxWC,
+                             yStride: r.idxHeads, m: r.idxHeads, n: h, tokens: T)
+            k.encodeIndexerScore(commandBuffer: stream, q: idxQC, pooled: pooled, weights: idxWC, scores: scoresC,
+                                 heads: r.idxHeads, dim: r.idxDim, pools: pools, tokens: T,
+                                 headScale: 1 / Float(r.idxDim).squareRoot(),
+                                 weightScale: 1 / Float(r.idxHeads).squareRoot())
+            try r.sync()
+            // Per-query selection on the CPU, the decode path's rule.
+            let scoresPtr = scoresC.contents().bindMemory(to: Float.self, capacity: T * maxPools)
+            let selPtr = selectedC.contents().bindMemory(to: UInt32.self, capacity: T * selStride)
+            let cntPtr = countsC.contents().bindMemory(to: UInt32.self, capacity: T)
+            for t in 0..<T {
+                let visible = p0 + t + 1
+                if visible <= r.idxTopK {
+                    cntPtr[t] = Glm53Kernels.attendAll
+                    continue
+                }
+                let complete = visible / r.kPool
+                let row = (0..<complete).map { scoresPtr[t * pools + $0] }
+                let picks = Glm53Selection.selectTokens(poolScores: row, cached: visible, kPool: r.kPool,
+                                                        indexTopK: r.idxTopK,
+                                                        alwaysSelectTail: r.g53.indexKPoolAlwaysSelectTail)
+                precondition(picks.count <= selStride)
+                for (i, tok) in picks.enumerated() { selPtr[t * selStride + i] = UInt32(tok) }
+                cntPtr[t] = UInt32(picks.count)
+            }
+            stream = try r.open()
+            k.encodeLatentAttentionSelected(commandBuffer: stream, qLatent: qLatC, latents: latents, selected: selectedC,
+                                            counts: countsC, out: oLatC, heads: heads, latentDim: kvRank, base: p0,
+                                            selectionStride: selStride, tokens: T, scale: Float(r.cfg.attentionScale))
+        }
+        k.encodeHeadedGEMV(commandBuffer: stream, weights: unembed, x: oLatC, y: attnHeadsC, heads: heads, m: r.vDim,
                            n: kvRank, tokens: T)
-        k.encodeInt8GEMM(commandBuffer: cb, weights: layer.oProj, x: attnHeadsC, xStride: heads * r.vDim, y: attnOutC,
+        k.encodeInt8GEMM(commandBuffer: stream, weights: layer.oProj, x: attnHeadsC, xStride: heads * r.vDim, y: attnOutC,
                          yStride: h, m: h, n: heads * r.vDim, tokens: T)
+        return stream
     }
 
     private func encodeDense(_ cb: MTLCommandBuffer, layer: Glm53ForwardRunner.LayerTensors, index L: Int,

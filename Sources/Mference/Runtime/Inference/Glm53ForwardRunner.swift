@@ -608,8 +608,9 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         }
         var done = 0
         var remaining = tokens
-        // Batched chunks while the prompt stays below index_topk (dense
-        // attention is the model there); the per-token path takes the rest.
+        // Batched chunks over the whole prompt (dense attention below
+        // index_topk, the indexer's per-query selection past it); the
+        // per-token loop below only runs when the batched path is off.
         if batchedPrefillEnabled, expertsResident, capture == nil, !denseSelectionForAB {
             if batchedPrefill == nil { batchedPrefill = try Glm53PrefillEngine(runner: self) }
             if let engine = batchedPrefill {
@@ -619,8 +620,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                     .flatMap { Int($0) }.map { max(1, min($0, Glm53PrefillEngine.capacity)) }
                     ?? Glm53PrefillEngine.capacity
                 while !remaining.isEmpty {
-                    let n = min(remaining.count, chunkCap, idxTopK - position)
-                    guard n > 0 else { break }
+                    let n = min(remaining.count, chunkCap)
                     try Task.checkCancellation()
                     let chunk = remaining.prefix(n)
                     let last = n == remaining.count
@@ -1129,9 +1129,14 @@ enum Glm53Selection {
         let order = (0..<complete).sorted { a, b in
             scores[a] != scores[b] ? scores[a] > scores[b] : a < b
         }
-        var tokens = Set<Int>()
-        for j in order.prefix(selectK) { for c in 0..<kPool { tokens.insert(j * kPool + c) } }
-        if alwaysSelectTail { for t in (complete * kPool)..<T { tokens.insert(t) } }
-        return tokens.sorted()
+        // Marks instead of a set: the result is the ascending token list, and
+        // this runs once per query of a prefill chunk.
+        var chosen = [Bool](repeating: false, count: complete)
+        for j in order.prefix(selectK) { chosen[j] = true }
+        var tokens: [Int] = []
+        tokens.reserveCapacity(selectK * kPool + kPool)
+        for j in 0..<complete where chosen[j] { for c in 0..<kPool { tokens.append(j * kPool + c) } }
+        if alwaysSelectTail { for t in (complete * kPool)..<T { tokens.append(t) } }
+        return tokens
     }
 }

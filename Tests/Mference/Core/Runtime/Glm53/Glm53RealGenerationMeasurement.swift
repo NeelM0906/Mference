@@ -271,7 +271,7 @@ import Metal
         }
 
         var chatPrompt: [Int32] = []
-        if probes.contains("chat") || probes.contains("dense-ab") || probes.contains("prefill-ab") {
+        if probes.contains("chat") || probes.contains("dense-ab") || probes.contains("prefill-ab") || probes.contains("prefill-time") {
             chatPrompt = try Self.shortExplanationPrompt(h.tokenizer)
         }
 
@@ -351,6 +351,23 @@ import Metal
             Self.log(String(format: "[glm53-firstlight] prompt logits: max abs delta %.4f at %d (per-token value %.3f); argmax %d vs %d; per-token top-2 margin %.3f; top value %.3f",
                             maxAbs, maxAbsAt, lp[maxAbsAt], argB, argP, sortedP[0] - sortedP[1], sortedP[0]))
             #expect(argB == argP, "batched and per-token prefill disagree on the next token")
+        }
+
+        if probes.contains("prefill-time") {
+            // Batched prefill alone on the chosen case, timed; the per-token
+            // tail past index_topk is included in the total.
+            let vocab = h.model.config.vocabSize
+            h.runner.batchedPrefillEnabled = true
+            h.runner.reset()
+            let buffer = try #require(h.context.device.makeBuffer(
+                length: vocab * MemoryLayout<Float16>.stride, options: .storageModeShared))
+            let start = Date()
+            _ = try await h.runner.prefillChunked(tokens: chatPrompt[...], startPosition: 0, outputMode: .logits,
+                                                  config: .production(chunkTokens: 128), into: buffer,
+                                                  onProgress: { _ in })
+            let dt = Date().timeIntervalSince(start)
+            Self.log(String(format: "[glm53-firstlight] prefill-time: %d tokens in %.3f s (%.1f tok/s)",
+                            chatPrompt.count, dt, Double(chatPrompt.count) / dt))
         }
 
         if probes.contains("needle") {

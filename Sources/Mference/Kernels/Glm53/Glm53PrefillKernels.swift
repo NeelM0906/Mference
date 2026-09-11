@@ -21,6 +21,8 @@ final class Glm53PrefillKernels {
     private let layerNormPSO: MTLComputePipelineState
     private let poolKeysPSO: MTLComputePipelineState
     private let routerSelectPSO: MTLComputePipelineState
+    private let indexerScorePSO: MTLComputePipelineState
+    private let latentSelectedPSO: MTLComputePipelineState
     private let moePhase1PSO: MTLComputePipelineState
     private let moeDownPSO: MTLComputePipelineState
     private let moeReducePSO: MTLComputePipelineState
@@ -54,6 +56,10 @@ final class Glm53PrefillKernels {
                                             maxTotalThreadsPerThreadgroup: 256)
         poolKeysPSO = try context.pipeline("glm53p_pool_keys_batched")
         routerSelectPSO = try context.pipeline("glm53p_router_select_k8_batched")
+        indexerScorePSO = try context.pipeline("glm53p_indexer_score_batched", constants: [],
+                                               maxTotalThreadsPerThreadgroup: 128)
+        latentSelectedPSO = try context.pipeline("glm53p_latent_attention_selected", constants: [],
+                                                 maxTotalThreadsPerThreadgroup: 256)
         // The grouped expert kernels share moe.metal's INT4 bodies; the swiglu
         // clamp and SiLU come through the same function constants as `MoE`.
         var moeConstants: [MetalFunctionConstant] = [MetalFunctionConstant(index: 4, value: .bool(true))]
@@ -275,6 +281,48 @@ final class Glm53PrefillKernels {
         enc.setBytes(&b, length: 4, index: 4)
         enc.setBytes(&h, length: 4, index: 5)
         enc.setBytes(&s, length: 4, index: 6)
+        enc.dispatchThreadgroups(Self.tg(heads, tokens), threadsPerThreadgroup: Self.tg(256))
+        enc.endEncoding()
+    }
+
+    /// scores[t][j] for `pools` pooled keys and `tokens` queries.
+    func encodeIndexerScore(commandBuffer cb: MTLCommandBuffer, q: MTLBuffer, pooled: MTLBuffer, weights: MTLBuffer,
+                            scores: MTLBuffer, heads: Int, dim: Int, pools: Int, tokens: Int,
+                            headScale: Float, weightScale: Float) {
+        guard pools > 0, tokens > 0, let enc = cb.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(indexerScorePSO)
+        enc.setBuffer(q, offset: 0, index: 0)
+        enc.setBuffer(pooled, offset: 0, index: 1)
+        enc.setBuffer(weights, offset: 0, index: 2)
+        enc.setBuffer(scores, offset: 0, index: 3)
+        var hh = UInt32(heads), dd = UInt32(dim), pp = UInt32(pools), hs = headScale, ws = weightScale
+        enc.setBytes(&hh, length: 4, index: 4)
+        enc.setBytes(&dd, length: 4, index: 5)
+        enc.setBytes(&pp, length: 4, index: 6)
+        enc.setBytes(&hs, length: 4, index: 7)
+        enc.setBytes(&ws, length: 4, index: 8)
+        enc.dispatchThreadgroups(Self.tg(pools, tokens), threadsPerThreadgroup: Self.tg(128))
+        enc.endEncoding()
+    }
+
+    /// Per-query row sets: `counts[t] == 0xFFFFFFFF` means dense causal.
+    func encodeLatentAttentionSelected(commandBuffer cb: MTLCommandBuffer, qLatent: MTLBuffer, latents: MTLBuffer,
+                                       selected: MTLBuffer, counts: MTLBuffer, out: MTLBuffer, heads: Int,
+                                       latentDim: Int, base: Int, selectionStride: Int, tokens: Int, scale: Float) {
+        precondition(latentDim % 32 == 0 && latentDim <= 512)
+        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(latentSelectedPSO)
+        enc.setBuffer(qLatent, offset: 0, index: 0)
+        enc.setBuffer(latents, offset: 0, index: 1)
+        enc.setBuffer(selected, offset: 0, index: 2)
+        enc.setBuffer(counts, offset: 0, index: 3)
+        enc.setBuffer(out, offset: 0, index: 4)
+        var kv = UInt32(latentDim), b = UInt32(base), h = UInt32(heads), ss = UInt32(selectionStride), sc = scale
+        enc.setBytes(&kv, length: 4, index: 5)
+        enc.setBytes(&b, length: 4, index: 6)
+        enc.setBytes(&h, length: 4, index: 7)
+        enc.setBytes(&ss, length: 4, index: 8)
+        enc.setBytes(&sc, length: 4, index: 9)
         enc.dispatchThreadgroups(Self.tg(heads, tokens), threadsPerThreadgroup: Self.tg(256))
         enc.endEncoding()
     }

@@ -776,3 +776,119 @@ kernel void glm53p_int8_gemm_mma(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pooled indexer scores for a chunk of queries: scores[t][j] =
+// sum_h w[t][h] * w_scale * relu(q[t][h] . pooled[j] * head_scale), the
+// decode kernel's arithmetic (`dsv4_indexer_score`) per query. Grid (P, T)
+// threadgroups of 128 threads (4 simdgroups round-robin over heads). Which
+// pools a query may see is decided on the CPU from its position.
+// ---------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(128)]]
+kernel void glm53p_indexer_score_batched(
+    device const half*  q        [[buffer(0)]],   // [T][heads][dim]
+    device const half*  pooled   [[buffer(1)]],   // [P][dim]
+    device const half*  w        [[buffer(2)]],   // [T][heads]
+    device float*       scores   [[buffer(3)]],   // [T][P]
+    constant uint&      heads    [[buffer(4)]],
+    constant uint&      dim      [[buffer(5)]],
+    constant uint&      P        [[buffer(6)]],
+    constant float&     head_scale [[buffer(7)]],
+    constant float&     w_scale  [[buffer(8)]],
+    uint2 tgp  [[threadgroup_position_in_grid]],
+    uint2 tid2 [[thread_position_in_threadgroup]],
+    uint  sg   [[simdgroup_index_in_threadgroup]],
+    uint  lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float head_red[4];
+    const uint j = tgp.x, t = tgp.y;
+    const uint tid = tid2.x;
+    device const half* key = pooled + uint(j) * dim;
+    device const half* qt = q + uint(t) * heads * dim;
+    device const half* wt = w + uint(t) * heads;
+    float acc = 0.0f;
+    for (uint h = sg; h < heads; h += 4u) {
+        device const half* q_head = qt + h * dim;
+        float dot = 0.0f;
+        for (uint d = lane * 4u; d < dim; d += 128u) {
+            const half4 qa = *((device const half4*)(q_head + d));
+            const half4 ka = *((device const half4*)(key + d));
+            dot += float(qa.x) * float(ka.x) + float(qa.y) * float(ka.y)
+                 + float(qa.z) * float(ka.z) + float(qa.w) * float(ka.w);
+        }
+        dot = simd_sum(dot);
+        if (lane == 0) acc = fma(float(wt[h]) * w_scale, max(dot * head_scale, 0.0f), acc);
+    }
+    if (lane == 0) head_red[sg] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) scores[uint(t) * P + j] = head_red[0] + head_red[1] + head_red[2] + head_red[3];
+}
+
+// ---------------------------------------------------------------------------
+// Latent attention for a chunk of queries over each query's own row set:
+// `counts[t] == 0xFFFFFFFF` attends rows 0 ..< base + t + 1 (dense causal,
+// the model below index_topk), otherwise rows `selected[t][0 ..< counts[t]]`.
+// Grid (H, T); the decode kernel's online softmax.
+// ---------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void glm53p_latent_attention_selected(
+    device const half* q_lat    [[buffer(0)]],   // [T][H][kv]
+    device const half* latents  [[buffer(1)]],   // [rows][kv]
+    device const uint* selected [[buffer(2)]],   // [T][sel_stride]
+    device const uint* counts   [[buffer(3)]],   // [T]
+    device half*       out      [[buffer(4)]],   // [T][H][kv]
+    constant uint&     kv_dim   [[buffer(5)]],
+    constant uint&     base     [[buffer(6)]],
+    constant uint&     H        [[buffer(7)]],
+    constant uint&     sel_stride [[buffer(8)]],
+    constant float&    scale    [[buffer(9)]],
+    uint2 tgp  [[threadgroup_position_in_grid]],
+    uint2 tid2 [[thread_position_in_threadgroup]],
+    uint  sg   [[simdgroup_index_in_threadgroup]],
+    uint  lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float acc_tg[8 * 512];
+    threadgroup float m_tg[8];
+    threadgroup float d_tg[8];
+    const uint tid = tid2.x;
+    const uint h = tgp.x;
+    const uint t = tgp.y;
+    const uint per = kv_dim / 32u;
+    const uint count = counts[t];
+    const bool dense = count == 0xFFFFFFFFu;
+    const uint n = dense ? base + t + 1u : count;
+    device const uint* sel = selected + uint(t) * sel_stride;
+    float q[16];
+    for (uint i = 0; i < per; ++i) q[i] = float(q_lat[(uint(t) * H + h) * kv_dim + lane * per + i]);
+    float m = -FLT_MAX / 2.0f;
+    float denom = 0.0f;
+    float acc[16];
+    for (uint i = 0; i < per; ++i) acc[i] = 0.0f;
+    for (uint r = sg; r < n; r += 8u) {
+        const uint row = dense ? r : sel[r];
+        device const half* k = latents + uint(row) * kv_dim + lane * per;
+        float kv[16];
+        float dot = 0.0f;
+        for (uint i = 0; i < per; ++i) { kv[i] = float(k[i]); dot = fma(q[i], kv[i], dot); }
+        dot = simd_sum(dot) * scale;
+        const float new_m = max(m, dot);
+        const float rescale = exp(m - new_m);
+        const float wgt = exp(dot - new_m);
+        denom = fma(denom, rescale, wgt);
+        for (uint i = 0; i < per; ++i) acc[i] = fma(acc[i], rescale, kv[i] * wgt);
+        m = new_m;
+    }
+    for (uint i = 0; i < per; ++i) acc_tg[sg * kv_dim + lane * per + i] = acc[i];
+    if (lane == 0) { m_tg[sg] = m; d_tg[sg] = denom; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float M = -FLT_MAX / 2.0f;
+    for (uint s = 0; s < 8u; ++s) M = max(M, m_tg[s]);
+    float Dn = 0.0f;
+    for (uint s = 0; s < 8u; ++s) Dn = fma(d_tg[s], exp(m_tg[s] - M), Dn);
+    const float inv = Dn > 0.0f ? 1.0f / Dn : 0.0f;
+    for (uint d = tid; d < kv_dim; d += 256u) {
+        float o = 0.0f;
+        for (uint s = 0; s < 8u; ++s) o = fma(acc_tg[s * kv_dim + d], exp(m_tg[s] - M), o);
+        out[(uint(t) * H + h) * kv_dim + d] = half(o * inv);
+    }
+}
