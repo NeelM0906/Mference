@@ -125,12 +125,25 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// arithmetic differs. `expertPoolBytes`/`coreWeightsBytes` stay in the
     /// signature so a future measured rung can use them without replumbing
     /// callers.
+    ///
+    /// GLM-5.3-Flash is the one measured exception: its whole INT4 expert set
+    /// (~171 GB) fits a 256 GB host beside the ~10 GB core, and with the
+    /// experts resident its runner routes on the GPU with no per-layer CPU
+    /// round trip, so `auto` picks `.resident` whenever pool + core + the
+    /// resident reserve + 16 GiB for KV, scratch and the process fit physical
+    /// memory. Smaller hosts fall back to the slot rule.
     public static func defaultExpertStreamingMode(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
-        expertPoolBytes _: UInt64,
-        coreWeightsBytes _: UInt64
+        expertPoolBytes: UInt64,
+        coreWeightsBytes: UInt64
     ) -> ExpertStreamingMode {
+        if family == .glm53Flash {
+            let runtimeReserve = UInt64(16) * 1024 * 1024 * 1024
+            let (sum1, o1) = expertPoolBytes.addingReportingOverflow(coreWeightsBytes)
+            let (sum2, o2) = sum1.addingReportingOverflow(residentHeadroomBytes + runtimeReserve)
+            if !o1, !o2, physicalMemoryBytes >= sum2 { return .resident }
+        }
         return .pread(slotCount: defaultExpertCacheSlots(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes))

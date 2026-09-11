@@ -29,6 +29,17 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
     /// only when the expert's file offset is not page-aligned).
     private let expertViews: [(buffer: MTLBuffer, offset: UInt64)]
 
+    /// One buffer over the whole mapping, for kernels that address an expert
+    /// from a GPU-side index as `baseOffset + expert * expertStride`. Nil when
+    /// the layer's experts are not laid out at a uniform stride.
+    public struct SlabView {
+        public let buffer: MTLBuffer
+        /// Byte offset of expert 0 inside `buffer`.
+        public let baseOffset: Int
+        public let expertStride: Int
+    }
+    public let slabView: SlabView?
+
     public init(layout: StreamLayout, device: MTLDevice) throws {
         self.layout = layout
         let pageSize = Int(getpagesize())
@@ -88,6 +99,26 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
             views.append((buffer: buffer, offset: UInt64(delta)))
         }
         self.expertViews = views
+
+        // The slab covers every mapped page; `bytesNoCopy` wants a page
+        // multiple, and mmap maps whole pages, so rounding up stays inside
+        // the region.
+        let uniform = (0..<layout.expertsPerLayer).allSatisfy {
+            layout.expertOffset(layer: 0, expert: $0) == UInt64($0) * layout.expertStride
+        }
+        let slabLength = ((mappedLength + pageSize - 1) / pageSize) * pageSize
+        nonisolated(unsafe) let slabBase = base
+        if uniform, layout.expertsPerLayer > 0,
+           let slab = device.makeBuffer(bytesNoCopy: slabBase, length: slabLength,
+                                        options: .storageModeShared,
+                                        deallocator: { _, _ in _ = mapping }) {
+            self.slabView = SlabView(
+                buffer: slab,
+                baseOffset: shift + Int(layout.expertOffset(layer: 0, expert: 0)),
+                expertStride: Int(layout.expertStride))
+        } else {
+            self.slabView = nil
+        }
     }
 
     public func expertBuffer(layer _: Int, expert: Int) throws

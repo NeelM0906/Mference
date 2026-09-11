@@ -20,6 +20,7 @@ final class Glm53Kernels {
     private let hcPlaceMixPSO: MTLComputePipelineState
     private let swigluClampPSO: MTLComputePipelineState
     private let broadcastPSO: MTLComputePipelineState
+    private let routerSelectPSO: MTLComputePipelineState
 
     /// Widest KDA head the decode kernel's threadgroup scratch holds.
     static let maxKDAHeadDim = 128
@@ -47,9 +48,31 @@ final class Glm53Kernels {
         hcPlaceMixPSO = try context.pipeline("dsv4_hc_place_mix")
         swigluClampPSO = try context.pipeline("dsv4_swiglu_clamp_mul")
         broadcastPSO = try context.pipeline("dsv4_broadcast_streams")
+        routerSelectPSO = try context.pipeline("glm53_router_select_k8")
     }
 
     // MARK: - Embedding
+
+    /// GLM-5.3 router top-8 on the GPU (`glm53_router_select_k8`): sigmoid
+    /// scores, selection on score + bias, renormalized scaled weights.
+    func encodeRouterSelect(commandBuffer: MTLCommandBuffer,
+                            logits: MTLBuffer, bias: TensorView,
+                            outIndices: MTLBuffer, outWeights: MTLBuffer,
+                            numExperts: Int, routeScale: Float) {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        var e = UInt32(numExperts)
+        var scale = routeScale
+        enc.setComputePipelineState(routerSelectPSO)
+        enc.setBuffer(logits, offset: 0, index: 0)
+        enc.setBuffer(bias.buffer, offset: Int(bias.offset), index: 1)
+        enc.setBuffer(outIndices, offset: 0, index: 2)
+        enc.setBuffer(outWeights, offset: 0, index: 3)
+        enc.setBytes(&e, length: 4, index: 4)
+        enc.setBytes(&scale, length: 4, index: 5)
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        enc.endEncoding()
+    }
 
     func encodeEmbedLookupInt8(commandBuffer: MTLCommandBuffer,
                                table: TensorView, out: MTLBuffer, tokenId: UInt32, d: Int) {

@@ -407,6 +407,35 @@ import Testing
         }
     }
 
+    /// Resident experts (the mode a 256 GB host runs) and the slot cache take
+    /// different expert paths — GPU-resolved slab offsets against argument-
+    /// buffer blobs — but share the router kernel and the FFN math bodies, so
+    /// their logits must be identical bit for bit.
+    @Test func residentExpertsMatchTheSlotCacheBitForBit() async throws {
+        let h = try Self.makeHarness()
+        defer { h.cleanup() }
+        #expect(!h.runner.expertsResident)
+        let resident = try Glm53Parity.loadModel(at: h.dir, device: h.ctx.device, mode: .resident)
+        let runnerR = try Glm53ForwardRunner(
+            model: resident, context: h.ctx, maxContext: 128,
+            runtimeConfiguration: RuntimeConfiguration(prefillEnabled: true, forceLogitsHead: true))
+        #expect(runnerR.expertsResident)
+        let logitsR = try #require(h.ctx.device.makeBuffer(
+            length: h.config.vocabSize * MemoryLayout<Float16>.stride, options: .storageModeShared))
+
+        let tokens = try Glm53Goldens.promptTokens(.long).map { Int32($0) }
+        var next = tokens[0], nextR = tokens[0]
+        for step in 0..<(tokens.count + 6) {
+            let isPrompt = step < tokens.count
+            if isPrompt { next = tokens[step]; nextR = tokens[step] }
+            try await h.runner.produce(token: next, position: step, into: h.logits)
+            try await runnerR.produce(token: nextR, position: step, into: logitsR)
+            let a = h.logitsRow(), b = Glm53ForwardRunner.readFP16(logitsR, count: h.config.vocabSize)
+            #expect(a == b, "position \(step): resident and slot-cache logits differ")
+            next = Int32(Self.argmax(a)); nextR = Int32(Self.argmax(b))
+        }
+    }
+
     @Test func factoryDispatchesTheFamilyToItsRunner() throws {
         let dir = try Glm53Parity.installToyCheckpoint()
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -128,8 +128,9 @@ enum Glm53Parity {
     /// Opens the install with the family's toy baseline and the pread slot
     /// cache. `expecting:` is the loader entry the gated-family tests use; the
     /// family stays behind `familiesWithoutRunner` until its runner is proven.
-    static func loadModel(at dir: URL, device: MTLDevice, slots: Int = 16) throws -> Model {
+    static func loadModel(at dir: URL, device: MTLDevice, slots: Int = 16,
+                          mode: ExpertStreamingMode? = nil) throws -> Model {
         try Model.load(directoryURL: dir, device: device, expecting: archConfig(),
-                       streamingMode: .pread(slotCount: slots))
+                       streamingMode: mode ?? .pread(slotCount: slots))
     }
 }

@@ -338,3 +338,54 @@ kernel void glm53_headed_int8_gemv(
     acc = simd_sum(acc);
     if (lane == 0) y[uint(h) * M + row] = half(acc);
 }
+
+
+// ---------------------------------------------------------------------------
+// Router selection: sigmoid scores, selection on score + correction bias
+// (stable descending, the lower index on ties, as MLX's argsort), weights the
+// unbiased scores of the chosen experts renormalized to one and scaled by
+// routed_scaling_factor. Serial on one thread: 288 experts x 8 slots is a few
+// thousand flops, well below one kernel launch on the layer's critical path,
+// and the serial scan pins the tie rule exactly. Both expert-streaming modes
+// route through this kernel, so their outputs are byte-identical.
+// ---------------------------------------------------------------------------
+kernel void glm53_router_select_k8(
+    device const float* logits [[buffer(0)]],
+    device const float* bias [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant float& route_scale [[buffer(5)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid != 0) return;
+    constexpr uint K = 8;
+    uint top_idx[K];
+    float top_key[K];
+    float top_score[K];
+    for (uint i = 0; i < K; ++i) { top_idx[i] = 0u; top_key[i] = -INFINITY; top_score[i] = 0.0f; }
+    for (uint e = 0; e < num_experts; ++e) {
+        const float s = 1.0f / (1.0f + precise::exp(-logits[e]));
+        const float key = s + bias[e];
+        if (key <= top_key[K - 1]) continue;
+        uint pos = K;
+        for (uint i = 0; i < K; ++i) {
+            if (key > top_key[i]) { pos = i; break; }
+        }
+        if (pos >= K) continue;
+        for (uint i = K - 1; i > pos; --i) {
+            top_idx[i] = top_idx[i - 1];
+            top_key[i] = top_key[i - 1];
+            top_score[i] = top_score[i - 1];
+        }
+        top_idx[pos] = e;
+        top_key[pos] = key;
+        top_score[pos] = s;
+    }
+    float sum = 0.0f;
+    for (uint i = 0; i < K; ++i) sum += top_score[i];
+    for (uint i = 0; i < K; ++i) {
+        out_indices[i] = top_idx[i];
+        out_weights[i] = half(top_score[i] / sum * route_scale);
+    }
+}

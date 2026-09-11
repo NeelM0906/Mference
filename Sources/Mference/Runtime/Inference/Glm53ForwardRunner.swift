@@ -45,12 +45,16 @@ public enum Glm53ForwardRunnerError: Error, CustomStringConvertible {
 /// router logits stay FP32 because each feeds a nonlinearity, a recurrence or
 /// a selection. Norm eps is the model's 1e-5 (indexer key LayerNorm 1e-6).
 ///
-/// # Selection on the CPU
+/// # One command stream per token
 ///
-/// The pooled indexer's top-k and the router's top-8 are computed on the CPU
-/// from FP32 scores read back at the sync the expert fetch already needs
-/// (`Glm53Selection`, exact transcriptions of the reference including the
-/// stable ascending-index order among equal scores).
+/// A token is encoded into one command buffer that is committed only where a
+/// CPU decision genuinely needs GPU data: the pooled indexer's top-k (sparse
+/// layers past `index_topk` tokens) and, under the slot cache, the routed
+/// expert fetch. The router runs on the GPU in both expert-streaming modes
+/// (`glm53_router_select_k8`), so with the experts **resident** (the whole
+/// set fits a 256 GB host) a MoE layer needs no round trip at all: the
+/// router's indices resolve to slab offsets on the GPU and the slot-map
+/// FFN bodies run in the same stream. The two modes are byte-identical.
 ///
 /// # Prefill
 ///
@@ -59,7 +63,7 @@ public enum Glm53ForwardRunnerError: Error, CustomStringConvertible {
 /// `produceToken`, carrying the conv tails, the KDA state, the latent and
 /// indexer caches across chunk boundaries. PERF, not correctness: a prompt
 /// token re-reads its eight expert blobs per layer rather than amortizing them
-/// over a chunk. A layer-major expert pass is the first perf item.
+/// over a chunk. A layer-major expert pass is the first prefill perf item.
 public final class Glm53ForwardRunner: ContinuableLogitProducer,
                                        ContextWindowReporting,
                                        HeadlessSequentialPrefillRunner,
@@ -89,6 +93,10 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     /// selection is exhaustive, so the two arms must generate the same tokens;
     /// past that the knob is refused, where dense would no longer be the model.
     public var denseSelectionForAB = false
+
+    /// True when every MoE layer's experts are served from a resident slab and
+    /// the routed FFN runs GPU-indexed with no CPU round trip.
+    public let expertsResident: Bool
 
     // MARK: - Weights
 
@@ -132,11 +140,12 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         let idxApe: TensorView?
         // FFN
         let router: FlashNextWeightMatrix?
-        let routerBias: [Float]
+        let routerBias: TensorView?
         let sharedGate: TensorView?
         let sharedUp: TensorView?
         let sharedDown: TensorView?
         let expertOffsets: MoEExpertOffsets?
+        let slab: ResidentExpertSlab?
         let denseGate: TensorView?
         let denseUp: TensorView?
         let denseDown: TensorView?
@@ -215,13 +224,20 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     private let idxScores: MTLBuffer             // fp32 [pools]
     private let selected: MTLBuffer              // uint32
     private let routerLogits: MTLBuffer          // fp32 [numExperts]
-    private let routerWeights: MTLBuffer         // [topK]
+    private let routerIndices: MTLBuffer         // uint32 [topK]
+    private let routerWeights: MTLBuffer         // fp16 [topK]
+    private let identityTable: MTLBuffer         // int16 [numExperts], slot_of[e] = e
+    private let slotOffsets: MTLBuffer           // uint32 [topK]
+    private let allHit: MTLBuffer                // uint32 [1]
     private let ffnGateScratch: MTLBuffer        // [max(sharedF, denseF)]
     private let ffnUpScratch: MTLBuffer
     private let ffnActScratch: MTLBuffer
     private let sharedOut: MTLBuffer
     private let moeActs: MTLBuffer
     private let mlpOut: MTLBuffer
+
+    /// The open command buffer of the token being produced.
+    private var stream: MTLCommandBuffer?
 
     private var position = 0
     private var inSequentialPrefill = false
@@ -234,12 +250,13 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     private static let phaseInstrumentationEnabled =
         ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1"
 
-    /// Wall time inside `fetchExperts`: the eight routed expert blobs per MoE
-    /// layer, nothing overlapping them.
+    /// Wall time inside `fetchExperts` (slot cache only): the eight routed
+    /// expert blobs per MoE layer, nothing overlapping them. Zero when resident.
     public private(set) var totalIoNanos: UInt64 = 0
     /// Wall time in the indexer's CPU selection (readback, sort, expand).
     public private(set) var totalIndexerTopKNanos: UInt64 = 0
-    /// Wall time in the router's CPU top-8 (logit readback included).
+    /// Wall time waiting on the router readback before an expert fetch (slot
+    /// cache only); zero when resident, where the router never leaves the GPU.
     public private(set) var totalRouterNanos: UInt64 = 0
     /// Command buffers committed in the window.
     public private(set) var totalCommandBuffers = 0
@@ -351,18 +368,25 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                                             options: .storageModeShared) else { throw MetalError.noDevice }
             return b
         }
+        func words(_ count: Int) throws -> MTLBuffer {
+            guard let b = device.makeBuffer(length: max(1, count) * MemoryLayout<UInt32>.stride,
+                                            options: .storageModeShared) else { throw MetalError.noDevice }
+            return b
+        }
+
+        // Resident experts: every MoE layer must offer a slab, else the slot
+        // cache path serves all of them (one rule for the whole model).
+        var slabs: [Int: ResidentExpertSlab] = [:]
+        for L in 0..<cfg.numLayers where !cfg.layerIsDenseFFN(L) {
+            if let slab = try model.residentExpertSlab(layer: L) { slabs[L] = slab }
+        }
+        let moeLayerCount = (0..<cfg.numLayers).filter { !cfg.layerIsDenseFFN($0) }.count
+        expertsResident = moeLayerCount > 0 && slabs.count == moeLayerCount
 
         var built: [LayerTensors] = []
         for L in 0..<cfg.numLayers {
             let isKDA = cfg.layerIsKDA(L)
             let isDense = cfg.layerIsDenseFFN(L)
-            var bias: [Float] = []
-            if !isDense {
-                let biasView = try model.glm53RouterCorrectionBias(layer: L)
-                let ptr = biasView.buffer.contents().advanced(by: Int(biasView.offset))
-                    .assumingMemoryBound(to: Float.self)
-                bias = (0..<cfg.numExperts).map { ptr[$0] }
-            }
             let prefix = "language_model.model.layers.\(L)."
             built.append(LayerTensors(
                 attnNorm: try model.inputNorm(layer: L),
@@ -402,11 +426,12 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                 idxPoolGate: isKDA ? nil : .from(try model.glm53IndexerPoolGate(layer: L)),
                 idxApe: isKDA ? nil : try model.glm53IndexerPoolAPE(layer: L),
                 router: isDense ? nil : .from(try model.router(layer: L)),
-                routerBias: bias,
+                routerBias: isDense ? nil : try model.glm53RouterCorrectionBias(layer: L),
                 sharedGate: isDense ? nil : try model.sharedExpertGate(layer: L),
                 sharedUp: isDense ? nil : try model.sharedExpertUp(layer: L),
                 sharedDown: isDense ? nil : try model.sharedExpertDown(layer: L),
                 expertOffsets: isDense ? nil : model.routedExpertOffsets(layer: L),
+                slab: expertsResident ? slabs[L] : nil,
                 denseGate: isDense ? try model.glm53DenseFFN("gate_proj", layer: L) : nil,
                 denseUp: isDense ? try model.glm53DenseFFN("up_proj", layer: L) : nil,
                 denseDown: isDense ? try model.glm53DenseFFN("down_proj", layer: L) : nil))
@@ -439,11 +464,17 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         idxQ = try half(idxHeads * idxDim)
         idxW = try half(idxHeads)
         idxScores = try float(maxContext / max(kPool, 1) + 1)
-        guard let sel = device.makeBuffer(length: (idxTopK + kPool) * MemoryLayout<UInt32>.stride,
-                                          options: .storageModeShared) else { throw MetalError.noDevice }
-        selected = sel
+        selected = try words(idxTopK + kPool)
         routerLogits = try float(numExperts)
+        routerIndices = try words(topK)
         routerWeights = try half(topK)
+        guard let table = device.makeBuffer(length: numExperts * MemoryLayout<Int16>.stride,
+                                            options: .storageModeShared) else { throw MetalError.noDevice }
+        let tablePtr = table.contents().assumingMemoryBound(to: Int16.self)
+        for e in 0..<numExperts { tablePtr[e] = Int16(e) }
+        identityTable = table
+        slotOffsets = try words(topK)
+        allHit = try words(1)
         let ffnWidth = max(sharedF, denseF)
         ffnGateScratch = try half(ffnWidth)
         ffnUpScratch = try half(ffnWidth)
@@ -478,10 +509,10 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         guard config.hyperConnections.mult <= 4 else {
             throw Glm53ForwardRunnerError.invalidConfiguration("hc_mult above 4 is not supported")
         }
-        guard MoE.routedComputeWidths.contains(UInt32(config.topKExperts)) else {
+        guard config.topKExperts == MoE.maxStreamedExperts, config.numExperts <= Int(Int16.max) else {
             throw Glm53ForwardRunnerError.invalidConfiguration(
-                "INT4 routed experts at top-\(config.topKExperts); the reduce implements "
-                + "\(MoE.routedComputeWidths.sorted())")
+                "the GLM-5.3 router and expert path are written for top-\(MoE.maxStreamedExperts) "
+                + "over at most \(Int16.max) experts; got top-\(config.topKExperts) of \(config.numExperts)")
         }
         guard maxContext > 0 else {
             throw Glm53ForwardRunnerError.invalidConfiguration("maxContext must be positive")
@@ -568,30 +599,29 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         }
         try Task.checkCancellation()
 
-        var cb = try makeCommandBuffer()
+        let cb = try open()
         kernels.encodeEmbedLookupInt8(commandBuffer: cb, table: embedding, out: hiddenBuf,
                                       tokenId: UInt32(token), d: hidden)
-        try captureHalf(&cb, "embed_out", hiddenBuf, count: hidden)
-        kernels.encodeBroadcastStreams(commandBuffer: cb, x: hiddenBuf, streams: streams,
+        try captureHalf("embed_out", hiddenBuf, count: hidden)
+        kernels.encodeBroadcastStreams(commandBuffer: try open(), x: hiddenBuf, streams: streams,
                                        hcMult: hc, hidden: hidden)
-        try finish(cb)
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
             try await encodeLayer(L, position: p)
         }
 
-        cb = try makeCommandBuffer()
-        kernels.encodeHCCollapse(commandBuffer: cb, streams: streams, pre: meanPre, x: hiddenBuf,
+        let tail = try open()
+        kernels.encodeHCCollapse(commandBuffer: tail, streams: streams, pre: meanPre, x: hiddenBuf,
                                  hcMult: hc, hidden: hidden)
-        rms.encodeBF16W(commandBuffer: cb, x: hiddenBuf,
+        rms.encodeBF16W(commandBuffer: tail, x: hiddenBuf,
                         weight: finalNorm.buffer, weightOffset: Int(finalNorm.offset),
                         out: normed, d: UInt32(hidden), eps: eps)
-        try captureHalf(&cb, "final_norm_out", normed, count: hidden)
+        try captureHalf("final_norm_out", normed, count: hidden)
         if let logits {
-            gemvInt8(cb, lmHead, x: normed, y: logits, m: cfg.vocabSize, n: hidden)
+            gemvInt8(try open(), lmHead, x: normed, y: logits, m: cfg.vocabSize, n: hidden)
         }
-        try finish(cb)
+        try sync()
         if capture != nil, let logits {
             capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
         }
@@ -601,35 +631,39 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     private func encodeLayer(_ L: Int, position p: Int) async throws {
         let layer = layers[L]
         let key = String(format: "layer%02d.", L)
-        var cb = try makeCommandBuffer()
         if capture != nil {
+            try sync()
             capture?.floats[key + "stream_in"] = Self.readFP16(streams, count: hc * hidden)
         }
 
         // ---- attention site: mixes, collapse, norm ----
+        var cb = try open()
         kernels.encodeHCWeights(commandBuffer: cb, streams: streams,
                                 fn: layer.hcAttnFn, base: layer.hcAttnBase, scale: layer.hcAttnScale,
                                 outPre: hcPreA, outPost: hcPostA, outComb: hcCombA,
                                 hcMult: hc, hidden: hidden,
                                 sinkhornIters: cfg.hyperConnections.sinkhornIters,
                                 hcEps: hcEps, rmsEps: eps)
-        try captureFloat(&cb, key + "attn_hc_pre", hcPreA, count: hc)
-        try captureFloat(&cb, key + "attn_hc_post", hcPostA, count: hc)
-        try captureFloat(&cb, key + "attn_hc_comb", hcCombA, count: hc * hc)
+        try captureFloat(key + "attn_hc_pre", hcPreA, count: hc)
+        try captureFloat(key + "attn_hc_post", hcPostA, count: hc)
+        try captureFloat(key + "attn_hc_comb", hcCombA, count: hc * hc)
+        cb = try open()
         kernels.encodeHCCollapse(commandBuffer: cb, streams: streams, pre: hcPreA, x: hiddenBuf,
                                  hcMult: hc, hidden: hidden)
-        try captureHalf(&cb, key + "attn_collapsed", hiddenBuf, count: hidden)
+        try captureHalf(key + "attn_collapsed", hiddenBuf, count: hidden)
+        cb = try open()
         rms.encodeBF16W(commandBuffer: cb, x: hiddenBuf,
                         weight: layer.attnNorm.buffer, weightOffset: Int(layer.attnNorm.offset),
                         out: normed, d: UInt32(hidden), eps: eps)
-        try captureHalf(&cb, key + "input_layernorm_out", normed, count: hidden)
+        try captureHalf(key + "input_layernorm_out", normed, count: hidden)
 
         if cfg.layerIsKDA(L) {
-            try encodeKDA(&cb, layer: layer, index: L, key: key)
+            try encodeKDA(layer: layer, index: L, key: key)
         } else {
-            try encodeSparseAttention(&cb, layer: layer, index: L, position: p, key: key)
+            try encodeSparseAttention(layer: layer, index: L, position: p, key: key)
         }
-        try captureHalf(&cb, key + "attn_out", attnOut, count: hidden)
+        try captureHalf(key + "attn_out", attnOut, count: hidden)
+        cb = try open()
         kernels.encodeHCPlaceMix(commandBuffer: cb, streams: streams, sub: attnOut,
                                  post: hcPostA, comb: hcCombA, outStreams: streamsAlt,
                                  hcMult: hc, hidden: hidden)
@@ -641,43 +675,46 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                                 hcMult: hc, hidden: hidden,
                                 sinkhornIters: cfg.hyperConnections.sinkhornIters,
                                 hcEps: hcEps, rmsEps: eps)
-        try captureFloat(&cb, key + "ffn_hc_pre", hcPreF, count: hc)
-        try captureFloat(&cb, key + "ffn_hc_post", hcPostF, count: hc)
-        try captureFloat(&cb, key + "ffn_hc_comb", hcCombF, count: hc * hc)
+        try captureFloat(key + "ffn_hc_pre", hcPreF, count: hc)
+        try captureFloat(key + "ffn_hc_post", hcPostF, count: hc)
+        try captureFloat(key + "ffn_hc_comb", hcCombF, count: hc * hc)
+        cb = try open()
         kernels.encodeHCCollapse(commandBuffer: cb, streams: streamsAlt, pre: hcPreF, x: hiddenBuf,
                                  hcMult: hc, hidden: hidden)
-        try captureHalf(&cb, key + "ffn_collapsed", hiddenBuf, count: hidden)
+        try captureHalf(key + "ffn_collapsed", hiddenBuf, count: hidden)
+        cb = try open()
         rms.encodeBF16W(commandBuffer: cb, x: hiddenBuf,
                         weight: layer.ffnNorm.buffer, weightOffset: Int(layer.ffnNorm.offset),
                         out: normed, d: UInt32(hidden), eps: eps)
-        try captureHalf(&cb, key + "post_attention_layernorm_out", normed, count: hidden)
+        try captureHalf(key + "post_attention_layernorm_out", normed, count: hidden)
 
         if cfg.layerIsDenseFFN(L) {
             guard let g = layer.denseGate, let u = layer.denseUp, let d = layer.denseDown else {
                 throw Glm53ForwardRunnerError.invalidConfiguration("layer \(L) has no dense FFN")
             }
+            cb = try open()
             gemvInt8(cb, g, x: normed, y: ffnGateScratch, m: denseF, n: hidden)
             gemvInt8(cb, u, x: normed, y: ffnUpScratch, m: denseF, n: hidden)
             kernels.encodeSwigluClampMul(commandBuffer: cb, gate: ffnGateScratch, up: ffnUpScratch,
                                          out: ffnActScratch, n: denseF, limit: Float(cfg.swigluLimit))
             gemvInt8(cb, d, x: ffnActScratch, y: mlpOut, m: hidden, n: denseF)
-            try captureHalf(&cb, key + "mlp_out", mlpOut, count: hidden)
-            kernels.encodeHCPlaceMix(commandBuffer: cb, streams: streamsAlt, sub: mlpOut,
-                                     post: hcPostF, comb: hcCombF, outStreams: streams,
-                                     hcMult: hc, hidden: hidden)
-            try finish(cb)
         } else {
-            try await encodeMoE(cb, layer: layer, index: L, key: key)
+            try await encodeMoE(layer: layer, index: L, key: key)
         }
+        try captureHalf(key + "mlp_out", mlpOut, count: hidden)
+        cb = try open()
+        kernels.encodeHCPlaceMix(commandBuffer: cb, streams: streamsAlt, sub: mlpOut,
+                                 post: hcPostF, comb: hcCombF, outStreams: streams,
+                                 hcMult: hc, hidden: hidden)
         if capture != nil {
+            try sync()
             capture?.floats[key + "stream_out"] = Self.readFP16(streams, count: hc * hidden)
         }
     }
 
     // MARK: - Kimi Delta Attention
 
-    private func encodeKDA(_ cb: inout MTLCommandBuffer, layer: LayerTensors, index L: Int,
-                           key: String) throws {
+    private func encodeKDA(layer: LayerTensors, index L: Int, key: String) throws {
         guard let qP = layer.qProj, let kP = layer.kProj, let vP = layer.vProj, let conv = layer.conv,
               let fA = layer.fA, let fB = layer.fB, let gA = layer.gA, let gB = layer.gB,
               let bP = layer.bProj, let aLog = layer.aLog, let dtBias = layer.dtBias,
@@ -686,56 +723,65 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         }
         let qkv = kdaHeads * kdaDim
         let rowBytes = qkv * MemoryLayout<Float16>.stride
+        var cb = try open()
         gemvInt8(cb, qP, x: normed, y: mixed, m: qkv, n: hidden)
         gemvInt8(cb, kP, x: normed, y: mixed, yOffset: rowBytes, m: qkv, n: hidden)
         gemvInt8(cb, vP, x: normed, y: mixed, yOffset: 2 * rowBytes, m: qkv, n: hidden)
-        try captureHalf(&cb, key + "kda_mixed", mixed, count: 3 * qkv)
+        try captureHalf(key + "kda_mixed", mixed, count: 3 * qkv)
+        cb = try open()
         kernels.encodeConvDecode(commandBuffer: cb, tail: tail, mixed: mixed,
                                  convWeight: conv.buffer, convWeightOffset: Int(conv.offset),
                                  out: convOut, channels: 3 * qkv, taps: convTaps)
-        try captureHalf(&cb, key + "kda_conv_out", convOut, count: 3 * qkv)
+        try captureHalf(key + "kda_conv_out", convOut, count: 3 * qkv)
+        cb = try open()
         gemvInt8(cb, fA, x: normed, y: kdaLow, m: kdaDim, n: hidden)
         gemvInt8(cb, fB, x: kdaLow, y: kdaA, m: qkv, n: kdaDim)
         gemvInt8(cb, gA, x: normed, y: kdaLow, m: kdaDim, n: hidden)
         gemvInt8(cb, gB, x: kdaLow, y: kdaGate, m: qkv, n: kdaDim)
         gemvInt8(cb, bP, x: normed, y: kdaB, m: kdaHeads, n: hidden)
-        try captureHalf(&cb, key + "kda_gate", kdaGate, count: qkv)
+        try captureHalf(key + "kda_gate", kdaGate, count: qkv)
+        cb = try open()
         kernels.encodeKDADecode(commandBuffer: cb, convOut: convOut, a: kdaA, b: kdaB, gate: kdaGate,
                                 aLog: aLog, dtBias: dtBias, oNorm: oNorm, state: st,
                                 out: attnHeads, yOut: kdaY, heads: kdaHeads, headDim: kdaDim,
                                 lowerBound: Float(g53.kdaGateLowerBound), eps: eps)
-        try captureHalf(&cb, key + "kda_y", kdaY, count: qkv)
-        gemvInt8(cb, layer.oProj, x: attnHeads, y: attnOut, m: hidden, n: qkv)
+        try captureHalf(key + "kda_y", kdaY, count: qkv)
+        gemvInt8(try open(), layer.oProj, x: attnHeads, y: attnOut, m: hidden, n: qkv)
     }
 
     // MARK: - NoPE latent sparse attention
 
-    private func encodeSparseAttention(_ cb: inout MTLCommandBuffer, layer: LayerTensors, index L: Int,
-                                       position p: Int, key: String) throws {
+    private func encodeSparseAttention(layer: LayerTensors, index L: Int, position p: Int,
+                                       key: String) throws {
         guard let qA = layer.qA, let qANorm = layer.qANorm, let qB = layer.qB, let kvA = layer.kvA,
               let kvANorm = layer.kvANorm, let embedQ = layer.embedQ, let unembed = layer.unembedOut,
               let latents = state.latents[L] else {
             throw Glm53ForwardRunnerError.invalidConfiguration("layer \(L) is not a sparse layer")
         }
         let T = p + 1
+        var cb = try open()
         gemvInt8(cb, qA, x: normed, y: qr, m: qRank, n: hidden)
         rms.encodeBF16W(commandBuffer: cb, x: qr, weight: qANorm.buffer, weightOffset: Int(qANorm.offset),
                         out: qr, d: UInt32(qRank), eps: eps)
-        try captureHalf(&cb, key + "dsa_qr", qr, count: qRank)
+        try captureHalf(key + "dsa_qr", qr, count: qRank)
+        cb = try open()
         gemvInt8(cb, qB, x: qr, y: q, m: numHeads * qkDim, n: qRank)
-        try captureHalf(&cb, key + "dsa_q", q, count: numHeads * qkDim)
+        try captureHalf(key + "dsa_q", q, count: numHeads * qkDim)
         let latentOffset = p * kvRank * MemoryLayout<Float16>.stride
+        cb = try open()
         gemvInt8(cb, kvA, x: normed, y: latents, yOffset: latentOffset, m: kvRank, n: hidden)
         rms.encodeBF16W(commandBuffer: cb, x: latents, xOffset: latentOffset,
                         weight: kvANorm.buffer, weightOffset: Int(kvANorm.offset),
                         out: latents, outOffset: latentOffset, d: UInt32(kvRank), eps: eps)
-        try captureHalf(&cb, key + "dsa_latent_new", latents, offset: latentOffset, count: kvRank)
+        try captureHalf(key + "dsa_latent_new", latents, offset: latentOffset, count: kvRank)
 
-        let selectedCount = try encodeIndexer(&cb, layer: layer, index: L, position: p, key: key)
+        let selectedCount = try encodeIndexer(layer: layer, index: L, position: p, key: key)
 
+        cb = try open()
         kernels.encodeHeadedInt8GEMV(commandBuffer: cb, weights: embedQ, x: q, y: qLat,
                                      heads: numHeads, m: kvRank, n: qkDim)
-        try captureHalf(&cb, key + "dsa_q_latent", qLat, count: numHeads * kvRank)
+        try captureHalf(key + "dsa_q_latent", qLat, count: numHeads * kvRank)
+        cb = try open()
         kernels.encodeLatentAttention(commandBuffer: cb, qLatent: qLat, latents: latents, selected: selected,
                                       out: oLat, heads: numHeads, latentDim: kvRank,
                                       cachedRows: T, selectedCount: selectedCount,
@@ -749,8 +795,8 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     /// group, and — once the cache holds more than `index_topk` tokens —
     /// scores the complete pools and selects on the CPU. Returns the count of
     /// rows in `selected`, or `Glm53Kernels.attendAll` for the dense bypass.
-    private func encodeIndexer(_ cb: inout MTLCommandBuffer, layer: LayerTensors, index L: Int,
-                               position p: Int, key: String) throws -> UInt32 {
+    private func encodeIndexer(layer: LayerTensors, index L: Int, position p: Int,
+                               key: String) throws -> UInt32 {
         guard let wk = layer.idxK, let kw = layer.idxKNormWeight, let kb = layer.idxKNormBias,
               let gate = layer.idxPoolGate, let ape = layer.idxApe, let wqB = layer.idxQB,
               let wproj = layer.idxWeights,
@@ -759,15 +805,17 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         }
         let T = p + 1
         let rowOffset = p * idxDim * MemoryLayout<Float16>.stride
+        var cb = try open()
         gemvInt8(cb, wk, x: normed, y: idxKRaw, m: idxDim, n: hidden)
         kernels.encodeLayerNormBias(commandBuffer: cb, x: idxKRaw, weight: kw, bias: kb,
                                     out: keys, outOffset: rowOffset, d: idxDim,
                                     eps: Float(g53.indexerKNormEps))
         matVec.encode(commandBuffer: cb, matrix: gate, x: normed, y: gates, yOffset: rowOffset,
                       rows: idxDim, cols: hidden)
-        try captureHalf(&cb, key + "idx_k_new", keys, offset: rowOffset, count: idxDim)
-        try captureHalf(&cb, key + "idx_gate_new", gates, offset: rowOffset, count: idxDim)
+        try captureHalf(key + "idx_k_new", keys, offset: rowOffset, count: idxDim)
+        try captureHalf(key + "idx_gate_new", gates, offset: rowOffset, count: idxDim)
         if T % kPool == 0 {
+            cb = try open()
             kernels.encodePoolKeys(commandBuffer: cb, keys: keys, gates: gates, ape: ape, pooled: pooled,
                                    pool: T / kPool - 1, kPool: kPool, dim: idxDim)
         }
@@ -781,14 +829,14 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                 "dense A/B: \(T) cached tokens exceed index_topk \(idxTopK); dense attention is only the model below that")
         }
         let completePools = T / kPool
+        cb = try open()
         gemvInt8(cb, wqB, x: qr, y: idxQ, m: idxHeads * idxDim, n: qRank)
         gemvInt8(cb, wproj, x: normed, y: idxW, m: idxHeads, n: hidden)
         kernels.encodeIndexerScore(commandBuffer: cb, q: idxQ, keys: pooled, weights: idxW, scores: idxScores,
                                    numHeads: idxHeads, indexDim: idxDim, entryCount: completePools,
                                    headScale: 1 / Float(idxDim).squareRoot(),
                                    weightScale: 1 / Float(idxHeads).squareRoot())
-        try finish(cb)
-        cb = try makeCommandBuffer()
+        try sync()
 
         let tSel = Self.phaseClock()
         let scoresPtr = idxScores.contents().assumingMemoryBound(to: Float.self)
@@ -808,61 +856,78 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
 
     // MARK: - MoE
 
-    private func encodeMoE(_ cbIn: MTLCommandBuffer, layer: LayerTensors, index L: Int, key: String) async throws {
-        var cb = cbIn
-        guard let router = layer.router, let sg = layer.sharedGate, let su = layer.sharedUp,
-              let sd = layer.sharedDown, let offsets = layer.expertOffsets else {
+    private func encodeMoE(layer: LayerTensors, index L: Int, key: String) async throws {
+        guard let router = layer.router, let bias = layer.routerBias, let sg = layer.sharedGate,
+              let su = layer.sharedUp, let sd = layer.sharedDown, let offsets = layer.expertOffsets else {
             throw Glm53ForwardRunnerError.invalidConfiguration("layer \(L) has no MoE block")
         }
-        // Router logits in fp32 from the BF16 gate; the shared expert alongside.
+        // Router logits in fp32 from the BF16 gate, the top-8 on the GPU, and
+        // the shared expert alongside.
+        var cb = try open()
         matVec.encode(commandBuffer: cb, matrix: router, x: normed, y: routerLogits,
                       rows: numExperts, cols: hidden, outputFloat32: true)
+        kernels.encodeRouterSelect(commandBuffer: cb, logits: routerLogits, bias: bias,
+                                   outIndices: routerIndices, outWeights: routerWeights,
+                                   numExperts: numExperts, routeScale: Float(cfg.routedScalingFactor))
         gemvInt8(cb, sg, x: normed, y: ffnGateScratch, m: sharedF, n: hidden)
         gemvInt8(cb, su, x: normed, y: ffnUpScratch, m: sharedF, n: hidden)
         kernels.encodeSwigluClampMul(commandBuffer: cb, gate: ffnGateScratch, up: ffnUpScratch,
                                      out: ffnActScratch, n: sharedF, limit: Float(cfg.swigluLimit))
         gemvInt8(cb, sd, x: ffnActScratch, y: sharedOut, m: hidden, n: sharedF)
-        try captureHalf(&cb, key + "shared_out", sharedOut, count: hidden)
-        try finish(cb)
-
-        let tRoute = Self.phaseClock()
-        let logitsPtr = routerLogits.contents().assumingMemoryBound(to: Float.self)
-        let logitsRow = (0..<numExperts).map { logitsPtr[$0] }
-        let route = Glm53Selection.route(logits: logitsRow, bias: layer.routerBias, topK: topK,
-                                         routeScale: Float(cfg.routedScalingFactor))
-        let weightsPtr = routerWeights.contents().assumingMemoryBound(to: Float16.self)
-        for (i, w) in route.weights.enumerated() { weightsPtr[i] = Float16(w) }
-        if Self.phaseInstrumentationEnabled { totalRouterNanos &+= Self.phaseClock() - tRoute }
+        try captureHalf(key + "shared_out", sharedOut, count: hidden)
         if capture != nil {
+            try sync()
+            let logitsPtr = routerLogits.contents().assumingMemoryBound(to: Float.self)
+            let logitsRow = (0..<numExperts).map { logitsPtr[$0] }
             capture?.floats[key + "router_logits"] = logitsRow
-            capture?.floats[key + "router_scores"] = route.scores
-            capture?.integers[key + "router_indices"] = route.experts
-            capture?.floats[key + "router_weights"] = route.weights
+            capture?.floats[key + "router_scores"] = logitsRow.map { 1 / (1 + expf(-$0)) }
+            capture?.integers[key + "router_indices"] = routedExpertIndices()
+            capture?.floats[key + "router_weights"] = Self.readFP16(routerWeights, count: topK)
         }
 
+        if let slab = layer.slab {
+            // Resident: the indices resolve to slab offsets on the GPU and the
+            // routed FFN runs in the same stream. `y = shared + routed`.
+            cb = try open()
+            moe.encodeRoutedResidentFFN(
+                commandBuffer: cb, slab: slab.buffer, slabOffset: slab.baseOffset,
+                expertStride: slab.expertStride, indices: routerIndices, identityTable: identityTable,
+                slotOffsets: slotOffsets, allHit: allHit, routedOffsets: offsets,
+                x: normed, acts: moeActs, routingWeights: routerWeights,
+                residual: sharedOut, y: mlpOut,
+                numExperts: UInt32(numExperts), d: UInt32(hidden), f: UInt32(moeF), topK: UInt32(topK))
+            return
+        }
+
+        // Slot cache: the fetch needs the indices on the CPU.
+        let tRoute = Self.phaseClock()
+        try sync()
+        let experts = routedExpertIndices()
+        if Self.phaseInstrumentationEnabled { totalRouterNanos &+= Self.phaseClock() - tRoute }
         try checkSlotBudget(layer: L)
         let tIo = Self.phaseClock()
-        let blobs = try await fetchExperts(layer: L, experts: route.experts)
+        let blobs = try await fetchExperts(layer: L, experts: experts)
         if Self.phaseInstrumentationEnabled { totalIoNanos &+= Self.phaseClock() - tIo }
-        var moeCB = try makeCommandBuffer()
+        cb = try open()
         let argBuffer = moe.makeReusedRoutedArgumentBuffer(routedBlobs: blobs, topK: UInt32(topK))
         moe.encodeRoutedPersistentPhase1U16Load(
-            commandBuffer: moeCB, routedArgBuffer: argBuffer, routedBlobs: blobs,
+            commandBuffer: cb, routedArgBuffer: argBuffer, routedBlobs: blobs,
             routedOffsets: offsets, x: normed, acts: moeActs,
             d: UInt32(hidden), f: UInt32(moeF), topK: UInt32(topK))
         // The reduce seeds with the shared-expert output: routed + shared.
         moe.encodeRoutedPersistentPhase2Reduce(
-            commandBuffer: moeCB, routedArgBuffer: argBuffer, routedBlobs: blobs,
+            commandBuffer: cb, routedArgBuffer: argBuffer, routedBlobs: blobs,
             routedOffsets: offsets, acts: moeActs, routingWeights: routerWeights,
             residual: sharedOut, y: mlpOut, d: UInt32(hidden), f: UInt32(moeF), topK: UInt32(topK))
-        try captureHalf(&moeCB, key + "mlp_out", mlpOut, count: hidden)
-        kernels.encodeHCPlaceMix(commandBuffer: moeCB, streams: streamsAlt, sub: mlpOut,
-                                 post: hcPostF, comb: hcCombF, outStreams: streams,
-                                 hcMult: hc, hidden: hidden)
-        try finish(moeCB)
     }
 
-    // MARK: - Expert streaming
+    /// The router's chosen experts, read after a `sync()`.
+    private func routedExpertIndices() -> [Int] {
+        let ptr = routerIndices.contents().assumingMemoryBound(to: UInt32.self)
+        return (0..<topK).map { min(Int(ptr[$0]), numExperts - 1) }
+    }
+
+    // MARK: - Expert streaming (slot cache)
 
     private func checkSlotBudget(layer L: Int) throws {
         guard !slotBudgetChecked else { return }
@@ -885,6 +950,33 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         return views.map { (buffer: $0.buffer, offset: Int($0.offset)) }
     }
 
+    // MARK: - Command stream
+
+    /// The token's open command buffer, opened on demand.
+    private func open() throws -> MTLCommandBuffer {
+        if let stream { return stream }
+        guard let cb = ctx.queue.makeCommandBuffer() else {
+            throw Glm53ForwardRunnerError.commandFailed("no command buffer")
+        }
+        stream = cb
+        return cb
+    }
+
+    /// Commit the open stream and wait for it; the next `open()` starts a new one.
+    private func sync() throws {
+        guard let cb = stream else { return }
+        stream = nil
+        trackGpuInterval(cb)
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let error = cb.error {
+            throw Glm53ForwardRunnerError.commandFailed("\(error)")
+        }
+        guard cb.status == .completed else {
+            throw Glm53ForwardRunnerError.commandFailed("command buffer status \(cb.status.rawValue)")
+        }
+    }
+
     // MARK: - Encoding helpers
 
     private func gemvInt8(_ cb: MTLCommandBuffer, _ view: TensorView,
@@ -898,40 +990,17 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                     m: UInt32(m), n: UInt32(n))
     }
 
-    private func makeCommandBuffer() throws -> MTLCommandBuffer {
-        guard let cb = ctx.queue.makeCommandBuffer() else {
-            throw Glm53ForwardRunnerError.commandFailed("no command buffer")
-        }
-        return cb
-    }
-
-    private func finish(_ cb: MTLCommandBuffer) throws {
-        trackGpuInterval(cb)
-        cb.commit()
-        cb.waitUntilCompleted()
-        if let error = cb.error {
-            throw Glm53ForwardRunnerError.commandFailed("\(error)")
-        }
-        guard cb.status == .completed else {
-            throw Glm53ForwardRunnerError.commandFailed("command buffer status \(cb.status.rawValue)")
-        }
-    }
-
-    private func captureHalf(_ cb: inout MTLCommandBuffer, _ key: String, _ buffer: MTLBuffer,
-                             offset: Int = 0, count: Int) throws {
+    private func captureHalf(_ key: String, _ buffer: MTLBuffer, offset: Int = 0, count: Int) throws {
         guard capture != nil else { return }
-        try finish(cb)
+        try sync()
         capture?.floats[key] = Self.readFP16(buffer, offset: offset, count: count)
-        cb = try makeCommandBuffer()
     }
 
-    private func captureFloat(_ cb: inout MTLCommandBuffer, _ key: String, _ buffer: MTLBuffer,
-                              count: Int) throws {
+    private func captureFloat(_ key: String, _ buffer: MTLBuffer, count: Int) throws {
         guard capture != nil else { return }
-        try finish(cb)
+        try sync()
         let base = buffer.contents().assumingMemoryBound(to: Float.self)
         capture?.floats[key] = (0..<count).map { base[$0] }
-        cb = try makeCommandBuffer()
     }
 
     static func readFP16(_ buffer: MTLBuffer, offset: Int = 0, count: Int) -> [Float] {
@@ -949,9 +1018,10 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     }
 }
 
-/// The CPU-side selections of the GLM-5.3 forward, exact transcriptions of
-/// the reference (`Glm5NextIndexer`, `group_expert_select`). Ties break toward
-/// the lower index, as MLX's stable `argsort` does.
+/// The CPU-side selection of the GLM-5.3 forward: the pooled indexer's
+/// attended set, an exact transcription of the reference (`Glm5NextIndexer`).
+/// Ties break toward the lower index, as MLX's stable `argsort` does. The
+/// router's selection lives on the GPU (`glm53_router_select_k8`).
 enum Glm53Selection {
     /// The indexer's attended token set for the newest query: the top
     /// `indexTopK / kPool` complete pools by score (stable descending order),
@@ -968,26 +1038,5 @@ enum Glm53Selection {
         for j in order.prefix(selectK) { for c in 0..<kPool { tokens.insert(j * kPool + c) } }
         if alwaysSelectTail { for t in (complete * kPool)..<T { tokens.insert(t) } }
         return tokens.sorted()
-    }
-
-    struct Route {
-        let experts: [Int]
-        let weights: [Float]
-        let scores: [Float]
-    }
-
-    /// Sigmoid scores; selection on `score + bias`; weights are the unbiased
-    /// scores of the chosen experts renormalized to one and scaled.
-    static func route(logits: [Float], bias: [Float], topK: Int, routeScale: Float) -> Route {
-        let scores = logits.map { 1 / (1 + expf(-$0)) }
-        let biased = (0..<scores.count).map { scores[$0] + bias[$0] }
-        let order = (0..<scores.count).sorted { a, b in
-            biased[a] != biased[b] ? biased[a] > biased[b] : a < b
-        }
-        let chosen = Array(order.prefix(topK))
-        var sum: Float = 0
-        for e in chosen { sum += scores[e] }
-        let weights = chosen.map { scores[$0] / sum * routeScale }
-        return Route(experts: chosen, weights: weights, scores: scores)
     }
 }

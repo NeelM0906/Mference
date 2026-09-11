@@ -124,7 +124,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 
 extension Args {
     public static let usage = """
-    MferenceCLI — Gemma 4 / Qwen 3.6 / DeepSeek V4 Flash / Inkling-Small / Maple text generation
+    MferenceCLI — Gemma 4 / Qwen 3.6 / DeepSeek V4 Flash / Inkling-Small / Maple / GLM-5.3 Flash text generation
 
     usage: MferenceCLI --model <dir> (--prompt <string> | --messages-file <path> | --chat) [options]
 

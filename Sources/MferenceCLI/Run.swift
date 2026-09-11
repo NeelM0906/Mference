@@ -219,6 +219,30 @@ public func run(args: Args,
             lines += String(format: "%.1f", total - accounted) + " ms\n"
             stderr.write(Data(lines.utf8))
         }
+        // GLM-5.3-Flash: per-token path with the routed-expert read fully
+        // exposed, the pooled indexer's CPU top-k (sparse layers past
+        // index_topk) and the CPU router round trip per MoE layer.
+        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
+           let g53 = runner as? Glm53ForwardRunner {
+            let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
+            let total = stats.decodeSeconds * 1000
+            let accounted = Double(g53.totalIoNanos + g53.totalIndexerTopKNanos
+                                   + g53.totalRouterNanos) / 1e6
+            var lines = "\n[phases over \(stats.newTokens) tokens, decode "
+            lines += String(format: "%.0f", total) + " ms]\n"
+            lines += "  expert io (all exposed): " + ms(g53.totalIoNanos) + " ms\n"
+            lines += "  indexer cpu top-k:       " + ms(g53.totalIndexerTopKNanos) + " ms\n"
+            lines += "  router readback wait:    " + ms(g53.totalRouterNanos) + " ms"
+            lines += g53.expertsResident ? " (resident: none)\n" : "\n"
+            let gpuBusy = g53.totalGpuBusyNanos
+            let gpuSpan = g53.totalGpuSpanNanos
+            lines += "  gpu busy: " + ms(gpuBusy) + " ms, span: " + ms(gpuSpan) + " ms, gap: "
+            lines += ms(gpuSpan > gpuBusy ? gpuSpan - gpuBusy : 0) + " ms\n"
+            lines += "  command buffers: \(g53.totalCommandBuffers)\n"
+            lines += "  unaccounted (CPU encode + GPU waits): "
+            lines += String(format: "%.1f", total - accounted) + " ms\n"
+            stderr.write(Data(lines.utf8))
+        }
         if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
            let m5 = runner as? MiniCPM5ForwardRunner, m5.phaseStats.decodeSteps > 0 {
             // Dense, one command buffer per token: no expert I/O phases exist.

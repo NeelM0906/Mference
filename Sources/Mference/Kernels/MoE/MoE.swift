@@ -382,6 +382,80 @@ final class MoE {
         encoder.endEncoding()
     }
 
+    /// Resident experts routed on the GPU. `indices` (the router's top-k,
+    /// uint32) resolve through `identityTable` (`slot_of[e] = e`, Int16) to
+    /// byte offsets `e * expertStride` inside `slab`, then the slot-map
+    /// phase-1 / phase-2 bodies run the routed FFN — no CPU round trip and no
+    /// residual add: `y = residual + Σ_k w_k · down_k(act_k)`. The identity
+    /// table makes `all_hit` always 1, so the guarded bodies always run. The
+    /// math bodies are the production ones, so the output is byte-identical to
+    /// the argument-buffer path fed the same experts and weights.
+    func encodeRoutedResidentFFN(commandBuffer: MTLCommandBuffer,
+                                 slab: MTLBuffer,
+                                 slabOffset: Int,
+                                 expertStride: Int,
+                                 indices: MTLBuffer,
+                                 identityTable: MTLBuffer,
+                                 slotOffsets: MTLBuffer,
+                                 allHit: MTLBuffer,
+                                 routedOffsets: MoEExpertOffsets,
+                                 x: MTLBuffer,
+                                 acts: MTLBuffer,
+                                 routingWeights: MTLBuffer,
+                                 residual: MTLBuffer,
+                                 y: MTLBuffer,
+                                 numExperts: UInt32,
+                                 d: UInt32,
+                                 f: UInt32,
+                                 topK: UInt32) {
+        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(UInt64(expertStride) * UInt64(numExperts - 1) <= UInt64(UInt32.max),
+                     "resident slab offsets must fit 32 bits")
+        encodeSlotLookup(commandBuffer: commandBuffer, indices: indices, table: identityTable,
+                         slotStride: expertStride, slotOffsets: slotOffsets, allHit: allHit,
+                         numExperts: numExperts, topK: topK)
+        var offsets = routedOffsets
+        var dimension = d
+        var intermediate = f
+        var k = topK
+        let specialized = useRealDecodeConstants(d: d, f: f, topK: topK)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            preconditionFailure("resident routed FFN: no compute encoder")
+        }
+        encoder.useResource(slab, usage: .read)
+        encoder.setComputePipelineState(
+            specialized ? phase1SlotmapSpecializedPSO : phase1SlotmapPSO)
+        encoder.setBuffer(slab, offset: slabOffset, index: 0)
+        encoder.setBuffer(slotOffsets, offset: 0, index: 1)
+        encoder.setBuffer(allHit, offset: 0, index: 2)
+        encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 3)
+        encoder.setBuffer(x, offset: 0, index: 4)
+        encoder.setBuffer(acts, offset: 0, index: 5)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(topK * f) + 7) / 8, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+
+        encoder.setComputePipelineState(
+            specialized ? phase2SlotmapSpecializedPSO : phase2SlotmapPSO)
+        encoder.setBuffer(slab, offset: slabOffset, index: 0)
+        encoder.setBuffer(slotOffsets, offset: 0, index: 1)
+        encoder.setBuffer(allHit, offset: 0, index: 2)
+        encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 3)
+        encoder.setBuffer(acts, offset: 0, index: 4)
+        encoder.setBuffer(routingWeights, offset: 0, index: 5)
+        encoder.setBuffer(residual, offset: 0, index: 6)
+        encoder.setBuffer(y, offset: 0, index: 7)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 9)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: Int(d), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
     /// S3 guarded routed FFN, encoded after the shared expert in cb1. The
     /// three kernels no-op unless the lookup found every routed expert in a
     /// slot; the math bodies are the production ones, so an all-hit layer is
