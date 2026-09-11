@@ -1,0 +1,318 @@
+{
+ "capture_layout": {
+  "decode": "decode.step{s:02d}.*; decode.step_logits [steps, V]",
+  "prompt": "seq.pos{p:03d}.* per prompt token on the one-token cached path; seq.logits [S, V]; prefill.logits [S, V] from one batched forward",
+  "state": "seq.final.* and decode.final.*: kda_conv_state [K-1, 3*qkv], kda_state [H, Dv, Dk], dsa_latent_cache [T, kv_lora], idx_packed_cache [T, 2*idx_dim+1]"
+ },
+ "config": {
+  "attention_bias": false,
+  "eos_token_id": [
+   1
+  ],
+  "first_k_dense_replace": 1,
+  "hc_eps": 1e-06,
+  "hc_mult": 4,
+  "hc_sinkhorn_iters": 20,
+  "head_dim": 0,
+  "hidden_act": "silu",
+  "hidden_size": 128,
+  "index_head_dim": 64,
+  "index_kpool": 2,
+  "index_kpool_always_select_tail": true,
+  "index_kpool_compress": true,
+  "index_n_heads": 2,
+  "index_share_for_mtp_iteration": true,
+  "index_topk": 4,
+  "indexer_rope_interleave": true,
+  "indexer_types": [
+   "full",
+   "full",
+   "full",
+   "full"
+  ],
+  "intermediate_size": 128,
+  "kv_lora_rank": 64,
+  "layer_types": [
+   "linear_attention",
+   "linear_attention",
+   "linear_attention",
+   "deepseek_sparse_attention"
+  ],
+  "linear_attn_config": {
+   "full_attn_layers": [
+    3
+   ],
+   "gate_lower_bound": -5.0,
+   "head_dim": 64,
+   "kda_layers": [
+    0,
+    1,
+    2
+   ],
+   "num_heads": 2,
+   "short_conv_kernel_size": 4
+  },
+  "max_position_embeddings": 4096,
+  "mhc": true,
+  "mla_use_nope": true,
+  "mlp_layer_types": [
+   "dense",
+   "sparse",
+   "sparse",
+   "sparse"
+  ],
+  "model_type": "glm5_next_text",
+  "moe_intermediate_size": 64,
+  "moe_router_dtype": "float32",
+  "n_group": 1,
+  "n_routed_experts": 8,
+  "n_shared_experts": 1,
+  "norm_topk_prob": true,
+  "num_attention_heads": 2,
+  "num_experts_per_tok": 2,
+  "num_hidden_layers": 4,
+  "num_key_value_heads": 2,
+  "num_nextn_predict_layers": 0,
+  "pad_token_id": 0,
+  "q_lora_rank": 64,
+  "qk_head_dim": 64,
+  "qk_nope_head_dim": 64,
+  "qk_rope_head_dim": 0,
+  "rms_norm_eps": 1e-05,
+  "routed_scaling_factor": 2.5,
+  "scoring_func": "sigmoid",
+  "swiglu_limit": 0.5,
+  "tie_word_embeddings": false,
+  "topk_group": 1,
+  "topk_method": "noaux_tc",
+  "v_head_dim": 64,
+  "vocab_size": 256
+ },
+ "decode_steps": 16,
+ "family": "glm53Flash",
+ "files": {
+  "decode_long.safetensors": {
+   "sha256": "bc7b9541cfcab24c2a563be124882e0da5e2a57cde325d9d0f9fb3d270c7f4d2",
+   "size": 1360112
+  },
+  "decode_short.safetensors": {
+   "sha256": "de0729d58b52d46ab5940beeebfe203cd898b3e862a5d8a993a851f5637c78de",
+   "size": 1257088
+  },
+  "integers_decode_long.json": {
+   "sha256": "e029e9db9e60f6e2d28221401f4333fccbb0f3e7aa1feb65024bb954bb65298c",
+   "size": 7901
+  },
+  "integers_decode_short.json": {
+   "sha256": "78635eb71ca183190af3b36a3d1fac927b725e25d70d49042fc943e15156c3d2",
+   "size": 6152
+  },
+  "integers_prompt_long.json": {
+   "sha256": "92548e6c044aa471bba4ece9371976cef956e5d28d10db54ca14315222fd5008",
+   "size": 17631
+  },
+  "integers_prompt_short.json": {
+   "sha256": "458decb30d3a3e9a6569f6a2dc7a62593a0cfa82c9614a1ffd1dd0896a0b80f2",
+   "size": 3681
+  },
+  "prompt_long.safetensors": {
+   "sha256": "6313160b15dc93e8d62155672316f0b79d5709d91e72ff116ba80a3f09a85897",
+   "size": 3577384
+  },
+  "prompt_short.safetensors": {
+   "sha256": "fba2a5477258c61b88022e78f0d7df684a2622f9271a4bb0a4bdc8386a92e016",
+   "size": 945272
+  },
+  "toy-ckpt/config.json": {
+   "sha256": "5a44e378a2c9e3a7777da526029a1629b16c2f4a9b966dfeea1daad2b2a3dd72",
+   "size": 6869
+  },
+  "toy-ckpt/model-00001.safetensors": {
+   "sha256": "596d9953365bc60899ad2c4516731e545d7ccbee2995a93d1bad2a2c05eadffe",
+   "size": 1203019
+  },
+  "toy-ckpt/model.safetensors.index.json": {
+   "sha256": "969c525e041c529b2c9aff3c21c718b0ee48790a21e73b6f2aa0f5be115dbc23",
+   "size": 21003
+  },
+  "toy-ckpt/tokenizer_config.json": {
+   "sha256": "9b8577e487e7d31bad201cddf22fabfc18b248f5c431f82fb37d09613c92cb40",
+   "size": 73
+  }
+ },
+ "margins": {
+  "below_floor": {
+   "argmax": 15,
+   "indexer": 0,
+   "router": 0
+  },
+  "below_floor_locations": {
+   "argmax": [
+    {
+     "margin": 0.004230499267578125,
+     "where": "long.seq.pos005.argmax"
+    },
+    {
+     "margin": 0.0018467903137207031,
+     "where": "long.seq.pos007.argmax"
+    },
+    {
+     "margin": 0.001920461654663086,
+     "where": "long.seq.pos013.argmax"
+    },
+    {
+     "margin": 0.018213510513305664,
+     "where": "long.seq.pos015.argmax"
+    },
+    {
+     "margin": 0.037587881088256836,
+     "where": "long.seq.pos016.argmax"
+    },
+    {
+     "margin": 0.015157222747802734,
+     "where": "long.seq.pos017.argmax"
+    },
+    {
+     "margin": 0.000446319580078125,
+     "where": "long.seq.pos019.argmax"
+    },
+    {
+     "margin": 0.047948360443115234,
+     "where": "long.seq.pos020.argmax"
+    },
+    {
+     "margin": 0.01654338836669922,
+     "where": "long.seq.pos034.argmax"
+    },
+    {
+     "margin": 0.01895427703857422,
+     "where": "long.seq.pos037.argmax"
+    },
+    {
+     "margin": 0.04751133918762207,
+     "where": "long.seq.pos038.argmax"
+    },
+    {
+     "margin": 0.019425153732299805,
+     "where": "long.seq.pos041.argmax"
+    },
+    {
+     "margin": 0.01560354232788086,
+     "where": "long.decode.step05.argmax"
+    },
+    {
+     "margin": 0.010910749435424805,
+     "where": "long.decode.step07.argmax"
+    },
+    {
+     "margin": 0.01481318473815918,
+     "where": "long.decode.step09.argmax"
+    }
+   ],
+   "indexer": [],
+   "router": []
+  },
+  "decisions": {
+   "argmax": 92,
+   "indexer": 75,
+   "router": 276
+  },
+  "floors": {
+   "argmax": 0.05,
+   "indexer": 0.002,
+   "router": 0.002
+  },
+  "indexer_zero_score_ties": 10,
+  "min": {
+   "argmax": 0.000446319580078125,
+   "indexer": 0.003584449179470539,
+   "router": 0.0035774707794189453
+  },
+  "note": "exact-zero ties are rejected except where both boundary pools score exactly zero, where the stable ascending-index order is the rule"
+ },
+ "prompts": {
+  "long": {
+   "ids": [
+    22,
+    213,
+    67,
+    11,
+    88,
+    49,
+    51,
+    128,
+    119,
+    7,
+    166,
+    217,
+    233,
+    174,
+    43,
+    66,
+    94,
+    166,
+    129,
+    176,
+    151,
+    250,
+    135,
+    70,
+    201,
+    9,
+    251,
+    105,
+    237,
+    68,
+    220,
+    187,
+    180,
+    141,
+    89,
+    145,
+    69,
+    53,
+    181,
+    78,
+    231,
+    203,
+    94,
+    134,
+    131,
+    249,
+    32,
+    115
+   ]
+  },
+  "short": {
+   "ids": [
+    7,
+    194,
+    45,
+    69,
+    239,
+    178,
+    117,
+    225,
+    36,
+    118,
+    62,
+    89
+   ]
+  }
+ },
+ "reference": {
+  "commit": "a61a7c7d2fbdf3d218a9909365a24bd794f3a247",
+  "device": "cpu",
+  "dtype": "float32",
+  "mlx": "0.32.2",
+  "pinned_commit": "a61a7c7d2fbdf3d218a9909365a24bd794f3a247",
+  "repo": "https://github.com/PipeNetwork/glm53-flash-mlx"
+ },
+ "seed": 12,
+ "storage_policy": {
+  "bf16": "mlp.gate.weight, attn_hc/ffn_hc fn, conv1d, indexer k_norm weight/bias, index_kpool_compress_gate/ape, every RMSNorm weight",
+  "f32": "attn_hc/ffn_hc base and scale, A_log, dt_bias, e_score_correction_bias",
+  "int4_g64": "mlp.switch_mlp.{gate,up,down}_proj (stacked)",
+  "int8_g64": "every Linear the conversion's quantization map names: KDA q/k/v/o, f_a/f_b, g_a/g_b, b_proj; q_a/q_b/kv_a/embed_q/unembed_out/o_proj; indexer wq_b/wk/weights_proj; shared and dense FFNs; embed_tokens; lm_head"
+ }
+}

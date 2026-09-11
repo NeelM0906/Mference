@@ -344,3 +344,95 @@ Chat-template fixtures for the same family are produced by
 [`minicpm5_make_template_fixtures.py`](minicpm5_make_template_fixtures.py) from
 the real `tokenizer.json` + `chat_template.jinja` (16 renders through
 `apply_chat_template`, keys of tool-call arguments given sorted).
+
+# glm53flash reference-parity goldens
+
+Goldens for the `glm53Flash` (upstream `glm5_next`) port, captured from
+**PipeNetwork's parity-fixed MLX runtime**
+([`PipeNetwork/glm53-flash-mlx`](https://github.com/PipeNetwork/glm53-flash-mlx)
+at `a61a7c7d2fbdf3d218a9909365a24bd794f3a247`, which reproduces `transformers`
+5.16 at 1e-6) running a toy `glm5_next` text model on the CPU in float32.
+
+Contract being pinned:
+[`docs/superpowers/specs/2026-09-11-glm53-flash-runtime-design.md`](../../docs/superpowers/specs/2026-09-11-glm53-flash-runtime-design.md).
+Family dossier: [`docs/families/GLM53_FLASH.md`](../../docs/families/GLM53_FLASH.md).
+
+- Generator: [`glm53_make_goldens.py`](glm53_make_goldens.py) (committed)
+- Goldens and toy checkpoint: `Tests/Mference/Fixtures/glm53/` (committed, 8.4 MB)
+- Swift consumers: `Tests/Mference/Core/Runtime/Glm53/` — `Glm53Goldens` (reader and
+  dequantizing toy-checkpoint loader), `Glm53ReferenceRunner` (fp32 CPU oracle),
+  `Glm53ReferenceParityTests`
+
+## Environment
+
+```bash
+/opt/homebrew/bin/python3.12 -m venv scratch/glm53-parity-venv
+scratch/glm53-parity-venv/bin/pip install mlx numpy safetensors "git+https://github.com/Blaizzy/mlx-vlm.git@main"
+git clone https://github.com/PipeNetwork/glm53-flash-mlx scratch/glm53-flash-mlx
+git -C scratch/glm53-flash-mlx checkout a61a7c7d2fbdf3d218a9909365a24bd794f3a247
+scratch/glm53-parity-venv/bin/python Scripts/parity/glm53_make_goldens.py --reference scratch/glm53-flash-mlx
+```
+
+Recorded: `mlx 0.32.2`, `mlx_vlm 0.7.0` (main, 2026-09-11; the runtime imports
+`deepseek_v32`, `deepseek_v4.hyper_connection`, `gated_delta`, `mla` and
+`switch_layers` from it), Python 3.12, CPU float32.
+
+## Toy configuration
+
+`ArchConfig.glm53Toy()` and `SyntheticSnapshot.buildGlm53` carry the same geometry;
+`Glm53ReferenceParityTests.toyConfigMatchesTheGoldensManifest` cross-checks it.
+
+| | |
+|---|---|
+| layers | 4: `linear_attention` x3 (mask 7), `deepseek_sparse_attention` on layer 3 (mask 8) |
+| hidden / dense FFN / MoE width | 128 / 128 (layer 0 dense) / 64 |
+| experts | 8 routed, top-2, 1 shared; sigmoid + correction bias, renormalized, x2.5; `swiglu_limit 0.5` |
+| KDA | 2 heads x 64, conv 4, `gate_lower_bound -5` |
+| sparse attention | 2 heads x 64 (`qk_nope`), latent 64, `q_lora_rank 64` |
+| indexer | 2 heads x 64, `index_topk 4`, `index_kpool 2`, tail always selected |
+| mHC | 4 streams, 20 Sinkhorn sweeps, eps 1e-6; final collapse is the stream mean |
+| vocabulary | 256 |
+| prompts | `short` 12 tokens, `long` 48 tokens, 16 greedy decode steps each |
+
+Every quantized inner dimension is a multiple of 64 so the toy is quantized exactly as
+production is (INT8 group-64 everywhere the conversion's `quantization` map names a
+module, INT4 group-64 for the stacked experts, BF16 for the router gate / mHC `fn` /
+conv / norms / indexer pooling parameters, FP32 for mHC `base` / `scale`, `A_log`,
+`dt_bias`, the router bias). The reference forward runs on the dequantized values and
+the checkpoint carries the stored bytes.
+
+## Captures
+
+Per prompt token on the one-token cached path (`seq.pos{p:03d}.*`) and per decode step
+(`decode.step{s:02d}.*`), each layer records the mHC `pre` / `post` / `comb` and
+collapsed inputs, the norm outputs, KDA `mixed` / `conv_out` / normalized `q` `k` / `v`
+/ per-channel `decay` / `beta` / `y` / output gate, the sparse layer's `qr`, `q`, new
+latent, folded `q_latent`, the indexer's new key and gate, pooled keys, scores,
+visibility and the selected token set (or `"dense"` under the bypass), router logits /
+scores / indices / weights, shared and MLP outputs, stream in / out, and the logits;
+`seq.final.*` / `decode.final.*` snapshot the KDA conv tail and state, the latent cache
+and the packed indexer cache. `seq.logits` (per-token path) and `prefill.logits` (one
+batched forward) are both recorded; their gap is the reference's own fp32
+self-disagreement (`integers_prompt_*.json: sequential_vs_single_max_abs`).
+
+## Margins and seed
+
+Every discrete decision is audited: router `k`-th vs `(k+1)`-th biased score (floor
+2e-3), indexer `k`-th vs `(k+1)`-th pool score (floor 2e-3), greedy argmax (floor 0.05).
+Seed 12 was chosen by `--scan` over seeds 1–12 at unit weight scale: no router or indexer
+boundary below its floor, 15 argmax boundaries below 0.05 (the rollout is fed the
+goldens' tokens, so they do not desynchronize), 0 exact ties. Pools whose boundary scores
+are both exactly zero (every head's relu clamped) are counted separately
+(`indexer_zero_score_ties`, 10): the reference's stable argsort keeps the lower pool
+index there, and the port reproduces that rule.
+
+## Two tiers in the Swift suite
+
+`Glm53ReferenceParityTests.anchoredOracleReproducesEveryLayer` teacher-forces the
+reference's own layer inputs (`stream_in`) and cache appends (latent, indexer key and
+gate) and asserts every continuous capture within `atol = rtol = 1e-4`, every integer
+decision exact and every argmax exact: the semantics of each layer, isolated from
+accumulated drift. `freeRunningOracleKeepsEveryDecision` lets the oracle carry its own
+fp32 drift through prompt and rollout and asserts the decisions and rollout exact and the
+logits inside 4x the reference's own batched-vs-per-token gap (measured 2.5e-4 vs
+3.55e-4 on the long prompt).

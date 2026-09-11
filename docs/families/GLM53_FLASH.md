@@ -133,10 +133,13 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
       the generic pre-quantized planner lays the family out
       (`Glm53RepackPlannerTests`); `--verify-install` on a produced install
       not yet run.
-- [ ] **Toy parity** — family toy synthetic (`SyntheticSnapshot.buildGlm53`,
-      `ArchConfig.glm53Toy()`) registered and wired into `bringup-check.sh`'s
-      stage 1 filter table (`Glm53`); the reference-parity goldens are the
-      next step.
+- [x] **Toy parity (fp32 tier)** — goldens from PipeNetwork's parity-fixed
+      MLX runtime (`Scripts/parity/README.md`, "glm53flash"); the fp32 oracle
+      `Glm53ReferenceRunner` reproduces every layer at `1e-4` on the
+      reference's inputs with every integer decision and every argmax exact,
+      and free-running keeps every decision and 16/16 rollouts on both prompts
+      (`Glm53ReferenceParityTests`); suites wired into `bringup-check.sh`'s
+      stage 1 filter table (`Glm53`). The Metal tier follows with the runner.
 - [ ] **Runner** — `Glm53ForwardRunner` not yet written; the family is gated
       by `ManifestReader.familiesWithoutRunner` under the three axis names.
 - [ ] **Ladder** — 16 / 32 / auto expert-cache slots produce byte-identical
@@ -152,10 +155,11 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
    `ArchConfig.glm53Flash_320B_A18B`, manifest fields and validation, the
    capability gate, tensor accessors, the repacker's `glm5_next` loader and
    planner classification, the pinned source, tests and this page.
-2. **Reference-parity goldens** from PipeNetwork's runtime at the toy
-   geometry (`Scripts/parity/glm53_make_goldens.py`): per-layer captures of
-   the KDA recurrence, the pooled indexer's selections, the latent attention
-   and the routed selections, as `DeepseekV41`'s harness did for V4.1.
+2. **Reference-parity goldens** (done 2026-09-11) from PipeNetwork's runtime
+   at the toy geometry (`Scripts/parity/glm53_make_goldens.py`): per-token
+   captures of the KDA recurrence, the pooled indexer's selections, the latent
+   attention, the routed selections and the mHC coefficients, plus an fp32
+   Swift oracle that reproduces them (see "Toy parity" below).
 3. **Kernels**: KDA decode / prefill (ported from the MIT-licensed
    `metal/glm53_kda.metal` in `IngeniousIdiocy/ds4` at `90d71e0d`, with
    attribution), the pooled indexer, the latent attention with per-head fold /
@@ -171,6 +175,17 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
    `index_topk` the selection is exhaustive), a needle beyond 2,048 with the
    pooled selection active, ladder smoke, `bringup-check.sh glm53flash`, the
    frozen protocol, one phases snapshot; then the gate lift.
+
+## Toy parity
+
+Two tiers, both from the committed goldens (seed 12, toy geometry in
+`Scripts/parity/README.md`):
+
+| Tier | What is compared | Result |
+|---|---|---|
+| fp32 oracle, anchored | `Glm53ReferenceRunner` given the reference's own layer inputs and cache appends, every capture of both prompts (12 + 48 tokens) and 16 decode steps each | every value within `atol = rtol = 1e-4`; every indexer selection (dense bypass, pooled top-2, tail), router top-2 and argmax exact |
+| fp32 oracle, free-running | the oracle carrying its own fp32 drift | decisions and 16/16 rollouts exact on both prompts; logits drift 1.8e-4 (short) / 2.5e-4 (long) against the reference's own batched-vs-per-token gap of 4.7e-5 / 3.55e-4 |
+| Metal runner vs oracle | — | not yet built |
 
 ## Measured results
 
