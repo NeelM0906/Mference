@@ -916,12 +916,12 @@ public enum ManifestReader {
     /// runner is built *against*. Presence in this table is the single fact
     /// that decides whether it can be loaded, and it is checked in
     /// `peekFamily` before any of that machinery is reached.
-    static let familiesWithoutRunner: [String: [String]] = [
-        ModelFamily.glm53Flash.rawValue: glm53RequiredAxes,
-    ]
+    static let familiesWithoutRunner: [String: [String]] = [:]
 
-    /// The axes `glm53Flash` needs a runner for, in the order the port builds
-    /// them. Also what the installer publishes as `arch.requiredAxes`.
+    /// The axes `glm53Flash` needed a runner for, in the order the port built
+    /// them; `Glm53ForwardRunner` implements all three, so the family is no
+    /// longer in the table. Still what the installer publishes as
+    /// `arch.requiredAxes`.
     public static let glm53RequiredAxes: [String] = [
         "kimiDeltaAttention",
         "nopeLatentSparseAttention",

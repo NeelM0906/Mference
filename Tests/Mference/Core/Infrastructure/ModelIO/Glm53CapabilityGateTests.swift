@@ -124,35 +124,49 @@ import Testing
 
     // MARK: - Capability gate
 
-    @Test func gateTableNamesTheThreeAxes() {
-        #expect(ManifestReader.familiesWithoutRunner["glm53Flash"]
-                == ManifestReader.glm53RequiredAxes)
+    /// The gate is lifted: `Glm53ForwardRunner` implements the three axes the
+    /// installer still publishes as `arch.requiredAxes`, so the table no
+    /// longer names the family and the funnel refuses nothing.
+    @Test func gateIsLiftedAndTheAxesStayPublished() {
+        #expect(ManifestReader.familiesWithoutRunner["glm53Flash"] == nil)
         #expect(ManifestReader.glm53RequiredAxes == [
             "kimiDeltaAttention",
             "nopeLatentSparseAttention",
             "pooledLightningIndexer",
         ])
-        #expect(ManifestReader.capabilityRefusal(family: "glm53Flash")
-                == .familyRunnerNotImplemented(family: "glm53Flash",
-                                               missingAxes: ManifestReader.glm53RequiredAxes))
+        #expect(ManifestReader.capabilityRefusal(family: "glm53Flash") == nil)
+        // The mechanism itself still works against an injected table.
+        #expect(ManifestReader.capabilityRefusal(
+            family: "glm53Flash", in: ["glm53Flash": ManifestReader.glm53RequiredAxes])
+            == .familyRunnerNotImplemented(family: "glm53Flash",
+                                           missingAxes: ManifestReader.glm53RequiredAxes))
     }
 
-    /// The funnel refuses the family by name off a minimal decode, before the
-    /// strict manifest shape is required.
-    @Test func peekFamilyRefusesTheFamilyByAxisName() throws {
+    /// Both halves of a loadable family, together: with the gate gone the
+    /// funnel reads the whole manifest and resolves the family, and the
+    /// auto-detect baseline is there. (The minimal decode the refusal used to
+    /// stop at is no longer enough: `writeMinimalManifest` stays for the
+    /// injected-table mechanism test.)
+    @Test func peekFamilyResolvesTheFamily() throws {
+        let directory = try Self.write(manifest: Self.manifestDict(for: .glm53Toy()))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(try ManifestReader.peekFamily(directoryURL: directory) == .glm53Flash)
+        #expect(ArchConfig.knownArchitectures[.glm53Flash] != nil)
+    }
+
+    /// The mechanism the family shipped behind still works against an
+    /// injected table, off the minimal decode it stops at.
+    @Test func injectedGateStillRefusesByAxisName() throws {
         let directory = try Self.writeMinimalManifest(family: "glm53Flash")
         defer { try? FileManager.default.removeItem(at: directory) }
-        var thrown: Error?
-        #expect(throws: (any Error).self) {
-            do { _ = try ManifestReader.peekFamily(directoryURL: directory) }
-            catch { thrown = error; throw error }
-        }
-        let error = try #require(thrown as? ModelError)
-        #expect(error == .familyRunnerNotImplemented(
-            family: "glm53Flash",
-            missingAxes: ManifestReader.glm53RequiredAxes))
-        let text = error.description
-        #expect(text.contains("glm53Flash"))
+        let root = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: directory.appendingPathComponent("manifest.json"))) as? [String: Any]
+        let family = try #require((root?["arch"] as? [String: Any])?["family"] as? String)
+        let refusal = ManifestReader.capabilityRefusal(
+            family: family, in: ["glm53Flash": ManifestReader.glm53RequiredAxes])
+        #expect(refusal == .familyRunnerNotImplemented(
+            family: "glm53Flash", missingAxes: ManifestReader.glm53RequiredAxes))
+        let text = refusal?.description ?? ""
         #expect(text.contains("runner is not implemented"))
         for axis in ManifestReader.glm53RequiredAxes { #expect(text.contains(axis)) }
     }

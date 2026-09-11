@@ -13,7 +13,7 @@ document is the architecture contract for the `glm53Flash` family.
 | Pinned revision | `d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3` (index SHA-256 `5e0a3768…314383`) |
 | Parameters | 320B total, 18B active (vendor figures) |
 | Download / install size | 181,944,533,258 bytes downloaded; ~181 GB on disk (computed from the shard headers, not yet measured on a produced install) |
-| Status | **in port** — Day-0 contract landed 2026-09-11; gated by axis name until the runner passes first light |
+| Status | **first light green 2026-09-11** — runner, tokenizer and resident-expert path landed; the capability gate is lifted; perf pass and the FAMILY_GATE protocol run in progress |
 
 ## Checkpoint selection
 
@@ -143,9 +143,10 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
 - [x] **Runner** — `Glm53ForwardRunner` (per-token; KDA decode, pooled
       indexer with CPU selection, latent attention, INT4 experts with the
       swiglu clamp, mHC), dispatched by `ForwardRunnerFactory`; the Metal tier
-      of toy parity is green (see "Toy parity"). The family stays gated by
-      `ManifestReader.familiesWithoutRunner` until first light on the real
-      install.
+      of toy parity is green (see "Toy parity"). First light on the real
+      install is green (see "Measured results") and the gate is lifted:
+      `familiesWithoutRunner` no longer names the family;
+      `shippedFamiliesAreNotGated` covers it.
 - [x] **Tokenizer** — `ChatDialect.glm5` (`Glm5ChatTemplate.swift`,
       `Glm5ToolCallParser`), detected by the `[gMASK]` special token; the
       three `generation_config` EOS ids (`<|endoftext|>`, `<|user|>`,
@@ -238,9 +239,11 @@ Not yet run.
 
 ## Known limits
 
-- **Gated until first light.** Every ordinary load path refuses the family by
-  axis name (`ManifestReader.familiesWithoutRunner`) until
-  `Glm53ForwardRunner` exists and passes toy parity and first light.
+- **256 GB-class hosts.** The family's runner is built for the whole expert
+  set resident in memory (`auto` picks `.resident` when pool + core + 20 GiB
+  fit physical memory); the slot-cache mode works on smaller hosts but reads
+  ~4.75 GB of experts per token through `pread` and is not what the measured
+  figures describe.
 - **Text-only.** The vision tower, image spans and video tokens are excluded;
   the chat template's image / video / audio markers are not rendered.
 - **No MTP.** The pinned conversion omits the multi-token-prediction layer;
