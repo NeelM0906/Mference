@@ -608,7 +608,9 @@ static inline void moe_phase1_gate_up_act_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    // DeepSeek's swiglu_limit clamp: a no-op unless function constant 5 is set.
+    const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
 }
 
 static inline void moe_phase1_gate_up_act_subset_u16load_body(
@@ -644,7 +646,9 @@ static inline void moe_phase1_gate_up_act_subset_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    // DeepSeek's swiglu_limit clamp: a no-op unless function constant 5 is set.
+    const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
 }
 
 kernel void moe_phase1_gate_up_act_u16load(
@@ -733,7 +737,8 @@ kernel void moe_phase1_gate_up_act_slotmap(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, DD, lane);
-    if (lane == 0) acts[slot * FF + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+    if (lane == 0) acts[slot * FF + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
 }
 
 kernel void moe_phase2_down_reduce_k8_slotmap(

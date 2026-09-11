@@ -92,7 +92,8 @@ final class MoE {
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
-         specializedTopK: UInt32 = 8) throws {
+         specializedTopK: UInt32 = 8,
+         swigluLimit: Float = 0) throws {
         precondition(Self.routedComputeWidths.contains(specializedTopK),
                      "routed INT4 decode supports top-k "
                      + "\(Self.routedComputeWidths.sorted())")
@@ -100,9 +101,17 @@ final class MoE {
         self.realDecodeF = specializedF
         self.realDecodeTopK = specializedTopK
         self.realDecodeNumExperts = specializedNumExperts
-        let activationConstants: [MetalFunctionConstant] = siluActivation
+        var activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
             : []
+        // `swigluLimit > 0` bakes DeepSeek's asymmetric pre-activation clamp
+        // (gate `<= limit`, up in `[-limit, limit]`) into the INT4 phase-1
+        // kernels through function constant 5 (`moe_swiglu_clamp`). Zero, the
+        // default, leaves the constant undefined so every existing caller's
+        // pipelines are byte-identical.
+        if swigluLimit > 0 {
+            activationConstants.append(MetalFunctionConstant(index: 5, value: .float(swigluLimit)))
+        }
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),

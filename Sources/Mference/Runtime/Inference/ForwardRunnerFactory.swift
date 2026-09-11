@@ -49,6 +49,17 @@ public enum ForwardRunnerFactory {
                                       ? .chunked : .off,
                                   kvStorageMode: .fp16)
         }
+        if model.config.family == .glm53Flash {
+            // Per-token runner; `prefillChunked` walks the chunk through the
+            // decode path, so the chunked config is honored by construction.
+            return ForwardRuntime(producer: try Glm53ForwardRunner(
+                model: model, context: context, maxContext: maxContext,
+                runtimeConfiguration: runtimeConfiguration),
+                                  prefillConfig: runtimeConfiguration.prefillConfig,
+                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
+                                      ? .chunked : .off,
+                                  kvStorageMode: .fp16)
+        }
         if model.config.family == .qwen38flashnext {
             // Sequential prefill: this runner does not implement
             // `ChunkedPrefillRunner`, and `RawCompletion` throws rather than

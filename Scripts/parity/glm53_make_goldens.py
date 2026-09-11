@@ -13,7 +13,8 @@ that keeps every axis of the production model live at small size:
 * ``index_topk 4`` with ``index_kpool 2`` so the pooled selection (two pools
   plus the always-selected tail) is active from the fifth token of a 48-token
   prompt, and the dense bypass is exercised on the first four;
-* one leading dense layer, then 8 routed experts top-2 plus one shared expert,
+* one leading dense layer, then 16 routed experts top-8 (the production
+  width, the one the INT4 expert reduce implements) plus one shared expert,
   sigmoid routing with a selection-only correction bias, weights renormalized
   after selection and scaled by 2.5, and ``swiglu_limit 0.5`` so the clamp bites;
 * a 4-stream mHC residual (20 Sinkhorn sweeps) collapsed by the stream mean.
@@ -30,7 +31,7 @@ exactly those stored bytes, so a Swift forward over the installed checkpoint
 measures the *port*, not the quantizer.
 
 Every discrete decision the port has to reproduce exactly — pooled-indexer
-selections, router top-2, greedy argmax — is audited for boundary ties and the
+selections, router top-8, greedy argmax — is audited for boundary ties and the
 smallest margin is recorded in the manifest; the seed is chosen so no boundary
 is tied.
 
@@ -61,7 +62,7 @@ os.environ.setdefault("PYTHONHASHSEED", "0")
 
 import numpy as np  # noqa: E402
 
-SEED = 12   # chosen by `--scan` over seeds 1-12 at unit weight scale: no router or indexer boundary below its floor, fewest zero-score indexer ties among those
+SEED = 12   # chosen by `--scan` over seeds 1-20 at unit weight scale with 16 experts top-8: no indexer boundary below its floor, the fewest router boundaries below the floor (2 of 276, narrowest 1.6e-3), 19 zero-score indexer ties
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "Tests" / "Mference" / "Fixtures" / "glm53"
 CKPT_DIR = FIXTURES / "toy-ckpt"
@@ -79,9 +80,9 @@ FLOORS = {"argmax": MIN_ARGMAX_MARGIN, "router": MIN_ROUTER_MARGIN, "indexer": M
 TOY = dict(
     model_type="glm5_next_text", vocab_size=256, hidden_size=128, intermediate_size=128,
     moe_intermediate_size=64, num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=2,
-    n_shared_experts=1, n_routed_experts=8, routed_scaling_factor=2.5, kv_lora_rank=64,
+    n_shared_experts=1, n_routed_experts=16, routed_scaling_factor=2.5, kv_lora_rank=64,
     q_lora_rank=64, qk_rope_head_dim=0, v_head_dim=64, qk_nope_head_dim=64, qk_head_dim=64,
-    n_group=1, topk_group=1, num_experts_per_tok=2, norm_topk_prob=True, hidden_act="silu",
+    n_group=1, topk_group=1, num_experts_per_tok=8, norm_topk_prob=True, hidden_act="silu",
     max_position_embeddings=4096, rms_norm_eps=1e-5, first_k_dense_replace=1,
     index_topk=4, index_head_dim=64, index_n_heads=2, head_dim=0, index_kpool=2,
     index_kpool_compress=True, index_kpool_always_select_tail=True, indexer_rope_interleave=True,

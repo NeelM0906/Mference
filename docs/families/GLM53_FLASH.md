@@ -140,8 +140,12 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
       and free-running keeps every decision and 16/16 rollouts on both prompts
       (`Glm53ReferenceParityTests`); suites wired into `bringup-check.sh`'s
       stage 1 filter table (`Glm53`). The Metal tier follows with the runner.
-- [ ] **Runner** — `Glm53ForwardRunner` not yet written; the family is gated
-      by `ManifestReader.familiesWithoutRunner` under the three axis names.
+- [x] **Runner** — `Glm53ForwardRunner` (per-token; KDA decode, pooled
+      indexer with CPU selection, latent attention, INT4 experts with the
+      swiglu clamp, mHC), dispatched by `ForwardRunnerFactory`; the Metal tier
+      of toy parity is green (see "Toy parity"). The family stays gated by
+      `ManifestReader.familiesWithoutRunner` until first light on the real
+      install.
 - [ ] **Ladder** — 16 / 32 / auto expert-cache slots produce byte-identical
       greedy output.
 - [ ] **Gate** — every step of [`FAMILY_GATE.md`](../FAMILY_GATE.md) green,
@@ -183,9 +187,9 @@ Two tiers, both from the committed goldens (seed 12, toy geometry in
 
 | Tier | What is compared | Result |
 |---|---|---|
-| fp32 oracle, anchored | `Glm53ReferenceRunner` given the reference's own layer inputs and cache appends, every capture of both prompts (12 + 48 tokens) and 16 decode steps each | every value within `atol = rtol = 1e-4`; every indexer selection (dense bypass, pooled top-2, tail), router top-2 and argmax exact |
+| fp32 oracle, anchored | `Glm53ReferenceRunner` given the reference's own layer inputs and cache appends, every capture of both prompts (12 + 48 tokens) and 16 decode steps each | every value within `atol = rtol = 1e-4`; every indexer selection (dense bypass, pooled top-2, tail), router top-8 and argmax exact |
 | fp32 oracle, free-running | the oracle carrying its own fp32 drift | decisions and 16/16 rollouts exact on both prompts; logits drift 1.8e-4 (short) / 2.5e-4 (long) against the reference's own batched-vs-per-token gap of 4.7e-5 / 3.55e-4 |
-| Metal runner vs oracle | — | not yet built |
+| Metal runner vs oracle (FP16 tier) | `Glm53ForwardRunner` on a planner-written install of the toy checkpoint, the oracle anchored to the runner's layer inputs and cache appends, both prompts and 16 decode steps each (`Glm53ForwardRunnerTests`) | no decision flips at any margin, greedy 17/17 on both prompts; worst abs 2.07e-2 (`post_attention_layernorm_out`, long decode), streams 1.58e-2, mHC coefficients 8.6e-3, logits 3.6e-3 — gate `atol = rtol = 5e-2`; chunked prefill == sequential decode bit for bit at three chunkings; dense A/B arm bit-equal below `index_topk` and refused above |
 
 ## Measured results
 

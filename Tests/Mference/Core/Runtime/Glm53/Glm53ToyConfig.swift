@@ -7,7 +7,8 @@ extension ArchConfig {
     /// size (INT8 / INT4 group-64 needs multiples of 64): hidden 128, four
     /// layers — three Kimi Delta Attention (mask 7) and one NoPE latent
     /// sparse attention (mask 8) — one leading dense layer of width 128, then
-    /// 8 routed experts of width 64 (top-2) plus one shared expert, 2
+    /// 16 routed experts of width 64 (top-8, the production width the INT4
+    /// expert reduce implements) plus one shared expert, 2
     /// attention heads of 64 over a 64-wide latent, a 2-head 64-wide indexer
     /// with `index_topk` 4 pooled in pairs, 2 KDA heads of 64 with a 4-tap
     /// conv, a 4-stream mHC, and a deliberately low swiglu clamp (0.5) so
@@ -30,8 +31,8 @@ extension ArchConfig {
             fullRopeTheta: 0.0,
             partialRotaryFactor: 0.0,
             numLayers: 4,
-            numExperts: 8,
-            topKExperts: 2,
+            numExperts: 16,
+            topKExperts: 8,
             tieWordEmbeddings: false,
             attentionKEqV: true,
             fullAttentionLayerMask: [7, 7, 7, 8],

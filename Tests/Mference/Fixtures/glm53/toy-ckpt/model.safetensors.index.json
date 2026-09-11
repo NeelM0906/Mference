@@ -1,6 +1,6 @@
 {
  "metadata": {
-  "total_size": 1203019
+  "total_size": 1541178
  },
  "weight_map": {
   "language_model.lm_head.biases": "model-00001.safetensors",

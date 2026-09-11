@@ -7,7 +7,7 @@ import Testing
 /// from the same toy checkpoint (`Scripts/parity/README.md`, "glm53flash").
 ///
 /// Every integer decision is exact — pooled-indexer selections (including the
-/// dense bypass and the tail rule), router top-2, greedy argmax — and every
+/// dense bypass and the tail rule), router top-8, greedy argmax — and every
 /// continuous capture is compared elementwise at `atol = rtol = 1e-4`
 /// (`Self.tolerance`); both sides are fp32, so the residual is accumulation
 /// order. The worst delta per capture family is printed so a drift is visible
@@ -31,7 +31,7 @@ import Testing
         #expect(try ckpt.entry("language_model.model.layers.0.self_attn.conv1d.weight").dtype == "BF16")
         #expect(try ckpt.entry("language_model.model.layers.3.self_attn.embed_q.weight").shape == [2, 64, 16])
         // INT8 experts would be a different width: the routed triplets are x8 packed.
-        #expect(try ckpt.entry("language_model.model.layers.1.mlp.switch_mlp.down_proj.weight").shape == [8, 128, 8])
+        #expect(try ckpt.entry("language_model.model.layers.1.mlp.switch_mlp.down_proj.weight").shape == [16, 128, 8])
     }
 
     private struct Worst {
@@ -96,6 +96,19 @@ import Testing
             guard let mine = cap.floats[local] else {
                 integerFailures.append("\(key): oracle captured nothing")
                 continue
+            }
+            if local.hasSuffix("router_weights") {
+                // The reference lists the chosen experts in selection-kernel
+                // order, the oracle in descending biased score; pair the
+                // weights by expert. (The index sets are compared below.)
+                let idxLocal = local.replacingOccurrences(of: "router_weights", with: "router_indices")
+                if let theirs = goldens.integers[prefix + idxLocal] as? [Int], let ours = cap.ints[idxLocal],
+                   theirs.count == tensor.values.count, ours.count == mine.count, Set(theirs) == Set(ours) {
+                    compare(zip(ours, mine).sorted { $0.0 < $1.0 }.map { $0.1 },
+                            zip(theirs, tensor.values).sorted { $0.0 < $1.0 }.map { $0.1 },
+                            key: key, into: &worst)
+                    continue
+                }
             }
             compare(mine, tensor.values, key: key, into: &worst)
         }

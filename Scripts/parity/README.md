@@ -386,7 +386,7 @@ Recorded: `mlx 0.32.2`, `mlx_vlm 0.7.0` (main, 2026-09-11; the runtime imports
 |---|---|
 | layers | 4: `linear_attention` x3 (mask 7), `deepseek_sparse_attention` on layer 3 (mask 8) |
 | hidden / dense FFN / MoE width | 128 / 128 (layer 0 dense) / 64 |
-| experts | 8 routed, top-2, 1 shared; sigmoid + correction bias, renormalized, x2.5; `swiglu_limit 0.5` |
+| experts | 16 routed, top-8, 1 shared; sigmoid + correction bias, renormalized, x2.5; `swiglu_limit 0.5` |
 | KDA | 2 heads x 64, conv 4, `gate_lower_bound -5` |
 | sparse attention | 2 heads x 64 (`qk_nope`), latent 64, `q_lora_rank 64` |
 | indexer | 2 heads x 64, `index_topk 4`, `index_kpool 2`, tail always selected |
