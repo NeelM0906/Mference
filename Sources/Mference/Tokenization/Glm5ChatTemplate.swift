@@ -41,9 +41,18 @@ extension MFTokenizer {
         case low = "Low", high = "High", max = "Max"
     }
 
-    /// The effort the chat and tool encoders pin. `Max` is what the template
-    /// renders when a caller passes nothing, so it is the vendor's default.
-    public static let glm5DefaultReasoningEffort: Glm5ReasoningEffort = .max
+    /// The effort the chat and tool encoders render. `Max` is what the
+    /// template renders when a caller passes nothing, so it is the vendor's
+    /// default; `MFERENCE_GLM5_REASONING_EFFORT=low|high|max` overrides it for
+    /// the process (the template's own `reasoning_effort` kwarg, exposed the
+    /// way the runtime exposes its other knobs). Read once at first use.
+    public static let glm5DefaultReasoningEffort: Glm5ReasoningEffort = {
+        switch ProcessInfo.processInfo.environment["MFERENCE_GLM5_REASONING_EFFORT"]?.lowercased() {
+        case "low": return .low
+        case "high": return .high
+        default: return .max
+        }
+    }()
 
     static let glm5Prefix = "[gMASK]<sop>"
     static let glm5SystemMark = "<|system|>"

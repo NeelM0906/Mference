@@ -196,8 +196,14 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
 byte-matched to `transformers` 5.17 `apply_chat_template` on 22 fixtures that
 cover the effort line, system / user / assistant / tool turns, historical
 thinking with and without `clear_thinking`, tool schemas, tool calls with
-typed arguments and result ordering by `tool_call_id`. The reasoning effort is
-pinned to `Max` (the template's own default when the caller passes nothing);
+typed arguments and result ordering by `tool_call_id`. The reasoning effort renders as
+`Max` (the template's own default when the caller passes nothing) unless
+`MFERENCE_GLM5_REASONING_EFFORT=low|high` is set for the process — the
+template's own `reasoning_effort` kwarg, exposed the way the runtime exposes
+its other knobs. Measured on the frozen short-explanation case: at `Max` the
+model was still inside its think block after 2,400 tokens (it word-counts
+its own draft), at `low` it closed the think block after 288 characters and
+reached `stop=endOfTurn` at 668 tokens with a complete answer.
 `generation_config.json`'s three EOS ids all stop generation.
 
 Two deviations by construction, both shared with the MiniCPM5 and DeepSeek
