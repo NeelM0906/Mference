@@ -122,6 +122,9 @@ import Metal
                                   "the factory did not dispatch Glm53ForwardRunner")
 
         #expect(runner.expertsResident == resident)
+        log(String(format: "[glm53-firstlight] device working set: recommended %.1f GB, allocated %.1f GB",
+                   Double(context.device.recommendedMaxWorkingSetSize) / 1e9,
+                   Double(context.device.currentAllocatedSize) / 1e9))
         log("[glm53-firstlight] loaded glm53Flash against the pinned baseline "
             + "(verify=\(verifyMode), experts=\(resident ? "resident" : "\(slots) slots"), maxContext=\(maxContext), "
             + String(format: "first_load_s=%.1f", firstLoadSeconds) + ")")
@@ -206,9 +209,9 @@ import Metal
 
     /// The frozen short-explanation case, rendered through the glm5 template.
     private static func shortExplanationPrompt(_ tokenizer: MFTokenizer) throws -> [Int32] {
-        // Tests/Mference/Core/Runtime/Glm53/<file>: five levels up is the repo root.
+        // Tests/Mference/Core/Runtime/Glm53/<file>: six levels up is the repo root.
         var root = URL(fileURLWithPath: #filePath)
-        for _ in 0..<5 { root.deleteLastPathComponent() }
+        for _ in 0..<6 { root.deleteLastPathComponent() }
         let benchURL = root
             .appendingPathComponent("docs/benchmark-prompts/real-generation-v1")
             .appendingPathComponent("short-explanation.json")
@@ -255,10 +258,15 @@ import Metal
         let indexTopK = h.model.config.compressedAttention.indexTopK
 
         if probes.contains("raw") {
+            // Twice: the first pass pays any first-touch cost (GPU residency
+            // of freshly read expert buffers), the second is the steady state.
             let p1 = h.tokenizer.encode("The capital of France is", addBOS: true)
             let g = try await Self.generate(h, label: "greedy-capital", promptIds: p1,
                                             maxNew: 24, temperature: 0)
             #expect(!g.text.isEmpty, "raw probe produced no text")
+            let g2 = try await Self.generate(h, label: "greedy-capital (second pass)", promptIds: p1,
+                                             maxNew: 24, temperature: 0)
+            #expect(g2.tokens == g.tokens, "the second pass must reproduce the first")
         }
 
         var chatPrompt: [Int32] = []

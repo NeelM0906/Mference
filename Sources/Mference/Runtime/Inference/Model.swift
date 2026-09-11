@@ -687,8 +687,18 @@ public struct Model {
         case .resident:
             streamersBox.streamers[L] = .resident(try ResidentExpertStreamer(
                 layout: layout,
-                device: device))
+                device: device,
+                strategy: Self.residentStrategy(for: config.family)))
         }
+    }
+
+    /// How `.resident` holds a layer's experts. GLM-5.3-Flash's runner
+    /// addresses experts by GPU-side index inside one layer buffer and its
+    /// 171 GB set is meant to live in memory outright, so it takes the copied
+    /// strategy (see `ResidentExpertStreamer`); every other family keeps the
+    /// mapped one it shipped with.
+    static func residentStrategy(for family: ModelFamily) -> ResidentExpertStreamer.Strategy {
+        family == .glm53Flash ? .copied : .mapped
     }
 
     /// Resident mode: open every routed layer and touch its mapping so page-in

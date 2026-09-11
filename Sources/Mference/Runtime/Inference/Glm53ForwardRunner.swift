@@ -243,6 +243,11 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     /// The open command buffer of the token being produced.
     private var stream: MTLCommandBuffer?
 
+    /// Resident experts: every layer's slab is pinned into the GPU's working
+    /// set once, here, so no command buffer pays residency for ~171 GB of
+    /// buffers on the way in (macOS 15 residency sets).
+    private var residencySet: (any MTLResidencySet)?
+
     private var position = 0
     private var inSequentialPrefill = false
     private var slotBudgetChecked = false
@@ -441,6 +446,21 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                 denseDown: isDense ? try model.glm53DenseFFN("down_proj", layer: L) : nil))
         }
         layers = built
+
+        if expertsResident {
+            let descriptor = MTLResidencySetDescriptor()
+            descriptor.label = "glm53 resident experts"
+            descriptor.initialCapacity = slabs.count + 1
+            let set = try context.device.makeResidencySet(descriptor: descriptor)
+            var seen = Set<ObjectIdentifier>()
+            for slab in slabs.values where seen.insert(ObjectIdentifier(slab.buffer)).inserted {
+                set.addAllocation(slab.buffer)
+            }
+            set.commit()
+            set.requestResidency()
+            context.queue.addResidencySet(set)
+            residencySet = set
+        }
 
         streams = try half(hc * hidden)
         streamsAlt = try half(hc * hidden)
