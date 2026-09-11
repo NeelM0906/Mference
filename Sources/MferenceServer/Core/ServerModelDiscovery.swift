@@ -20,6 +20,7 @@ public enum ServerFamilyModelID {
         case .maple: "maple-preview-2bit-mlx"
         case .qwen38flashnext: "qwen3.8-flash-next-int4g64"
         case .minicpm5: "minicpm5-2b-int4g64"
+        case .glm53Flash: "glm-5.3-flash-mlx-mixed-4-8bit"
         }
     }
 

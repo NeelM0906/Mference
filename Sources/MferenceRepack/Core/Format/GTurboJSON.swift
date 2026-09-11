@@ -31,7 +31,7 @@ enum GTurboJSON {
         case .minicpm5:
             return "W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX"
         case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-             .qwen38flashnext:
+             .qwen38flashnext, .glm53Flash:
             return "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36"
         }
     }
@@ -158,6 +158,39 @@ enum GTurboJSON {
         // under their own names plus a `requiredAxes` list, so a runtime that
         // cannot execute them can say which ones it is missing instead of
         // reporting an unrecognised family.
+        // GLM-5.3-Flash: the low-rank query rank and indexer head shape ride
+        // the V4 `ca*` keys, the KDA geometry the `linear*` keys (already
+        // emitted above), mHC and router fields their DSV4 keys, the dense
+        // leading layers the Inkling keys, then its own axes and the
+        // `requiredAxes` list the capability gate refuses it by.
+        if arch.family == .glm53Flash, let axes = arch.glm53 {
+            archDict["caQLoraRank"] = arch.caQLoraRank
+            archDict["caIndexNHeads"] = arch.caIndexNHeads
+            archDict["caIndexHeadDim"] = arch.caIndexHeadDim
+            archDict["caIndexTopK"] = arch.caIndexTopK
+            archDict["hcMult"] = arch.hcMult
+            archDict["hcSinkhornIters"] = arch.hcSinkhornIters
+            archDict["hcEps"] = arch.hcEps
+            archDict["numHashRoutedLayers"] = arch.numHashRoutedLayers
+            archDict["routerScoringFunc"] = arch.routerScoringFunc
+            archDict["routedScalingFactor"] = arch.routedScalingFactor
+            archDict["swigluLimit"] = arch.swigluLimit
+            archDict["numSharedExperts"] = arch.numSharedExperts
+            archDict["numDenseLayers"] = arch.numDenseLayers
+            archDict["denseIntermediateSize"] = arch.denseIntermediateSize
+            archDict["routerGateBias"] = arch.routerGateBias
+            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
+            archDict["qkNorm"] = arch.qkNorm
+            archDict["kvLoraRank"] = axes.kvLoraRank
+            archDict["qkNopeHeadDim"] = axes.qkNopeHeadDim
+            archDict["vHeadDim"] = axes.vHeadDim
+            archDict["indexKPool"] = axes.indexKPool
+            archDict["indexKPoolAlwaysSelectTail"] = axes.indexKPoolAlwaysSelectTail
+            archDict["indexerKNormEps"] = axes.indexerKNormEps
+            archDict["kdaGateLowerBound"] = axes.kdaGateLowerBound
+            archDict["rmsNormEps"] = axes.rmsNormEps
+            archDict["requiredAxes"] = Glm53Axes.requiredAxisNames
+        }
         if arch.family == .qwen38flashnext, let axes = arch.flashNext {
             archDict["numSharedExperts"] = arch.numSharedExperts
             archDict["numDenseLayers"] = arch.numDenseLayers
@@ -203,6 +236,18 @@ enum GTurboJSON {
         // Dense family: there is no router, shared expert or routed expert to
         // quantize. Mark the slots absent (Maple's sharedExpert convention);
         // embedding/attention keep the affine INT4 entries from the loop.
+        // GLM-5.3-Flash's router gate is unquantized BF16; the manifest
+        // records the slot as such rather than the 8-bit default a BF16
+        // tensor would otherwise leave in place.
+        if arch.family == .glm53Flash {
+            quantDict["router"] = [
+                "weightBits": 16,
+                "scheme": "unquantized",
+                "scaleType": "none",
+                "biasType": "none",
+                "groupSize": 0,
+            ]
+        }
         if arch.family == .qwen38 || arch.family == .minicpm5 {
             let absent: [String: Any] = [
                 "weightBits": 0,

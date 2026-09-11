@@ -335,6 +335,10 @@ enum FlashNextPlanner {
             // The vendor already spells the trunk `model.` and the head
             // `lm_head.weight`, which is what the runner looks up.
             return sourceName
+        case .glm53Flash:
+            // Pre-quantized path only today; a BF16 source would keep the
+            // conversion's `language_model.` names the runner is written for.
+            return sourceName
         case .qwen36, .qwen38, .gemma4:
             if sourceName == lmHeadName {
                 return "language_model.lm_head.weight"
@@ -403,7 +407,7 @@ enum FlashNextPlanner {
             // the vendor's own MLX conversion stores the bare weights. No
             // fold. See docs/families/MINICPM5.md.
             return false
-        case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple:
+        case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple, .glm53Flash:
             // No original-repo entry exists for these, so no conversion has
             // been compared and no fold can be justified. A family arriving
             // here must check its own norm convention first.

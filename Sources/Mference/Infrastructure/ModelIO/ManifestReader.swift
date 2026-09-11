@@ -114,6 +114,18 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     /// manifest predating the axis decodes unchanged; absent validates against
     /// the Gemma default (`true`).
     public let qkNorm: Bool?
+
+    // GLM-5.3-Flash extensions. Optional for the same reason: absent values
+    // validate against the zeroed `Glm53Config.none`. Field names match what
+    // `MferenceRepack`'s `Glm53Axes` publishes.
+    public let kvLoraRank: Int?
+    public let qkNopeHeadDim: Int?
+    public let vHeadDim: Int?
+    public let indexKPool: Int?
+    public let indexKPoolAlwaysSelectTail: Bool?
+    public let indexerKNormEps: Double?
+    public let kdaGateLowerBound: Double?
+    public let rmsNormEps: Double?
 }
 
 /// One page-aligned region of a row-lookup pool, mirroring one source shard.
@@ -366,6 +378,39 @@ public enum ManifestReader {
 
     private static func validateQuant(_ quant: ManifestQuant,
                                       expected: ArchConfig) throws {
+        if expected.family == .glm53Flash {
+            // PipeNetwork's mixed 4/8-bit conversion: INT8 affine group-64
+            // attention (KDA and sparse projections alike), shared experts,
+            // dense FFNs, embedding and head; INT4 group-64 routed experts;
+            // the router gate unquantized BF16, recorded as an unquantized
+            // slot (the Maple convention) rather than the default 8 the
+            // writer would otherwise assume.
+            let affine: [(String, ManifestQuantSlot, Int)] = [
+                ("embedding", quant.embedding, 8),
+                ("attention", quant.attention, 8),
+                ("sharedExpert", quant.sharedExpert, 8),
+                ("routedExpert", quant.routedExpert, 4),
+            ]
+            for (name, slot, bits) in affine {
+                guard slot.weightBits == bits,
+                      slot.scheme.lowercased() == "affine",
+                      slot.scaleType.lowercased() == "bf16",
+                      slot.biasType.lowercased() == "bf16",
+                      slot.groupSize == Quantization.groupSize else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported GLM-5.3-Flash quantization for \(name)")
+                }
+            }
+            guard quant.router.weightBits == 16,
+                  quant.router.scheme.lowercased() == "unquantized",
+                  quant.router.scaleType.lowercased() == "none",
+                  quant.router.biasType.lowercased() == "none",
+                  quant.router.groupSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "unsupported GLM-5.3-Flash quantization for router")
+            }
+            return
+        }
         if expected.family == .minicpm5 {
             // Dense, like Qwen 3.8: INT4 affine group-64 embedding and
             // attention slots (the MLP shares the attention slot), and the
@@ -772,6 +817,17 @@ public enum ManifestReader {
         if let published = a.pleEosTokenID {
             try check("pleEosTokenID", published, fn.pleEosTokenID)
         }
+
+        let g = e.glm53
+        try check("kvLoraRank",        a.kvLoraRank ?? 0,        g.kvLoraRank)
+        try check("qkNopeHeadDim",     a.qkNopeHeadDim ?? 0,     g.qkNopeHeadDim)
+        try check("vHeadDim",          a.vHeadDim ?? 0,          g.vHeadDim)
+        try check("indexKPool",        a.indexKPool ?? 0,        g.indexKPool)
+        try check("indexKPoolAlwaysSelectTail",
+                  a.indexKPoolAlwaysSelectTail ?? false, g.indexKPoolAlwaysSelectTail)
+        try check("indexerKNormEps",   a.indexerKNormEps ?? 0,   g.indexerKNormEps)
+        try check("kdaGateLowerBound", a.kdaGateLowerBound ?? 0, g.kdaGateLowerBound)
+        try check("rmsNormEps",        a.rmsNormEps ?? 0,        g.rmsNormEps)
     }
 
     /// Decode just enough of `manifest.json` to identify the model family,
@@ -832,11 +888,12 @@ public enum ManifestReader {
     /// Families `MferenceRepack` can install but no forward runner can execute,
     /// mapped to the axes whose kernels are missing.
     ///
-    /// **Empty: every family the repacker installs now has a runner.** The last
-    /// entry, `qwen38flashnext`, was removed on 2026-09-10 when
-    /// `FlashNextForwardRunner` landed and the owner lifted its gate. The table
-    /// and the `peekFamily` check stay because the next family port needs them
-    /// on day one, not because anything is gated today.
+    /// One entry today: `glm53Flash`, added 2026-09-11 with its Day-0 contract.
+    /// `qwen38flashnext` was the previous occupant, removed 2026-09-10 when
+    /// `FlashNextForwardRunner` landed and the owner lifted its gate. The three
+    /// axis names are the runtime's own (`Glm53Config` and its doc comment name
+    /// the mechanism behind each); remove the entry only when
+    /// `ForwardRunnerFactory` actually dispatches to the family's runner.
     ///
     /// Add an entry the moment a new family gains an `ArchInfo` install path,
     /// keyed by its `manifest.arch.family` string and valued with the axis
@@ -859,7 +916,17 @@ public enum ManifestReader {
     /// runner is built *against*. Presence in this table is the single fact
     /// that decides whether it can be loaded, and it is checked in
     /// `peekFamily` before any of that machinery is reached.
-    static let familiesWithoutRunner: [String: [String]] = [:]
+    static let familiesWithoutRunner: [String: [String]] = [
+        ModelFamily.glm53Flash.rawValue: glm53RequiredAxes,
+    ]
+
+    /// The axes `glm53Flash` needs a runner for, in the order the port builds
+    /// them. Also what the installer publishes as `arch.requiredAxes`.
+    public static let glm53RequiredAxes: [String] = [
+        "kimiDeltaAttention",
+        "nopeLatentSparseAttention",
+        "pooledLightningIndexer",
+    ]
 
     /// The gate lookup, factored out of `peekFamily` so it can be exercised
     /// against an injected table: with `familiesWithoutRunner` empty there is

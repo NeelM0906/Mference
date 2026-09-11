@@ -21,6 +21,42 @@ enum RepackModelFamily: String, Sendable, Equatable {
     /// MLX INT4 conversion (pre-quantized path). Bare `model.` prefix and a
     /// top-level `lm_head.weight` on both.
     case minicpm5 = "minicpm5"
+    /// GLM-5.3-Flash. Installed from PipeNetwork's mixed 4/8-bit MLX
+    /// conversion (pre-quantized path) under its `language_model.` names.
+    /// Gated in `ManifestReader.familiesWithoutRunner` until its runner lands.
+    case glm53Flash = "glm53Flash"
+}
+
+/// Axes GLM-5.3-Flash introduces beyond the shipped families' geometry.
+/// Mirrored into `manifest.json -> arch` under these exact field names so the
+/// runtime validates them field by field against `Glm53Config`, and published
+/// with `requiredAxes` so the capability gate can refuse the install by axis
+/// name until the kernels exist.
+struct Glm53Axes: Sendable, Equatable {
+    /// Width of the shared attention latent (K = V) on sparse layers.
+    let kvLoraRank: Int
+    /// Query head width on sparse layers; there is no rotary part.
+    let qkNopeHeadDim: Int
+    /// Per-head output width unfolded from the latent.
+    let vHeadDim: Int
+    /// Consecutive tokens pooled into one indexer key.
+    let indexKPool: Int
+    let indexKPoolAlwaysSelectTail: Bool
+    /// The indexer key LayerNorm's epsilon (the reference hard-codes 1e-6).
+    let indexerKNormEps: Double
+    /// `linear_attn_config.gate_lower_bound`: the KDA decay's log-space floor.
+    let kdaGateLowerBound: Double
+    /// `rms_norm_eps` verbatim (1e-5 in production).
+    let rmsNormEps: Double
+
+    /// Axis names the runner must implement before this family can decode.
+    /// Published verbatim as `arch.requiredAxes`; the runtime's
+    /// `ManifestReader.glm53RequiredAxes` is the same list.
+    static let requiredAxisNames = [
+        "kimiDeltaAttention",
+        "nopeLatentSparseAttention",
+        "pooledLightningIndexer",
+    ]
 }
 
 /// Axes Qwen3.8-Flash-Next introduces beyond the shipped families' geometry.
@@ -161,6 +197,9 @@ struct ArchInfo: Sendable, Equatable {
     /// Per-head q/k RMSNorm gains on full-attention layers. Defaults to the
     /// Gemma behavior; only plain-llama families (MiniCPM5) set it false.
     let qkNorm: Bool
+    /// GLM-5.3-Flash's new axes. Nil for every other family, so their
+    /// manifests are unchanged.
+    let glm53: Glm53Axes?
 
     init(hiddenSize: Int,
          intermediateSize: Int,
@@ -234,9 +273,11 @@ struct ArchInfo: Sendable, Equatable {
          routerGlobalScale: Bool = false,
          unpaddedVocabSize: Int = 0,
          flashNext: FlashNextAxes? = nil,
-         qkNorm: Bool = true) {
+         qkNorm: Bool = true,
+         glm53: Glm53Axes? = nil) {
         self.flashNext = flashNext
         self.qkNorm = qkNorm
+        self.glm53 = glm53
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.moeIntermediateSize = moeIntermediateSize
@@ -334,6 +375,9 @@ struct ArchInfo: Sendable, Equatable {
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
         }
+        if (root["model_type"] as? String) == "glm5_next" {
+            return try loadGlm53Flash(configPath: configPath, tc: tc)
+        }
         if (root["model_type"] as? String) == "qwen3_5_moe" {
             return try loadQwen36(configPath: configPath, tc: tc)
         }
@@ -347,6 +391,245 @@ struct ArchInfo: Sendable, Equatable {
             return try loadInklingSmall(configPath: configPath, tc: tc)
         }
         return try loadGemma4(configPath: configPath, tc: tc)
+    }
+
+    // MARK: - GLM-5.3-Flash (`model_type == "glm5_next"`)
+
+    /// `tc` is `config.json -> text_config` of the `glm5_next` checkpoint (the
+    /// vision tower rides `vision_config` and is dropped by the planner).
+    ///
+    /// The layer kinds ride `layer_types`: `linear_attention` is Kimi Delta
+    /// Attention (mask 7) and `deepseek_sparse_attention` the NoPE latent
+    /// sparse attention (mask 8). `first_k_dense_replace` leading layers run a
+    /// dense FFN of `intermediate_size`; `mlp_layer_types` must agree with it.
+    /// Anything this runtime has no code for — a rotary part on the sparse
+    /// layers, expert groups, an unclamped or non-sigmoid router, a
+    /// non-vector (`safe_gate` off) KDA decay — is refused rather than guessed.
+    private static func loadGlm53Flash(configPath: String,
+                                       tc: [String: Any]) throws -> ArchInfo {
+        func i(_ k: String) throws -> Int {
+            guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        func d(_ k: String) throws -> Double {
+            guard let n = (tc[k] as? Double) ?? (tc[k] as? NSNumber)?.doubleValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        func b(_ k: String, default value: Bool) -> Bool {
+            (tc[k] as? Bool) ?? value
+        }
+        let numLayers = try i("num_hidden_layers")
+        guard let layerTypes = tc["layer_types"] as? [String], layerTypes.count == numLayers else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "layer_types must list every one of \(numLayers) layers")
+        }
+        var mask: [UInt8] = []
+        mask.reserveCapacity(numLayers)
+        for t in layerTypes {
+            switch t {
+            case "linear_attention":          mask.append(7)
+            case "deepseek_sparse_attention": mask.append(8)
+            default:
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "unknown layer_types entry \"\(t)\"")
+            }
+        }
+        let numDense = try i("first_k_dense_replace")
+        if let mlpTypes = tc["mlp_layer_types"] as? [String] {
+            guard mlpTypes.count == numLayers else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "mlp_layer_types must list every layer")
+            }
+            for (idx, t) in mlpTypes.enumerated() {
+                let expectedKind = idx < numDense ? "dense" : "sparse"
+                guard t == expectedKind else {
+                    throw RepackError.configJsonInvalid(
+                        path: configPath,
+                        detail: "mlp_layer_types[\(idx)] is \(t); first_k_dense_replace \(numDense) implies \(expectedKind)")
+                }
+            }
+        }
+        guard try i("qk_rope_head_dim") == 0, b("mla_use_nope", default: true) else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "glm5_next runtime is NoPE only; qk_rope_head_dim must be 0")
+        }
+        guard (try? i("n_group")) ?? 1 == 1, (try? i("topk_group")) ?? 1 == 1 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "expert groups are not supported (n_group / topk_group must be 1)")
+        }
+        let scoring = (tc["scoring_func"] as? String) ?? "sigmoid"
+        guard scoring == "sigmoid", b("norm_topk_prob", default: true),
+              ((tc["topk_method"] as? String) ?? "noaux_tc") == "noaux_tc" else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "router must be sigmoid / noaux_tc with norm_topk_prob; got \(scoring)")
+        }
+        guard let la = tc["linear_attn_config"] as? [String: Any] else {
+            throw RepackError.configJsonInvalid(path: configPath, detail: "missing linear_attn_config")
+        }
+        func li(_ k: String) throws -> Int {
+            guard let n = (la[k] as? Int) ?? (la[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing linear_attn_config.\(k)")
+            }
+            return n
+        }
+        guard let lowerBound = (la["gate_lower_bound"] as? Double)
+                ?? (la["gate_lower_bound"] as? NSNumber)?.doubleValue else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "linear_attn_config.gate_lower_bound is required (safe-gate KDA)")
+        }
+        let linearHeads = try li("num_heads")
+        let linearHeadDim = try li("head_dim")
+        let qkNope = try i("qk_nope_head_dim")
+        let numShared = (tc["n_shared_experts"] as? Int) ?? (tc["n_shared_experts"] as? NSNumber)?.intValue ?? 0
+        let moeIntermediate = try i("moe_intermediate_size")
+        let axes = Glm53Axes(
+            kvLoraRank: try i("kv_lora_rank"),
+            qkNopeHeadDim: qkNope,
+            vHeadDim: try i("v_head_dim"),
+            indexKPool: try i("index_kpool"),
+            indexKPoolAlwaysSelectTail: b("index_kpool_always_select_tail", default: true),
+            indexerKNormEps: 1.0e-6,
+            kdaGateLowerBound: lowerBound,
+            rmsNormEps: try d("rms_norm_eps"))
+        let arch = ArchInfo(
+            hiddenSize: try i("hidden_size"),
+            // The shared expert is `n_shared_experts` copies of the MoE width.
+            intermediateSize: moeIntermediate * max(numShared, 1),
+            moeIntermediateSize: moeIntermediate,
+            numHeads: try i("num_attention_heads"),
+            numKVHeads: 1,
+            numFullKVHeads: 1,
+            headDim: qkNope,
+            fullHeadDim: qkNope,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 0.0,
+            fullRopeTheta: 0.0,
+            partialRotaryFactor: 0.0,
+            numLayers: numLayers,
+            numExperts: try i("n_routed_experts"),
+            topKExperts: try i("num_experts_per_tok"),
+            tieWordEmbeddings: b("tie_word_embeddings", default: false),
+            attentionKEqV: true,
+            fullAttentionLayerMask: mask,
+            hiddenActivation: (tc["hidden_act"] as? String) ?? "silu",
+            family: .glm53Flash,
+            attnOutputGate: false,
+            attentionScale: 1.0 / Double(qkNope).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: false,
+            linearNumKHeads: linearHeads,
+            linearNumVHeads: linearHeads,
+            linearKeyHeadDim: linearHeadDim,
+            linearValueHeadDim: linearHeadDim,
+            linearConvKernelSize: try li("short_conv_kernel_size"),
+            caQLoraRank: try i("q_lora_rank"),
+            caIndexNHeads: try i("index_n_heads"),
+            caIndexHeadDim: try i("index_head_dim"),
+            caIndexTopK: try i("index_topk"),
+            hcMult: try i("hc_mult"),
+            hcSinkhornIters: try i("hc_sinkhorn_iters"),
+            hcEps: try d("hc_eps"),
+            numHashRoutedLayers: 0,
+            routerScoringFunc: scoring,
+            routedScalingFactor: try d("routed_scaling_factor"),
+            swigluLimit: try d("swiglu_limit"),
+            numSharedExperts: numShared,
+            numDenseLayers: numDense,
+            denseIntermediateSize: try i("intermediate_size"),
+            routerGateBias: true,
+            routerNormAfterTopK: true,
+            qkNorm: false,
+            glm53: axes)
+        try crossCheckProductionGlm53Flash(arch, configPath: configPath)
+        return arch
+    }
+
+    /// Production GLM-5.3-Flash 320B-A18B baseline (mirrors the runtime's
+    /// `ArchConfig.glm53Flash_320B_A18B`). A config matching the production
+    /// shape (hidden 4096, 45 layers) must agree on every field; toy /
+    /// synthetic configs are exempt.
+    private static func crossCheckProductionGlm53Flash(_ a: ArchInfo,
+                                                       configPath: String) throws {
+        guard a.hiddenSize == 4096, a.numLayers == 45 else { return }
+        var expectedMask = [UInt8](repeating: 7, count: 45)
+        for i in stride(from: 3, to: 45, by: 4) { expectedMask[i] = 8 }
+        let expected = ArchInfo(
+            hiddenSize: 4096,
+            intermediateSize: 2048,
+            moeIntermediateSize: 2048,
+            numHeads: 64,
+            numKVHeads: 1,
+            numFullKVHeads: 1,
+            headDim: 256,
+            fullHeadDim: 256,
+            vocabSize: 154_880,
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 0.0,
+            fullRopeTheta: 0.0,
+            partialRotaryFactor: 0.0,
+            numLayers: 45,
+            numExperts: 288,
+            topKExperts: 8,
+            tieWordEmbeddings: false,
+            attentionKEqV: true,
+            fullAttentionLayerMask: expectedMask,
+            hiddenActivation: "silu",
+            family: .glm53Flash,
+            attnOutputGate: false,
+            attentionScale: 0.0625,
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: false,
+            linearNumKHeads: 64,
+            linearNumVHeads: 64,
+            linearKeyHeadDim: 128,
+            linearValueHeadDim: 128,
+            linearConvKernelSize: 4,
+            caQLoraRank: 1536,
+            caIndexNHeads: 32,
+            caIndexHeadDim: 128,
+            caIndexTopK: 2048,
+            hcMult: 4,
+            hcSinkhornIters: 20,
+            hcEps: 1.0e-6,
+            numHashRoutedLayers: 0,
+            routerScoringFunc: "sigmoid",
+            routedScalingFactor: 2.5,
+            swigluLimit: 10.0,
+            numSharedExperts: 1,
+            numDenseLayers: 3,
+            denseIntermediateSize: 12_288,
+            routerGateBias: true,
+            routerNormAfterTopK: true,
+            qkNorm: false,
+            glm53: Glm53Axes(
+                kvLoraRank: 512,
+                qkNopeHeadDim: 256,
+                vHeadDim: 256,
+                indexKPool: 4,
+                indexKPoolAlwaysSelectTail: true,
+                indexerKNormEps: 1.0e-6,
+                kdaGateLowerBound: -5.0,
+                rmsNormEps: 1.0e-5))
+        guard a == expected else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "glm5_next config does not match the pinned "
+                    + "GLM-5.3-Flash-320B-A18B architecture baseline")
+        }
     }
 
     // MARK: - Maple

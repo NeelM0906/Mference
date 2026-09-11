@@ -95,6 +95,12 @@ Mference currently runs eight pinned instruction checkpoints:
   not leave within the 1,024-token cap, so those are reported as a stated
   deviation at a raised cap. See the
   [bring-up dossier](docs/families/MINICPM5.md).
+- **[GLM-5.3-Flash 320B-A18B](https://huggingface.co/zai-org/GLM-5.3-Flash)**
+  *(in port)* — 320B total, 18B active, 45 layers mixing Kimi Delta Attention
+  with NoPE latent sparse attention over a four-stream mHC residual, 288
+  experts per layer with top-8 routing. Day-0 contract landed; the family is
+  refused by axis name until its runner passes first light. See the
+  [bring-up dossier](docs/families/GLM53_FLASH.md).
 
 The runtime, streaming installer, CLI, and loopback OpenAI-compatible server
 are written in Swift and Metal; the UI is Open WebUI, driven through that

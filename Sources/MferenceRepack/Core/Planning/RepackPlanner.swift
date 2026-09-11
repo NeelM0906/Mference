@@ -285,6 +285,10 @@ enum RepackPlanner {
             // The MLX control (pre-quantized path) uses the plain llama
             // spelling; the BF16 source is planned by FlashNextPlanner.
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
+        case .glm53Flash:
+            // PipeNetwork's mlx-vlm conversion: text trunk and head under
+            // `language_model.`; `vision_model.` is excluded below.
+            return name.hasPrefix("language_model.")
         }
     }
 
@@ -306,6 +310,9 @@ enum RepackPlanner {
         case .qwen38flashnext: return nil
         // Dense llama: every `.mlp.*_proj` is the layer's own FFN, resident.
         case .minicpm5:        return nil
+        // `.mlp.switch_mlp.` is the stacked routed triplet; `.mlp.shared_experts.`
+        // and the dense layers' bare `.mlp.*_proj` do not match it.
+        case .glm53Flash:      routedContainer = ".mlp.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -465,7 +472,16 @@ enum RepackPlanner {
             name.hasPrefix("audio_tower.") ||
             name.hasPrefix("model.visual.") ||
             name.hasPrefix("model.audio.") ||
-            (family == .maple && isExcludedMapleFlashTensor(name))
+            (family == .maple && isExcludedMapleFlashTensor(name)) ||
+            (family == .glm53Flash && isExcludedGlm53Tensor(name))
+    }
+
+    /// GLM-5.3-Flash drops the vision tower (`vision_model.*`) and any
+    /// multi-token-prediction draft layer (`language_model.model.layers.N`
+    /// with `N` at or past the decoder count is the MTP block; PipeNetwork's
+    /// conversion omits it, other conversions carry it under `mtp.`).
+    static func isExcludedGlm53Tensor(_ name: String) -> Bool {
+        name.hasPrefix("vision_model.") || name.hasPrefix("language_model.model.mtp.")
     }
 
     private static func isMapleFlashResidentTensor(_ name: String) -> Bool {
@@ -1049,6 +1065,10 @@ enum RepackPlanner {
                 if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "lm_head.weight"             { return (4, 0, 0, n) }
+            case .glm53Flash:
+                if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
+                if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
+                if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
             }
             if let li = layerIndex(in: n) {
                 let slot: Int
@@ -1061,6 +1081,7 @@ enum RepackPlanner {
                 case .maple:           slot = mapleSlotRank(in: n)
                 case .qwen38flashnext: slot = 100
                 case .minicpm5:        slot = miniCPM5SlotRank(in: n)
+                case .glm53Flash:      slot = glm53SlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -1073,6 +1094,59 @@ enum RepackPlanner {
             if ka.2 != kb.2 { return ka.2 < kb.2 }
             return ka.3 < kb.3
         }
+    }
+
+    /// Within-layer slot order for GLM-5.3-Flash: the attention bundle (KDA
+    /// projections and gates, or the sparse low-rank path with its absorbed
+    /// per-head folds and the indexer), the two mHC sites, the two layer
+    /// norms, then the router, the shared expert, and the dense FFN of the
+    /// leading layers. Checked in order so `.mlp.gate.` cannot swallow
+    /// `.mlp.gate_proj.`.
+    static func glm53SlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight")                     { return 0 }
+        if n.contains(".self_attn.k_proj.weight")                     { return 1 }
+        if n.contains(".self_attn.v_proj.weight")                     { return 2 }
+        if n.contains(".self_attn.conv1d.weight")                     { return 3 }
+        if n.contains(".self_attn.forget_gate.f_a_proj.weight")       { return 4 }
+        if n.contains(".self_attn.forget_gate.f_b_proj.weight")       { return 5 }
+        if n.hasSuffix(".self_attn.forget_gate.A_log")                { return 6 }
+        if n.hasSuffix(".self_attn.forget_gate.dt_bias")              { return 7 }
+        if n.contains(".self_attn.g_a_proj.weight")                   { return 8 }
+        if n.contains(".self_attn.g_b_proj.weight")                   { return 9 }
+        if n.contains(".self_attn.b_proj.weight")                     { return 10 }
+        if n.contains(".self_attn.o_norm.weight")                     { return 11 }
+        if n.contains(".self_attn.q_a_proj.weight")                   { return 12 }
+        if n.contains(".self_attn.q_a_layernorm.weight")              { return 13 }
+        if n.contains(".self_attn.q_b_proj.weight")                   { return 14 }
+        if n.contains(".self_attn.kv_a_proj_with_mqa.weight")         { return 15 }
+        if n.contains(".self_attn.kv_a_layernorm.weight")             { return 16 }
+        if n.contains(".self_attn.embed_q.weight")                    { return 17 }
+        if n.contains(".self_attn.unembed_out.weight")                { return 18 }
+        if n.contains(".self_attn.indexer.wq_b.weight")               { return 19 }
+        if n.contains(".self_attn.indexer.wk.weight")                 { return 20 }
+        if n.contains(".self_attn.indexer.k_norm.weight")             { return 21 }
+        if n.contains(".self_attn.indexer.k_norm.bias")               { return 22 }
+        if n.contains(".self_attn.indexer.weights_proj.weight")       { return 23 }
+        if n.hasSuffix(".self_attn.indexer.index_kpool_compress_gate") { return 24 }
+        if n.hasSuffix(".self_attn.indexer.index_kpool_compress_ape")  { return 25 }
+        if n.contains(".self_attn.o_proj.weight")                     { return 26 }
+        if n.hasSuffix(".attn_hc.fn")                                 { return 27 }
+        if n.hasSuffix(".attn_hc.base")                               { return 28 }
+        if n.hasSuffix(".attn_hc.scale")                              { return 29 }
+        if n.hasSuffix(".ffn_hc.fn")                                  { return 30 }
+        if n.hasSuffix(".ffn_hc.base")                                { return 31 }
+        if n.hasSuffix(".ffn_hc.scale")                               { return 32 }
+        if n.hasSuffix(".input_layernorm.weight")                     { return 33 }
+        if n.hasSuffix(".post_attention_layernorm.weight")            { return 34 }
+        if n.contains(".mlp.gate.weight")                             { return 35 }
+        if n.hasSuffix(".mlp.gate.e_score_correction_bias")           { return 36 }
+        if n.contains(".mlp.shared_experts.gate_proj.weight")         { return 37 }
+        if n.contains(".mlp.shared_experts.up_proj.weight")           { return 38 }
+        if n.contains(".mlp.shared_experts.down_proj.weight")         { return 39 }
+        if n.contains(".mlp.gate_proj.weight")                        { return 40 }
+        if n.contains(".mlp.up_proj.weight")                          { return 41 }
+        if n.contains(".mlp.down_proj.weight")                        { return 42 }
+        return 99
     }
 
     private static func mapleSlotRank(in n: String) -> Int {
