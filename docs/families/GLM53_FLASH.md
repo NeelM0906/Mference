@@ -146,6 +146,14 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
       of toy parity is green (see "Toy parity"). The family stays gated by
       `ManifestReader.familiesWithoutRunner` until first light on the real
       install.
+- [x] **Tokenizer** — `ChatDialect.glm5` (`Glm5ChatTemplate.swift`,
+      `Glm5ToolCallParser`), detected by the `[gMASK]` special token; the
+      three `generation_config` EOS ids (`<|endoftext|>`, `<|user|>`,
+      `<|observation|>`) in `stopTokenIDs`, `<|user|>` as the end-of-turn
+      bridge; 22 HF renders byte-identical (`Glm5TemplateTests`, fixtures from
+      `Scripts/parity/glm5_make_template_fixtures.py`); the decoder starts in
+      thought because the generation prompt opens `<think>`. See "Tokenizer
+      dialect" below for the two recorded deviations.
 - [ ] **Ladder** — 16 / 32 / auto expert-cache slots produce byte-identical
       greedy output.
 - [ ] **Gate** — every step of [`FAMILY_GATE.md`](../FAMILY_GATE.md) green,
@@ -179,6 +187,24 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
    `index_topk` the selection is exhaustive), a needle beyond 2,048 with the
    pooled selection active, ladder smoke, `bringup-check.sh glm53flash`, the
    frozen protocol, one phases snapshot; then the gate lift.
+
+## Tokenizer dialect
+
+`glm5` is a hand-port of the checkpoint's `chat_template.jinja` (SHA-256 in
+`Tests/Mference/Core/Tokenization/Fixtures/Glm5Tokenizer/renders.json`),
+byte-matched to `transformers` 5.17 `apply_chat_template` on 22 fixtures that
+cover the effort line, system / user / assistant / tool turns, historical
+thinking with and without `clear_thinking`, tool schemas, tool calls with
+typed arguments and result ordering by `tool_call_id`. The reasoning effort is
+pinned to `Max` (the template's own default when the caller passes nothing);
+`generation_config.json`'s three EOS ids all stop generation.
+
+Two deviations by construction, both shared with the MiniCPM5 and DeepSeek
+dialects: `JSONValue` objects are unordered, so tool-schema keys and call
+arguments render in sorted key order where Jinja keeps insertion order; and
+`developer` guidance renders as a `<|system|>` turn (the server folds it there
+for every non-Gemma dialect). Raw prompts carry no `[gMASK]<sop>` prefix — the
+chat render supplies it, as ChatML supplies its own framing.
 
 ## Toy parity
 

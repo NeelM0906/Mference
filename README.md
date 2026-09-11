@@ -248,8 +248,9 @@ four-day-old checkpoint to coherent real-model output.
 
 Only one model-owning product should run at a time. The server selects the
 installed model's native dialect automatically, including Gemma's chat format,
-Qwen's ChatML template with `<tool_call>` function calls, and Maple's ChatML
-template with hidden reasoning.
+Qwen's ChatML template with `<tool_call>` function calls, Maple's ChatML
+template with hidden reasoning, and GLM-5.3's `[gMASK]<sop>` turns with
+`<think>` reasoning and `<arg_key>` / `<arg_value>` tool calls.
 
 ### Requirements
 
