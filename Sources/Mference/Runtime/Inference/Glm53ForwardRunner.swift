@@ -104,7 +104,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
 
     // MARK: - Weights
 
-    private struct LayerTensors {
+    struct LayerTensors {
         let attnNorm: TensorView
         let ffnNorm: TensorView
         let hcAttnFn: TensorView
@@ -157,100 +157,107 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
 
     // MARK: - Stored state
 
-    private let model: Model
-    private let ctx: MetalContext
-    private let cfg: ArchConfig
-    private let g53: Glm53Config
+    let model: Model
+    let ctx: MetalContext
+    let cfg: ArchConfig
+    let g53: Glm53Config
     public let maxContext: Int
 
-    private let hidden: Int
-    private let hc: Int
-    private let kdaHeads: Int
-    private let kdaDim: Int
-    private let convTaps: Int
-    private let numHeads: Int
-    private let qkDim: Int
-    private let vDim: Int
-    private let kvRank: Int
-    private let qRank: Int
-    private let idxHeads: Int
-    private let idxDim: Int
-    private let idxTopK: Int
-    private let kPool: Int
-    private let topK: Int
-    private let numExperts: Int
-    private let moeF: Int
-    private let sharedF: Int
-    private let denseF: Int
-    private let eps: Float
-    private let hcEps: Float
+    let hidden: Int
+    let hc: Int
+    let kdaHeads: Int
+    let kdaDim: Int
+    let convTaps: Int
+    let numHeads: Int
+    let qkDim: Int
+    let vDim: Int
+    let kvRank: Int
+    let qRank: Int
+    let idxHeads: Int
+    let idxDim: Int
+    let idxTopK: Int
+    let kPool: Int
+    let topK: Int
+    let numExperts: Int
+    let moeF: Int
+    let sharedF: Int
+    let denseF: Int
+    let eps: Float
+    let hcEps: Float
 
-    private let kernels: Glm53Kernels
-    private let rms: RMSNorm
-    private let int8: DequantInt8GEMV
-    private let matVec: FlashNextMatVec
-    private let moe: MoE
-    private let state: Glm53StateManager
+    let kernels: Glm53Kernels
+    let rms: RMSNorm
+    let int8: DequantInt8GEMV
+    let matVec: FlashNextMatVec
+    let moe: MoE
+    let state: Glm53StateManager
 
-    private let layers: [LayerTensors]
-    private let embedding: TensorView
-    private let finalNorm: TensorView
-    private let lmHead: TensorView
+    let layers: [LayerTensors]
+    let embedding: TensorView
+    let finalNorm: TensorView
+    let lmHead: TensorView
 
     // Scratch (FP16 unless noted)
-    private let streams: MTLBuffer
-    private let streamsAlt: MTLBuffer
-    private let hiddenBuf: MTLBuffer
-    private let normed: MTLBuffer
-    private let meanPre: MTLBuffer               // fp32 [hc] = 1/hc
-    private let hcPreA: MTLBuffer                // fp32
-    private let hcPostA: MTLBuffer
-    private let hcCombA: MTLBuffer
-    private let hcPreF: MTLBuffer
-    private let hcPostF: MTLBuffer
-    private let hcCombF: MTLBuffer
-    private let mixed: MTLBuffer                 // [3 * H * D]
-    private let convOut: MTLBuffer
-    private let kdaA: MTLBuffer                  // [H * D]
-    private let kdaB: MTLBuffer                  // [H]
-    private let kdaGate: MTLBuffer               // [H * D]
-    private let kdaLow: MTLBuffer                // [D]
-    private let kdaY: MTLBuffer                  // [H * D]
-    private let attnHeads: MTLBuffer             // [max(H*D, heads*vDim)]
-    private let attnOut: MTLBuffer               // [hidden]
-    private let qr: MTLBuffer                    // [qRank]
-    private let q: MTLBuffer                     // [heads * qkDim]
-    private let qLat: MTLBuffer                  // [heads * kvRank]
-    private let oLat: MTLBuffer                  // [heads * kvRank]
-    private let idxKRaw: MTLBuffer               // [idxDim]
-    private let idxQ: MTLBuffer                  // [idxHeads * idxDim]
-    private let idxW: MTLBuffer                  // [idxHeads]
-    private let idxScores: MTLBuffer             // fp32 [pools]
-    private let selected: MTLBuffer              // uint32
-    private let routerLogits: MTLBuffer          // fp32 [numExperts]
-    private let routerIndices: MTLBuffer         // uint32 [topK]
-    private let routerWeights: MTLBuffer         // fp16 [topK]
-    private let identityTable: MTLBuffer         // int16 [numExperts], slot_of[e] = e
-    private let slotOffsets: MTLBuffer           // uint32 [topK]
-    private let allHit: MTLBuffer                // uint32 [1]
-    private let ffnGateScratch: MTLBuffer        // [max(sharedF, denseF)]
-    private let ffnUpScratch: MTLBuffer
-    private let ffnActScratch: MTLBuffer
-    private let sharedOut: MTLBuffer
-    private let moeActs: MTLBuffer
-    private let mlpOut: MTLBuffer
+    let streams: MTLBuffer
+    let streamsAlt: MTLBuffer
+    let hiddenBuf: MTLBuffer
+    let normed: MTLBuffer
+    let meanPre: MTLBuffer               // fp32 [hc] = 1/hc
+    let hcPreA: MTLBuffer                // fp32
+    let hcPostA: MTLBuffer
+    let hcCombA: MTLBuffer
+    let hcPreF: MTLBuffer
+    let hcPostF: MTLBuffer
+    let hcCombF: MTLBuffer
+    let mixed: MTLBuffer                 // [3 * H * D]
+    let convOut: MTLBuffer
+    let kdaA: MTLBuffer                  // [H * D]
+    let kdaB: MTLBuffer                  // [H]
+    let kdaGate: MTLBuffer               // [H * D]
+    let kdaLow: MTLBuffer                // [D]
+    let kdaY: MTLBuffer                  // [H * D]
+    let attnHeads: MTLBuffer             // [max(H*D, heads*vDim)]
+    let attnOut: MTLBuffer               // [hidden]
+    let qr: MTLBuffer                    // [qRank]
+    let q: MTLBuffer                     // [heads * qkDim]
+    let qLat: MTLBuffer                  // [heads * kvRank]
+    let oLat: MTLBuffer                  // [heads * kvRank]
+    let idxKRaw: MTLBuffer               // [idxDim]
+    let idxQ: MTLBuffer                  // [idxHeads * idxDim]
+    let idxW: MTLBuffer                  // [idxHeads]
+    let idxScores: MTLBuffer             // fp32 [pools]
+    let selected: MTLBuffer              // uint32
+    let routerLogits: MTLBuffer          // fp32 [numExperts]
+    let routerIndices: MTLBuffer         // uint32 [topK]
+    let routerWeights: MTLBuffer         // fp16 [topK]
+    let identityTable: MTLBuffer         // int16 [numExperts], slot_of[e] = e
+    let slotOffsets: MTLBuffer           // uint32 [topK]
+    let allHit: MTLBuffer                // uint32 [1]
+    let ffnGateScratch: MTLBuffer        // [max(sharedF, denseF)]
+    let ffnUpScratch: MTLBuffer
+    let ffnActScratch: MTLBuffer
+    let sharedOut: MTLBuffer
+    let moeActs: MTLBuffer
+    let mlpOut: MTLBuffer
 
     /// The open command buffer of the token being produced.
-    private var stream: MTLCommandBuffer?
+    var stream: MTLCommandBuffer?
 
     /// Resident experts: every layer's slab is pinned into the GPU's working
     /// set once, here, so no command buffer pays residency for ~171 GB of
     /// buffers on the way in (macOS 15 residency sets).
-    private var residencySet: (any MTLResidencySet)?
+    var residencySet: (any MTLResidencySet)?
 
-    private var position = 0
-    private var inSequentialPrefill = false
-    private var slotBudgetChecked = false
+    /// The batched prefill (`Glm53PrefillEngine`), built on first use when
+    /// the experts are resident. `MFERENCE_GLM53_BATCHED_PREFILL=0` keeps
+    /// every prompt token on the per-token path (the exactness reference).
+    var batchedPrefill: Glm53PrefillEngine?
+    public var batchedPrefillEnabled =
+        ProcessInfo.processInfo.environment["MFERENCE_GLM53_BATCHED_PREFILL"] != "0"
+
+    var position = 0
+    var inSequentialPrefill = false
+    var slotBudgetChecked = false
 
     public var continuationPosition: Int { position }
 
@@ -269,10 +276,10 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     public private(set) var totalRouterNanos: UInt64 = 0
     /// Command buffers committed in the window.
     public private(set) var totalCommandBuffers = 0
-    private let gpuTimeLock = NSLock()
+    let gpuTimeLock = NSLock()
     public private(set) var totalGpuBusyNanos: UInt64 = 0
-    private var gpuSpanFirstStart: Double = .infinity
-    private var gpuSpanLastEnd: Double = 0
+    var gpuSpanFirstStart: Double = .infinity
+    var gpuSpanLastEnd: Double = 0
 
     public var totalGpuSpanNanos: UInt64 {
         gpuTimeLock.lock()
@@ -600,23 +607,44 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
         }
         var done = 0
-        for (i, token) in tokens.enumerated() {
+        var remaining = tokens
+        // Batched chunks while the prompt stays below index_topk (dense
+        // attention is the model there); the per-token path takes the rest.
+        if batchedPrefillEnabled, expertsResident, capture == nil, !denseSelectionForAB {
+            if batchedPrefill == nil { batchedPrefill = try Glm53PrefillEngine(runner: self) }
+            if let engine = batchedPrefill {
+                while !remaining.isEmpty {
+                    let n = min(remaining.count, Glm53PrefillEngine.capacity, idxTopK - position)
+                    guard n > 0 else { break }
+                    try Task.checkCancellation()
+                    let chunk = remaining.prefix(n)
+                    let last = n == remaining.count
+                    try engine.run(tokens: chunk, startPosition: position, into: last ? logits : nil)
+                    position += n
+                    remaining = remaining.dropFirst(n)
+                    done += n
+                    onProgress(done)
+                }
+            }
+        }
+        for (i, token) in remaining.enumerated() {
             try Task.checkCancellation()
-            let last = i == tokens.count - 1
-            try await produceToken(token: token, position: startPosition + i, into: last ? logits : nil)
+            let last = i == remaining.count - 1
+            try await produceToken(token: token, position: position, into: last ? logits : nil)
             done += 1
             if done % max(1, config.chunkTokens) == 0 || last {
                 try waitForCommitted()
                 onProgress(done)
             }
         }
+        try waitForCommitted()
         beginDecodePhaseWindow()
         return PrefillResult(newPosition: startPosition + tokens.count, seed: .logitsWritten)
     }
 
     // MARK: - The forward pass
 
-    private func produceToken(token: Int32, position p: Int, into logits: MTLBuffer?) async throws {
+    func produceToken(token: Int32, position p: Int, into logits: MTLBuffer?) async throws {
         guard p == position else {
             throw Glm53ForwardRunnerError.invalidInput("expected position \(position), got \(p)")
         }
@@ -959,7 +987,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     }
 
     /// The router's chosen experts, read after a `sync()`.
-    private func routedExpertIndices() -> [Int] {
+    func routedExpertIndices() -> [Int] {
         let ptr = routerIndices.contents().assumingMemoryBound(to: UInt32.self)
         return (0..<topK).map { min(Int(ptr[$0]), numExperts - 1) }
     }
@@ -990,7 +1018,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     // MARK: - Command stream
 
     /// The token's open command buffer, opened on demand.
-    private func open() throws -> MTLCommandBuffer {
+    func open() throws -> MTLCommandBuffer {
         if let stream { return stream }
         guard let cb = ctx.queue.makeCommandBuffer() else {
             throw Glm53ForwardRunnerError.commandFailed("no command buffer")
@@ -1000,11 +1028,11 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     }
 
     /// Streams committed without waiting (headless prefill), oldest first.
-    private var inFlight: [MTLCommandBuffer] = []
+    var inFlight: [MTLCommandBuffer] = []
 
     /// Commit the open stream and wait for it and everything committed before
     /// it; the next `open()` starts a new one.
-    private func sync() throws {
+    func sync() throws {
         if let cb = stream {
             stream = nil
             trackGpuInterval(cb)
@@ -1016,7 +1044,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
 
     /// Commit the open stream without waiting; the next `open()` starts a new
     /// one that the queue executes after it.
-    private func flush() throws {
+    func flush() throws {
         guard let cb = stream else { return }
         stream = nil
         trackGpuInterval(cb)
@@ -1025,7 +1053,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     }
 
     /// Wait for every committed stream and surface its error.
-    private func waitForCommitted() throws {
+    func waitForCommitted() throws {
         let pending = inFlight
         inFlight.removeAll()
         for cb in pending {
@@ -1041,7 +1069,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
 
     // MARK: - Encoding helpers
 
-    private func gemvInt8(_ cb: MTLCommandBuffer, _ view: TensorView,
+    func gemvInt8(_ cb: MTLCommandBuffer, _ view: TensorView,
                           x: MTLBuffer, xOffset: Int = 0,
                           y: MTLBuffer, yOffset: Int = 0, m: Int, n: Int) {
         int8.encode(commandBuffer: cb,

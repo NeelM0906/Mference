@@ -58,6 +58,115 @@ import Testing
                      Double(bytes) / perGPU / 1e9, Double(bytes) / 1e6))
     }
 
+    @Test func batchedPrefillKernelsAtProductionShape() throws {
+        guard Self.enabled else { return }
+        let ctx = try MetalContext()
+        let device = ctx.device
+        let k = try Glm53PrefillKernels(context: ctx, swigluLimit: 10)
+        let hidden = 4096, T = 64
+        let x = Self.halfBuffer(device, T * 32768)
+        let y = Self.halfBuffer(device, T * 16384)
+        print("  [kbench] GLM-5.3-Flash batched prefill kernels, T = \(T), production shapes")
+        func gemm(_ w: TensorView, m: Int, n: Int, _ cb: MTLCommandBuffer) {
+            k.encodeInt8GEMM(commandBuffer: cb, weights: w, x: x, xStride: n, y: y, yStride: m, m: m, n: n, tokens: T)
+        }
+        let sq = Self.int8Matrix(device, m: 8192, n: hidden)
+        try Self.time(ctx, label: "gemm 8192x4096 x T (kda q)", bytes: 8192 * hidden) { gemm(sq, m: 8192, n: hidden, $0) }
+        let oS = Self.int8Matrix(device, m: hidden, n: 32768)
+        try Self.time(ctx, label: "gemm 4096x32768 x T (sparse o_proj)", bytes: hidden * 32768) { gemm(oS, m: hidden, n: 32768, $0) }
+        let sh = Self.int8Matrix(device, m: 2048, n: hidden)
+        try Self.time(ctx, label: "gemm 2048x4096 x T (shared)", bytes: 2048 * hidden) { gemm(sh, m: 2048, n: hidden, $0) }
+        let small = Self.int8Matrix(device, m: 128, n: hidden)
+        try Self.time(ctx, label: "gemm 128x4096 x T (f_a)", bytes: 128 * hidden) { gemm(small, m: 128, n: hidden, $0) }
+        let up = Self.int8Matrix(device, m: 8192, n: 128)
+        try Self.time(ctx, label: "gemm 8192x128 x T (f_b)", bytes: 8192 * 128) { gemm(up, m: 8192, n: 128, $0) }
+        let dense = Self.int8Matrix(device, m: 12288, n: hidden)
+        try Self.time(ctx, label: "gemm 12288x4096 x T (dense)", bytes: 12288 * hidden) { gemm(dense, m: 12288, n: hidden, $0) }
+        let router = device.makeBuffer(length: 288 * hidden * 2, options: .storageModeShared)!
+        let routerView = TensorView(buffer: router, offset: 0, length: UInt64(288 * hidden * 2), scaleOffset: 0, scaleLength: 0,
+                                    biasOffset: 0, biasLength: 0, shape: (288, UInt32(hidden), 0, 0), dtype: 1)
+        let logits = device.makeBuffer(length: T * 288 * 4, options: .storageModeShared)!
+        try Self.time(ctx, label: "bf16 gemm 288x4096 x T (router)", bytes: 288 * hidden * 2) { cb in
+            k.encodeBF16GEMM(commandBuffer: cb, weights: routerView, x: x, xStride: hidden, y: logits, yStride: 288,
+                             outputFloat32: true, m: 288, n: hidden, tokens: T)
+        }
+        let H = 64, D = 128, qkv = H * D
+        let f32 = { (n: Int) -> TensorView in
+            let buf = device.makeBuffer(length: n * 4, options: .storageModeShared)!
+            return TensorView(buffer: buf, offset: 0, length: UInt64(n * 4), scaleOffset: 0, scaleLength: 0,
+                              biasOffset: 0, biasLength: 0, shape: (UInt32(n), 0, 0, 0), dtype: 3)
+        }
+        let bf = { (n: Int) -> TensorView in
+            let buf = device.makeBuffer(length: n * 2, options: .storageModeShared)!
+            return TensorView(buffer: buf, offset: 0, length: UInt64(n * 2), scaleOffset: 0, scaleLength: 0,
+                              biasOffset: 0, biasLength: 0, shape: (UInt32(n), 0, 0, 0), dtype: 1)
+        }
+        let state = device.makeBuffer(length: H * D * D * 4, options: .storageModeShared)!
+        let conv = Self.halfBuffer(device, T * 3 * qkv), a = Self.halfBuffer(device, T * qkv)
+        let b = Self.halfBuffer(device, T * H), gate = Self.halfBuffer(device, T * qkv)
+        try Self.time(ctx, label: "kda chunk 64 heads x T", bytes: T * 3 * qkv * 2) { cb in
+            k.encodeKDAChunk(commandBuffer: cb, convOut: conv, a: a, b: b, gate: gate, aLog: f32(H), dtBias: f32(qkv),
+                             oNorm: bf(D), state: state, out: y, heads: H, headDim: D, tokens: T, lowerBound: -5, eps: 1e-5)
+        }
+        let streams = Self.halfBuffer(device, T * 4 * hidden)
+        let partials = device.makeBuffer(length: T * 25 * 4, options: .storageModeShared)!
+        let pre = device.makeBuffer(length: T * 16, options: .storageModeShared)!
+        let post = device.makeBuffer(length: T * 16, options: .storageModeShared)!
+        let comb = device.makeBuffer(length: T * 64, options: .storageModeShared)!
+        try Self.time(ctx, label: "hc weights + collapse + place-mix x T", bytes: T * 4 * hidden * 2 * 3) { cb in
+            k.encodeHCWeights(commandBuffer: cb, streams: streams, fn: f32(24 * 4 * hidden), base: f32(24), scale: f32(3),
+                              partials: partials, outPre: pre, outPost: post, outComb: comb, hcMult: 4, hidden: hidden,
+                              sinkhornIters: 20, hcEps: 1e-6, rmsEps: 1e-5, tokens: T)
+            k.encodeHCCollapse(commandBuffer: cb, streams: streams, pre: pre, x: x, hcMult: 4, hidden: hidden, tokens: T)
+            k.encodeHCPlaceMix(commandBuffer: cb, streams: streams, sub: x, post: post, comb: comb, outStreams: streams,
+                               hcMult: 4, hidden: hidden, tokens: T)
+        }
+        let lat = Self.halfBuffer(device, 2048 * 512)
+        let qLat = Self.halfBuffer(device, T * 64 * 512), oLat = Self.halfBuffer(device, T * 64 * 512)
+        try Self.time(ctx, label: "latent attention causal 64 heads x T (base 1024)", bytes: 64 * T * 1056 * 512 * 2) { cb in
+            k.encodeLatentAttentionCausal(commandBuffer: cb, qLatent: qLat, latents: lat, out: oLat, heads: 64,
+                                          latentDim: 512, base: 1024, tokens: T, scale: 0.0625)
+        }
+        let embedQ = Self.int8Matrix(device, m: 64 * 512, n: 256)
+        try Self.time(ctx, label: "headed gemv embed_q x T", bytes: T * 64 * 512 * 256) { cb in
+            k.encodeHeadedGEMV(commandBuffer: cb, weights: embedQ, x: x, y: qLat, heads: 64, m: 512, n: 256, tokens: T)
+        }
+        // Grouped experts: 16 resident experts, T x 8 routes spread over them.
+        let stride = 14_155_776
+        let slabBuf = Self.randomBytes(device, 16 * stride)
+        let slab = ResidentExpertSlab(buffer: slabBuf, baseOffset: 0, expertStride: stride)
+        let offsets = MoEExpertOffsets(gateWOff: 0, gateSOff: 4_194_304, gateBOff: 4_456_448,
+                                       upWOff: 4_718_592, upSOff: 8_912_896, upBOff: 9_175_040,
+                                       downWOff: 9_437_184, downSOff: 13_631_488, downBOff: 13_893_632)
+        let K = 8, pairs = T * K
+        let pairToken = device.makeBuffer(length: pairs * 4, options: .storageModeShared)!
+        let routePair = device.makeBuffer(length: pairs * 4, options: .storageModeShared)!
+        let segStart = device.makeBuffer(length: 17 * 4, options: .storageModeShared)!
+        let active = device.makeBuffer(length: 16 * 4, options: .storageModeShared)!
+        let pt = pairToken.contents().bindMemory(to: UInt32.self, capacity: pairs)
+        let rp = routePair.contents().bindMemory(to: UInt32.self, capacity: pairs)
+        let sp = segStart.contents().bindMemory(to: UInt32.self, capacity: 17)
+        let ap = active.contents().bindMemory(to: UInt32.self, capacity: 16)
+        var pair = 0
+        for e in 0..<16 {
+            ap[e] = UInt32(e); sp[e] = UInt32(pair)
+            for t in 0..<T where (t + e) % 2 == 0 { pt[pair] = UInt32(t); rp[t * K + (e / 2)] = UInt32(pair); pair += 1 }
+        }
+        sp[16] = UInt32(pair)
+        let acts = Self.halfBuffer(device, pairs * 2048)
+        let partial = device.makeBuffer(length: pairs * hidden * 4, options: .storageModeShared)!
+        let weights = Self.halfBuffer(device, pairs, scale: 0.3)
+        try Self.time(ctx, label: "grouped moe 16 experts, \(pair) routes", bytes: 16 * stride) { cb in
+            k.encodeGroupedMoE(commandBuffer: cb, slab: slab, offsets: offsets, x: x, acts: acts, partial: partial,
+                               pairToken: pairToken, segStart: segStart, activeExperts: active, activeCount: 16,
+                               routePair: routePair, weights: weights, residual: x, y: y, d: hidden, f: 2048, topK: K, tokens: T)
+        }
+        try Self.time(ctx, label: "router select batched x T", bytes: T * 288 * 4) { cb in
+            k.encodeRouterSelect(commandBuffer: cb, logits: logits, bias: f32(288), outIndices: routePair,
+                                 outWeights: weights, numExperts: 288, routeScale: 2.5, tokens: T)
+        }
+    }
+
     @Test func decodeKernelsAtProductionShape() throws {
         guard Self.enabled else { return }
         let ctx = try MetalContext()

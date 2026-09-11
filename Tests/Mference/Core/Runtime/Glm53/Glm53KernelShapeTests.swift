@@ -235,6 +235,122 @@ import Testing
         #expect(worst < 2e-3, "pooled key worst abs delta \(worst)")
     }
 
+    @Test func batchedInt8GemmMatchesTheDequantizedProduct() throws {
+        let ctx = try MetalContext()
+        let kernels = try Glm53PrefillKernels(context: ctx, swigluLimit: 10)
+        var rng = SystemRandomNumberGenerator()
+        let M = 520, N = 1024, T = 37, groups = N / 64
+        let weights = (0..<(M * N)).map { _ in UInt8.random(in: 0...255, using: &rng) }
+        let scales = Self.bf16(Self.rand(M * groups, 0.02, &rng))
+        let biases = Self.bf16(Self.rand(M * groups, 0.5, &rng))
+        let x = Self.f16(Self.rand(T * N, 1, &rng))
+        let wBytes = weights.count, sBytes = scales.count * 2
+        let buf = ctx.device.makeBuffer(length: wBytes + 2 * sBytes, options: .storageModeShared)!
+        buf.contents().copyMemory(from: weights, byteCount: wBytes)
+        let sp = buf.contents().advanced(by: wBytes).bindMemory(to: UInt16.self, capacity: scales.count)
+        let bp = buf.contents().advanced(by: wBytes + sBytes).bindMemory(to: UInt16.self, capacity: biases.count)
+        for i in 0..<scales.count { sp[i] = Quantization.bf16Bits(scales[i]); bp[i] = Quantization.bf16Bits(biases[i]) }
+        let view = TensorView(buffer: buf, offset: 0, length: UInt64(wBytes),
+                              scaleOffset: UInt64(wBytes), scaleLength: UInt64(sBytes),
+                              biasOffset: UInt64(wBytes + sBytes), biasLength: UInt64(sBytes),
+                              shape: (UInt32(M), UInt32(N), 0, 0), dtype: 0)
+        let yBuf = ctx.device.makeBuffer(length: T * M * 2, options: .storageModeShared)!
+        try Self.run(ctx) { cb in
+            kernels.encodeInt8GEMM(commandBuffer: cb, weights: view, x: Self.halfBuffer(ctx.device, x), xStride: N,
+                                   y: yBuf, yStride: M, m: M, n: N, tokens: T)
+        }
+        let got = Glm53ForwardRunner.readFP16(yBuf, count: T * M)
+        var worst: Float = 0
+        for t in 0..<T {
+            for m in 0..<M {
+                var acc: Float = 0
+                for n in 0..<N {
+                    let g = m * groups + n / 64
+                    acc += (Float(weights[m * N + n]) * scales[g] + biases[g]) * x[t * N + n]
+                }
+                worst = max(worst, abs(got[t * M + m] - acc) / max(1, abs(acc)))
+            }
+        }
+        #expect(worst < 5e-3, "batched INT8 GEMM worst rel delta \(worst)")
+
+        // BF16 GEMM (router / pooling gate), fp32 and fp16 outputs.
+        let wb = Self.bf16(Self.rand(M * N, 0.05, &rng))
+        let wbView = Self.bf16View(ctx.device, wb)
+        let y32 = ctx.device.makeBuffer(length: T * M * 4, options: .storageModeShared)!
+        try Self.run(ctx) { cb in
+            kernels.encodeBF16GEMM(commandBuffer: cb, weights: wbView, x: Self.halfBuffer(ctx.device, x), xStride: N,
+                                   y: y32, yStride: M, outputFloat32: true, m: M, n: N, tokens: T)
+        }
+        let g32 = y32.contents().bindMemory(to: Float.self, capacity: T * M)
+        var worstB: Float = 0
+        for t in stride(from: 0, to: T, by: 5) {
+            for m in stride(from: 0, to: M, by: 7) {
+                var acc: Float = 0
+                for n in 0..<N { acc += wb[m * N + n] * x[t * N + n] }
+                worstB = max(worstB, abs(g32[t * M + m] - acc) / max(1, abs(acc)))
+            }
+        }
+        #expect(worstB < 2e-3, "batched BF16 GEMM worst rel delta \(worstB)")
+    }
+
+    /// The chunk kernel walks T tokens with the state in registers; per token
+    /// it performs the decode kernel's arithmetic in the same order, so the
+    /// outputs and the final state must be bit-identical to T decode steps.
+    @Test func kdaChunkEqualsSequentialDecodeStepsBitForBit() throws {
+        let ctx = try MetalContext()
+        let kernels = try Glm53Kernels(context: ctx)
+        let prefill = try Glm53PrefillKernels(context: ctx, swigluLimit: 10)
+        var rng = SystemRandomNumberGenerator()
+        let H = 8, D = 128, qkv = H * D, T = 5
+        let aLog = Self.f32View(ctx.device, Self.rand(H, 1, &rng))
+        let dtBias = Self.f32View(ctx.device, Self.rand(qkv, 0.5, &rng))
+        let oNorm = Self.bf16View(ctx.device, Self.rand(D, 1, &rng).map { 1 + 0.2 * $0 })
+        let conv = Self.rand(T * 3 * qkv, 1, &rng), a = Self.rand(T * qkv, 1, &rng)
+        let b = Self.rand(T * H, 2, &rng), gate = Self.rand(T * qkv, 2, &rng)
+        let stateSeq = ctx.device.makeBuffer(length: H * D * D * 4, options: .storageModeShared)!
+        let stateChunk = ctx.device.makeBuffer(length: H * D * D * 4, options: .storageModeShared)!
+        let seed = Self.rand(H * D * D, 0.1, &rng)
+        stateSeq.contents().copyMemory(from: seed, byteCount: seed.count * 4)
+        stateChunk.contents().copyMemory(from: seed, byteCount: seed.count * 4)
+        var stepOuts: [MTLBuffer] = []
+        let yTmp = ctx.device.makeBuffer(length: qkv * 2, options: .storageModeShared)!
+        for t in 0..<T {
+            let out = ctx.device.makeBuffer(length: qkv * 2, options: .storageModeShared)!
+            try Self.run(ctx) { cb in
+                kernels.encodeKDADecode(
+                    commandBuffer: cb,
+                    convOut: Self.halfBuffer(ctx.device, Array(conv[(t * 3 * qkv)..<((t + 1) * 3 * qkv)])),
+                    a: Self.halfBuffer(ctx.device, Array(a[(t * qkv)..<((t + 1) * qkv)])),
+                    b: Self.halfBuffer(ctx.device, Array(b[(t * H)..<((t + 1) * H)])),
+                    gate: Self.halfBuffer(ctx.device, Array(gate[(t * qkv)..<((t + 1) * qkv)])),
+                    aLog: aLog, dtBias: dtBias, oNorm: oNorm, state: stateSeq,
+                    out: out, yOut: yTmp, heads: H, headDim: D, lowerBound: -5, eps: 1e-5)
+            }
+            stepOuts.append(out)
+        }
+        let outChunk = ctx.device.makeBuffer(length: T * qkv * 2, options: .storageModeShared)!
+        try Self.run(ctx) { cb in
+            prefill.encodeKDAChunk(commandBuffer: cb, convOut: Self.halfBuffer(ctx.device, conv),
+                                   a: Self.halfBuffer(ctx.device, a), b: Self.halfBuffer(ctx.device, b),
+                                   gate: Self.halfBuffer(ctx.device, gate), aLog: aLog, dtBias: dtBias, oNorm: oNorm,
+                                   state: stateChunk, out: outChunk, heads: H, headDim: D, tokens: T,
+                                   lowerBound: -5, eps: 1e-5)
+        }
+        let chunk = Glm53ForwardRunner.readFP16(outChunk, count: T * qkv)
+        var mismatches = 0
+        for t in 0..<T {
+            let seqRow = Glm53ForwardRunner.readFP16(stepOuts[t], count: qkv)
+            let chunkRow = Array(chunk[(t * qkv)..<((t + 1) * qkv)])
+            mismatches += zip(seqRow, chunkRow).filter { $0 != $1 }.count
+        }
+        #expect(mismatches == 0, "KDA chunk differs from sequential decode in \(mismatches) outputs")
+        let s1 = stateSeq.contents().bindMemory(to: Float.self, capacity: H * D * D)
+        let s2 = stateChunk.contents().bindMemory(to: Float.self, capacity: H * D * D)
+        var stateMismatch = 0
+        for i in 0..<(H * D * D) where s1[i] != s2[i] { stateMismatch += 1 }
+        #expect(stateMismatch == 0, "KDA chunk final state differs in \(stateMismatch) entries")
+    }
+
     @Test func routerSelectOver288ExpertsMatchesTheReferenceRule() throws {
         let ctx = try MetalContext()
         let kernels = try Glm53Kernels(context: ctx)

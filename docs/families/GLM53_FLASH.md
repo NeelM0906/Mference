@@ -129,10 +129,11 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
 
 ## Port status
 
-- [ ] **Repack** — `SupportedModelSource.glm53Flash` pinned to `d43ea8b4`;
+- [x] **Repack** — `SupportedModelSource.glm53Flash` pinned to `d43ea8b4`;
       the generic pre-quantized planner lays the family out
-      (`Glm53RepackPlannerTests`); `--verify-install` on a produced install
-      not yet run.
+      (`Glm53RepackPlannerTests`); installed 2026-09-11 in 1 h 15 min
+      (180.8 GB over 2,744 ranges), `--verify-install` verified 49 files
+      (180,843,651,755 bytes) in 68 s.
 - [x] **Toy parity (fp32 tier)** — goldens from PipeNetwork's parity-fixed
       MLX runtime (`Scripts/parity/README.md`, "glm53flash"); the fp32 oracle
       `Glm53ReferenceRunner` reproduces every layer at `1e-4` on the
@@ -155,12 +156,15 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
       `Scripts/parity/glm5_make_template_fixtures.py`); the decoder starts in
       thought because the generation prompt opens `<think>`. See "Tokenizer
       dialect" below for the two recorded deviations.
-- [ ] **Ladder** — 16 / 32 / auto expert-cache slots produce byte-identical
-      greedy output.
+- [x] **Ladder** — 16 / 32 / auto expert-cache slots produce byte-identical
+      greedy output (`bringup-check.sh glm53flash` stage 3, 2026-09-11:
+      7.0 / 7.5 / 28.3 tok/s; `auto` resolves to resident on this host).
 - [ ] **Gate** — every step of [`FAMILY_GATE.md`](../FAMILY_GATE.md) green,
       including the full suite three times consecutively.
-- [ ] **Protocol bench** — the three frozen `real-generation-v1` cases with one
-      discarded warmup and every footer `stop=endOfTurn`.
+- [x] **Protocol bench** — the three frozen `real-generation-v1` cases with one
+      discarded warmup, 9/9 measured footers `stop=endOfTurn` at
+      `MFERENCE_GLM5_REASONING_EFFORT=low` (stated deviation; see "Measured
+      results").
 
 ## Port plan
 
@@ -224,20 +228,97 @@ Two tiers, both from the committed goldens (seed 12, toy geometry in
 | fp32 oracle, free-running | the oracle carrying its own fp32 drift | decisions and 16/16 rollouts exact on both prompts; logits drift 1.8e-4 (short) / 2.5e-4 (long) against the reference's own batched-vs-per-token gap of 4.7e-5 / 3.55e-4 |
 | Metal runner vs oracle (FP16 tier) | `Glm53ForwardRunner` on a planner-written install of the toy checkpoint, the oracle anchored to the runner's layer inputs and cache appends, both prompts and 16 decode steps each (`Glm53ForwardRunnerTests`) | no decision flips at any margin, greedy 17/17 on both prompts; worst abs 2.07e-2 (`post_attention_layernorm_out`, long decode), streams 1.58e-2, mHC coefficients 8.6e-3, logits 3.6e-3 — gate `atol = rtol = 5e-2`; chunked prefill == sequential decode bit for bit at three chunkings; dense A/B arm bit-equal below `index_topk` and refused above |
 
+## First light (real install, 2026-09-11)
+
+Host: Mac Studio, Apple M3 Ultra, 256 GB, macOS 26.3.1 (Darwin 25.3.0),
+Swift 6.3.3; `scratch/glm53flash.gturbo` verified with strict SHA-256. The
+env-gated `Glm53RealGenerationMeasurement` harness loads through the
+explicit-baseline door with `MFERENCE_GLM53_RESIDENT=1` (the debug test
+bundle; the release CLI figures follow).
+
+| Probe | Result |
+|---|---|
+| `The capital of France is` (greedy, 24 new, twice) | ` Paris. It is the largest city in France and serves as the country's political, economic, and cultural center.` both passes, identical token ids |
+| frozen short-explanation (greedy, 160 new, raw deltas) | coherent think-block reasoning about wetlands, mechanisms, limits |
+| dense A/B (60-token prompt + 32 new, below `index_topk`) | indexer arm and dense arm identical, 32/32 tokens |
+| load | 22 s for 181 GB (copied resident experts at 6.4 GB/s), device working set 239 GB recommended / 181 GB allocated, peak RSS 164 GB |
+
+Two findings on the way there, both fixed before the numbers above:
+
+1. **The mapped resident strategy does not work at this size.** With the
+   expert set `mmap`'d and wrapped `bytesNoCopy`, the GPU faulted the 171 GB
+   in page by page at ~0.7 GB/s (one token a minute) and ~140 GB of
+   incompressible pages landed in the compressor. `ResidentExpertStreamer`
+   gained a `.copied` strategy (one anonymous shared buffer per layer filled
+   by `F_NOCACHE` direct reads) and the runner pins every layer buffer in an
+   `MTLResidencySet`; without the residency set the same buffers still cost
+   2.7 s of GPU time per token.
+2. **`dsv4_hc_weights` was 52 ms of an 86 ms token.** The production-shape
+   kernel benchmark (`Glm53KernelBenchmarks`, `MFERENCE_GLM53_KBENCH=1`) put
+   every GEMV and the resident expert FFN at 400-750 GB/s and the mHC weights
+   kernel at 2.9 GB/s (0.58 ms per site, one threadgroup walking 24 x 16,384
+   fp32). `glm53_hc_dots` / `glm53_hc_finalize` bring a site to 0.10 ms
+   including collapse, norm and place-mix; the router select moved to one
+   simdgroup (0.068 -> 0.021 ms). Decode went from 11 to 27 tok/s.
+
+Release CLI after both fixes (commit `7e0821d`, `MFERENCE_PHASES=1`):
+
+| Run | Footer |
+|---|---|
+| raw `The capital of France is`, greedy, 48 new | `prefill=5tok/0.89s new=48tok decode=1.74s tok/s=27.622` |
+| chat short-explanation, greedy, 1,024 new (Max effort, still thinking at the cap) | `prefill=60tok/2.73s new=1024tok decode=40.90s tok/s=25.039` |
+| chat short-explanation, greedy, low effort (harness) | `stop=endOfTurn prefill=60tok/2.71s new=668tok decode=26.29s tok/s=25.412` |
+
+Prefill is the per-token path, so it runs at decode speed (~22 tok/s); a
+batched prefill is the open perf item (see "Known limits").
+
 ## Measured results
 
-Not yet run. Host for the port: Mac Studio, Apple M3 Ultra, 256 GB, macOS
-26.3 (Darwin 25.3.0), Swift 6.3.3.
+Host: Mac Studio, Apple M3 Ultra, 256 GB, macOS 26.3.1 (Darwin 25.3.0),
+Swift 6.3.3. Protocol: [`COMMUNITY_BENCHMARKS.md`](../COMMUNITY_BENCHMARKS.md),
+3 measured repetitions per case after one discarded warmup, each run a fresh
+process. **Stated deviation:** `MFERENCE_GLM5_REASONING_EFFORT=low`. At the
+template's default (`Max`) the model does not leave its think block inside
+the 1,024-token cap on any case (2,400 tokens of thinking measured on
+short-explanation), so no footer could read `stop=endOfTurn`; `low` is the
+vendor template's own setting, not a sampling change.
+
+Run 2026-09-11, release `MferenceCLI` at commit `011a016`, `auto` expert
+mode (resident), `./run-benchmark.sh glm53flash-bringup scratch/glm53flash.gturbo 3`
+with `MFERENCE_GLM5_REASONING_EFFORT=low`; `stop=endOfTurn` on 9/9 measured
+runs. Prefill is the per-token path of that commit (the batched prefill
+that follows is measured separately below).
 
 | Case | Prompt / generated | Prefill | Decode | Range | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: |
-| short-explanation | | | | | |
-| medium-review | | | | | |
-| long-synthesis | | | | | |
+| short-explanation | 60 / 686 | 2.77 s (21.7 tok/s) | 25.61 tok/s | 25.44 – 25.72 | 160.1 GiB |
+| medium-review | 420 / 801 | 15.29 s (27.5 tok/s) | 24.09 tok/s | 23.90 – 24.43 | 160.1 GiB |
+| long-synthesis | 2,792 / 712 | 116.64 s (23.9 tok/s) | 19.09 tok/s | 18.49 – 19.11 | 160.1 GiB |
+
+The long-synthesis prompt crosses `index_topk`, so its decode runs the
+pooled indexer's CPU selection on the 11 sparse layers every token (one
+readback each) and the latent attention over ~3k rows; that is the 19 vs
+25 tok/s gap.
 
 ### Phases attribution
 
-Not yet run.
+Release CLI, chat short-explanation, greedy, 1,024 generated tokens, resident
+experts (`scratch/glm53-cli-smoke-2.log`, commit `7e0821d`):
+
+| Phase | ms/token | Share |
+|---|---:|---:|
+| GPU busy (one command buffer per token) | 37.6 | 94% |
+| GPU span minus busy (CPU encode, sampler, detokenizer between tokens) | 2.3 | 6% |
+| expert I/O | 0 | resident: none |
+| router readback wait | 0 | resident: the router never leaves the GPU |
+| indexer CPU top-k | 0 | prompt + generation stayed below `index_topk` |
+
+Per-kernel attribution at production shape (`Glm53KernelBenchmarks`): KDA
+layer projections 0.23 ms (609 GB/s), routed experts 0.22 ms (508 GB/s),
+mHC site 0.10 ms, lm_head 0.86 ms (740 GB/s), sparse `o_proj` 0.33 ms
+(413 GB/s), latent attention over 2,048 rows 0.95 ms (141 GB/s, the next
+kernel to widen). About 700 dispatches per token; ~11.5 GB of weights per
+token puts the memory-bandwidth floor near 15 ms.
 
 | Phase | ms/token | Share |
 |---|---:|---:|

@@ -436,6 +436,47 @@ import Testing
         }
     }
 
+    /// The batched prefill covers positions below `index_topk` (4 on the toy):
+    /// its logits for the fourth token must be FP16-close to the per-token
+    /// path's, with the same argmax, and the decode that follows must carry
+    /// the same state (greedy continuation agrees).
+    @Test func batchedPrefillMatchesThePerTokenPathBelowIndexTopK() async throws {
+        let h = try Self.makeHarness()
+        defer { h.cleanup() }
+        let resident = try Glm53Parity.loadModel(at: h.dir, device: h.ctx.device, mode: .resident)
+        let config = RuntimeConfiguration(prefillEnabled: true, forceLogitsHead: true)
+        let batched = try Glm53ForwardRunner(model: resident, context: h.ctx, maxContext: 128, runtimeConfiguration: config)
+        let perToken = try Glm53ForwardRunner(model: resident, context: h.ctx, maxContext: 128, runtimeConfiguration: config)
+        perToken.batchedPrefillEnabled = false
+        #expect(batched.expertsResident && batched.batchedPrefillEnabled)
+        let logitsB = try #require(h.ctx.device.makeBuffer(
+            length: h.config.vocabSize * MemoryLayout<Float16>.stride, options: .storageModeShared))
+        let tokens = try Glm53Goldens.promptTokens(.long).map { Int32($0) }
+        let n = h.config.compressedAttention.indexTopK
+        let prefix = tokens[0..<n]
+        _ = try await batched.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
+                                             config: .production(chunkTokens: 32), into: logitsB, onProgress: { _ in })
+        _ = try await perToken.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
+                                              config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
+        let a = Glm53ForwardRunner.readFP16(logitsB, count: h.config.vocabSize)
+        let b = h.logitsRow()
+        let d = FlashNextDelta.compare(a, b, atol: Self.atol, rtol: Self.rtol)
+        print(String(format: "  [glm53 batched prefill vs per-token, %d tokens] logits maxAbs %.3e maxRel %.3e", n, d.maxAbs, d.maxRel))
+        #expect(d.mismatched == 0, "batched prefill logits outside the FP16 tier: worst \(d.maxAbs)")
+        #expect(Self.argmax(a) == Self.argmax(b))
+        var nextA = Int32(Self.argmax(a)), nextB = Int32(Self.argmax(b))
+        var agreed = 0
+        for step in 0..<6 {
+            try await batched.produce(token: nextA, position: n + step, into: logitsB)
+            try await perToken.produce(token: nextB, position: n + step, into: h.logits)
+            let ra = Glm53ForwardRunner.readFP16(logitsB, count: h.config.vocabSize), rb = h.logitsRow()
+            nextA = Int32(Self.argmax(ra)); nextB = Int32(Self.argmax(rb))
+            if nextA == nextB { agreed += 1 }
+        }
+        print("  [glm53 batched prefill vs per-token] greedy agreement over 6 decode steps: \(agreed)/6")
+        #expect(agreed >= 5, "decode after a batched prefill diverged from the per-token path")
+    }
+
     @Test func factoryDispatchesTheFamilyToItsRunner() throws {
         let dir = try Glm53Parity.installToyCheckpoint()
         defer { try? FileManager.default.removeItem(at: dir) }

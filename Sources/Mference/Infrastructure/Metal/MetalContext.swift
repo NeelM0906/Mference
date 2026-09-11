@@ -85,6 +85,7 @@ public final class MetalContext: @unchecked Sendable {
         "flashnext_indexer",
         "flashnext_gdn",
         "glm53",
+        "glm53_prefill",
     ]
 
     /// Bundle locations for runtime shader modules.
@@ -99,6 +100,7 @@ public final class MetalContext: @unchecked Sendable {
         "flashnext_indexer": "Metal/FlashNext",
         "flashnext_moe": "Metal/FlashNext",
         "glm53": "Metal/Glm53",
+        "glm53_prefill": "Metal/Glm53",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
         "inkling": "Metal/Inkling",

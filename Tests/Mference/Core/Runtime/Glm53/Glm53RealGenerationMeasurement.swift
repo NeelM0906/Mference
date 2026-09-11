@@ -24,7 +24,7 @@ import Metal
 ///   * `MFERENCE_GLM53_VERIFY=trusted-receipt` — skip the first-touch SHA-256
 ///     in favour of the install receipt's size checks. Default `full-sha256`.
 ///   * `MFERENCE_GLM53_PROBES` — comma list of `raw`, `chat`, `dense-ab`,
-///     `needle`; default `raw,chat,dense-ab`.
+///     `prefill-ab`, `needle`; default `raw,chat,dense-ab`.
 ///   * `MFERENCE_GLM53_MAX_CONTEXT` — runner context; default 2048, or the
 ///     needle length plus 512 when `needle` is requested.
 ///   * `MFERENCE_GLM53_NEEDLE_TOKENS` — needle prompt target; default 2,600
@@ -270,7 +270,7 @@ import Metal
         }
 
         var chatPrompt: [Int32] = []
-        if probes.contains("chat") || probes.contains("dense-ab") {
+        if probes.contains("chat") || probes.contains("dense-ab") || probes.contains("prefill-ab") {
             chatPrompt = try Self.shortExplanationPrompt(h.tokenizer)
         }
 
@@ -303,6 +303,53 @@ import Metal
                      + (firstDiff.map { ", first divergence at token \($0)" } ?? ""))
             #expect(sparse.tokens == dense.tokens,
                     "indexer arm and dense arm diverged at \(firstDiff.map(String.init) ?? "length")")
+        }
+
+        if probes.contains("prefill-ab") {
+            // Batched vs per-token prefill on the chat prompt: same greedy
+            // continuation expected up to near-ties; the footer shows the
+            // prefill time of each arm.
+            h.runner.batchedPrefillEnabled = true
+            let batched = try await Self.generate(h, label: "prefill-ab/batched", promptIds: chatPrompt,
+                                                  maxNew: 32, temperature: 0)
+            h.runner.batchedPrefillEnabled = false
+            let perToken = try await Self.generate(h, label: "prefill-ab/per-token", promptIds: chatPrompt,
+                                                   maxNew: 32, temperature: 0)
+            h.runner.batchedPrefillEnabled = true
+            let firstDiff = zip(batched.tokens, perToken.tokens).enumerated()
+                .first { $0.element.0 != $0.element.1 }?.offset
+            Self.log(String(format: "[glm53-firstlight] prefill A/B: batched %.2fs vs per-token %.2fs for %d tokens; identical=%@%@",
+                            batched.stats.prefillSeconds, perToken.stats.prefillSeconds, chatPrompt.count,
+                            batched.tokens == perToken.tokens ? "YES" : "NO",
+                            firstDiff.map { ", first divergence at token \($0)" } ?? ""))
+            #expect(batched.tokens.first == perToken.tokens.first, "the first generated token must agree")
+
+            // The prompt-end logits of both arms, directly.
+            let vocab = h.model.config.vocabSize
+            func promptLogits(batched on: Bool) async throws -> [Float] {
+                h.runner.batchedPrefillEnabled = on
+                h.runner.reset()
+                let buffer = try #require(h.context.device.makeBuffer(
+                    length: vocab * MemoryLayout<Float16>.stride, options: .storageModeShared))
+                let start = Date()
+                _ = try await h.runner.prefillChunked(tokens: chatPrompt[...], startPosition: 0, outputMode: .logits,
+                                                      config: .production(chunkTokens: 128), into: buffer,
+                                                      onProgress: { _ in })
+                Self.log(String(format: "[glm53-firstlight] prefill %@: %d tokens in %.3f s (%.1f tok/s)",
+                                on ? "batched" : "per-token", chatPrompt.count, Date().timeIntervalSince(start),
+                                Double(chatPrompt.count) / Date().timeIntervalSince(start)))
+                return Glm53ForwardRunner.readFP16(buffer, count: vocab)
+            }
+            let lb = try await promptLogits(batched: true)
+            let lp = try await promptLogits(batched: false)
+            h.runner.batchedPrefillEnabled = true
+            var maxAbs: Float = 0, maxAbsAt = 0
+            for i in 0..<vocab where abs(lb[i] - lp[i]) > maxAbs { maxAbs = abs(lb[i] - lp[i]); maxAbsAt = i }
+            let argB = lb.indices.max { lb[$0] < lb[$1] }!, argP = lp.indices.max { lp[$0] < lp[$1] }!
+            let sortedP = lp.sorted(by: >)
+            Self.log(String(format: "[glm53-firstlight] prompt logits: max abs delta %.4f at %d (per-token value %.3f); argmax %d vs %d; per-token top-2 margin %.3f; top value %.3f",
+                            maxAbs, maxAbsAt, lp[maxAbsAt], argB, argP, sortedP[0] - sortedP[1], sortedP[0]))
+            #expect(argB == argP, "batched and per-token prefill disagree on the next token")
         }
 
         if probes.contains("needle") {
