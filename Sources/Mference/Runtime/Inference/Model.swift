@@ -128,6 +128,10 @@ public struct Model {
         case .inklingSmall: return "model.llm."
         case .qwen38flashnext: return "model.language_model."
         case .minicpm5: return "model."
+        // PipeNetwork's mlx-vlm conversion keeps the multimodal container
+        // order: `language_model.model.` for the text trunk and a
+        // `language_model.lm_head`, with `vision_model.` dropped at install.
+        case .glm53Flash: return "language_model.model."
         }
     }
     private var lmHeadName: String {
@@ -136,6 +140,7 @@ public struct Model {
         case .deepseekV4Flash, .maple, .qwen38flashnext: return "lm_head.weight"
         case .inklingSmall: return "model.llm.unembed.weight"
         case .minicpm5: return "lm_head.weight"
+        case .glm53Flash: return "language_model.lm_head.weight"
         }
     }
     /// Inkling names the token embedding `embed`, not `embed_tokens`.
@@ -147,7 +152,7 @@ public struct Model {
             return "\(trunkPrefix)word_embeddings.weight"
         case .inklingSmall:
             return "\(trunkPrefix)embed.weight"
-        case .minicpm5:
+        case .minicpm5, .glm53Flash:
             return "\(trunkPrefix)embed_tokens.weight"
         }
     }
@@ -220,6 +225,11 @@ public struct Model {
             // Dense: no router tensor exists; the accessor throws
             // tensorNotFound if a caller ever asks.
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp.gate.weight")
+        case .glm53Flash:
+            // Unquantized BF16 `[numExperts, hidden]` on the MoE layers; the
+            // selection bias is `glm53RouterCorrectionBias`. The three dense
+            // layers have none.
+            return try resident(name: "\(trunkPrefix)layers.\(L).mlp.gate.weight")
         }
     }
     /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
@@ -251,6 +261,10 @@ public struct Model {
         case .minicpm5:
             // Dense llama: the per-layer MLP under the bare `.mlp.` names.
             return "\(trunkPrefix)layers.\(L).mlp.\(proj).weight"
+        case .glm53Flash:
+            // MoE layers keep the source's `.mlp.shared_experts.` container;
+            // the three dense layers' FFN is `glm53DenseFFN`.
+            return "\(trunkPrefix)layers.\(L).mlp.shared_experts.\(proj).weight"
         }
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
@@ -270,7 +284,7 @@ public struct Model {
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
         case .qwen38flashnext:
             throw accessorNotAvailable("inputNorm")
-        case .minicpm5:
+        case .minicpm5, .glm53Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
         }
     }
@@ -286,7 +300,7 @@ public struct Model {
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp_norm.weight")
         case .qwen38flashnext:
             throw accessorNotAvailable("postAttnNorm")
-        case .minicpm5:
+        case .minicpm5, .glm53Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
         }
     }
@@ -673,8 +687,18 @@ public struct Model {
         case .resident:
             streamersBox.streamers[L] = .resident(try ResidentExpertStreamer(
                 layout: layout,
-                device: device))
+                device: device,
+                strategy: Self.residentStrategy(for: config.family)))
         }
+    }
+
+    /// How `.resident` holds a layer's experts. GLM-5.3-Flash's runner
+    /// addresses experts by GPU-side index inside one layer buffer and its
+    /// 171 GB set is meant to live in memory outright, so it takes the copied
+    /// strategy (see `ResidentExpertStreamer`); every other family keeps the
+    /// mapped one it shipped with.
+    static func residentStrategy(for family: ModelFamily) -> ResidentExpertStreamer.Strategy {
+        family == .glm53Flash ? .copied : .mapped
     }
 
     /// Resident mode: open every routed layer and touch its mapping so page-in

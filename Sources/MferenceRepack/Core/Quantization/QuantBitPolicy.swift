@@ -139,7 +139,7 @@ public struct QuantBitPolicy: Sendable, Equatable {
             // `embed_tokens` and `lm_head` is INT4 g64, and a dense llama has
             // no router to keep wider.
             return .uniformInt4
-        case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple:
+        case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple, .glm53Flash:
             // None of these has an original-repo installer entry today, so no
             // conversion has been examined and no table can be honest. Uniform
             // INT4 is the base the quantize-in-flight path was built for; a

@@ -608,7 +608,9 @@ static inline void moe_phase1_gate_up_act_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    // DeepSeek's swiglu_limit clamp: a no-op unless function constant 5 is set.
+    const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
 }
 
 static inline void moe_phase1_gate_up_act_subset_u16load_body(
@@ -644,7 +646,9 @@ static inline void moe_phase1_gate_up_act_subset_u16load_body(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    // DeepSeek's swiglu_limit clamp: a no-op unless function constant 5 is set.
+    const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
 }
 
 kernel void moe_phase1_gate_up_act_u16load(
@@ -733,7 +737,8 @@ kernel void moe_phase1_gate_up_act_slotmap(
 
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, DD, lane);
-    if (lane == 0) acts[slot * FF + f] = half(moe_hidden_activation(gu.x) * gu.y);
+    const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+    if (lane == 0) acts[slot * FF + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
 }
 
 kernel void moe_phase2_down_reduce_k8_slotmap(
@@ -1579,4 +1584,106 @@ kernel void dsv4_prefill_moe_reduce_pairs_k6(
     acc += partials[base + 4u * DD];
     acc += partials[base + 5u * DD];
     y[row] = half(acc);
+}
+
+// ============================================================================
+// GLM-5.3-Flash chunked prefill: routed experts grouped by expert over a
+// chunk. The CPU sorts the chunk's (token, rank) routes by expert into
+// `pair_token` / `pair_rank` with `seg_start[a] ..< seg_start[a + 1]` the
+// routes of active expert `active_experts[a]`; expert `e` lives at
+// `slab + e * expert_stride` (resident slab). Each expert's rows are read once
+// per chunk and applied to every route on it. Same INT4 row math as the
+// decode phase-1 / phase-2 bodies (`moe_int4_gate_up_rows_simd_dev_vec_u16load`,
+// `moe_int4_gemv_row_simd_dev_vec`, `moe_swiglu_clamp`).
+// ============================================================================
+
+// Grid (ceil(F/8), active_count): simdgroup = one f row of one expert, looped
+// over the expert's routes. acts[pair][F].
+kernel void glm53p_moe_grouped_phase1(
+    device const uint8_t* slab          [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half*    x             [[buffer(2)]],   // [T][D]
+    device half*          acts          [[buffer(3)]],   // [pairs][F]
+    device const uint*    pair_token    [[buffer(4)]],
+    device const uint*    seg_start     [[buffer(5)]],   // [active_count + 1]
+    device const uint*    active_experts [[buffer(6)]],
+    constant uint&        D             [[buffer(7)]],
+    constant uint&        F             [[buffer(8)]],
+    constant uint&        expert_stride [[buffer(9)]],
+    uint2 tg   [[threadgroup_position_in_grid]],
+    uint  sg   [[simdgroup_index_in_threadgroup]],
+    uint  lane [[thread_index_in_simdgroup]]
+) {
+    const uint f = tg.x * 8u + sg;
+    if (f >= F) return;
+    const uint a = tg.y;
+    const uint e = active_experts[a];
+    device const uint8_t* base = slab + uint(e) * expert_stride;
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* gW = base + re.gate_W_off;
+    device const uint8_t* uW = base + re.up_W_off;
+    device const bfloat* gS = (device const bfloat*)(base + re.gate_s_off);
+    device const bfloat* uS = (device const bfloat*)(base + re.up_s_off);
+    device const bfloat* gB = (device const bfloat*)(base + re.gate_b_off);
+    device const bfloat* uB = (device const bfloat*)(base + re.up_b_off);
+    const uint p0 = seg_start[a], p1 = seg_start[a + 1u];
+    for (uint p = p0; p < p1; ++p) {
+        device const half* xt = x + pair_token[p] * D;
+        const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(gW, gS, gB, uW, uS, uB, xt, f, D, lane);
+        const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+        if (lane == 0) acts[p * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
+    }
+}
+
+// Grid (ceil(D/8), active_count): simdgroup = one d row, looped over the
+// expert's routes. partial[pair][D] = down_e(act[pair]).
+kernel void glm53p_moe_grouped_down(
+    device const uint8_t* slab          [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half*    acts          [[buffer(2)]],   // [pairs][F]
+    device float*         partial       [[buffer(3)]],   // [pairs][D] fp32, as the decode reduce's per-rank term
+    device const uint*    seg_start     [[buffer(4)]],
+    device const uint*    active_experts [[buffer(5)]],
+    constant uint&        D             [[buffer(6)]],
+    constant uint&        F             [[buffer(7)]],
+    constant uint&        expert_stride [[buffer(8)]],
+    uint2 tg   [[threadgroup_position_in_grid]],
+    uint  sg   [[simdgroup_index_in_threadgroup]],
+    uint  lane [[thread_index_in_simdgroup]]
+) {
+    const uint d = tg.x * 8u + sg;
+    if (d >= D) return;
+    const uint a = tg.y;
+    const uint e = active_experts[a];
+    device const uint8_t* base = slab + uint(e) * expert_stride;
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* dW = base + re.down_W_off;
+    device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
+    device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
+    const uint p0 = seg_start[a], p1 = seg_start[a + 1u];
+    for (uint p = p0; p < p1; ++p) {
+        const float v = moe_int4_gemv_row_simd_dev_vec(dW, dS, dB, acts + p * F, d, F, lane);
+        if (lane == 0) partial[p * D + d] = v;
+    }
+}
+
+// y[t][d] = residual[t][d] + sum_k w[t][k] * partial[route_pair[t*K + k]][d].
+// Grid (D, T). The reduce order (rank 0 first) matches the decode reduce.
+kernel void glm53p_moe_route_reduce(
+    device const float* partial    [[buffer(0)]],   // [pairs][D]
+    device const uint*  route_pair [[buffer(1)]],   // [T][K]
+    device const half*  weights    [[buffer(2)]],   // [T][K]
+    device const half*  residual   [[buffer(3)]],   // [T][D]
+    device half*        y          [[buffer(4)]],   // [T][D]
+    constant uint&      D          [[buffer(5)]],
+    constant uint&      K          [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint d = gid.x, t = gid.y;
+    if (d >= D) return;
+    float acc = float(residual[t * D + d]);
+    for (uint k = 0; k < K; ++k) {
+        acc += float(weights[t * K + k]) * partial[route_pair[t * K + k] * D + d];
+    }
+    y[t * D + d] = half(acc);
 }

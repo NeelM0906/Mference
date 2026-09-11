@@ -179,6 +179,7 @@ public actor ServerModelSession: ServerLoadedModel {
         case .maple: return "maple-preview-2bit-mlx"
         case .qwen38flashnext: return "qwen3.8-flash-next-int4g64"
         case .minicpm5: return "minicpm5-2b-int4g64"
+        case .glm53Flash: return "glm-5.3-flash-mlx-mixed-4-8bit"
         }
     }
     private nonisolated let modelFamily: ModelFamily
@@ -209,7 +210,12 @@ public actor ServerModelSession: ServerLoadedModel {
         // changes only when that native render does. Every other dialect
         // still requires the bundled template.
         let templateData: Data
-        if FileManager.default.fileExists(atPath: templateURL.path) {
+        if tokenizer.dialect == .glm5 {
+            // GLM-5.3 ships a chat_template.jinja but the dialect renders
+            // natively (`Glm5ChatTemplate.swift`); the identity follows the
+            // native render, not the sidecar.
+            templateData = Data("native:glm5:v1".utf8)
+        } else if FileManager.default.fileExists(atPath: templateURL.path) {
             templateData = try Data(contentsOf: templateURL)
         } else if tokenizer.dialect == .deepseek {
             templateData = Data("native:deepseek:v1".utf8)

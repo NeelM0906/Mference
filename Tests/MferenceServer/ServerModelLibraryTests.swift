@@ -103,7 +103,7 @@ struct ServerFamilyModelIDTests {
     @Test func everyKnownFamilyHasAnIdentifier() {
         let families: [ModelFamily] = [
             .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-            .qwen38flashnext, .minicpm5,
+            .qwen38flashnext, .minicpm5, .glm53Flash,
         ]
         var identifiers = Set<String>()
         for family in families {
@@ -122,6 +122,7 @@ struct ServerFamilyModelIDTests {
         #expect(ServerFamilyModelID.modelID(for: .qwen36) == "qwen3.6-35b-a3b")
         #expect(ServerFamilyModelID.modelID(for: .maple) == "maple-preview-2bit-mlx")
         #expect(ServerFamilyModelID.modelID(for: .minicpm5) == "minicpm5-2b-int4g64")
+        #expect(ServerFamilyModelID.modelID(for: .glm53Flash) == "glm-5.3-flash-mlx-mixed-4-8bit")
     }
 
     @Test func unknownRawFamilyHasNoIdentifier() {

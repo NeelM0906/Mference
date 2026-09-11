@@ -127,6 +127,13 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// the whole expert pool. Qwen 3.6 therefore stays on the slot rule.
     /// Flash-Next separately selects resident mapping at ≥192 GiB when the
     /// routed pool and core still leave the fixed headroom above.
+    ///
+    /// GLM-5.3-Flash is the other measured exception: its whole INT4 expert
+    /// set (~171 GB) fits a 256 GB host beside the ~10 GB core, and with the
+    /// experts resident its runner routes on the GPU with no per-layer CPU
+    /// round trip, so `auto` picks `.resident` whenever pool + core + the
+    /// resident reserve + 16 GiB for KV, scratch and the process fit physical
+    /// memory. Smaller hosts fall back to the slot rule.
     public static func defaultExpertStreamingMode(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
@@ -143,6 +150,12 @@ public struct RuntimeConfiguration: Sendable, Equatable {
             // improved the full protocol to 15.12/15.39/14.91 tok/s and avoids
             // the 17 GiB zero-filled allocation of the runner-up 128-slot rung.
             return .resident
+        }
+        if family == .glm53Flash {
+            let runtimeReserve = UInt64(16) * gib
+            let (sum1, o1) = expertPoolBytes.addingReportingOverflow(coreWeightsBytes)
+            let (sum2, o2) = sum1.addingReportingOverflow(reserve + runtimeReserve)
+            if !o1, !o2, physicalMemoryBytes >= sum2 { return .resident }
         }
         return .pread(slotCount: defaultExpertCacheSlots(
             for: family,

@@ -47,6 +47,26 @@ included for broader design context rather than a line-level claim.
   is the reference for the explicit approximate singleton-decode candidate
   head; the default complete-head path keeps it disabled.
 
+- [`pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit`](https://huggingface.co/pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit),
+  pinned at `d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3` with source-index
+  SHA-256 `5e0a3768db6fb795c4846bed713785a17d336f4cc4494b4f6b28f75082314383`,
+  is the GLM-5.3-Flash checkpoint. Its `text_config` and the 18 shard headers
+  define the `glm53Flash` architecture contract.
+- [`PipeNetwork/glm53-flash-mlx`](https://github.com/PipeNetwork/glm53-flash-mlx/tree/a61a7c7d2fbdf3d218a9909365a24bd794f3a247)
+  at `a61a7c7d` is the executable GLM-5.3-Flash reference: its `language.py`
+  (Kimi Delta Attention, NoPE latent attention, the pooled indexer, the clamped
+  MoE) reproduces `transformers` 5.16 at 1e-6 and is what the family's toy
+  goldens are generated from. Its `docs/upstream-notes.md` records the four
+  upstream mlx-vlm defects the port must not inherit.
+- [`IngeniousIdiocy/ds4`](https://github.com/IngeniousIdiocy/ds4/tree/90d71e0de89de5eebbd3e9a4b0302116f92bee6d),
+  branch `glm53-m3ultra` at `90d71e0d`: an MIT-licensed C/Metal engine that runs
+  GLM-5.3-Flash Q4_K at 38–41 tok/s on a 512 GB M3 Ultra. Read as a design
+  reference: its `metal/glm53_kda.metal` informed the shape of the KDA decode
+  kernel (which Mference wrote from the reference arithmetic rather than
+  porting), and its `CHANGES-GLM53.md` (decode ledger, epilogue fusions,
+  router fold, radix top-k, layer-major expert bank) is the perf backlog the
+  runner is judged against.
+
 ## Metal and kernels
 
 - Pinned [MLX Metal kernels](https://github.com/ml-explore/mlx/tree/4367c73b60541ddd5a266ce4644fd93d20223b6e/mlx/backend/metal/kernels)

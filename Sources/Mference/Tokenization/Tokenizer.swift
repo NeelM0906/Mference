@@ -32,6 +32,13 @@ public enum ChatDialect: String, Sendable {
     /// MiniCPM5: ChatML framing with `<s>` first, XML `<function …>` tool
     /// calls, `<tool_response>` results inside user turns, two EOS ids.
     case minicpm
+    /// GLM-5.3-Flash: `[gMASK]<sop>` prefix, `<|system|>` / `<|user|>` /
+    /// `<|assistant|>` / `<|observation|>` turn markers, a `Reasoning Effort`
+    /// system line, `<think>` opening every assistant turn, `<tool_call>`
+    /// bodies keyed by `<arg_key>` / `<arg_value>`; `<|user|>`,
+    /// `<|observation|>` and `<|endoftext|>` all end the assistant turn.
+    /// Detected by the `[gMASK]` special token (`Glm5ChatTemplate.swift`).
+    case glm5
 }
 
 /// Tokenizer wrapper for the supported model families (Gemma 4, ChatML/Qwen,
@@ -79,6 +86,7 @@ public struct MFTokenizer: @unchecked Sendable {
     public var generationPromptStartsInThinking: Bool {
         (dialect == .chatml && eosID == endOfTurnID)
             || (dialect == .minicpm && Self.miniCPMDefaultThinking == .enabled)
+            || dialect == .glm5
     }
 
     /// BOS actually prepended by `encode(_:addBOS:)`; nil for dialects that
@@ -160,6 +168,8 @@ public struct MFTokenizer: @unchecked Sendable {
                 .inkling
             } else if Self.specialTokenID(tokenizer, Self.deepseekUserMark) != nil {
                 .deepseek
+            } else if Self.specialTokenID(tokenizer, Self.glm5GMaskMark) != nil {
+                .glm5
             } else if family == .minicpm5
                         || (Self.specialTokenID(tokenizer, Self.miniCPMFunctionOpen) != nil
                             && Self.specialTokenID(tokenizer, Self.imEndMark) != nil) {
@@ -180,6 +190,7 @@ public struct MFTokenizer: @unchecked Sendable {
         case .deepseek: try Self.resolveDeepseekTokens(tokenizer)
         case .inkling: try Self.resolveInklingTokens(tokenizer)
         case .minicpm: try Self.resolveMiniCPMTokens(tokenizer)
+        case .glm5: try Self.resolveGlm5Tokens(tokenizer)
         }
 
         self.dialect = dialect
@@ -406,6 +417,54 @@ public struct MFTokenizer: @unchecked Sendable {
             vocabSize: 129_280)
     }
 
+    private static let glm5GMaskMark = "[gMASK]"
+
+    /// GLM-5.3-Flash: `[gMASK]` is the nominal BOS but is never prepended on
+    /// its own — the chat render carries the `[gMASK]<sop>` pair itself and a
+    /// raw prompt gets neither (`bosPrefixID` nil, as ChatML). The assistant
+    /// turn has no closing token of its own: `<|user|>` (the end-of-turn id),
+    /// `<|observation|>` and `<|endoftext|>` all stop generation, matching the
+    /// checkpoint's `generation_config.json`. `<think>` / `</think>` and the
+    /// `<tool_call>` / `<tool_response>` family are added tokens flagged
+    /// non-special; they still arrive as single ids, which the decoder keys on.
+    private static func resolveGlm5Tokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw MFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let gmask = try id(Self.glm5GMaskMark)
+        _ = try id("<sop>")
+        _ = try id(Self.glm5SystemMark)
+        _ = try id(Self.glm5AssistantMark)
+        let eos = try id("<|endoftext|>")
+        let user = try id(Self.glm5UserMark)
+        let observation = try id(Self.glm5ObservationMark)
+        let thinkStart = try id(Self.glm5ThinkOpen)
+        let thinkEnd = try id(Self.glm5ThinkClose)
+        return ResolvedSpecialTokens(
+            bosID: gmask,
+            bosPrefixID: nil,
+            eosID: eos,
+            padID: eos,
+            endOfTurnID: user,
+            toolCallStartID: try id("<tool_call>"),
+            toolCallEndID: try id("</tool_call>"),
+            toolResponseID: try id("<tool_response>"),
+            toolResponseEndID: try id("</tool_response>"),
+            channelStartID: thinkStart,
+            channelEndID: thinkEnd,
+            thinkStartID: thinkStart,
+            thinkEndID: thinkEnd,
+            stopTokenIDs: [eos, user, observation],
+            // The model's padded embedding / lm_head row count (154,880 for
+            // 154,856 tokenizer ids), so logits buffers match the weights.
+            vocabSize: 154_880)
+    }
+
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
     ///
     /// The library's `addSpecialTokens: true` flag is a no-op for the Gemma 4 IT
@@ -569,6 +628,8 @@ public struct MFTokenizer: @unchecked Sendable {
         case .minicpm:
             return try miniCPMRender(messages: messages, tools: [],
                                      thinking: Self.miniCPMDefaultThinking)
+        case .glm5:
+            return try glm5Render(messages: messages, tools: [])
         }
     }
 
@@ -700,6 +761,11 @@ public struct MFTokenizer: @unchecked Sendable {
             return encode(try miniCPMRender(messages: messages, tools: tools,
                                             thinking: Self.miniCPMDefaultThinking),
                           addBOS: false)
+        }
+        // GLM-5.3's template is hand-ported as well (`Glm5ChatTemplate.swift`),
+        // byte-checked against HF renders on the committed fixtures.
+        if dialect == .glm5 {
+            return encode(try glm5Render(messages: messages, tools: tools), addBOS: false)
         }
         guard tokenizer.hasChatTemplate else {
             throw MFTokenizerError.missingToolTemplate
@@ -950,6 +1016,12 @@ public struct MFTokenizer: @unchecked Sendable {
                 "\n\(Self.imStartMark)user\n\(userContent)\(Self.imEndMark)\n"
                     + "\(Self.imStartMark)assistant\n" + suffix,
                 addBOS: false)
+        case .glm5:
+            // The assistant turn has no closing token; `<|user|>` (== the
+            // end-of-turn id) is the separator the full render writes, so the
+            // bridge supplies it, then the user content (untrimmed, as the
+            // template) and the generation prompt.
+            return [endOfTurnID] + encode(userContent + Self.glm5GenerationSuffix, addBOS: false)
         }
     }
 

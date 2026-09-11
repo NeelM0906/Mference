@@ -99,6 +99,13 @@ Mference currently runs eight pinned instruction checkpoints:
   not leave within the 1,024-token cap, so those are reported as a stated
   deviation at a raised cap. See the
   [bring-up dossier](docs/families/MINICPM5.md).
+- **[GLM-5.3-Flash 320B-A18B](https://huggingface.co/zai-org/GLM-5.3-Flash)**
+  *(family gate green 2026-09-11; prefill perf pass continuing)* — 320B total, 18B active,
+  45 layers mixing Kimi Delta Attention with NoPE latent sparse attention over
+  a four-stream mHC residual, 288 experts per layer with top-8 routing. Runs
+  from PipeNetwork's mixed 4/8-bit conversion (~181 GB installed) with the
+  whole expert set resident on a 256 GB host. See the
+  [bring-up dossier](docs/families/GLM53_FLASH.md).
 
 The runtime, streaming installer, CLI, and loopback OpenAI-compatible server
 are written in Swift and Metal; the UI is Open WebUI, driven through that
@@ -160,7 +167,7 @@ The server alone, for other OpenAI-compatible clients, is documented in
 
 | Metric | Value |
 | --- | --- |
-| Models | Gemma 4 26B-A4B IT · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B · MiniCPM5-2B (dense, plain llama) (new) |
+| Models | Gemma 4 26B-A4B IT · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B · MiniCPM5-2B (dense, plain llama) · GLM-5.3-Flash 320B-A18B (new) |
 | Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts; vendor BF16 quantized in flight to INT4/INT8 group 64 for Qwen 3.6, Flash-Next, and MiniCPM5 |
 | Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB at 16 slots (Flash-Next); high-memory auto maps its ~68 GiB routed pool** · 123 MiB (MiniCPM5-2B, short-explanation case) |
 | Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) · ~15 GB (Qwen 3.8) · ~175 GB (Flash-Next) · 1.43 GB (MiniCPM5-2B; 1,425,981,882 bytes over 8 files) |
@@ -286,8 +293,9 @@ launcher that composes the server with Open WebUI.
 
 Only one model-owning product should run at a time. The server selects the
 installed model's native dialect automatically, including Gemma's chat format,
-Qwen's ChatML template with `<tool_call>` function calls, and Maple's ChatML
-template with hidden reasoning.
+Qwen's ChatML template with `<tool_call>` function calls, Maple's ChatML
+template with hidden reasoning, and GLM-5.3's `[gMASK]<sop>` turns with
+`<think>` reasoning and `<arg_key>` / `<arg_value>` tool calls.
 
 ### Requirements
 

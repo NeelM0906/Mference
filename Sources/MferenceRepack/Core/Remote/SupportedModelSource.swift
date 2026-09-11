@@ -310,9 +310,30 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
+    /// GLM-5.3-Flash 320B-A18B from PipeNetwork's mixed 4/8-bit MLX
+    /// conversion: 42 layers x 288 routed experts at INT4 group-64 (~164 GB
+    /// of page-aligned expert blobs), everything else INT8 group-64 with the
+    /// router gates BF16 and the mHC / KDA decay parameters FP32 (~10.6 GB
+    /// resident), the vision tower dropped. The download is the 18 shards
+    /// (181.9 GB) plus sidecars. See docs/families/GLM53_FLASH.md.
+    ///
+    /// `ManifestReader.familiesWithoutRunner` gates the family until its
+    /// runner lands, so an install made here is refused by axis name at load.
+    public static let glm53Flash = SupportedModelSource(
+        name: "glm53flash",
+        displayName: "GLM-5.3-Flash 320B-A18B MLX mixed 4/8-bit",
+        repoID: "pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit",
+        revision: "d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3",
+        sourceIndexSHA256:
+            "5e0a3768db6fb795c4846bed713785a17d336f4cc4494b4f6b28f75082314383",
+        modelID: "glm-5.3-flash-mlx-mixed-4-8bit",
+        approximateDownloadBytes: 181_944_533_258,
+        installedBytes: 182_000_000_000,
+        reserveBytes: 2_147_483_648)
+
     public static let all: [SupportedModelSource] = [
         gemma4, qwen36, qwen36Original, qwen38, deepseekV4Flash, inklingSmall,
-        maple, qwen38FlashNext, minicpm5, minicpm5MLX,
+        maple, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

@@ -94,7 +94,8 @@ final class MoE {
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
-         specializedTopK: UInt32 = 8) throws {
+         specializedTopK: UInt32 = 8,
+         swigluLimit: Float = 0) throws {
         precondition(Self.routedComputeWidths.contains(specializedTopK),
                      "routed INT4 decode supports top-k "
                      + "\(Self.routedComputeWidths.sorted())")
@@ -102,9 +103,17 @@ final class MoE {
         self.realDecodeF = specializedF
         self.realDecodeTopK = specializedTopK
         self.realDecodeNumExperts = specializedNumExperts
-        let activationConstants: [MetalFunctionConstant] = siluActivation
+        var activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
             : []
+        // `swigluLimit > 0` bakes DeepSeek's asymmetric pre-activation clamp
+        // (gate `<= limit`, up in `[-limit, limit]`) into the INT4 phase-1
+        // kernels through function constant 5 (`moe_swiglu_clamp`). Zero, the
+        // default, leaves the constant undefined so every existing caller's
+        // pipelines are byte-identical.
+        if swigluLimit > 0 {
+            activationConstants.append(MetalFunctionConstant(index: 5, value: .float(swigluLimit)))
+        }
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),
@@ -454,6 +463,83 @@ final class MoE {
             MTLSize(width: Int(d), height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: Int(topK) * 32,
                                            height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// Resident experts routed on the GPU (GLM-5.3-Flash). `indices` (the
+    /// router's top-k, uint32) resolve through `identityTable` (`slot_of[e] =
+    /// e`, Int16) to byte offsets `e * expertStride` inside `slab` (bound at
+    /// `slabOffset`), then the slot-map phase-1 / phase-2 bodies run the routed
+    /// FFN — no CPU round trip and no residual add: `y = residual + Σ_k w_k ·
+    /// down_k(act_k)`. The identity table makes `all_hit` always 1, so the
+    /// guarded bodies always run; the math bodies are the production ones, so
+    /// the output is byte-identical to the argument-buffer path fed the same
+    /// experts and weights. Sibling of `encodeResidentSlabRouted` (Flash-Next,
+    /// top-10 through the wide reduce); this one is the top-8 k8 reduce with a
+    /// slab offset.
+    func encodeRoutedResidentFFN(commandBuffer: MTLCommandBuffer,
+                                 slab: MTLBuffer,
+                                 slabOffset: Int,
+                                 expertStride: Int,
+                                 indices: MTLBuffer,
+                                 identityTable: MTLBuffer,
+                                 slotOffsets: MTLBuffer,
+                                 allHit: MTLBuffer,
+                                 routedOffsets: MoEExpertOffsets,
+                                 x: MTLBuffer,
+                                 acts: MTLBuffer,
+                                 routingWeights: MTLBuffer,
+                                 residual: MTLBuffer,
+                                 y: MTLBuffer,
+                                 numExperts: UInt32,
+                                 d: UInt32,
+                                 f: UInt32,
+                                 topK: UInt32) {
+        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(UInt64(expertStride) * UInt64(numExperts - 1) <= UInt64(UInt32.max),
+                     "resident slab offsets must fit 32 bits")
+        encodeSlotLookup(commandBuffer: commandBuffer, indices: indices, table: identityTable,
+                         slotStride: expertStride, slotOffsets: slotOffsets, allHit: allHit,
+                         numExperts: numExperts, topK: topK)
+        var offsets = routedOffsets
+        var dimension = d
+        var intermediate = f
+        var k = topK
+        let specialized = useRealDecodeConstants(d: d, f: f, topK: topK)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            preconditionFailure("resident routed FFN: no compute encoder")
+        }
+        encoder.useResource(slab, usage: .read)
+        encoder.setComputePipelineState(
+            specialized ? phase1SlotmapSpecializedPSO : phase1SlotmapPSO)
+        encoder.setBuffer(slab, offset: slabOffset, index: 0)
+        encoder.setBuffer(slotOffsets, offset: 0, index: 1)
+        encoder.setBuffer(allHit, offset: 0, index: 2)
+        encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 3)
+        encoder.setBuffer(x, offset: 0, index: 4)
+        encoder.setBuffer(acts, offset: 0, index: 5)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(topK * f) + 7) / 8, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+
+        encoder.setComputePipelineState(
+            specialized ? phase2SlotmapSpecializedPSO : phase2SlotmapPSO)
+        encoder.setBuffer(slab, offset: slabOffset, index: 0)
+        encoder.setBuffer(slotOffsets, offset: 0, index: 1)
+        encoder.setBuffer(allHit, offset: 0, index: 2)
+        encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 3)
+        encoder.setBuffer(acts, offset: 0, index: 4)
+        encoder.setBuffer(routingWeights, offset: 0, index: 5)
+        encoder.setBuffer(residual, offset: 0, index: 6)
+        encoder.setBuffer(y, offset: 0, index: 7)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 9)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: Int(d), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

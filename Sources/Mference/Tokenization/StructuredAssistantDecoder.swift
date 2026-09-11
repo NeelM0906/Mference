@@ -66,6 +66,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenizer.dialect == .minicpm {
             return try consumeMiniCPM(tokenID: tokenID, delta: delta)
         }
+        if tokenizer.dialect == .glm5 {
+            return try consumeGlm5(tokenID: tokenID, delta: delta)
+        }
         if tokenID == tokenizer.channelStartID {
             label = ""
             channel = .label
@@ -171,6 +174,63 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             }
             toolTokens = tokens
             return []
+        }
+        if tokenID == tokenizer.thinkStartID {
+            channel = .thought
+            return []
+        }
+        if tokenID == tokenizer.thinkEndID {
+            channel = .visible
+            return []
+        }
+        guard channel != .thought else { return [] }
+        return delta.isEmpty ? [] : [.content(delta)]
+    }
+
+    /// GLM-5 transitions: `<think>`…`</think>` (added tokens flagged
+    /// non-special, still single ids) suppress thought text, and
+    /// `<tool_call>`…`</tool_call>` buffer the body for `Glm5ToolCallParser`;
+    /// the `<arg_key>` / `<arg_value>` ids inside decode to their text and are
+    /// parsed as part of the body. `<tool_response>` never appears in a reply
+    /// (results arrive in `<|observation|>` turns), so it is malformed here.
+    private func consumeGlm5(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        if tokenID == tokenizer.toolCallStartID {
+            guard toolTokens == nil else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = []
+            return []
+        }
+        if tokenID == tokenizer.toolCallEndID {
+            guard let tokens = toolTokens else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = nil
+            let text = tokenizer.decode(tokens, skipSpecialTokens: false)
+            do {
+                let call = try Glm5ToolCallParser().parse(
+                    text, allowedTools: allowedTools, id: idGenerator())
+                emittedCalls += 1
+                return [.toolCall(call)]
+            } catch {
+                failed = true
+                throw error
+            }
+        }
+        if var tokens = toolTokens {
+            tokens.append(tokenID)
+            guard tokens.count * MemoryLayout<Int32>.size <= Glm5ToolCallParser.maximumBytes else {
+                failed = true
+                throw ToolCallParserError.oversized
+            }
+            toolTokens = tokens
+            return []
+        }
+        if tokenID == tokenizer.toolResponseID || tokenID == tokenizer.toolResponseEndID {
+            failed = true
+            throw ToolCallParserError.malformed
         }
         if tokenID == tokenizer.thinkStartID {
             channel = .thought

@@ -65,6 +65,31 @@ import Metal
         }
     }
 
+    @Test("The copied strategy serves the same bytes from one layer buffer with a slab view")
+    func copiedStrategyServesFileBytes() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let url = try Self.writeSyntheticLayer()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let streamer = try ResidentExpertStreamer(
+            layout: Self.makeLayout(path: url.path), device: device, strategy: .copied)
+        let first = try streamer.expertBuffer(layer: 0, expert: 0)
+        for expert in 0..<Self.numExperts {
+            let view = try streamer.expertBuffer(layer: 0, expert: expert)
+            #expect(view.buffer === first.buffer, "one buffer per layer")
+            #expect(view.offset == UInt64(expert * Self.expertStride))
+            let contents = Self.bytes(of: view.buffer, offset: view.offset, count: Int(view.size))
+            #expect(contents.allSatisfy { $0 == Self.tagByte(expert) },
+                    "expert \(expert) bytes must match the file blob")
+        }
+        let slab = try #require(streamer.slabView)
+        #expect(slab.buffer === first.buffer)
+        #expect(slab.baseOffset == 0)
+        #expect(slab.expertStride == Self.expertStride)
+        streamer.warmUp()   // no-op for the copied strategy, must be safe
+        #expect(throws: StreamerError.self) { _ = try streamer.expertBuffer(layer: 0, expert: Self.numExperts) }
+    }
+
     @Test("Each expert gets its own page-aligned buffer over the mapping")
     func expertsGetDedicatedBuffers() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())

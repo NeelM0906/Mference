@@ -11,7 +11,8 @@ Mikhaylov and contributors, licensed under the
 [Apache License 2.0](LICENSE-APACHE). The derived portions remain governed by
 that license. Significant changes from the original include: the Mference
 rebrand throughout; support for Qwen 3.6, DeepSeek-V4-Flash, Inkling-Small,
-Maple, Qwen3.8-Flash-Next, and MiniCPM5-2B across architecture configuration,
+Maple, Qwen3.8-Flash-Next, MiniCPM5-2B, and GLM-5.3-Flash (in port) across
+architecture configuration,
 streaming installation, Metal kernels, forward runners, tokenization, and
 products; model-derived kernel specialization; and expanded validation and
 performance documentation.
@@ -101,6 +102,27 @@ revision `35ac38ee7bdb0bf7fa748d0700eeb6d6675760a3` of
 is the vendor's own conversion under the same license. No reference code was
 imported for this family: its architecture was read from
 `transformers` v5.6.2 (Apache-2.0) and nothing was copied from it.
+
+GLM-5.3-Flash (in port): revision `d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3`
+of
+[`pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit`](https://huggingface.co/pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit),
+PipeNetwork's mixed 4/8-bit MLX conversion of Z.ai's
+[GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash). The installer
+verifies its source-index SHA-256
+`5e0a3768db6fb795c4846bed713785a17d336f4cc4494b4f6b28f75082314383`. Both the
+vendor checkpoint and the conversion are published under the MIT license.
+PipeNetwork's runtime for it
+([`PipeNetwork/glm53-flash-mlx`](https://github.com/PipeNetwork/glm53-flash-mlx),
+MIT, revision `a61a7c7d`) is the executable reference the family's parity
+goldens are cut from; no code from it is imported. The family's Metal
+kernels (`Sources/Mference/Metal/Glm53/glm53.metal`: the Kimi Delta Attention
+decode recurrence, the pooled indexer, the latent attention, the per-head
+INT8 GEMV and the router select) are original transcriptions of the
+reference's arithmetic; nothing was imported from
+[`IngeniousIdiocy/ds4`](https://github.com/IngeniousIdiocy/ds4) (branch
+`glm53-m3ultra`, revision `90d71e0d`, MIT), which was read as a design
+reference only. Should a kernel be ported from it later, its notice (MIT with
+the ggml authors' copyright) will be added here at that time.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.

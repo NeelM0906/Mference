@@ -140,10 +140,15 @@ import Foundation
     /// `qkNorm` defaults to the Gemma behavior so every existing baseline —
     /// and every manifest that omits the key — keeps its meaning.
     @Test func qkNormDefaultsToTrueForEveryShippedFamily() {
-        for (family, config) in ArchConfig.knownArchitectures where family != .minicpm5 {
+        // MiniCPM5 is plain-llama attention; GLM-5.3-Flash's sparse layers
+        // norm the low-rank query latent (`q_a_layernorm`) rather than the
+        // per-head projections, and its KDA layers have no q/k norm at all.
+        let plainQK: Set<ModelFamily> = [.minicpm5, .glm53Flash]
+        for (family, config) in ArchConfig.knownArchitectures where !plainQK.contains(family) {
             #expect(config.qkNorm, "\(family.rawValue) should keep q/k norms")
         }
         #expect(ArchConfig.knownArchitectures[.minicpm5]?.qkNorm == false)
+        #expect(ArchConfig.knownArchitectures[.glm53Flash]?.qkNorm == false)
     }
 
     @Test func miniCPM5IsRegisteredForAutoDetection() {

@@ -1614,6 +1614,225 @@ enum SyntheticSnapshot {
         return Snapshot(shardPath: shardPath)
     }
 
+    /// GLM-5.3-Flash at toy scale, in PipeNetwork's mlx-vlm layout: the
+    /// `language_model.model.layers.N.…` text trunk with a `language_model.
+    /// lm_head`, a `vision_model.` tower the planner must drop, a nested
+    /// `text_config`, and a `quantization` block with INT4 base width plus
+    /// flat per-module INT8 overrides for everything but the routed experts.
+    /// The routed experts are stacked `mlp.switch_mlp.{gate,up,down}_proj`
+    /// INT4 triplets; the router gate is BF16 with an FP32 correction bias;
+    /// the mHC `fn` is BF16 with FP32 `base` / `scale`; the KDA decay
+    /// parameters are FP32 and the depthwise conv BF16.
+    ///
+    /// Four layers: three Kimi-Delta-Attention layers and one sparse layer
+    /// (index 3), the first layer dense. Same geometry as the runtime's
+    /// `ArchConfig.glm53Toy()`.
+    struct Glm53Arch {
+        let hidden: Int = 128
+        let moeIntermediate: Int = 64
+        let denseIntermediate: Int = 128
+        let numHeads: Int = 2
+        let qkNopeHeadDim: Int = 64
+        let vHeadDim: Int = 64
+        let kvLoraRank: Int = 64
+        let qLoraRank: Int = 64
+        let linearHeads: Int = 2
+        let linearHeadDim: Int = 64
+        let convKernel: Int = 4
+        let indexNHeads: Int = 2
+        let indexHeadDim: Int = 64
+        let indexTopK: Int = 4
+        let indexKPool: Int = 2
+        let vocab: Int = 256
+        let numLayers: Int = 4
+        let numExperts: Int = 8
+        let topK: Int = 2
+        let groupSize: Int = 64
+        let hcMult: Int = 4
+        let layerTypes: [String] = ["linear_attention", "linear_attention",
+                                    "linear_attention", "deepseek_sparse_attention"]
+        let firstKDense: Int = 1
+        var hcFnRows: Int { (2 + hcMult) * hcMult }
+        var linearDim: Int { linearHeads * linearHeadDim }
+    }
+
+    static func buildGlm53(at dir: String,
+                           seed: UInt64 = 0x61A5_3F1A_5B11_2026) throws -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+        let arch = Glm53Arch()
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+        var quant: [String: Any] = ["group_size": arch.groupSize, "bits": 4]
+        func int8(_ module: String, rows: Int, cols: Int) {
+            appendQuantizedWeight(name: module, outerShape: [rows], innerLogical: cols,
+                                  bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            quant[module] = ["group_size": arch.groupSize, "bits": 8]
+        }
+        func int8PerHead(_ module: String, heads: Int, rows: Int, cols: Int) {
+            appendQuantizedWeight(name: module, outerShape: [heads, rows], innerLogical: cols,
+                                  bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            quant[module] = ["group_size": arch.groupSize, "bits": 8]
+        }
+        func bf16(_ name: String, _ shape: [Int]) {
+            appendUnquantizedBF16(name: name, shape: shape, into: &tensors, rng: &rng)
+        }
+        func f32(_ name: String, _ shape: [Int]) {
+            appendUnquantizedFP32(name: name, shape: shape, into: &tensors, rng: &rng)
+        }
+
+        let lm = "language_model."
+        int8(lm + "model.embed_tokens", rows: arch.vocab, cols: arch.hidden)
+        int8(lm + "lm_head", rows: arch.vocab, cols: arch.hidden)
+        bf16(lm + "model.norm.weight", [arch.hidden])
+
+        for li in 0..<arch.numLayers {
+            let p = lm + "model.layers.\(li)."
+            bf16(p + "input_layernorm.weight", [arch.hidden])
+            bf16(p + "post_attention_layernorm.weight", [arch.hidden])
+            for site in ["attn_hc", "ffn_hc"] {
+                bf16(p + "\(site).fn", [arch.hcFnRows, arch.hcMult * arch.hidden])
+                f32(p + "\(site).base", [arch.hcFnRows])
+                f32(p + "\(site).scale", [3])
+            }
+            if arch.layerTypes[li] == "linear_attention" {
+                let d = arch.linearDim
+                int8(p + "self_attn.q_proj", rows: d, cols: arch.hidden)
+                int8(p + "self_attn.k_proj", rows: d, cols: arch.hidden)
+                int8(p + "self_attn.v_proj", rows: d, cols: arch.hidden)
+                bf16(p + "self_attn.conv1d.weight", [3 * d, arch.convKernel, 1])
+                int8(p + "self_attn.forget_gate.f_a_proj", rows: arch.linearHeadDim, cols: arch.hidden)
+                int8(p + "self_attn.forget_gate.f_b_proj", rows: d, cols: arch.linearHeadDim)
+                f32(p + "self_attn.forget_gate.A_log", [arch.linearHeads])
+                f32(p + "self_attn.forget_gate.dt_bias", [d])
+                int8(p + "self_attn.g_a_proj", rows: arch.linearHeadDim, cols: arch.hidden)
+                int8(p + "self_attn.g_b_proj", rows: d, cols: arch.linearHeadDim)
+                int8(p + "self_attn.b_proj", rows: arch.linearHeads, cols: arch.hidden)
+                bf16(p + "self_attn.o_norm.weight", [arch.linearHeadDim])
+                int8(p + "self_attn.o_proj", rows: arch.hidden, cols: d)
+            } else {
+                int8(p + "self_attn.q_a_proj", rows: arch.qLoraRank, cols: arch.hidden)
+                bf16(p + "self_attn.q_a_layernorm.weight", [arch.qLoraRank])
+                int8(p + "self_attn.q_b_proj", rows: arch.numHeads * arch.qkNopeHeadDim, cols: arch.qLoraRank)
+                int8(p + "self_attn.kv_a_proj_with_mqa", rows: arch.kvLoraRank, cols: arch.hidden)
+                bf16(p + "self_attn.kv_a_layernorm.weight", [arch.kvLoraRank])
+                int8PerHead(p + "self_attn.embed_q", heads: arch.numHeads,
+                            rows: arch.kvLoraRank, cols: arch.qkNopeHeadDim)
+                int8PerHead(p + "self_attn.unembed_out", heads: arch.numHeads,
+                            rows: arch.vHeadDim, cols: arch.kvLoraRank)
+                int8(p + "self_attn.o_proj", rows: arch.hidden, cols: arch.numHeads * arch.vHeadDim)
+                int8(p + "self_attn.indexer.wq_b", rows: arch.indexNHeads * arch.indexHeadDim,
+                     cols: arch.qLoraRank)
+                int8(p + "self_attn.indexer.wk", rows: arch.indexHeadDim, cols: arch.hidden)
+                bf16(p + "self_attn.indexer.k_norm.weight", [arch.indexHeadDim])
+                bf16(p + "self_attn.indexer.k_norm.bias", [arch.indexHeadDim])
+                int8(p + "self_attn.indexer.weights_proj", rows: arch.indexNHeads, cols: arch.hidden)
+                bf16(p + "self_attn.indexer.index_kpool_compress_gate", [arch.indexHeadDim, arch.hidden])
+                bf16(p + "self_attn.indexer.index_kpool_compress_ape", [arch.indexKPool, arch.indexHeadDim])
+            }
+            if li < arch.firstKDense {
+                int8(p + "mlp.gate_proj", rows: arch.denseIntermediate, cols: arch.hidden)
+                int8(p + "mlp.up_proj", rows: arch.denseIntermediate, cols: arch.hidden)
+                int8(p + "mlp.down_proj", rows: arch.hidden, cols: arch.denseIntermediate)
+            } else {
+                bf16(p + "mlp.gate.weight", [arch.numExperts, arch.hidden])
+                f32(p + "mlp.gate.e_score_correction_bias", [arch.numExperts])
+                int8(p + "mlp.shared_experts.gate_proj", rows: arch.moeIntermediate, cols: arch.hidden)
+                int8(p + "mlp.shared_experts.up_proj", rows: arch.moeIntermediate, cols: arch.hidden)
+                int8(p + "mlp.shared_experts.down_proj", rows: arch.hidden, cols: arch.moeIntermediate)
+                for (role, rows, cols) in [("gate_proj", arch.moeIntermediate, arch.hidden),
+                                           ("up_proj", arch.moeIntermediate, arch.hidden),
+                                           ("down_proj", arch.hidden, arch.moeIntermediate)] {
+                    appendQuantizedWeight(name: p + "mlp.switch_mlp.\(role)",
+                                          outerShape: [arch.numExperts, rows],
+                                          innerLogical: cols, bits: 4,
+                                          groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                }
+            }
+        }
+
+        // The vision tower the planner drops (BF16, as the real conversion).
+        bf16("vision_model.patch_embed.proj.weight", [32, 12])
+        bf16("vision_model.patch_embed.proj.bias", [32])
+        bf16("vision_model.blocks.0.attn.qkv.weight", [96, 32])
+        bf16("vision_model.merger.proj.weight", [arch.hidden, 32])
+        bf16("vision_model.post_layernorm.weight", [32])
+
+        let shardName = "model-00001.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+        var weightMap: [String: String] = [:]
+        for (name, _, _, _) in tensors { weightMap[name] = shardName }
+
+        let textConfig: [String: Any] = [
+            "model_type": "glm5_next_text",
+            "vocab_size": arch.vocab,
+            "hidden_size": arch.hidden,
+            "intermediate_size": arch.denseIntermediate,
+            "moe_intermediate_size": arch.moeIntermediate,
+            "num_hidden_layers": arch.numLayers,
+            "num_attention_heads": arch.numHeads,
+            "num_key_value_heads": arch.numHeads,
+            "n_shared_experts": 1,
+            "n_routed_experts": arch.numExperts,
+            "num_experts_per_tok": arch.topK,
+            "routed_scaling_factor": 2.5,
+            "kv_lora_rank": arch.kvLoraRank,
+            "q_lora_rank": arch.qLoraRank,
+            "qk_rope_head_dim": 0,
+            "qk_nope_head_dim": arch.qkNopeHeadDim,
+            "qk_head_dim": arch.qkNopeHeadDim,
+            "v_head_dim": arch.vHeadDim,
+            "head_dim": 0,
+            "n_group": 1, "topk_group": 1,
+            "norm_topk_prob": true,
+            "scoring_func": "sigmoid",
+            "topk_method": "noaux_tc",
+            "hidden_act": "silu",
+            "first_k_dense_replace": arch.firstKDense,
+            "max_position_embeddings": 4096,
+            "rms_norm_eps": 1e-5,
+            "index_topk": arch.indexTopK,
+            "index_head_dim": arch.indexHeadDim,
+            "index_n_heads": arch.indexNHeads,
+            "index_kpool": arch.indexKPool,
+            "index_kpool_compress": true,
+            "index_kpool_always_select_tail": true,
+            "indexer_rope_interleave": true,
+            "indexer_types": Array(repeating: "full", count: arch.numLayers),
+            "layer_types": arch.layerTypes,
+            "mlp_layer_types": (0..<arch.numLayers).map { $0 < arch.firstKDense ? "dense" : "sparse" },
+            "linear_attn_config": [
+                "num_heads": arch.linearHeads, "head_dim": arch.linearHeadDim,
+                "short_conv_kernel_size": arch.convKernel, "gate_lower_bound": -5.0,
+                "kda_layers": [0, 1, 2], "full_attn_layers": [3],
+            ],
+            "swiglu_limit": 0.5,
+            "hc_mult": arch.hcMult, "hc_eps": 1e-06, "hc_sinkhorn_iters": 20, "mhc": true,
+            "mla_use_nope": true,
+            "moe_router_dtype": "float32",
+            "num_nextn_predict_layers": 0,
+            "tie_word_embeddings": false,
+            "eos_token_id": [1],
+        ]
+        let config: [String: Any] = [
+            "architectures": ["Glm5NextForConditionalGeneration"],
+            "model_type": "glm5_next",
+            "text_config": textConfig,
+            "vision_config": ["model_type": "glm5_next_vision", "depth": 1, "hidden_size": 32],
+            "tie_word_embeddings": false,
+            "quantization": quant,
+        ]
+        let configData = try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+        try configData.write(to: URL(fileURLWithPath: (dir as NSString).appendingPathComponent("config.json")))
+        let indexObj: [String: Any] = ["metadata": [:], "weight_map": weightMap]
+        let indexData = try JSONSerialization.data(withJSONObject: indexObj, options: [.sortedKeys])
+        try indexData.write(to: URL(fileURLWithPath:
+            (dir as NSString).appendingPathComponent("model.safetensors.index.json")))
+        return Snapshot(shardPath: shardPath)
+    }
+
     // MARK: - Tensor builders
 
     private static func appendQuantizedWeight(name: String,

@@ -16,7 +16,29 @@ public struct RoutedExpertFetchPlan: Sendable {
     }
 }
 
+/// Resident mode only: one buffer over a layer's whole expert file, so a kernel
+/// can address expert `e` at `baseOffset + e * expertStride` from a GPU-side
+/// index with no CPU round trip.
+public struct ResidentExpertSlab: @unchecked Sendable {
+    public let buffer: MTLBuffer
+    public let baseOffset: Int
+    public let expertStride: Int
+}
+
 extension Model {
+    /// The layer's expert slab in resident mode; nil under the slot cache, for
+    /// a layer without routed experts, or when the experts are not laid out at
+    /// a uniform stride.
+    public func residentExpertSlab(layer L: Int) throws -> ResidentExpertSlab? {
+        guard !packedExpertsLayout.layers[L].experts.isEmpty else { return nil }
+        try ensureLayerOpened(L)
+        guard case .resident(let streamer) = expertBackend(L), let view = streamer.slabView else {
+            return nil
+        }
+        return ResidentExpertSlab(buffer: view.buffer, baseOffset: view.baseOffset,
+                                  expertStride: view.expertStride)
+    }
+
     public func routedExpertOffsets(layer: Int) -> MoEExpertOffsets {
         let expert = packedExpertsLayout.expert(layer: layer, expert: 0)
         func offset(_ role: String) -> UInt32 {
