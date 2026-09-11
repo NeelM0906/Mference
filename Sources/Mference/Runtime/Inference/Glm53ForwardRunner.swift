@@ -61,9 +61,13 @@ public enum Glm53ForwardRunnerError: Error, CustomStringConvertible {
 /// Chunked prefill and sequential decode share one per-token path, so the two
 /// are equal by construction: `prefillChunked` walks the tokens through
 /// `produceToken`, carrying the conv tails, the KDA state, the latent and
-/// indexer caches across chunk boundaries. PERF, not correctness: a prompt
-/// token re-reads its eight expert blobs per layer rather than amortizing them
-/// over a chunk. A layer-major expert pass is the first prefill perf item.
+/// indexer caches across chunk boundaries. Prompt tokens need no readback
+/// (below `index_topk`, with resident experts), so each token's stream is
+/// committed without waiting and the CPU encodes the next token while the
+/// GPU runs this one; the chunk waits once at its end. PERF, not
+/// correctness: a prompt token still streams every weight once per token
+/// rather than once per chunk. A batched (GEMM) prefill is the next perf
+/// item after first light.
 public final class Glm53ForwardRunner: ContinuableLogitProducer,
                                        ContextWindowReporting,
                                        HeadlessSequentialPrefillRunner,
@@ -522,6 +526,8 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     // MARK: - Lifecycle
 
     public func reset() {
+        // Anything still executing writes the state this is about to clear.
+        try? sync()
         position = 0
         inSequentialPrefill = false
         state.reset()
@@ -547,6 +553,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     func produceWithoutLogits(token: Int32, position p: Int) async throws {
         inSequentialPrefill = true
         try await produceToken(token: token, position: p, into: nil)
+        try waitForCommitted()
     }
 
     func produceExactPrefill(token: Int32, position p: Int, into logits: MTLBuffer) async throws {
@@ -578,7 +585,10 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
             let last = i == tokens.count - 1
             try await produceToken(token: token, position: startPosition + i, into: last ? logits : nil)
             done += 1
-            if done % max(1, config.chunkTokens) == 0 || last { onProgress(done) }
+            if done % max(1, config.chunkTokens) == 0 || last {
+                try waitForCommitted()
+                onProgress(done)
+            }
         }
         beginDecodePhaseWindow()
         return PrefillResult(newPosition: startPosition + tokens.count, seed: .logitsWritten)
@@ -620,10 +630,17 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         try captureHalf("final_norm_out", normed, count: hidden)
         if let logits {
             gemvInt8(try open(), lmHead, x: normed, y: logits, m: cfg.vocabSize, n: hidden)
-        }
-        try sync()
-        if capture != nil, let logits {
-            capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
+            try sync()
+            if capture != nil {
+                capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
+            }
+        } else {
+            // Headless prefill: nothing is read back, so the token's stream is
+            // committed without waiting and the next token encodes while it
+            // runs. One queue executes in order, and every token reuses the
+            // same scratch through GPU-ordered dispatches, so the result is
+            // the sequential one bit for bit. The chunk waits at its end.
+            try flush()
         }
         position += 1
     }
@@ -962,18 +979,43 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         return cb
     }
 
-    /// Commit the open stream and wait for it; the next `open()` starts a new one.
+    /// Streams committed without waiting (headless prefill), oldest first.
+    private var inFlight: [MTLCommandBuffer] = []
+
+    /// Commit the open stream and wait for it and everything committed before
+    /// it; the next `open()` starts a new one.
     private func sync() throws {
+        if let cb = stream {
+            stream = nil
+            trackGpuInterval(cb)
+            cb.commit()
+            inFlight.append(cb)
+        }
+        try waitForCommitted()
+    }
+
+    /// Commit the open stream without waiting; the next `open()` starts a new
+    /// one that the queue executes after it.
+    private func flush() throws {
         guard let cb = stream else { return }
         stream = nil
         trackGpuInterval(cb)
         cb.commit()
-        cb.waitUntilCompleted()
-        if let error = cb.error {
-            throw Glm53ForwardRunnerError.commandFailed("\(error)")
-        }
-        guard cb.status == .completed else {
-            throw Glm53ForwardRunnerError.commandFailed("command buffer status \(cb.status.rawValue)")
+        inFlight.append(cb)
+    }
+
+    /// Wait for every committed stream and surface its error.
+    private func waitForCommitted() throws {
+        let pending = inFlight
+        inFlight.removeAll()
+        for cb in pending {
+            cb.waitUntilCompleted()
+            if let error = cb.error {
+                throw Glm53ForwardRunnerError.commandFailed("\(error)")
+            }
+            guard cb.status == .completed else {
+                throw Glm53ForwardRunnerError.commandFailed("command buffer status \(cb.status.rawValue)")
+            }
         }
     }
 
