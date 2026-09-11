@@ -114,11 +114,15 @@ vendor checkpoint and the conversion are published under the MIT license.
 PipeNetwork's runtime for it
 ([`PipeNetwork/glm53-flash-mlx`](https://github.com/PipeNetwork/glm53-flash-mlx),
 MIT, revision `a61a7c7d`) is the executable reference the family's parity
-goldens are cut from; no code from it is imported. The family's Kimi Delta
-Attention kernels are planned as a port of `metal/glm53_kda.metal` from
+goldens are cut from; no code from it is imported. The family's Metal
+kernels (`Sources/Mference/Metal/Glm53/glm53.metal`: the Kimi Delta Attention
+decode recurrence, the pooled indexer, the latent attention, the per-head
+INT8 GEMV and the router select) are original transcriptions of the
+reference's arithmetic; nothing was imported from
 [`IngeniousIdiocy/ds4`](https://github.com/IngeniousIdiocy/ds4) (branch
-`glm53-m3ultra`, revision `90d71e0d`), MIT with the ggml authors' copyright
-notice retained; the notice will be added here when that port lands.
+`glm53-m3ultra`, revision `90d71e0d`, MIT), which was read as a design
+reference only. Should a kernel be ported from it later, its notice (MIT with
+the ggml authors' copyright) will be added here at that time.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.

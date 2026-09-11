@@ -30,6 +30,9 @@ import Metal
 ///   * `MFERENCE_GLM53_NEEDLE_TOKENS` — needle prompt target; default 2,600
 ///     (must exceed `index_topk` 2,048 so the pooled selection is applied).
 ///   * `MFERENCE_GLM53_SLOTS` — expert cache slots; default 16.
+///   * `MFERENCE_GLM53_RESIDENT=1` — map every expert file once (the mode
+///     `auto` picks on a 256 GB host) instead of the slot cache; the runner
+///     then routes on the GPU with no per-layer round trip.
 ///   * `MFERENCE_GLM53_CHAT_MAX_NEW` — chat probe token budget; default 160.
 ///
 /// Quality caveat carried in every report: greedy token-exactness against a
@@ -86,7 +89,10 @@ import Metal
         let verifyMode = env["MFERENCE_GLM53_VERIFY"] ?? "full-sha256"
         let integrity: ModelIntegrityPolicy = verifyMode == "trusted-receipt"
             ? .sizeCheckTrustedReceipt : .fullSha256
-        let slots = intEnv("MFERENCE_GLM53_SLOTS", default: 16)
+        let resident = env["MFERENCE_GLM53_RESIDENT"] == "1"
+        let slots = resident
+            ? RuntimeConfiguration.allowedExpertCacheSlots.max()!
+            : intEnv("MFERENCE_GLM53_SLOTS", default: 16)
         let runtime = RuntimeConfiguration(expertCacheSlots: slots,
                                            prefillChunkTokens: 128,
                                            forceLogitsHead: false)
@@ -96,7 +102,7 @@ import Metal
             directoryURL: modelURL,
             device: context.device,
             expecting: cfg,
-            streamingMode: .pread(slotCount: runtime.expertCacheSlots),
+            streamingMode: resident ? .resident : .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: integrity)
         let firstLoadSeconds = Date().timeIntervalSince(loadStart)
@@ -115,8 +121,9 @@ import Metal
         let runner = try #require(forwardRuntime.producer as? Glm53ForwardRunner,
                                   "the factory did not dispatch Glm53ForwardRunner")
 
+        #expect(runner.expertsResident == resident)
         log("[glm53-firstlight] loaded glm53Flash against the pinned baseline "
-            + "(verify=\(verifyMode), slots=\(slots), maxContext=\(maxContext), "
+            + "(verify=\(verifyMode), experts=\(resident ? "resident" : "\(slots) slots"), maxContext=\(maxContext), "
             + String(format: "first_load_s=%.1f", firstLoadSeconds) + ")")
         return Harness(context: context, model: model, tokenizer: tokenizer,
                        forwardRuntime: forwardRuntime, runner: runner,

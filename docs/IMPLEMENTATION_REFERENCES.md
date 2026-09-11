@@ -60,11 +60,12 @@ included for broader design context rather than a line-level claim.
   upstream mlx-vlm defects the port must not inherit.
 - [`IngeniousIdiocy/ds4`](https://github.com/IngeniousIdiocy/ds4/tree/90d71e0de89de5eebbd3e9a4b0302116f92bee6d),
   branch `glm53-m3ultra` at `90d71e0d`: an MIT-licensed C/Metal engine that runs
-  GLM-5.3-Flash Q4_K at 38–41 tok/s on a 512 GB M3 Ultra. Its
-  `metal/glm53_kda.metal` is the planned source of the KDA kernels, and its
-  `CHANGES-GLM53.md` (decode ledger, epilogue fusions, router fold, radix
-  top-k, layer-major expert bank) is the perf backlog the runner is judged
-  against.
+  GLM-5.3-Flash Q4_K at 38–41 tok/s on a 512 GB M3 Ultra. Read as a design
+  reference: its `metal/glm53_kda.metal` informed the shape of the KDA decode
+  kernel (which Mference wrote from the reference arithmetic rather than
+  porting), and its `CHANGES-GLM53.md` (decode ledger, epilogue fusions,
+  router fold, radix top-k, layer-major expert bank) is the perf backlog the
+  runner is judged against.
 
 ## Metal and kernels
 
