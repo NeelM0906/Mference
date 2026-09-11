@@ -247,7 +247,7 @@ import Testing
             let bias = Self.rand(E, 0.5, &rng)
             if trial % 4 == 0 {
                 // Planted ties: equal biased keys must pick the lower index.
-                logits[17] = logits[200]; 
+                logits[17] = logits[200]
                 var b = bias; b[17] = b[200]
                 try check(logits, b)
             } else {
