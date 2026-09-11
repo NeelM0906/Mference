@@ -144,39 +144,18 @@ final class FlashNextHyperConnections {
                                out: scratch.normed,
                                groupSize: UInt32(hidden), groups: UInt32(hcCount),
                                rows: rows, eps: eps)
-        // The two GEMVs are per-token, so a chunk walks them one row at a time.
-        //
-        // PERF, not correctness: that is one compute encoder per row per GEMV.
-        // Decode (rows == 1) is fine; a wide prefill chunk is not — at 48 layers
-        // and two hyper-connections each, a 256-token chunk would encode ~49k
-        // dispatches for these two matrices alone. Batching this into a 2-D
-        // mat-vec (rows on the grid's second axis, which the BF16 kernel here
-        // could take directly and `dequant_int4_gemv_simd` would need a variant
-        // for) is the fix, and it belongs with the production runner rather than
-        // ahead of it — the shapes are small enough that the dispatch count,
-        // not the bandwidth, is what it buys back.
-        for row in 0..<rows {
-            matVec.encode(commandBuffer: commandBuffer,
-                          matrix: weights.mixDown,
-                          x: scratch.normed,
-                          xOffset: row * bundle * MemoryLayout<Float16>.stride,
-                          y: scratch.lowRankRaw,
-                          yOffset: row * lowRank * MemoryLayout<Float>.stride,
-                          rows: lowRank, cols: bundle, outputFloat32: true)
-        }
+        matVec.encodeBatchedContinuousF32(
+            commandBuffer: commandBuffer, matrix: weights.mixDown,
+            x: scratch.normed, y: scratch.lowRankRaw,
+            matrixRows: lowRank, matrixColumns: bundle, tokens: rows)
         encodeElementwise(commandBuffer: commandBuffer,
                           pso: lowRankActivationPSO,
                           input: scratch.lowRankRaw, output: scratch.lowRank,
                           count: rows * lowRank, divisor: Float(hcCount))
-        for row in 0..<rows {
-            matVec.encode(commandBuffer: commandBuffer,
-                          matrix: weights.mixUp,
-                          x: scratch.lowRank,
-                          xOffset: row * lowRank * MemoryLayout<Float16>.stride,
-                          y: scratch.mixGate,
-                          yOffset: row * bundle * MemoryLayout<Float>.stride,
-                          rows: bundle, cols: lowRank, outputFloat32: true)
-        }
+        matVec.encodeBatchedContinuousF32(
+            commandBuffer: commandBuffer, matrix: weights.mixUp,
+            x: scratch.lowRank, y: scratch.mixGate,
+            matrixRows: bundle, matrixColumns: lowRank, tokens: rows)
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(mixPSO)
         enc.setBuffer(scratch.mixGate, offset: 0, index: 0)
@@ -198,15 +177,11 @@ final class FlashNextHyperConnections {
         guard let inject = weights.inject else {
             preconditionFailure("the global mixer has no inject path")
         }
-        for row in 0..<rows {
-            matVec.encode(commandBuffer: commandBuffer,
-                          matrix: inject,
-                          x: scratch.normed,
-                          xOffset: row * bundle * MemoryLayout<Float16>.stride,
-                          y: scratch.injectRaw,
-                          yOffset: row * hcCount * MemoryLayout<Float>.stride,
-                          rows: hcCount, cols: bundle, outputFloat32: true)
-        }
+        matVec.encodeBatched(commandBuffer: commandBuffer,
+                             matrix: inject,
+                             x: scratch.normed, y: scratch.injectRaw,
+                             matrixRows: hcCount, matrixColumns: bundle,
+                             tokens: rows, outputFloat32: true)
         encodeElementwise(commandBuffer: commandBuffer,
                           pso: injectGatePSO,
                           input: scratch.injectRaw, output: scratch.injectGate,

@@ -1,14 +1,15 @@
 # Qwen3.8-Flash-Next on Mference — bring-up dossier
 
-Checkpoint selection, architecture contract, memory budget, and the priced
-port plan for running
+Checkpoint selection, architecture contract, memory budget, implementation
+record, and measured results for running
 [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)
 (~180B total, ~3.5B active per token, natively multimodal) with SSD-streamed
-experts. This document is the Day-0 output of the bring-up kit's timed
+experts. This document began as the Day-0 output of the bring-up kit's timed
 rehearsal ([Phase A spec, Workstream 4](../superpowers/specs/2026-08-08-family-bringup-kit-design.md));
-the rehearsal clock started 2026-08-31T19:42:22Z. It is the architecture
-contract for a proposed `qwen38flashnext` family. Nothing below is
-implemented yet unless marked so.
+the rehearsal clock started 2026-08-31T19:42:22Z. The family is now supported:
+its production runner, INT8-router install, family gate, and frozen-protocol
+measurements landed on 2026-09-10. The checklists below retain the bring-up
+history and mark the remaining performance work explicitly.
 
 ## Why this model, strategically
 
@@ -491,11 +492,11 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
             is 8. Real installs never take it; the runner branches on geometry.
 - [x] **`FlashNextForwardRunner`** — the production layer loop, both install
       dtypes, expert streaming at top-10 through the real LFU slot cache
-      (`pread`, 16 slots — the default rung, and the lowest that can hold a
-      top-10 layer's working set), PLE row pool through `PleRowPool`, and the
-      global mixer standing in for the absent final norm. Prefill is
-      **sequential** (`PrefillRuntimeConfig.off`, `HeadlessSequentialPrefillRunner`),
-      which is the first thing a perf pass should take.
+      (`pread`; auto maps the routed pool on ≥192 GiB hosts when 32 GiB of
+      headroom remains and uses 16 slots otherwise), PLE row pool through
+      `PleRowPool`, and the global mixer standing in for the absent final norm.
+      Production prefill is native, chunked and layer-major; scalar replay
+      remains only behind the internal `.off` reference/diagnostic seam.
 - [x] **The family gate is LIFTED** (2026-09-10, owner decision).
       `ManifestReader.familiesWithoutRunner` no longer lists `qwen38flashnext` —
       the table is now empty — so `peekFamily` resolves this family and the CLI
@@ -657,9 +658,10 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
         **3,247-token prompt — beyond the 2,048 indexer budget** — is
         retrieved **exactly** (`739215`), the model finishing at end-of-turn.
         Decode holds at **12.3 tok/s** at that context (no long-context decode
-        penalty — the sparse indexer's whole purpose), prefill 310 s
-        (sequential, unoptimized). This exercises the QSA sparse-attention path
-        on real weights past its budget and confirms it attends correctly. (A
+        penalty — the sparse indexer's whole purpose), prefill 310 s on the
+        historical sequential path, since replaced. This exercises the QSA
+        sparse-attention path on real weights past its budget and confirms it
+        attends correctly. (A
         first probe capped generation at 16 tokens, too few for the model's
         `<think>` block to finish; at a 320-token budget it answers cleanly.)
       - The result settles the toy near-tie question: a **trained** model does
@@ -716,8 +718,135 @@ hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding`.
       is the CLI's raw `prefill=` figure and, as for Inkling and DeepSeek on
       this host, includes the fresh process's first-touch verification of the
       install (~26 s for 175 GB, see the ladder smoke's 5-token prompt at
-      26.0–26.1 s); the marginal cost is ~10 tok/s of **sequential, unoptimized
-      prefill**, the family's one open performance item.
+      26.0–26.1 s); the marginal cost was ~10 tok/s on the **historical
+      sequential path**, now superseded by the chunked result below.
+- [x] **256 GB residency ladder — 128 slots validated, then superseded.**
+      `./run-benchmark.sh qwen38flashnext-auto128-m3ultra
+      scratch/qwen38flashnext-r8.gturbo 3`, with no extra CLI arguments, selected
+      the new auto rung and completed the full frozen protocol. Every measured
+      run reached `stop=endOfTurn` (9/9); output was byte-identical across the
+      three repetitions of each case.
+
+      | Case | Prompt / generated | Prefill median | Decode median | Range | Peak RSS |
+      | --- | --- | ---: | ---: | ---: | ---: |
+      | short-explanation | 62 / 480 | 32.14 s | **13.10 tok/s** | 13.04–13.12 | 16,542 MiB |
+      | medium-review | 426 / 598 | 59.38 s | **13.07 tok/s** | 13.07–13.10 | 16,544 MiB |
+      | long-synthesis | 2,940 / 593 | 273.50 s | **11.54 tok/s** | 11.51–11.86 | 16,553 MiB |
+
+      Against the 16-slot table, decode improved **10.9% / 11.6% / 3.9%**.
+      Raw prefill changed **−4.2% / +3.5% / +2.8%**; the short regression is
+      consistent with a fresh process paying the larger one-time slot
+      allocation, while a long-lived server keeps that pool. The 17 GiB cache
+      is comfortable on this host, but resident mapping won the next rung.
+
+      The full resident control used the same protocol with the documented
+      extra argument `--expert-cache-slots resident`:
+      `./run-benchmark.sh qwen38flashnext-resident-m3ultra
+      scratch/qwen38flashnext-r8.gturbo 3 --expert-cache-slots resident`.
+      It ran at HEAD `8c762841`, on the same Mac Studio (`Mac15,14`), 256 GB
+      M3 Ultra, macOS 26.3 (25D125), and Xcode Swift 6.3.3 described above.
+      Every measured run reached `stop=endOfTurn` (9/9), and outputs were
+      byte-identical within each case.
+
+      | Case | Prompt / generated | Prefill median | Decode median | Range | Peak RSS |
+      | --- | --- | ---: | ---: | ---: | ---: |
+      | short-explanation | 62 / 480 | 5.85 s | **15.12 tok/s** | 15.10–15.30 | 402 MiB |
+      | medium-review | 426 / 598 | 29.03 s | **15.39 tok/s** | 15.13–15.46 | 423 MiB |
+      | long-synthesis | 2,940 / 593 | 192.69 s | **14.91 tok/s** | 13.70–14.95 | 480 MiB |
+
+      Against 16 slots, decode improved **28.0% / 31.4% / 34.2%**. The RSS
+      footer undercounts clean file-backed pages: resident mode maps the ~68
+      GiB routed pool and lets macOS account for those pages through its file
+      cache. The raw prefill figures followed several model runs and therefore
+      benefited from a warm page cache; they are valid run footers, not a
+      cold-start prefill A/B. Auto now selects resident only on ≥192 GiB hosts
+      where the measured pool plus core leaves 32 GiB of headroom. Smaller
+      hosts retain the 16-slot bounded-memory path until their rungs are
+      measured. After that policy landed, a no-extra-argument automatic smoke
+      selected the same path and reached `stop=endOfTurn prefill=62tok/6.03s
+      new=480tok decode=32.79s tok/s=14.638` (exit 0); restricting the protocol
+      to one case and one measured repetition was the stated smoke deviation.
+- [x] **Native chunked prefill — measured 2026-09-10.** The production runner
+      now stages each prompt block layer-major. Resident INT4 projections use
+      batched QMM, GDN keeps its required recurrence inside one GPU scan, QSA
+      ranks a whole block at a layer boundary, and routed MoE work is grouped
+      expert-major. Long resident chunks use a grouped MPP expert matrix kernel
+      across the mapped layer slab, contiguous QSA rows attend in one causal
+      batch, and FP32 TensorOps projections feed hyper-connections and the
+      deterministic indexer. The bounded path retains safe per-tile drains
+      because its slots may be reused.
+
+      The final run used
+      `./run-benchmark.sh qwen38flashnext-prefill-final
+      scratch/qwen38flashnext-r8.gturbo 1`: one discarded warmup per case, one
+      fresh-process measured run per case, the frozen prompts/settings/seeds,
+      no experimental controls, and the default full-SHA policy. Host and
+      install match the resident table above; build base was dirty HEAD
+      `8c762841` because this row measures the changes documented here. Every
+      process exited 0 and every measured footer reached `stop=endOfTurn`.
+
+      | Case | Prompt / generated | Prefill | Prompt rate | Versus scalar resident | Decode | Peak RSS |
+      | --- | --- | ---: | ---: | ---: | ---: | ---: |
+      | short-explanation | 62 / 521 | 2.55 s | **24.31 tok/s** | **2.29×** | 20.109 tok/s | 398 MiB |
+      | medium-review | 426 / 557 | 4.42 s | **96.38 tok/s** | **6.57×** | 21.029 tok/s | 402 MiB |
+      | long-synthesis | 2,940 / 635 | 13.97 s | **210.45 tok/s** | **13.79×** | 18.168 tok/s | 431 MiB |
+
+      The speedup column compares the same prompt IDs with the old resident
+      prefill times (5.85 / 29.03 / 192.69 s). Generated lengths differ because
+      batched arithmetic can move temperature sampling across a near tie,
+      so the decode rows are current measurements, not a token-for-token decode
+      A/B. All three outputs were read and are complete and coherent.
+
+      Correctness is gated twice. The always-available production-layout INT4
+      fixture is bit-exact against scalar replay for short and multi-chunk
+      prompts, including the next decode state. The real INT8-router install's
+      final direct A/B records 2.17% relative head drift after the 62-token
+      prompt and 1.71% after one continuation, with the same argmax at both
+      boundaries and an **exact 16-token greedy rollout**. This is bounded
+      numerical-order drift, not a state or routing failure.
+- [x] **Resident GPU-routed decode — measured 2026-09-10.** In resident mode,
+      each layer's contiguous expert file is exposed as an immutable Metal slab
+      with an identity expert-to-slot table. Router ids remain on-device; the
+      existing slot lookup produces byte offsets consumed directly by the
+      top-10 expert kernels, removing the CPU router readback and per-layer
+      expert-view construction. Bounded-memory and capture paths are unchanged.
+
+      The final run used
+      `./run-benchmark.sh qwen38flashnext-resident-gpu-route-final-m3ultra
+      scratch/qwen38flashnext-r8.gturbo 1` under the same frozen protocol and
+      host as the chunked-prefill row. Every process exited 0, all outputs
+      reached `stop=endOfTurn`, and every measured output was byte-identical to
+      the prior CPU-routed resident run.
+
+      | Case | Prompt / generated | Prefill | Prompt rate | Decode | Decode gain | Peak RSS |
+      | --- | --- | ---: | ---: | ---: | ---: | ---: |
+      | short-explanation | 62 / 469 | 2.45 s | **25.3 tok/s** | **17.924 tok/s** | **29.9%** | 399 MiB |
+      | medium-review | 426 / 523 | 4.70 s | **90.6 tok/s** | **18.732 tok/s** | **33.3%** | 408 MiB |
+      | long-synthesis | 2,940 / 552 | 18.50 s | **158.9 tok/s** | **19.084 tok/s** | **38.8%** | 506 MiB |
+
+      The geometric-mean decode gain is **33.9%**. Synthetic production-layout
+      state parity and a dedicated 512-expert/top-10 kernel test additionally
+      require the GPU slab output to be bit-identical to the established
+      argument-buffer path.
+- [ ] **Competitive performance gate.** The reproducible public M3 Ultra / 256
+      GB 4-bit MLX record reports 21.37–25.35 tok/s ordinary decode,
+      28.71–34.71 tok/s with fixed-K=1 MTP, and 262–875 tok/s prefill over its
+      92-to-32K context curve. Mference now reaches 210.45 tok/s on its
+      2,940-token case, so scalar prefill is closed and a true routed-expert
+      matrix path is present, but the public prefill bar is not yet cleared.
+      The latest autonomous decode run spans 18.17–21.03 tok/s, and the MTP
+      sidecar is not yet wired. Those workloads are not token-for-token
+      identical to Mference's community cases, so they remain directional
+      targets rather than a valid row merge. The widely linked 63 tok/s
+      LLMCheck entry calls itself an estimate and supplies neither a measured
+      footer nor a real matching artifact. Sources: [Rapid-MLX measured record](https://github.com/raullenchai/Rapid-MLX/blob/main/docs/benchmarks/recent-large-models-m3-ultra.md),
+      [current mlx-community 4-bit artifact](https://huggingface.co/mlx-community/Qwen3.8-Flash-Next-4bit),
+      and [the LLMCheck estimate](https://llmcheck.net/models/qwen38-flash-next-on-m3-ultra/).
+      Resident decode router readback, sequential prompt replay, and pair-wise
+      routed prefill are now gone. Next remove the remaining CPU prefill route
+      grouping and layer synchronization, then qualify the native MTP head
+      against the faster ordinary path. Each step must preserve the real-install
+      greedy gate and improve a matched benchmark before becoming the default.
 - [x] **`bringup-check.sh qwen38flashnext` — PASS** on the INT8-router install
       (2026-09-10): stage 0 preflight; stage 1 toy suite 96 tests / 23 suites
       green (2 known issues: the toy parity checkpoint is not present on this

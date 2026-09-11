@@ -92,8 +92,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         RuntimeConfiguration()
     }
 
-    /// Qwen's 256 experts per layer need twice Gemma's cache coverage to avoid
-    /// repeated SSD reads. Keep the larger footprint family- and RAM-specific.
+    /// Qwen 3.6's large expert table needs more cache coverage to avoid repeated
+    /// SSD reads. Keep the larger footprint family- and RAM-specific.
     /// 64 slots beat 32 by 4.6–5.9% (2026-08-08 A/B); with the GPU slot map
     /// the economics improved further and 96 slots (~6.8 GB wired, 50.7%
     /// all-hit layer rate) beat 64 on every case — so ≥24 GiB hosts run 96.
@@ -103,34 +103,47 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) -> Int {
-        guard family == .qwen36 else { return 16 }
         let gib = UInt64(1) << 30
-        if physicalMemoryBytes >= 24 * gib { return 96 }
-        if physicalMemoryBytes >= 16 * gib { return 32 }
-        return 16
+        switch family {
+        case .qwen36:
+            if physicalMemoryBytes >= 24 * gib { return 96 }
+            if physicalMemoryBytes >= 16 * gib { return 32 }
+            return 16
+        default:
+            return 16
+        }
     }
 
     /// Fixed reserve the resident rung leaves for the KV cache, scratch, the
     /// process, and the OS. Clean file-backed expert pages degrade toward
     /// page-cache streaming under pressure, so the rung only needs the nominal
     /// working set to fit.
-    static let residentHeadroomBytes = UInt64(4) * 1024 * 1024 * 1024
+    static let residentHeadroomBytes = UInt64(32) * 1024 * 1024 * 1024
 
-    /// The auto profile's streaming mode. Measured on the 24 GB M5
+    /// The auto profile's streaming mode. For Qwen 3.6, measured on the 24 GB M5
     /// (2026-08-07): `.resident` lost the community A/B on every case
     /// (short −2%, long −56% from page-cache thrash), and 128 near-resident
     /// slots beat nothing, because at 32 slots the page cache already holds
-    /// the whole Qwen expert pool. Auto therefore stays on the slot rule;
-    /// `resident`, 96, and 128 remain explicit flags for hosts where the
-    /// arithmetic differs. `expertPoolBytes`/`coreWeightsBytes` stay in the
-    /// signature so a future measured rung can use them without replumbing
-    /// callers.
+    /// the whole expert pool. Qwen 3.6 therefore stays on the slot rule.
+    /// Flash-Next separately selects resident mapping at ≥192 GiB when the
+    /// routed pool and core still leave the fixed headroom above.
     public static func defaultExpertStreamingMode(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
-        expertPoolBytes _: UInt64,
-        coreWeightsBytes _: UInt64
+        expertPoolBytes: UInt64,
+        coreWeightsBytes: UInt64
     ) -> ExpertStreamingMode {
+        let gib = UInt64(1) << 30
+        let reserve = residentHeadroomBytes
+        if family == .qwen38flashnext,
+           physicalMemoryBytes >= 192 * gib,
+           coreWeightsBytes <= physicalMemoryBytes - reserve,
+           expertPoolBytes <= physicalMemoryBytes - reserve - coreWeightsBytes {
+            // The routed pool is ~68 GiB. Mapping it on the 256 GiB M3 Ultra
+            // improved the full protocol to 15.12/15.39/14.91 tok/s and avoids
+            // the 17 GiB zero-filled allocation of the runner-up 128-slot rung.
+            return .resident
+        }
         return .pread(slotCount: defaultExpertCacheSlots(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes))

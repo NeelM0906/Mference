@@ -5,8 +5,8 @@
 <h1 align="center">Mference</h1>
 
 <p align="center">
-  <strong>Big MoE models in "Small" GB of RAM</strong><br>
-  A Swift + Metal inference engine for any Apple Silicon Mac, even the 8 GB ones.
+  <strong>Frontier models on Apple Silicon — even when the weights exceed RAM</strong><br>
+  A native Swift + Metal runtime for pinned checkpoints, with bounded-memory streaming and measured ports.
 </p>
 
 <p align="center">
@@ -28,18 +28,20 @@
 </p>
 
 <p align="center">
-  <strong>Qwen3.8-Flash-Next, a 180B-parameter MoE: 11–12 tok/s from 2.4 GB of process memory</strong><br>
+  <strong>Qwen3.8-Flash-Next, a 180B-parameter MoE: 24–210 prompt tok/s and 18.2–21.0 decode tok/s resident on M3 Ultra</strong><br>
   <strong>Qwen 3.6 on a 24 GB M5: 23.5–29.3 tok/s decode · on a 256 GB M3 Ultra: 36.1–42.2 tok/s</strong><br>
   <strong>Inkling-Small 276B on a 24 GB M5: 3.0–3.7 tok/s · Qwen 3.8 27B dense on an M3 Ultra: 38.4–39.4 tok/s</strong>
 </p>
 
-Mixture-of-experts models activate only a few billion (cough) parameters per token.
-Mference builds on that: it keeps each model's shared core and KV cache in
-memory, then streams just the experts chosen for each token from SSD. The
-model never has to fit in RAM — only its working set does. The same fixed
-aperture now covers three kinds of tensor: routed experts stream into a slot
-cache, long-context KV pages spill to SSD, and Flash-Next's 320-million-row
-n-gram embedding table is read a few rows per token.
+Mixture-of-experts models activate only a fraction of their parameters per
+token. Mference turns that sparsity into a bounded working set: it keeps the
+shared core and KV cache in memory, then streams only the experts selected for
+the current token from SSD. The complete model does not have to fit in RAM.
+The same fixed aperture now covers three kinds of tensor: routed experts stream
+into a slot cache, long-context KV pages spill to SSD, and Flash-Next's
+320-million-row n-gram embedding table is read a few rows per token. Dense
+families remain fully resident but share the same native runtime, verified
+installer, model contract, and serving layer.
 
 Mference currently runs eight pinned instruction checkpoints:
 
@@ -77,11 +79,13 @@ Mference currently runs eight pinned instruction checkpoints:
   hyper-connections, and a hashed n-gram embedding table that is 102 GB of
   the checkpoint and is read by row lookup. Installed from the vendor's BF16
   repo (359 GB streamed, ~175 GB on disk, quantized in flight; routers at
-  INT8 after a measured routing check). Under the frozen protocol on a 256 GB
-  M3 Ultra: **11.8 / 11.7 / 11.1 tok/s decode at ~2.36 GB peak process
-  memory**, byte-identical across runs, and an exact passkey retrieval from a
+  INT8 after a measured routing check). On a 256 GB M3 Ultra, the latest
+  frozen-protocol run reaches **20.1 / 21.0 / 18.2 tok/s
+  decode**, with native chunked prefill at **24 / 96 / 210 prompt tok/s**
+  across its 62 / 426 / 2,940-token cases. The long prompt is 13.8× faster to
+  prefill than the former scalar path. An exact passkey was retrieved from a
   3,247-token prompt, beyond the indexer's 2,048-token budget. Runs from the
-  CLI, the server, and the UI. Prefill is still sequential (~10 tok/s). See
+  CLI, the server, and the UI. See
   the [bring-up dossier](docs/families/QWEN38_FLASH_NEXT.md).
 - **[MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B)** *(new)* — the
   first plain-llama dense family: 2B total, all active, 42 layers with no
@@ -131,7 +135,8 @@ so do not expose either port. Details, model switching cost, and
 troubleshooting are in [docs/OPEN_WEBUI.md](docs/OPEN_WEBUI.md).
 
 Install more families the same way (`./mference-ui.sh install qwen36`,
-`maple`, `qwen38`, `deepseekv4flash`, `inklingsmall`, `qwen38flashnext`),
+`maple`, `qwen38`, `deepseekv4flash`, `inklingsmall`, `qwen38flashnext`,
+`minicpm5`),
 and they appear in the model picker. `./mference-ui.sh models` shows what the
 server would expose without loading anything.
 
@@ -157,9 +162,9 @@ The server alone, for other OpenAI-compatible clients, is documented in
 | --- | --- |
 | Models | Gemma 4 26B-A4B IT · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B · MiniCPM5-2B (dense, plain llama) (new) |
 | Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts; vendor BF16 quantized in flight to INT4/INT8 group 64 for Qwen 3.6, Flash-Next, and MiniCPM5 |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB (Flash-Next)** · 123 MiB (MiniCPM5-2B, short-explanation case) |
+| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB at 16 slots (Flash-Next); high-memory auto maps its ~68 GiB routed pool** · 123 MiB (MiniCPM5-2B, short-explanation case) |
 | Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) · ~15 GB (Qwen 3.8) · ~175 GB (Flash-Next) · 1.43 GB (MiniCPM5-2B; 1,425,981,882 bytes over 8 files) |
-| Hardware | Apple Silicon Mac; 8 GB of RAM |
+| Hardware | Apple Silicon Mac; RAM is family-specific — low-memory streamed families run on 8 GB, while fully resident Qwen 3.8 requires a 24 GB-class host |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) · 17.1–18.7 tok/s (256 GB M3 Ultra) |
 | Measured decode, Qwen 3.6 | 23.5–29.3 tok/s (24 GB M5, 32-slot profile) · 36.1–42.2 tok/s (256 GB M3 Ultra, 96-slot auto rung, 6.8 GB peak) |
@@ -167,7 +172,7 @@ The server alone, for other OpenAI-compatible clients, is documented in
 | Measured decode, Inkling-Small | 3.0–3.7 tok/s (24 GB M5, native top-6 path) · 5.3–7.1 tok/s (256 GB M3 Ultra) at a ~8.95 GB peak footprint |
 | Measured, Maple Preview | Exact head: 18.9–24.6 tok/s decode, 25.1–44.9 tok/s prefill, and 491–1,211 MiB peak process footprint on 128-8192 context (16 GB M4) · 38.5 tok/s decode (M3 Ultra) |
 | Measured, Qwen 3.8 27B | 15.0 tok/s decode (MTP speculative, byte-identical; 7.9 plain) · ~60 tok/s prefill (24 GB M5); mlx-vlm on the same checkpoint: 6.41 decode / 40.5 prefill · 38.4–39.4 tok/s plain decode (M3 Ultra, where MTP gives no gain) · passkey exact at 10.6k tokens through the paged KV + SSD tier |
-| Measured, Qwen3.8-Flash-Next | Frozen protocol (256 GB M3 Ultra, INT8-router install): 11.81 / 11.71 / 11.11 tok/s decode on the short / medium / long cases at 2,355–2,367 MiB peak RSS, 9/9 runs to end of turn, outputs byte-identical across runs · 12.3 tok/s at 3,247 tokens of context with the needle retrieved exactly · prefill sequential, ~10 tok/s marginal |
+| Measured, Qwen3.8-Flash-Next | Frozen protocol (256 GB M3 Ultra, INT8-router install): current native chunked prefill **24.31 / 96.38 / 210.45 prompt tok/s** at 62 / 426 / 2,940 tokens, a **2.29× / 6.57× / 13.79×** speedup over scalar resident prefill · the same autonomous run decoded at **20.109 / 21.029 / 18.168 tok/s** · a separate byte-identical routing A/B measured a 33.9% geometric-mean decode gain · historical 16-slot memory-first decode 11.81 / 11.71 / 11.11 tok/s at ~2.36 GB peak RSS · 12.3 tok/s at 3,247 tokens of context with the needle retrieved exactly |
 | Measured, MiniCPM5-2B | Protocol proper (24 GB M5): **65.56 tok/s** decode on short-explanation, 65.50–65.80 across 3 runs, 3/3 to end of turn, 123 MiB peak RSS · as the stated deviation, with only the token cap raised: 37.63 tok/s (medium-review, still inside its think block at 4,096 tokens) and 34.72 tok/s (long-synthesis) · passkey exact at 8,692 prompt tokens through the paged KV cache |
 
 Qwen 3.6 numbers follow the frozen
@@ -214,9 +219,10 @@ stated gates rather than as conversions that worked because they ran:
   where a family has a Python reference implementation, against committed
   goldens from a toy checkpoint: integer selections exact, floating-point
   outputs within a stated tolerance tier, greedy rollouts token-exact.
-- **Byte-identical A/Bs.** Optimizations ship only when the generated output
-  is byte-identical to the unoptimized control across the frozen protocol
-  cases; approximate features are opt-in flags.
+- **Matched A/Bs.** Algebraically exact optimizations must keep generated output
+  byte-identical to the control across the frozen protocol. Changes that alter
+  FP16 reduction order publish their drift bound and exact greedy-rollout gate;
+  approximate features remain opt-in.
 - **The family gate.** Every new family, internal or external, passes the same
   [acceptance gate](docs/FAMILY_GATE.md): full suite three times, release
   build, static checks, pinned install and smoke, the frozen protocol page,
@@ -230,6 +236,41 @@ is the project's answer to its own ambition: a flagship MoE running on Macs
 people own within days of release. Flash-Next was its timed rehearsal, from a
 four-day-old checkpoint to coherent real-model output.
 
+## Project direction
+
+Mference is a **checkpoint-specialized inference engine for Apple Silicon**.
+Its north star is to make important open checkpoints both usable and fast on a
+Mac, including models whose total weights, context state, or sparse tables
+would otherwise exceed practical memory. It earns specialization by owning the
+whole execution artifact: the pinned checkpoint contract, quantization and
+on-disk layout, Metal kernels, scheduler, correctness evidence, and benchmark
+claim advance together.
+
+Three commitments keep that direction concrete:
+
+- **Specialize the complete hot path.** Static model geometry is an advantage,
+  not a limitation: fuse its recurrent blocks, batch its exact routed work,
+  choose a hardware-aware residency plan, and remove generic dispatch that the
+  pinned checkpoint does not need.
+- **Bound memory without accepting a slow-engine identity.** Stream sparse
+  resources and page long-lived state when necessary, but treat that memory
+  freedom as room for better scheduling. A flagship port must pursue the best
+  matched throughput available on its target Mac, not merely run where another
+  engine cannot.
+- **Treat every port as a measured product.** Pin the source, prove its kernels
+  and quantization, and publish reproducible real-model behavior. Performance
+  claims require the same checkpoint, hardware class, prompt shape, generation
+  mode, and memory accounting; estimates are not baselines.
+- **Expose one dependable local interface.** The server and Open WebUI are the
+  user path; the CLI is the diagnostic path; every surface uses the same core.
+
+Mference is not a generic model loader, a wrapper around another inference
+engine, or a separate chat application. New families are selected when they
+strengthen the fixed-aperture thesis, exercise an important new architecture,
+or provide a useful calibration point for the porting system — not to maximize
+a model count. The intended result of a port is a native model appliance, not
+another compatibility entry in a generic loader.
+
 # Products
 
 | Product | Purpose |
@@ -239,6 +280,9 @@ four-day-old checkpoint to coherent real-model output.
 | `MferenceServer` | OpenAI-compatible Chat Completions server and the engine behind the UI; loopback by default or a Tailnet address with `--bind tailnet`; `--library` lists every installed model and swaps in-process |
 | `mference-ui.sh` | Launcher: installs Open WebUI on first run, starts the server in library mode, opens the UI; `install <family>` and `models` subcommands |
 | `MferenceRepack` | Streaming model installer, quantize-in-flight repacker, and install verifier |
+
+The Swift package builds four products; `mference-ui.sh` is the supported
+launcher that composes the server with Open WebUI.
 
 Only one model-owning product should run at a time. The server selects the
 installed model's native dialect automatically, including Gemma's chat format,
@@ -280,17 +324,21 @@ weights mapped read-only, holds a small per-layer LFU expert cache, and
 Inkling dispatches six experts; Gemma, Qwen 3.6, and Maple dispatch eight;
 Flash-Next dispatches ten of 512.
 
-The memory-first path uses 16 slots; CLI and server auto select larger rungs
-for Qwen 3.6 — 96 slots on hosts with at least 24 GiB, 32 with at least 16 GiB —
-because its 256 experts per layer benefit measurably from the added coverage.
+The memory-first path uses 16 slots; CLI and server auto select larger measured
+rungs. Qwen 3.6 uses 96 slots on hosts with at least 24 GiB and 32 with at
+least 16 GiB. Flash-Next maps its routed pool on hosts with at least 192 GiB
+when the pool and core leave 32 GiB of headroom. That improved the full
+protocol from 11.81 / 11.71 / 11.11 to 15.12 / 15.39 / 14.91 tok/s on the
+256 GiB M3 Ultra; smaller hosts retain the 16-slot bounded-memory path.
 Inkling remains at 16 because a 24-slot control warmup on the 24 GB M5 entered
 memory pressure and regressed sharply. Each layer's slots share one contiguous
 wired buffer, and on Qwen a GPU-resident expert-to-slot map lets layers whose
 experts are all cached run their routed branch from pre-encoded, GPU-guarded
 commands, with no CPU expert planning or fetching; the routed command buffer
 also commits eagerly, gated on a shared event that fires as expert fills land.
-An explicit `resident` mode that maps every layer file once exists as an
-opt-in, but it measured slower than the slot rungs under page-cache pressure.
+An explicit `resident` mode maps every routed-expert layer file once. It is the
+high-memory Flash-Next default above, but remains opt-in for other families:
+on a 24 GiB Qwen 3.6 host it lost to the slot rungs under page-cache pressure.
 
 Qwen 3.6's linear-attention layers replace KV storage entirely: each keeps a
 2 MiB delta-rule state and a 3-row convolution tail, updated in place every
@@ -311,11 +359,23 @@ engine are in [System design](docs/SYSTEM_DESIGN.md) and the
 
 ## Roadmap
 
-- Flash-Next: frozen-protocol numbers, pipelined prefill, INT8 routers, and
-  the MTP sidecar
-- Extend resident-expert compute/I/O overlap to every model family and prefill
-- Longer contexts, vision towers, and a hardware benchmark matrix
-- More explicitly pinned architectures without a generic-model fallback
+- **Flash-Next performance:** native chunked prefill is now shipped and reaches
+  210 prompt tok/s on the frozen 2,940-token case. Long-prompt routed experts
+  use grouped Metal tensor operations, contiguous QSA rows attend as a batch,
+  and resident decode addresses routed experts without CPU readback. The next
+  work is to move prefill route grouping fully onto the GPU, remove the
+  per-layer synchronization it currently requires, and then wire the carried
+  MTP sidecar as a runtime drafter. On a 256 GB M3 Ultra,
+  the current measured external bar is about 21–25 tok/s ordinary decode,
+  29–35 with MTP, and 262–875 tok/s prefill; the 63 tok/s catalog headline
+  circulating online is explicitly an estimate, not a submitted run.
+- **Hardware-aware defaults:** finish measuring mid-memory Flash-Next cache
+  rungs while preserving the 16-slot low-memory path.
+- **Product hardening:** keep library switching, OpenAI behavior, installation,
+  and the Open WebUI path reproducible across the supported hardware matrix.
+- **Longer context and multimodality:** extend the fixed-aperture design before
+  adding vision towers or more families. New ports remain explicitly pinned
+  and pass the family gate; there is no generic-model fallback.
 
 ## Acknowledgments
 

@@ -3,10 +3,10 @@ import Foundation
 import Metal
 
 /// All-resident routed-expert backend. Maps the entire layer file once and
-/// wraps each expert blob in its own `MTLBuffer` over the shared mapping.
-/// Per-expert buffers matter: Metal makes a bound buffer resident in full,
-/// so one buffer per layer would demand the whole file's pages every token,
-/// while per-expert buffers demand only the routed experts' pages.
+/// wraps each expert blob in its own `MTLBuffer` over the shared mapping. It
+/// also exposes one complete layer view to checkpoint-specialized GPU routing;
+/// only explicit resident mode uses that view. Per-expert views remain the
+/// compatibility path for callers that already resolved routes on the CPU.
 public final class ResidentExpertStreamer: @unchecked Sendable {
 
     /// Owns the `mmap` region; captured by every expert buffer's deallocator
@@ -28,6 +28,14 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
     /// Per-expert buffer plus the expert's byte offset within it (non-zero
     /// only when the expert's file offset is not page-aligned).
     private let expertViews: [(buffer: MTLBuffer, offset: UInt64)]
+    /// One contiguous view used only by checkpoint-specialized GPU routing.
+    /// Binding this view makes the complete layer visible to Metal, which is
+    /// appropriate for explicit resident mode but deliberately never exposed
+    /// by the bounded-memory backend.
+    private let layerBuffer: MTLBuffer
+    /// Identity expert-to-slot table consumed by the existing GPU slot lookup.
+    /// `Int16` matches the bounded slot map and comfortably covers 512 experts.
+    private let identitySlotTable: MTLBuffer
 
     public init(layout: StreamLayout, device: MTLDevice) throws {
         self.layout = layout
@@ -62,6 +70,25 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
         self.mapping = mapping
         self.sliceShift = shift
 
+        guard layout.expertsPerLayer <= Int(Int16.max),
+              let layerBuffer = device.makeBuffer(
+                bytesNoCopy: base,
+                length: mappedLength,
+                options: .storageModeShared,
+                deallocator: { _, _ in _ = mapping }),
+              let identitySlotTable = device.makeBuffer(
+                length: layout.expertsPerLayer * MemoryLayout<Int16>.stride,
+                options: .storageModeShared) else {
+            throw StreamerError.bufferWrapFailed
+        }
+        let identity = identitySlotTable.contents().bindMemory(
+            to: Int16.self, capacity: layout.expertsPerLayer)
+        for expert in 0..<layout.expertsPerLayer {
+            identity[expert] = Int16(expert)
+        }
+        self.layerBuffer = layerBuffer
+        self.identitySlotTable = identitySlotTable
+
         var views: [(buffer: MTLBuffer, offset: UInt64)] = []
         views.reserveCapacity(layout.expertsPerLayer)
         for expert in 0..<layout.expertsPerLayer {
@@ -88,6 +115,21 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
             views.append((buffer: buffer, offset: UInt64(delta)))
         }
         self.expertViews = views
+    }
+
+    /// A direct expert-indexed slab for a resident GPU path. The fast address
+    /// calculation is valid only when the file stores experts contiguously at
+    /// `expert * expertStride` from a page-aligned stream start.
+    public var contiguousSlabBinding:
+        (slab: MTLBuffer, table: MTLBuffer, expertStride: Int)? {
+        guard sliceShift == 0,
+              layout.expertStride <= UInt64(UInt32.max),
+              layout.expertOffsets?.enumerated().allSatisfy({ index, offset in
+                  offset == UInt64(index) * layout.expertStride
+              }) ?? true else {
+            return nil
+        }
+        return (layerBuffer, identitySlotTable, Int(layout.expertStride))
     }
 
     public func expertBuffer(layer _: Int, expert: Int) throws

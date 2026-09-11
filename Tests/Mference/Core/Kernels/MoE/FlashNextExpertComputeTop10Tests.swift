@@ -256,6 +256,108 @@ import MferenceValidationSupport
                 "INT4 top-10 expert compute off by \(error)")
     }
 
+    /// Resident mode binds one immutable layer slab and leaves the router ids
+    /// on the GPU. This gates that exact top-10 route against the established
+    /// argument-buffer computation on identical expert bytes.
+    @Test func residentSlabTop10IsBitIdenticalToArgumentBufferPath() throws {
+        let context = try MetalContext()
+        var rng = SplitMix64(seed: 0xE7E7_0010)
+        let x = (0..<Self.dimension).map {
+            _ in Float(Float16(rng.uniform(-0.5, 0.5)))
+        }
+        let residual = (0..<Self.dimension).map {
+            _ in Float(Float16(rng.uniform(-0.5, 0.5)))
+        }
+        let routing = try Self.routeOnGPU(context: context, hidden: x)
+        let blobs = routing.indices.map { Self.int4Blob($0) }
+        let stride = blobs[0].bytes.count
+        var slabBytes = [UInt8](repeating: 0, count: Self.numExperts * stride)
+        for (rank, expert) in routing.indices.enumerated() {
+            let start = expert * stride
+            slabBytes.replaceSubrange(start ..< start + stride,
+                                      with: blobs[rank].bytes)
+        }
+        let identity = (0..<Self.numExperts).map { Int16($0) }
+        let routeIDs = routing.indices.map(UInt32.init)
+
+        let kernel = try MoE(context: context, siluActivation: true,
+                             specializedD: UInt32(Self.dimension),
+                             specializedF: UInt32(Self.intermediate),
+                             specializedNumExperts: UInt32(Self.numExperts),
+                             specializedTopK: UInt32(Self.topK))
+        guard let slab = context.device.makeBuffer(
+                  bytes: slabBytes, length: slabBytes.count,
+                  options: .storageModeShared),
+              let table = context.device.makeBuffer(
+                  bytes: identity,
+                  length: identity.count * MemoryLayout<Int16>.stride,
+                  options: .storageModeShared),
+              let indices = context.device.makeBuffer(
+                  bytes: routeIDs,
+                  length: routeIDs.count * MemoryLayout<UInt32>.stride,
+                  options: .storageModeShared),
+              let slotOffsets = context.device.makeBuffer(
+                  length: Self.topK * MemoryLayout<UInt32>.stride,
+                  options: .storageModeShared),
+              let allHit = context.device.makeBuffer(
+                  length: MemoryLayout<UInt32>.stride,
+                  options: .storageModeShared),
+              let xBuffer = Fp16Buffer.make(context.device, values: x),
+              let residualBuffer = Fp16Buffer.make(context.device,
+                                                    values: residual),
+              let routingBuffer = Fp16Buffer.make(context.device,
+                                                   values: routing.weights),
+              let referenceActs = Fp16Buffer.make(
+                  context.device, count: Self.topK * Self.intermediate),
+              let residentActs = Fp16Buffer.make(
+                  context.device, count: Self.topK * Self.intermediate),
+              let referenceOut = Fp16Buffer.make(context.device,
+                                                  count: Self.dimension),
+              let residentOut = Fp16Buffer.make(context.device,
+                                                 count: Self.dimension),
+              let cb = context.queue.makeCommandBuffer() else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+
+        let selected = routing.indices.map {
+            (buffer: slab, offset: $0 * stride)
+        }
+        let argumentBuffer = try #require(kernel.makeRoutedArgumentBuffer(
+            routedBlobs: selected, topK: UInt32(Self.topK)))
+        kernel.encodeRoutedPersistentPhase1U16Load(
+            commandBuffer: cb, routedArgBuffer: argumentBuffer,
+            routedBlobs: selected, routedOffsets: blobs[0].offsets,
+            x: xBuffer, acts: referenceActs,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
+        kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: cb, routedArgBuffer: argumentBuffer,
+            routedBlobs: selected, routedOffsets: blobs[0].offsets,
+            acts: referenceActs, routingWeights: routingBuffer,
+            residual: residualBuffer, y: referenceOut,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(Self.topK))
+        kernel.encodeResidentSlabRouted(
+            commandBuffer: cb, slab: slab, table: table, slotStride: stride,
+            indices: indices, slotOffsets: slotOffsets, allHit: allHit,
+            routedOffsets: blobs[0].offsets, x: xBuffer, acts: residentActs,
+            routingWeights: routingBuffer, residual: residualBuffer,
+            y: residentOut, d: UInt32(Self.dimension),
+            f: UInt32(Self.intermediate), numExperts: UInt32(Self.numExperts),
+            topK: UInt32(Self.topK))
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(cb.error == nil)
+        #expect(allHit.contents().load(as: UInt32.self) == 1)
+        #expect(Fp16Buffer.read(residentActs,
+                               count: Self.topK * Self.intermediate)
+            == Fp16Buffer.read(referenceActs,
+                               count: Self.topK * Self.intermediate))
+        #expect(Fp16Buffer.read(residentOut, count: Self.dimension)
+            == Fp16Buffer.read(referenceOut, count: Self.dimension))
+    }
+
     // MARK: - 2. BF16 expert compute at 512 / top-10
 
     @Test func bf16ExpertComputeAtTop10MatchesTheFlashNextReference() throws {

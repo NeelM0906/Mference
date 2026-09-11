@@ -71,6 +71,8 @@ final class MoE {
     private let phase1SlotmapSpecializedPSO: MTLComputePipelineState
     private let phase2SlotmapPSO: MTLComputePipelineState
     private let phase2SlotmapSpecializedPSO: MTLComputePipelineState
+    private let phase2SlotmapWidePSO: MTLComputePipelineState
+    private let phase2SlotmapWideSpecializedPSO: MTLComputePipelineState
     private let residualAddGuardedPSO: MTLComputePipelineState
     private let phase1SubsetU16PSO: MTLComputePipelineState
     private let phase1SubsetU16SpecializedPSO: MTLComputePipelineState
@@ -150,6 +152,10 @@ final class MoE {
             "moe_phase2_down_reduce_k8_slotmap")
         self.phase2SlotmapSpecializedPSO = try context.pipeline(
             "moe_phase2_down_reduce_k8_slotmap", constants: moeConstants)
+        self.phase2SlotmapWidePSO = try context.pipeline(
+            "moe_phase2_down_reduce_slotmap_wide")
+        self.phase2SlotmapWideSpecializedPSO = try context.pipeline(
+            "moe_phase2_down_reduce_slotmap_wide", constants: moeConstants)
         self.residualAddGuardedPSO = try context.pipeline("residual_add_fp16_guarded")
         self.phase1SubsetU16PSO = try context.pipeline(
             "moe_phase1_gate_up_act_subset_u16load", constants: activationConstants)
@@ -354,7 +360,7 @@ final class MoE {
                           allHit: MTLBuffer,
                           numExperts: UInt32,
                           topK: UInt32) {
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(Self.routedComputeWidths.contains(topK))
         var expertCount = numExperts
         var k = topK
         var stride = UInt32(slotStride)
@@ -370,6 +376,84 @@ final class MoE {
         encoder.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// GPU-direct routed FFN for an immutable resident layer slab. The
+    /// identity slot table turns router ids into byte offsets, so routing,
+    /// expert compute, and reduction remain in the command buffer with no CPU
+    /// readback. Unlike `encodeSlotMapGuardedFFN`, this returns only the routed
+    /// result; Flash-Next applies its hyper-connection injection afterwards.
+    func encodeResidentSlabRouted(
+        commandBuffer: MTLCommandBuffer,
+        slab: MTLBuffer,
+        table: MTLBuffer,
+        slotStride: Int,
+        indices: MTLBuffer,
+        slotOffsets: MTLBuffer,
+        allHit: MTLBuffer,
+        routedOffsets: MoEExpertOffsets,
+        x: MTLBuffer,
+        acts: MTLBuffer,
+        routingWeights: MTLBuffer,
+        residual: MTLBuffer,
+        y: MTLBuffer,
+        d: UInt32,
+        f: UInt32,
+        numExperts: UInt32,
+        topK: UInt32
+    ) {
+        precondition(Self.routedComputeWidths.contains(topK))
+        encodeSlotLookup(commandBuffer: commandBuffer, indices: indices,
+                         table: table, slotStride: slotStride,
+                         slotOffsets: slotOffsets, allHit: allHit,
+                         numExperts: numExperts, topK: topK)
+
+        var offsets = routedOffsets
+        var dimension = d
+        var intermediate = f
+        var k = topK
+        let specialized = useRealDecodeConstants(d: d, f: f, topK: topK)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            preconditionFailure("resident-slab routed FFN: no compute encoder")
+        }
+        encoder.useResource(slab, usage: .read)
+        encoder.setComputePipelineState(
+            specialized ? phase1SlotmapSpecializedPSO : phase1SlotmapPSO)
+        encoder.setBuffer(slab, offset: 0, index: 0)
+        encoder.setBuffer(slotOffsets, offset: 0, index: 1)
+        encoder.setBuffer(allHit, offset: 0, index: 2)
+        encoder.setBytes(&offsets,
+                         length: MemoryLayout<MoEExpertOffsets>.stride, index: 3)
+        encoder.setBuffer(x, offset: 0, index: 4)
+        encoder.setBuffer(acts, offset: 0, index: 5)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride,
+                         index: 7)
+        encoder.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(topK * f) + 7) / 8, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+
+        encoder.setComputePipelineState(
+            specialized ? phase2SlotmapWideSpecializedPSO : phase2SlotmapWidePSO)
+        encoder.setBuffer(slab, offset: 0, index: 0)
+        encoder.setBuffer(slotOffsets, offset: 0, index: 1)
+        encoder.setBuffer(allHit, offset: 0, index: 2)
+        encoder.setBytes(&offsets,
+                         length: MemoryLayout<MoEExpertOffsets>.stride, index: 3)
+        encoder.setBuffer(acts, offset: 0, index: 4)
+        encoder.setBuffer(routingWeights, offset: 0, index: 5)
+        encoder.setBuffer(residual, offset: 0, index: 6)
+        encoder.setBuffer(y, offset: 0, index: 7)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride,
+                         index: 9)
+        encoder.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 10)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: Int(d), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: Int(topK) * 32,
+                                           height: 1, depth: 1))
         encoder.endEncoding()
     }
 

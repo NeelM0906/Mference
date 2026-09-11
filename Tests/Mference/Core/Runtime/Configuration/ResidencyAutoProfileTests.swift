@@ -5,7 +5,8 @@ import Testing
 /// The auto profile keeps the measured slot rule: the 2026-08-07 community
 /// A/B on the 24 GB M5 showed `.resident` losing every case (long prompts by
 /// 56%) because the page cache already holds the whole Qwen pool at 32
-/// slots. `resident`, 96, and 128 stay explicit flags.
+/// slots. Flash-Next's separately measured resident high-memory rule is covered
+/// below.
 @Suite struct ResidencyAutoProfileTests {
 
     static let gib = UInt64(1) << 30
@@ -35,6 +36,45 @@ import Testing
             coreWeightsBytes: Self.qwenCore)
         guard case .pread(let slots) = mode, slots == 16 else {
             Issue.record("expected 16-slot fallback, got \(mode)")
+            return
+        }
+    }
+
+    @Test("192 GiB host gives Flash-Next its measured resident rung")
+    func flashNextOn192GiBUsesResidentMode() {
+        let mode = RuntimeConfiguration.defaultExpertStreamingMode(
+            for: .qwen38flashnext,
+            physicalMemoryBytes: 192 * Self.gib,
+            expertPoolBytes: UInt64(68_000_000_000),
+            coreWeightsBytes: UInt64(5_000_000_000))
+        guard case .resident = mode else {
+            Issue.record("expected resident Flash-Next mode, got \(mode)")
+            return
+        }
+    }
+
+    @Test("Smaller Flash-Next hosts retain the bounded 16-slot rung")
+    func flashNextBelow192GiBKeepsSmallSlots() {
+        let mode = RuntimeConfiguration.defaultExpertStreamingMode(
+            for: .qwen38flashnext,
+            physicalMemoryBytes: 128 * Self.gib,
+            expertPoolBytes: UInt64(68_000_000_000),
+            coreWeightsBytes: UInt64(5_000_000_000))
+        guard case .pread(let slots) = mode, slots == 16 else {
+            Issue.record("expected 16-slot Flash-Next fallback, got \(mode)")
+            return
+        }
+    }
+
+    @Test("Flash-Next resident auto keeps 32 GiB of headroom")
+    func flashNextResidentModeRequiresHeadroom() {
+        let mode = RuntimeConfiguration.defaultExpertStreamingMode(
+            for: .qwen38flashnext,
+            physicalMemoryBytes: 192 * Self.gib,
+            expertPoolBytes: 170 * Self.gib,
+            coreWeightsBytes: 5 * Self.gib)
+        guard case .pread(let slots) = mode, slots == 16 else {
+            Issue.record("expected 16-slot Flash-Next fallback, got \(mode)")
             return
         }
     }
