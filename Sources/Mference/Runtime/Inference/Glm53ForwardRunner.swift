@@ -455,18 +455,22 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         layers = built
 
         if expertsResident {
+            // Best effort: a device without residency sets (CI's virtual GPU
+            // returns nil here) still runs, paying first-touch residency per
+            // command buffer instead.
             let descriptor = MTLResidencySetDescriptor()
             descriptor.label = "glm53 resident experts"
             descriptor.initialCapacity = slabs.count + 1
-            let set = try context.device.makeResidencySet(descriptor: descriptor)
-            var seen = Set<ObjectIdentifier>()
-            for slab in slabs.values where seen.insert(ObjectIdentifier(slab.buffer)).inserted {
-                set.addAllocation(slab.buffer)
+            if let set = try? context.device.makeResidencySet(descriptor: descriptor) {
+                var seen = Set<ObjectIdentifier>()
+                for slab in slabs.values where seen.insert(ObjectIdentifier(slab.buffer)).inserted {
+                    set.addAllocation(slab.buffer)
+                }
+                set.commit()
+                set.requestResidency()
+                context.queue.addResidencySet(set)
+                residencySet = set
             }
-            set.commit()
-            set.requestResidency()
-            context.queue.addResidencySet(set)
-            residencySet = set
         }
 
         streams = try half(hc * hidden)

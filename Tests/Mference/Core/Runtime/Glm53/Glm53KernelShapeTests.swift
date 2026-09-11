@@ -52,7 +52,7 @@ import Testing
         let H = 32, D = 128, qkv = H * D
         let lowerBound: Float = -5, eps: Float = 1e-5
         let aLog = Self.rand(H, 1, &rng), dtBias = Self.rand(qkv, 0.5, &rng)
-        let oNorm = Self.bf16(Self.rand(D, 1, &rng).map { 1 + 0.2 * $0 })
+        let oNorm = Self.bf16(Self.rand(D, 1, &rng).map { (v: Float) -> Float in 1 + 0.2 * v })
         let aLogV = Self.f32View(ctx.device, aLog), dtBiasV = Self.f32View(ctx.device, dtBias)
         let oNormV = Self.bf16View(ctx.device, oNorm)
         let stateBuf = ctx.device.makeBuffer(length: H * D * D * 4, options: .storageModeShared)!
@@ -175,8 +175,8 @@ import Testing
         var rng = SystemRandomNumberGenerator()
         let H = 64, M = 512, N = 256, groups = N / 64
         let weights = (0..<(H * M * N)).map { _ in UInt8.random(in: 0...255, using: &rng) }
-        let scales = Self.bf16(Self.rand(H * M * groups, 0.02, &rng))
-        let biases = Self.bf16(Self.rand(H * M * groups, 0.5, &rng))
+        let scales: [Float] = Self.bf16(Self.rand(H * M * groups, 0.02, &rng))
+        let biases: [Float] = Self.bf16(Self.rand(H * M * groups, 0.5, &rng))
         let x = Self.f16(Self.rand(H * N, 1, &rng))
         let wBytes = weights.count, sBytes = scales.count * 2
         let buf = ctx.device.makeBuffer(length: wBytes + 2 * sBytes, options: .storageModeShared)!
@@ -224,7 +224,9 @@ import Testing
         let got = Glm53ForwardRunner.readFP16(pooled, offset: pool * dim * 2, count: dim)
         var worst: Float = 0
         for d in 0..<dim {
-            var logits = (0..<kp).map { gates[(pool * kp + $0) * dim + d] + ape[$0 * dim + d] }
+            var logits: [Float] = (0..<kp).map { (c: Int) -> Float in
+                gates[(pool * kp + c) * dim + d] + ape[c * dim + d]
+            }
             let mx = logits.max()!
             var sum: Float = 0
             for c in 0..<kp { logits[c] = expf(logits[c] - mx); sum += logits[c] }
