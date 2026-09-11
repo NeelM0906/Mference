@@ -613,8 +613,13 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         if batchedPrefillEnabled, expertsResident, capture == nil, !denseSelectionForAB {
             if batchedPrefill == nil { batchedPrefill = try Glm53PrefillEngine(runner: self) }
             if let engine = batchedPrefill {
+                // `MFERENCE_GLM53_PREFILL_CHUNK` caps the chunk (diagnostics: 1 isolates
+                // kernel arithmetic from anything chunk-size dependent).
+                let chunkCap = ProcessInfo.processInfo.environment["MFERENCE_GLM53_PREFILL_CHUNK"]
+                    .flatMap { Int($0) }.map { max(1, min($0, Glm53PrefillEngine.capacity)) }
+                    ?? Glm53PrefillEngine.capacity
                 while !remaining.isEmpty {
-                    let n = min(remaining.count, Glm53PrefillEngine.capacity, idxTopK - position)
+                    let n = min(remaining.count, chunkCap, idxTopK - position)
                     guard n > 0 else { break }
                     try Task.checkCancellation()
                     let chunk = remaining.prefix(n)

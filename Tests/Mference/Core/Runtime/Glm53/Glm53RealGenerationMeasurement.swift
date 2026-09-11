@@ -207,14 +207,15 @@ import Metal
         return Generation(text: text, tokens: tokens, stats: stats)
     }
 
-    /// The frozen short-explanation case, rendered through the glm5 template.
+    /// A frozen protocol case rendered through the glm5 template:
+    /// short-explanation unless `MFERENCE_GLM53_AB_CASE` names another.
     private static func shortExplanationPrompt(_ tokenizer: MFTokenizer) throws -> [Int32] {
         // Tests/Mference/Core/Runtime/Glm53/<file>: six levels up is the repo root.
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
         let benchURL = root
             .appendingPathComponent("docs/benchmark-prompts/real-generation-v1")
-            .appendingPathComponent("short-explanation.json")
+            .appendingPathComponent((env["MFERENCE_GLM53_AB_CASE"] ?? "short-explanation") + ".json")
         struct Turn: Decodable { let role: String; let content: String }
         let turns = try JSONDecoder().decode([Turn].self, from: try Data(contentsOf: benchURL))
         let messages = turns.map {

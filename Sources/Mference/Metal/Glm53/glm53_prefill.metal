@@ -660,3 +660,119 @@ kernel void glm53p_router_select_k8_batched(
         for (uint k = 0; k < K; ++k) out_weights[uint(t) * K + k] = half(chosen_score[k] / sum * route_scale);
     }
 }
+
+// ---------------------------------------------------------------------------
+// INT8 affine group-64 GEMM on the simdgroup matrix units. Threadgroup: 4
+// simdgroups x 32 rows (8 per simdgroup) x a tile of 32 tokens; grid
+// (ceil(M/32), ceil(T/32)). N is walked in chunks of 256 staged as an
+// activation tile [32 tokens][256] in threadgroup memory; per 8-wide k step a
+// simdgroup dequantizes its 8 x 8 weight tile to half (2 elements per lane,
+// `fma(q, s, b)` rounded once), loads it as A, loads four transposed 8 x 8
+// activation tiles as B and accumulates C[8 rows][8 tokens] x 4 in fp32.
+// The dequantized weight rounds to fp16 here (the GEMV keeps it fp32); the
+// step is ~16x below the INT8 quantization step itself.
+// ---------------------------------------------------------------------------
+#include <metal_simdgroup_matrix>
+
+// fp32 operands: the dequantized weight `fma(q, s, b)` stays fp32 as in the
+// GEMV, the activations convert exactly, products and sums are fp32 — the
+// GEMV's arithmetic up to accumulation order. Chunks of 128 columns (two
+// groups) keep the fp32 activation tile inside threadgroup memory.
+constant uint kG53PMMAChunk = 128;
+constant uint kG53PXTStride = kG53PMMAChunk + 4;   // padded fp32 row stride (elements)
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+kernel void glm53p_int8_gemm_mma(
+    device const uint8_t* W      [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device const half*    X      [[buffer(3)]],
+    device half*          Y      [[buffer(4)]],
+    constant uint&        M      [[buffer(5)]],
+    constant uint&        N      [[buffer(6)]],
+    constant uint&        T      [[buffer(7)]],
+    constant uint&        x_stride [[buffer(8)]],
+    constant uint&        y_stride [[buffer(9)]],
+    uint2 tg   [[threadgroup_position_in_grid]],
+    uint2 tid2 [[thread_position_in_threadgroup]],
+    uint  sg   [[simdgroup_index_in_threadgroup]],
+    uint  lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float xt[kG53PTokenTile * kG53PXTStride];   // [32 t][132], 16.9 KB
+    threadgroup float at[4][8 * 64];                         // per simdgroup A group, 2 KB each
+    threadgroup float ct[4][8 * kG53PTokenTile];
+    const uint tid = tid2.x;
+    const uint m0 = tg.x * 32u + sg * 8u;
+    const uint t0 = tg.y * kG53PTokenTile;
+    const uint tn = min(kG53PTokenTile, T - t0);
+    const uint n_groups = N / kG53PGroup;
+    const uint a_row = lane / 4u;
+    const uint a_col = (lane % 4u) * 16u;
+    const uint m = min(m0 + a_row, M - 1u);
+    device const uint8_t* W_row = W + uint(m) * N;
+    device const bfloat*  s_row = scales + uint(m) * n_groups;
+    device const bfloat*  b_row = biases + uint(m) * n_groups;
+    threadgroup float* a_mine = at[sg] + (a_col / 8u) * 64u + a_row * 8u;
+
+    simdgroup_float8x8 C[4];
+    for (uint i = 0; i < 4u; ++i) C[i] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+
+    for (uint n0 = 0; n0 < N; n0 += kG53PMMAChunk) {
+        const uint nc = min(kG53PMMAChunk, N - n0);
+        const uint segs = nc / 8u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = tid; e < kG53PTokenTile * segs; e += 128u) {
+            const uint row = e / segs;
+            const uint seg = e - row * segs;
+            // Rows past T are in-bounds scratch whose results are never stored.
+            const half4 v0 = *((device const half4*)(X + (t0 + row) * x_stride + n0 + seg * 8u));
+            const half4 v1 = *((device const half4*)(X + (t0 + row) * x_stride + n0 + seg * 8u + 4u));
+            threadgroup float* dst = xt + row * kG53PXTStride + seg * 8u;
+            *((threadgroup float4*)dst) = float4(v0);
+            *((threadgroup float4*)(dst + 4)) = float4(v1);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint gi = 0; gi < nc / kG53PGroup; ++gi) {
+            const uint g = n0 / kG53PGroup + gi;
+            const float s = float(s_row[g]);
+            const float b = float(b_row[g]);
+            const uint4 w16 = *((device const uint4*)(W_row + g * kG53PGroup + a_col));
+            const uint words[4] = { w16.x, w16.y, w16.z, w16.w };
+#pragma unroll
+            for (uint j = 0; j < 4u; ++j) {
+                const uint w = words[j];
+                threadgroup float* dst = a_mine + (j / 2u) * 64u + (j % 2u) * 4u;
+                dst[0] = fma(float(w & 0xFFu), s, b);
+                dst[1] = fma(float((w >> 8) & 0xFFu), s, b);
+                dst[2] = fma(float((w >> 16) & 0xFFu), s, b);
+                dst[3] = fma(float(w >> 24), s, b);
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            simdgroup_float8x8 A[8];
+#pragma unroll
+            for (uint kk = 0; kk < 8u; ++kk) simdgroup_load(A[kk], at[sg] + kk * 64u, 8);
+            threadgroup const float* xg = xt + gi * kG53PGroup;
+#pragma unroll
+            for (uint tt = 0; tt < 4u; ++tt) {
+#pragma unroll
+                for (uint kk = 0; kk < 8u; ++kk) {
+                    simdgroup_float8x8 B;
+                    simdgroup_load(B, xg + tt * 8u * kG53PXTStride + kk * 8u, kG53PXTStride, ulong2(0, 0), true);
+                    simdgroup_multiply_accumulate(C[tt], A[kk], B, C[tt]);
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    for (uint tt = 0; tt < 4u; ++tt) {
+        simdgroup_store(C[tt], ct[sg] + tt * 8u, kG53PTokenTile);
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    const uint out_row = m0 + a_row;
+    if (out_row < M) {
+        for (uint j = 0; j < 8u; ++j) {
+            const uint t = (lane % 4u) * 8u + j;
+            if (t < tn) Y[(t0 + t) * y_stride + out_row] = half(ct[sg][a_row * kG53PTokenTile + t]);
+        }
+    }
+}

@@ -255,12 +255,17 @@ import Testing
                               biasOffset: UInt64(wBytes + sBytes), biasLength: UInt64(sBytes),
                               shape: (UInt32(M), UInt32(N), 0, 0), dtype: 0)
         let yBuf = ctx.device.makeBuffer(length: T * M * 2, options: .storageModeShared)!
+        let yScalar = ctx.device.makeBuffer(length: T * M * 2, options: .storageModeShared)!
+        let xBuf = Self.halfBuffer(ctx.device, x)
         try Self.run(ctx) { cb in
-            kernels.encodeInt8GEMM(commandBuffer: cb, weights: view, x: Self.halfBuffer(ctx.device, x), xStride: N,
-                                   y: yBuf, yStride: M, m: M, n: N, tokens: T)
+            kernels.encodeInt8GEMM(commandBuffer: cb, weights: view, x: xBuf, xStride: N,
+                                   y: yBuf, yStride: M, m: M, n: N, tokens: T, matrixUnits: true)
+            kernels.encodeInt8GEMM(commandBuffer: cb, weights: view, x: xBuf, xStride: N,
+                                   y: yScalar, yStride: M, m: M, n: N, tokens: T, matrixUnits: false)
         }
         let got = Glm53ForwardRunner.readFP16(yBuf, count: T * M)
-        var worst: Float = 0
+        let gotScalar = Glm53ForwardRunner.readFP16(yScalar, count: T * M)
+        var worst: Float = 0, worstScalar: Float = 0, worstAbs: Float = 0, worstAbsAt = (0, 0), magnitude: Float = 0
         for t in 0..<T {
             for m in 0..<M {
                 var acc: Float = 0
@@ -268,10 +273,21 @@ import Testing
                     let g = m * groups + n / 64
                     acc += (Float(weights[m * N + n]) * scales[g] + biases[g]) * x[t * N + n]
                 }
-                worst = max(worst, abs(got[t * M + m] - acc) / max(1, abs(acc)))
+                magnitude = max(magnitude, abs(acc))
+                let d = abs(got[t * M + m] - acc)
+                if d > worstAbs { worstAbs = d; worstAbsAt = (t, m) }
+                worst = max(worst, d / max(1, abs(acc)))
+                worstScalar = max(worstScalar, abs(gotScalar[t * M + m] - acc) / max(1, abs(acc)))
             }
         }
-        #expect(worst < 5e-3, "batched INT8 GEMM worst rel delta \(worst)")
+        print(String(format: "  [glm53 shape] GEMM: scalar worst rel %.3e; mma worst rel %.3e, worst abs %.4f at (t %d, m %d), output magnitude %.2f",
+                     worstScalar, worst, worstAbs, worstAbsAt.0, worstAbsAt.1, magnitude))
+        #expect(worstScalar < 5e-3, "scalar batched INT8 GEMM worst rel delta \(worstScalar)")
+        // The matrix-unit path rounds each dequantized weight to fp16 (about
+        // 1/16 of an INT8 step) and, like the scalar path, the output to fp16
+        // (ulp 0.0625 at magnitude 100), so judge it against the output scale.
+        #expect(worstAbs <= 2e-3 * magnitude, "matrix-unit INT8 GEMM worst abs delta \(worstAbs) at magnitude \(magnitude)")
+        _ = worst
 
         // BF16 GEMM (router / pooling gate), fp32 and fp16 outputs.
         let wb = Self.bf16(Self.rand(M * N, 0.05, &rng))

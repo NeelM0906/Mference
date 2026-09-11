@@ -5,6 +5,9 @@ import Metal
 /// in `moe.metal`: the chunked (batched) GLM-5.3 prefill.
 final class Glm53PrefillKernels {
     private let int8GemmPSO: MTLComputePipelineState
+    private let int8GemmMMAPSO: MTLComputePipelineState
+    /// `MFERENCE_GLM53_GEMM=scalar` keeps the scalar GEMM (A/B, fallback).
+    private let useMMA = ProcessInfo.processInfo.environment["MFERENCE_GLM53_GEMM"] != "scalar"
     private let bf16GemmPSO: MTLComputePipelineState
     private let headedGemvPSO: MTLComputePipelineState
     private let embedPSO: MTLComputePipelineState
@@ -30,6 +33,8 @@ final class Glm53PrefillKernels {
     init(context: MetalContext, swigluLimit: Float) throws {
         int8GemmPSO = try context.pipeline("glm53p_int8_gemm", constants: [],
                                            maxTotalThreadsPerThreadgroup: 256)
+        int8GemmMMAPSO = try context.pipeline("glm53p_int8_gemm_mma", constants: [],
+                                              maxTotalThreadsPerThreadgroup: 128)
         bf16GemmPSO = try context.pipeline("glm53p_bf16_gemm", constants: [],
                                            maxTotalThreadsPerThreadgroup: 256)
         headedGemvPSO = try context.pipeline("glm53p_headed_int8_gemv_batched", constants: [],
@@ -66,10 +71,13 @@ final class Glm53PrefillKernels {
     func encodeInt8GEMM(commandBuffer cb: MTLCommandBuffer, weights: TensorView,
                         x: MTLBuffer, xOffset: Int = 0, xStride: Int,
                         y: MTLBuffer, yOffset: Int = 0, yStride: Int,
-                        m: Int, n: Int, tokens: Int) {
+                        m: Int, n: Int, tokens: Int, matrixUnits: Bool? = nil) {
         precondition(n % Quantization.groupSize == 0)
         guard tokens > 0, let enc = cb.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(int8GemmPSO)
+        // Small-M projections (f_a / g_a / b_proj) launch too few threadgroups
+        // for the matrix-unit kernel to hide its latency; the scalar kernel wins.
+        let mma = (matrixUnits ?? (useMMA && m >= 1024)) && m % 8 == 0
+        enc.setComputePipelineState(mma ? int8GemmMMAPSO : int8GemmPSO)
         enc.setBuffer(weights.buffer, offset: Int(weights.offset), index: 0)
         enc.setBuffer(weights.buffer, offset: Int(weights.scaleOffset), index: 1)
         enc.setBuffer(weights.buffer, offset: Int(weights.biasOffset), index: 2)
@@ -81,8 +89,13 @@ final class Glm53PrefillKernels {
         enc.setBytes(&tt, length: 4, index: 7)
         enc.setBytes(&xs, length: 4, index: 8)
         enc.setBytes(&ys, length: 4, index: 9)
-        enc.dispatchThreadgroups(Self.tg((m + 7) / 8, (tokens + Self.int8TokenTile - 1) / Self.int8TokenTile),
-                                 threadsPerThreadgroup: Self.tg(256))
+        if mma {
+            enc.dispatchThreadgroups(Self.tg((m + 31) / 32, (tokens + Self.int8TokenTile - 1) / Self.int8TokenTile),
+                                     threadsPerThreadgroup: Self.tg(128))
+        } else {
+            enc.dispatchThreadgroups(Self.tg((m + 7) / 8, (tokens + Self.int8TokenTile - 1) / Self.int8TokenTile),
+                                     threadsPerThreadgroup: Self.tg(256))
+        }
         enc.endEncoding()
     }
 
