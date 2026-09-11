@@ -34,8 +34,9 @@ swift run -c release MferenceCLI \
 ```
 
 The installer streams each pinned checkpoint without staging the full source.
-Set `HF_TOKEN` only if requested. Downloads range from ~15 GB (Gemma 4) to
-~148 GB (Inkling-Small); check disk before installing, and read
+Set `HF_TOKEN` only if requested. Source reads range from ~5 GB (MiniCPM5) to
+~360 GB (Flash-Next), producing installs from ~1.4 GB to ~175 GB; check disk
+before installing, and read
 [docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) or
 [docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) before touching those two.
 Cancellation preserves verified completed ranges; continue with `--resume` or

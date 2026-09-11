@@ -192,6 +192,21 @@ extension Model {
         }
     }
 
+    /// Resident-only contiguous layer binding for GPU-direct expert routing.
+    /// Unlike the bounded slot-cache binding, every table entry is a hit and
+    /// the table maps an expert id to its stable on-disk slot.
+    public func routedResidentSlabBinding(layer: Int) throws
+        -> (slab: MTLBuffer, table: MTLBuffer, slotStride: Int)? {
+        try ensureLayerOpened(layer)
+        switch expertBackend(layer) {
+        case .pread:
+            return nil
+        case .resident(let streamer):
+            guard let binding = streamer.contiguousSlabBinding else { return nil }
+            return (binding.slab, binding.table, binding.expertStride)
+        }
+    }
+
     public func routedExpertStreamer(layer: Int) throws -> PreadExpertStreamer {
         try ensureLayerOpened(layer)
         switch expertBackend(layer) {

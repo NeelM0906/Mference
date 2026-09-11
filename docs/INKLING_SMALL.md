@@ -327,9 +327,10 @@ select with shared-expert sinks), each parity-tested against a CPU reference
 on random data (`InklingKernelTests`). The first implementation reused the
 existing INT4 MoE phase kernels by padding top-6 to eight slots with
 weight-zero duplicates; the native top-6 path described below removed that
-compute waste. Prefill v1 replays the decode path
-token by token — the DSV4-v1 pattern; conv state makes batched prefill a
-follow-up, not a correctness need. The `.inkling` chat dialect implements the
+compute waste. The original prefill v1 replayed decode token by token. It has
+since been replaced by the layer-major chunked path documented below; the
+convolution recurrence advances inside its GPU kernel. The `.inkling` chat
+dialect implements the
 shipped Jinja's framing (role tokens + `<|content_text|>` + `<|end_message|>`,
 effort line, `<|content_model_end_sampling|>` stop).
 
@@ -337,9 +338,9 @@ effort line, `<|content_model_end_sampling|>` stop).
 France is" → " Paris. The capital of Germany is Berlin. …"; chat-framed
 "capital of France?" → "Paris" with a clean end-of-turn stop. The engine
 matches pipenetwork's reference implementation layer-by-layer (cos ≥ 0.999,
-first 11 layers verified against the real weights). Decode ≈ 2.4-6.5 tok/s
-unoptimized; prefill v1 ≈ 12 s/token (sequential replay — batched prefill is
-the top perf follow-up).
+first 11 layers verified against the real weights). At first light, decode was
+≈ 2.4-6.5 tok/s and the historical scalar prefill v1 was ≈ 12 s/token.
+Current decode and chunked-prefill measurements appear below.
 
 Post-first-light bug ledger (all found by CPU/oracle parity, in order):
 FP16 residual overflow at L23 (stream is now FP32); FP16 sconv-delta

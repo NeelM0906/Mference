@@ -140,6 +140,32 @@ import Metal
             + "tok/s=\(String(format: "%.3f", tps))]"
     }
 
+    private static func shortBenchmarkPrompt(_ h: Harness) throws -> [Int32] {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let benchURL = root
+            .appendingPathComponent("docs/benchmark-prompts/real-generation-v1")
+            .appendingPathComponent("short-explanation.json")
+        struct Turn: Decodable { let role: String; let content: String }
+        let turns = try JSONDecoder().decode(
+            [Turn].self, from: try Data(contentsOf: benchURL))
+        let messages = turns.map {
+            MFTokenizer.Message(role: $0.role == "system" ? .system : .user,
+                                content: $0.content)
+        }
+        return h.tokenizer.encode(
+            try h.tokenizer.applyChatTemplate(messages), addBOS: false)
+    }
+
+    private static func readLogits(_ buffer: MTLBuffer, count: Int) -> [Float] {
+        let values = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+        return (0..<count).map { Float(values[$0]) }
+    }
+
+    private static func argmax(_ values: [Float]) -> Int {
+        values.indices.max { values[$0] < values[$1] } ?? 0
+    }
+
     /// Drive one generation through the production loop, capturing raw deltas
     /// verbatim (no structured-decoder filtering, so any think/markup tokens are
     /// visible), and print the text + CLI footer + peak RSS.
@@ -230,22 +256,7 @@ import Metal
         #expect(!t1.isEmpty, "probe 1 produced no text")
 
         // Probe 2 — greedy chat-template explanation (short-explanation benchmark).
-        // This file is at Tests/Mference/Core/Runtime/FlashNext/<file>; six
-        // levels up is the repo root that holds docs/.
-        var root = URL(fileURLWithPath: #filePath)
-        for _ in 0..<6 { root.deleteLastPathComponent() }
-        let benchURL = root
-            .appendingPathComponent("docs/benchmark-prompts/real-generation-v1")
-            .appendingPathComponent("short-explanation.json")
-        struct Turn: Decodable { let role: String; let content: String }
-        let turns = try JSONDecoder().decode(
-            [Turn].self, from: try Data(contentsOf: benchURL))
-        let messages = turns.map {
-            MFTokenizer.Message(role: $0.role == "system" ? .system : .user,
-                                content: $0.content)
-        }
-        let rendered = try h.tokenizer.applyChatTemplate(messages)
-        let p2 = h.tokenizer.encode(rendered, addBOS: false)
+        let p2 = try Self.shortBenchmarkPrompt(h)
         let (t2, _) = try await Self.generate(
             h, label: "greedy-short-explanation", promptIds: p2,
             maxNew: 128, temperature: 0)
@@ -276,6 +287,87 @@ import Metal
             retrieved ? "YES" : "NO", tps3, p3.count).utf8))
         // Not asserted hard: retrieval quality is a read, not a proven gate at
         // 180B scale. The captured YES/NO and tok/s are the measurement.
+    }
+
+    /// Current-build A/B against scalar replay on the real INT8-router install.
+    /// This does not need an external reference: both sides share the exact
+    /// weights and decode path, isolating the prefill implementation itself.
+    @Test func chunkedPrefillMatchesSequentialOnRealInstall() async throws {
+        guard Self.installPath() != nil else { return }
+        guard let h = try await Self.loadHarness(maxContext: 256),
+              let runner = h.runner as? FlashNextForwardRunner else { return }
+        let prompt = try Self.shortBenchmarkPrompt(h)
+        let vocab = h.model.config.vocabSize
+        let logits = try #require(h.context.device.makeBuffer(
+            length: vocab * MemoryLayout<Float16>.stride,
+            options: .storageModeShared))
+
+        for (position, token) in prompt.enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+        }
+        let sequentialPrompt = Self.readLogits(logits, count: vocab)
+        let continuation = Int32(Self.argmax(sequentialPrompt))
+        try await runner.produce(token: continuation, position: prompt.count,
+                                 into: logits)
+        let sequentialNext = Self.readLogits(logits, count: vocab)
+        var sequentialRollout = [continuation]
+        var sequentialCursor = sequentialNext
+        for step in 1..<16 {
+            let token = Int32(Self.argmax(sequentialCursor))
+            sequentialRollout.append(token)
+            try await runner.produce(token: token, position: prompt.count + step,
+                                     into: logits)
+            sequentialCursor = Self.readLogits(logits, count: vocab)
+        }
+
+        runner.reset()
+        let result = try await runner.prefillChunked(
+            tokens: prompt[...], startPosition: 0, outputMode: .logits,
+            config: .production(chunkTokens: 128), into: logits,
+            onProgress: { _ in })
+        let chunkedPrompt = Self.readLogits(logits, count: vocab)
+        let chunkedContinuation = Int32(Self.argmax(chunkedPrompt))
+        try await runner.produce(token: chunkedContinuation, position: prompt.count,
+                                 into: logits)
+        let chunkedNext = Self.readLogits(logits, count: vocab)
+        var chunkedRollout = [chunkedContinuation]
+        var chunkedCursor = chunkedNext
+        for step in 1..<16 {
+            let token = Int32(Self.argmax(chunkedCursor))
+            chunkedRollout.append(token)
+            try await runner.produce(token: token, position: prompt.count + step,
+                                     into: logits)
+            chunkedCursor = Self.readLogits(logits, count: vocab)
+        }
+
+        let promptMaxAbs = zip(sequentialPrompt, chunkedPrompt)
+            .map { abs($0 - $1) }.max() ?? 0
+        let nextMaxAbs = zip(sequentialNext, chunkedNext)
+            .map { abs($0 - $1) }.max() ?? 0
+        let promptScale = sequentialPrompt.map(abs).max() ?? 1
+        let nextScale = sequentialNext.map(abs).max() ?? 1
+        let promptRelative = promptMaxAbs / max(promptScale, 1e-6)
+        let nextRelative = nextMaxAbs / max(nextScale, 1e-6)
+        let promptArgmax = Self.argmax(sequentialPrompt)
+        let chunkedPromptArgmax = Self.argmax(chunkedPrompt)
+        let nextArgmax = Self.argmax(sequentialNext)
+        let chunkedNextArgmax = Self.argmax(chunkedNext)
+        let rolloutStatus = sequentialRollout == chunkedRollout ? "exact" : "DIFF"
+        let report = "[flashnext-prefill-ab] prompt=\(prompt.count) "
+            + "prompt_max_abs=\(promptMaxAbs) relative=\(promptRelative) "
+            + "prompt_argmax=\(promptArgmax)/\(chunkedPromptArgmax) "
+            + "next_max_abs=\(nextMaxAbs) relative=\(nextRelative) "
+            + "next_argmax=\(nextArgmax)/\(chunkedNextArgmax) "
+            + "greedy16=\(rolloutStatus)\n"
+        FileHandle.standardError.write(Data(report.utf8))
+
+        #expect(result == PrefillResult(newPosition: prompt.count,
+                                        seed: .logitsWritten))
+        #expect(chunkedPromptArgmax == promptArgmax)
+        #expect(chunkedNextArgmax == nextArgmax)
+        #expect(sequentialRollout == chunkedRollout)
+        #expect(promptRelative < 0.05)
+        #expect(nextRelative < 0.05)
     }
 
     /// The gate is UP: the production door now resolves the REAL installed

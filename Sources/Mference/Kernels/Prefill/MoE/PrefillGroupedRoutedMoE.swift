@@ -14,6 +14,7 @@ enum PrefillGroupedRoutedMoEBufferIndex {
 
 struct PrefillGroupedRoutedMoEStreamedMetadataBuffers {
     let sortedPairs: MTLBuffer
+    let groups: MTLBuffer
 }
 
 struct PrefillStreamedTileArgumentBuffer {
@@ -170,6 +171,47 @@ struct PrefillGroupedRoutedMoEStreamedParams: Equatable, Sendable {
         self.localExpert13 = ids[13]
         self.localExpert14 = ids[14]
         self.localExpert15 = ids[15]
+        self.gateWOff = offsets.gateWOff
+        self.gateSOff = offsets.gateSOff
+        self.gateBOff = offsets.gateBOff
+        self.upWOff = offsets.upWOff
+        self.upSOff = offsets.upSOff
+        self.upBOff = offsets.upBOff
+        self.downWOff = offsets.downWOff
+        self.downSOff = offsets.downSOff
+        self.downBOff = offsets.downBOff
+    }
+
+    init(groupStart: UInt32,
+         groupCount: UInt32,
+         d: UInt32,
+         routedIntermediate: UInt32,
+         topK: UInt32,
+         hiddenStrideElements: UInt32,
+         offsets: MoEExpertOffsets) {
+        self.pairStart = groupStart
+        self.pairCount = groupCount
+        self.d = d
+        self.routedIntermediate = routedIntermediate
+        self.topK = topK
+        self.hiddenStrideElements = hiddenStrideElements
+        self.liveExpertCount = 0
+        self.localExpert0 = .max
+        self.localExpert1 = .max
+        self.localExpert2 = .max
+        self.localExpert3 = .max
+        self.localExpert4 = .max
+        self.localExpert5 = .max
+        self.localExpert6 = .max
+        self.localExpert7 = .max
+        self.localExpert8 = .max
+        self.localExpert9 = .max
+        self.localExpert10 = .max
+        self.localExpert11 = .max
+        self.localExpert12 = .max
+        self.localExpert13 = .max
+        self.localExpert14 = .max
+        self.localExpert15 = .max
         self.gateWOff = offsets.gateWOff
         self.gateSOff = offsets.gateSOff
         self.gateBOff = offsets.gateBOff
@@ -382,10 +424,17 @@ final class PrefillGroupedRoutedMoE {
             device.makeBuffer(bytes: ptr.baseAddress!,
                               length: bytes,
                               options: .storageModeShared)
+        }),
+        let groups = routes.groups.withUnsafeBufferPointer({ ptr in
+            device.makeBuffer(bytes: ptr.baseAddress!,
+                              length: routes.groups.count
+                                * MemoryLayout<PrefillMoEGroup>.stride,
+                              options: .storageModeShared)
         }) else {
             throw PrefillGroupedRoutedMoEError.allocationFailed("prefill sorted route pairs")
         }
-        return PrefillGroupedRoutedMoEStreamedMetadataBuffers(sortedPairs: sortedPairs)
+        return PrefillGroupedRoutedMoEStreamedMetadataBuffers(
+            sortedPairs: sortedPairs, groups: groups)
     }
 
     @discardableResult

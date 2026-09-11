@@ -69,6 +69,9 @@ final class FlashNextIndexer {
         /// prefill wave that overwrote one slot per row before committing would
         /// gather the last row's selection for every row.
         let selection: MTLBuffer
+        /// `[rows, scoreStride]` byte marks used by the device-side heap
+        /// selector to emit the winning blocks in ascending position order.
+        let selectionFlags: MTLBuffer
         let maxRows: Int
         let scoreStride: Int
         /// `blockBudget * compressRatio + compressRatio` — the widest selection
@@ -88,6 +91,8 @@ final class FlashNextIndexer {
     /// Largest indexer head dim the kernels' thread-local scratch supports.
     /// Mirrors `kFlashNextIndexerMaxHeadDim` in `flashnext_indexer.metal`.
     static let maxHeadDim = 128
+    /// Production selects 2,048 / 4 = 512 complete blocks.
+    static let maxBlockBudget = 512
 
     let geometry: Geometry
     private let matVec: FlashNextMatVec
@@ -95,6 +100,7 @@ final class FlashNextIndexer {
     private let appendPSO: MTLComputePipelineState
     private let poolPSO: MTLComputePipelineState
     private let scoresPSO: MTLComputePipelineState
+    private let selectPSO: MTLComputePipelineState
     private let gatherPSO: MTLComputePipelineState
 
     init(context: MetalContext, matVec: FlashNextMatVec,
@@ -107,12 +113,14 @@ final class FlashNextIndexer {
         precondition(geometry.compressRatio > 0 && geometry.blockBudget > 0)
         precondition(geometry.rotaryDim.isMultiple(of: 2))
         precondition(geometry.rotaryDim <= geometry.headDim)
+        precondition(geometry.blockBudget <= Self.maxBlockBudget)
         self.geometry = geometry
         self.matVec = matVec
         self.preparePSO = try context.pipeline("flashnext_indexer_prepare_queries")
         self.appendPSO = try context.pipeline("flashnext_indexer_append_raw_keys")
         self.poolPSO = try context.pipeline("flashnext_indexer_pool_block_keys")
         self.scoresPSO = try context.pipeline("flashnext_indexer_scores")
+        self.selectPSO = try context.pipeline("flashnext_indexer_select_blocks")
         self.gatherPSO = try context.pipeline("flashnext_indexer_gather_kv")
     }
 
@@ -137,6 +145,9 @@ final class FlashNextIndexer {
             scores: try buffer(rows * stride, float, .storageModeShared),
             selection: try buffer(rows * selectionStride,
                                   MemoryLayout<UInt32>.stride, .storageModeShared),
+            selectionFlags: try buffer(rows * stride,
+                                       MemoryLayout<UInt8>.stride,
+                                       .storageModePrivate),
             maxRows: rows,
             scoreStride: stride,
             selectionStride: selectionStride)
@@ -165,13 +176,8 @@ final class FlashNextIndexer {
 
     // MARK: - Encode
 
-    /// `proj = index_qk_proj . x`, one row at a time, straight into FP32.
-    ///
-    /// PERF, not correctness: one compute encoder per row. Decode is one row;
-    /// a wide prefill chunk pays a dispatch per token per attention layer. The
-    /// fix is a batched mat-vec (rows on the grid's second axis) and it belongs
-    /// with the perf pass — the same note `FlashNextHyperConnections.encodeMix`
-    /// carries for the identical reason.
+    /// `proj = index_qk_proj . x`, batched over a contiguous token block and
+    /// written straight into FP32.
     func encodeProjection(commandBuffer: MTLCommandBuffer,
                           weight: FlashNextWeightMatrix,
                           x: MTLBuffer, xOffset: Int,
@@ -179,16 +185,14 @@ final class FlashNextIndexer {
                           scratch: Scratch,
                           rows: Int) {
         precondition(rows <= scratch.maxRows)
-        for row in 0..<rows {
-            matVec.encode(commandBuffer: commandBuffer,
-                          matrix: weight,
-                          x: x,
-                          xOffset: xOffset + row * hidden * MemoryLayout<Float16>.stride,
-                          y: scratch.projection,
-                          yOffset: row * geometry.projRows * MemoryLayout<Float>.stride,
-                          rows: geometry.projRows, cols: hidden,
-                          outputFloat32: true)
-        }
+        // The projection remains FP32 in memory. Long chunks use the same
+        // cooperative affine product as other prefill projections; QSA's
+        // deterministic selector still owns the discrete top-k and tie rule.
+        matVec.encodeBatchedContinuousF32(
+            commandBuffer: commandBuffer, matrix: weight,
+            x: x, xOffset: xOffset, y: scratch.projection,
+            matrixRows: geometry.projRows, matrixColumns: hidden,
+            tokens: rows)
     }
 
     /// Query heads (norm + RoPE at each row's own position), the raw-key append,
@@ -329,6 +333,57 @@ final class FlashNextIndexer {
             out.append(chosen.sorted())
         }
         return out
+    }
+
+    /// Exact on-device block selection. A fixed-size worst-first heap retains
+    /// the best `blockBudget` scores with lowest-index-first tie handling, then
+    /// byte flags turn that unordered heap into the ascending absolute-position
+    /// list consumed by the gather. One single-thread threadgroup owns each row
+    /// so its 512-entry heap is private and deterministic.
+    func encodeSelection(commandBuffer: MTLCommandBuffer,
+                         scratch: Scratch,
+                         rows: Int,
+                         startPosition: Int) {
+        precondition(rows > 0 && rows <= scratch.maxRows)
+        var scoreStride = UInt32(scratch.scoreStride)
+        var selectionStride = UInt32(scratch.selectionStride)
+        var start = UInt32(startPosition)
+        var ratio = UInt32(geometry.compressRatio)
+        var budget = UInt32(geometry.blockBudget)
+        var rowCount = UInt32(rows)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(selectPSO)
+        enc.setBuffer(scratch.scores, offset: 0, index: 0)
+        enc.setBuffer(scratch.selection, offset: 0, index: 1)
+        enc.setBuffer(scratch.selectionFlags, offset: 0, index: 2)
+        enc.setBytes(&scoreStride, length: 4, index: 3)
+        enc.setBytes(&selectionStride, length: 4, index: 4)
+        enc.setBytes(&start, length: 4, index: 5)
+        enc.setBytes(&ratio, length: 4, index: 6)
+        enc.setBytes(&budget, length: 4, index: 7)
+        enc.setBytes(&rowCount, length: 4, index: 8)
+        enc.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 1,
+                                                                height: 1,
+                                                                depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Selection width is geometry-only; attention can be scheduled without
+    /// reading a device-produced count.
+    func selectionCount(row: Int, startPosition: Int) -> Int {
+        let visible = startPosition + row + 1
+        let complete = visible / geometry.compressRatio
+        return min(complete, geometry.blockBudget) * geometry.compressRatio
+            + visible % geometry.compressRatio
+    }
+
+    /// True while QSA keeps every visible token. In this region the caller can
+    /// attend over the cache directly, avoiding both top-k selection and a
+    /// byte-for-byte KV gather.
+    func selectsAllVisible(row: Int, startPosition: Int) -> Bool {
+        let visible = startPosition + row + 1
+        return visible / geometry.compressRatio <= geometry.blockBudget
     }
 
     /// Whether a row's selection boundary is a bit-exact tie, i.e. decided by the

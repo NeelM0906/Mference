@@ -17,6 +17,7 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | 24 GB M5 Pro, Mference | 31-35 tok/s | ~2.1 GB footprint |
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
 | M5, Mference, Qwen 3.6 35B-A3B | 23.5-29.3 tok/s | 32-slot Qwen profile (auto as of 2026-08-06) |
+| 256 GB M3 Ultra, Mference, Flash-Next 180B-A3.5B | 18.17-21.03 tok/s decode; 24.3-210.5 tok/s prefill | Resident mapped expert pool; 398-431 MiB reported RSS |
 
 A separate report covers the four pre-Maple model families on a 256 GB M3 Ultra,
 including the first measured DeepSeek-V4-Flash and Inkling-Small rows:
@@ -201,6 +202,48 @@ The exact measured command was:
 ```text
 .build/release/MferenceCLI --model scratch/inklingsmall.gturbo --messages-file docs/benchmark-prompts/real-generation-v1/<case>.json --max-new 1024 --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95 --seed <seed>
 ```
+
+## Qwen3.8-Flash-Next native prefill and resident GPU routing
+
+These rows ran on 2026-09-10 on a 256 GB M3 Ultra (`Mac15,14`) with macOS
+26.3 and Swift 6.2.4, against the INT8-router install. The automatic profile
+selected the resident mapped routed-expert pool. One discarded warmup preceded
+one fresh-process measured run per frozen community case; no experimental
+control or profiler was active, every process exited 0, and all three outputs
+reached `stop=endOfTurn` and were read for coherence.
+
+| Case | Prompt / generated | Prefill | Prompt rate | Old scalar resident | Speedup | Decode |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | 62 / 521 | 2.55 s | 24.31 tok/s | 5.85 s | 2.29× | 20.109 tok/s |
+| medium-review | 426 / 557 | 4.42 s | 96.38 tok/s | 29.03 s | 6.57× | 21.029 tok/s |
+| long-synthesis | 2,940 / 635 | 13.97 s | 210.45 tok/s | 192.69 s | 13.79× | 18.168 tok/s |
+
+The current rows are from `qwen38flashnext-prefill-final`, run with the exact
+community command, one discarded warmup and one measured fresh process per
+case. The old and new prefill columns use the same prompt IDs and warm resident
+backend. Generated token counts differ because batched reduction order can move
+stochastic sampling across a near tie, so the decode column is the autonomous
+current run rather than a token-for-token speed A/B. Every output was coherent
+and reached `stop=endOfTurn`. A current-build A/B on the real install kept the
+prompt and next-token argmaxes and the 16-token greedy rollout exact; relative
+head drift was 2.17% after the prompt and 1.71% after one continuation.
+
+Long resident prompts now use a grouped routed-expert TensorOps kernel,
+contiguous QSA rows attend in one causal batch, and FP32 TensorOps projections
+feed the hyper-connection and indexer paths. Focused kernel tests compare the
+new paths with their established GPU or CPU references. The resident decode
+path separately keeps router ids on the GPU and addresses selected expert
+records directly in the mapped layer slab. Against the immediately prior
+CPU-routed resident run it improved decode by 29.9%, 33.3%, and 38.8% (33.9%
+geometric mean), with byte-identical output in all three cases.
+
+This closes host-side scalar prompt replay and adds a real expert matrix path,
+but it does not clear the external performance gate. The public Rapid-MLX M3
+Ultra record reports 262-875 prompt tok/s on different prompt lengths and
+21-25 tok/s ordinary decode, so both remain directional targets. Mference's
+next prefill bottleneck is the CPU grouping and layer synchronization between
+GPU routing and the grouped expert dispatch; moving that handoff onto the GPU
+is the next honest route toward the public low bar.
 
 ## Same-host MLX comparison
 

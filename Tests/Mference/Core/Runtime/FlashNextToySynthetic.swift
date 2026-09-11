@@ -518,7 +518,7 @@ extension ArchConfig {
     /// Tiny Qwen3.8-Flash-Next baseline: 4 layers in the production 3:1 mask
     /// shape (linear, linear, linear, full), a 4-stream low-rank
     /// hyper-connected residual, a QSA indexer on the full layer, a PLE block
-    /// at one-indexed layer id 2 (`layers[1]`), and 8 routed experts top-2
+    /// at one-indexed layer id 2 (`layers[1]`), and 8 routed experts top-6
     /// beside a gated shared expert.
     ///
     /// Numbers are toy but respect the divisibility every path assumes:
@@ -542,7 +542,7 @@ extension ArchConfig {
             partialRotaryFactor: 0.25,
             numLayers: 4,
             numExperts: 8,
-            topKExperts: 2,
+            topKExperts: 6,
             tieWordEmbeddings: false,
             attentionKEqV: false,
             fullAttentionLayerMask: [2, 2, 2, 1],

@@ -177,7 +177,10 @@ Full suite, three consecutive passes on 2026-09-11 at the final commit
 (`Scripts/test.sh`, each a fresh process): 1,184 tests in 206 suites passed
 in 257 s, 248 s and 244 s, each with the one pre-existing known issue that
 `main` already carried. Release build `swift build -c release` clean;
-`git diff --check` and `Scripts/check_markdown_links.rb` clean.
+`git diff --check` and `Scripts/check_markdown_links.rb` clean. Repeated
+after merging `main` (#29, Flash-Next's resident routing landed alongside;
+both families keep their own resident FFN encoder and `auto` rule): 1,195
+tests in 208 suites, three passes of 241 / 239 / 240 s, all green.
 
 ## Port plan
 

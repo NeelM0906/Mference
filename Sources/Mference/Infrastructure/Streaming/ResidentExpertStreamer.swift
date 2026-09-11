@@ -61,6 +61,9 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
         public let expertStride: Int
     }
     public let slabView: SlabView?
+    /// Identity expert-to-slot table (`Int16`, `slot_of[e] = e`) for the GPU
+    /// slot lookup, so a router's expert ids resolve to `e * expertStride`.
+    private let identitySlotTable: MTLBuffer
 
     /// Bytes per direct read while filling a `.copied` layer.
     static let copyChunkBytes = 64 << 20
@@ -94,6 +97,15 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
         let uniform = (0..<layout.expertsPerLayer).allSatisfy {
             layout.expertOffset(layer: 0, expert: $0) == UInt64($0) * layout.expertStride
         }
+        guard layout.expertsPerLayer <= Int(Int16.max),
+              let identity = device.makeBuffer(
+                length: max(1, layout.expertsPerLayer) * MemoryLayout<Int16>.stride,
+                options: .storageModeShared) else {
+            throw StreamerError.bufferWrapFailed
+        }
+        let identityPtr = identity.contents().bindMemory(to: Int16.self, capacity: max(1, layout.expertsPerLayer))
+        for expert in 0..<layout.expertsPerLayer { identityPtr[expert] = Int16(expert) }
+        self.identitySlotTable = identity
 
         switch strategy {
         case .copied:
@@ -203,6 +215,19 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
             }
         }
         if failure != 0 { throw StreamerError.preadFailed(errno: failure) }
+    }
+
+
+    /// A direct expert-indexed slab for a resident GPU path (Flash-Next's
+    /// checkpoint-specialized routing): the layer buffer bound at offset 0, the
+    /// identity slot table, and the stride. Valid only when the file stores
+    /// experts contiguously at `expert * expertStride` from a page-aligned
+    /// stream start, so expert 0 sits at offset 0 of the buffer.
+    public var contiguousSlabBinding:
+        (slab: MTLBuffer, table: MTLBuffer, expertStride: Int)? {
+        guard let view = slabView, view.baseOffset == 0,
+              layout.expertStride <= UInt64(UInt32.max) else { return nil }
+        return (view.buffer, identitySlotTable, view.expertStride)
     }
 
     public func expertBuffer(layer _: Int, expert: Int) throws
