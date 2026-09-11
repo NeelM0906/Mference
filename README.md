@@ -96,7 +96,7 @@ Mference currently runs eight pinned instruction checkpoints:
   deviation at a raised cap. See the
   [bring-up dossier](docs/families/MINICPM5.md).
 - **[GLM-5.3-Flash 320B-A18B](https://huggingface.co/zai-org/GLM-5.3-Flash)**
-  *(first light 2026-09-11; perf pass in progress)* — 320B total, 18B active,
+  *(family gate green 2026-09-11; prefill perf pass continuing)* — 320B total, 18B active,
   45 layers mixing Kimi Delta Attention with NoPE latent sparse attention over
   a four-stream mHC residual, 288 experts per layer with top-8 routing. Runs
   from PipeNetwork's mixed 4/8-bit conversion (~181 GB installed) with the

@@ -159,12 +159,25 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
 - [x] **Ladder** — 16 / 32 / auto expert-cache slots produce byte-identical
       greedy output (`bringup-check.sh glm53flash` stage 3, 2026-09-11:
       7.0 / 7.5 / 28.3 tok/s; `auto` resolves to resident on this host).
-- [ ] **Gate** — every step of [`FAMILY_GATE.md`](../FAMILY_GATE.md) green,
-      including the full suite three times consecutively.
+- [x] **Gate** — [`FAMILY_GATE.md`](../FAMILY_GATE.md) steps 1–9: full suite
+      three times consecutively (see "Gate record"), release build clean,
+      `git diff --check` and the Markdown link check clean, pinned install
+      with strict verification plus raw and chat CLI footers, protocol page,
+      phases snapshot, no approximate default paths (the batched prefill is
+      an FP16-tier execution of the same model, the per-token path stays one
+      switch away), provenance recorded, no credentials or weights in fixtures.
 - [x] **Protocol bench** — the three frozen `real-generation-v1` cases with one
       discarded warmup, 9/9 measured footers `stop=endOfTurn` at
       `MFERENCE_GLM5_REASONING_EFFORT=low` (stated deviation; see "Measured
-      results").
+      results"), run twice: per-token prefill and batched prefill.
+
+### Gate record
+
+Full suite, three consecutive passes on 2026-09-11 at the final commit
+(`Scripts/test.sh`, each a fresh process): 1,184 tests in 206 suites passed
+in 257 s, 248 s and 244 s, each with the one pre-existing known issue that
+`main` already carried. Release build `swift build -c release` clean;
+`git diff --check` and `Scripts/check_markdown_links.rb` clean.
 
 ## Port plan
 
@@ -330,22 +343,33 @@ the 1,024-token cap on any case (2,400 tokens of thinking measured on
 short-explanation), so no footer could read `stop=endOfTurn`; `low` is the
 vendor template's own setting, not a sampling change.
 
-Run 2026-09-11, release `MferenceCLI` at commit `011a016`, `auto` expert
-mode (resident), `./run-benchmark.sh glm53flash-bringup scratch/glm53flash.gturbo 3`
-with `MFERENCE_GLM5_REASONING_EFFORT=low`; `stop=endOfTurn` on 9/9 measured
-runs. Prefill is the per-token path of that commit (the batched prefill
-that follows is measured separately below).
+Run 2026-09-11, release `MferenceCLI` at commit `166f6a2` (batched prefill),
+`auto` expert mode (resident),
+`./run-benchmark.sh glm53flash-batched scratch/glm53flash.gturbo 3` with
+`MFERENCE_GLM5_REASONING_EFFORT=low`; `stop=endOfTurn` on 9/9 measured runs.
 
 | Case | Prompt / generated | Prefill | Decode | Range | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: |
-| short-explanation | 60 / 686 | 2.77 s (21.7 tok/s) | 25.61 tok/s | 25.44 – 25.72 | 160.1 GiB |
-| medium-review | 420 / 801 | 15.29 s (27.5 tok/s) | 24.09 tok/s | 23.90 – 24.43 | 160.1 GiB |
-| long-synthesis | 2,792 / 712 | 116.64 s (23.9 tok/s) | 19.09 tok/s | 18.49 – 19.11 | 160.1 GiB |
+| short-explanation | 60 / 653 | 1.25 s (48 tok/s) | 25.79 tok/s | 25.73 – 25.79 | 160.0 GiB |
+| medium-review | 420 / 841 | 4.16 s (101 tok/s) | 24.30 tok/s | 24.30 – 24.30 | 160.0 GiB |
+| long-synthesis | 2,792 / 709 | 33.28 s (84 tok/s) | 19.16 tok/s | 19.13 – 19.17 | 160.0 GiB |
+
+The earlier run of the same protocol at commit `011a016` (per-token prefill)
+measured prefill 2.77 / 15.29 / 116.64 s and decode 25.61 / 24.09 / 19.09
+tok/s (686 / 801 / 712 generated); the generated lengths differ because the
+two prefills are FP16-tier different executions and sampling at temperature
+0.2 takes a different path. The 60-token prefill includes the batched
+engine's first-use setup (scratch and pipelines) in a fresh process.
 
 The long-synthesis prompt crosses `index_topk`, so its decode runs the
 pooled indexer's CPU selection on the 11 sparse layers every token (one
 readback each) and the latent attention over ~3k rows; that is the 19 vs
 25 tok/s gap.
+
+Against the targets set for the port (decode 25–35 tok/s after the perf
+pass, prefill 150–400 tok/s): decode is inside the band; prefill sits at
+roughly half of the lower bound on prompts past a few hundred tokens, with
+the three levers listed under "Batched prefill".
 
 ### Phases attribution
 
