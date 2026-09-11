@@ -1158,6 +1158,10 @@ public struct ArchConfig: Sendable, Equatable {
         denseIntermediateSize: 12_288,
         routerGateBias: true,
         routerNormAfterTopK: true,
+        // The embedding / lm_head carry 154,880 rows; the tokenizer defines
+        // 154,856 ids (154,820 BPE + 36 added). The head masks the 24 padding
+        // rows to -inf so sampling can never emit an undecodable id.
+        unpaddedVocabSize: 154_856,
         qkNorm: false,
         glm53: Glm53Config(
             kvLoraRank: 512,

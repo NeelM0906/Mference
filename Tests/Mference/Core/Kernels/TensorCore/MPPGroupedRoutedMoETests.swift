@@ -4,8 +4,18 @@ import MferenceValidationSupport
 
 @testable import Mference
 
+private let mppGroupedRoutedMoEAvailable: Bool = {
+    guard let context = try? MetalContext() else { return false }
+    return MPPGroupedRoutedMoE(context: context).isAvailable
+}()
+
 @Suite struct MPPGroupedRoutedMoETests {
-    @Test func groupedTensorOpsMatchesSiluGemvReference() throws {
+    /// Skipped where the runtime has no MPP tensor ops (GitHub's macOS
+    /// runners), like the other MPP suites; `isAvailable` is asserted where
+    /// the test does run.
+    @Test(.enabled(if: mppGroupedRoutedMoEAvailable,
+                   "Requires runtime MPP TensorOps support"))
+    func groupedTensorOpsMatchesSiluGemvReference() throws {
         let d = 64, f = 64, rows = 13, topK = 2
         let pairs = (0..<rows).flatMap { token in
             (0..<topK).map { rank in

@@ -20,6 +20,7 @@ import Testing
         #expect(a.hiddenSize == 4096)
         #expect(a.numLayers == 45)
         #expect(a.vocabSize == 154_880)
+        #expect(a.unpaddedVocabSize == 154_856)   // 154,820 BPE + 36 added tokenizer ids
         #expect(a.numHeads == 64)
         #expect(a.numKVHeads == 1)
         #expect(a.headDim == 256)

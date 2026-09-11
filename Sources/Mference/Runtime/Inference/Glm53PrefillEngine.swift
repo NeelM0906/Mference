@@ -202,6 +202,7 @@ final class Glm53PrefillEngine {
             r.rms.encodeBF16W(commandBuffer: cb, x: r.hiddenBuf, weight: r.finalNorm.buffer,
                               weightOffset: Int(r.finalNorm.offset), out: r.normed, d: UInt32(h), eps: eps)
             r.gemvInt8(cb, r.lmHead, x: r.normed, y: logits, m: r.cfg.vocabSize, n: h)
+            r.maskPaddedLogits(cb, logits)
             try r.sync()
         } else {
             try r.flush()

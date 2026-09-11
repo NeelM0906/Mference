@@ -369,6 +369,26 @@ import Testing
         #expect(stateMismatch == 0, "KDA chunk final state differs in \(stateMismatch) entries")
     }
 
+    /// The head epilogue: rows past the tokenizer's last id read -inf, the
+    /// rest untouched, so no sampler can emit a padding id.
+    @Test func maskLogitsTailSetsOnlyThePaddingRows() throws {
+        let ctx = try MetalContext()
+        let kernels = try Glm53Kernels(context: ctx)
+        let vocab = 154_880, valid = 154_856
+        let logits = Self.halfBuffer(ctx.device, (0..<vocab).map { Float($0 % 97) - 48 })
+        try Self.run(ctx) { cb in
+            kernels.encodeMaskLogitsTail(commandBuffer: cb, logits: logits, validVocab: valid, vocab: vocab)
+        }
+        let got = Glm53ForwardRunner.readFP16(logits, count: vocab)
+        #expect(got[valid...].allSatisfy { $0 == -.infinity })
+        #expect(got[..<valid].enumerated().allSatisfy { $0.element == Float(Float16(Float($0.offset % 97) - 48)) })
+        // A family without padding rows leaves the logits alone.
+        try Self.run(ctx) { cb in
+            kernels.encodeMaskLogitsTail(commandBuffer: cb, logits: logits, validVocab: vocab, vocab: vocab)
+        }
+        #expect(Glm53ForwardRunner.readFP16(logits, count: valid) == Array(got[..<valid]))
+    }
+
     @Test func routerSelectOver288ExpertsMatchesTheReferenceRule() throws {
         let ctx = try MetalContext()
         let kernels = try Glm53Kernels(context: ctx)

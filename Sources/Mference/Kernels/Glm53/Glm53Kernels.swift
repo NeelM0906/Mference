@@ -20,6 +20,7 @@ final class Glm53Kernels {
     private let swigluClampPSO: MTLComputePipelineState
     private let broadcastPSO: MTLComputePipelineState
     private let routerSelectPSO: MTLComputePipelineState
+    private let maskLogitsPSO: MTLComputePipelineState
     private let hcDotsPSO: MTLComputePipelineState
     private let hcFinalizePSO: MTLComputePipelineState
     /// fp32 `[(2 + hc) * hc + 1]` dots and sum of squares between the two
@@ -51,6 +52,7 @@ final class Glm53Kernels {
         swigluClampPSO = try context.pipeline("dsv4_swiglu_clamp_mul")
         broadcastPSO = try context.pipeline("dsv4_broadcast_streams")
         routerSelectPSO = try context.pipeline("glm53_router_select_k8_par")
+        maskLogitsPSO = try context.pipeline("glm53_mask_logits_tail")
         hcDotsPSO = try context.pipeline("glm53_hc_dots", constants: [],
                                          maxTotalThreadsPerThreadgroup: 256)
         hcFinalizePSO = try context.pipeline("glm53_hc_finalize")
@@ -81,6 +83,20 @@ final class Glm53Kernels {
         enc.setBytes(&scale, length: 4, index: 5)
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// `logits[validVocab ..< vocab] = -inf`: the head's padding rows.
+    func encodeMaskLogitsTail(commandBuffer: MTLCommandBuffer, logits: MTLBuffer,
+                              validVocab: Int, vocab: Int) {
+        guard validVocab < vocab, let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(maskLogitsPSO)
+        enc.setBuffer(logits, offset: 0, index: 0)
+        var from = UInt32(validVocab), count = UInt32(vocab - validVocab)
+        enc.setBytes(&from, length: 4, index: 1)
+        enc.setBytes(&count, length: 4, index: 2)
+        enc.dispatchThreads(MTLSize(width: vocab - validVocab, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: min(256, vocab - validVocab), height: 1, depth: 1))
         enc.endEncoding()
     }
 

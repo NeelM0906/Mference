@@ -400,6 +400,12 @@ token puts the memory-bandwidth floor near 15 ms.
 
 ## Known limits
 
+- **Padded vocabulary rows are masked.** The embedding / head carry 154,880
+  rows but the tokenizer defines 154,856 ids; `unpaddedVocabSize` records
+  that and the head epilogue sets the 24 padding logits to -inf
+  (`glm53_mask_logits_tail`), so neither greedy nor sampled decode can emit
+  an undecodable id. Installs written before the field existed load with the
+  baseline's value (the manifest check treats the field as absent, not zero).
 - **Prefill numerics are FP16-tier, not bit-identical to decode.** The
   batched prefill and the per-token path are two valid FP16 executions of the
   model that differ in accumulation order (see "Batched prefill"); greedy

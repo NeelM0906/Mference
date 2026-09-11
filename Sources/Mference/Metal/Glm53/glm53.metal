@@ -563,3 +563,18 @@ kernel void glm53_router_select_k8_par(
         for (uint k = 0; k < K; ++k) out_weights[k] = half(chosen_score[k] / sum * route_scale);
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Head epilogue: logits[from ..< from + count] = -inf, the embedding table's
+// padding rows past the tokenizer's last id, so no sampler can pick them.
+// ---------------------------------------------------------------------------
+kernel void glm53_mask_logits_tail(
+    device half* logits [[buffer(0)]],
+    constant uint& from [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint i [[thread_position_in_grid]])
+{
+    if (i >= count) return;
+    logits[from + i] = half(-INFINITY);
+}

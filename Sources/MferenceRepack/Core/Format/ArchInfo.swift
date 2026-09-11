@@ -33,6 +33,11 @@ enum RepackModelFamily: String, Sendable, Equatable {
 /// with `requiredAxes` so the capability gate can refuse the install by axis
 /// name until the kernels exist.
 struct Glm53Axes: Sendable, Equatable {
+    /// The tokenizer's id count behind the 154,880-row embedding: 154,820 BPE
+    /// entries plus 36 added tokens (`<|endoftext|>` … `<|video|>`). The
+    /// runtime masks the padding rows at the head.
+    static let unpaddedVocabSize = 154_856
+
     /// Width of the shared attention latent (K = V) on sparse layers.
     let kvLoraRank: Int
     /// Query head width on sparse layers; there is no rotary part.
@@ -548,6 +553,7 @@ struct ArchInfo: Sendable, Equatable {
             denseIntermediateSize: try i("intermediate_size"),
             routerGateBias: true,
             routerNormAfterTopK: true,
+            unpaddedVocabSize: Glm53Axes.unpaddedVocabSize,
             qkNorm: false,
             glm53: axes)
         try crossCheckProductionGlm53Flash(arch, configPath: configPath)
@@ -614,6 +620,7 @@ struct ArchInfo: Sendable, Equatable {
             denseIntermediateSize: 12_288,
             routerGateBias: true,
             routerNormAfterTopK: true,
+            unpaddedVocabSize: Glm53Axes.unpaddedVocabSize,
             qkNorm: false,
             glm53: Glm53Axes(
                 kvLoraRank: 512,

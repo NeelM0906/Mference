@@ -189,6 +189,7 @@ enum GTurboJSON {
             archDict["indexerKNormEps"] = axes.indexerKNormEps
             archDict["kdaGateLowerBound"] = axes.kdaGateLowerBound
             archDict["rmsNormEps"] = axes.rmsNormEps
+            archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
             archDict["requiredAxes"] = Glm53Axes.requiredAxisNames
         }
         if arch.family == .qwen38flashnext, let axes = arch.flashNext {

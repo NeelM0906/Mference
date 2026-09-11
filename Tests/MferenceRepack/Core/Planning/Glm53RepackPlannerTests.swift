@@ -72,6 +72,7 @@ import Testing
         #expect(arch.hiddenSize == 4096)
         #expect(arch.numLayers == 45)
         #expect(arch.vocabSize == 154_880)
+        #expect(arch.unpaddedVocabSize == 154_856)
         #expect(arch.numExperts == 288)
         #expect(arch.topKExperts == 8)
         #expect(arch.numDenseLayers == 3)

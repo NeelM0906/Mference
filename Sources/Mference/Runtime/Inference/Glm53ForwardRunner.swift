@@ -686,7 +686,9 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                         out: normed, d: UInt32(hidden), eps: eps)
         try captureHalf("final_norm_out", normed, count: hidden)
         if let logits {
-            gemvInt8(try open(), lmHead, x: normed, y: logits, m: cfg.vocabSize, n: hidden)
+            let cb = try open()
+            gemvInt8(cb, lmHead, x: normed, y: logits, m: cfg.vocabSize, n: hidden)
+            maskPaddedLogits(cb, logits)
             try sync()
             if capture != nil {
                 capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
@@ -1022,6 +1024,13 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
             views = try await model.fetchRoutedExperts(layer: L, experts: experts)
         }
         return views.map { (buffer: $0.buffer, offset: Int($0.offset)) }
+    }
+
+    /// The embedding table's rows past the tokenizer's last id are padding;
+    /// their logits become -inf so greedy and sampled decode never emit them.
+    func maskPaddedLogits(_ cb: MTLCommandBuffer, _ logits: MTLBuffer) {
+        let valid = cfg.unpaddedVocabSize > 0 ? cfg.unpaddedVocabSize : cfg.vocabSize
+        kernels.encodeMaskLogitsTail(commandBuffer: cb, logits: logits, validVocab: valid, vocab: cfg.vocabSize)
     }
 
     // MARK: - Command stream

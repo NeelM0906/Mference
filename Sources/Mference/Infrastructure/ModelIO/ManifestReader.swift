@@ -794,8 +794,13 @@ public enum ManifestReader {
                   a.routerNormAfterTopK ?? false, e.routerNormAfterTopK)
         try check("routerGlobalScale",
                   a.routerGlobalScale ?? false, e.routerGlobalScale)
-        try check("unpaddedVocabSize",
-                  a.unpaddedVocabSize ?? 0, e.unpaddedVocabSize)
+        // The unpadded vocabulary is a head-masking fact, not a layout one:
+        // a manifest written before a family recorded it (GLM-5.3-Flash
+        // installs from before 2026-09-11) leaves the baseline's value in
+        // force; one that records it must agree.
+        if let recorded = a.unpaddedVocabSize {
+            try check("unpaddedVocabSize", recorded, e.unpaddedVocabSize)
+        }
 
         let fn = e.flashNext
         try check("hcCount",              a.hcCount ?? 0,              fn.hcCount)
