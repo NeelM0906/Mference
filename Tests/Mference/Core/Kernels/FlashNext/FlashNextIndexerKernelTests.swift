@@ -76,6 +76,7 @@ import MferenceValidationSupport
             elementwise: try Elementwise(context: context),
             epilogue: try PrefillQKVEpilogue(context: context),
             attention: try Attention(context: context),
+            prefillAttention: try PrefillAttention(context: context),
             geometry: .init(hidden: config.hiddenSize,
                             numHeads: config.numHeads,
                             numKVHeads: config.numFullKVHeads,
@@ -207,6 +208,56 @@ import MferenceValidationSupport
         print("flashnext gated attention over the selected set "
                 + "(\(prompt.rawValue)): worst relative error \(worst)")
         #expect(checkedLayers > 0)
+    }
+
+    @Test func deviceSelectionMatchesCPUAtProductionBudgetIncludingTies() throws {
+        let context = try MetalContext()
+        let matVec = try FlashNextMatVec(
+            context: context, int4: try DequantInt4GEMV(context: context))
+        let indexer = try FlashNextIndexer(
+            context: context, matVec: matVec,
+            geometry: .init(numHeads: 4, numKVHeads: 1, headDim: 128,
+                            compressRatio: 4, blockBudget: 512,
+                            rotaryDim: 32, theta: 10_000_000, eps: 1e-6))
+
+        func check(startPosition: Int, rows: Int, maxTokens: Int) throws {
+            let scratch = try indexer.makeScratch(device: context.device,
+                                                  rows: rows,
+                                                  maxTokens: maxTokens)
+            let scores = scratch.scores.contents().bindMemory(
+                to: Float.self, capacity: rows * scratch.scoreStride)
+            for row in 0..<rows {
+                for block in 0..<scratch.scoreStride {
+                    // Repeated values put exact ties on and around the boundary.
+                    scores[row * scratch.scoreStride + block] =
+                        Float((block * 37 + row * 11) % 97)
+                }
+            }
+            let expected = indexer.selections(scratch: scratch, rows: rows,
+                                              startPosition: startPosition)
+            let cb = try #require(context.queue.makeCommandBuffer())
+            indexer.encodeSelection(commandBuffer: cb, scratch: scratch,
+                                    rows: rows,
+                                    startPosition: startPosition)
+            cb.commit()
+            cb.waitUntilCompleted()
+            #expect(cb.error == nil)
+
+            let output = scratch.selection.contents().bindMemory(
+                to: UInt32.self,
+                capacity: rows * scratch.selectionStride)
+            for row in 0..<rows {
+                let count = indexer.selectionCount(row: row,
+                                                   startPosition: startPosition)
+                let offset = row * scratch.selectionStride
+                let actual = (0..<count).map { Int(output[offset + $0]) }
+                #expect(actual == expected[row],
+                        "device QSA selection diverged at row \(row)")
+            }
+        }
+
+        try check(startPosition: 100, rows: 3, maxTokens: 4_096)
+        try check(startPosition: 2_940, rows: 3, maxTokens: 4_096)
     }
 
     // MARK: - Drivers

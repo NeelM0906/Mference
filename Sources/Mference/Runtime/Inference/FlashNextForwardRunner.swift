@@ -77,18 +77,18 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 ///
 /// # Prefill
 ///
-/// Sequential, one token per call, through `produceWithoutLogits` for all but the
-/// last prompt token. This runner does not implement `ChunkedPrefillRunner`, and
-/// `ForwardRunnerFactory` hands it a `.off` prefill config accordingly. That is a
-/// correctness-first choice with a real cost — a prompt token re-reads its ten
-/// expert blobs per layer rather than amortizing them over a chunk — and it is
-/// the first thing the perf pass should take.
+/// Production prefill is chunked and layer-major. Resident projections operate
+/// over the token block, GDN carries its exact recurrence inside the prefill
+/// kernel, QSA ranks all rows at one layer boundary, and routed experts are
+/// grouped expert-major so each unique blob is fetched once per chunk-layer.
+/// `produceWithoutLogits` remains only as the explicit sequential reference
+/// seam used by parity/debug callers.
 ///
-/// PERF, not correctness: the layer loop takes two CPU round trips per attention
-/// layer (indexer scores out, selection in) and one per layer for the router's
-/// expert ids, ~60 per token before any expert I/O. `RealForwardRunner`'s
-/// event-signalled overlap, its eager fill and its GPU slot map all apply here
-/// and none of them are wired yet.
+/// PERF, not correctness: the layer loop still takes two CPU round trips per
+/// attention layer (indexer scores out, selection in). Resident routed experts
+/// stay GPU-directed; the bounded-memory backend still reads route ids to plan
+/// cache fills. Device-side indexer selection and bounded-mode I/O overlap are
+/// the remaining synchronization work.
 ///
 /// `MFERENCE_PHASES=1` splits a decode window into the four costs that pass
 /// touches — expert I/O (all of it exposed, since nothing overlaps it yet), the
@@ -98,6 +98,7 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 /// zero.
 public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                            ContextWindowReporting,
+                                           ChunkedPrefillRunner,
                                            HeadlessSequentialPrefillRunner,
                                            @unchecked Sendable {
 
@@ -164,6 +165,136 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         let moe: MoETensors
     }
 
+    private final class PrefillScratch {
+        let chunkTokens: Int
+        let hc: FlashNextHyperConnections.Scratch
+        let indexer: FlashNextIndexer.Scratch
+        let attention: FlashNextAttention.Scratch
+        let ple: FlashNextPLE.Scratch?
+        let genericGDN: FlashNextGDN.Scratch?
+        let tokens: MTLBuffer
+        let pleStaging: MTLBuffer?
+        let hyper: MTLBuffer
+        let embed: MTLBuffer
+        let mixed: MTLBuffer
+        let blockOut: MTLBuffer
+        let moeOut: MTLBuffer
+        let routerLogits: MTLBuffer
+        let routeIDs: MTLBuffer
+        let routeWeights: MTLBuffer
+        let routePartials: MTLBuffer
+        let routedGateUpAct: MTLBuffer
+        let routedDown: MTLBuffer
+        let routedMatrixAct: MTLBuffer
+        let sharedGate: MTLBuffer
+        let sharedUp: MTLBuffer
+        let sharedAct: MTLBuffer
+        let sharedOut: MTLBuffer
+        let sharedScalar: MTLBuffer
+        let gdnQKV: MTLBuffer
+        let gdnConvOut: MTLBuffer
+        let gdnZ: MTLBuffer
+        let gdnA: MTLBuffer
+        let gdnB: MTLBuffer
+        let gdnY: MTLBuffer
+        let gdnOut: MTLBuffer
+
+        init(device: MTLDevice, chunkTokens: Int, maxContext: Int,
+             cfg: ArchConfig, bundle: Int,
+             hcEncoder: FlashNextHyperConnections,
+             indexerEncoder: FlashNextIndexer,
+             attentionEncoder: FlashNextAttention,
+             pleEncoder: FlashNextPLE?,
+             genericGDNEncoder: FlashNextGDN?) throws {
+            self.chunkTokens = chunkTokens
+            self.hc = try hcEncoder.makeScratch(device: device, rows: chunkTokens)
+            self.indexer = try indexerEncoder.makeScratch(
+                device: device, rows: chunkTokens, maxTokens: maxContext)
+            self.attention = try attentionEncoder.makeScratch(
+                device: device, rows: chunkTokens,
+                maxSelected: indexerEncoder.maxSelected, gatherSlots: 1)
+            self.ple = try pleEncoder?.makeScratch(device: device, rows: chunkTokens)
+            self.genericGDN = try genericGDNEncoder?.makeScratch(
+                device: device, rows: chunkTokens)
+
+            func make(_ elements: Int, stride: Int,
+                      mode: MTLResourceOptions = .storageModePrivate,
+                      label: String) throws -> MTLBuffer {
+                guard let value = device.makeBuffer(
+                    length: max(1, elements) * stride, options: mode) else {
+                    throw FlashNextForwardRunnerError.commandFailed(
+                        "unable to allocate Flash-Next prefill \(label)")
+                }
+                value.label = label
+                return value
+            }
+            let h = MemoryLayout<Float16>.stride
+            let f = MemoryLayout<Float>.stride
+            let u = MemoryLayout<UInt32>.stride
+            let d = cfg.hiddenSize
+            let la = cfg.linearAttention
+            let pairRows = min(256, chunkTokens * cfg.topKExperts)
+            self.tokens = try make(chunkTokens, stride: u, mode: .storageModeShared,
+                                   label: "flashnext.prefill.tokens")
+            self.pleStaging = pleEncoder == nil ? nil : try make(
+                chunkTokens * d, stride: h, mode: .storageModeShared,
+                label: "flashnext.prefill.pleStaging")
+            self.hyper = try make(chunkTokens * bundle, stride: h,
+                                  label: "flashnext.prefill.hyper")
+            self.embed = try make(chunkTokens * d, stride: h,
+                                  label: "flashnext.prefill.embed")
+            self.mixed = try make(chunkTokens * d, stride: h,
+                                  label: "flashnext.prefill.mixed")
+            self.blockOut = try make(chunkTokens * d, stride: h,
+                                     label: "flashnext.prefill.blockOut")
+            self.moeOut = try make(chunkTokens * d, stride: h,
+                                   label: "flashnext.prefill.moeOut")
+            self.routerLogits = try make(chunkTokens * cfg.numExperts, stride: f,
+                                         label: "flashnext.prefill.routerLogits")
+            self.routeIDs = try make(chunkTokens * cfg.topKExperts, stride: u,
+                                     mode: .storageModeShared,
+                                     label: "flashnext.prefill.routeIDs")
+            self.routeWeights = try make(chunkTokens * cfg.topKExperts, stride: h,
+                                         mode: .storageModeShared,
+                                         label: "flashnext.prefill.routeWeights")
+            self.routePartials = try make(
+                chunkTokens * cfg.topKExperts * d, stride: h,
+                label: "flashnext.prefill.routePartials")
+            self.routedGateUpAct = try make(
+                3 * pairRows * cfg.moeIntermediateSize, stride: h,
+                label: "flashnext.prefill.routedGateUpAct")
+            self.routedDown = try make(pairRows * d, stride: h,
+                                       label: "flashnext.prefill.routedDown")
+            self.routedMatrixAct = try make(
+                chunkTokens * cfg.topKExperts * cfg.moeIntermediateSize,
+                stride: h, label: "flashnext.prefill.routedMatrixAct")
+            self.sharedGate = try make(chunkTokens * cfg.intermediateSize, stride: h,
+                                       label: "flashnext.prefill.sharedGate")
+            self.sharedUp = try make(chunkTokens * cfg.intermediateSize, stride: h,
+                                     label: "flashnext.prefill.sharedUp")
+            self.sharedAct = try make(chunkTokens * cfg.intermediateSize, stride: h,
+                                      label: "flashnext.prefill.sharedAct")
+            self.sharedOut = try make(chunkTokens * d, stride: h,
+                                      label: "flashnext.prefill.sharedOut")
+            self.sharedScalar = try make(chunkTokens, stride: f,
+                                         label: "flashnext.prefill.sharedScalar")
+            self.gdnQKV = try make(chunkTokens * la.qkvDim, stride: h,
+                                   label: "flashnext.prefill.gdnQKV")
+            self.gdnConvOut = try make(chunkTokens * la.qkvDim, stride: h,
+                                       label: "flashnext.prefill.gdnConvOut")
+            self.gdnZ = try make(chunkTokens * la.valueDim, stride: h,
+                                 label: "flashnext.prefill.gdnZ")
+            self.gdnA = try make(chunkTokens * la.numVHeads, stride: h,
+                                 label: "flashnext.prefill.gdnA")
+            self.gdnB = try make(chunkTokens * la.numVHeads, stride: h,
+                                 label: "flashnext.prefill.gdnB")
+            self.gdnY = try make(chunkTokens * la.valueDim, stride: h,
+                                 label: "flashnext.prefill.gdnY")
+            self.gdnOut = try make(chunkTokens * la.valueDim, stride: h,
+                                   label: "flashnext.prefill.gdnOut")
+        }
+    }
+
     // MARK: - Stored state
 
     private let model: Model
@@ -204,6 +335,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private let embedInt4: EmbedLookupInt4
     private let embedBF16PSO: MTLComputePipelineState
     private let siluMulPSO: MTLComputePipelineState
+    private let prefillEmbed: PrefillEmbedLookupInt4
+    private let prefillRouter: PrefillRouter
+    private let prefillSharedExpert: PrefillSharedExpert
+    private let prefillGroupedMoE: PrefillGroupedRoutedMoE
+    private let prefillMoE: PrefillMoE
+    private let prefillMPPGroupedMoE: MPPGroupedRoutedMoE
 
     private let layers: [LayerTensors]
     private let embedding: TensorView
@@ -214,7 +351,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     // PLE
     private let ple: FlashNextPLE?
     private let pleWeights: FlashNextPLE.Weights?
-    private let pleScratch: FlashNextPLE.Scratch?
+    private var pleScratch: FlashNextPLE.Scratch?
     private let pleHash: FlashNextPleHash?
     private let pleRowPool: PleRowPool?
     private let pleStaging: MTLBuffer?
@@ -236,8 +373,14 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private let zeroResidual: MTLBuffer
     private let routerLogits: MTLBuffer
     private let routerExpertScale: MTLBuffer
+    private let prefillEffectiveScale: MTLBuffer
     private let routerIndices: MTLBuffer
     private let routerWeights: MTLBuffer
+    /// Resident-mode GPU routing scratch. The router writes expert ids, the
+    /// slot lookup converts them to stable offsets in the mapped layer slab,
+    /// and expert compute consumes those offsets without a CPU readback.
+    private let residentSlotOffsets: MTLBuffer
+    private let residentAllHit: MTLBuffer
     private let sharedGateScratch: MTLBuffer
     private let sharedUpScratch: MTLBuffer
     private let sharedActScratch: MTLBuffer
@@ -252,6 +395,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private let gdnOut: MTLBuffer
 
     private var position = 0
+    private var prefillChunkState = PrefillChunkCommitState()
+    private var prefillScratch: PrefillScratch?
     /// The MoE sub-block's command buffer, committed without a wait so the CPU
     /// can start the next layer's work while it runs. Joined before anything
     /// else touches `hyper`.
@@ -278,9 +423,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1"
 
     /// Wall time inside `fetchExperts` — the top-10 routed expert blobs read
-    /// from SSD through the LFU slot cache, per layer, per token. Sequential
-    /// prefill and decode both pay it. This runner has no expert-I/O overlap
-    /// yet, so unlike `RealForwardRunner.totalIoNanos` all of it is exposed.
+    /// from SSD through the LFU slot cache, per layer, per token. Resident
+    /// GPU-directed decode does not enter this path, so its value remains zero.
     public private(set) var totalIoNanos: UInt64 = 0
     /// Wall time gathering one PLE n-gram row set through `PleRowPool` (its LFU
     /// row cache, then the FP16 staging copy). One layer per token, and the
@@ -406,6 +550,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             context: context, matVec: matVec, elementwise: elementwise,
             epilogue: try PrefillQKVEpilogue(context: context),
             attention: try Attention(context: context),
+            prefillAttention: try PrefillAttention(context: context),
             geometry: .init(hidden: hidden,
                             numHeads: cfg.numHeads,
                             numKVHeads: cfg.numFullKVHeads,
@@ -473,6 +618,14 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         self.embedInt4 = try EmbedLookupInt4(context: context)
         self.embedBF16PSO = try context.pipeline("flashnext_embed_row_bf16")
         self.siluMulPSO = try context.pipeline("silu_mul_fp16")
+        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
+        self.prefillRouter = try PrefillRouter(context: context)
+        self.prefillSharedExpert = try PrefillSharedExpert(
+            context: context, weightBits: 4, siluActivation: true)
+        self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(
+            context: context, siluActivation: true)
+        self.prefillMoE = try PrefillMoE(context: context)
+        self.prefillMPPGroupedMoE = MPPGroupedRoutedMoE(context: context)
 
         self.embedding = model.embedding
         self.embeddingMatrix = FlashNextWeightMatrix.from(model.embedding)
@@ -596,7 +749,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             self.pleStaging = nil
         }
 
-        // Scratch. Every buffer is one token wide: prefill is sequential.
+        // Decode scratch is one token wide. Chunked prompt ingestion owns its
+        // separate, multi-row `PrefillScratch` allocation.
         self.hcScratch = try hc.makeScratch(device: context.device, rows: 1)
         self.indexerScratch = try indexer.makeScratch(device: context.device,
                                                       rows: 1, maxTokens: maxContext)
@@ -643,12 +797,26 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                 count: numExperts),
                 length: numExperts * MemoryLayout<UInt16>.stride,
                 options: .storageModeShared),
+              let effectiveScale = device.makeBuffer(
+                bytes: [UInt16](repeating: Quantization.bf16Bits(1),
+                                count: hidden),
+                length: hidden * MemoryLayout<UInt16>.stride,
+                options: .storageModeShared),
               let indices = device.makeBuffer(
                 length: topK * MemoryLayout<UInt32>.stride,
-                options: .storageModeShared) else { throw MetalError.noDevice }
+                options: .storageModeShared),
+              let residentOffsets = device.makeBuffer(
+                length: topK * MemoryLayout<UInt32>.stride,
+                options: .storageModePrivate),
+              let residentAllHit = device.makeBuffer(
+                length: MemoryLayout<UInt32>.stride,
+                options: .storageModePrivate) else { throw MetalError.noDevice }
         self.routerExpertScale = scale
+        self.prefillEffectiveScale = effectiveScale
         self.routerIndices = indices
         self.routerWeights = try half(topK)
+        self.residentSlotOffsets = residentOffsets
+        self.residentAllHit = residentAllHit
         self.sharedGateScratch = try half(sharedIntermediate)
         self.sharedUpScratch = try half(sharedIntermediate)
         self.sharedActScratch = try half(sharedIntermediate)
@@ -700,6 +868,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
     public func reset() {
         position = 0
+        prefillChunkState.reset()
         inSequentialPrefill = false
         try? joinPendingMoE()
         gdnState?.reset()
@@ -732,6 +901,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
     public func produce(token: Int32, position p: Int,
                         into logits: MTLBuffer) async throws {
+        try prefillChunkState.requireClean(operation: "produce")
         try await produceToken(token: token, position: p, into: logits)
         // Sequential prefill runs `produceWithoutLogits` for every prompt token
         // but the last, so the first `produce` after one of those *is* that last
@@ -744,8 +914,709 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     }
 
     func produceWithoutLogits(token: Int32, position p: Int) async throws {
+        try prefillChunkState.requireClean(operation: "produceWithoutLogits")
         inSequentialPrefill = true
         try await produceToken(token: token, position: p, into: nil)
+    }
+
+    // MARK: - Prefill (chunked, layer-major)
+
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try prefillChunkState.requireClean(operation: "prefillChunked")
+        guard config.mode == .chunked else {
+            throw PrefillError.chunkedUnsupported(
+                "Flash-Next prefillChunked requires chunked mode")
+        }
+        guard startPosition == position else {
+            throw PrefillError.prefillCursorMismatch(
+                "Flash-Next prefill cursor \(position) != startPosition \(startPosition)")
+        }
+        guard startPosition >= 0,
+              tokens.count <= maxContext - startPosition else {
+            throw PrefillError.chunkedUnsupported(
+                "Flash-Next prefill range [\(startPosition), \(startPosition + tokens.count)) exceeds maxContext \(maxContext)")
+        }
+        guard tokens.allSatisfy({ $0 >= 0 && Int($0) < cfg.vocabSize }) else {
+            throw FlashNextForwardRunnerError.invalidInput(
+                "Flash-Next prefill token is outside the vocabulary")
+        }
+        guard capture == nil else {
+            throw PrefillError.chunkedUnsupported(
+                "Flash-Next tensor capture is a sequential reference/debug facility")
+        }
+        guard !tokens.isEmpty else {
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+        }
+        guard logits.length >= cfg.vocabSize * MemoryLayout<Float16>.stride else {
+            throw FlashNextForwardRunnerError.invalidInput(
+                "Flash-Next logits buffer is too small")
+        }
+
+        let scratch = try ensurePrefillScratch(config: config)
+        let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
+                                              startPosition: startPosition,
+                                              config: config)
+        for (spanIndex, span) in spans.enumerated() {
+            try Task.checkCancellation()
+            let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
+            let upper = tokens.index(lower, offsetBy: span.tokenCount)
+            try await executePrefillChunk(
+                tokens: tokens[lower..<upper],
+                startPosition: span.startPosition,
+                logits: logits,
+                scratch: scratch,
+                writeFinalHead: spanIndex == spans.count - 1)
+            onProgress(span.completedCount)
+        }
+        beginDecodePhaseWindow()
+        return PrefillResult(newPosition: startPosition + tokens.count,
+                             seed: .logitsWritten)
+    }
+
+    private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws
+        -> PrefillScratch {
+        let chunkTokens = max(1, min(config.chunkTokens,
+                                     PrefillRuntimeConfig.maxChunkTokens))
+        if let prefillScratch, prefillScratch.chunkTokens == chunkTokens {
+            return prefillScratch
+        }
+        let scratch = try PrefillScratch(
+            device: ctx.device, chunkTokens: chunkTokens, maxContext: maxContext,
+            cfg: cfg, bundle: bundle, hcEncoder: hc,
+            indexerEncoder: indexer, attentionEncoder: attention,
+            pleEncoder: ple, genericGDNEncoder: genericGDN)
+        if let ple, let chunkPLE = scratch.ple,
+           let cb = ctx.queue.makeCommandBuffer() {
+            if let prior = pleScratch, prior.convState !== chunkPLE.convState,
+               let blit = cb.makeBlitCommandEncoder() {
+                blit.copy(from: prior.convState, sourceOffset: 0,
+                          to: chunkPLE.convState, destinationOffset: 0,
+                          size: min(prior.convState.length,
+                                    chunkPLE.convState.length))
+                blit.endEncoding()
+            } else {
+                ple.encodeResetState(commandBuffer: cb, scratch: chunkPLE)
+            }
+            try finish(cb)
+            // Decode continues in the same carried conv state. A PLE scratch
+            // sized for a chunk is also valid for a one-row decode call.
+            pleScratch = chunkPLE
+        }
+        prefillScratch = scratch
+        return scratch
+    }
+
+    private func executePrefillChunk(tokens: ArraySlice<Int32>,
+                                     startPosition: Int,
+                                     logits: MTLBuffer,
+                                     scratch: PrefillScratch,
+                                     writeFinalHead: Bool) async throws {
+        let t = tokens.count
+        precondition(t > 0 && t <= scratch.chunkTokens)
+        let half = MemoryLayout<Float16>.stride
+        let tokenBase = scratch.tokens.contents()
+            .bindMemory(to: UInt32.self, capacity: scratch.chunkTokens)
+        for (row, token) in tokens.enumerated() {
+            tokenBase[row] = UInt32(bitPattern: token)
+        }
+
+        // PLE table I/O depends only on token IDs. Gather the entire chunk up
+        // front so its one special layer does not turn into per-token GPU/CPU
+        // synchronization.
+        if let hash = pleHash, let pool = pleRowPool,
+           let staging = scratch.pleStaging {
+            let ids = tokens.map(Int.init)
+            let window = pleHistory + ids
+            let rows = Array(hash.rowIDs(window: window).suffix(t))
+            let base = staging.contents().bindMemory(
+                to: Float16.self, capacity: scratch.chunkTokens * hidden)
+            let clock = Self.phaseClock()
+            for row in 0..<t {
+                let embedding = try pool.readEmbedding(rows: rows[row])
+                precondition(embedding.count == hidden)
+                for column in 0..<hidden {
+                    base[row * hidden + column] = Float16(embedding[column])
+                }
+            }
+            if Self.phaseInstrumentationEnabled {
+                totalPleRowNanos &+= Self.phaseClock() - clock
+            }
+            pleHistory = Array(window.suffix(hash.historyLength))
+        }
+
+        prefillChunkState.markDirty(startPosition: startPosition, tokenCount: t)
+        guard var cb = ctx.queue.makeCommandBuffer() else {
+            throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+        }
+        switch embeddingMatrix {
+        case .int4:
+            prefillEmbed.encode(
+                commandBuffer: cb,
+                table: embedding.buffer, tableOffset: Int(embedding.offset),
+                scales: embedding.buffer, scalesOffset: Int(embedding.scaleOffset),
+                biases: embedding.buffer, biasesOffset: Int(embedding.biasOffset),
+                tokens: scratch.tokens, out: scratch.embed,
+                t: UInt32(t), d: UInt32(hidden), outScale: 1)
+        case .int8:
+            preconditionFailure("Flash-Next embedding policy never emits INT8")
+        case let .bf16(buffer, offset):
+            for row in 0..<t {
+                guard let enc = cb.makeComputeCommandEncoder() else { continue }
+                enc.setComputePipelineState(embedBF16PSO)
+                enc.setBuffer(buffer, offset: offset, index: 0)
+                enc.setBuffer(scratch.embed, offset: row * hidden * half, index: 1)
+                var token = tokenBase[row]
+                var d = UInt32(hidden)
+                enc.setBytes(&token, length: 4, index: 2)
+                enc.setBytes(&d, length: 4, index: 3)
+                let width = min(Int(embedBF16PSO.maxTotalThreadsPerThreadgroup), 256)
+                enc.dispatchThreads(
+                    MTLSize(width: hidden, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(width, hidden),
+                                                   height: 1, depth: 1))
+                enc.endEncoding()
+            }
+        }
+        hc.encodeTileEmbedding(commandBuffer: cb, embedding: scratch.embed,
+                               hyper: scratch.hyper, rows: t)
+
+        for (layerIndex, layer) in layers.enumerated() {
+            try Task.checkCancellation()
+            if layerIndex == pleLayer, let ple, let weights = pleWeights,
+               let pleScratch = scratch.ple, let staging = scratch.pleStaging {
+                if let blit = cb.makeBlitCommandEncoder() {
+                    blit.copy(from: staging, sourceOffset: 0,
+                              to: pleScratch.embeds, destinationOffset: 0,
+                              size: t * hidden * half)
+                    blit.endEncoding()
+                }
+                ple.encode(commandBuffer: cb, weights: weights,
+                           scratch: pleScratch, hyper: scratch.hyper, rows: t)
+            }
+
+            hc.encodeMix(commandBuffer: cb, weights: layer.attnHC,
+                         scratch: scratch.hc, hyper: scratch.hyper,
+                         mixed: scratch.mixed, rows: t)
+            hc.encodeInjectGate(commandBuffer: cb, weights: layer.attnHC,
+                                scratch: scratch.hc, rows: t)
+            if layer.isLinear {
+                try encodeGDNPrefill(commandBuffer: cb, layer: layer,
+                                     index: layerIndex, scratch: scratch,
+                                     rows: t)
+            } else {
+                cb = try encodeAttentionPrefill(
+                    commandBuffer: cb, layer: layer, index: layerIndex,
+                    scratch: scratch, rows: t, startPosition: startPosition)
+            }
+            hc.encodeInjectAccumulate(commandBuffer: cb, scratch: scratch.hc,
+                                      hyper: scratch.hyper,
+                                      block: scratch.blockOut, rows: t)
+
+            hc.encodeMix(commandBuffer: cb, weights: layer.mlpHC,
+                         scratch: scratch.hc, hyper: scratch.hyper,
+                         mixed: scratch.mixed, rows: t)
+            hc.encodeInjectGate(commandBuffer: cb, weights: layer.mlpHC,
+                                scratch: scratch.hc, rows: t)
+            try encodeRouterPrefill(commandBuffer: cb, layer: layer,
+                                    scratch: scratch, rows: t)
+            try encodeSharedExpertPrefill(commandBuffer: cb, layer: layer,
+                                          scratch: scratch, rows: t)
+            try finish(cb)
+
+            let routeCount = t * topK
+            let idPointer = scratch.routeIDs.contents()
+                .bindMemory(to: UInt32.self, capacity: routeCount)
+            let weightPointer = scratch.routeWeights.contents()
+                .bindMemory(to: Float16.self, capacity: routeCount)
+            let routeIDs = (0..<routeCount).map {
+                min(idPointer[$0], UInt32(numExperts - 1))
+            }
+            let routeWeights = (0..<routeCount).map { weightPointer[$0] }
+            if layer.moe.expertsAreBF16 {
+                try await encodeBF16RoutedPrefill(
+                    layerIndex: layerIndex, layer: layer, scratch: scratch,
+                    routeIDs: routeIDs, rows: t)
+            } else {
+                try await encodeINT4RoutedPrefill(
+                    layerIndex: layerIndex, layer: layer, scratch: scratch,
+                    routeIDs: routeIDs, routeWeights: routeWeights, rows: t)
+            }
+
+            guard let tail = ctx.queue.makeCommandBuffer() else {
+                throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+            }
+            cb = tail
+            elementwise.encodeResidualAdd(commandBuffer: cb,
+                                           hidden: scratch.moeOut,
+                                           delta: scratch.sharedOut,
+                                           count: t * hidden)
+            hc.encodeInjectAccumulate(commandBuffer: cb, scratch: scratch.hc,
+                                      hyper: scratch.hyper,
+                                      block: scratch.moeOut, rows: t)
+        }
+
+        hc.encodeMix(commandBuffer: cb, weights: mixer, scratch: scratch.hc,
+                     hyper: scratch.hyper, mixed: scratch.mixed, rows: t)
+        if writeFinalHead {
+            matVec.encode(commandBuffer: cb, matrix: lmHead,
+                          x: scratch.mixed, xOffset: (t - 1) * hidden * half,
+                          y: logits, rows: cfg.vocabSize, cols: hidden)
+        }
+        try finish(cb)
+        position += t
+        prefillChunkState.markCommitted()
+    }
+
+    private func encodeGDNPrefill(commandBuffer cb: MTLCommandBuffer,
+                                  layer: LayerTensors, index: Int,
+                                  scratch: PrefillScratch, rows: Int) throws {
+        guard let weights = layer.gdn else { return }
+        guard let gdn, let state = gdnState else {
+            throw PrefillError.chunkedUnsupported(
+                "Flash-Next chunked GDN requires the production 32-lane geometry")
+        }
+        let la = cfg.linearAttention
+        matVec.encodeBatched(commandBuffer: cb, matrix: weights.qkv,
+                             x: scratch.mixed, y: scratch.gdnQKV,
+                             matrixRows: la.qkvDim, matrixColumns: hidden,
+                             tokens: rows)
+        matVec.encodeBatched(commandBuffer: cb, matrix: weights.z,
+                             x: scratch.mixed, y: scratch.gdnZ,
+                             matrixRows: la.valueDim, matrixColumns: hidden,
+                             tokens: rows)
+        matVec.encodeBatched(commandBuffer: cb, matrix: weights.a,
+                             x: scratch.mixed, y: scratch.gdnA,
+                             matrixRows: la.numVHeads, matrixColumns: hidden,
+                             tokens: rows)
+        matVec.encodeBatched(commandBuffer: cb, matrix: weights.b,
+                             x: scratch.mixed, y: scratch.gdnB,
+                             matrixRows: la.numVHeads, matrixColumns: hidden,
+                             tokens: rows)
+        let tail = state.convTailBuffer(layer: index)
+        gdn.encodeConvPrefill(commandBuffer: cb, tail: tail,
+                              qkvRows: scratch.gdnQKV,
+                              convWeight: weights.conv.buffer,
+                              convWeightOffset: Int(weights.conv.offset),
+                              out: scratch.gdnConvOut, rows: rows)
+        gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tail,
+                                 qkvRows: scratch.gdnQKV, rows: rows)
+        gdn.encodeQKNorm(commandBuffer: cb, convOut: scratch.gdnConvOut,
+                         rows: rows)
+        gdn.encodeDeltaStepPrefill(
+            commandBuffer: cb, convOut: scratch.gdnConvOut,
+            aProj: scratch.gdnA, bProj: scratch.gdnB,
+            aLog: weights.aLog.buffer, aLogOffset: Int(weights.aLog.offset),
+            dtBias: weights.dtBias.buffer, dtBiasOffset: Int(weights.dtBias.offset),
+            state: state.stateBuffer(layer: index), y: scratch.gdnY, rows: rows)
+        gdn.encodeGatedNorm(commandBuffer: cb, y: scratch.gdnY,
+                            z: scratch.gdnZ,
+                            weight: weights.norm.buffer,
+                            weightOffset: Int(weights.norm.offset),
+                            out: scratch.gdnOut, rows: rows)
+        matVec.encodeBatched(commandBuffer: cb, matrix: weights.out,
+                             x: scratch.gdnOut, y: scratch.blockOut,
+                             matrixRows: hidden, matrixColumns: la.valueDim,
+                             tokens: rows)
+    }
+
+    private func encodeAttentionPrefill(
+        commandBuffer cb: MTLCommandBuffer,
+        layer: LayerTensors, index: Int,
+        scratch: PrefillScratch, rows: Int, startPosition: Int
+    ) throws -> MTLCommandBuffer {
+        guard let indexWeights = layer.indexer,
+              let indexCache = indexerCaches[index],
+              let attentionWeights = layer.attention,
+              let kv = kvCaches[index] else {
+            throw FlashNextForwardRunnerError.invalidConfiguration(
+                "Flash-Next full-attention layer \(index) is incomplete")
+        }
+        indexer.encodeProjection(commandBuffer: cb,
+                                 weight: indexWeights.qkProj,
+                                 x: scratch.mixed, xOffset: 0,
+                                 hidden: hidden, scratch: scratch.indexer,
+                                 rows: rows)
+        indexer.encodePrepare(
+            commandBuffer: cb,
+            qNorm: indexWeights.qNorm.buffer,
+            qNormOffset: Int(indexWeights.qNorm.offset),
+            kNorm: indexWeights.kNorm.buffer,
+            kNormOffset: Int(indexWeights.kNorm.offset),
+            scratch: scratch.indexer, cache: indexCache,
+            rows: rows, startPosition: startPosition)
+        let allRowsContiguous = indexer.selectsAllVisible(
+            row: rows - 1, startPosition: startPosition)
+        if !allRowsContiguous {
+            indexer.encodeScores(commandBuffer: cb, scratch: scratch.indexer,
+                                 cache: indexCache, rows: rows,
+                                 startPosition: startPosition)
+            indexer.encodeSelection(commandBuffer: cb, scratch: scratch.indexer,
+                                    rows: rows, startPosition: startPosition)
+        }
+        attention.encodeProjectAndCache(
+            commandBuffer: cb, weights: attentionWeights,
+            scratch: scratch.attention, cache: kv,
+            x: scratch.mixed, xOffset: 0, rows: rows,
+            startPosition: startPosition)
+        var contiguousRows = 0
+        while contiguousRows < rows,
+              indexer.selectsAllVisible(row: contiguousRows,
+                                        startPosition: startPosition) {
+            contiguousRows += 1
+        }
+        if contiguousRows > 0 {
+            attention.encodeAttendContiguousPrefix(
+                commandBuffer: cb, scratch: scratch.attention, cache: kv,
+                rows: contiguousRows, startPosition: startPosition)
+        }
+        for row in contiguousRows..<rows {
+            let count = indexer.selectionCount(row: row,
+                                               startPosition: startPosition)
+            indexer.encodeGatherKV(
+                commandBuffer: cb,
+                kCache: kv.keys, kCacheOffset: 0,
+                vCache: kv.values, vCacheOffset: 0,
+                scratch: scratch.indexer, selectionRow: row,
+                kOut: scratch.attention.gatheredK, kOutOffset: 0,
+                vOut: scratch.attention.gatheredV, vOutOffset: 0,
+                kvDim: attention.geometry.kvDim, count: count)
+            attention.encodeAttendRow(commandBuffer: cb,
+                                      scratch: scratch.attention,
+                                      row: row, slot: 0,
+                                      selectedCount: count)
+        }
+        attention.encodeGateAndProject(
+            commandBuffer: cb, weights: attentionWeights,
+            scratch: scratch.attention, out: scratch.blockOut,
+            outOffset: 0, rows: rows)
+        return cb
+    }
+
+    private func encodeRouterPrefill(commandBuffer cb: MTLCommandBuffer,
+                                     layer: LayerTensors,
+                                     scratch: PrefillScratch, rows: Int) throws {
+        let half = MemoryLayout<Float16>.stride
+        switch layer.moe.router {
+        case let .int8(weights, weightsOffset, scales, scalesOffset,
+                       biases, biasesOffset):
+            prefillRouter.encodeGemma4Block(
+                commandBuffer: cb,
+                weights: weights, weightsOffset: weightsOffset,
+                scales: scales, scalesOffset: scalesOffset,
+                biases: biases, biasesOffset: biasesOffset,
+                hidden: scratch.mixed,
+                effectiveScale: prefillEffectiveScale,
+                perExpertScale: routerExpertScale,
+                outIndices: scratch.routeIDs,
+                outWeights: scratch.routeWeights,
+                queryCount: UInt32(rows), numExperts: UInt32(numExperts),
+                d: UInt32(hidden), topK: UInt32(topK),
+                hiddenStrideElements: UInt32(hidden))
+        case .int4, .bf16:
+            matVec.encodeBatched(commandBuffer: cb, matrix: layer.moe.router,
+                                 x: scratch.mixed, y: scratch.routerLogits,
+                                 matrixRows: numExperts, matrixColumns: hidden,
+                                 tokens: rows, outputFloat32: true)
+            for row in 0..<rows {
+                moeBF16.encodeRouterSelect(
+                    commandBuffer: cb,
+                    logits: scratch.routerLogits,
+                    logitsOffset: row * numExperts * MemoryLayout<Float>.stride,
+                    perExpertScale: routerExpertScale,
+                    outIndices: scratch.routeIDs,
+                    outIndicesOffset: row * topK * MemoryLayout<UInt32>.stride,
+                    outWeights: scratch.routeWeights,
+                    outWeightsOffset: row * topK * half,
+                    numExperts: UInt32(numExperts))
+            }
+        }
+    }
+
+    private func encodeSharedExpertPrefill(commandBuffer cb: MTLCommandBuffer,
+                                           layer: LayerTensors,
+                                           scratch: PrefillScratch,
+                                           rows: Int) throws {
+        func projection(_ matrix: FlashNextWeightMatrix,
+                        rows: Int, columns: Int) -> SharedExpertProjection? {
+            guard case let .int4(weights, weightsOffset, scales, scalesOffset,
+                                 biases, biasesOffset) = matrix else { return nil }
+            return SharedExpertProjection(
+                weights: weights, scales: scales, biases: biases,
+                weightsOffset: weightsOffset, scalesOffset: scalesOffset,
+                biasesOffset: biasesOffset,
+                rows: UInt32(rows), cols: UInt32(columns))
+        }
+        if let gate = projection(layer.moe.sharedGateProj,
+                                 rows: sharedIntermediate, columns: hidden),
+           let up = projection(layer.moe.sharedUp,
+                               rows: sharedIntermediate, columns: hidden),
+           let down = projection(layer.moe.sharedDown,
+                                 rows: hidden, columns: sharedIntermediate) {
+            _ = try prefillSharedExpert.encodeBlock(
+                commandBuffer: cb, x: scratch.mixed, y: scratch.sharedOut,
+                gate: gate, up: up, down: down,
+                scratchGate: scratch.sharedGate,
+                scratchUp: scratch.sharedUp,
+                scratchAct: scratch.sharedAct,
+                queryCount: rows, d: hidden,
+                intermediate: sharedIntermediate,
+                xStrideElements: hidden, yStrideElements: hidden)
+            if case let .int8(weights, weightsOffset, scales, scalesOffset,
+                              biases, biasesOffset) = layer.moe.sharedGate {
+                let scalar = SharedExpertProjection(
+                    weights: weights, scales: scales, biases: biases,
+                    weightsOffset: weightsOffset, scalesOffset: scalesOffset,
+                    biasesOffset: biasesOffset, rows: 1, cols: UInt32(hidden))
+                try prefillSharedExpert.encodeQwenScalarGate(
+                    commandBuffer: cb, x: scratch.mixed, gate: scalar,
+                    y: scratch.sharedOut, queryCount: rows, d: hidden,
+                    xStrideElements: hidden, yStrideElements: hidden)
+            } else {
+                matVec.encodeBatched(commandBuffer: cb,
+                                     matrix: layer.moe.sharedGate,
+                                     x: scratch.mixed, y: scratch.sharedScalar,
+                                     matrixRows: 1, matrixColumns: hidden,
+                                     tokens: rows, outputFloat32: true)
+                for row in 0..<rows {
+                    moeBF16.encodeSharedGateScale(
+                        commandBuffer: cb, out: scratch.sharedOut,
+                        outOffset: row * hidden * MemoryLayout<Float16>.stride,
+                        scalar: scratch.sharedScalar,
+                        scalarOffset: row * MemoryLayout<Float>.stride,
+                        count: hidden)
+                }
+            }
+            return
+        }
+
+        matVec.encodeBatched(commandBuffer: cb,
+                             matrix: layer.moe.sharedGateProj,
+                             x: scratch.mixed, y: scratch.sharedGate,
+                             matrixRows: sharedIntermediate,
+                             matrixColumns: hidden, tokens: rows)
+        matVec.encodeBatched(commandBuffer: cb, matrix: layer.moe.sharedUp,
+                             x: scratch.mixed, y: scratch.sharedUp,
+                             matrixRows: sharedIntermediate,
+                             matrixColumns: hidden, tokens: rows)
+        if let enc = cb.makeComputeCommandEncoder() {
+            enc.setComputePipelineState(siluMulPSO)
+            enc.setBuffer(scratch.sharedGate, offset: 0, index: 0)
+            enc.setBuffer(scratch.sharedUp, offset: 0, index: 1)
+            enc.setBuffer(scratch.sharedAct, offset: 0, index: 2)
+            var count = UInt32(rows * sharedIntermediate)
+            enc.setBytes(&count, length: 4, index: 3)
+            enc.dispatchThreads(
+                MTLSize(width: Int(count), height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(
+                    width: min(Int(siluMulPSO.maxTotalThreadsPerThreadgroup), 256),
+                    height: 1, depth: 1))
+            enc.endEncoding()
+        }
+        matVec.encodeBatched(commandBuffer: cb, matrix: layer.moe.sharedDown,
+                             x: scratch.sharedAct, y: scratch.sharedOut,
+                             matrixRows: hidden,
+                             matrixColumns: sharedIntermediate, tokens: rows)
+        matVec.encodeBatched(commandBuffer: cb, matrix: layer.moe.sharedGate,
+                             x: scratch.mixed, y: scratch.sharedScalar,
+                             matrixRows: 1, matrixColumns: hidden,
+                             tokens: rows, outputFloat32: true)
+        for row in 0..<rows {
+            moeBF16.encodeSharedGateScale(
+                commandBuffer: cb, out: scratch.sharedOut,
+                outOffset: row * hidden * MemoryLayout<Float16>.stride,
+                scalar: scratch.sharedScalar,
+                scalarOffset: row * MemoryLayout<Float>.stride,
+                count: hidden)
+        }
+    }
+
+    private func encodeINT4RoutedPrefill(
+        layerIndex: Int, layer: LayerTensors,
+        scratch: PrefillScratch,
+        routeIDs: [UInt32], routeWeights: [Float16], rows: Int
+    ) async throws {
+        let pairs = PrefillRouter.makeTokenExpertPairs(
+            indices: routeIDs, weights: routeWeights,
+            queryCount: rows, topK: topK)
+        let cacheSlotCount = model.routedExpertCacheSlotCount(layer: layerIndex)
+        let slotCount = cacheSlotCount ?? 16
+        guard slotCount >= topK else {
+            throw PrefillError.chunkedUnsupported(
+                "Flash-Next top-\(topK) routing needs at least \(topK) expert slots")
+        }
+        let tileExperts = min(16, slotCount)
+        let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs, queryCount: rows, topK: topK, numExperts: numExperts,
+            tileExpertCount: tileExperts,
+            expertSortKeys: model.routedExpertPhysicalOffsets(layer: layerIndex))
+        let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
+            device: ctx.device, routes: routes)
+
+        // A resident backend cannot overwrite expert slots because it has no
+        // slot cache: every view points at its own immutable mapped region.
+        // Encode all expert tiles into one command buffer so a high-memory Mac
+        // pays one GPU drain per layer rather than one per 16 experts.
+        if cacheSlotCount == nil, hidden >= 1_024,
+           scratch.chunkTokens >= 1_024, prefillMPPGroupedMoE.isAvailable,
+           let resident = try model.routedResidentSlabBinding(layer: layerIndex) {
+            guard resident.slotStride <= Int(UInt32.max),
+                  let cb = ctx.queue.makeCommandBuffer() else {
+                throw FlashNextForwardRunnerError.commandFailed(
+                    "invalid resident expert slab binding")
+            }
+            let params = PrefillGroupedRoutedMoEStreamedParams(
+                groupStart: 0, groupCount: UInt32(routes.groups.count),
+                d: UInt32(hidden), routedIntermediate: UInt32(moeIntermediate),
+                topK: UInt32(topK), hiddenStrideElements: UInt32(hidden),
+                offsets: layer.moe.expertOffsets)
+            let encoded = prefillMPPGroupedMoE.encodeResident(
+                commandBuffer: cb, hidden: scratch.mixed,
+                sortedPairs: metadata.sortedPairs, groups: metadata.groups,
+                activation: scratch.routedMatrixAct,
+                routePartials: scratch.routePartials,
+                slab: resident.slab, params: params,
+                residentExpertStride: UInt32(resident.slotStride),
+                maxPairsPerGroup: routes.maxPairsPerExpert)
+            precondition(encoded, "resident grouped TensorOps encoding failed")
+            try finish(cb)
+        } else if cacheSlotCount == nil {
+            guard let cb = ctx.queue.makeCommandBuffer() else {
+                throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+            }
+            var retainedFetches: [PrefillStreamedTileFetchResult] = []
+            var retainedArguments: [MTLBuffer] = []
+            retainedFetches.reserveCapacity(routes.tiles.count)
+            retainedArguments.reserveCapacity(routes.tiles.count)
+            for (tileIndex, tile) in routes.tiles.enumerated() {
+                let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
+                    model: model, layer: layerIndex, tileIndex: tileIndex,
+                    routes: routes)
+                let argument = try encodeINT4RoutedPrefillTile(
+                    commandBuffer: cb, tile: tile, routes: routes,
+                    binding: fetch.binding, offsets: layer.moe.expertOffsets,
+                    metadata: metadata, scratch: scratch)
+                retainedFetches.append(fetch)
+                retainedArguments.append(argument)
+            }
+            try withExtendedLifetime((retainedFetches, retainedArguments)) {
+                try finish(cb)
+            }
+        } else {
+            for (tileIndex, tile) in routes.tiles.enumerated() {
+                let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
+                    model: model, layer: layerIndex, tileIndex: tileIndex,
+                    routes: routes)
+                guard let cb = ctx.queue.makeCommandBuffer() else {
+                    throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+                }
+                let argument = try encodeINT4RoutedPrefillTile(
+                    commandBuffer: cb, tile: tile, routes: routes,
+                    binding: fetch.binding, offsets: layer.moe.expertOffsets,
+                    metadata: metadata, scratch: scratch)
+                try withExtendedLifetime((fetch, argument)) { try finish(cb) }
+            }
+        }
+        guard let reduce = ctx.queue.makeCommandBuffer() else {
+            throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+        }
+        prefillMoE.encodeReduceTokenMajor(
+            commandBuffer: reduce, routePartials: scratch.routePartials,
+            routeWeights: scratch.routeWeights, h2: scratch.moeOut,
+            queryCount: UInt32(rows), topK: UInt32(topK), d: UInt32(hidden))
+        try finish(reduce)
+    }
+
+    /// One expert tile through the 8-row grouped TensorOps kernel when the
+    /// production geometry supports it, with the original exact GEMV path as
+    /// the portable and synthetic-fixture fallback.
+    private func encodeINT4RoutedPrefillTile(
+        commandBuffer cb: MTLCommandBuffer,
+        tile: PrefillMoETile,
+        routes: PrefillMoEGroupedRoutes,
+        binding: PrefillStreamedTileBinding,
+        offsets: MoEExpertOffsets,
+        metadata: PrefillGroupedRoutedMoEStreamedMetadataBuffers,
+        scratch: PrefillScratch
+    ) throws -> MTLBuffer {
+        let params = PrefillGroupedRoutedMoEStreamedParams(
+            pairStart: tile.pairStart, pairCount: tile.pairCount,
+            d: UInt32(hidden), routedIntermediate: UInt32(moeIntermediate),
+            topK: UInt32(topK), hiddenStrideElements: UInt32(hidden),
+            binding: binding, offsets: offsets)
+        if hidden >= 1_024, scratch.chunkTokens >= 1_024,
+           prefillMPPGroupedMoE.isAvailable {
+            let argument = try prefillMPPGroupedMoE.makeArgumentBuffer(
+                device: ctx.device, binding: binding)
+            let first = Int(tile.groupStart)
+            let end = first + Int(tile.groupCount)
+            let maxPairs = routes.groups[first..<end]
+                .map { Int($0.pairCount) }.max() ?? 0
+            var mppParams = params
+            mppParams.pairStart = tile.groupStart
+            mppParams.pairCount = tile.groupCount
+            if prefillMPPGroupedMoE.encode(
+                commandBuffer: cb, hidden: scratch.mixed,
+                sortedPairs: metadata.sortedPairs, groups: metadata.groups,
+                activation: scratch.routedMatrixAct,
+                routePartials: scratch.routePartials,
+                argumentBuffer: argument, binding: binding,
+                params: mppParams, maxPairsPerGroup: maxPairs) {
+                return argument.buffer
+            }
+        }
+
+        let argument = try prefillGroupedMoE.makeStreamedArgumentBuffer(
+            device: ctx.device, binding: binding)
+        _ = prefillGroupedMoE.encodeStreamedBatched(
+            commandBuffer: cb, hidden: scratch.mixed,
+            sortedPairs: metadata.sortedPairs,
+            routePartials: scratch.routePartials,
+            gateUpActScratch: scratch.routedGateUpAct,
+            downScratch: scratch.routedDown,
+            argumentBuffer: argument, binding: binding,
+            params: params, pairMicrobatchRows: 256)
+        return argument.buffer
+    }
+
+    /// Dense-BF16 experts exist only in the tiny parity fixture. Keep them on
+    /// the same layer-major chunk path, while the shipped INT4 checkpoint takes
+    /// the expert-major grouped implementation above.
+    private func encodeBF16RoutedPrefill(
+        layerIndex: Int, layer: LayerTensors,
+        scratch: PrefillScratch, routeIDs: [UInt32], rows: Int
+    ) async throws {
+        let half = MemoryLayout<Float16>.stride
+        for row in 0..<rows {
+            let experts = (0..<topK).map {
+                Int(routeIDs[row * topK + $0])
+            }
+            let blobs = try await fetchExperts(layer: layerIndex, experts: experts)
+            guard let cb = ctx.queue.makeCommandBuffer() else {
+                throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+            }
+            let arg = moeBF16.makeRoutedArgumentBuffer(routedBlobs: blobs)
+            moeBF16.encodePhase1(
+                commandBuffer: cb, routedArgBuffer: arg, routedBlobs: blobs,
+                routedOffsets: layer.moe.expertOffsets,
+                x: scratch.mixed, xOffset: row * hidden * half,
+                acts: moeActs, d: UInt32(hidden), f: UInt32(moeIntermediate),
+                topK: UInt32(topK))
+            moeBF16.encodePhase2(
+                commandBuffer: cb, routedArgBuffer: arg, routedBlobs: blobs,
+                routedOffsets: layer.moe.expertOffsets, acts: moeActs,
+                routingWeights: scratch.routeWeights,
+                routingWeightsOffset: row * topK * half,
+                residual: zeroResidual,
+                y: scratch.moeOut, yOffset: row * hidden * half,
+                d: UInt32(hidden), f: UInt32(moeIntermediate),
+                topK: UInt32(topK))
+            try withExtendedLifetime((arg, blobs)) { try finish(cb) }
+        }
     }
 
     // MARK: - The forward pass
@@ -840,46 +1711,77 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                   kNormOffset: Int(idx.kNorm.offset),
                                   scratch: indexerScratch, cache: cache,
                                   rows: 1, startPosition: p)
-            indexer.encodeScores(commandBuffer: cb, scratch: indexerScratch,
-                                 cache: cache, rows: 1, startPosition: p)
-            try finish(cb)
-
-            // Selection is CPU work by design: exact `torch.topk` ordering over
-            // a few thousand FP32 scores, read back while the attention it gates
-            // is still much larger.
-            let tTopKStart = Self.phaseClock()
-            let selected = indexer.selections(scratch: indexerScratch, rows: 1,
-                                              startPosition: p)[0]
-            if Self.phaseInstrumentationEnabled {
-                totalIndexerTopKNanos &+= Self.phaseClock() - tTopKStart
-            }
-            if capture != nil {
-                capture?.integers[key + "indexer_selected"] = [selected]
-                capture?.integers[key + "indexer_visible"] = [Array(0...p)]
-            }
             guard let attnWeights = layer.attention, let kv = kvCaches[L] else {
                 throw FlashNextForwardRunnerError.invalidConfiguration(
                     "layer \(L) is a full-attention layer with no projections")
             }
-            guard let next = ctx.queue.makeCommandBuffer() else {
-                throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+            let contiguous = indexer.selectsAllVisible(row: 0,
+                                                       startPosition: p)
+            let count: Int
+            if capture != nil {
+                // Capture keeps the CPU oracle as an independent reference for
+                // the production device selector.
+                let tTopKStart = Self.phaseClock()
+                let selected: [Int]
+                if contiguous {
+                    selected = Array(0...p)
+                } else {
+                    indexer.encodeScores(commandBuffer: cb,
+                                         scratch: indexerScratch,
+                                         cache: cache, rows: 1,
+                                         startPosition: p)
+                    try finish(cb)
+                    selected = indexer.selections(
+                        scratch: indexerScratch, rows: 1, startPosition: p)[0]
+                }
+                if Self.phaseInstrumentationEnabled {
+                    totalIndexerTopKNanos &+= Self.phaseClock() - tTopKStart
+                }
+                capture?.integers[key + "indexer_selected"] = [selected]
+                capture?.integers[key + "indexer_visible"] = [Array(0...p)]
+                count = selected.count
+                if !contiguous {
+                    _ = indexer.writeSelection(selected, row: 0,
+                                               into: indexerScratch)
+                    guard let next = ctx.queue.makeCommandBuffer() else {
+                        throw FlashNextForwardRunnerError.commandFailed(
+                            "no command buffer")
+                    }
+                    cb = next
+                }
+            } else {
+                if !contiguous {
+                    indexer.encodeScores(commandBuffer: cb,
+                                         scratch: indexerScratch,
+                                         cache: cache, rows: 1,
+                                         startPosition: p)
+                    indexer.encodeSelection(commandBuffer: cb,
+                                            scratch: indexerScratch,
+                                            rows: 1, startPosition: p)
+                }
+                count = indexer.selectionCount(row: 0, startPosition: p)
             }
-            cb = next
             attention.encodeProjectAndCache(
                 commandBuffer: cb, weights: attnWeights, scratch: attnScratch,
                 cache: kv, x: mixed, xOffset: 0, rows: 1, startPosition: p)
-            let count = indexer.writeSelection(selected, row: 0,
-                                               into: indexerScratch)
-            indexer.encodeGatherKV(
-                commandBuffer: cb,
-                kCache: kv.keys, kCacheOffset: 0,
-                vCache: kv.values, vCacheOffset: 0,
-                scratch: indexerScratch, selectionRow: 0,
-                kOut: attnScratch.gatheredK, kOutOffset: 0,
-                vOut: attnScratch.gatheredV, vOutOffset: 0,
-                kvDim: attention.geometry.kvDim, count: count)
-            attention.encodeAttendRow(commandBuffer: cb, scratch: attnScratch,
-                                      row: 0, slot: 0, selectedCount: count)
+            if contiguous {
+                attention.encodeAttendContiguousRow(
+                    commandBuffer: cb, scratch: attnScratch, cache: kv,
+                    row: 0, visibleCount: count)
+            } else {
+                indexer.encodeGatherKV(
+                    commandBuffer: cb,
+                    kCache: kv.keys, kCacheOffset: 0,
+                    vCache: kv.values, vCacheOffset: 0,
+                    scratch: indexerScratch, selectionRow: 0,
+                    kOut: attnScratch.gatheredK, kOutOffset: 0,
+                    vOut: attnScratch.gatheredV, vOutOffset: 0,
+                    kvDim: attention.geometry.kvDim, count: count)
+                attention.encodeAttendRow(commandBuffer: cb,
+                                          scratch: attnScratch,
+                                          row: 0, slot: 0,
+                                          selectedCount: count)
+            }
             attention.encodeGateAndProject(commandBuffer: cb, weights: attnWeights,
                                            scratch: attnScratch,
                                            out: blockOut, outOffset: 0, rows: 1)
@@ -907,6 +1809,40 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         // routing, so it rides in this command buffer rather than waiting for
         // the expert blobs.
         encodeSharedExpert(commandBuffer: cb, layer: layer)
+
+        // In resident mode the complete layer is already a stable Metal slab.
+        // Keep router ids on the GPU and address the selected expert records
+        // there directly. Capture deliberately retains the reference path,
+        // because its contract includes the selected ids and weights.
+        if capture == nil, let moeInt4,
+           let resident = try model.routedResidentSlabBinding(layer: L) {
+            moeInt4.encodeResidentSlabRouted(
+                commandBuffer: cb,
+                slab: resident.slab,
+                table: resident.table,
+                slotStride: resident.slotStride,
+                indices: routerIndices,
+                slotOffsets: residentSlotOffsets,
+                allHit: residentAllHit,
+                routedOffsets: layer.moe.expertOffsets,
+                x: mixed,
+                acts: moeActs,
+                routingWeights: routerWeights,
+                residual: zeroResidual,
+                y: moeOut,
+                d: UInt32(hidden),
+                f: UInt32(moeIntermediate),
+                numExperts: UInt32(numExperts),
+                topK: UInt32(topK))
+            elementwise.encodeResidualAdd(commandBuffer: cb, hidden: moeOut,
+                                           delta: sharedOut, count: hidden)
+            hc.encodeInjectAccumulate(commandBuffer: cb, scratch: hcScratch,
+                                      hyper: hyper, block: moeOut, rows: 1)
+            trackGpuInterval(cb)
+            cb.commit()
+            pendingMoECommand = cb
+            return
+        }
         try finish(cb)
 
         let indexPointer = routerIndices.contents()

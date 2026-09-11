@@ -104,6 +104,70 @@ private let mppTensorOpsAvailable: Bool = {
         return output
     }
 
+    private static func cpuReferenceF32(_ inputs: Inputs,
+                                        m: Int, n: Int, k: Int) -> [Float] {
+        let groups = k / Quantization.groupSize
+        let rowBytes = k / 2
+        var output = [Float](repeating: 0, count: m * n)
+        for token in 0..<m {
+            for row in 0..<n {
+                var accumulator: Float = 0
+                for group in 0..<groups {
+                    let scale = Quantization.bf16ToFloat(
+                        inputs.scales[row * groups + group])
+                    let bias = Quantization.bf16ToFloat(
+                        inputs.biases[row * groups + group])
+                    for localK in 0..<Quantization.groupSize {
+                        let column = group * Quantization.groupSize + localK
+                        let byte = inputs.packed[row * rowBytes + column / 2]
+                        let q = column.isMultiple(of: 2) ? byte & 0x0f : byte >> 4
+                        accumulator.addProduct(
+                            Float(q) * scale + bias,
+                            Float(inputs.x[token * k + column]))
+                    }
+                }
+                output[token * n + row] = accumulator
+            }
+        }
+        return output
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "requires Apple10 TensorOps and MSL 4"))
+    func float32OutputRetainsTheCooperativeAccumulator() throws {
+        let m = 37, n = 70, k = 128
+        let inputs = Self.makeInputs(m: m, n: n, k: k)
+        let context = try MetalContext()
+        let candidate = MPPPrefillInt4QMM(context: context)
+        let weights = try #require(Self.makeBuffer(
+            device: context.device, values: inputs.packed))
+        let scales = try #require(Self.makeBuffer(
+            device: context.device, values: inputs.scales))
+        let biases = try #require(Self.makeBuffer(
+            device: context.device, values: inputs.biases))
+        let input = try #require(Fp16Buffer.make(context.device,
+                                                 halves: inputs.x))
+        let output = try #require(context.device.makeBuffer(
+            length: m * n * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
+        let cb = try #require(context.queue.makeCommandBuffer())
+        let path = candidate.encodeFloat32(
+            commandBuffer: cb, weights: weights, scales: scales,
+            biases: biases, x: input, y: output, m: m, n: n, k: k)
+        cb.commit()
+        cb.waitUntilCompleted()
+        try #require(cb.error == nil)
+        #expect(path == .affineThreadgroupF32)
+        let pointer = output.contents().bindMemory(to: Float.self,
+                                                   capacity: m * n)
+        let actual = Array(UnsafeBufferPointer(start: pointer, count: m * n))
+        let reference = Self.cpuReferenceF32(inputs, m: m, n: n, k: k)
+        let maxAbs = RelError.maxAbsDiff(actual, reference)
+        let relative = RelError.compute(actual: actual, reference: reference)
+        #expect(maxAbs <= 0.03, "maxAbs=\(maxAbs) rel=\(relative)")
+        #expect(relative <= 1e-3, "maxAbs=\(maxAbs) rel=\(relative)")
+    }
+
     @discardableResult
     private static func runShape(context: MetalContext,
                                  candidate: MPPPrefillInt4QMM,

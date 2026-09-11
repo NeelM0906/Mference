@@ -15,6 +15,15 @@ checkpoint: **6.41 tok/s decode, 40.5 tok/s prefill, 18.6 GB peak** (it
 warns it is near the host's working-set ceiling; Mference's text-only
 install is ~3.5 GB leaner because the vision tower is excluded at repack).
 
+That is a valid same-checkpoint, same-host win for the measured 2026-08-14
+stack; it is not a timeless claim that Mference beats every MLX-derived
+runtime. A later public Rapid-MLX M3 Ultra context curve reports 30.71 tok/s
+for its ordinary short-context path and 38.66–44.69 tok/s after its automatic
+adaptive-MTP work. Mference's separately measured M3 Ultra plain path is
+38.4–39.4 tok/s, but the prompt protocol and GPU configuration differ, so the
+rows establish competitive range rather than a direct winner. Re-run a matched
+local A/B before making a current cross-engine headline.
+
 ## Decode
 
 | Configuration | tok/s | vs mlx-vlm |

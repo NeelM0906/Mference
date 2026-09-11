@@ -10,9 +10,9 @@ public enum PrefillChunkChoice: Equatable, Sendable {
 }
 
 /// Routed-expert cache selection. Auto keeps the 16-slot memory-first default
-/// for every family except Qwen 3.6, whose 256 experts per layer measurably
-/// benefit from larger rungs: 96 slots on hosts with at least 24 GiB,
-/// 32 with at least 16 GiB.
+/// except where a larger rung has been measured: Qwen 3.6 uses 96 slots on
+/// hosts with at least 24 GiB and 32 with at least 16 GiB. Flash-Next maps its
+/// routed pool on hosts with at least 192 GiB when 32 GiB of headroom remains.
 public enum ExpertCacheSlotChoice: Equatable, Sendable {
     case fixed(Int)
     case resident
@@ -159,10 +159,11 @@ extension Args {
                                 Routed-expert cache slots per layer: 8, 16,
                                 24, 32, 64, 96, 128, resident, or auto.
                                 resident maps every layer file once and skips
-                                the slot cache entirely. auto always uses the
-                                slot cache: Qwen gets 96 slots on hosts with
-                                at least 24 GiB, 32 with at least 16 GiB,
-                                else 16; other families get 16.
+                                the slot cache entirely. auto maps Flash-Next's
+                                routed pool on 192 GiB+ hosts when 32 GiB of
+                                headroom remains; Qwen 3.6 gets 96 slots on
+                                hosts with at least 24 GiB, 32 with at least
+                                16 GiB, else 16; other cases get 16.
                                 More slots raise the hit rate but use more RAM.
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during

@@ -171,17 +171,21 @@ final class FlashNextMoE {
     /// the logit, which is why no 512-wide prob vector is ever materialized.
     func encodeRouterSelect(commandBuffer: MTLCommandBuffer,
                             logits: MTLBuffer,
+                            logitsOffset: Int = 0,
                             perExpertScale: MTLBuffer,
+                            perExpertScaleOffset: Int = 0,
                             outIndices: MTLBuffer,
+                            outIndicesOffset: Int = 0,
                             outWeights: MTLBuffer,
+                            outWeightsOffset: Int = 0,
                             numExperts: UInt32) {
         var expertCount = numExperts
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(routerSelectPSO)
-        enc.setBuffer(logits, offset: 0, index: 0)
-        enc.setBuffer(perExpertScale, offset: 0, index: 1)
-        enc.setBuffer(outIndices, offset: 0, index: 2)
-        enc.setBuffer(outWeights, offset: 0, index: 3)
+        enc.setBuffer(logits, offset: logitsOffset, index: 0)
+        enc.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
+        enc.setBuffer(outIndices, offset: outIndicesOffset, index: 2)
+        enc.setBuffer(outWeights, offset: outWeightsOffset, index: 3)
         enc.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 32, height: 1,

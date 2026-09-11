@@ -305,8 +305,6 @@ validate without being loadable.
       against the shard header
 - [x] Sizing model closed against the shard header (params exact) and the
       control's index `total_size` (bytes exact)
-- [ ] **Contract** — `ModelFamily.minicpm5`, `ArchConfig.miniCPM5_2B`, `qkNorm`
-      axis, registry, switches, FAMILY_CONTRACT rows; capability gate up
 - [x] **Contract** — `ModelFamily.minicpm5`, `ArchConfig.miniCPM5_2B`, `qkNorm`
       axis, registry, 13 switch sites, FAMILY_CONTRACT rows; capability gate up
       (`familiesWithoutRunner["minicpm5"] = ["qkNormFreeAttention"]`)

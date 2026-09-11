@@ -777,6 +777,53 @@ kernel void moe_phase2_down_reduce_k8_slotmap(
     }
 }
 
+// Resident expert slabs can address every routed expert directly, so the
+// selected width is the model's actual top-k rather than the historical
+// eight-slot cache width. This generic reduction supports every production
+// width admitted by `MoE` (6, 8, and Flash-Next's 10) while preserving the
+// same rank-order accumulation as the argument-buffer kernels.
+kernel void moe_phase2_down_reduce_slotmap_wide(
+    device const uint8_t* slab [[buffer(0)]],
+    device const uint* slot_offsets [[buffer(1)]],
+    device const uint* all_hit [[buffer(2)]],
+    constant ExpertOffsets& routed_offsets [[buffer(3)]],
+    device const half* acts [[buffer(4)]],
+    device const half* routing_w [[buffer(5)]],
+    device const half* residual [[buffer(6)]],
+    device half* y [[buffer(7)]],
+    constant uint& D [[buffer(8)]],
+    constant uint& F [[buffer(9)]],
+    constant uint& top_k [[buffer(10)]],
+    uint d [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    if (all_hit[0] == 0u) return;
+    threadgroup float partial[kRoutedBlobSlots];
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    const uint K = moe_fc_top_k(top_k);
+    if (d >= DD || sg_idx >= K) return;
+
+    device const uint8_t* base = slab + slot_offsets[sg_idx];
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* dW = base + re.down_W_off;
+    device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
+    device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
+    device const half* act_slot = acts + sg_idx * FF;
+
+    const float value = moe_int4_gemv_row_simd_dev_vec(
+        dW, dS, dB, act_slot, d, FF, lane);
+    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg_idx == 0 && lane == 0) {
+        float acc = float(residual[d]);
+        for (uint rank = 0; rank < K; ++rank) acc += partial[rank];
+        y[d] = half(acc);
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void residual_add_fp16_guarded(
     device half*       hidden [[buffer(0)]],

@@ -110,6 +110,9 @@ enum FlashNextWeightMatrix {
 final class FlashNextMatVec {
 
     private let int4: DequantInt4GEMV
+    private let int4MultiX: DequantInt4GEMVMultiX
+    private let prefillQMM: PrefillInt4QMM
+    private let prefillMPP: MPPPrefillInt4QMM
     private let bf16PSO: MTLComputePipelineState
     private let bf16F32PSO: MTLComputePipelineState
     private let int8PSO: MTLComputePipelineState
@@ -133,6 +136,9 @@ final class FlashNextMatVec {
     /// install want.
     init(context: MetalContext, int4: DequantInt4GEMV, int8Columns: Int = 0) throws {
         self.int4 = int4
+        self.int4MultiX = try DequantInt4GEMVMultiX(context: context)
+        self.prefillQMM = try PrefillInt4QMM(context: context)
+        self.prefillMPP = MPPPrefillInt4QMM(context: context)
         self.int8Columns = int8Columns
         self.bf16PSO = try context.pipeline("flashnext_gemv_bf16",
                                             constants: [],
@@ -206,6 +212,105 @@ final class FlashNextMatVec {
                                                height: 1, depth: 1))
             enc.endEncoding()
         }
+    }
+
+    /// `Y[T, M] = X[T, N] * W[M, N]^T` for a contiguous prefill block.
+    ///
+    /// Production INT4 projections use TensorOps for a tile-tall block and the
+    /// decode-identical multi-X kernel otherwise. FP32 outputs deliberately use
+    /// multi-X in groups of eight: the QSA indexer and hyper-connection gates
+    /// consume pre-activations whose exact FP32 reduction order is part of the
+    /// model's discrete decisions. Dense BF16 is retained for the parity toy,
+    /// where repeated rows are a reference-only compatibility path rather than
+    /// a production checkpoint path.
+    func encodeBatched(commandBuffer: MTLCommandBuffer,
+                       matrix: FlashNextWeightMatrix,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       y: MTLBuffer, yOffset: Int = 0,
+                       matrixRows: Int, matrixColumns: Int,
+                       tokens: Int,
+                       outputFloat32: Bool = false) {
+        precondition(tokens > 0)
+        let half = MemoryLayout<Float16>.stride
+        let outStride = outputFloat32
+            ? MemoryLayout<Float>.stride : MemoryLayout<Float16>.stride
+        switch matrix {
+        case let .int4(weights, weightsOffset, scales, scalesOffset,
+                       biases, biasesOffset):
+            if !outputFloat32, tokens >= MPPPrefillInt4QMM.tileN,
+               prefillMPP.isAvailable {
+                let path = prefillMPP.encode(
+                    commandBuffer: commandBuffer,
+                    weights: weights, weightsOffset: weightsOffset,
+                    scales: scales, scalesOffset: scalesOffset,
+                    biases: biases, biasesOffset: biasesOffset,
+                    x: x, xOffset: xOffset,
+                    y: y, yOffset: yOffset,
+                    m: tokens, n: matrixRows, k: matrixColumns)
+                if path == .affineThreadgroupF16 { return }
+            }
+            if !outputFloat32, tokens >= 32 {
+                prefillQMM.encode(commandBuffer: commandBuffer,
+                                  weights: weights, weightsOffset: weightsOffset,
+                                  scales: scales, scalesOffset: scalesOffset,
+                                  biases: biases, biasesOffset: biasesOffset,
+                                  x: x, xOffset: xOffset,
+                                  y: y, yOffset: yOffset,
+                                  t: tokens, n: matrixRows, k: matrixColumns)
+                return
+            }
+            var row = 0
+            while row < tokens {
+                let count = min(DequantInt4GEMVMultiX.maxTokens, tokens - row)
+                int4MultiX.encode(
+                    commandBuffer: commandBuffer,
+                    weights: weights, weightsOffset: weightsOffset,
+                    scales: scales, scalesOffset: scalesOffset,
+                    biases: biases, biasesOffset: biasesOffset,
+                    x: x, xOffset: xOffset + row * matrixColumns * half,
+                    y: y, yOffset: yOffset + row * matrixRows * outStride,
+                    m: matrixRows, n: matrixColumns, tokens: count,
+                    outputFloat32: outputFloat32)
+                row += count
+            }
+        case .int8, .bf16:
+            for row in 0..<tokens {
+                encode(commandBuffer: commandBuffer, matrix: matrix,
+                       x: x, xOffset: xOffset + row * matrixColumns * half,
+                       y: y, yOffset: yOffset + row * matrixRows * outStride,
+                       rows: matrixRows, cols: matrixColumns,
+                       outputFloat32: outputFloat32)
+            }
+        }
+    }
+
+    /// Batched INT4 projection that retains the cooperative accumulator in FP32.
+    /// Continuous hyper-connection gates use it directly. The Flash-Next
+    /// indexer also opts in before its deterministic selector; routed-MoE
+    /// top-k keeps the exact multi-X implementation above.
+    func encodeBatchedContinuousF32(commandBuffer: MTLCommandBuffer,
+                                    matrix: FlashNextWeightMatrix,
+                                    x: MTLBuffer, xOffset: Int = 0,
+                                    y: MTLBuffer, yOffset: Int = 0,
+                                    matrixRows: Int, matrixColumns: Int,
+                                    tokens: Int) {
+        if case let .int4(weights, weightsOffset, scales, scalesOffset,
+                          biases, biasesOffset) = matrix,
+           tokens >= MPPPrefillInt4QMM.tileN,
+           prefillMPP.isFloat32Available {
+            let path = prefillMPP.encodeFloat32(
+                commandBuffer: commandBuffer,
+                weights: weights, weightsOffset: weightsOffset,
+                scales: scales, scalesOffset: scalesOffset,
+                biases: biases, biasesOffset: biasesOffset,
+                x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                m: tokens, n: matrixRows, k: matrixColumns)
+            if path == .affineThreadgroupF32 { return }
+        }
+        encodeBatched(commandBuffer: commandBuffer, matrix: matrix,
+                      x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                      matrixRows: matrixRows, matrixColumns: matrixColumns,
+                      tokens: tokens, outputFloat32: true)
     }
 
     private func encodeInt8(commandBuffer: MTLCommandBuffer,

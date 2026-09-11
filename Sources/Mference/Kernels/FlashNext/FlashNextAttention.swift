@@ -77,10 +77,12 @@ final class FlashNextAttention {
     private let elementwise: Elementwise
     private let epilogue: PrefillQKVEpilogue
     private let attention: Attention
+    private let prefillAttention: PrefillAttention
 
     init(context: MetalContext, matVec: FlashNextMatVec,
          elementwise: Elementwise, epilogue: PrefillQKVEpilogue,
-         attention: Attention, geometry: Geometry) {
+         attention: Attention, prefillAttention: PrefillAttention,
+         geometry: Geometry) {
         precondition(geometry.numHeads % geometry.numKVHeads == 0)
         precondition(geometry.rotaryDim.isMultiple(of: 2))
         precondition(geometry.rotaryDim <= geometry.headDim)
@@ -89,6 +91,7 @@ final class FlashNextAttention {
         self.elementwise = elementwise
         self.epilogue = epilogue
         self.attention = attention
+        self.prefillAttention = prefillAttention
     }
 
     // MARK: - Allocation
@@ -142,9 +145,8 @@ final class FlashNextAttention {
     /// Qwen 3.8 decode path uses, which is why the cache holds post-norm,
     /// post-RoPE keys and raw values.
     ///
-    /// PERF, not correctness: the three projections are per-row mat-vecs, one
-    /// compute encoder each. Decode is one row; a wide prefill chunk wants the
-    /// batched form, which belongs with the perf pass.
+    /// The three projections are batched across the chunk; decode is the same
+    /// helper with one row.
     func encodeProjectAndCache(commandBuffer: MTLCommandBuffer,
                                weights w: Weights,
                                scratch: Scratch,
@@ -160,21 +162,20 @@ final class FlashNextAttention {
         let kvDim = geometry.kvDim
         let kvBase = startPosition * kvDim * half
 
-        for row in 0..<rows {
-            let rowX = xOffset + row * geometry.hidden * half
-            matVec.encode(commandBuffer: commandBuffer, matrix: w.q,
-                          x: x, xOffset: rowX,
-                          y: scratch.packed, yOffset: row * 2 * qDim * half,
-                          rows: 2 * qDim, cols: geometry.hidden)
-            matVec.encode(commandBuffer: commandBuffer, matrix: w.k,
-                          x: x, xOffset: rowX,
-                          y: cache.keys, yOffset: kvBase + row * kvDim * half,
-                          rows: kvDim, cols: geometry.hidden)
-            matVec.encode(commandBuffer: commandBuffer, matrix: w.v,
-                          x: x, xOffset: rowX,
-                          y: cache.values, yOffset: kvBase + row * kvDim * half,
-                          rows: kvDim, cols: geometry.hidden)
-        }
+        matVec.encodeBatched(commandBuffer: commandBuffer, matrix: w.q,
+                             x: x, xOffset: xOffset, y: scratch.packed,
+                             matrixRows: 2 * qDim,
+                             matrixColumns: geometry.hidden, tokens: rows)
+        matVec.encodeBatched(commandBuffer: commandBuffer, matrix: w.k,
+                             x: x, xOffset: xOffset,
+                             y: cache.keys, yOffset: kvBase,
+                             matrixRows: kvDim,
+                             matrixColumns: geometry.hidden, tokens: rows)
+        matVec.encodeBatched(commandBuffer: commandBuffer, matrix: w.v,
+                             x: x, xOffset: xOffset,
+                             y: cache.values, yOffset: kvBase,
+                             matrixRows: kvDim,
+                             matrixColumns: geometry.hidden, tokens: rows)
 
         elementwise.encodeSplitQGate(commandBuffer: commandBuffer,
                                      packed: scratch.packed,
@@ -232,6 +233,65 @@ final class FlashNextAttention {
             scale: geometry.scale)
     }
 
+    /// Attention for one query row while QSA retains every visible token.
+    /// Reading the append-only cache in place avoids materializing an identity
+    /// gather, which is the complete short/medium-context path and the first
+    /// 2,048 tokens of a long prefill.
+    func encodeAttendContiguousRow(commandBuffer: MTLCommandBuffer,
+                                   scratch: Scratch,
+                                   cache: KVCache,
+                                   row: Int, visibleCount: Int) {
+        precondition(row < scratch.maxRows)
+        precondition(visibleCount > 0 && visibleCount <= cache.maxTokens)
+        let half = MemoryLayout<Float16>.stride
+        attention.encodeFull(
+            commandBuffer: commandBuffer,
+            q: scratch.queries, qOffset: row * geometry.qDim * half,
+            k: cache.keys, kOffset: 0,
+            v: cache.values, vOffset: 0,
+            out: scratch.attnOut, outOffset: row * geometry.qDim * half,
+            headDim: UInt32(geometry.headDim),
+            numQHeads: UInt32(geometry.numHeads),
+            numKVHeads: UInt32(geometry.numKVHeads),
+            seqLen: UInt32(visibleCount),
+                             scale: geometry.scale)
+    }
+
+    /// Causal attention for the contiguous prefix of a prefill chunk.
+    ///
+    /// Before QSA's block budget is exceeded, every query selects every visible
+    /// key. Encoding those rows together removes one compute encoder launch per
+    /// prompt row while preserving the same append-only KV-cache semantics.
+    func encodeAttendContiguousPrefix(commandBuffer: MTLCommandBuffer,
+                                      scratch: Scratch,
+                                      cache: KVCache,
+                                      rows: Int,
+                                      startPosition: Int) {
+        precondition(rows > 0 && rows <= scratch.maxRows)
+        precondition(startPosition >= 0)
+        precondition(startPosition + rows <= cache.maxTokens)
+        let params = PrefillAttentionParams(
+            startPosition: UInt32(startPosition),
+            queryCount: UInt32(rows),
+            headDim: UInt32(geometry.headDim),
+            numQHeads: UInt32(geometry.numHeads),
+            numKVHeads: UInt32(geometry.numKVHeads),
+            kvValidCount: UInt32(startPosition + rows),
+            slidingWindow: UInt32(startPosition + rows),
+            kvTokenStrideElements: UInt32(geometry.kvDim),
+            qTokenStrideElements: UInt32(geometry.qDim),
+            oTokenStrideElements: UInt32(geometry.qDim),
+            scale: geometry.scale)
+        prefillAttention.encodeCausal(
+            commandBuffer: commandBuffer,
+            q: scratch.queries,
+            k: cache.keys,
+            v: cache.values,
+            out: scratch.attnOut,
+            params: params,
+            path: .causalTiled)
+    }
+
     /// Byte offsets of one gather slot, for `FlashNextIndexer.encodeGatherKV`.
     func gatherSlotOffset(_ slot: Int, scratch: Scratch) -> Int {
         slot * scratch.maxSelected * geometry.kvDim * MemoryLayout<Float16>.stride
@@ -245,17 +305,14 @@ final class FlashNextAttention {
                               scratch: Scratch,
                               out: MTLBuffer, outOffset: Int,
                               rows: Int) {
-        let half = MemoryLayout<Float16>.stride
         elementwise.encodeSigmoidGateMul(commandBuffer: commandBuffer,
                                          out: scratch.attnOut,
                                          gate: scratch.gates,
                                          count: rows * geometry.qDim)
-        for row in 0..<rows {
-            matVec.encode(commandBuffer: commandBuffer, matrix: w.o,
-                          x: scratch.attnOut,
-                          xOffset: row * geometry.qDim * half,
-                          y: out, yOffset: outOffset + row * geometry.hidden * half,
-                          rows: geometry.hidden, cols: geometry.qDim)
-        }
+        matVec.encodeBatched(commandBuffer: commandBuffer, matrix: w.o,
+                             x: scratch.attnOut,
+                             y: out, yOffset: outOffset,
+                             matrixRows: geometry.hidden,
+                             matrixColumns: geometry.qDim, tokens: rows)
     }
 }

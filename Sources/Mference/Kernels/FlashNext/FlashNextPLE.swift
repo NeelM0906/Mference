@@ -161,12 +161,11 @@ final class FlashNextPLE {
         encodeLoadConvState(commandBuffer: commandBuffer, scratch: scratch)
 
         // k = group_rmsnorm(W_key . e)
-        for row in 0..<rows {
-            matVec.encode(commandBuffer: commandBuffer, matrix: weights.keyProj,
-                          x: scratch.embeds, xOffset: row * hidden * half,
-                          y: scratch.keyProjected, yOffset: row * bundle * half,
-                          rows: bundle, cols: hidden)
-        }
+        matVec.encodeBatched(commandBuffer: commandBuffer,
+                             matrix: weights.keyProj,
+                             x: scratch.embeds, y: scratch.keyProjected,
+                             matrixRows: bundle, matrixColumns: hidden,
+                             tokens: rows)
         rms.encodeBF16WGrouped(commandBuffer: commandBuffer,
                                x: scratch.keyProjected,
                                weight: weights.normKey,
@@ -176,12 +175,11 @@ final class FlashNextPLE {
                                rows: rows, eps: eps)
 
         // v = W_value . e
-        for row in 0..<rows {
-            matVec.encode(commandBuffer: commandBuffer, matrix: weights.valueProj,
-                          x: scratch.embeds, xOffset: row * hidden * half,
-                          y: scratch.value, yOffset: row * hidden * half,
-                          rows: hidden, cols: hidden)
-        }
+        matVec.encodeBatched(commandBuffer: commandBuffer,
+                             matrix: weights.valueProj,
+                             x: scratch.embeds, y: scratch.value,
+                             matrixRows: hidden, matrixColumns: hidden,
+                             tokens: rows)
 
         // qn = group_rmsnorm(hyper) — the RAW stream, before this block's add.
         rms.encodeBF16WGrouped(commandBuffer: commandBuffer,

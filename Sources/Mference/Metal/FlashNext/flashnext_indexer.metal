@@ -239,7 +239,115 @@ kernel void flashnext_indexer_scores(
 }
 
 // ---------------------------------------------------------------------------
-// 5. Gather the selected KV into contiguous scratch.
+// 5. Exact device-side block selection.
+//
+// A worst-first heap retains the best `blockBudget` scores. Equal scores keep
+// the lower block index, matching the CPU fallback used above libc++'s small-N
+// branches. The heap itself is unordered; byte flags let the final scan emit
+// blocks (and therefore token positions) in ascending order without a second
+// sort. The production heap is 512 entries and each row owns one single-thread
+// threadgroup, keeping the result deterministic and avoiding a CPU readback.
+// ---------------------------------------------------------------------------
+constant constexpr uint kFlashNextIndexerMaxBlockBudget = 512;
+
+static inline bool flashnext_indexer_worse(float aValue, uint aIndex,
+                                           float bValue, uint bIndex) {
+    if (aValue < bValue) return true;
+    if (aValue > bValue) return false;
+    return aIndex > bIndex;
+}
+
+static inline void flashnext_indexer_heap_sift_down(
+    thread float* values, thread uint* indices, uint count, uint root
+) {
+    while (true) {
+        const uint left = root * 2u + 1u;
+        if (left >= count) return;
+        const uint right = left + 1u;
+        uint worst = left;
+        if (right < count && flashnext_indexer_worse(
+                values[right], indices[right], values[left], indices[left])) {
+            worst = right;
+        }
+        if (!flashnext_indexer_worse(values[worst], indices[worst],
+                                     values[root], indices[root])) return;
+        const float oldValue = values[root];
+        const uint oldIndex = indices[root];
+        values[root] = values[worst];
+        indices[root] = indices[worst];
+        values[worst] = oldValue;
+        indices[worst] = oldIndex;
+        root = worst;
+    }
+}
+
+kernel void flashnext_indexer_select_blocks(
+    device const float* scores       [[buffer(0)]],
+    device uint* selected            [[buffer(1)]],
+    device uchar* flags              [[buffer(2)]],
+    constant uint& scoreStride       [[buffer(3)]],
+    constant uint& selectionStride   [[buffer(4)]],
+    constant uint& startPosition     [[buffer(5)]],
+    constant uint& compressRatio     [[buffer(6)]],
+    constant uint& blockBudget       [[buffer(7)]],
+    constant uint& rows              [[buffer(8)]],
+    uint row [[threadgroup_position_in_grid]]
+) {
+    if (row >= rows || blockBudget > kFlashNextIndexerMaxBlockBudget) return;
+    const uint visible = startPosition + row + 1u;
+    const uint complete = visible / compressRatio;
+    const uint keep = min(complete, blockBudget);
+    device uint* output = selected + ulong(row) * ulong(selectionStride);
+
+    // Below the budget every complete block survives, and the incomplete tail
+    // follows it. This is the overwhelmingly common short-context path.
+    if (complete <= blockBudget) {
+        for (uint position = 0; position < visible; ++position) {
+            output[position] = position;
+        }
+        return;
+    }
+
+    thread float heapValues[kFlashNextIndexerMaxBlockBudget];
+    thread uint heapIndices[kFlashNextIndexerMaxBlockBudget];
+    device const float* rowScores = scores + ulong(row) * ulong(scoreStride);
+    for (uint i = 0; i < keep; ++i) {
+        heapValues[i] = rowScores[i];
+        heapIndices[i] = i;
+    }
+    for (int root = int(keep / 2u) - 1; root >= 0; --root) {
+        flashnext_indexer_heap_sift_down(
+            heapValues, heapIndices, keep, uint(root));
+    }
+    for (uint block = keep; block < complete; ++block) {
+        const float value = rowScores[block];
+        if (flashnext_indexer_worse(heapValues[0], heapIndices[0],
+                                    value, block)) {
+            heapValues[0] = value;
+            heapIndices[0] = block;
+            flashnext_indexer_heap_sift_down(heapValues, heapIndices, keep, 0u);
+        }
+    }
+
+    device uchar* rowFlags = flags + ulong(row) * ulong(scoreStride);
+    for (uint block = 0; block < complete; ++block) rowFlags[block] = 0;
+    for (uint i = 0; i < keep; ++i) rowFlags[heapIndices[i]] = 1;
+
+    uint out = 0;
+    for (uint block = 0; block < complete; ++block) {
+        if (rowFlags[block] == 0) continue;
+        for (uint j = 0; j < compressRatio; ++j) {
+            output[out++] = block * compressRatio + j;
+        }
+    }
+    for (uint position = complete * compressRatio; position < visible;
+         ++position) {
+        output[out++] = position;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Gather the selected KV into contiguous scratch.
 //
 // The selection is at most `budget + tail` positions (2048 + 3 in production),
 // so materializing them beats threading a per-query index list through the
