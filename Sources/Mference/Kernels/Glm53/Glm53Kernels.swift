@@ -15,12 +15,16 @@ final class Glm53Kernels {
     private let latentAttentionPSO: MTLComputePipelineState
     private let headedInt8PSO: MTLComputePipelineState
     private let indexerScorePSO: MTLComputePipelineState
-    private let hcWeightsPSO: MTLComputePipelineState
     private let hcCollapsePSO: MTLComputePipelineState
     private let hcPlaceMixPSO: MTLComputePipelineState
     private let swigluClampPSO: MTLComputePipelineState
     private let broadcastPSO: MTLComputePipelineState
     private let routerSelectPSO: MTLComputePipelineState
+    private let hcDotsPSO: MTLComputePipelineState
+    private let hcFinalizePSO: MTLComputePipelineState
+    /// fp32 `[(2 + hc) * hc + 1]` dots and sum of squares between the two
+    /// mHC kernels; the two sites of a layer run in order in one stream.
+    private let hcPartials: MTLBuffer
 
     /// Widest KDA head the decode kernel's threadgroup scratch holds.
     static let maxKDAHeadDim = 128
@@ -42,13 +46,19 @@ final class Glm53Kernels {
         headedInt8PSO = try context.pipeline("glm53_headed_int8_gemv", constants: [],
                                              maxTotalThreadsPerThreadgroup: 256)
         indexerScorePSO = try context.pipeline("dsv4_indexer_score")
-        hcWeightsPSO = try context.pipeline("dsv4_hc_weights", constants: [],
-                                            maxTotalThreadsPerThreadgroup: 256)
         hcCollapsePSO = try context.pipeline("dsv4_hc_collapse")
         hcPlaceMixPSO = try context.pipeline("dsv4_hc_place_mix")
         swigluClampPSO = try context.pipeline("dsv4_swiglu_clamp_mul")
         broadcastPSO = try context.pipeline("dsv4_broadcast_streams")
-        routerSelectPSO = try context.pipeline("glm53_router_select_k8")
+        routerSelectPSO = try context.pipeline("glm53_router_select_k8_par")
+        hcDotsPSO = try context.pipeline("glm53_hc_dots", constants: [],
+                                         maxTotalThreadsPerThreadgroup: 256)
+        hcFinalizePSO = try context.pipeline("glm53_hc_finalize")
+        guard let partials = context.device.makeBuffer(length: 64 * MemoryLayout<Float>.stride,
+                                                       options: .storageModeShared) else {
+            throw MetalError.noDevice
+        }
+        hcPartials = partials
     }
 
     // MARK: - Embedding
@@ -70,7 +80,7 @@ final class Glm53Kernels {
         enc.setBytes(&e, length: 4, index: 4)
         enc.setBytes(&scale, length: 4, index: 5)
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         enc.endEncoding()
     }
 
@@ -263,36 +273,48 @@ final class Glm53Kernels {
     // MARK: - Hyper-connections (DeepSeek V4 kernels, reused)
 
     /// `fn` is fp32 `[(2 + mult) * mult, mult * hidden]`, `base` fp32, `scale` fp32 `[3]`.
+    /// Two dispatches: `glm53_hc_dots` (one threadgroup per fn row plus one
+    /// for the sum of squares) and `glm53_hc_finalize`.
     func encodeHCWeights(commandBuffer: MTLCommandBuffer, streams: MTLBuffer,
                          fn: TensorView, base: TensorView, scale: TensorView,
                          outPre: MTLBuffer, outPost: MTLBuffer, outComb: MTLBuffer,
                          hcMult: Int, hidden: Int, sinkhornIters: Int, hcEps: Float, rmsEps: Float) {
+        let rows = (2 + hcMult) * hcMult
+        precondition(rows <= 24 && hcMult <= 4, "the finalize kernel holds 24 mix values")
+        precondition((hcMult * hidden) % 4 == 0, "flat stream width must be a multiple of 4 (half4 loads)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(hcWeightsPSO)
+        var flat = UInt32(hcMult * hidden)
+        var rowCount = UInt32(rows)
+        enc.setComputePipelineState(hcDotsPSO)
         enc.setBuffer(streams, offset: 0, index: 0)
         enc.setBuffer(fn.buffer, offset: Int(fn.offset), index: 1)
-        enc.setBuffer(base.buffer, offset: Int(base.offset), index: 2)
-        enc.setBuffer(scale.buffer, offset: Int(scale.offset), index: 3)
-        enc.setBuffer(outPre, offset: 0, index: 4)
-        enc.setBuffer(outPost, offset: 0, index: 5)
-        enc.setBuffer(outComb, offset: 0, index: 6)
+        enc.setBuffer(hcPartials, offset: 0, index: 2)
+        enc.setBytes(&flat, length: 4, index: 3)
+        enc.setBytes(&rowCount, length: 4, index: 4)
+        enc.dispatchThreadgroups(MTLSize(width: rows + 1, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+
         var mult = UInt32(hcMult)
-        var hid = UInt32(hidden)
         var iters = UInt32(sinkhornIters)
         var he = hcEps
         var re = rmsEps
-        enc.setBytes(&mult, length: MemoryLayout<UInt32>.size, index: 7)
-        enc.setBytes(&hid, length: MemoryLayout<UInt32>.size, index: 8)
-        enc.setBytes(&iters, length: MemoryLayout<UInt32>.size, index: 9)
-        enc.setBytes(&he, length: MemoryLayout<Float>.size, index: 10)
-        enc.setBytes(&re, length: MemoryLayout<Float>.size, index: 11)
+        enc.setComputePipelineState(hcFinalizePSO)
+        enc.setBuffer(hcPartials, offset: 0, index: 0)
+        enc.setBuffer(base.buffer, offset: Int(base.offset), index: 1)
+        enc.setBuffer(scale.buffer, offset: Int(scale.offset), index: 2)
+        enc.setBuffer(outPre, offset: 0, index: 3)
+        enc.setBuffer(outPost, offset: 0, index: 4)
+        enc.setBuffer(outComb, offset: 0, index: 5)
+        enc.setBytes(&mult, length: 4, index: 6)
+        enc.setBytes(&flat, length: 4, index: 7)
+        enc.setBytes(&iters, length: 4, index: 8)
+        enc.setBytes(&he, length: 4, index: 9)
+        enc.setBytes(&re, length: 4, index: 10)
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                                 threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
         enc.endEncoding()
     }
 
-    /// `x[d] = sum_j pre[j] * streams[j][d]`; with `pre` = 1/mult this is the
-    /// family's final stream mean.
     func encodeHCCollapse(commandBuffer: MTLCommandBuffer, streams: MTLBuffer, pre: MTLBuffer,
                           x: MTLBuffer, hcMult: Int, hidden: Int) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }

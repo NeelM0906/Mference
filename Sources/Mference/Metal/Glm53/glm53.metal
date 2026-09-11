@@ -389,3 +389,177 @@ kernel void glm53_router_select_k8(
         out_weights[i] = half(top_score[i] / sum * route_scale);
     }
 }
+
+// ---------------------------------------------------------------------------
+// mHC mixing weights, split so the fn matvec runs wide. `dsv4_hc_weights`
+// does the whole site in one threadgroup: 24 rows x 16,384 fp32 walked with a
+// dependent load-fma chain per lane, which measured 0.58 ms per site on the
+// M3 Ultra (2.9 GB/s) — two sites x 45 layers was 52 ms of an 86 ms token.
+//
+// `glm53_hc_dots`: threadgroup r < rows computes the raw dot of fn row r with
+// the flattened streams (float4 / half4 loads, 256 threads); threadgroup
+// `rows` computes the streams' sum of squares. `glm53_hc_finalize` (one
+// thread) applies the RMS normalization (linear, so it factors out of the
+// dots), the sigmoid / 2*sigmoid / softmax + Sinkhorn maps — the same
+// arithmetic as `dsv4_hc_weights`' tail, in the same order.
+// ---------------------------------------------------------------------------
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void glm53_hc_dots(
+    device const half*  streams [[buffer(0)]],   // [H * hidden]
+    device const float* fn      [[buffer(1)]],   // [rows, H * hidden]
+    device float*       partials [[buffer(2)]],  // [rows + 1]: dots, then sumsq
+    constant uint&      flat    [[buffer(3)]],   // H * hidden, a multiple of 4
+    constant uint&      rows    [[buffer(4)]],
+    uint r    [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float red[8];
+    float acc = 0.0f;
+    if (r < rows) {
+        device const float4* f4 = (device const float4*)(fn + uint(r) * flat);
+        device const half4*  s4 = (device const half4*)streams;
+        for (uint i = tid; i < flat / 4u; i += 256u) {
+            const float4 f = f4[i];
+            const float4 s = float4(s4[i]);
+            acc = fma(f.x, s.x, acc);
+            acc = fma(f.y, s.y, acc);
+            acc = fma(f.z, s.z, acc);
+            acc = fma(f.w, s.w, acc);
+        }
+    } else {
+        device const half4* s4 = (device const half4*)streams;
+        for (uint i = tid; i < flat / 4u; i += 256u) {
+            const float4 s = float4(s4[i]);
+            acc = fma(s.x, s.x, acc);
+            acc = fma(s.y, s.y, acc);
+            acc = fma(s.z, s.z, acc);
+            acc = fma(s.w, s.w, acc);
+        }
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) red[sg] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8u; ++i) total += red[i];
+        partials[r] = total;
+    }
+}
+
+kernel void glm53_hc_finalize(
+    device const float* partials [[buffer(0)]],  // [rows + 1]
+    device const float* base_b   [[buffer(1)]],  // [rows]
+    device const float* scale3   [[buffer(2)]],  // [3]
+    device float*       out_pre  [[buffer(3)]],  // [H]
+    device float*       out_post [[buffer(4)]],  // [H]
+    device float*       out_comb [[buffer(5)]],  // [H, H]
+    constant uint&      hc_mult  [[buffer(6)]],
+    constant uint&      flat     [[buffer(7)]],
+    constant uint&      sinkhorn_iters [[buffer(8)]],
+    constant float&     hc_eps   [[buffer(9)]],
+    constant float&     rms_eps  [[buffer(10)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid != 0) return;
+    const uint H = hc_mult;
+    const uint rows = (2u + H) * H;
+    const float inv_norm = rsqrt(partials[rows] / float(flat) + rms_eps);
+    float mix[24];
+    for (uint i = 0; i < rows; ++i) mix[i] = partials[i] * inv_norm;
+
+    const float pre_scale = scale3[0];
+    const float post_scale = scale3[1];
+    const float comb_scale = scale3[2];
+    for (uint i = 0; i < H; ++i) {
+        out_pre[i] = 1.0f / (1.0f + fast::exp(-(mix[i] * pre_scale + base_b[i]))) + hc_eps;
+        out_post[i] = 2.0f / (1.0f + fast::exp(-(mix[H + i] * post_scale + base_b[H + i])));
+    }
+    float comb[16];
+    for (uint r = 0; r < H; ++r) {
+        float mx = -INFINITY;
+        for (uint c2 = 0; c2 < H; ++c2) {
+            const uint i = 2u * H + r * H + c2;
+            comb[r * H + c2] = mix[i] * comb_scale + base_b[i];
+            mx = max(mx, comb[r * H + c2]);
+        }
+        float sum = 0.0f;
+        for (uint c2 = 0; c2 < H; ++c2) {
+            comb[r * H + c2] = fast::exp(comb[r * H + c2] - mx);
+            sum += comb[r * H + c2];
+        }
+        for (uint c2 = 0; c2 < H; ++c2) comb[r * H + c2] = comb[r * H + c2] / sum + hc_eps;
+    }
+    for (uint c2 = 0; c2 < H; ++c2) {
+        float col = 0.0f;
+        for (uint r = 0; r < H; ++r) col += comb[r * H + c2];
+        for (uint r = 0; r < H; ++r) comb[r * H + c2] /= (col + hc_eps);
+    }
+    for (uint it = 1; it < sinkhorn_iters; ++it) {
+        for (uint r = 0; r < H; ++r) {
+            float row_sum = 0.0f;
+            for (uint c2 = 0; c2 < H; ++c2) row_sum += comb[r * H + c2];
+            for (uint c2 = 0; c2 < H; ++c2) comb[r * H + c2] /= (row_sum + hc_eps);
+        }
+        for (uint c2 = 0; c2 < H; ++c2) {
+            float col = 0.0f;
+            for (uint r = 0; r < H; ++r) col += comb[r * H + c2];
+            for (uint r = 0; r < H; ++r) comb[r * H + c2] /= (col + hc_eps);
+        }
+    }
+    for (uint i = 0; i < H * H; ++i) out_comb[i] = comb[i];
+}
+
+// ---------------------------------------------------------------------------
+// Router select, one simdgroup: lane L owns experts L, L+32, ... (at most 16
+// per lane, so up to 512 experts). Each of the K steps takes the lane-local
+// best (highest biased key, lowest index among equals), then the simdgroup's
+// highest key and, among lanes holding it, the lowest index — the serial
+// kernel's order exactly, so selection and weights are bit-identical to
+// `glm53_router_select_k8`.
+// ---------------------------------------------------------------------------
+kernel void glm53_router_select_k8_par(
+    device const float* logits [[buffer(0)]],
+    device const float* bias [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant float& route_scale [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    constexpr uint K = 8;
+    constexpr uint PER = 16;
+    float key[PER];
+    float score[PER];
+    for (uint j = 0; j < PER; ++j) {
+        const uint e = lane + 32u * j;
+        if (e < num_experts) {
+            score[j] = 1.0f / (1.0f + precise::exp(-logits[e]));
+            key[j] = score[j] + bias[e];
+        } else {
+            score[j] = 0.0f;
+            key[j] = -INFINITY;
+        }
+    }
+    float chosen_score[K];
+    for (uint k = 0; k < K; ++k) {
+        float best = -INFINITY;
+        uint best_j = PER;
+        for (uint j = 0; j < PER; ++j) {
+            if (key[j] > best) { best = key[j]; best_j = j; }
+        }
+        const float top = simd_max(best);
+        const uint mine = (best_j < PER && best == top) ? lane + 32u * best_j : 0xFFFFFFFFu;
+        const uint winner = simd_min(mine);
+        const float s = 1.0f / (1.0f + precise::exp(-logits[winner]));
+        chosen_score[k] = s;
+        if (lane == 0) out_indices[k] = winner;
+        if (winner == mine) key[best_j] = -INFINITY;
+    }
+    if (lane == 0) {
+        float sum = 0.0f;
+        for (uint k = 0; k < K; ++k) sum += chosen_score[k];
+        for (uint k = 0; k < K; ++k) out_weights[k] = half(chosen_score[k] / sum * route_scale);
+    }
+}
