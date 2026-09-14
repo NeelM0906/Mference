@@ -37,6 +37,9 @@ struct Glm53Axes: Sendable, Equatable {
     /// entries plus 36 added tokens (`<|endoftext|>` … `<|video|>`). The
     /// runtime masks the padding rows at the head.
     static let unpaddedVocabSize = 154_856
+    /// The pinned checkpoint's embedding / head row count; only a config with
+    /// this `vocab_size` carries the padding above.
+    static let paddedVocabSize = 154_880
 
     /// Width of the shared attention latent (K = V) on sparse layers.
     let kvLoraRank: Int
@@ -553,7 +556,12 @@ struct ArchInfo: Sendable, Equatable {
             denseIntermediateSize: try i("intermediate_size"),
             routerGateBias: true,
             routerNormAfterTopK: true,
-            unpaddedVocabSize: Glm53Axes.unpaddedVocabSize,
+            // The pinned checkpoint's 154,880 embedding rows sit over 154,856
+            // tokenizer ids (154,820 BPE + 36 added); the runtime masks the
+            // padding rows at the head. Any other vocabulary (the parity toys)
+            // records no padding.
+            unpaddedVocabSize: try i("vocab_size") == Glm53Axes.paddedVocabSize
+                ? Glm53Axes.unpaddedVocabSize : 0,
             qkNorm: false,
             glm53: axes)
         try crossCheckProductionGlm53Flash(arch, configPath: configPath)
