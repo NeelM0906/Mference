@@ -316,6 +316,11 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh \
 ```
 
 Exit 0; `Test run with 10 tests in 1 suite passed after 18.732 seconds.`
+The full serial suite used the same command without `--filter` on the same
+code (committed as `c36a517`): build `4.42s`, exit 0;
+`Test run with 1203 tests in 209 suites passed after 256.496 seconds with 1 known issue.`
+The known issue is the existing optional Flash-Next toy checkpoint not being
+present; real-install env-gated tests were not enabled.
 These are synthetic correctness tests, not community-protocol performance
 measurements. No completed GLM install was found in the current library, so
 real-checkpoint streamed qualification and new throughput/memory measurements
