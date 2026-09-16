@@ -296,7 +296,8 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
 
     /// MTP speculative decoding, present when the install carries the
-    /// `mtp.*` draft tensors and `MFERENCE_MTP` is not "0". Greedy-only:
+    /// `mtp.*` draft tensors and `MFERENCE_MTP` is not "0" (Swift-Qwen
+    /// instead requires explicit "1" until qualification). Greedy-only:
     /// rounds run only through the fused-greedy `produce` path, which the
     /// generation loop already restricts to temperature 0 with no
     /// repetition penalty. Internal var so tests can disable it per-instance.
@@ -463,7 +464,11 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                 isLinear: isLinear)
         }
 
-        if ProcessInfo.processInfo.environment["MFERENCE_MTP"] != "0" {
+        // Swift carries its own draft weights, but acceptance/parity must be
+        // qualified independently of base Qwen. Plain decode is its default.
+        let mtpSetting = ProcessInfo.processInfo.environment["MFERENCE_MTP"]
+        let enableMTP = CheckpointIdentity.qwenMTPEnabled(modelID: model.modelID, setting: mtpSetting)
+        if enableMTP {
             self.mtp = try Qwen38MTPSpeculator.probe(model: model,
                                                      context: context,
                                                      config: cfg,

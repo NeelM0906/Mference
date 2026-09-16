@@ -76,6 +76,7 @@ public struct OpenAIToolCall: Codable, Equatable, Sendable {
 }
 
 public struct OpenAIChatMessage: Codable, Equatable, Sendable {
+    public var reasoningContent: String? = nil
     public let role: String
     public let content: OpenAIMessageContent?
     public let toolCalls: [OpenAIToolCall]?
@@ -84,6 +85,7 @@ public struct OpenAIChatMessage: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case role, content, name
+        case reasoningContent = "reasoning_content"
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"
     }
@@ -138,6 +140,7 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
 }
 
 public struct OpenAIChatRequest: Codable, Equatable, Sendable {
+    public var reasoningEffort: String? = nil
     public let model: String
     public let messages: [OpenAIChatMessage]
     public let stream: Bool?
@@ -160,6 +163,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
+        case reasoningEffort = "reasoning_effort"
         case streamOptions = "stream_options"
         case topP = "top_p"
         case maxTokens = "max_tokens"
@@ -246,6 +250,7 @@ public enum ServerRequestError: Error, Equatable, Sendable {
 }
 
 public struct ValidatedChatRequest: Sendable {
+    public var reasoningEffort: QwenReasoningEffort? = nil
     public let messages: [MFTokenizer.Message]
     public let tools: [MFTokenizer.FunctionDefinition]
     public let stream: Bool
@@ -257,8 +262,23 @@ public struct ValidatedChatRequest: Sendable {
 public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
-                                dialect: ChatDialect = .gemma) throws -> ValidatedChatRequest {
+                                dialect: ChatDialect = .gemma,
+                                swiftQwen: Bool? = nil) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
+        let isSwiftQwen = swiftQwen ?? (modelID.split(separator: "@").first == Substring(CheckpointIdentity.swiftQwen38))
+        if isSwiftQwen, request.messages.contains(where: { $0.role == "developer" }) {
+            throw invalid("Swift-Qwen requires leading system guidance; developer messages are not supported by its pinned template",
+                          "messages", "unsupported_role")
+        }
+        if !isSwiftQwen, request.reasoningEffort != nil {
+            throw invalid("reasoning_effort is currently supported only for Swift-Qwen",
+                          "reasoning_effort", "unsupported_value")
+        }
+        let effort = request.reasoningEffort.flatMap(QwenReasoningEffort.init(rawValue:))
+        guard request.reasoningEffort == nil || effort != nil else {
+            throw invalid("reasoning_effort must be xhigh, medium, low, or none",
+                          "reasoning_effort", "unsupported_value")
+        }
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
         }
@@ -327,7 +347,7 @@ public enum OpenAIRequestValidator {
                                       repetitionPenalty: repetitionPenalty,
                                       seed: request.seed,
                                       stopStrings: request.stop?.values ?? [])
-        return ValidatedChatRequest(messages: messages,
+        return ValidatedChatRequest(reasoningEffort: effort, messages: messages,
                                     tools: tools,
                                     stream: request.stream ?? false,
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
@@ -492,7 +512,8 @@ public enum OpenAIRequestValidator {
                                                   content: content,
                                                   toolCalls: calls,
                                                   toolCallID: message.toolCallID,
-                                                  name: message.name))
+                                                  name: message.name,
+                                                  reasoningContent: message.reasoningContent))
             }
         }
         return result

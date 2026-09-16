@@ -127,6 +127,15 @@ the ggml authors' copyright) will be added here at that time.
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.
 
+## Swift-Qwen template test fixture
+
+`Tests/Mference/Core/Tokenization/Fixtures/SwiftQwenTemplate/chat_template.jinja`
+is from `ukisai/Swift-Qwen3.8-27b`, revision
+`1b30aaaf753fe5c1cb51ada2ea0367a53445359c`. The source model card identifies
+Swift Open License 1.0. See the
+[pinned upstream repository](https://huggingface.co/ukisai/Swift-Qwen3.8-27b/tree/1b30aaaf753fe5c1cb51ada2ea0367a53445359c)
+for attribution and terms. Model weights are not bundled with Mference.
+
 ## Swift package graph
 
 The following table covers the complete graph reported by

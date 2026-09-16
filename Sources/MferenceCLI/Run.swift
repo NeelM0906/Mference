@@ -5,6 +5,7 @@ import Mference
 private struct MessageJSON: Decodable {
     let role: String
     let content: String
+    let reasoning_content: String?
 }
 
 public struct RunResult: Equatable, Sendable {
@@ -34,10 +35,10 @@ public func run(args: Args,
                 guard let role = MFTokenizer.Role(rawValue: row.role) else {
                     throw MFTokenizerError.invalidChatTemplate("unsupported role \(row.role)")
                 }
-                return MFTokenizer.Message(role: role, content: row.content)
+                return MFTokenizer.Message(role: role, content: row.content,
+                                           reasoningContent: row.reasoning_content)
             }
-            let rendered = try tokenizer.applyChatTemplate(messages)
-            promptIds = tokenizer.encode(rendered, addBOS: false)
+            promptIds = try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort)
         } else {
             return errored(stderr, "one of --prompt or --messages-file is required", 2)
         }
@@ -99,10 +100,11 @@ public func run(args: Args,
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
-        let decoder = args.messagesFile != nil && tokenizer.generationPromptStartsInThinking
+        let startsInThinking = tokenizer.startsInThinking(reasoningEffort: args.reasoningEffort)
+        let decoder = args.messagesFile != nil && (tokenizer.isSwiftQwen || startsInThinking)
             ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                          allowedTools: [],
-                                         startsInThought: true)
+                                         startsInThought: startsInThinking)
             : nil
         var completionConfig = config
         var stopMatcher = StreamingStopMatcher(stops: decoder == nil ? [] : config.stopStrings)
@@ -417,7 +419,7 @@ private func runChat(args: Args,
         } ?? []
         var history = opening
         let promptTokens = { (messages: [MFTokenizer.Message]) throws -> Int in
-            tokenizer.encode(try tokenizer.applyChatTemplate(messages), addBOS: false).count
+            try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort).count
         }
 
         stderr.write(Data("Interactive chat. Commands: /clear, /history, /quit.\n".utf8))
@@ -459,14 +461,14 @@ private func runChat(args: Args,
             }
             history = fitted.messages
 
-            let promptIds = tokenizer.encode(try tokenizer.applyChatTemplate(history),
-                                             addBOS: false)
+            let promptIds = try tokenizer.encodeChat(messages: history, reasoningEffort: args.reasoningEffort)
             var config = baseConfig
             config.maxNewTokens = min(args.maxNew, args.maxContext - promptIds.count)
             let reply = try await streamChatTurn(promptIds: promptIds,
                                                  model: model,
                                                  config: config,
                                                  tokenizer: tokenizer,
+                                                 reasoningEffort: args.reasoningEffort,
                                                  runner: runner,
                                                  context: context,
                                                  scratch: scratch,
@@ -474,8 +476,8 @@ private func runChat(args: Args,
                                                  quiet: args.quiet,
                                                  stdout: stdout,
                                                  stderr: stderr)
-            if !reply.isEmpty {
-                history.append(MFTokenizer.Message(role: .assistant, content: reply))
+            if reply.content?.isEmpty == false || reply.reasoningContent != nil {
+                history.append(reply)
             }
         }
     } catch is CancellationError {
@@ -530,19 +532,25 @@ private func streamChatTurn(promptIds: [Int32],
                             model: Model,
                             config: GenerationConfig,
                             tokenizer: MFTokenizer,
+                            reasoningEffort: QwenReasoningEffort?,
                             runner: any ContinuableLogitProducer,
                             context: MetalContext,
                             scratch: RawCompletionScratch,
                             prefillConfig: PrefillRuntimeConfig,
                             quiet: Bool,
                             stdout: FileHandle,
-                            stderr: FileHandle) async throws -> String {
+                            stderr: FileHandle) async throws -> MFTokenizer.Message {
     var reply = ""
-    let decoder = tokenizer.generationPromptStartsInThinking
+    var reasoning = ""
+    let startsInThinking = tokenizer.startsInThinking(reasoningEffort: reasoningEffort)
+    let decoder = tokenizer.isSwiftQwen || startsInThinking
         ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                      allowedTools: [],
-                                     startsInThought: true)
+                                     startsInThought: startsInThinking)
         : nil
+    if tokenizer.isSwiftQwen {
+        decoder?.onReasoning = { reasoning += $0 }
+    }
     var completionConfig = config
     var stopMatcher = StreamingStopMatcher(stops: decoder == nil ? [] : config.stopStrings)
     if decoder != nil { completionConfig.stopStrings = [] }
@@ -594,5 +602,6 @@ private func streamChatTurn(promptIds: [Int32],
         let footer = "[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
         stderr.write(Data(footer.utf8))
     }
-    return reply
+    return MFTokenizer.Message(role: .assistant, content: reply,
+                               reasoningContent: reasoning.isEmpty ? nil : reasoning)
 }

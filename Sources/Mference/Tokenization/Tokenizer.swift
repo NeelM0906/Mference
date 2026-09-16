@@ -59,6 +59,7 @@ public struct MFTokenizer: @unchecked Sendable {
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
 
     public let dialect: ChatDialect
+    public internal(set) var isSwiftQwen = false
     /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.
     public let bosID: Int32
@@ -113,10 +114,14 @@ public struct MFTokenizer: @unchecked Sendable {
     public static func load(forModelDirectory modelDirectory: URL,
                             environment: [String: String] = ProcessInfo.processInfo.environment) async throws -> MFTokenizer {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+        let checkpointID = try ManifestReader.peekModelID(directoryURL: modelDirectory)
         if let folder = tokenizerFolder(forModelDirectory: modelDirectory, environment: environment) {
-            return try await load(from: folder, family: family)
+            let loaded = try await load(from: folder, family: family)
+            return try loaded.forCheckpoint(checkpointID)
         }
-        if family == .maple { throw MFTokenizerError.missingToolTemplate }
+        if family == .maple || checkpointID == CheckpointIdentity.swiftQwen38 {
+            throw MFTokenizerError.missingToolTemplate
+        }
         return try await load()
     }
 
@@ -516,6 +521,7 @@ public struct MFTokenizer: @unchecked Sendable {
         public let toolCalls: [HistoricalToolCall]
         public let toolCallID: String?
         public let name: String?
+        public let reasoningContent: String?
 
         public init(role: Role, content: String) {
             self.role = role
@@ -523,18 +529,21 @@ public struct MFTokenizer: @unchecked Sendable {
             self.toolCalls = []
             self.toolCallID = nil
             self.name = nil
+            self.reasoningContent = nil
         }
 
         public init(role: Role,
                     content: String?,
                     toolCalls: [HistoricalToolCall] = [],
                     toolCallID: String? = nil,
-                    name: String? = nil) {
+                    name: String? = nil,
+                    reasoningContent: String? = nil) {
             self.role = role
             self.content = content
             self.toolCalls = toolCalls
             self.toolCallID = toolCallID
             self.name = name
+            self.reasoningContent = reasoningContent
         }
     }
 
@@ -620,6 +629,9 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
+        if isSwiftQwen {
+            return decode(try encodeChat(messages: messages), skipSpecialTokens: false)
+        }
         switch dialect {
         case .gemma: return try gemmaChatTemplate(messages)
         case .chatml: return try chatMLChatTemplate(messages)
@@ -748,7 +760,11 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     public func encodeToolChat(messages: [Message],
-                               tools: [FunctionDefinition]) throws -> [Int32] {
+                               tools: [FunctionDefinition],
+                               reasoningEffort: QwenReasoningEffort? = nil) throws -> [Int32] {
+        guard isSwiftQwen || reasoningEffort == nil else {
+            throw MFTokenizerError.unsupportedForDialect("reasoning_effort requires Swift-Qwen")
+        }
         // DeepSeek ships no chat_template.jinja; its tool framing is native.
         if dialect == .deepseek {
             return try encodeDeepseekToolChat(messages: messages, tools: tools)
@@ -789,6 +805,7 @@ public struct MFTokenizer: @unchecked Sendable {
             }
             if let toolCallID = message.toolCallID { value["tool_call_id"] = toolCallID }
             if let name = message.name { value["name"] = name }
+            if let reasoning = message.reasoningContent { value["reasoning_content"] = reasoning }
             return value
         }
         let upstreamTools: [ToolSpec] = try tools.map { tool in
@@ -814,7 +831,11 @@ public struct MFTokenizer: @unchecked Sendable {
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: ["enable_thinking": false]
+            additionalContext: isSwiftQwen
+                ? ["enable_thinking": reasoningEffort != .off,
+                   "reasoning_effort": (reasoningEffort ?? .xhigh).rawValue,
+                   "preserve_thinking": true]
+                : ["enable_thinking": false]
         ).map(Int32.init)
     }
 

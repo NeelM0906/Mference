@@ -6,6 +6,9 @@ public enum StructuredAssistantEvent: Equatable, Sendable {
 }
 
 public final class StructuredAssistantDecoder: @unchecked Sendable {
+    /// Optional separate reasoning channel; never mixed into visible content.
+    /// Swift-Qwen callers use this to round-trip the source template's history.
+    public var onReasoning: ((String) -> Void)?
     private enum Channel {
         case thought
         case visible
@@ -183,7 +186,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             channel = .visible
             return []
         }
-        guard channel != .thought else { return [] }
+        guard channel != .thought else {
+            if !delta.isEmpty { onReasoning?(delta) }
+            return []
+        }
         return delta.isEmpty ? [] : [.content(delta)]
     }
 
@@ -245,13 +251,19 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     private var chatMLToolCallMaximumBytes: Int {
-        tokenizer.generationPromptStartsInThinking
+        usesJSONToolCalls
             ? MapleToolCallParser.maximumBytes
             : QwenToolCallParser.maximumBytes
     }
 
+    // Thinking mode does not determine tool syntax: Swift-Qwen opens a
+    // thought block but its pinned template uses Qwen's XML payload.
+    private var usesJSONToolCalls: Bool {
+        !tokenizer.isSwiftQwen && tokenizer.generationPromptStartsInThinking
+    }
+
     private func parseChatMLToolCall(_ text: String) throws -> ParsedToolCall {
-        if tokenizer.generationPromptStartsInThinking {
+        if usesJSONToolCalls {
             return try MapleToolCallParser().parse(
                 text, allowedTools: allowedTools, id: idGenerator())
         }

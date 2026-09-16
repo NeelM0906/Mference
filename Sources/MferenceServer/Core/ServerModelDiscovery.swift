@@ -5,13 +5,14 @@ import Mference
 ///
 /// Library mode has to name every install in `GET /v1/models` before any of
 /// them is loaded, so the mapping cannot come from a live `ServerModelSession`.
-/// This is deliberately a second copy of `ServerModelSession.defaultModelID`'s
-/// switch, and deliberately a `switch` rather than a dictionary: adding a
-/// `ModelFamily` case fails the build here until it is given an identifier, so
-/// the two copies cannot drift silently.
+/// Shared with `ServerModelSession.defaultModelID`. Checkpoint variants keep
+/// their own identity while using the same architecture and runner.
 public enum ServerFamilyModelID {
-    public static func modelID(for family: ModelFamily) -> String {
-        switch family {
+    public static func modelID(for family: ModelFamily, checkpointID: String? = nil) -> String {
+        if family == .qwen38, checkpointID == CheckpointIdentity.swiftQwen38 {
+            return CheckpointIdentity.swiftQwen38
+        }
+        return switch family {
         case .gemma4: "gemma-4-26b-a4b-it"
         case .qwen36: "qwen3.6-35b-a3b"
         case .qwen38: "qwen3.8-27b-4bit"
@@ -28,7 +29,7 @@ public enum ServerFamilyModelID {
     /// not know the family at all. Used for the installs `peekFamily` refuses
     /// by name, which never reach a `ModelFamily` value through it.
     public static func modelID(forRawFamily raw: String) -> String? {
-        ModelFamily(rawValue: raw).map(modelID(for:))
+        ModelFamily(rawValue: raw).map { modelID(for: $0) }
     }
 }
 
@@ -305,7 +306,7 @@ public enum ServerLibraryDiscovery {
             for child in childDirectories(root.standardizedFileURL) { consider(child) }
         }
 
-        var found: [(basename: String, directory: URL, family: ModelFamily)] = []
+        var found: [(basename: String, directory: URL, family: ModelFamily, identifier: String)] = []
         var skipped: [ServerLibrarySkip] = []
         for candidate in candidates {
             switch probe(candidate) {
@@ -323,7 +324,10 @@ public enum ServerLibraryDiscovery {
             case .complete(let family):
                 found.append((basename: strippedBasename(candidate),
                               directory: candidate,
-                              family: family))
+                              family: family,
+                              identifier: ServerFamilyModelID.modelID(
+                                for: family,
+                                checkpointID: try? ManifestReader.peekModelID(directoryURL: candidate))))
             }
         }
 
@@ -331,23 +335,23 @@ public enum ServerLibraryDiscovery {
     }
 
     private static func assignIdentifiers(
-        _ found: [(basename: String, directory: URL, family: ModelFamily)]
+        _ found: [(basename: String, directory: URL, family: ModelFamily, identifier: String)]
     ) -> [ServerLibraryEntry] {
         let sorted = found.sorted {
-            let left = (ServerFamilyModelID.modelID(for: $0.family), $0.basename,
+            let left = ($0.identifier, $0.basename,
                         $0.directory.path)
-            let right = (ServerFamilyModelID.modelID(for: $1.family), $1.basename,
+            let right = ($1.identifier, $1.basename,
                          $1.directory.path)
             return left < right
         }
         var familyCounts: [String: Int] = [:]
         for item in sorted {
-            familyCounts[ServerFamilyModelID.modelID(for: item.family), default: 0] += 1
+            familyCounts[item.identifier, default: 0] += 1
         }
         var used: [String: Int] = [:]
         var entries: [ServerLibraryEntry] = []
         for item in sorted {
-            let familyModelID = ServerFamilyModelID.modelID(for: item.family)
+            let familyModelID = item.identifier
             var modelID = familyModelID
             if familyCounts[familyModelID, default: 0] > 1 {
                 modelID = "\(familyModelID)@\(item.basename)"

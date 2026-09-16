@@ -835,6 +835,18 @@ public enum ManifestReader {
         try check("rmsNormEps",        a.rmsNormEps ?? 0,        g.rmsNormEps)
     }
 
+    /// Metadata-only checkpoint identity, bounded like the family probe.
+    public static func peekModelID(directoryURL: URL,
+                                   maxBytes: UInt64 = defaultMaxBytes) throws -> String {
+        let url = directoryURL.appendingPathComponent("manifest.json")
+        let size = try metadataFileSize(url, fileName: "manifest.json")
+        guard size <= maxBytes else {
+            throw ModelError.indexCorrupt(detail: "manifest.json exceeds metadata cap")
+        }
+        struct Identity: Decodable { let modelID: String }
+        return try JSONDecoder().decode(Identity.self, from: Data(contentsOf: url)).modelID
+    }
+
     /// Decode just enough of `manifest.json` to identify the model family,
     /// without arch validation. Used by `Model.load` auto-detection.
     public static func peekFamily(directoryURL: URL,

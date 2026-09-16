@@ -131,6 +131,11 @@ public struct QuantBitPolicy: Sendable, Equatable {
             // and `FlashNextWeightMatrix` reads each tensor's width from its own
             // index entry rather than from a family-wide assumption.
             return .moeRouterInt8
+        case .qwen38:
+            // Dense Qwen3_5 text model: MLX's quant_predicate returns no
+            // per-projection overrides when num_experts <= 0. Norms and
+            // convolution kernels remain unquantized in the planner.
+            return .uniformInt4
         case .minicpm5:
             // Uniform INT4, mirroring the vendor's own MLX conversion
             // (`openbmb/MiniCPM5-2B-MLX` rev `35ac38ee`): its config carries
@@ -139,7 +144,7 @@ public struct QuantBitPolicy: Sendable, Equatable {
             // `embed_tokens` and `lm_head` is INT4 g64, and a dense llama has
             // no router to keep wider.
             return .uniformInt4
-        case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple, .glm53Flash:
+        case .gemma4, .deepseekV4Flash, .inklingSmall, .maple, .glm53Flash:
             // None of these has an original-repo installer entry today, so no
             // conversion has been examined and no table can be honest. Uniform
             // INT4 is the base the quantize-in-flight path was built for; a

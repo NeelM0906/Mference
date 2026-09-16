@@ -147,6 +147,10 @@ Install more families the same way (`./mference-ui.sh install qwen36`,
 and they appear in the model picker. `./mference-ui.sh models` shows what the
 server would expose without loading anything.
 
+`swiftqwen38` installs [Swift-Qwen3.8 27B](docs/families/SWIFT_QWEN38.md) as a
+separate qualification candidate. It preserves the base Qwen installation;
+model-level validation is required before treating it as a recommended replacement.
+
 From the command line, without the UI:
 
 ```bash

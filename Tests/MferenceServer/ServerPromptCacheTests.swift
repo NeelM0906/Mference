@@ -6,6 +6,36 @@ import Testing
 
 @Suite("Server prompt cache")
 struct ServerPromptCacheTests {
+    @Test func swiftQwenHistoryIsPreservedAndBaseDomainCannotReuseIt() async throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Mference/Core/Tokenization/Fixtures/ChatMLTokenizer")
+        let tok = try await MFTokenizer.load(from: fixture, family: .qwen38)
+            .forCheckpoint(CheckpointIdentity.swiftQwen38)
+        let initial = request(messages: [.init(role: .user, content: "A")])
+        func checkpointDomain(_ id: String) -> ServerPromptCacheDomain {
+            .init(modelID: id, sourceSnapshotHash: "source", runtimeProfileHash: "profile",
+                  maximumContext: 16384, kvStorage: "fp16", fp16RingEnabled: true, templateSHA256: "template")
+        }
+        let swift = checkpointDomain(CheckpointIdentity.swiftQwen38)
+        var cache = ServerPromptCache()
+        cache.publish(domain: swift, request: initial, content: "B", calls: [],
+                      result: rawResult(prompt: [1], kvBacked: [1, 2], boundary: 3, reason: .endOfTurn),
+                      reasoningContent: "Check A")
+        #expect(cache.entry?.assistantTurn.message.reasoningContent == "Check A")
+        #expect(cache.match(domain: checkpointDomain("qwen3.8-27b-4bit"), request: initial,
+                            renderedPromptIDs: [1, 2, 3, 4], tokenizer: tok) == .miss)
+        let continuation = request(messages: initial.messages + [
+            .init(role: .assistant, content: "B", reasoningContent: "Check A"),
+            .init(role: .user, content: "C")])
+        #expect(cache.match(domain: swift, request: continuation,
+                            renderedPromptIDs: [1, 9, 3, 4], tokenizer: tok) == .miss)
+        if case .hit = cache.match(domain: swift, request: continuation,
+                                    renderedPromptIDs: [1, 2, 3, 4], tokenizer: tok) {} else {
+            Issue.record("an exact Swift prefix should remain reusable")
+        }
+        cache.invalidate()
+        #expect(cache.entry == nil)
+    }
     private let domain = ServerPromptCacheDomain(
         modelID: "model",
         sourceSnapshotHash: "snapshot",

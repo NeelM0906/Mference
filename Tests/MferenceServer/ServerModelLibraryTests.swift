@@ -433,6 +433,18 @@ struct ServerModelLibrarySwapTests {
         #expect(log.events == ["load alpha", "release alpha", "load beta"])
     }
 
+    @Test func swiftQwenAndBaseSwitchWithoutRetainingPreviousSession() async throws {
+        let base = "qwen3.8-27b-4bit"
+        let swift = CheckpointIdentity.swiftQwen38
+        let log = LibraryEventLog()
+        let library = makeLibrary(makeIndex([(id: base, path: "/models/base"),
+                                              (id: swift, path: "/models/swift")]), log: log)
+        _ = try await library.resolve(modelID: base)
+        _ = try await library.resolve(modelID: swift)
+        _ = try await library.resolve(modelID: base)
+        #expect(log.events == ["load base", "release base", "load swift", "release swift", "load base"])
+    }
+
     @Test func unknownModelIsRejectedWithoutLoading() async throws {
         let log = LibraryEventLog()
         let library = makeLibrary(

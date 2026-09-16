@@ -72,6 +72,11 @@ picker the next time the UI starts. Supported families are `gemma4`, `qwen36`,
 `minicpm5mlx`; the launcher reads that list out of `MferenceRepack`'s own help,
 so it cannot drift.
 
+The optional `swiftqwen38` selector installs a separately identified
+[Swift-Qwen qualification candidate](families/SWIFT_QWEN38.md), not a replacement
+of `qwen38`. Its server reasoning policy defaults to `xhigh`; see that page for
+request-level controls and the remaining client-history qualification gates.
+
 Downloads range from ~5 GB (MiniCPM5-2B) to ~360 GB read for Flash-Next.
 Check disk first, and read [docs/DEEPSEEK_V4_FLASH.md](DEEPSEEK_V4_FLASH.md) or
 [docs/INKLING_SMALL.md](INKLING_SMALL.md) before installing either of those two.
