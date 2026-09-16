@@ -62,16 +62,12 @@ public enum Glm53ForwardRunnerError: Error, CustomStringConvertible {
 ///
 /// # Prefill
 ///
-/// Chunked prefill and sequential decode share one per-token path, so the two
-/// are equal by construction: `prefillChunked` walks the tokens through
-/// `produceToken`, carrying the conv tails, the KDA state, the latent and
-/// indexer caches across chunk boundaries. Prompt tokens need no readback
-/// (below `index_topk`, with resident experts), so each token's stream is
-/// committed without waiting and the CPU encodes the next token while the
-/// GPU runs this one; the chunk waits once at its end. PERF, not
-/// correctness: a prompt token still streams every weight once per token
-/// rather than once per chunk. A batched (GEMM) prefill is the next perf
-/// item after first light.
+/// Production prefill walks each chunk layer by layer, preserving conv tails,
+/// KDA state, latent/indexer caches and per-query sparse selection. Both resident
+/// and bounded streamed experts use grouped projections over prompt rows; the
+/// streamed path completes each expert group before reusing its slot. Explicit
+/// reference/capture controls retain the per-token path for numerical A/Bs.
+/// An interrupted partial chunk requires reset before any further inference.
 public final class Glm53ForwardRunner: ContinuableLogitProducer,
                                        ContextWindowReporting,
                                        HeadlessSequentialPrefillRunner,
@@ -105,6 +101,9 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     /// True when every MoE layer's experts are served from a resident slab and
     /// the routed FFN runs GPU-indexed with no CPU round trip.
     public let expertsResident: Bool
+    private var prefillChunkState = PrefillChunkCommitState()
+    /// Internal fault-injection boundary for partial-chunk recovery tests.
+    var prefillDidCompleteLayer: ((Int) throws -> Void)?
 
     // MARK: - Weights
 
@@ -252,8 +251,8 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     /// buffers on the way in (macOS 15 residency sets).
     var residencySet: (any MTLResidencySet)?
 
-    /// The batched prefill (`Glm53PrefillEngine`), built on first use when
-    /// the experts are resident. `MFERENCE_GLM53_BATCHED_PREFILL=0` keeps
+    /// The batched prefill (`Glm53PrefillEngine`), built on first use for
+    /// resident or streamed experts. `MFERENCE_GLM53_BATCHED_PREFILL=0` keeps
     /// every prompt token on the per-token path (the exactness reference).
     var batchedPrefill: Glm53PrefillEngine?
     public var batchedPrefillEnabled =
@@ -566,9 +565,11 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         position = 0
         inSequentialPrefill = false
         state.reset()
+        prefillChunkState.reset()
     }
 
     public func prepareForContinuation(expectedPosition: Int) throws {
+        try prefillChunkState.requireClean(operation: "prepareForContinuation")
         guard expectedPosition == position else {
             throw Glm53ForwardRunnerError.invalidInput(
                 "continuation expects position \(expectedPosition) but the runner is at \(position)")
@@ -595,7 +596,8 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         try await produceToken(token: token, position: p, into: logits)
     }
 
-    /// Batches eligible resident execution; otherwise replays the decode path.
+    /// Batches both resident and bounded streamed execution. Only explicit
+    /// reference/capture controls replay the decode path.
     /// The returned report records the actual path, not the requested mode.
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
@@ -604,6 +606,10 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
         var execution = PrefillExecutionReport()
+        try prefillChunkState.requireClean(operation: "prefillChunked")
+        guard config.mode == .chunked else {
+            throw PrefillError.chunkedUnsupported("GLM prefill requires chunked configuration")
+        }
         guard startPosition == position else {
             throw PrefillError.chunkedUnsupported(
                 "GLM-5.3 prefill cursor \(position) != startPosition \(startPosition)")
@@ -616,27 +622,35 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
+        guard tokens.allSatisfy({ $0 >= 0 && Int($0) < cfg.vocabSize }),
+              logits.length >= cfg.vocabSize * MemoryLayout<Float16>.stride else {
+            throw Glm53ForwardRunnerError.invalidInput("invalid prefill tokens or logits buffer")
+        }
         var done = 0
         var remaining = tokens
         // Batched chunks over the whole prompt (dense attention below
         // index_topk, the indexer's per-query selection past it); the
         // per-token loop below only runs when the batched path is off.
-        if batchedPrefillEnabled, expertsResident, capture == nil, !denseSelectionForAB {
+        if batchedPrefillEnabled, capture == nil, !denseSelectionForAB {
             if batchedPrefill == nil { batchedPrefill = try Glm53PrefillEngine(runner: self) }
             if let engine = batchedPrefill {
                 // `MFERENCE_GLM53_PREFILL_CHUNK` caps the chunk (diagnostics: 1 isolates
                 // kernel arithmetic from anything chunk-size dependent).
-                let chunkCap = ProcessInfo.processInfo.environment["MFERENCE_GLM53_PREFILL_CHUNK"]
+                let overrideCap = ProcessInfo.processInfo.environment["MFERENCE_GLM53_PREFILL_CHUNK"]
                     .flatMap { Int($0) }.map { max(1, min($0, Glm53PrefillEngine.capacity)) }
                     ?? Glm53PrefillEngine.capacity
+                let chunkCap = min(max(1, config.chunkTokens), overrideCap)
                 while !remaining.isEmpty {
                     let n = min(remaining.count, chunkCap)
                     try Task.checkCancellation()
                     let chunk = remaining.prefix(n)
                     let last = n == remaining.count
-                    try engine.run(tokens: chunk, startPosition: position, into: last ? logits : nil)
+                    prefillChunkState.markDirty(startPosition: position, tokenCount: n)
+                    try await engine.run(tokens: chunk, startPosition: position, into: last ? logits : nil)
+                    try waitForCommitted()
                     execution.recordBatch(n)
                     position += n
+                    prefillChunkState.markCommitted()
                     remaining = remaining.dropFirst(n)
                     done += n
                     onProgress(done)
@@ -644,7 +658,6 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
             }
         }
         let replayReason = !batchedPrefillEnabled ? "glm_batched_prefill_disabled"
-            : !expertsResident ? "glm_streamed_experts"
             : capture != nil ? "glm_capture_reference"
             : denseSelectionForAB ? "glm_dense_selection_reference"
             : "glm_batched_engine_unavailable"
@@ -667,6 +680,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
     // MARK: - The forward pass
 
     func produceToken(token: Int32, position p: Int, into logits: MTLBuffer?) async throws {
+        try prefillChunkState.requireClean(operation: "produce")
         guard p == position else {
             throw Glm53ForwardRunnerError.invalidInput("expected position \(position), got \(p)")
         }
@@ -1018,7 +1032,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
 
     // MARK: - Expert streaming (slot cache)
 
-    private func checkSlotBudget(layer L: Int) throws {
+    func checkSlotBudget(layer L: Int) throws {
         guard !slotBudgetChecked else { return }
         slotBudgetChecked = true
         guard let slots = model.routedExpertCacheSlotCount(layer: L) else { return }
@@ -1029,7 +1043,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         }
     }
 
-    private func fetchExperts(layer L: Int, experts: [Int]) async throws -> [(buffer: MTLBuffer, offset: Int)] {
+    func fetchExperts(layer L: Int, experts: [Int]) async throws -> [(buffer: MTLBuffer, offset: Int)] {
         let views: [TensorView]
         if let plan = try model.planRoutedExpertsIfPossible(layer: L, experts: experts) {
             views = try await model.fetchRoutedExperts(plan: plan)

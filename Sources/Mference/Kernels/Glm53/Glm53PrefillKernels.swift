@@ -381,17 +381,32 @@ final class Glm53PrefillKernels {
                           pairToken: MTLBuffer, segStart: MTLBuffer, activeExperts: MTLBuffer, activeCount: Int,
                           routePair: MTLBuffer, weights: MTLBuffer, residual: MTLBuffer, y: MTLBuffer,
                           d: Int, f: Int, topK: Int, tokens: Int) {
+        encodeGroupedExpertProjections(commandBuffer: cb, buffer: slab.buffer, baseOffset: slab.baseOffset,
+            expertStride: slab.expertStride, offsets: offsets, x: x, acts: acts, partial: partial,
+            pairToken: pairToken, segStart: segStart, activeExperts: activeExperts, activeCount: activeCount,
+            d: d, f: f)
+        encodeGroupedExpertReduce(commandBuffer: cb, partial: partial, routePair: routePair,
+            weights: weights, residual: residual, y: y, d: d, topK: topK, tokens: tokens)
+    }
+
+    /// A resident slab or one streamed blob. Segment offsets retain global
+    /// route-pair indices so each bounded fetch fills its own partial rows.
+    func encodeGroupedExpertProjections(commandBuffer cb: MTLCommandBuffer,
+                          buffer: MTLBuffer, baseOffset: Int, expertStride: Int, offsets: MoEExpertOffsets,
+                          x: MTLBuffer, acts: MTLBuffer, partial: MTLBuffer,
+                          pairToken: MTLBuffer, segStart: MTLBuffer, segStartOffset: Int = 0,
+                          activeExperts: MTLBuffer, activeCount: Int, d: Int, f: Int) {
         guard activeCount > 0, let enc = cb.makeComputeCommandEncoder() else { return }
         var off = offsets
-        var dd = UInt32(d), ff = UInt32(f), stride = UInt32(slab.expertStride), kk = UInt32(topK)
-        enc.useResource(slab.buffer, usage: .read)
+        var dd = UInt32(d), ff = UInt32(f), stride = UInt32(expertStride)
+        enc.useResource(buffer, usage: .read)
         enc.setComputePipelineState(moePhase1PSO)
-        enc.setBuffer(slab.buffer, offset: slab.baseOffset, index: 0)
+        enc.setBuffer(buffer, offset: baseOffset, index: 0)
         enc.setBytes(&off, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         enc.setBuffer(x, offset: 0, index: 2)
         enc.setBuffer(acts, offset: 0, index: 3)
         enc.setBuffer(pairToken, offset: 0, index: 4)
-        enc.setBuffer(segStart, offset: 0, index: 5)
+        enc.setBuffer(segStart, offset: segStartOffset, index: 5)
         enc.setBuffer(activeExperts, offset: 0, index: 6)
         enc.setBytes(&dd, length: 4, index: 7)
         enc.setBytes(&ff, length: 4, index: 8)
@@ -399,17 +414,24 @@ final class Glm53PrefillKernels {
         enc.dispatchThreadgroups(Self.tg((f + 7) / 8, activeCount), threadsPerThreadgroup: Self.tg(256))
 
         enc.setComputePipelineState(moeDownPSO)
-        enc.setBuffer(slab.buffer, offset: slab.baseOffset, index: 0)
+        enc.setBuffer(buffer, offset: baseOffset, index: 0)
         enc.setBytes(&off, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         enc.setBuffer(acts, offset: 0, index: 2)
         enc.setBuffer(partial, offset: 0, index: 3)
-        enc.setBuffer(segStart, offset: 0, index: 4)
+        enc.setBuffer(segStart, offset: segStartOffset, index: 4)
         enc.setBuffer(activeExperts, offset: 0, index: 5)
         enc.setBytes(&dd, length: 4, index: 6)
         enc.setBytes(&ff, length: 4, index: 7)
         enc.setBytes(&stride, length: 4, index: 8)
         enc.dispatchThreadgroups(Self.tg((d + 7) / 8, activeCount), threadsPerThreadgroup: Self.tg(256))
+        enc.endEncoding()
+    }
 
+    func encodeGroupedExpertReduce(commandBuffer cb: MTLCommandBuffer, partial: MTLBuffer,
+                                    routePair: MTLBuffer, weights: MTLBuffer, residual: MTLBuffer,
+                                    y: MTLBuffer, d: Int, topK: Int, tokens: Int) {
+        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        var dd = UInt32(d), kk = UInt32(topK)
         enc.setComputePipelineState(moeReducePSO)
         enc.setBuffer(partial, offset: 0, index: 0)
         enc.setBuffer(routePair, offset: 0, index: 1)
