@@ -364,6 +364,10 @@ import Testing
                     config: .production(chunkTokens: 32),
                     into: h.logits, onProgress: { _ in })
                 #expect(result.newPosition == start + n)
+                #expect(result.execution?.executedMode == .sequential)
+                #expect(result.execution?.batchedChunkSizes == [])
+                #expect(result.execution?.replayedTokens == n)
+                #expect(result.execution?.replayReasons == ["glm_streamed_experts": n])
                 start += n
                 if i == chunks.count - 1 { lastLogits = h.logitsRow() }
             }
@@ -456,10 +460,15 @@ import Testing
         let tokens = try Glm53Goldens.promptTokens(.long).map { Int32($0) }
         let n = tokens.count
         let prefix = tokens[0..<n]
-        _ = try await batched.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
+        let batchedResult = try await batched.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
                                              config: .production(chunkTokens: 32), into: logitsB, onProgress: { _ in })
-        _ = try await perToken.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
+        let replayResult = try await perToken.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
                                               config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
+        #expect(batchedResult.execution?.batchedChunkSizes == [n])
+        #expect(batchedResult.execution?.replayedTokens == 0)
+        #expect(replayResult.execution?.batchedTokens == 0)
+        #expect(replayResult.execution?.replayedTokens == n)
+        #expect(replayResult.execution?.replayReasons == ["glm_batched_prefill_disabled": n])
         let a = Glm53ForwardRunner.readFP16(logitsB, count: h.config.vocabSize)
         let b = h.logitsRow()
         let d = FlashNextDelta.compare(a, b, atol: Self.atol, rtol: Self.rtol)
@@ -486,6 +495,6 @@ import Testing
         let model = try Glm53Parity.loadModel(at: dir, device: ctx.device)
         let runtime = try ForwardRunnerFactory.make(model: model, context: ctx, maxContext: 64)
         #expect(runtime.producer is Glm53ForwardRunner)
-        #expect(runtime.executedPrefillMode == .chunked)
+        #expect(runtime.executedPrefillMode == .unreported)
     }
 }

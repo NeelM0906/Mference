@@ -64,6 +64,11 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
     /// Identity expert-to-slot table (`Int16`, `slot_of[e] = e`) for the GPU
     /// slot lookup, so a router's expert ids resolve to `e * expertStride`.
     private let identitySlotTable: MTLBuffer
+    var diagnosticMappedBytes: UInt64 { UInt64(mapping?.length ?? 0) }
+    var diagnosticCopiedBytes: UInt64 {
+        strategy == .copied ? uniqueBufferBytes(expertViews.map(\.buffer)) : 0
+    }
+    var diagnosticMetadataBytes: UInt64 { UInt64(identitySlotTable.length) }
 
     /// Bytes per direct read while filling a `.copied` layer.
     static let copyChunkBytes = 64 << 20

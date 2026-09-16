@@ -28,6 +28,7 @@ public struct RawDecodeResult: Sendable {
     public let kvPosition: Int
     public let kvBackedTokenIDs: [Int32]
     public let uncommittedBoundaryTokenIDs: [Int32]
+    public let prefillExecution: PrefillExecutionReport?
 }
 
 /// Preallocated per-generation buffers (two 512 KiB vocab buffers plus a token
@@ -41,6 +42,8 @@ public struct RawCompletionScratch: @unchecked Sendable {
     let probs: MTLBuffer
     let outToken: MTLBuffer
     let sampler: Sampler
+    /// Caller-owned logits, probability and output-token buffer capacities.
+    var diagnosticBufferBytes: UInt64 { uniqueBufferBytes([logits, probs, outToken]) }
 
     public init(context: MetalContext, vocab: Int, logitSoftcap: Float = 30.0) throws {
         guard let logits = context.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
@@ -137,6 +140,7 @@ public func runRawCompletion(producer: any LogitProducer,
     let prefillStart = Date()
     var position = cachedPromptTokens
     var prefillSeed: PrefillSeed?
+    var prefillExecution: PrefillExecutionReport?
     let prefillTokens = promptIds[cachedPromptTokens...]
     switch prefillConfig.mode {
     case .chunked where producer is any ChunkedPrefillRunner:
@@ -159,11 +163,13 @@ public func runRawCompletion(producer: any LogitProducer,
         }
         position = result.newPosition
         prefillSeed = result.seed
+        prefillExecution = result.execution
         history.append(contentsOf: prefillTokens)
     case .chunked:
         throw PrefillError.chunkedUnsupported(
             PrefillError.chunkedRequiresChunkedRunnerReason)
     case .off:
+        var execution = PrefillExecutionReport()
         let headless = producer as? any HeadlessSequentialPrefillRunner
         let exactPrefill = producer as? any ExactPrefillLogitProducer
         for (offset, t) in prefillTokens.enumerated() {
@@ -177,9 +183,11 @@ public func runRawCompletion(producer: any LogitProducer,
                 try await producer.produce(token: t, position: position, into: scratch.logits)
             }
             position += 1
+            execution.recordReplay(1, reason: "prefill_disabled")
             history.append(t)
             onProgress(.prefill(done: position, total: promptIds.count))
         }
+        prefillExecution = execution
     }
 
     let decodeStart = Date()
@@ -251,7 +259,8 @@ public func runRawCompletion(producer: any LogitProducer,
                            reason: reason,
                            kvPosition: position,
                            kvBackedTokenIDs: history,
-                           uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs)
+                           uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs,
+                           prefillExecution: prefillExecution)
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,

@@ -61,6 +61,7 @@ public final class KVCacheManager {
 
     private let kBuffers: [MTLBuffer]
     private let vBuffers: [MTLBuffer]
+    var diagnosticBufferBytes: UInt64 { uniqueBufferBytes(kBuffers + vBuffers) }
     private let strides:  [Int]         // bytes per token, per layer
     private let kinds:    [LayerKind]
     private let capacityTokens: [Int]

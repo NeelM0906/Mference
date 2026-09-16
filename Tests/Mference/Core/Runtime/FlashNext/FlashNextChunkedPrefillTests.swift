@@ -45,7 +45,7 @@ import Testing
         (0..<count).map { Int32(4 + ($0 * 37 + 11) % (vocab - 4)) }
     }
 
-    @Test func factoryReportsChunkedProductionPrefill() throws {
+    @Test func factoryDoesNotClaimExecutionBeforePrefill() throws {
         let (directory, context, model, _) = try Self.makeRunner(maxContext: 64)
         defer { try? FileManager.default.removeItem(at: directory) }
         let requested = RuntimeConfiguration(prefillEnabled: true,
@@ -56,7 +56,7 @@ import Testing
         #expect(runtime.producer is FlashNextForwardRunner)
         #expect(runtime.producer is any ChunkedPrefillRunner)
         #expect(runtime.prefillConfig == requested.prefillConfig)
-        #expect(runtime.executedPrefillMode == .chunked)
+        #expect(runtime.executedPrefillMode == .unreported)
         #expect(runtime.kvStorageMode == .fp16)
     }
 
@@ -86,8 +86,12 @@ import Testing
             tokens: prompt[...], startPosition: 0, outputMode: .logits,
             config: .production(chunkTokens: 32), into: logits,
             onProgress: { progress.append($0) })
-        #expect(result == PrefillResult(newPosition: prompt.count,
-                                       seed: .logitsWritten))
+        #expect(result.newPosition == prompt.count)
+        #expect(result.seed == .logitsWritten)
+        #expect(result.execution?.batchedTokens == prompt.count)
+        #expect(result.execution?.replayedTokens == 0)
+        #expect(result.execution?.batchedChunkSizes == (prompt.count <= 32
+            ? [prompt.count] : [32, prompt.count - 32]))
         #expect(progress.last == prompt.count)
         #expect(runner.continuationPosition == prompt.count)
         let chunkedPrompt = Self.bits(logits, count: vocab)
@@ -109,5 +113,36 @@ import Testing
     @Test func residentChunkedPrefillMatchesSequentialState() async throws {
         try await Self.expectChunkedMatchesSequential(
             promptLength: 40, streamingMode: .resident)
+    }
+
+    @Test func memorySnapshotReadsExistingAllocationsWithoutOpeningExperts() throws {
+        let directory = try FlashNextToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let context = try MetalContext()
+        let model = try Model.load(
+            directoryURL: directory, device: context.device,
+            expecting: .qwen38FlashNextToy(), streamingMode: .pread(slotCount: 16))
+        let before = model.diagnosticMemoryBytes
+        let again = model.diagnosticMemoryBytes
+        #expect(before == again)
+        #expect(before["expertSlotBuffers"]! == 0)
+        #expect(before["mappedExpertRegions"]! == 0)
+        let alias = try model.resident(name: "lm_head.weight")
+        model.streamersQueue.sync { model.convertedBox.views["test-core-alias"] = alias }
+        #expect(model.diagnosticMemoryBytes["convertedWeightBuffers"]! == 0)
+        let converted = try model.residentAsF32(
+            name: "model.language_model.hyper_connection_mixer.hc_norm.weight")
+        model.streamersQueue.sync { model.convertedBox.views["test-converted-alias"] = converted }
+        #expect(model.diagnosticMemoryBytes["convertedWeightBuffers"]! == UInt64(converted.buffer.length))
+        let runner = try FlashNextForwardRunner(model: model, context: context, maxContext: 64)
+        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize)
+        let snapshot = RuntimeMemorySnapshot.capture(model: model, producer: runner, scratch: scratch)
+        #expect(try #require(snapshot.bytes["targetKVStateBuffers"]!) > 0)
+        #expect(try #require(snapshot.bytes["mappedCoreWeightBuffers"]!) > 0)
+        #expect(snapshot.bytes["completionScratchBuffers"]! == scratch.diagnosticBufferBytes)
+        #expect(try #require(snapshot.bytes["processPhysicalFootprint"]!) > 0)
+        #expect(try #require(snapshot.bytes["processRSS"]!) > 0)
+        #expect(snapshot.bytes["runnerScratchBuffers"]! == nil)
+        #expect(snapshot.bytes["filesystemCache"]! == nil)
     }
 }

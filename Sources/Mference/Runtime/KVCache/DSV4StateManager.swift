@@ -51,6 +51,12 @@ final class DSV4StateManager {
     private(set) var indexerPendingGate: [MTLBuffer?]
     private(set) var indexerPriorCaKV: [MTLBuffer?]
     private(set) var indexerPriorCaGate: [MTLBuffer?]
+    var diagnosticBufferBytes: UInt64 {
+        let groups = [compressedKV, pendingKV, pendingGate, priorCaKV, priorCaGate,
+                      indexerKeys, indexerPendingKV, indexerPendingGate,
+                      indexerPriorCaKV, indexerPriorCaGate]
+        return uniqueBufferBytes(windowKV + groups.flatMap { $0.compactMap { $0 } })
+    }
 
     /// Written by the decode loop as each token's compressor bookkeeping
     /// commits.

@@ -20,6 +20,9 @@ public final class GDNStateManager {
     /// Non-nil only at indices whose layer mask is 2.
     private let stateBuffers: [MTLBuffer?]
     private let convTailBuffers: [MTLBuffer?]
+    var diagnosticBufferBytes: UInt64 {
+        uniqueBufferBytes((stateBuffers + convTailBuffers).compactMap { $0 })
+    }
 
     public let stateBytesPerLayer: Int
     public let convTailBytesPerLayer: Int

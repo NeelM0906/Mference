@@ -78,6 +78,9 @@ public final class KVPageStore {
     private let poolPagesPerLayer: Int
     private let kPools: [MTLBuffer]           // [fullLayerOrdinal]
     private let vPools: [MTLBuffer]
+    var diagnosticBufferBytes: UInt64 {
+        uniqueBufferBytes(kPools + vPools + [metadataBuffer])
+    }
     private let ordinalByLayer: [Int: Int]
 
     private enum PageState: UInt8 { case untouched, unsealed, sealed }

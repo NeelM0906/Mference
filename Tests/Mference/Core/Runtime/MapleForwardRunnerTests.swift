@@ -243,7 +243,7 @@ import Testing
         #expect(model.integrityPolicy == .sizeCheckTrustedReceipt)
         #expect(model.routedExpertCacheSlotCount(layer: 0) == 8)
         #expect(runtime.prefillConfig == requested.prefillConfig)
-        #expect(runtime.executedPrefillMode == .chunked)
+        #expect(runtime.executedPrefillMode == .unreported)
         #expect(runtime.kvStorageMode == .bf16)
         #expect(runtime.producer is any ChunkedPrefillRunner)
         #expect(!(runtime.producer is any FusedHeadLogitProducer))
@@ -324,7 +324,7 @@ import Testing
                                                        useMapleFlashHead: true))
         let runner = try #require(runtime.producer as? MapleForwardRunner)
         #expect(runtime.prefillConfig == .off)
-        #expect(runtime.executedPrefillMode == .off)
+        #expect(runtime.executedPrefillMode == .unreported)
         #expect(runtime.kvStorageMode == .bf16)
 
         let logits = try makeLogits(fixture.context)
@@ -359,7 +359,10 @@ import Testing
             config: .production(chunkTokens: 32), into: chunkedLogits,
             onProgress: { progress.append($0) })
 
-        #expect(result == PrefillResult(newPosition: 2, seed: .logitsWritten))
+        #expect(result.newPosition == 2)
+        #expect(result.seed == .logitsWritten)
+        #expect(result.execution?.batchedTokens == 2)
+        #expect(result.execution?.replayedTokens == 0)
         #expect(progress == [2])
         #expect(bits(chunkedLogits) == expected)
         #expect(chunked.continuationPosition == 2)
@@ -485,7 +488,7 @@ import Testing
         #expect(runtime.producer is RealForwardRunner)
         #expect(runtime.producer is any ChunkedPrefillRunner)
         #expect(runtime.prefillConfig == requested.prefillConfig)
-        #expect(runtime.executedPrefillMode == .chunked)
+        #expect(runtime.executedPrefillMode == .unreported)
         #expect(runtime.kvStorageMode == .fp16)
         #expect((runtime.producer as? any FusedHeadLogitProducer)?.usesFusedGreedyHead == true)
     }

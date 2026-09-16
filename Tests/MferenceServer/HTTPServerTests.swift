@@ -7,9 +7,21 @@ import Testing
 
 private actor ScriptedServerBackend: ServerInferenceBackend {
     let delayNanoseconds: UInt64
+    let diagnostics: RuntimeDiagnostics?
 
-    init(delayNanoseconds: UInt64 = 0) {
+    init(delayNanoseconds: UInt64 = 0, includeDiagnostics: Bool = false) {
         self.delayNanoseconds = delayNanoseconds
+        if includeDiagnostics {
+            let result = RawDecodeResult(
+                prefillTokens: 3, cachedPromptTokens: 0, computedPrefillTokens: 3,
+                prefillSeconds: 0, newTokens: 1, decodeSeconds: 0, reason: .maxTokens,
+                kvPosition: 3, kvBackedTokenIDs: [], uncommittedBoundaryTokenIDs: [],
+                prefillExecution: nil)
+            diagnostics = RuntimeDiagnostics(result: result,
+                memory: RuntimeMemorySnapshot(bytes: ["processRSS": 123]))
+        } else {
+            diagnostics = nil
+        }
     }
 
     func generate(
@@ -24,7 +36,8 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
             content: "hello",
             toolCalls: [],
             finishReason: "stop",
-            usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4))
+            usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4),
+            diagnostics: diagnostics)
     }
 }
 
@@ -213,11 +226,12 @@ private actor CancellableServerBackend: ServerInferenceBackend {
 
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
-    @Test func healthModelsAndNonStreamingCompletion() async throws {
+    @Test(arguments: [false, true])
+    func healthModelsAndNonStreamingCompletion(includeDiagnostics: Bool) async throws {
         let server = MferenceHTTPServer(
             modelID: "test-model",
             queueLimit: 1,
-            backend: ScriptedServerBackend())
+            backend: ScriptedServerBackend(includeDiagnostics: includeDiagnostics))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
 
@@ -243,6 +257,8 @@ struct HTTPServerTests {
         let choices = try #require(object["choices"] as? [[String: Any]])
         let message = try #require(choices[0]["message"] as? [String: Any])
         #expect(message["content"] as? String == "hello")
+        #expect(object["diagnostics"] == nil)
+        #expect(!String(decoding: data, as: UTF8.self).contains("processRSS"))
         let usage = try #require(object["usage"] as? [String: Any])
         let details = try #require(usage["prompt_tokens_details"] as? [String: Any])
         #expect(details["cached_tokens"] as? Int == 0)
@@ -273,11 +289,12 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
-    @Test func streamingUsesStableShapeAndDoneMarker() async throws {
+    @Test(arguments: [false, true])
+    func streamingUsesStableShapeAndDoneMarker(includeDiagnostics: Bool) async throws {
         let server = MferenceHTTPServer(
             modelID: "test-model",
             queueLimit: 1,
-            backend: ScriptedServerBackend())
+            backend: ScriptedServerBackend(includeDiagnostics: includeDiagnostics))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(
@@ -296,6 +313,8 @@ struct HTTPServerTests {
         #expect(text.contains(#""finish_reason":"stop""#))
         #expect(text.contains(#""prompt_tokens":3"#))
         #expect(text.contains(#""cached_tokens":0"#))
+        #expect(!text.contains("diagnostics"))
+        #expect(!text.contains("processRSS"))
         #expect(text.hasSuffix("data: [DONE]\n\n"))
 
         try await server.shutdown()

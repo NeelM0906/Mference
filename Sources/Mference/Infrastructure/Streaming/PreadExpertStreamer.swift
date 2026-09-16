@@ -76,6 +76,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// offsets without the CPU. Entries are valid only when the slot's
     /// content is published (reserved/in-flight slots read -1).
     private let slotOfBuffer: MTLBuffer
+    var diagnosticSlotBytes: UInt64 { UInt64(slotSlabBuffer.length) }
+    var diagnosticMetadataBytes: UInt64 { UInt64(slotOfBuffer.length) }
     private let slotOfPointer: UnsafeMutablePointer<Int16>
 
     private var nextSlot = 0

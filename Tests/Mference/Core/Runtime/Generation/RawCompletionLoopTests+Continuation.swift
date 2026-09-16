@@ -13,6 +13,7 @@ extension RawCompletionLoopTests {
         private(set) var resetCalls = 0
         private(set) var prepareCalls: [Int] = []
         private(set) var prefillRanges: [Range<Int>] = []
+        var reportedExecution: PrefillExecutionReport?
 
         init(vocabSize: Int, terminalToken: Int32, position: Int) {
             self.vocabSize = vocabSize
@@ -54,7 +55,7 @@ extension RawCompletionLoopTests {
             onProgress(tokens.count)
             writeTerminal(to: logits)
             return PrefillResult(newPosition: continuationPosition,
-                                 seed: .logitsWritten)
+                                 seed: .logitsWritten, execution: reportedExecution)
         }
 
         private func writeTerminal(to logits: MTLBuffer) {
@@ -64,7 +65,8 @@ extension RawCompletionLoopTests {
         }
     }
 
-    @Test func resumedChunkedPrefillUsesNonzeroStart() async throws {
+    @Test(arguments: [false, true])
+    func resumedChunkedPrefillUsesNonzeroStart(reportsExecution: Bool) async throws {
         let context = try MetalContext()
         let tokenizer = try await MFTokenizer.load()
         let prompt = tokenizer.encode("one two three four", addBOS: true)
@@ -73,6 +75,11 @@ extension RawCompletionLoopTests {
             vocabSize: tokenizer.vocabSize,
             terminalToken: tokenizer.eosID,
             position: cached)
+        if reportsExecution {
+            var report = PrefillExecutionReport()
+            report.recordBatch(1)
+            producer.reportedExecution = report
+        }
         let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
         var progress: [(Int, Int)] = []
 
@@ -99,6 +106,12 @@ extension RawCompletionLoopTests {
         #expect(result.prefillTokens == prompt.count)
         #expect(result.cachedPromptTokens == cached)
         #expect(result.computedPrefillTokens == 1)
+        // Preserve either actual work or the legacy producer's unknown state.
+        #expect(result.prefillExecution == producer.reportedExecution)
+        if reportsExecution {
+            #expect(result.prefillExecution?.computedTokens == 1)
+            #expect(result.prefillExecution?.batchedChunkSizes == [1])
+        }
         #expect(result.kvPosition == prompt.count)
         #expect(result.kvBackedTokenIDs == prompt)
         #expect(result.uncommittedBoundaryTokenIDs == [tokenizer.eosID])

@@ -1,6 +1,14 @@
 import Foundation
 import Metal
 
+extension RealForwardRunner: RuntimeMemoryReporting {
+    var diagnosticKVStateBytes: UInt64? {
+        let convBuffers = inklingConvStates.flatMap { [$0.k, $0.v, $0.attn, $0.mlp] }
+        return (kv?.diagnosticBufferBytes ?? 0) + (gdnState?.diagnosticBufferBytes ?? 0)
+            + (dsv4State?.diagnosticBufferBytes ?? 0) + uniqueBufferBytes(convBuffers)
+    }
+}
+
 /// Faults detected at the Inkling output head. Both cases mean an
 /// intermediate went non-finite somewhere in the 42-layer stack; the head is
 /// simply the first place that can see it cheaply.
@@ -1437,6 +1445,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                config: PrefillRuntimeConfig,
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
+        var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
         // Prompt prefill and decode share these counters; drop the prompt's
         // contribution on the way out so the phase report describes decode.
@@ -1459,7 +1468,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 "chunked prefill range starting at \(startPosition) with \(tokens.count) tokens exceeds maxContext \(maxContext)")
         }
         guard !tokens.isEmpty else {
-            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
 
         if cfg.family == .inklingSmall {
@@ -1478,6 +1487,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                   into: logits,
                                                   emitHead: isLast,
                                                   outputMode: outputMode)
+                    execution.recordReplay(1, reason: "inkling_reference_override")
                     pos += 1
                     index += 1
                     if index % 16 == 0 { onProgress(index) }
@@ -1501,6 +1511,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         outputMode: outputMode,
                         into: logits)
                     prefillChunkState.markCommitted()
+                    execution.recordBatch(count)
                     pos += count
                     offset += count
                     onProgress(offset)
@@ -1509,9 +1520,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             onProgress(tokens.count)
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 return PrefillResult(newPosition: pos,
-                                     seed: .greedyToken(lastGreedyToken))
+                                     seed: .greedyToken(lastGreedyToken), execution: execution)
             }
-            return PrefillResult(newPosition: pos, seed: .logitsWritten)
+            return PrefillResult(newPosition: pos, seed: .logitsWritten, execution: execution)
         }
 
         if cfg.hasCompressedAttentionLayers {
@@ -1576,10 +1587,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                       logits: logits)
                     if let greedy { lastGreedyToken = greedy }
                     for _ in 0..<batchedCount { kv?.advance() }
+                    execution.recordBatch(batchedCount)
                     pos += batchedCount
                     prefillChunkState.markCommitted()
                 }
                 if batchedCount < span.tokenCount {
+                    let replayReason: String
+                    if !DSV4ChunkedPrefill.batchedPathEnabled {
+                        replayReason = "deepseek_batched_prefill_disabled"
+                    } else if dsv4 == nil || moeDSV4 == nil || dsv4State == nil {
+                        replayReason = "deepseek_batched_engine_unavailable"
+                    } else if let expertSlots, expertSlots < 1 {
+                        replayReason = "deepseek_expert_slots_unavailable"
+                    } else if cfg.routerScoringFunc != "sqrtsoftplus"
+                                || cfg.topKExperts != MoEDeepseekV4.topK
+                                || cfg.compressedAttention.csaCompressRate <= 0 {
+                        replayReason = "deepseek_unsupported_geometry"
+                    } else {
+                        replayReason = "deepseek_sparse_selection_cutover"
+                    }
                     let remainder = span.tokenCount - batchedCount
                     let lower = tokens.index(tokens.startIndex,
                                              offsetBy: span.tokenOffset + batchedCount)
@@ -1591,6 +1617,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                    into: logits,
                                                    emitHead: isLast,
                                                    outputMode: outputMode)
+                        execution.recordReplay(1, reason: replayReason)
                         pos += 1
                         index += 1
                     }
@@ -1600,9 +1627,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 return PrefillResult(newPosition: pos,
-                                     seed: .greedyToken(lastGreedyToken))
+                                     seed: .greedyToken(lastGreedyToken), execution: execution)
             }
-            return PrefillResult(newPosition: pos, seed: .logitsWritten)
+            return PrefillResult(newPosition: pos, seed: .logitsWritten, execution: execution)
         }
 
         let scratch = try ensurePrefillScratch(config: config)
@@ -1620,14 +1647,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 scratch: scratch,
                 config: config,
                 writeFinalHead: spanIndex == spans.count - 1)
+            execution.recordBatch(span.tokenCount)
             onProgress(span.completedCount)
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
-                                 seed: .greedyToken(lastGreedyToken))
+                                 seed: .greedyToken(lastGreedyToken), execution: execution)
         }
         return PrefillResult(newPosition: startPosition + tokens.count,
-                             seed: .logitsWritten)
+                             seed: .logitsWritten, execution: execution)
     }
 
     @discardableResult

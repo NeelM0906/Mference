@@ -1,6 +1,17 @@
 import Foundation
 import Metal
 
+extension FlashNextForwardRunner: RuntimeMemoryReporting {
+    var diagnosticKVStateBytes: UInt64? {
+        let attention = kvCaches.values.flatMap { [$0.keys, $0.values] }
+        let indexer = indexerCaches.values.flatMap { [$0.rawKeys, $0.blockKeys] }
+        let recurrent = genericGDNState.values.flatMap { [$0.recurrent, $0.convTail] }
+        let pleState = pleScratch.map { [$0.convState] } ?? []
+        return (gdnState?.diagnosticBufferBytes ?? 0)
+            + uniqueBufferBytes(attention + indexer + recurrent + pleState)
+    }
+}
+
 public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
     case invalidConfiguration(String)
     case invalidInput(String)
@@ -927,6 +938,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
+        var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
@@ -950,7 +962,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 "Flash-Next tensor capture is a sequential reference/debug facility")
         }
         guard !tokens.isEmpty else {
-            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
         guard logits.length >= cfg.vocabSize * MemoryLayout<Float16>.stride else {
             throw FlashNextForwardRunnerError.invalidInput(
@@ -971,11 +983,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 logits: logits,
                 scratch: scratch,
                 writeFinalHead: spanIndex == spans.count - 1)
+            execution.recordBatch(span.tokenCount)
             onProgress(span.completedCount)
         }
         beginDecodePhaseWindow()
         return PrefillResult(newPosition: startPosition + tokens.count,
-                             seed: .logitsWritten)
+                             seed: .logitsWritten, execution: execution)
     }
 
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws

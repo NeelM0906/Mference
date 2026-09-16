@@ -121,15 +121,60 @@ public enum PrefillKVStorageMode: String, Sendable, Equatable {
     case bf16
 }
 
-public enum PrefillExecutedMode: String, Sendable, Equatable {
+public enum PrefillExecutedMode: String, Sendable, Equatable, Codable {
     case off
     case chunked
     case sequential
+    case mixed
+    case unreported
     case unsupported
+}
+
+/// Work actually completed by one prefill call, excluding cached prompt tokens
+/// and subsequent decode. Record a batch only after its execution succeeds.
+/// Token-ordered recurrence within a layer-major GPU batch is still batched.
+public struct PrefillExecutionReport: Sendable, Equatable, Encodable {
+    public private(set) var batchedChunkSizes: [Int] = []
+    public private(set) var replayedTokens: Int = 0
+    public private(set) var replayReasons: [String: Int] = [:]
+
+    public init() {}
+
+    public var batchedTokens: Int { batchedChunkSizes.reduce(0, +) }
+    public var computedTokens: Int { batchedTokens + replayedTokens }
+    public var executedMode: PrefillExecutedMode {
+        if batchedTokens > 0 { return replayedTokens > 0 ? .mixed : .chunked }
+        return replayedTokens > 0 ? .sequential : .off
+    }
+
+    mutating func recordBatch(_ tokenCount: Int) {
+        precondition(tokenCount > 0)
+        batchedChunkSizes.append(tokenCount)
+    }
+
+    mutating func recordReplay(_ tokenCount: Int, reason: String) {
+        precondition(tokenCount > 0 && !reason.isEmpty)
+        replayedTokens += tokenCount
+        replayReasons[reason, default: 0] += tokenCount
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case executedMode, batchedTokens, replayedTokens, batchedChunkSizes, replayReasons
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(executedMode, forKey: .executedMode)
+        try c.encode(batchedTokens, forKey: .batchedTokens)
+        try c.encode(replayedTokens, forKey: .replayedTokens)
+        try c.encode(batchedChunkSizes, forKey: .batchedChunkSizes)
+        try c.encode(replayReasons, forKey: .replayReasons)
+    }
 }
 
 public enum PrefillChunkCompleteness: String, Sendable, Equatable {
     case complete
+    case unreported
     case unsupported
 }
 
@@ -149,7 +194,8 @@ public struct PrefillExecutionDiagnostics: Sendable, Equatable {
         self.executedMode = executedMode
         self.kvStorageMode = kvStorageMode
         self.chunkCompleteness = chunkCompleteness
-            ?? (executedMode == .unsupported ? .unsupported : .complete)
+            ?? (executedMode == .unreported ? .unreported
+                : executedMode == .unsupported ? .unsupported : .complete)
         self.unsupportedReason = unsupportedReason
     }
 
