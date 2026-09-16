@@ -1,5 +1,9 @@
 import Metal
 
+extension MapleForwardRunner: RuntimeMemoryReporting {
+    var diagnosticKVStateBytes: UInt64? { kv.diagnosticBufferBytes }
+}
+
 public enum MapleForwardRunnerError: Error, CustomStringConvertible {
     case invalidConfiguration(String)
     case invalidInput(String)
@@ -230,6 +234,7 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
+        var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
@@ -244,7 +249,7 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
                 "Maple chunked prefill range exceeds maxContext \(maxContext)")
         }
         guard !tokens.isEmpty else {
-            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
         guard tokens.allSatisfy({ $0 >= 0 && $0 < Int32(Self.vocabularySize) }) else {
             throw MapleForwardRunnerError.invalidInput("Maple token is outside the vocabulary")
@@ -270,11 +275,12 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
                               into: logits)
             kv.advance(by: count)
             prefillChunkState.markCommitted()
+            execution.recordBatch(count)
             completed += count
             position += count
             onProgress(completed)
         }
-        return PrefillResult(newPosition: position, seed: .logitsWritten)
+        return PrefillResult(newPosition: position, seed: .logitsWritten, execution: execution)
     }
 
     private func produce(token: Int32, position: Int, logits: MTLBuffer?,

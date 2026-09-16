@@ -3,16 +3,16 @@ import Metal
 public struct ForwardRuntime: Sendable {
     public let producer: any ContinuableLogitProducer
     public let prefillConfig: PrefillRuntimeConfig
-    public let executedPrefillMode: PrefillExecutedMode
+    /// Construction cannot know the executed path. Read the per-request report.
+    @available(*, deprecated, message: "Use RawDecodeResult.prefillExecution after generation")
+    public var executedPrefillMode: PrefillExecutedMode { .unreported }
     public let kvStorageMode: PrefillKVStorageMode
 
     init(producer: any ContinuableLogitProducer,
          prefillConfig: PrefillRuntimeConfig,
-         executedPrefillMode: PrefillExecutedMode,
          kvStorageMode: PrefillKVStorageMode) {
         self.producer = producer
         self.prefillConfig = prefillConfig
-        self.executedPrefillMode = executedPrefillMode
         self.kvStorageMode = kvStorageMode
     }
 }
@@ -27,8 +27,6 @@ public enum ForwardRunnerFactory {
                 model: model, context: context, maxContext: maxContext,
                 useFlashHead: runtimeConfiguration.useMapleFlashHead),
                                   prefillConfig: runtimeConfiguration.prefillConfig,
-                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
-                                      ? .chunked : .off,
                                   kvStorageMode: .bf16)
         }
         if model.config.family == .qwen38 {
@@ -36,8 +34,6 @@ public enum ForwardRunnerFactory {
                 model: model, context: context, maxContext: maxContext,
                 runtimeConfiguration: runtimeConfiguration),
                                   prefillConfig: runtimeConfiguration.prefillConfig,
-                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
-                                      ? .chunked : .off,
                                   kvStorageMode: .fp16)
         }
         if model.config.family == .minicpm5 {
@@ -45,19 +41,13 @@ public enum ForwardRunnerFactory {
                 model: model, context: context, maxContext: maxContext,
                 runtimeConfiguration: runtimeConfiguration),
                                   prefillConfig: runtimeConfiguration.prefillConfig,
-                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
-                                      ? .chunked : .off,
                                   kvStorageMode: .fp16)
         }
         if model.config.family == .glm53Flash {
-            // Per-token runner; `prefillChunked` walks the chunk through the
-            // decode path, so the chunked config is honored by construction.
             return ForwardRuntime(producer: try Glm53ForwardRunner(
                 model: model, context: context, maxContext: maxContext,
                 runtimeConfiguration: runtimeConfiguration),
                                   prefillConfig: runtimeConfiguration.prefillConfig,
-                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
-                                      ? .chunked : .off,
                                   kvStorageMode: .fp16)
         }
         if model.config.family == .qwen38flashnext {
@@ -65,8 +55,6 @@ public enum ForwardRunnerFactory {
                 model: model, context: context, maxContext: maxContext,
                 runtimeConfiguration: runtimeConfiguration),
                                   prefillConfig: runtimeConfiguration.prefillConfig,
-                                  executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
-                                      ? .chunked : .off,
                                   kvStorageMode: .fp16)
         }
         return ForwardRuntime(producer: try RealForwardRunner(
@@ -75,8 +63,6 @@ public enum ForwardRunnerFactory {
             maxContext: maxContext,
             runtimeConfiguration: runtimeConfiguration),
             prefillConfig: runtimeConfiguration.prefillConfig,
-            executedPrefillMode: runtimeConfiguration.prefillConfig.mode == .chunked
-                ? .chunked : .off,
             kvStorageMode: .fp16)
     }
 }

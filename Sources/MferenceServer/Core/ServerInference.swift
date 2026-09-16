@@ -12,15 +12,19 @@ public struct ServerCompletion: Equatable, Sendable {
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
+    /// Operator-only diagnostics, not part of the OpenAI response body.
+    public let diagnostics: RuntimeDiagnostics?
 
     public init(content: String,
                 toolCalls: [ParsedToolCall],
                 finishReason: String,
-                usage: OpenAIUsage) {
+                usage: OpenAIUsage,
+                diagnostics: RuntimeDiagnostics? = nil) {
         self.content = content
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
+        self.diagnostics = diagnostics
     }
 }
 
@@ -502,6 +506,9 @@ public actor ServerModelSession: ServerLoadedModel {
             usage: OpenAIUsage(promptTokens: result.prefillTokens,
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
-                               cachedTokens: result.cachedPromptTokens))
+                               cachedTokens: result.cachedPromptTokens),
+            diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
+                result: result,
+                memory: .capture(model: model, producer: runner, scratch: scratch)) : nil)
     }
 }

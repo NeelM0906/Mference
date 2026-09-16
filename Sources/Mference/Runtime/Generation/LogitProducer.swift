@@ -37,10 +37,14 @@ public enum PrefillSeed: Sendable, Equatable {
 public struct PrefillResult: Sendable, Equatable {
     public let newPosition: Int
     public let seed: PrefillSeed
+    /// Nil means the producer does not report execution, never an inferred batch.
+    public let execution: PrefillExecutionReport?
 
-    public init(newPosition: Int, seed: PrefillSeed) {
+    public init(newPosition: Int, seed: PrefillSeed,
+                execution: PrefillExecutionReport? = nil) {
         self.newPosition = newPosition
         self.seed = seed
+        self.execution = execution
     }
 }
 

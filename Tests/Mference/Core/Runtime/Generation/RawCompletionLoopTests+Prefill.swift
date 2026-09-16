@@ -84,7 +84,7 @@ extension RawCompletionLoopTests {
                                                     position: cached)
         let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
 
-        _ = try await runRawCompletion(
+        let result = try await runRawCompletion(
             producer: producer,
             tokenizer: tokenizer,
             promptIds: prompt,
@@ -95,6 +95,12 @@ extension RawCompletionLoopTests {
             start: .resume(cachedPromptTokens: cached)
         ) { _ in }
 
+        #expect(result.prefillExecution?.executedMode == .sequential)
+        #expect(result.prefillExecution?.batchedTokens == 0)
+        #expect(result.prefillExecution?.replayedTokens == 2)
+        #expect(result.prefillExecution?.replayReasons == ["prefill_disabled": 2])
+        #expect(result.cachedPromptTokens == cached)
+        #expect(result.computedPrefillTokens == 2)
         #expect(producer.resetCalls == 0)
         #expect(producer.prepareCalls == [cached])
         #expect(producer.headlessPositions == [cached])

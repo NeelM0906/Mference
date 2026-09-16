@@ -54,6 +54,9 @@ import Metal
 
         let streamer = try ResidentExpertStreamer(
             layout: Self.makeLayout(path: url.path), device: device)
+        #expect(streamer.diagnosticMappedBytes == Self.streamSize)
+        #expect(streamer.diagnosticCopiedBytes == 0)
+        #expect(streamer.diagnosticMetadataBytes == UInt64(Self.numExperts * MemoryLayout<Int16>.stride))
         for expert in 0..<Self.numExperts {
             let view = try streamer.expertBuffer(layer: 0, expert: expert)
             #expect(view.size == UInt64(Self.expertStride))
@@ -83,6 +86,9 @@ import Metal
                     "expert \(expert) bytes must match the file blob")
         }
         let slab = try #require(streamer.slabView)
+        #expect(streamer.diagnosticMappedBytes == 0)
+        #expect(streamer.diagnosticCopiedBytes == UInt64(first.buffer.length))
+        #expect(streamer.diagnosticCopiedBytes == Self.streamSize)
         #expect(slab.buffer === first.buffer)
         #expect(slab.baseOffset == 0)
         #expect(slab.expertStride == Self.expertStride)

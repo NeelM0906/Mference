@@ -1,6 +1,10 @@
 import Foundation
 import Metal
 
+extension Glm53ForwardRunner: RuntimeMemoryReporting {
+    var diagnosticKVStateBytes: UInt64? { state.diagnosticBufferBytes }
+}
+
 public enum Glm53ForwardRunnerError: Error, CustomStringConvertible {
     case invalidConfiguration(String)
     case invalidInput(String)
@@ -591,13 +595,15 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         try await produceToken(token: token, position: p, into: logits)
     }
 
-    /// Sequential by construction: the same per-token path as decode.
+    /// Batches eligible resident execution; otherwise replays the decode path.
+    /// The returned report records the actual path, not the requested mode.
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
                         outputMode: PrefillOutputMode,
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
+        var execution = PrefillExecutionReport()
         guard startPosition == position else {
             throw PrefillError.chunkedUnsupported(
                 "GLM-5.3 prefill cursor \(position) != startPosition \(startPosition)")
@@ -608,7 +614,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                 + "tokens exceeds maxContext \(maxContext)")
         }
         guard !tokens.isEmpty else {
-            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
         var done = 0
         var remaining = tokens
@@ -629,6 +635,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                     let chunk = remaining.prefix(n)
                     let last = n == remaining.count
                     try engine.run(tokens: chunk, startPosition: position, into: last ? logits : nil)
+                    execution.recordBatch(n)
                     position += n
                     remaining = remaining.dropFirst(n)
                     done += n
@@ -636,10 +643,16 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
                 }
             }
         }
+        let replayReason = !batchedPrefillEnabled ? "glm_batched_prefill_disabled"
+            : !expertsResident ? "glm_streamed_experts"
+            : capture != nil ? "glm_capture_reference"
+            : denseSelectionForAB ? "glm_dense_selection_reference"
+            : "glm_batched_engine_unavailable"
         for (i, token) in remaining.enumerated() {
             try Task.checkCancellation()
             let last = i == remaining.count - 1
             try await produceToken(token: token, position: position, into: last ? logits : nil)
+            execution.recordReplay(1, reason: replayReason)
             done += 1
             if done % max(1, config.chunkTokens) == 0 || last {
                 try waitForCommitted()
@@ -648,7 +661,7 @@ public final class Glm53ForwardRunner: ContinuableLogitProducer,
         }
         try waitForCommitted()
         beginDecodePhaseWindow()
-        return PrefillResult(newPosition: startPosition + tokens.count, seed: .logitsWritten)
+        return PrefillResult(newPosition: startPosition + tokens.count, seed: .logitsWritten, execution: execution)
     }
 
     // MARK: - The forward pass

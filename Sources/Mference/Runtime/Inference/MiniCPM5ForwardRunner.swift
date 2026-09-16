@@ -1,6 +1,12 @@
 import Foundation
 import Metal
 
+extension MiniCPM5ForwardRunner: RuntimeMemoryReporting {
+    var diagnosticKVStateBytes: UInt64? {
+        kv.diagnosticBufferBytes + (pagedKV?.store.diagnosticBufferBytes ?? 0)
+    }
+}
+
 public enum MiniCPM5ForwardRunnerError: Error, CustomStringConvertible {
     case invalidConfiguration(String)
     case invalidInput(String)
@@ -425,6 +431,7 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
+        var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
@@ -439,7 +446,7 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
                 "MiniCPM5 prefill range starting at \(startPosition) with \(tokens.count) tokens exceeds maxContext \(maxContext)")
         }
         guard !tokens.isEmpty else {
-            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
         guard tokens.allSatisfy({ $0 >= 0 && $0 < Int32(cfg.vocabSize) }) else {
             throw MiniCPM5ForwardRunnerError.invalidInput(
@@ -467,14 +474,15 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
                                     logits: logits,
                                     scratch: scratch,
                                     writeFinalHead: spanIndex == spans.count - 1)
+            execution.recordBatch(span.tokenCount)
             onProgress(span.completedCount)
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
-                                 seed: .greedyToken(lastGreedyToken))
+                                 seed: .greedyToken(lastGreedyToken), execution: execution)
         }
         return PrefillResult(newPosition: startPosition + tokens.count,
-                             seed: .logitsWritten)
+                             seed: .logitsWritten, execution: execution)
     }
 
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillScratch {

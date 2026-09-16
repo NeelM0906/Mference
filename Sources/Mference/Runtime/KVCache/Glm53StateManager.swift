@@ -20,6 +20,10 @@ final class Glm53StateManager {
     private(set) var indexKeys: [MTLBuffer?]
     private(set) var indexGates: [MTLBuffer?]
     private(set) var pooledKeys: [MTLBuffer?]
+    var diagnosticBufferBytes: UInt64 {
+        uniqueBufferBytes((convTail + kdaState + latents + indexKeys + indexGates + pooledKeys)
+            .compactMap { $0 })
+    }
 
     private static let fp16Size = MemoryLayout<Float16>.stride
     let convTailBytes: Int

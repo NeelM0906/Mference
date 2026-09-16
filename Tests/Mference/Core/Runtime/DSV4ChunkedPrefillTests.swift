@@ -83,7 +83,9 @@ struct DSV4ChunkedPrefillTests {
     private static func chunkedRun(_ harness: Harness,
                                    tokens: [Int32],
                                    continuation: [Int32],
-                                   chunkTokens: Int) async throws -> [[UInt16]] {
+                                   chunkTokens: Int,
+                                   expectedBatches: [Int]? = nil,
+                                   expectedReplay: Int = 0) async throws -> [[UInt16]] {
         harness.runner.reset()
         var out: [[UInt16]] = []
         let result = try await harness.runner.prefillChunked(
@@ -94,6 +96,15 @@ struct DSV4ChunkedPrefillTests {
             into: harness.logits,
             onProgress: { _ in })
         #expect(result.newPosition == tokens.count)
+        let execution = try #require(result.execution)
+        #expect(execution.computedTokens == tokens.count)
+        #expect(execution.replayedTokens == expectedReplay)
+        if let expectedBatches {
+            #expect(execution.batchedChunkSizes == expectedBatches)
+        }
+        #expect(execution.executedMode == (expectedReplay > 0 ? .mixed : .chunked))
+        #expect(execution.replayReasons == (expectedReplay > 0
+            ? ["deepseek_sparse_selection_cutover": expectedReplay] : [:]))
         #expect(harness.runner.continuationPosition == tokens.count)
         out.append(snapshot(harness))
         for (i, token) in continuation.enumerated() {
@@ -166,7 +177,8 @@ struct DSV4ChunkedPrefillTests {
                                                        continuation: continuation)
         let chunked = try await Self.chunkedRun(harness, tokens: tokens,
                                                 continuation: continuation,
-                                                chunkTokens: 32)
+                                                chunkTokens: 32,
+                                                expectedBatches: [32, 19], expectedReplay: 9)
         Self.expectIdentical(reference, chunked, label: "mixed spans")
     }
 
@@ -192,7 +204,8 @@ struct DSV4ChunkedPrefillTests {
                                                        continuation: continuation)
         let chunked = try await Self.chunkedRun(harness, tokens: tokens,
                                                 continuation: continuation,
-                                                chunkTokens: 64)
+                                                chunkTokens: 64,
+                                                expectedBatches: [51], expectedReplay: 9)
         Self.expectIdentical(reference, chunked, label: "cutover split")
     }
 

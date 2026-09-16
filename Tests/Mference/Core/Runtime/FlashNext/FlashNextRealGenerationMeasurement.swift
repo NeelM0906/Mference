@@ -361,8 +361,10 @@ import Metal
             + "greedy16=\(rolloutStatus)\n"
         FileHandle.standardError.write(Data(report.utf8))
 
-        #expect(result == PrefillResult(newPosition: prompt.count,
-                                        seed: .logitsWritten))
+        #expect(result.newPosition == prompt.count)
+        #expect(result.seed == .logitsWritten)
+        #expect(result.execution?.batchedTokens == prompt.count)
+        #expect(result.execution?.replayedTokens == 0)
         #expect(chunkedPromptArgmax == promptArgmax)
         #expect(chunkedNextArgmax == nextArgmax)
         #expect(sequentialRollout == chunkedRollout)

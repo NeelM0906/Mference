@@ -23,6 +23,9 @@ enum ServerLog {
         completion=\(usage.completionTokens) \
         finish=\(completion.finishReason)
         """)
+        if let diagnostics = completion.diagnostics, let json = try? diagnostics.jsonLine() {
+            write("request \(id) runtime-diagnostics \(json)")
+        }
     }
 
     static func requestFailed(id: String, status: UInt, streaming: Bool, error: any Error) {

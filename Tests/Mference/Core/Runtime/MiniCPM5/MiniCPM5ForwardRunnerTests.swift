@@ -55,7 +55,7 @@ import Testing
         #expect(runtime.producer is any HeadlessSequentialPrefillRunner)
         #expect(runtime.producer is any ExactPrefillLogitProducer)
         #expect(runtime.prefillConfig == requested.prefillConfig)
-        #expect(runtime.executedPrefillMode == .chunked)
+        #expect(runtime.executedPrefillMode == .unreported)
         #expect(runtime.kvStorageMode == .fp16)
         #expect((runtime.producer as? any FusedHeadLogitProducer)?.usesFusedGreedyHead == true)
     }
@@ -154,7 +154,10 @@ import Testing
             config: .production(chunkTokens: chunkTokens),
             into: logits,
             onProgress: { progress.append($0) })
-        #expect(result == PrefillResult(newPosition: prompt.count, seed: .logitsWritten))
+        #expect(result.newPosition == prompt.count)
+        #expect(result.seed == .logitsWritten)
+        #expect(result.execution?.batchedTokens == prompt.count)
+        #expect(result.execution?.replayedTokens == 0)
         #expect(progress.last == prompt.count)
         #expect(runner.continuationPosition == prompt.count)
         var chunked: [[UInt16]] = [bits(logits)]

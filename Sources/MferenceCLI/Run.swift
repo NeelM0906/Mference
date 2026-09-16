@@ -283,6 +283,8 @@ public func run(args: Args,
             }
             stderr.write(Data(lines.utf8))
         }
+        writeRuntimeDiagnostics(stats: stats, model: model, runner: runner,
+                                scratch: scratch, stderr: stderr)
         if !args.quiet {
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds
@@ -302,6 +304,18 @@ public func run(args: Args,
 private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
     stderr.write(Data("error: \(message)\n".utf8))
     return RunResult(exitCode: code)
+}
+
+private func writeRuntimeDiagnostics(stats: RawDecodeResult, model: Model,
+                                     runner: any LogitProducer,
+                                     scratch: RawCompletionScratch, stderr: FileHandle) {
+    guard RuntimeDiagnostics.enabled else { return }
+    let diagnostics = RuntimeDiagnostics(result: stats,
+        memory: .capture(model: model, producer: runner, scratch: scratch))
+    // Diagnostic serialization must not turn a successful generation into a failure.
+    if let json = try? diagnostics.jsonLine() {
+        stderr.write(Data("\n[runtime-diagnostics] \(json)\n".utf8))
+    }
 }
 
 /// "auto" enables the paged KV cache above 32k context — the point where the
@@ -450,6 +464,7 @@ private func runChat(args: Args,
             var config = baseConfig
             config.maxNewTokens = min(args.maxNew, args.maxContext - promptIds.count)
             let reply = try await streamChatTurn(promptIds: promptIds,
+                                                 model: model,
                                                  config: config,
                                                  tokenizer: tokenizer,
                                                  runner: runner,
@@ -512,6 +527,7 @@ private func resolveExpertStreaming(_ choice: ExpertCacheSlotChoice,
 /// Generate one assistant turn, streaming deltas to `stdout`, and return the
 /// text that was streamed so the caller can append it to the history.
 private func streamChatTurn(promptIds: [Int32],
+                            model: Model,
                             config: GenerationConfig,
                             tokenizer: MFTokenizer,
                             runner: any ContinuableLogitProducer,
@@ -569,6 +585,8 @@ private func streamChatTurn(promptIds: [Int32],
         if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
     }
     stdout.write(Data("\n".utf8))
+    writeRuntimeDiagnostics(stats: stats, model: model, runner: runner,
+                            scratch: scratch, stderr: stderr)
     if !quiet {
         let tokensPerSecond = stats.decodeSeconds > 0
             ? Double(stats.newTokens) / stats.decodeSeconds

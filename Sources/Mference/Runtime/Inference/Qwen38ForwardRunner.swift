@@ -1,6 +1,13 @@
 import Foundation
 import Metal
 
+extension Qwen38ForwardRunner: RuntimeMemoryReporting {
+    var diagnosticKVStateBytes: UInt64? {
+        kv.diagnosticBufferBytes + gdnState.diagnosticBufferBytes
+            + (pagedKV?.store.diagnosticBufferBytes ?? 0)
+    }
+}
+
 public enum Qwen38ForwardRunnerError: Error, CustomStringConvertible {
     case invalidConfiguration(String)
     case invalidInput(String)
@@ -564,6 +571,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
+        var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
@@ -578,7 +586,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                 "Qwen 3.8 prefill range starting at \(startPosition) with \(tokens.count) tokens exceeds maxContext \(maxContext)")
         }
         guard !tokens.isEmpty else {
-            return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+            return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
         guard tokens.allSatisfy({ $0 >= 0 && $0 < Int32(cfg.vocabSize) }) else {
             throw Qwen38ForwardRunnerError.invalidInput(
@@ -619,14 +627,15 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                     scratch: scratch,
                                     writeFinalHead: spanIndex == spans.count - 1,
                                     dflash2TapBase: dflash2TapBase)
+            execution.recordBatch(span.tokenCount)
             onProgress(span.completedCount)
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
-                                 seed: .greedyToken(lastGreedyToken))
+                                 seed: .greedyToken(lastGreedyToken), execution: execution)
         }
         return PrefillResult(newPosition: startPosition + tokens.count,
-                             seed: .logitsWritten)
+                             seed: .logitsWritten, execution: execution)
     }
 
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillScratch {
