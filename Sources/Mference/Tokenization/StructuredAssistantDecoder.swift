@@ -256,10 +256,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             : QwenToolCallParser.maximumBytes
     }
 
-    // Thinking mode does not determine tool syntax: Swift-Qwen opens a
-    // thought block but its pinned template uses Qwen's XML payload.
+    // Thinking mode does not determine tool syntax: base and Swift Qwen
+    // open thought blocks but both pinned templates use XML payloads.
     private var usesJSONToolCalls: Bool {
-        !tokenizer.isSwiftQwen && tokenizer.generationPromptStartsInThinking
+        !tokenizer.isSwiftQwen && tokenizer.usesJSONChatMLToolCalls
     }
 
     private func parseChatMLToolCall(_ text: String) throws -> ParsedToolCall {

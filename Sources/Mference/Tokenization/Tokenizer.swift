@@ -60,6 +60,8 @@ public struct MFTokenizer: @unchecked Sendable {
 
     public let dialect: ChatDialect
     public internal(set) var isSwiftQwen = false
+    /// Tool grammar is a family contract, independent of thinking policy.
+    let usesJSONChatMLToolCalls: Bool
     /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.
     public let bosID: Int32
@@ -167,6 +169,7 @@ public struct MFTokenizer: @unchecked Sendable {
 
     public init(tokenizer: any Tokenizer, family: ModelFamily?) throws {
         self.tokenizer = tokenizer
+        self.usesJSONChatMLToolCalls = family == .maple
 
         let dialect: ChatDialect =
             if Self.specialTokenID(tokenizer, Self.inklingUserMark) != nil {

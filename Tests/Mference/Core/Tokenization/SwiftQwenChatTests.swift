@@ -102,9 +102,10 @@ struct SwiftQwenChatTests {
         #expect(throws: (any Error).self) { try tok.encodeChat(messages: []) }
     }
 
-    @Test(arguments: [false, true])
-    func thinkingDoesNotSelectJSONToolSyntax(startsInThought: Bool) async throws {
-        let tok = try await tokenizer()
+    @Test(arguments: [false, true], [false, true])
+    func thinkingDoesNotSelectJSONToolSyntax(startsInThought: Bool, swift: Bool) async throws {
+        let candidate = try await tokenizer()
+        let tok = try candidate.forCheckpoint(swift ? CheckpointIdentity.swiftQwen38 : "qwen3.8-27b-4bit")
         #expect(tok.generationPromptStartsInThinking)
         let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: ["add"],
                                                   startsInThought: startsInThought,

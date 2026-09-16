@@ -62,9 +62,12 @@ Generation stops at `<|im_end|>` or `<|endoftext|>`.
 
 Open WebUI sees the distinct API ID through library discovery. Where the client
 can forward a custom request parameter, use `reasoning_effort` with the exact
-values above; an omitted parameter uses `xhigh`. End-to-end UI forwarding and
-reasoning-history persistence still require qualification; no UI behavior is
-assumed from server unit tests. Base and Swift release their previous resident
+values above; an omitted parameter uses `xhigh`. The pinned Open WebUI launcher
+includes a narrow Swift-only reasoning-history adapter. Browser tests verified
+low/none parameter forwarding, separate reasoning rendering, persistence across
+UI restart/reload, and a history follow-up with 187 exact-prefix tokens reused.
+See [Open WebUI](../OPEN_WEBUI.md) for the compatibility contract.
+Base and Swift release their previous resident
 session when switching. Swift only reuses an exactly matching rendered prefix;
 it does not use the legacy hand-written continuation bridge.
 
@@ -72,6 +75,9 @@ MTP is disabled by default for this candidate. `MFERENCE_MTP=1` explicitly
 enables it for qualification; the base checkpoint's existing default is unchanged.
 
 ## Qualification gates
+
+Detailed commands, hardware, failed gates and the frozen base-versus-Swift
+task screen are recorded in [the qualification report](SWIFT_QWEN38_QUALIFICATION.md).
 
 Implemented checks: pinned source metadata/dry run; tiny synthetic remote
 range install including own MTP; norm payload folds and convolution metadata;
@@ -100,14 +106,36 @@ Swift 6.3.3; Phase 2 changes based on `3247c3d`):
   and 358 exact-prefix tokens reused. Live SSE kept reasoning separate from
   visible content and completed normally. Thinking-open prompts explicitly
   select Qwen XML tool parsing for this checkpoint, not Maple's JSON parser.
+  The expanded task screen exposed the same thinking-versus-tool-grammar
+  conflation in base Qwen; selection now keys off the explicit Maple family,
+  fixing both Qwen checkpoints while retaining Maple JSON behavior.
+
+Expanded local qualification adds 65/257/1025-token prefill with a nonzero
+33-token append boundary, followed by five full-logit state probes per case.
+All top-1 choices matched; all 15 subsequent state probes met the predeclared
+max-absolute 0.25 / mean-absolute 0.01 screen. **The gate is not passed:** the
+65- and 1025-token prefill heads had mean differences 0.01387 and 0.01428,
+above 0.01 (maximum differences 0.2070 and 0.1865). The tolerance was not
+relaxed after seeing these results. These measurements are not evidence of
+bit-exact production prefill; numerical/quality qualification remains open.
+
+Separately, MTP-on/off greedy outputs matched at stop lengths 2, 7, 32 and 64.
+After cursor reconciliation, all 20 full-vocabulary continuation probes were
+bit-identical. Organic acceptance was 1/3, 5/9, 30/36 and 79/87 drafted tokens
+on the single counting prompt. This establishes bounded stop/rewind evidence
+on M3 Ultra, not representative acceptance, a throughput result, or other-Mac
+qualification. The opt-in suite is `SwiftQwenInstalledQualificationTests`,
+gated by `MFERENCE_SWIFT_QWEN_GTURBO` and explicit `MFERENCE_MTP=1`.
 
 Still required before promotion:
 
 1. Broader same-Swift logits/state and long-context family acceptance checks.
-2. End-to-end Open WebUI parameter forwarding and reasoning-history checks.
+2. Broader Open WebUI native-tool-loop acceptance beyond the verified server
+   tool round trip and browser history/parameter checks.
 3. MTP state parity, acceptance and latency per supported hardware profile.
-4. Base-versus-Swift task quality, token usage and latency at matched policies,
-   including quantization-quality impact. Base Qwen is a task-quality control,
+4. Broader base-versus-Swift task quality, token usage and repeated latency at
+   matched policies beyond the recorded 12-task screen, including quantization-
+   quality impact. Base Qwen is a task-quality control,
    not a numerical reference for different fine-tuned weights.
 
 Until these pass, do not claim token savings, quality preservation or a faster

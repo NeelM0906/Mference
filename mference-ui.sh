@@ -197,6 +197,17 @@ open_webui_version() {
   printf '%s' "$reported"
 }
 
+# uv's entry point records the environment's own Python in its shebang. Do
+# not use an unrelated system Python to import the installed Open WebUI app.
+open_webui_python() {
+  local first_line interpreter
+  IFS= read -r first_line < "$1"
+  interpreter="${first_line#\#!}"
+  [[ "$interpreter" == /* && -x "$interpreter" && "$interpreter" != *" "* ]] ||
+    fail "cannot resolve Open WebUI's Python; install the pinned uv tool environment"
+  printf '%s' "$interpreter"
+}
+
 ensure_open_webui() {
   local binary
   binary="$(open_webui_binary)"
@@ -217,7 +228,7 @@ ensure_open_webui() {
   local installed
   installed="$(open_webui_version "$binary")"
   if [[ -n "$installed" && "$installed" != "$OPEN_WEBUI_VERSION" ]]; then
-    note "note: open-webui $installed is installed; this launcher pins $OPEN_WEBUI_VERSION (not reinstalling)."
+    fail "open-webui $installed is installed; reasoning-history compatibility requires $OPEN_WEBUI_VERSION (not reinstalling)."
   fi
   printf '%s' "$binary"
 }
@@ -307,7 +318,7 @@ cmd_run() {
     echo "would run:   $server_binary ${server_arguments[*]}"
     echo "would wait:  http://127.0.0.1:$server_port/health"
     echo "would read:  http://127.0.0.1:$server_port/v1/models"
-    echo "would run:   $(open_webui_binary) serve --host 127.0.0.1 --port $webui_port"
+    echo "would run:   Open WebUI's Python Scripts/openwebui-mference.py serve --host 127.0.0.1 --port $webui_port"
     echo "would run:   Scripts/openwebui-configure-models.py --webui http://127.0.0.1:$webui_port  (builtin tools off per Mference model)"
     echo "with env:"
     local entry
@@ -321,8 +332,9 @@ cmd_run() {
   fi
 
   check_no_model_process
-  local webui_binary
+  local webui_binary webui_python
   webui_binary="$(ensure_open_webui)"
+  webui_python="$(open_webui_python "$webui_binary")"
   ensure_server_binary
 
   trap stop_children INT TERM EXIT
@@ -337,7 +349,7 @@ cmd_run() {
   # The secret is created here, on a real launch only, so --dry-run, install
   # and models never touch the data directory.
   env "${webui_environment[@]}" "WEBUI_SECRET_KEY=$(webui_secret_key)" \
-    "$webui_binary" serve --host 127.0.0.1 --port "$webui_port" &
+    "$webui_python" "$repository_root/Scripts/openwebui-mference.py" serve --host 127.0.0.1 --port "$webui_port" &
   webui_pid=$!
   wait_for_webui
   configure_models
