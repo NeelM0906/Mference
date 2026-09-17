@@ -2,6 +2,22 @@ import Testing
 @testable import Mference
 
 @Suite struct PrefillRoutedTileSchedulerTests {
+    @Test func tileWidthAdaptsToSmallCacheWithoutChangingOverlapDepth() throws {
+        let requested = PrefillRoutedTileSchedulerConfig()
+        let small = try #require(requested.fittingSlotBudget(slotCount: 8))
+        #expect(small.tileExperts == 4)
+        #expect(small.maxPendingDepth == 1)
+        #expect(small.fitsSlotBudget(slotCount: 8))
+        #expect(requested.fittingSlotBudget(slotCount: 16) == requested)
+        #expect(requested.fittingSlotBudget(slotCount: 64) == requested)
+        #expect(requested.fittingSlotBudget(slotCount: 1) == nil)
+        let deeper = try #require(PrefillRoutedTileSchedulerConfig(maxPendingDepth: 2)
+            .fittingSlotBudget(slotCount: 8))
+        #expect(deeper.tileExperts == 2)
+        #expect(deeper.maxPendingDepth == 2)
+        #expect(deeper.fitsSlotBudget(slotCount: 8))
+    }
+
     @Test func halfCacheIssuesFirstTileWithoutPendingWork() {
         let decision = PrefillRoutedTileScheduler().decide(
             PrefillRoutedTileSchedulerInput(hasPendingTile: false,

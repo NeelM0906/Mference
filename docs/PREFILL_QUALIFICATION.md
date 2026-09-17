@@ -6,6 +6,12 @@ number of batched tokens, zero replay, and the observed chunk sizes. A factory's
 requested mode is not evidence. Explicit sequential reference modes remain
 available for correctness comparisons.
 
+The matrix exposed a production bug in the shared Gemma/Qwen runner: its
+depth-1, eight-expert tiles rejected the supported eight-slot cache because
+they required sixteen slots. Tile width now follows the actual budget (four
+experts at eight slots), preserving the overlap depth and grouped batched
+execution. Resident and larger-budget configurations keep their existing width.
+
 ## Automated coverage
 
 | Family / path | Production-dispatch evidence | Limits |

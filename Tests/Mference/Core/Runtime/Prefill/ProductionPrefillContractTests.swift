@@ -7,12 +7,20 @@ import Testing
 /// covered by the family suites. These assertions consume actual dispatch
 /// reports after cold/warm multi-token calls, rather than factory preferences.
 @Suite(.serialized) struct ProductionPrefillContractTests {
-    @Test(arguments: ["gemma", "qwen"], [false, true])
-    func realRunnerBatchesWarmAppends(family: String, resident: Bool) async throws {
+    @Test(arguments: ["gemma", "qwen"])
+    func realRunnerBatchesWarmAppends(family: String) async throws {
+        let streamed = try await Self.warmAppendRow(family: family, resident: false)
+        let resident = try await Self.warmAppendRow(family: family, resident: true)
+        #expect(streamed == resident, "bounded expert tiles preserve the resident result")
+    }
+
+    private static func warmAppendRow(family: String, resident: Bool) async throws -> [UInt16] {
         let gemma = family == "gemma"
-        let directory = try gemma ? ModelLoaderTests.writeToySynthetic() : QwenToySynthetic.write()
+        // The loader's historical top-2 toy does not satisfy the production
+        // MoE kernel contract. Keep its defaults, but run this fixture at top-8.
+        let config: ArchConfig = gemma ? .gemma4Toy(topKExperts: 8) : .qwen36Toy()
+        let directory = try (gemma ? ModelLoaderTests.writeToySynthetic(config: config, finiteNorms: true) : QwenToySynthetic.write())
         defer { try? FileManager.default.removeItem(at: directory) }
-        let config: ArchConfig = gemma ? .gemma4Toy() : .qwen36Toy()
         let context = try MetalContext()
         let model = try Model.load(directoryURL: directory, device: context.device,
             expecting: config, streamingMode: resident ? .resident : .pread(slotCount: 8))
@@ -54,5 +62,6 @@ import Testing
             if pass == 0 { first = row() }
             else { #expect(row() == first, "reset reproduces warm-append state") }
         }
+        return first
     }
 }

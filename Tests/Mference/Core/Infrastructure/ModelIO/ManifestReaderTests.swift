@@ -435,7 +435,7 @@ import Foundation
 extension ArchConfig {
     /// Tiny baseline used across the loader tests. 2 layers (both full), hidden 64,
     /// vocab 1024, 8 experts. Numbers are intentionally toy.
-    static func gemma4Toy() -> ArchConfig {
+    static func gemma4Toy(topKExperts: Int = 2) -> ArchConfig {
         ArchConfig(
             hiddenSize: 64,
             intermediateSize: 256,
@@ -453,7 +453,7 @@ extension ArchConfig {
             partialRotaryFactor: 0.25,
             numLayers: 2,
             numExperts: 8,
-            topKExperts: 2,
+            topKExperts: topKExperts,
             tieWordEmbeddings: true,
             attentionKEqV: true,
             fullAttentionLayerMask: [0, 1],
