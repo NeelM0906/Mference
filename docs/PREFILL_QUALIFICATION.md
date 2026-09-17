@@ -102,3 +102,60 @@ and prose-length assertions and now also confirms zero prefill replay. No
 download, model copy, cache purge or profiling was used. It is a debug-build
 correctness test, not a community performance measurement or a broader
 quality/hardware recommendation.
+
+## Combined PR validation
+
+The local `codex/roadmap-validation` branch combines PRs #33–36 without merging
+them into `main`. On the same Mac Studio/toolchain recorded above, revision
+`f60a74b` passed the full serial package suite:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs
+```
+
+Exit 0; build `19.04s`; full footer:
+
+```text
+Test run with 1227 tests in 216 suites passed after 254.968 seconds with 1 known issue.
+```
+
+The known issue is the existing absent optional Flash-Next toy checkpoint.
+Ordinary package runs do not enable installed-model environment gates. Real
+Inkling results are above; the separate resident and 16-slot installed
+DeepSeek cutover/continuation gates are recorded in
+[the DeepSeek validation record](DEEPSEEK_V4_FLASH.md) in PR #35.
+
+The combined release build ran on `d769a7e`, whose production source is
+identical to `f60a74b` (only qualification documentation changed):
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+swift build -c release --scratch-path /tmp/mference-phase1-build.sXnNTs
+```
+
+Exit 0; full footer: `Build complete! (59.29s)`.
+
+The dedicated scratch path reuses the compatible Xcode build directory; the
+default `.build` contained artifacts from a different toolchain and was not
+purged. No model download/copy, profiling or benchmark protocol was used.
+These are build/correctness results, not throughput measurements.
+
+Swift 6.1 CI subsequently exposed a type-checker timeout in the new test's
+single token-generation expression. Commit `ce2d0a9` replaces that expression
+with an explicitly typed loop and explicitly types the execution report; no
+production code or numerical limits changed. The full serial command above
+was repeated on combined revision `e0c02ba5` after that fix, with 788 GiB free
+disk, memory-pressure free percentage 98 and no existing model owner:
+
+```text
+Build complete! (11.45s)
+Test run with 1227 tests in 216 suites passed after 255.092 seconds with 1 known issue.
+```
+
+Exit 0; the same optional-fixture known issue remains. Markdown validation
+also passed for all 64 files, and the Open WebUI adapter/task-screen/reference
+script unit suites passed (3/3/4 tests respectively). The reference script's
+tests require its declared `uv run` environment; system Python lacked MLX, so
+the successful rerun used that documented runner. This did not perform model
+inference or download weights.
