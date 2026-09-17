@@ -42,9 +42,8 @@ import Metal
 //    the down projection lands in an FP32 per-route partial instead of
 //    threadgroup memory -- preserves the value bit-for-bit.
 //
-// Falls back to the token-by-token path (see `supports`) when the chunk would
-// need lightning-indexer selection, which requires a mid-layer CPU readback
-// per token.
+// Above the lightning-indexer threshold, GPU top-k selects the same ascending
+// entry set as decode's CPU reference, keeping each query in the command stream.
 // ============================================================================
 
 /// Everything the chunked DSV4 prefill needs from `RealForwardRunner`. Built
@@ -146,6 +145,9 @@ final class DSV4ChunkedPrefill {
     private let denseUp: MTLBuffer
     private let denseAct: MTLBuffer
     private let selected: MTLBuffer
+    private let indexerQ: MTLBuffer
+    private let indexerW: MTLBuffer
+    private let indexerScores: MTLBuffer
 
     private static let fp16 = MemoryLayout<Float16>.stride
 
@@ -277,6 +279,11 @@ final class DSV4ChunkedPrefill {
         self.denseAct = try buf(cfg.intermediateSize * fp16, "dsv4.prefill.denseAct")
         self.selected = try buf(max(ca.indexTopK, 1) * MemoryLayout<UInt32>.stride,
                                 "dsv4.prefill.selected")
+        self.indexerQ = try buf(ca.indexNHeads * ca.indexHeadDim * fp16, "dsv4.prefill.indexerQ")
+        self.indexerW = try buf(ca.indexNHeads * fp16, "dsv4.prefill.indexerW")
+        let maxEntries = (bindings.state.maxContext + max(ca.csaCompressRate, 1) - 1)
+            / max(ca.csaCompressRate, 1)
+        self.indexerScores = try buf(maxEntries * MemoryLayout<Float>.stride, "dsv4.prefill.indexerScores")
     }
 
     /// Escape hatch for A/B-ing the batched path against the token-by-token
@@ -302,13 +309,9 @@ final class DSV4ChunkedPrefill {
 
     /// How many tokens from the start of a chunk can run batched.
     ///
-    /// The lightning indexer selects a top-`indexTopK` subset of compressed
-    /// entries once a CSA layer holds more than `indexTopK` of them, and the
-    /// selection is a CPU top-k over a GPU readback taken *in the middle* of
-    /// the layer. Batching a whole chunk into one command buffer cannot host a
-    /// per-token mid-layer readback, so positions past that context length
-    /// fall back to the token-by-token path. A chunk that crosses the cutover
-    /// keeps its eligible prefix batched; only the remainder falls back.
+    /// GPU sparse selection serves every position, including chunks crossing
+    /// the cutover and warm appends above it. Only reference/geometry controls
+    /// can decline the production path.
     static func batchedTokenPrefix(config: ArchConfig,
                                    startPosition: Int,
                                    tokenCount: Int,
@@ -319,14 +322,7 @@ final class DSV4ChunkedPrefill {
         if let expertCacheSlots, expertCacheSlots < 1 { return 0 }
         let ca = config.compressedAttention
         guard ca.csaCompressRate > 0 else { return 0 }
-        let hasCSA = (0..<config.numLayers).contains { config.layerIsCSA($0) }
-        guard hasCSA else { return tokenCount }
-        // A position is batchable while the compressed-entry count after it
-        // stays within the selection threshold:
-        //   (lastPosition + 1) / csaCompressRate <= indexTopK
-        // which holds for lastPosition + 1 <= (indexTopK + 1) * rate - 1.
-        let batchablePositions = (ca.indexTopK + 1) * ca.csaCompressRate - 1
-        return max(0, min(tokenCount, batchablePositions - startPosition))
+        return tokenCount
     }
 
     /// Whether a whole chunk starting at `startPosition` can run batched.
@@ -348,7 +344,8 @@ final class DSV4ChunkedPrefill {
              startPosition: Int,
              emitHead: Bool,
              outputMode: PrefillOutputMode,
-             logits: MTLBuffer) async throws -> UInt32? {
+             logits: MTLBuffer,
+             didCompleteLayer: ((Int) throws -> Void)? = nil) async throws -> UInt32? {
         let tokenList = Array(tokens)
         let T = tokenList.count
         guard T > 0 else { return nil }
@@ -361,12 +358,15 @@ final class DSV4ChunkedPrefill {
                 "DeepSeek-V4 runtime supports 2-bit routed experts; manifest says \(b.model.routedExpertWeightBits)")
         }
 
+        try Task.checkCancellation()
         try encodeEmbedding(tokens: tokenList)
         for layer in 0..<b.cfg.numLayers {
+            try Task.checkCancellation()
             try encodeAttentionSite(layer: layer, tokens: tokenList,
                                     startPosition: startPosition, count: T)
             try await runRoutedMoE(layer: layer, count: T)
             try encodeLayerTail(layer: layer, count: T)
+            try didCompleteLayer?(layer)
         }
         guard emitHead else { return nil }
         return try encodeHead(lastToken: T - 1, outputMode: outputMode, logits: logits)
@@ -583,10 +583,27 @@ final class DSV4ChunkedPrefill {
             let compressedCount = isCompressed
                 ? counters.compressedEntries + (willEmit ? 1 : 0)
                 : 0
-            // `supports` guarantees no token in this chunk needs lightning
-            // selection, so every compressed entry is attended.
-            precondition(!(isCSA && compressedCount > ca.indexTopK),
-                         "DSV4 chunked prefill reached lightning-indexer selection")
+            var selectedCount = DSV4Kernels.selectAll
+            if isCSA && compressedCount > ca.indexTopK {
+                let idxQB = try b.model.dsv4IndexerQBProj(layer: L)
+                let idxWProj = try b.model.dsv4IndexerWeightsProj(layer: L)
+                let idxEntries = counters.indexerEntries + (willEmitIndexer ? 1 : 0)
+                gemv(cb, idxQB, x: qaBuf, y: indexerQ,
+                     m: ca.indexNHeads * ca.indexHeadDim, n: ca.qLoraRank)
+                b.dsv4.encodeRope(commandBuffer: cb, x: indexerQ,
+                    numHeads: ca.indexNHeads, headDim: ca.indexHeadDim,
+                    ropeDim: ca.ropeHeadDim, position: position, rope: .compress, direction: 1)
+                gemv(cb, idxWProj, x: normed, y: indexerW,
+                     m: ca.indexNHeads, n: cfg.hiddenSize)
+                b.dsv4.encodeIndexerScore(commandBuffer: cb, q: indexerQ,
+                    keys: b.state.indexerKeys[L]!, weights: indexerW, scores: indexerScores,
+                    numHeads: ca.indexNHeads, indexDim: ca.indexHeadDim, entryCount: idxEntries,
+                    headScale: 1.0 / Float(ca.indexHeadDim).squareRoot(),
+                    weightScale: 1.0 / Float(ca.indexNHeads).squareRoot())
+                b.dsv4.encodeIndexerSelect(commandBuffer: cb, scores: indexerScores,
+                    selected: selected, entryCount: compressedCount, topK: ca.indexTopK)
+                selectedCount = UInt32(min(ca.indexTopK, compressedCount))
+            }
 
             b.dsv4.encodeAttention(
                 commandBuffer: cb, q: qScratch,
@@ -600,7 +617,7 @@ final class DSV4ChunkedPrefill {
                 windowStartPos: b.state.windowStartPosition(position: position),
                 ringCapacity: b.state.ringCapacity,
                 compressedCount: compressedCount,
-                selectedCount: DSV4Kernels.selectAll,
+                selectedCount: selectedCount,
                 scale: Float(cfg.attentionScale))
             b.dsv4.encodeRope(commandBuffer: cb, x: attnOut,
                               numHeads: numHeads, headDim: headDim,
@@ -737,7 +754,11 @@ final class DSV4ChunkedPrefill {
         let liveTiles = tiles.filter { $0.routeCount > 0 }
 
         var pending: PendingRoutedTile?
+        // A failed fetch/cancellation must not leave GPU readers live while
+        // reset reuses cache slots and scratch. Queue order drains older tiles.
+        defer { if let pending { try? wait(pending.cb) } }
         for (index, tile) in liveTiles.enumerated() {
+            try Task.checkCancellation()
             // Plan around the in-flight tile's slots so its GPU work keeps
             // reading valid blobs while this tile's pread lands.
             var plan: RoutedExpertFetchPlan?
@@ -780,10 +801,10 @@ final class DSV4ChunkedPrefill {
                               routeStart: tile.routeStart, routeCount: tile.routeCount,
                               rowsPerRoute: cfg.hiddenSize, isPhase1: false)
             cb.commit()
-            if let inFlight = pending { try wait(inFlight.cb) }
-            if pipelineTiles {
-                pending = PendingRoutedTile(cb: cb, assignedSlots: tilePlan.assignedSlots)
-            } else {
+            let previous = pending
+            pending = PendingRoutedTile(cb: cb, assignedSlots: tilePlan.assignedSlots)
+            if let previous { try wait(previous.cb) }
+            if !pipelineTiles {
                 try wait(cb)
                 pending = nil
             }

@@ -171,9 +171,41 @@ global `expertStride` — plus ~4 GB resident file).
 - Prefill v1 ran the decode path token-by-token (the Qwen port's
   chunked-prefill ≡ sequential-decode guarantee is the correctness
   contract). The chunked implementation has since landed
-  (`DSV4ChunkedPrefill`): a span's eligible prefix is batched, and only
-  the remainder past the lightning-selection cutover replays
-  token-by-token.
+  (`DSV4ChunkedPrefill`): production spans are layer-major on both sides of
+  the lightning-selection cutover. GPU top-k selection replaces the mid-layer
+  score readback for prefill; decode retains its CPU reference selector.
+  Each query sees only its own emitted compressed entries, and selected entries
+  are consumed in ascending index order with lower-index tie-breaking.
+  Expert tiles remain bounded by the selected cache budget. Explicit
+  `MFERENCE_DSV4_PREFILL=off` still selects the sequential reference.
+
+## Sparse-prefill qualification (2026-09-16)
+
+The cutover removal preserves the scorer and attention kernels and the exact
+per-query compressor/ring update order. Selection uses an in-place bounded
+top-k heap on the GPU: O(k) selection storage plus one context-sized score row,
+shared across queries. It is not a multi-query attention throughput rewrite.
+
+Cancellation is checked between layers and expert tiles. Pending tile readers
+are drained before errors return, and an incomplete chunk requires reset.
+Warm-continuation preparation now checks the dirty flag before clearing
+transient state; it cannot silently reuse partially advanced layer caches.
+
+`DSV4ChunkedPrefillTests` covers synthetic below/across/above-cutover prompts,
+ragged chunks, warm appends, ring wraps, compressor boundaries, full-logit
+continuations and injected partial-chunk cancellation. The separate
+`DSV4IndexerSelectionTests` compares GPU selection with CPU score ordering,
+including cutoff ties, signed zeros, infinities and 8,193 entries.
+
+The opt-in `DSV4InstalledPrefillTests` uses a strict-verified existing install,
+one runner, and 2,083 tokens of repeated river-observation prose. It compares
+sequential decode against chunk-128 warm appends at positions 2,047, 2,051,
+2,052 and 2,083, then eight greedy continuations, requiring bit-identical full
+logits and zero production replay. Enable with `MFERENCE_DEEPSEEK_GTURBO` and
+choose `MFERENCE_DEEPSEEK_QUALIFICATION_EXPERTS=resident` or a slot count
+(default 16), after the repository safety checks. No model is downloaded.
+This is a correctness protocol, not a community benchmark or a small-memory
+hardware qualification.
 
 ## First-install verification record
 

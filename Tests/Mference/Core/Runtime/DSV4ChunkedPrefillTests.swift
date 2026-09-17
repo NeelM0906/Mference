@@ -25,13 +25,14 @@ struct DSV4ChunkedPrefillTests {
     }
 
     private static func makeHarness(maxContext: Int = 96,
-                                    chunkTokens: Int = 32) throws -> Harness {
+                                    chunkTokens: Int = 32,
+                                    streamingMode: ExpertStreamingMode = .pread(slotCount: 16)) throws -> Harness {
         let dir = try DSV4ToySynthetic.write()
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir,
                                    device: ctx.device,
                                    expecting: .deepseekV4Toy(),
-                                   streamingMode: .pread(slotCount: 16))
+                                   streamingMode: streamingMode)
         let runtime = RuntimeConfiguration(expertCacheSlots: 16,
                                            prefillChunkTokens: chunkTokens,
                                            forceLogitsHead: true)
@@ -84,8 +85,7 @@ struct DSV4ChunkedPrefillTests {
                                    tokens: [Int32],
                                    continuation: [Int32],
                                    chunkTokens: Int,
-                                   expectedBatches: [Int]? = nil,
-                                   expectedReplay: Int = 0) async throws -> [[UInt16]] {
+                                   expectedBatches: [Int]? = nil) async throws -> [[UInt16]] {
         harness.runner.reset()
         var out: [[UInt16]] = []
         let result = try await harness.runner.prefillChunked(
@@ -98,13 +98,13 @@ struct DSV4ChunkedPrefillTests {
         #expect(result.newPosition == tokens.count)
         let execution = try #require(result.execution)
         #expect(execution.computedTokens == tokens.count)
-        #expect(execution.replayedTokens == expectedReplay)
+        #expect(execution.replayedTokens == 0)
+        #expect(execution.batchedTokens == tokens.count)
         if let expectedBatches {
             #expect(execution.batchedChunkSizes == expectedBatches)
         }
-        #expect(execution.executedMode == (expectedReplay > 0 ? .mixed : .chunked))
-        #expect(execution.replayReasons == (expectedReplay > 0
-            ? ["deepseek_sparse_selection_cutover": expectedReplay] : [:]))
+        #expect(execution.executedMode == .chunked)
+        #expect(execution.replayReasons.isEmpty)
         #expect(harness.runner.continuationPosition == tokens.count)
         out.append(snapshot(harness))
         for (i, token) in continuation.enumerated() {
@@ -133,8 +133,8 @@ struct DSV4ChunkedPrefillTests {
     }
 
     /// The core contract. Every case is a *batched* chunk: the CSA lightning
-    /// selection cutover for the toy config is absolute position 48
-    /// (`indexTopK 12 * csaCompressRate 4`).
+    /// selection cutover for the toy config is absolute position 51
+    /// (the 13th compressed entry at rate 4).
     ///
     /// - 24 tokens / chunk 32: one full chunk.
     /// - 45 tokens / chunk 64: one ragged chunk.
@@ -142,7 +142,7 @@ struct DSV4ChunkedPrefillTests {
     ///   the compressor's pending window, the prior-Ca carry, and the window
     ///   ring all have to survive a chunk boundary mid-window.
     @Test("chunked prefill equals sequential decode",
-          arguments: [(24, 32), (45, 64), (45, 32), (32, 32)])
+          arguments: [(24, 32), (45, 64), (45, 32), (32, 32), (51, 32), (52, 32), (85, 32)])
     func chunkedPrefillMatchesSequentialDecode(promptLength: Int,
                                               chunkTokens: Int) async throws {
         let harness = try Self.makeHarness(chunkTokens: chunkTokens)
@@ -158,18 +158,16 @@ struct DSV4ChunkedPrefillTests {
                              label: "prompt \(promptLength) chunk \(chunkTokens)")
     }
 
-    /// A prompt long enough that the second span crosses the lightning-indexer
-    /// cutover, so one call mixes a batched chunk and a token-by-token
-    /// fallback chunk. The result must still match pure decode.
-    @Test("mixed batched and fallback spans equal sequential decode")
-    func mixedSpansMatchSequentialDecode() async throws {
+    /// Both spans stay batched even when the second crosses the cutover.
+    @Test("batched sparse spans equal sequential decode")
+    func sparseSpansMatchSequentialDecode() async throws {
         let harness = try Self.makeHarness(chunkTokens: 32)
         defer { try? FileManager.default.removeItem(at: harness.dir) }
         let tokens = Self.prompt(60)
         #expect(DSV4ChunkedPrefill.supports(config: .deepseekV4Toy(),
                                             startPosition: 0, tokenCount: 32,
                                             expertCacheSlots: 16))
-        #expect(!DSV4ChunkedPrefill.supports(config: .deepseekV4Toy(),
+        #expect(DSV4ChunkedPrefill.supports(config: .deepseekV4Toy(),
                                              startPosition: 32, tokenCount: 28,
                                              expertCacheSlots: 16))
         let continuation: [Int32] = [17, 42]
@@ -178,25 +176,22 @@ struct DSV4ChunkedPrefillTests {
         let chunked = try await Self.chunkedRun(harness, tokens: tokens,
                                                 continuation: continuation,
                                                 chunkTokens: 32,
-                                                expectedBatches: [32, 19], expectedReplay: 9)
-        Self.expectIdentical(reference, chunked, label: "mixed spans")
+                                                expectedBatches: [32, 28])
+        Self.expectIdentical(reference, chunked, label: "sparse spans")
     }
 
-    /// A single span that crosses the lightning-selection cutover (the
-    /// `--prefill-chunk auto` shape for long prompts) must batch its eligible
-    /// prefix and replay only the remainder token-by-token, splitting at the
-    /// cutover even mid compressor window — position 51 with the toy's
-    /// `indexTopK 12 × rate 4`.
-    @Test("span crossing the lightning cutover batches its eligible prefix")
-    func cutoverCrossingSpanBatchesPrefix() async throws {
+    /// A single span crossing the cutover stays one batch, including queries
+    /// that share compressed entries and those that emit a new entry.
+    @Test("span crossing the lightning cutover batches every token")
+    func cutoverCrossingSpanBatchesEveryToken() async throws {
         let harness = try Self.makeHarness(chunkTokens: 64)
         defer { try? FileManager.default.removeItem(at: harness.dir) }
         let tokens = Self.prompt(60)
         #expect(DSV4ChunkedPrefill.batchedTokenPrefix(config: .deepseekV4Toy(),
                                                       startPosition: 0,
                                                       tokenCount: 60,
-                                                      expertCacheSlots: 16) == 51)
-        #expect(!DSV4ChunkedPrefill.supports(config: .deepseekV4Toy(),
+                                                      expertCacheSlots: 16) == 60)
+        #expect(DSV4ChunkedPrefill.supports(config: .deepseekV4Toy(),
                                              startPosition: 0, tokenCount: 60,
                                              expertCacheSlots: 16))
         let continuation: [Int32] = [17, 42]
@@ -205,8 +200,70 @@ struct DSV4ChunkedPrefillTests {
         let chunked = try await Self.chunkedRun(harness, tokens: tokens,
                                                 continuation: continuation,
                                                 chunkTokens: 64,
-                                                expectedBatches: [51], expectedReplay: 9)
-        Self.expectIdentical(reference, chunked, label: "cutover split")
+                                                expectedBatches: [60])
+        Self.expectIdentical(reference, chunked, label: "cutover batch")
+    }
+
+    @Test func warmAppendsAcrossSparseCutoverMatchDecode() async throws {
+        let h = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: h.dir) }
+        let tokens = Self.prompt(79)
+        let reference = try await Self.decodeReference(h, tokens: tokens, continuation: [5, 17, 42, 91])
+        h.runner.reset()
+        var start = 0
+        for length in [47, 4, 1, 27] {
+            let result = try await h.runner.prefillChunked(tokens: tokens[start..<(start + length)],
+                startPosition: start, outputMode: .logits, config: .production(chunkTokens: 32),
+                into: h.logits, onProgress: { _ in })
+            #expect(result.execution?.batchedTokens == length)
+            #expect(result.execution?.replayedTokens == 0)
+            start += length
+            try h.runner.prepareForContinuation(expectedPosition: start)
+        }
+        var actual = [Self.snapshot(h)]
+        for (i, token) in [Int32(5), 17, 42, 91].enumerated() {
+            try await h.runner.produce(token: token, position: start + i, into: h.logits)
+            actual.append(Self.snapshot(h))
+        }
+        Self.expectIdentical(reference, actual, label: "warm sparse append")
+    }
+
+    @Test(arguments: ["8", "16", "resident"])
+    func sparsePrefillProfilesKeepExactState(profile: String) async throws {
+        let mode: ExpertStreamingMode = profile == "resident" ? .resident : .pread(slotCount: Int(profile)!)
+        let h = try Self.makeHarness(streamingMode: mode)
+        defer { try? FileManager.default.removeItem(at: h.dir) }
+        let tokens = Self.prompt(71)
+        let reference = try await Self.decodeReference(h, tokens: tokens, continuation: [7, 19, 31, 43, 55, 67])
+        let actual = try await Self.chunkedRun(h, tokens: tokens,
+            continuation: [7, 19, 31, 43, 55, 67], chunkTokens: 32, expectedBatches: [32, 32, 7])
+        Self.expectIdentical(reference, actual, label: "expert profile \(profile)")
+    }
+
+    @Test func partialChunkCancellationRequiresResetEvenOnWarmContinuation() async throws {
+        let h = try Self.makeHarness()
+        defer { try? FileManager.default.removeItem(at: h.dir) }
+        let tokens = Self.prompt(60)
+        let reference = try await Self.chunkedRun(h, tokens: tokens, continuation: [3], chunkTokens: 32)
+        h.runner.reset()
+        _ = try await h.runner.prefillChunked(tokens: tokens.prefix(16), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
+        h.runner.dsv4PrefillDidCompleteLayer = { if $0 == 2 { throw CancellationError() } }
+        do {
+            _ = try await h.runner.prefillChunked(tokens: tokens.dropFirst(16), startPosition: 16,
+                outputMode: .logits, config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
+            Issue.record("expected mid-chunk cancellation")
+        } catch is CancellationError { }
+        #expect(throws: PrefillError.self) { try h.runner.prepareForContinuation(expectedPosition: 16) }
+        do {
+            try await h.runner.produce(token: tokens[16], position: 16, into: h.logits)
+            Issue.record("dirty state must not decode")
+        } catch let error as PrefillError {
+            guard case .chunkedRunnerDirty = error else { throw error }
+        }
+        h.runner.dsv4PrefillDidCompleteLayer = nil
+        let recovered = try await Self.chunkedRun(h, tokens: tokens, continuation: [3], chunkTokens: 32)
+        Self.expectIdentical(reference, recovered, label: "reset after cancellation")
     }
 
     /// Two runs of the same chunked prefill must agree, so the scratch reuse

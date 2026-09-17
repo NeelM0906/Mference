@@ -341,6 +341,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Lazily built layer-major DeepSeek-V4 prefill; see
     /// `RealForwardRunner+DSV4Prefill.swift`.
     private var dsv4Prefill: DSV4ChunkedPrefill?
+    /// Internal fault-injection boundary; production leaves this unset.
+    var dsv4PrefillDidCompleteLayer: ((Int) throws -> Void)?
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -999,6 +1001,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     public func prepareForContinuation(expectedPosition: Int) throws {
+        try prefillChunkState.requireClean(operation: "prepareForContinuation")
         guard let kv else {
             throw PrefillError.prefillCursorMismatch(
                 "continuation requires an initialized KV cache")
@@ -1529,10 +1532,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // DeepSeek-V4 prefill runs layer-major over each chunk (see
             // `RealForwardRunner+DSV4Prefill.swift`), which amortizes the
             // routed-expert reads over the chunk instead of paying them per
-            // token. Spans that the batched path cannot serve — currently only
-            // those long enough to trigger lightning-indexer selection — fall
-            // back to the token-by-token decode replay, which is the
-            // correctness reference for both.
+            // token. GPU sparse selection keeps long prompts on this path;
+            // explicit reference and unsupported geometry controls retain
+            // truthful decode-replay diagnostics.
             let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
                                                   startPosition: startPosition,
                                                   config: config)
@@ -1541,9 +1543,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             var done = 0
             for (spanIndex, span) in spans.enumerated() {
                 let isLastSpan = spanIndex == spans.count - 1
-                // A span crossing the lightning-selection cutover keeps its
-                // eligible prefix batched; only the remainder replays
-                // token-by-token.
+                try Task.checkCancellation()
                 var batchedCount = DSV4ChunkedPrefill.batchedTokenPrefix(
                     config: cfg,
                     startPosition: span.startPosition,
@@ -1584,7 +1584,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                       startPosition: span.startPosition,
                                                       emitHead: isLastSpan && batchedCount == span.tokenCount,
                                                       outputMode: outputMode,
-                                                      logits: logits)
+                                                      logits: logits,
+                                                      didCompleteLayer: dsv4PrefillDidCompleteLayer)
                     if let greedy { lastGreedyToken = greedy }
                     for _ in 0..<batchedCount { kv?.advance() }
                     execution.recordBatch(batchedCount)
@@ -1604,7 +1605,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 || cfg.compressedAttention.csaCompressRate <= 0 {
                         replayReason = "deepseek_unsupported_geometry"
                     } else {
-                        replayReason = "deepseek_sparse_selection_cutover"
+                        replayReason = "deepseek_unsupported_geometry"
                     }
                     let remainder = span.tokenCount - batchedCount
                     let lower = tokens.index(tokens.startIndex,

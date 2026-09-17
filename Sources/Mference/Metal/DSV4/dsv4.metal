@@ -527,6 +527,64 @@ kernel void dsv4_indexer_score(
     }
 }
 
+// Stable score order: highest score first, lowest entry index on ties.
+// The decode CPU reference starts in entry order and uses a stable score sort.
+static inline bool dsv4_index_better(device const float* scores, uint a, uint b) {
+    return scores[a] > scores[b] || (scores[a] == scores[b] && a < b);
+}
+
+static inline void dsv4_index_sift(device const float* scores, device uint* heap,
+                                  uint root, uint count) {
+    // Worst selected entry at the root; O(log k) replacement, O(k) storage.
+    while (root * 2u + 1u < count) {
+        uint child = root * 2u + 1u;
+        if (child + 1u < count && dsv4_index_better(scores, heap[child], heap[child + 1u])) ++child;
+        if (!dsv4_index_better(scores, heap[root], heap[child])) break;
+        uint tmp = heap[root]; heap[root] = heap[child]; heap[child] = tmp;
+        root = child;
+    }
+}
+
+static inline void dsv4_index_order_sift(device uint* heap, uint root, uint count) {
+    while (root * 2u + 1u < count) {
+        uint child = root * 2u + 1u;
+        if (child + 1u < count && heap[child + 1u] > heap[child]) ++child;
+        if (heap[root] >= heap[child]) break;
+        uint tmp = heap[root]; heap[root] = heap[child]; heap[child] = tmp;
+        root = child;
+    }
+}
+
+// GPU selection keeps each query in the layer's command stream. No score
+// readback, no full-model replay, no context-sized sorting scratch. One lane
+// owns a bounded heap; scoring and attention remain parallel, unchanged kernels.
+kernel void dsv4_indexer_select(
+    device const float* scores [[buffer(0)]],
+    device uint* selected [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& top_k [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid != 0u) return;
+    const uint k = min(count, top_k);
+    if (k == 0u) return;
+    for (uint i = 0u; i < k; ++i) selected[i] = i;
+    for (uint i = k / 2u; i > 0u; --i) dsv4_index_sift(scores, selected, i - 1u, k);
+    for (uint i = k; i < count; ++i) {
+        if (dsv4_index_better(scores, i, selected[0])) {
+            selected[0] = i;
+            dsv4_index_sift(scores, selected, 0u, k);
+        }
+    }
+    // Attention consumes selected entries in ascending index order, exactly
+    // like the decode path's sorted top-k set. In-place index heapsort.
+    for (uint i = k / 2u; i > 0u; --i) dsv4_index_order_sift(selected, i - 1u, k);
+    for (uint end = k; end > 1u; --end) {
+        uint tmp = selected[0]; selected[0] = selected[end - 1u]; selected[end - 1u] = tmp;
+        dsv4_index_order_sift(selected, 0u, end - 1u);
+    }
+}
+
 // mHC mixing weights for one sublayer site (paper §2.2 eq. 8). Computes
 // mix = fn @ unweighted_rmsnorm(flatten(streams)), splits into pre / post /
 // comb, applies the sigmoid / sigmoid*2 / softmax+Sinkhorn maps, and writes
