@@ -207,6 +207,51 @@ choose `MFERENCE_DEEPSEEK_QUALIFICATION_EXPERTS=resident` or a slot count
 This is a correctness protocol, not a community benchmark or a small-memory
 hardware qualification.
 
+### Validation record
+
+Code `26139b0`; Mac Studio Mac15,14, M3 Ultra (32 CPU cores), 256 GiB;
+macOS 26.3 (25D125); Apple Swift 6.3.3 (`swiftlang-6.3.3.1.3`). The targeted
+synthetic command was:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh \
+  --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'DSV4IndexerSelectionTests|DSV4ChunkedPrefillTests'
+```
+
+Exit 0; build `5.69s`;
+`Test run with 8 tests in 2 suites passed after 15.510 seconds.`
+Cache profiles 8/16/resident pass exact state/logit checks. Earlier development
+attempts caught an async-context wait compile error and an invalid test-only
+16-token chunk setting; both were corrected before this successful run.
+
+The existing real install then ran alone, with 788 GiB free disk, memory-pressure
+free percentage 97, and all 50 receipt-file sizes checked before launch:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+MFERENCE_DEEPSEEK_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/deepseekv4flash.gturbo \
+MFERENCE_DEEPSEEK_QUALIFICATION_EXPERTS=resident \
+Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter DSV4InstalledPrefillTests
+```
+
+Exit 0; build `4.21s`. Full footer:
+
+```text
+Test sparseCutoverAndWarmAppendsMatchSequentialExactly() passed after 485.270 seconds.
+Suite DSV4InstalledPrefillTests passed after 485.270 seconds.
+Test run with 1 test in 1 suite passed after 485.270 seconds.
+```
+
+All four full-vocabulary heads and all eight continuation rows were finite and
+bit-identical to sequential decode; eight greedy continuation choices matched.
+Each warm prefill reported zero replay. This run used resident experts; real
+bounded-streaming qualification remains distinct from its synthetic coverage.
+No downloads, model copies, cache purges or profiling were used. It was a
+debug-build correctness test with no benchmark warmup/repetition protocol;
+its total test duration is not an inference throughput result.
+
 ## First-install verification record
 
 The port was originally written against the HF reference implementation
