@@ -246,11 +246,38 @@ Test run with 1 test in 1 suite passed after 485.270 seconds.
 
 All four full-vocabulary heads and all eight continuation rows were finite and
 bit-identical to sequential decode; eight greedy continuation choices matched.
-Each warm prefill reported zero replay. This run used resident experts; real
-bounded-streaming qualification remains distinct from its synthetic coverage.
+Each warm prefill reported zero replay. This first run used resident experts.
 No downloads, model copies, cache purges or profiling were used. It was a
 debug-build correctness test with no benchmark warmup/repetition protocol;
 its total test duration is not an inference throughput result.
+
+The same installed gate also passed with **16 streamed expert slots** on the
+combined Phase 2–5 validation revision `f60a74b` (same hardware, OS and Swift).
+Preflight found 788 GiB free disk, memory-pressure free percentage 98, the
+completed installation and no other model owner. Receipt sizes had been checked;
+the loader again used full-SHA verification.
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+MFERENCE_DEEPSEEK_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/deepseekv4flash.gturbo \
+MFERENCE_DEEPSEEK_QUALIFICATION_EXPERTS=16 \
+Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter DSV4InstalledPrefillTests
+```
+
+Exit 0; build `4.30s`. Full footer:
+
+```text
+Test sparseCutoverAndWarmAppendsMatchSequentialExactly() passed after 557.306 seconds.
+Suite DSV4InstalledPrefillTests passed after 557.306 seconds.
+Test run with 1 test in 1 suite passed after 557.306 seconds.
+```
+
+All four boundary heads again had zero mismatches and zero replay, and all
+eight greedy/full-logit continuation checks passed. This closes the installed
+resident-versus-bounded correctness check for this protocol, not every context
+or smaller-memory hardware profile. The same debug-build/non-benchmark
+limitations apply; no experimental controls or profiling were enabled.
 
 ## First-install verification record
 
