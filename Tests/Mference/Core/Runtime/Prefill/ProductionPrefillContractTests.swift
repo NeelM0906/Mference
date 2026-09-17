@@ -28,7 +28,12 @@ import Testing
         let runner = try RealForwardRunner(model: model, context: context, maxContext: 416,
                                           runtimeConfiguration: runtime)
         let logits = try #require(context.device.makeBuffer(length: config.vocabSize * 2, options: .storageModeShared))
-        let tokens = (0..<385).map { Int32(4 + ($0 * 37 + 11) % (config.vocabSize - 4)) }
+        let tokenRange: Int = config.vocabSize - 4
+        var tokens: [Int32] = []
+        for index in 0..<385 {
+            let mixed: Int = index * 37 + 11
+            tokens.append(Int32(4 + mixed % tokenRange))
+        }
         func row() -> [UInt16] {
             Array(UnsafeBufferPointer(start: logits.contents().assumingMemoryBound(to: UInt16.self),
                                       count: config.vocabSize))
@@ -44,8 +49,8 @@ import Testing
                 let result = try await runner.prefillChunked(tokens: tokens[start..<(start + length)],
                     startPosition: start, outputMode: .logits, config: runtime.prefillConfig,
                     into: logits, onProgress: { progress.append($0) })
-                let report = try #require(result.execution)
-                #expect(report.executedMode == .chunked)
+                let report: PrefillExecutionReport = try #require(result.execution)
+                #expect(report.executedMode == PrefillExecutedMode.chunked)
                 #expect(report.batchedTokens == length)
                 #expect(report.replayedTokens == 0)
                 #expect(report.replayReasons.isEmpty)
