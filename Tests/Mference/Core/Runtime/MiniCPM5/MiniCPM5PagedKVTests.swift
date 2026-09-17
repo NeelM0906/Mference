@@ -54,6 +54,9 @@ import Testing
                                                      config: .production(chunkTokens: chunk),
                                                      into: logits,
                                                      onProgress: { _ in })
+        #expect(result.execution?.batchedTokens == tokens.count)
+        #expect(result.execution?.replayedTokens == 0)
+        #expect(result.execution?.replayReasons.isEmpty == true)
         guard case .greedyToken(let seed) = result.seed else {
             throw ModelError.residentBufferWrapFailed
         }

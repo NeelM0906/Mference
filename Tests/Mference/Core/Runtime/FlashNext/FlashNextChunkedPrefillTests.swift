@@ -115,6 +115,42 @@ import Testing
             promptLength: 40, streamingMode: .resident)
     }
 
+    @Test(arguments: [false, true])
+    func warmAppendsPreserveObservedBatchingAndDecodeState(resident: Bool) async throws {
+        let (directory, context, _, runner) = try Self.makeRunner(
+            streamingMode: resident ? .resident : .pread(slotCount: 16))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let vocab = ArchConfig.qwen38FlashNextToy().vocabSize
+        let out = try Self.logits(context, vocab: vocab)
+        let tokens = Self.prompt(49, vocab: vocab)
+        let continuation: [Int32] = [5, 17, 29, 41, 53, 65]
+        for (position, token) in tokens.enumerated() {
+            try await runner.produce(token: token, position: position, into: out)
+        }
+        var expected = [Self.bits(out, count: vocab)]
+        for (i, token) in continuation.enumerated() {
+            try await runner.produce(token: token, position: tokens.count + i, into: out)
+            expected.append(Self.bits(out, count: vocab))
+        }
+        runner.reset()
+        var start = 0
+        for length in [3, 29, 17] {
+            let result = try await runner.prefillChunked(tokens: tokens[start..<(start + length)],
+                startPosition: start, outputMode: .logits, config: .production(chunkTokens: 32),
+                into: out, onProgress: { _ in })
+            #expect(result.execution?.batchedTokens == length)
+            #expect(result.execution?.replayedTokens == 0)
+            #expect(result.execution?.batchedChunkSizes == [length])
+            start += length
+            try runner.prepareForContinuation(expectedPosition: start)
+        }
+        #expect(Self.bits(out, count: vocab) == expected[0])
+        for (i, token) in continuation.enumerated() {
+            try await runner.produce(token: token, position: start + i, into: out)
+            #expect(Self.bits(out, count: vocab) == expected[i + 1])
+        }
+    }
+
     @Test func memorySnapshotReadsExistingAllocationsWithoutOpeningExperts() throws {
         let directory = try FlashNextToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: directory) }
