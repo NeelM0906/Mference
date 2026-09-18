@@ -26,13 +26,16 @@ def reasoning_format(original, model):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("serve", choices=["serve"])
+    parser.add_argument("command", choices=["serve", "check"])
     parser.add_argument("--host", choices=["127.0.0.1"], default="127.0.0.1")
     parser.add_argument("--port", type=int, default=3000)
     args = parser.parse_args()
     installed = version("open-webui")
     if installed != SUPPORTED_VERSION:
         parser.error(f"reasoning-history adapter requires Open WebUI {SUPPORTED_VERSION}; installed {installed}")
+    if args.command == "check":
+        print(f"Open WebUI {installed}: supported (no application/database loaded)")
+        return
     if not os.environ.get("WEBUI_SECRET_KEY"):
         parser.error("WEBUI_SECRET_KEY must be supplied by the launcher")
     os.environ["FROM_INIT_PY"] = "true"

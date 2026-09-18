@@ -222,15 +222,37 @@ Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream": true` for streaming. Set
 `"stream_options": {"include_usage": true}` to receive a final usage chunk.
 
+For ChatML (including base/Swift Qwen), GLM and MiniCPM, usage also includes
+`completion_tokens_details.reasoning_tokens` and the Mference extension
+`visible_tokens`. These count generated payload tokens in each channel,
+including whitespace and buffered byte tokens, not re-tokenized rendered text.
+They exclude channel markers, tool payloads and EOS; their sum need not equal
+`completion_tokens`. Visible counts are omitted when a string stop trims an
+answer inside a token. Unsupported dialects omit the details object rather
+than reporting invented zeros. Reasoning token accounting does not imply that
+every checkpoint streams its hidden reasoning text.
+
 Requests may contain system, developer, user, assistant, and tool messages.
 Guidance must precede the conversation, and consecutive messages of the same
 guidance role are merged into one block separated by a blank line. Only
 Gemma's chat template has a distinct `developer` role; with any other family
 loaded a `developer` message is treated as a `system` message — it merges
 with adjacent system guidance instead of rendering as its own block.
+Exception: Swift-Qwen, and base Qwen 3.8 requests with an explicit
+`reasoning_effort`, use the source template and reject `developer`; use leading
+`system` guidance instead.
 Supported options include `temperature`, `top_p`, `top_k`,
 `repetition_penalty`, `seed`, `stop`, `max_tokens`,
 `max_completion_tokens`, and function-tool fields.
+
+Base and Swift Qwen 3.8 accept `reasoning_effort` values `xhigh`, `medium`, `low`,
+and `none`. An explicit value uses the source template, retains reasoning in a
+separate `reasoning_content` response/history field, and allows only exact
+rendered-prefix cache reuse. Preserve that field when replaying history.
+Omitted effort retains Swift's source-default xhigh and base Qwen's legacy
+behavior; the latter does not stream hidden reasoning. Do not treat those two
+omitted-effort policies as a matched fine-tune comparison. Other models reject
+the effort parameter. No model's sampling or MTP default is changed by this.
 
 The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,

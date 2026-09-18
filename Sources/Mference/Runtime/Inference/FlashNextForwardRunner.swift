@@ -95,11 +95,9 @@ public enum FlashNextForwardRunnerError: Error, CustomStringConvertible {
 /// `produceWithoutLogits` remains only as the explicit sequential reference
 /// seam used by parity/debug callers.
 ///
-/// PERF, not correctness: the layer loop still takes two CPU round trips per
-/// attention layer (indexer scores out, selection in). Resident routed experts
-/// stay GPU-directed; the bounded-memory backend still reads route ids to plan
-/// cache fills. Device-side indexer selection and bounded-mode I/O overlap are
-/// the remaining synchronization work.
+/// Indexer selection and resident routed-expert grouping stay on the GPU.
+/// The bounded-memory backend reads route IDs to plan cache fills, then overlaps
+/// the next tile's I/O with GPU work in disjoint expert-cache slots.
 ///
 /// `MFERENCE_PHASES=1` splits a decode window into the four costs that pass
 /// touches — expert I/O (all of it exposed, since nothing overlaps it yet), the
@@ -193,6 +191,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         let routerLogits: MTLBuffer
         let routeIDs: MTLBuffer
         let routeWeights: MTLBuffer
+        let routeGrouping: PrefillDeviceMoEGrouping.Scratch
         let routePartials: MTLBuffer
         let routedGateUpAct: MTLBuffer
         let routedDown: MTLBuffer
@@ -268,6 +267,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             self.routeWeights = try make(chunkTokens * cfg.topKExperts, stride: h,
                                          mode: .storageModeShared,
                                          label: "flashnext.prefill.routeWeights")
+            self.routeGrouping = try PrefillDeviceMoEGrouping.Scratch(device: device,
+                maxPairs: chunkTokens * cfg.topKExperts, experts: cfg.numExperts)
             self.routePartials = try make(
                 chunkTokens * cfg.topKExperts * d, stride: h,
                 label: "flashnext.prefill.routePartials")
@@ -350,6 +351,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private let prefillRouter: PrefillRouter
     private let prefillSharedExpert: PrefillSharedExpert
     private let prefillGroupedMoE: PrefillGroupedRoutedMoE
+    private let prefillDeviceGrouping: PrefillDeviceMoEGrouping
     private let prefillMoE: PrefillMoE
     private let prefillMPPGroupedMoE: MPPGroupedRoutedMoE
 
@@ -408,6 +410,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private var position = 0
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillScratch?
+    /// Internal correctness seam: drain the layer before injecting a failure.
+    /// Nil in production, where resident layers remain in one command buffer.
+    var prefillDidCompleteLayer: ((Int) throws -> Void)?
+    private(set) var deviceGroupedPrefillLayers = 0
     /// The MoE sub-block's command buffer, committed without a wait so the CPU
     /// can start the next layer's work while it runs. Joined before anything
     /// else touches `hyper`.
@@ -635,6 +641,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             context: context, weightBits: 4, siluActivation: true)
         self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(
             context: context, siluActivation: true)
+        self.prefillDeviceGrouping = try PrefillDeviceMoEGrouping(context: context)
         self.prefillMoE = try PrefillMoE(context: context)
         self.prefillMPPGroupedMoE = MPPGroupedRoutedMoE(context: context)
 
@@ -880,6 +887,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     public func reset() {
         position = 0
         prefillChunkState.reset()
+        deviceGroupedPrefillLayers = 0
         inSequentialPrefill = false
         try? joinPendingMoE()
         gdnState?.reset()
@@ -901,6 +909,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     }
 
     public func prepareForContinuation(expectedPosition: Int) throws {
+        try prefillChunkState.requireClean(operation: "prepareForContinuation")
         guard expectedPosition == position else {
             throw FlashNextForwardRunnerError.invalidInput(
                 "continuation expects position \(expectedPosition) but the runner "
@@ -1139,31 +1148,33 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                     scratch: scratch, rows: t)
             try encodeSharedExpertPrefill(commandBuffer: cb, layer: layer,
                                           scratch: scratch, rows: t)
-            try finish(cb)
-
-            let routeCount = t * topK
-            let idPointer = scratch.routeIDs.contents()
-                .bindMemory(to: UInt32.self, capacity: routeCount)
-            let weightPointer = scratch.routeWeights.contents()
-                .bindMemory(to: Float16.self, capacity: routeCount)
-            let routeIDs = (0..<routeCount).map {
-                min(idPointer[$0], UInt32(numExperts - 1))
+            let residentEncoded = try encodeResidentRoutedPrefill(commandBuffer: cb,
+                layerIndex: layerIndex, layer: layer, scratch: scratch, rows: t)
+            if !residentEncoded {
+                try finish(cb)
+                let routeCount = t * topK
+                let idPointer = scratch.routeIDs.contents()
+                    .bindMemory(to: UInt32.self, capacity: routeCount)
+                let weightPointer = scratch.routeWeights.contents()
+                    .bindMemory(to: Float16.self, capacity: routeCount)
+                let routeIDs = (0..<routeCount).map {
+                    min(idPointer[$0], UInt32(numExperts - 1))
+                }
+                let routeWeights = (0..<routeCount).map { weightPointer[$0] }
+                if layer.moe.expertsAreBF16 {
+                    try await encodeBF16RoutedPrefill(
+                        layerIndex: layerIndex, layer: layer, scratch: scratch,
+                        routeIDs: routeIDs, rows: t)
+                } else {
+                    try await encodeINT4RoutedPrefill(
+                        layerIndex: layerIndex, layer: layer, scratch: scratch,
+                        routeIDs: routeIDs, routeWeights: routeWeights, rows: t)
+                }
+                guard let tail = ctx.queue.makeCommandBuffer() else {
+                    throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+                }
+                cb = tail
             }
-            let routeWeights = (0..<routeCount).map { weightPointer[$0] }
-            if layer.moe.expertsAreBF16 {
-                try await encodeBF16RoutedPrefill(
-                    layerIndex: layerIndex, layer: layer, scratch: scratch,
-                    routeIDs: routeIDs, rows: t)
-            } else {
-                try await encodeINT4RoutedPrefill(
-                    layerIndex: layerIndex, layer: layer, scratch: scratch,
-                    routeIDs: routeIDs, routeWeights: routeWeights, rows: t)
-            }
-
-            guard let tail = ctx.queue.makeCommandBuffer() else {
-                throw FlashNextForwardRunnerError.commandFailed("no command buffer")
-            }
-            cb = tail
             elementwise.encodeResidualAdd(commandBuffer: cb,
                                            hidden: scratch.moeOut,
                                            delta: scratch.sharedOut,
@@ -1171,6 +1182,14 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             hc.encodeInjectAccumulate(commandBuffer: cb, scratch: scratch.hc,
                                       hyper: scratch.hyper,
                                       block: scratch.moeOut, rows: t)
+            if let hook = prefillDidCompleteLayer {
+                try finish(cb)
+                try hook(layerIndex)
+                guard let next = ctx.queue.makeCommandBuffer() else {
+                    throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+                }
+                cb = next
+            }
         }
 
         hc.encodeMix(commandBuffer: cb, weights: mixer, scratch: scratch.hc,
@@ -1448,6 +1467,46 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         }
     }
 
+    /// Resident routes never leave the GPU. The bounded backend still needs
+    /// its CPU cache-fill plan and retains the established streamed path.
+    private func encodeResidentRoutedPrefill(commandBuffer cb: MTLCommandBuffer,
+                                            layerIndex: Int, layer: LayerTensors,
+                                            scratch: PrefillScratch, rows: Int) throws -> Bool {
+        guard !layer.moe.expertsAreBF16,
+              let resident = try model.routedResidentSlabBinding(layer: layerIndex) else { return false }
+        guard resident.slotStride <= Int(UInt32.max) else {
+            throw FlashNextForwardRunnerError.invalidConfiguration("resident expert stride exceeds the kernel ABI")
+        }
+        let grouping = scratch.routeGrouping
+        try prefillDeviceGrouping.encode(commandBuffer: cb, ids: scratch.routeIDs,
+            weights: scratch.routeWeights, scratch: grouping, rows: rows, topK: topK,
+            hidden: hidden, intermediate: moeIntermediate)
+        let useMPP = hidden >= 1_024 && scratch.chunkTokens >= 1_024 && prefillMPPGroupedMoE.isAvailable
+        let params = PrefillGroupedRoutedMoEStreamedParams(groupStart: 0,
+            groupCount: UInt32(useMPP ? numExperts : rows * topK), d: UInt32(hidden),
+            routedIntermediate: UInt32(moeIntermediate), topK: UInt32(topK),
+            hiddenStrideElements: UInt32(hidden), offsets: layer.moe.expertOffsets)
+        if useMPP {
+            guard prefillMPPGroupedMoE.encodeResident(commandBuffer: cb, hidden: scratch.mixed,
+                sortedPairs: grouping.pairs, groups: grouping.groups, activation: scratch.routedMatrixAct,
+                routePartials: scratch.routePartials, slab: resident.slab, params: params,
+                residentExpertStride: UInt32(resident.slotStride), maxPairsPerGroup: rows,
+                indirectDispatch: grouping.dispatch) else {
+                throw FlashNextForwardRunnerError.commandFailed("resident grouped TensorOps encoding failed")
+            }
+        } else {
+            try prefillGroupedMoE.encodeResidentBatched(commandBuffer: cb, hidden: scratch.mixed,
+                sortedPairs: grouping.pairs, activation: scratch.routedMatrixAct,
+                routePartials: scratch.routePartials, slab: resident.slab,
+                stride: UInt32(resident.slotStride), params: params)
+        }
+        prefillMoE.encodeReduceTokenMajor(commandBuffer: cb, routePartials: scratch.routePartials,
+            routeWeights: scratch.routeWeights, h2: scratch.moeOut, queryCount: UInt32(rows),
+            topK: UInt32(topK), d: UInt32(hidden))
+        deviceGroupedPrefillLayers += 1
+        return true
+    }
+
     private func encodeINT4RoutedPrefill(
         layerIndex: Int, layer: LayerTensors,
         scratch: PrefillScratch,
@@ -1462,7 +1521,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             throw PrefillError.chunkedUnsupported(
                 "Flash-Next top-\(topK) routing needs at least \(topK) expert slots")
         }
-        let tileExperts = min(16, slotCount)
+        let scheduler = PrefillRoutedTileScheduler(config:
+            PrefillRoutedTileSchedulerConfig().fittingSlotBudget(slotCount: slotCount)!)
+        let tileExperts = cacheSlotCount == nil ? 16 : scheduler.config.tileExperts
         let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
             pairs, queryCount: rows, topK: topK, numExperts: numExperts,
             tileExpertCount: tileExperts,
@@ -1520,10 +1581,37 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 try finish(cb)
             }
         } else {
+            // Keep at most one previous tile live while the next tile is read
+            // into disjoint slots. All GPU scratch accesses are queue-ordered.
+            var pending: (cb: MTLCommandBuffer, fetch: PrefillStreamedTileFetchResult,
+                          argument: MTLBuffer)?
+            defer {
+                if let pending {
+                    try? withExtendedLifetime(pending) { try waitForCompletion(pending.cb) }
+                }
+            }
             for (tileIndex, tile) in routes.tiles.enumerated() {
+                try Task.checkCancellation()
+                var plan: RoutedExpertFetchPlan?
+                if let inFlight = pending {
+                    let slots = inFlight.fetch.plannedAssignedSlots
+                    let experts = try PrefillStreamedTileBinding.expertIDs(
+                        forTile: tileIndex, routes: routes)
+                    let candidate = slots.isEmpty ? nil : try model.planRoutedExpertsIfPossible(
+                        layer: layerIndex, experts: experts, avoidingSlots: Set(slots))
+                    switch scheduler.decide(PrefillRoutedTileSchedulerInput(
+                        hasPendingTile: true, pendingAssignedSlots: slots,
+                        avoidingSlotPlanAvailable: candidate != nil)) {
+                    case .prefetchNext:
+                        plan = candidate
+                    case .drainBeforeIssue, .issueWithoutPending:
+                        try withExtendedLifetime(inFlight) { try waitForCompletion(inFlight.cb) }
+                        pending = nil
+                    }
+                }
                 let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
                     model: model, layer: layerIndex, tileIndex: tileIndex,
-                    routes: routes)
+                    routes: routes, plannedFetch: plan)
                 guard let cb = ctx.queue.makeCommandBuffer() else {
                     throw FlashNextForwardRunnerError.commandFailed("no command buffer")
                 }
@@ -1531,8 +1619,20 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                     commandBuffer: cb, tile: tile, routes: routes,
                     binding: fetch.binding, offsets: layer.moe.expertOffsets,
                     metadata: metadata, scratch: scratch)
-                try withExtendedLifetime((fetch, argument)) { try finish(cb) }
+                trackGpuInterval(cb)
+                cb.commit()
+                let previous = pending
+                // Retain the new command before waiting: if the older command
+                // fails, defer must still drain this command before reset.
+                pending = (cb, fetch, argument)
+                if let previous {
+                    try withExtendedLifetime(previous) { try waitForCompletion(previous.cb) }
+                }
             }
+            if let pending {
+                try withExtendedLifetime(pending) { try waitForCompletion(pending.cb) }
+            }
+            pending = nil
         }
         guard let reduce = ctx.queue.makeCommandBuffer() else {
             throw FlashNextForwardRunnerError.commandFailed("no command buffer")
@@ -2201,6 +2301,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private func finish(_ cb: MTLCommandBuffer) throws {
         trackGpuInterval(cb)
         cb.commit()
+        try waitForCompletion(cb)
+    }
+
+    private func waitForCompletion(_ cb: MTLCommandBuffer) throws {
         cb.waitUntilCompleted()
         if let error = cb.error {
             throw FlashNextForwardRunnerError.commandFailed("\(error)")

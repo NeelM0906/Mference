@@ -60,6 +60,7 @@ public struct MFTokenizer: @unchecked Sendable {
 
     public let dialect: ChatDialect
     public internal(set) var isSwiftQwen = false
+    public internal(set) var isBaseQwen38 = false
     /// Tool grammar is a family contract, independent of thinking policy.
     let usesJSONChatMLToolCalls: Bool
     /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
@@ -765,8 +766,8 @@ public struct MFTokenizer: @unchecked Sendable {
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition],
                                reasoningEffort: QwenReasoningEffort? = nil) throws -> [Int32] {
-        guard isSwiftQwen || reasoningEffort == nil else {
-            throw MFTokenizerError.unsupportedForDialect("reasoning_effort requires Swift-Qwen")
+        guard supportsQwenReasoningEffort || reasoningEffort == nil else {
+            throw MFTokenizerError.unsupportedForDialect("reasoning_effort requires base or Swift Qwen 3.8")
         }
         // DeepSeek ships no chat_template.jinja; its tool framing is native.
         if dialect == .deepseek {
@@ -834,7 +835,7 @@ public struct MFTokenizer: @unchecked Sendable {
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: isSwiftQwen
+            additionalContext: usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
                 ? ["enable_thinking": reasoningEffort != .off,
                    "reasoning_effort": (reasoningEffort ?? .xhigh).rawValue,
                    "preserve_thinking": true]

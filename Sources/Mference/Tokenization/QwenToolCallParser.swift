@@ -12,8 +12,10 @@ import Foundation
 /// tag and the newline before `</parameter>`; multi-line values are allowed.
 /// Values that parse as structural JSON (object / array / number / bool /
 /// null) become typed `JSONValue`s; everything else is kept as a raw string,
-/// mirroring the template's asymmetric serialization (strings pass through
-/// unquoted, non-strings via `tojson`).
+/// unless the tool schema explicitly declares a string. Qwen serializes
+/// strings unquoted, so `123`, `true`, and JSON text can all be string payloads.
+/// Without an unambiguous string declaration, retain the legacy JSON inference;
+/// this parser is not a general JSON Schema validator.
 public struct QwenToolCallParser: Sendable {
     public static let maximumBytes = 256 * 1024
 
@@ -22,6 +24,13 @@ public struct QwenToolCallParser: Sendable {
     public func parse(_ text: String,
                       allowedTools: Set<String>,
                       id: String) throws -> ParsedToolCall {
+        try parse(text, allowedTools: allowedTools, id: id, toolSchemas: [:])
+    }
+
+    public func parse(_ text: String,
+                      allowedTools: Set<String>,
+                      id: String,
+                      toolSchemas: [String: JSONValue]) throws -> ParsedToolCall {
         guard text.utf8.count <= Self.maximumBytes else {
             throw ToolCallParserError.oversized
         }
@@ -37,9 +46,11 @@ public struct QwenToolCallParser: Sendable {
         }
 
         var arguments: [String: JSONValue] = [:]
+        let properties = toolSchemas[name]?.objectValue?["properties"]?.objectValue ?? [:]
         while !body.hasPrefix("</function>") {
-            let (key, value) = try parameter(&body)
-            arguments[key] = value
+            let (key, raw) = try parameter(&body)
+            arguments[key] = properties[key]?.objectValue?["type"] == .string("string")
+                ? .string(raw) : try parsedValue(raw)
         }
         body.removeFirst("</function>".count)
         trimOuterWhitespace(&body)
@@ -72,7 +83,7 @@ public struct QwenToolCallParser: Sendable {
         return name
     }
 
-    private func parameter(_ body: inout Substring) throws -> (String, JSONValue) {
+    private func parameter(_ body: inout Substring) throws -> (String, String) {
         guard body.hasPrefix("<parameter=") else {
             throw ToolCallParserError.malformed
         }
@@ -95,7 +106,7 @@ public struct QwenToolCallParser: Sendable {
         }
         let value = String(body[..<closeRange.lowerBound])
         body = body[closeRange.upperBound...]
-        return (key, try parsedValue(value))
+        return (key, value)
     }
 
     /// Handles `<parameter=k>\n</parameter>\n` where the single newline both

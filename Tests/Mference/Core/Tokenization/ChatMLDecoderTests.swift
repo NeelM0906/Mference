@@ -45,6 +45,32 @@ struct ChatMLDecoderTests {
         #expect(!d.hasToolCalls)
     }
 
+    @Test("Payload counts exclude markers, tools, stop tokens and flushes")
+    func payloadCounts() throws {
+        let d = StructuredAssistantDecoder(tokenizer: tok, allowedTools: ["get_weather"],
+                                           startsInThought: true)
+        let hidden = "hidden reasoning"
+        let visible = "visible answer"
+        _ = try feed(hidden + "</think>" + visible, into: d)
+        _ = try feed("<tool_call>\n<function=get_weather>\n</function>\n</tool_call>", into: d)
+        _ = try d.consumeFlushedText("buffered tail")
+        let counts = try #require(d.payloadTokenCounts)
+        #expect(counts.reasoning == tok.encode(hidden, addBOS: false).count)
+        #expect(counts.visible == tok.encode(visible, addBOS: false).count)
+        _ = try d.consume(tokenID: tok.endOfTurnID, delta: "")
+        #expect(d.payloadTokenCounts == counts)
+    }
+
+    @Test("A buffered byte token counts even before it emits text")
+    func emptyDeltaCounts() throws {
+        let d = decoder()
+        let token = try #require(tok.encode("a", addBOS: false).first)
+        _ = try d.consume(tokenID: token, delta: "")
+        _ = try d.consumeFlushedText("a")
+        #expect(d.payloadTokenCounts?.visible == 1)
+        #expect(d.payloadTokenCounts?.reasoning == 0)
+    }
+
     @Test("Think spans are suppressed, text after them is visible")
     func thinkSuppression() throws {
         let d = decoder()

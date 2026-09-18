@@ -11,6 +11,16 @@ its production runner, INT8-router install, family gate, and frozen-protocol
 measurements landed on 2026-09-10. The checklists below retain the bring-up
 history and mark the remaining performance work explicitly.
 
+September 18 source-release update (PR #37): resident prefill route grouping
+now stays on the GPU; bounded prefill overlaps one expert tile's GPU work with
+the next tile's I/O in disjoint cache slots. The short installed INT8-router
+gate passes in resident and 16-slot modes, with zero replay and exact 16-token
+greedy continuation. New matched speed and real long-context/TensorOps-size
+qualification remain pending; **native MTP is still not implemented**. See
+[the dated validation record](../RELEASE_VALIDATION_2026-09-18.md) and
+[current support boundaries](../RELEASE_SUPPORT.md). Older roadmap statements
+below describe their dated measurements, not the status of this update.
+
 ## Why this model, strategically
 
 Released 2026-08-27 — four days before this dossier — and already the

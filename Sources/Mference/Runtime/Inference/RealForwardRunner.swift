@@ -343,6 +343,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var dsv4Prefill: DSV4ChunkedPrefill?
     /// Internal fault-injection boundary; production leaves this unset.
     var dsv4PrefillDidCompleteLayer: ((Int) throws -> Void)?
+    /// Test-only failure seam. Prior layer work is drained at this boundary;
+    /// production leaves it nil and adds no GPU synchronization.
+    var prefillWillEncodeLayer: ((Int) throws -> Void)?
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -1502,6 +1505,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let step = max(1, min(config.chunkTokens, inklingChunkCapacity))
                 var offset = 0
                 while offset < tokens.count {
+                    try Task.checkCancellation()
                     let count = min(step, tokens.count - offset)
                     let lower = tokens.index(tokens.startIndex, offsetBy: offset)
                     let upper = tokens.index(lower, offsetBy: count)
@@ -1638,6 +1642,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                               startPosition: startPosition,
                                               config: config)
         for (spanIndex, span) in spans.enumerated() {
+            try Task.checkCancellation()
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
             try await executePrefillChunk(
@@ -1929,6 +1934,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             outScale: embedOutScale)
 
         for L in 0..<cfg.numLayers {
+            try prefillWillEncodeLayer?(L)
+            try Task.checkCancellation()
             model.beginOpeningRoutedExpertStreamer(layer: L)
             let views = layerViews[L]
             let isLinear = cfg.layerIsLinear(L)
@@ -4248,6 +4255,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let isDense = L < cfg.numDenseLayers
             let conv = inklingConvStates[L]
             let inNorm = try model.inputNorm(layer: L)
+            try prefillWillEncodeLayer?(L)
+            try Task.checkCancellation()
             let mlpNorm = try model.postAttnNorm(layer: L)
             let q = try model.inklingWqDu(layer: L)
             let k = try model.inklingWkDv(layer: L)
@@ -4546,6 +4555,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if let error = pending.cb.error { throw error }
             }
             for (index, range) in routedRanges.enumerated() {
+                try Task.checkCancellation()
                 let t0 = now()
                 let blob: TensorView
                 let blobSlots: [Int]

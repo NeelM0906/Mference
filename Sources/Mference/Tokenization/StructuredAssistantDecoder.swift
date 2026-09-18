@@ -9,6 +9,20 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     /// Optional separate reasoning channel; never mixed into visible content.
     /// Swift-Qwen callers use this to round-trip the source template's history.
     public var onReasoning: ((String) -> Void)?
+    /// Generated payload tokens, not a re-tokenization of rendered text. Markers,
+    /// tool syntax and EOS are excluded; buffered byte tokens still count.
+    /// Text-scanned dialects cannot assign every token to exactly one channel.
+    public struct PayloadTokenCounts: Equatable, Sendable {
+        public fileprivate(set) var reasoning = 0
+        public fileprivate(set) var visible = 0
+    }
+    private var payloadCounts = PayloadTokenCounts()
+    public var payloadTokenCounts: PayloadTokenCounts? {
+        switch tokenizer.dialect {
+        case .chatml, .glm5, .minicpm: return payloadCounts
+        default: return nil
+        }
+    }
     private enum Channel {
         case thought
         case visible
@@ -17,6 +31,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     private let tokenizer: MFTokenizer
     private let allowedTools: Set<String>
+    private let toolSchemas: [String: JSONValue]
     private let idGenerator: @Sendable () -> String
     private var channel: Channel = .visible
     private var label = ""
@@ -29,13 +44,24 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private var emittedCalls = 0
     private var failed = false
 
+    public convenience init(tokenizer: MFTokenizer,
+                            allowedTools: Set<String>,
+                            idGenerator: @escaping @Sendable () -> String = {
+                                "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
+                            }) {
+        self.init(tokenizer: tokenizer, allowedTools: allowedTools,
+                  toolDefinitions: [], idGenerator: idGenerator)
+    }
+
     public init(tokenizer: MFTokenizer,
                 allowedTools: Set<String>,
+                toolDefinitions: [MFTokenizer.FunctionDefinition],
                 idGenerator: @escaping @Sendable () -> String = {
                     "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
                 }) {
         self.tokenizer = tokenizer
         self.allowedTools = allowedTools
+        self.toolSchemas = toolDefinitions.reduce(into: [:]) { $0[$1.name] = $1.parameters }
         self.idGenerator = idGenerator
     }
 
@@ -45,7 +71,19 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                             idGenerator: @escaping @Sendable () -> String = {
                                 "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
                             }) {
-        self.init(tokenizer: tokenizer, allowedTools: allowedTools, idGenerator: idGenerator)
+        self.init(tokenizer: tokenizer, allowedTools: allowedTools,
+                  startsInThought: startsInThought, toolDefinitions: [], idGenerator: idGenerator)
+    }
+
+    public convenience init(tokenizer: MFTokenizer,
+                            allowedTools: Set<String>,
+                            startsInThought: Bool,
+                            toolDefinitions: [MFTokenizer.FunctionDefinition],
+                            idGenerator: @escaping @Sendable () -> String = {
+                                "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
+                            }) {
+        self.init(tokenizer: tokenizer, allowedTools: allowedTools,
+                  toolDefinitions: toolDefinitions, idGenerator: idGenerator)
         channel = startsInThought ? .thought : .visible
     }
 
@@ -60,6 +98,15 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
         guard !failed else { throw ToolCallParserError.malformed }
+        if payloadTokenCounts != nil, tokenID >= 0,
+           !tokenizer.stopTokenIDs.contains(tokenID),
+           tokenID != tokenizer.thinkStartID, tokenID != tokenizer.thinkEndID,
+           tokenID != tokenizer.toolCallStartID, tokenID != tokenizer.toolCallEndID,
+           tokenID != tokenizer.toolResponseID, tokenID != tokenizer.toolResponseEndID,
+           toolTokens == nil {
+            if channel == .thought { payloadCounts.reasoning += 1 }
+            else if channel == .visible { payloadCounts.visible += 1 }
+        }
         if tokenizer.dialect == .chatml {
             return try consumeChatML(tokenID: tokenID, delta: delta)
         }
@@ -145,6 +192,24 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
     /// `<tool_call>`…`</tool_call>` buffer the dialect's tool payload.
     private func consumeChatML(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        // Reasoning can discuss tool syntax; only the visible channel may
+        // issue a call. Do not parse or reject examples inside <think>.
+        // Once a real call is open, its payload owns all tokens (including
+        // literal thinking markers in string arguments) until </tool_call>.
+        if toolTokens == nil {
+            if tokenID == tokenizer.thinkStartID {
+                channel = .thought
+                return []
+            }
+            if tokenID == tokenizer.thinkEndID {
+                channel = .visible
+                return []
+            }
+            if channel == .thought {
+                if !delta.isEmpty { onReasoning?(delta) }
+                return []
+            }
+        }
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
                 failed = true
@@ -176,18 +241,6 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 throw ToolCallParserError.oversized
             }
             toolTokens = tokens
-            return []
-        }
-        if tokenID == tokenizer.thinkStartID {
-            channel = .thought
-            return []
-        }
-        if tokenID == tokenizer.thinkEndID {
-            channel = .visible
-            return []
-        }
-        guard channel != .thought else {
-            if !delta.isEmpty { onReasoning?(delta) }
             return []
         }
         return delta.isEmpty ? [] : [.content(delta)]
@@ -268,7 +321,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 text, allowedTools: allowedTools, id: idGenerator())
         }
         return try QwenToolCallParser().parse(
-            text, allowedTools: allowedTools, id: idGenerator())
+            text, allowedTools: allowedTools, id: idGenerator(), toolSchemas: toolSchemas)
     }
 
     /// MiniCPM transitions: `<think>`…`</think>` (ids 8 / 9, added tokens

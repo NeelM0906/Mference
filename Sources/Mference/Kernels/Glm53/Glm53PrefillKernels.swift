@@ -18,11 +18,13 @@ final class Glm53PrefillKernels {
     private let hcPlaceMixPSO: MTLComputePipelineState
     private let kdaChunkPSO: MTLComputePipelineState
     private let latentCausalPSO: MTLComputePipelineState
+    private let latentCausalPairPSO: MTLComputePipelineState
     private let layerNormPSO: MTLComputePipelineState
     private let poolKeysPSO: MTLComputePipelineState
     private let routerSelectPSO: MTLComputePipelineState
     private let indexerScorePSO: MTLComputePipelineState
     private let latentSelectedPSO: MTLComputePipelineState
+    private let selectPoolsPSO: MTLComputePipelineState
     private let moePhase1PSO: MTLComputePipelineState
     private let moeDownPSO: MTLComputePipelineState
     private let moeReducePSO: MTLComputePipelineState
@@ -52,6 +54,8 @@ final class Glm53PrefillKernels {
                                            maxTotalThreadsPerThreadgroup: 256)
         latentCausalPSO = try context.pipeline("glm53p_latent_attention_causal", constants: [],
                                                maxTotalThreadsPerThreadgroup: 256)
+        latentCausalPairPSO = try context.pipeline("glm53p_latent_attention_causal_pair", constants: [],
+                                                   maxTotalThreadsPerThreadgroup: 256)
         layerNormPSO = try context.pipeline("glm53p_layernorm_bias_batched", constants: [],
                                             maxTotalThreadsPerThreadgroup: 256)
         poolKeysPSO = try context.pipeline("glm53p_pool_keys_batched")
@@ -60,6 +64,7 @@ final class Glm53PrefillKernels {
                                                maxTotalThreadsPerThreadgroup: 128)
         latentSelectedPSO = try context.pipeline("glm53p_latent_attention_selected", constants: [],
                                                  maxTotalThreadsPerThreadgroup: 256)
+        selectPoolsPSO = try context.pipeline("glm53p_select_pools")
         // The grouped expert kernels share moe.metal's INT4 bodies; the swiglu
         // clamp and SiLU come through the same function constants as `MoE`.
         var moeConstants: [MetalFunctionConstant] = [MetalFunctionConstant(index: 4, value: .bool(true))]
@@ -269,10 +274,11 @@ final class Glm53PrefillKernels {
 
     func encodeLatentAttentionCausal(commandBuffer cb: MTLCommandBuffer, qLatent: MTLBuffer, latents: MTLBuffer,
                                      out: MTLBuffer, heads: Int, latentDim: Int, base: Int, tokens: Int,
-                                     scale: Float) {
+                                     scale: Float, pairedQueries: Bool = true) {
         precondition(latentDim % 32 == 0 && latentDim <= 512)
         guard let enc = cb.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(latentCausalPSO)
+        let paired = pairedQueries && tokens > 1
+        enc.setComputePipelineState(paired ? latentCausalPairPSO : latentCausalPSO)
         enc.setBuffer(qLatent, offset: 0, index: 0)
         enc.setBuffer(latents, offset: 0, index: 1)
         enc.setBuffer(out, offset: 0, index: 2)
@@ -281,7 +287,12 @@ final class Glm53PrefillKernels {
         enc.setBytes(&b, length: 4, index: 4)
         enc.setBytes(&h, length: 4, index: 5)
         enc.setBytes(&s, length: 4, index: 6)
-        enc.dispatchThreadgroups(Self.tg(heads, tokens), threadsPerThreadgroup: Self.tg(256))
+        if paired {
+            var rows = UInt32(tokens)
+            enc.setBytes(&rows, length: 4, index: 7)
+        }
+        enc.dispatchThreadgroups(Self.tg(heads, paired ? (tokens + 1) / 2 : tokens),
+                                 threadsPerThreadgroup: Self.tg(256))
         enc.endEncoding()
     }
 
@@ -303,6 +314,28 @@ final class Glm53PrefillKernels {
         enc.setBytes(&ws, length: 4, index: 8)
         enc.dispatchThreadgroups(Self.tg(pools, tokens), threadsPerThreadgroup: Self.tg(128))
         enc.endEncoding()
+    }
+
+    /// Stable device-side selection; output is the decode CPU oracle's
+    /// ascending token set, including each query's own incomplete tail.
+    func encodePoolSelection(commandBuffer cb: MTLCommandBuffer, scores: MTLBuffer,
+                             selected: MTLBuffer, counts: MTLBuffer, marks: MTLBuffer,
+                             pools: Int, selectionStride: Int, base: Int, tokens: Int,
+                             poolSize: Int, topK: Int, includeTail: Bool) throws {
+        precondition(poolSize > 0 && selectionStride >= topK + poolSize)
+        precondition(pools >= (base + tokens) / poolSize)
+        guard let encoder = cb.makeComputeCommandEncoder() else { throw MetalError.noDevice }
+        encoder.setComputePipelineState(selectPoolsPSO)
+        encoder.setBuffer(scores, offset: 0, index: 0)
+        encoder.setBuffer(selected, offset: 0, index: 1)
+        encoder.setBuffer(counts, offset: 0, index: 2)
+        encoder.setBuffer(marks, offset: 0, index: 3)
+        for (index, value) in [pools, selectionStride, base, tokens, poolSize, topK, includeTail ? 1 : 0].enumerated() {
+            var value = UInt32(value)
+            encoder.setBytes(&value, length: 4, index: index + 4)
+        }
+        encoder.dispatchThreads(Self.tg(tokens), threadsPerThreadgroup: Self.tg(min(64, tokens)))
+        encoder.endEncoding()
     }
 
     /// Per-query row sets: `counts[t] == 0xFFFFFFFF` means dense causal.

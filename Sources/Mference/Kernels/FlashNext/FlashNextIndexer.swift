@@ -8,13 +8,10 @@ import Metal
 /// # What is on the GPU and what is not
 ///
 /// The projection, the query heads, the pooled block keys and the scores are GPU
-/// work. The **ranking is not**: scores come back as at most a few thousand FP32
-/// values per query and the top-k runs through `FlashNextDescendingTopK`, the
-/// exact `torch.topk` CPU ordering the reference uses. Selection is a support
-/// set, not a tensor — a flipped boundary changes which KV a layer may read —
-/// and relu-zero ties at the boundary are common enough that no GPU sort with a
-/// different tie rule would be safe. The readback is small next to the attention
-/// it gates.
+/// work. Production ranking also stays on the GPU, using the same heap and tie
+/// rules as `FlashNextDescendingTopK`. The CPU selector remains an independent
+/// capture/test reference. Selection is a support set, not a tensor: changing
+/// a tied boundary can change which KV rows a layer reads.
 ///
 /// # Caches
 ///
@@ -62,7 +59,7 @@ final class FlashNextIndexer {
         let projection: MTLBuffer
         /// `[rows, numHeads, headDim]` FP32 — normed and roped query heads.
         let queries: MTLBuffer
-        /// `[rows, scoreStride]` FP32, **shared** so the CPU can rank it.
+        /// `[rows, scoreStride]` FP32, shared for optional CPU reference capture.
         let scores: MTLBuffer
         /// `[rows, selectionStride]` UInt32, shared. Row-indexed rather than a
         /// single list because the gather reads it at GPU execution time: a

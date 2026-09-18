@@ -12,23 +12,26 @@ so nothing here depends on CORS.
 ## First launch
 
 ```bash
-git clone <this repository> && cd Mference
+git clone https://github.com/NeelM0906/Mference.git && cd Mference
+./mference-ui.sh doctor          # prerequisites only; no download or settings changes
 swift build -c release
 ./mference-ui.sh install gemma4   # ~15 GB; see "Installing models" first
 ./mference-ui.sh                  # starts both halves, opens the browser
 ```
 
-The fifth step is the browser: the launcher opens
+After the services are ready, the launcher opens
 `http://127.0.0.1:3000` once Open WebUI answers.
 
 `./mference-ui.sh` with no arguments:
 
-1. Runs the model-process check from [AGENTS.md](../AGENTS.md) and refuses to
+1. Checks platform/toolchain, ports and the model-process rule from [AGENTS.md](../AGENTS.md), and refuses to
    start if anything already owns a model. It never terminates a process it did
    not start.
 2. Installs Open WebUI with `uv` if it is missing, pinned to the version this
    launcher expects. It never installs `uv` itself.
-3. Builds `MferenceServer` if `.build/release/MferenceServer` is missing.
+3. Verifies the actual Open WebUI interpreter's package version without loading
+   its database, then incrementally builds `MferenceServer`. Source updates
+   therefore cannot silently run an old executable.
 4. Starts `MferenceServer` on `127.0.0.1:8080` in library mode and waits for
    `/health`.
 5. Starts Open WebUI on `127.0.0.1:3000`, waits for it to answer, and opens it.
@@ -45,6 +48,8 @@ Options:
 ./mference-ui.sh --model scratch/qwen36.gturbo   # preload instead of loading lazily
 ./mference-ui.sh --max-context 32768             # applies to every model
 ./mference-ui.sh --server-port 8081 --webui-port 3001
+./mference-ui.sh --build-path /tmp/mference-build  # separate toolchain build artifacts
+./mference-ui.sh --data-dir /tmp/mference-ui-test # isolated chats/settings for testing
 ```
 
 `--dry-run` works for every subcommand, before or after it, and prints each step
@@ -68,7 +73,7 @@ The install runs `MferenceRepack` into `scratch/<family>.gturbo`, which is one
 of the roots library mode scans, so a model installed this way appears in the
 picker the next time the UI starts. Supported families are `gemma4`, `qwen36`,
 `qwen38`, `deepseekv4flash`, `inklingsmall`, `maple`, `qwen38flashnext`, and
-`minicpm5`, plus the two quantizer-control installs `qwen36original` and
+`minicpm5`, `glm53flash`, and `swiftqwen38`, plus the two quantizer-control installs `qwen36original` and
 `minicpm5mlx`; the launcher reads that list out of `MferenceRepack`'s own help,
 so it cannot drift.
 
@@ -80,7 +85,10 @@ request-level controls and the remaining client-history qualification gates.
 For Swift-Qwen, use **Controls → Advanced Params → Reasoning Effort**, switch
 from Default to Custom, and enter `xhigh`, `medium`, `low`, or `none`. Default
 means `xhigh`. Reset this chat-level control to Default before switching to a
-non-Swift model; those models reject an explicit reasoning-effort parameter.
+non-Swift model. Base Qwen 3.8 now also accepts explicit efforts through the API
+and CLI for matched comparisons; other models reject them. The history adapter
+below remains Swift-only, so this does not newly qualify base-Qwen reasoning
+history replay through Open WebUI.
 
 The launcher runs the pinned Open WebUI 0.11.3 through
 `Scripts/openwebui-mference.py`. Its narrow, process-local compatibility hook

@@ -252,6 +252,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     private let prefillEmbed: PrefillEmbedLookupInt4
     private let prefillRMS: PrefillRMSNorm
     private let prefillQMM: PrefillInt4QMM
+    private let prefillUsesDecodeOrder: Bool
     private let prefillMPPInt4: MPPPrefillInt4QMM
     private let prefillQKVEpilogue: PrefillQKVEpilogue
     private let prefillAttention: PrefillAttention
@@ -260,6 +261,9 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     private let mlpWeightBits: Int
     private var prefillScratch: PrefillScratch?
     private var prefillChunkState = PrefillChunkCommitState()
+    /// Test-only failure seam after a drained layer. Nil preserves production
+    /// command-buffer batching; cancellation checks add no GPU synchronization.
+    var prefillDidCompleteLayer: ((Int) throws -> Void)?
 
     // Decode scratch, allocated once. FP16 unless noted. At production shape
     // (D 5120, F 17408, qDim 24*256 = 6144, gdn qkvDim 10240, valueDim 6144)
@@ -381,7 +385,13 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         self.fusedQKVGEMV = try FusedQKVGEMV(context: context)
         self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
         self.prefillRMS = try PrefillRMSNorm(context: context)
-        self.prefillQMM = try PrefillInt4QMM(context: context)
+        // Swift's installed numerical gate exposes error amplification across
+        // 64 layers with QMM arithmetic differing from decode. Preserve its
+        // affine factoring/reduction order while keeping a token-parallel
+        // dispatch. Base Qwen retains its existing qualified dispatch policy.
+        self.prefillUsesDecodeOrder = model.modelID == CheckpointIdentity.swiftQwen38
+        self.prefillQMM = try PrefillInt4QMM(context: context,
+                                           decodeOrder: prefillUsesDecodeOrder)
         self.prefillMPPInt4 = MPPPrefillInt4QMM(context: context)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
         self.prefillAttention = try PrefillAttention(context: context)
@@ -737,6 +747,12 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                     srcOffset: local * D * MemoryLayout<Float16>.stride,
                     rows: t - local)
             }
+            if let hook = prefillDidCompleteLayer {
+                try withExtendedLifetime(tokenBuffer) { try finish(cb) }
+                try hook(index)
+                cb = try commandBuffer()
+            }
+            try Task.checkCancellation()
         }
         if let drafter = mtp?.dflash2, dflash2TapBase < startPosition + t {
             drafter.commitTapRows(t - max(0, dflash2TapBase - startPosition))
@@ -1314,7 +1330,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                 biases: MTLBuffer, biasesOffset: Int,
                                 x: MTLBuffer, y: MTLBuffer,
                                 t: Int, n: Int, k: Int) {
-        if prefillMPPInt4.isAvailable {
+        if prefillMPPInt4.isAvailable && !prefillUsesDecodeOrder {
             let path = prefillMPPInt4.encode(commandBuffer: cb,
                                              weights: weights, weightsOffset: weightsOffset,
                                              scales: scales, scalesOffset: scalesOffset,

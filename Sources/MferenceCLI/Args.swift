@@ -182,7 +182,7 @@ extension Args {
                                 ~59 s inside the first prefill;
                                 trusted-receipt checks file sizes against the
                                 receipt written at install time instead.
-      --reasoning-effort <mode>  Swift-Qwen chat: xhigh (source default), medium,
+      --reasoning-effort <mode>  Base/Swift Qwen 3.8 chat: xhigh, medium,
                                 low, or none. Not applied to raw prompts.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.

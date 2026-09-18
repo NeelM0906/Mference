@@ -425,6 +425,10 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
 
     // MARK: - Prefill (chunked, layer-major)
 
+    /// Tests drain the encoded layer before injecting a failure. Production
+    /// leaves this nil and retains the single-command-buffer prefill path.
+    var prefillDidCompleteLayer: ((Int) throws -> Void)?
+
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
                         outputMode: PrefillOutputMode,
@@ -563,6 +567,12 @@ public final class MiniCPM5ForwardRunner: ContinuableLogitProducer, ContextWindo
                                           hidden: scratch.hidden,
                                           delta: scratch.mlpOut,
                                           count: t * D)
+            if let hook = prefillDidCompleteLayer {
+                try finish(cb)
+                try hook(index)
+                cb = try commandBuffer()
+            }
+            try Task.checkCancellation()
         }
 
         let emitGreedyHead = outputMode == .greedyIfAvailable && useFusedGreedyHead

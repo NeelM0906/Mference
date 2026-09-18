@@ -45,8 +45,9 @@ The CLI and server expose these generation controls:
 
 | Control | Values | CLI flag | Default | Effect |
 | --- | --- | --- | --- | --- |
-| Maximum response | 1 up to the remaining context | `--max-new` | 1,024 tokens | Caps the generated tokens. A request may use only the context space left after formatting the prompt. |
-| Maximum context | 4K, 8K, 16K, 32K, 64K, 128K | `--max-context` | 4K | Sets prompt plus response capacity. Maple supports 128000 tokens in the runtime, CLI, and server; other family or product limits may differ. |
+| Maximum response | 1 up to the remaining context | `--max-new` | 1,024 tokens | Caps generated tokens, including hidden reasoning. A request may use only the context space left after formatting the prompt; a limit reached during reasoning can leave the visible answer empty. |
+| Maximum context | 4K, 8K, 16K, 32K, 64K, 128K | `--max-context` | CLI 4K; server/UI 16K | Sets prompt plus response capacity. Maple supports 128000 tokens in the runtime, CLI, and server; other family or product limits may differ. A selectable context is not a fresh hardware qualification. |
+| Qwen 3.8 reasoning effort | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Swift: `xhigh`; base: unchanged legacy policy when omitted | Base/Swift Qwen 3.8 only; chat/messages mode, not raw completion. Server field: `reasoning_effort`. An explicit value selects the installed source template for either checkpoint. `medium` adds no effort instruction; `none` closes thinking in the prompt. Other checkpoints reject this explicit parameter. |
 | Temperature | 0...2 | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
 | Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
@@ -57,12 +58,17 @@ Generation controls apply to the next request and do not require a model
 reload. They are interactive product settings, not the fixed community
 benchmark protocol.
 
+If a CLI chat exhausts its token budget before emitting visible text, stderr
+now explains the truncation and points to budget controls (and Swift's supported
+effort controls when applicable). It does not invent an answer, change settings
+automatically, or treat a truncated reply as an end-of-turn success.
+
 ## Runtime settings
 
 | Control | Values | CLI flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
-| Expert-cache slots | 8, 16, 24, 32, 64, 96, 128; CLI also accepts resident and auto | `--expert-cache-slots` | CLI/server auto | Qwen 3.6 auto uses 96 slots on hosts with at least 24 GiB, 32 with at least 16 GiB, and 16 otherwise. Flash-Next auto maps the routed-expert pool on hosts with at least 192 GiB when that pool plus the core leaves 32 GiB of headroom; otherwise it uses 16 slots. Other families use 16. `resident` maps every layer file once and skips the slot cache. This won for Flash-Next on the 256 GiB M3 Ultra but lost the Qwen 3.6 community A/B on 24 GiB because of page-cache pressure, so it is not a universal default. More slots retain more routed experts and reduce later reads at the cost of RAM. Ordinary RSS substantially undercounts clean file-backed pages in resident mode. |
-| Prompt prefill | On, off | — | On | On requests chunked prefill; actual execution depends on the family/profile. GLM currently batches resident experts but replays streamed experts. DeepSeek batches the eligible prefix and replays beyond its sparse-selection cutover. Other production paths batch; recurrent scans inside a layer-major GPU batch still advance in token order where required. Off selects scalar replay, not skipped prompt processing. See [Runtime diagnostics](RUNTIME_DIAGNOSTICS.md) for actual per-request counts and separate memory metrics. |
+| Expert-cache slots | 8, 16, 24, 32, 64, 96, 128; CLI also accepts resident and auto | `--expert-cache-slots` | CLI/server auto | Qwen 3.6 auto uses 96 slots on hosts with at least 24 GiB, 32 with at least 16 GiB, and 16 otherwise. Flash-Next auto maps the routed-expert pool on hosts with at least 192 GiB when that pool plus the core leaves 32 GiB of headroom; otherwise it uses 16 slots. GLM selects resident when its pool plus core plus 48 GiB of reserve fits physical memory; otherwise it uses 16 slots. Other families use 16. `resident` maps every layer file once and skips the slot cache. This won for Flash-Next on the 256 GiB M3 Ultra but lost the Qwen 3.6 community A/B on 24 GiB because of page-cache pressure, so it is not a universal default. More slots retain more routed experts and reduce later reads at the cost of RAM. Ordinary RSS substantially undercounts clean file-backed pages in resident mode. |
+| Prompt prefill | On, off | — | On | On requests chunked prefill. The merged GLM bounded-expert path and DeepSeek sparse-cutover path now batch rather than replaying the full model per prompt token. Real-checkpoint and hardware coverage remains separate: see the [qualification matrix](PREFILL_QUALIFICATION.md). Recurrent scans inside a layer-major GPU batch still advance in token order where required. Off selects scalar replay, not skipped prompt processing. [Runtime diagnostics](RUNTIME_DIAGNOSTICS.md) reports actual per-request counts and separate memory metrics. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 | Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Maple stages each chunk layer-major but preserves its fixed 512-slot sliding-cache semantics by committing and attending rows in time order. |
 | Maple FlashHead | Off, on | `--flash-head` | Off | Enables Maple's approximate singleton-decode candidate head when the install carries validated FlashHead tensors. It leaves all non-candidates at negative infinity, so sampling is restricted to selected rows. Prefill and the default decode head remain exact; an install without the data falls back to the exact head. |
@@ -92,12 +98,16 @@ selects the speculative-prefetch mode — shadow prefetch is the accepted
 DeepSeek-V4-Flash default, off elsewhere — and `MFERENCE_SHADOW_BUDGET` caps
 its per-layer speculative reads. For Qwen 3.8, `MFERENCE_MTP=0` disables MTP
 speculative decoding (on by default for greedy decode when the install
-carries the attached MTP tensors) and `MFERENCE_MTP_K` (1–6, default 3) sets
+carries the attached MTP tensors; **off by default for the Swift-Qwen candidate**)
+and `MFERENCE_MTP_K` (1–6, default 3) sets
 the draft depth. `MFERENCE_DFLASH2_DIR` points at a DFlash2 drafter
 checkpoint and swaps the round's draft source to it (draft depth defaults
 to 6; see docs/QWEN38_DFLASH2.md); `MFERENCE_DFLASH2_BF16=1` skips its
 load-time INT4 quantization for reference runs. All are byte-identical
 toggles, not quality controls.
+
+Flash-Next's installer carries an MTP sidecar, but native Flash-Next speculative
+execution is not implemented. The dense Qwen MTP switches do not activate it.
 
 Changing context length, expert-cache slots, RDADVISE, model verification,
 prompt-prefill enablement, the prefill chunk size, or FlashHead selection

@@ -49,6 +49,66 @@ import Testing
         (0..<count).map { Int32((($0 + seed) * 37 + 11) % vocab) }
     }
 
+    @Test("cancelled warm append requires reset across KV backends",
+          arguments: ["dense", "paged", "spilled"])
+    func cancelledWarmAppendRequiresReset(backend: String) async throws {
+        let (dir, ctx, runner) = try makeRunner(maxContext: 512,
+            paged: backend != "dense", poolPages: backend == "spilled" ? 5 : nil)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx)
+        let tokens = Self.prompt(433)
+        func bits() -> [UInt16] {
+            Array(UnsafeBufferPointer(start: logits.contents().assumingMemoryBound(to: UInt16.self),
+                                      count: Self.vocab))
+        }
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(400), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        let reference = bits()
+        try await runner.produceExactPrefill(token: 7, position: 400, into: logits)
+        let referenceNext = bits()
+        runner.reset()
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(400), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        runner.prefillDidCompleteLayer = { layer in
+            // Toy layer 3 is full attention: both KV and earlier GDN/conv state
+            // have been written, including spill metadata in the bounded arm.
+            if layer == 3 { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        struct SerialBuffer: @unchecked Sendable { let value: MTLBuffer }
+        let output = SerialBuffer(value: logits)
+        let interrupted = Task { @Sendable in
+            _ = try await runner.prefillChunked(tokens: tokens[400..<433], startPosition: 400,
+                outputMode: .logits, config: .production(chunkTokens: 64),
+                into: output.value, onProgress: { _ in })
+        }
+        do {
+            try await interrupted.value
+            Issue.record("expected cancellation after GPU state writes")
+        } catch is CancellationError {}
+        #expect(throws: PrefillError.self) {
+            try runner.prepareForContinuation(expectedPosition: 400)
+        }
+        do {
+            try await runner.produce(token: 7, position: 400, into: logits)
+            Issue.record("dirty state must reject decode")
+        } catch let error as PrefillError {
+            guard case .chunkedRunnerDirty = error else { throw error }
+        }
+        runner.prefillDidCompleteLayer = nil
+        runner.reset()
+        let recovered = try await runner.prefillChunked(tokens: tokens.prefix(400), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        #expect(recovered.execution?.batchedTokens == 400)
+        #expect(recovered.execution?.replayedTokens == 0)
+        #expect(bits() == reference)
+        try runner.prepareForContinuation(expectedPosition: 400)
+        try await runner.produceExactPrefill(token: 7, position: 400, into: logits)
+        #expect(bits() == referenceNext)
+    }
+
     private func prefill(_ runner: Qwen38ForwardRunner,
                          tokens: [Int32], start: Int,
                          logits: MTLBuffer,

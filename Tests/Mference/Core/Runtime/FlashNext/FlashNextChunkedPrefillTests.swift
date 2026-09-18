@@ -94,6 +94,11 @@ import Testing
             ? [prompt.count] : [32, prompt.count - 32]))
         #expect(progress.last == prompt.count)
         #expect(runner.continuationPosition == prompt.count)
+        if case .resident = streamingMode {
+            #expect(runner.deviceGroupedPrefillLayers > 0)
+        } else {
+            #expect(runner.deviceGroupedPrefillLayers == 0)
+        }
         let chunkedPrompt = Self.bits(logits, count: vocab)
         try await runner.produce(token: continuation, position: prompt.count,
                                  into: logits)
@@ -149,6 +154,49 @@ import Testing
             try await runner.produce(token: token, position: start + i, into: out)
             #expect(Self.bits(out, count: vocab) == expected[i + 1])
         }
+    }
+
+    @Test(arguments: [false, true])
+    func interruptedWarmAppendRequiresReset(resident: Bool) async throws {
+        let (directory, context, _, runner) = try Self.makeRunner(
+            streamingMode: resident ? .resident : .pread(slotCount: 16))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let vocab = ArchConfig.qwen38FlashNextToy().vocabSize
+        let out = try Self.logits(context, vocab: vocab)
+        let tokens = Self.prompt(40, vocab: vocab)
+        _ = try await runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: out,
+            onProgress: { _ in })
+        let expected = Self.bits(out, count: vocab)
+        runner.reset()
+        _ = try await runner.prefillChunked(tokens: tokens[..<3], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: out,
+            onProgress: { _ in })
+        runner.prefillDidCompleteLayer = { layer in
+            if layer == 1 { throw CancellationError() }
+        }
+        do {
+            _ = try await runner.prefillChunked(tokens: tokens[3...], startPosition: 3,
+                outputMode: .logits, config: .production(chunkTokens: 32), into: out,
+                onProgress: { _ in })
+            Issue.record("expected cancellation after GPU state advanced")
+        } catch is CancellationError { }
+        #expect(throws: PrefillError.self) {
+            try runner.prepareForContinuation(expectedPosition: 3)
+        }
+        do {
+            try await runner.produce(token: tokens[3], position: 3, into: out)
+            Issue.record("dirty state must reject decode")
+        } catch let error as PrefillError {
+            guard case .chunkedRunnerDirty = error else { throw error }
+        }
+        runner.prefillDidCompleteLayer = nil
+        runner.reset()
+        _ = try await runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: out,
+            onProgress: { _ in })
+        #expect(Self.bits(out, count: vocab) == expected)
+        try runner.prepareForContinuation(expectedPosition: tokens.count)
     }
 
     @Test func memorySnapshotReadsExistingAllocationsWithoutOpeningExperts() throws {

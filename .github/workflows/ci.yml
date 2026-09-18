@@ -59,6 +59,13 @@ jobs:
         run: swift build -c release
       - name: Run serial tests
         run: Scripts/test.sh
+      - name: Check launcher and UI adapters without model downloads
+        run: |
+          bash -n mference-ui.sh
+          python3 Scripts/tests/test_mference_ui.py
+          python3 Scripts/tests/test_openwebui_mference.py
+          python3 Scripts/tests/test_swift_qwen_task_screen.py
+          python3 Scripts/tests/test_release_task_screen.py
 
   docs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -70,3 +77,5 @@ jobs:
         # defaults to US-ASCII on a bare runner and aborts on the first
         # non-ASCII byte.
         run: LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
+      - name: Check distributable source archive
+        run: python3 Scripts/check_source_archive.py

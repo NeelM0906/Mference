@@ -3,6 +3,20 @@ import Mference
 @testable import MferenceCLICore
 
 @Suite struct CLIArgumentsTests {
+    @Test func emptyTruncationHasActionableNoticeWithoutChangingSuccessOutput() throws {
+        let swift = try #require(emptyResponseLimitNotice(reason: .maxTokens,
+            hasVisibleText: false, isSwiftQwen: true))
+        #expect(swift.contains("--max-new"))
+        #expect(swift.contains("--max-context"))
+        #expect(swift.contains("--reasoning-effort medium or low"))
+        let base = try #require(emptyResponseLimitNotice(reason: .maxTokens,
+            hasVisibleText: false, isSwiftQwen: false))
+        #expect(!base.contains("--reasoning-effort"))
+        #expect(emptyResponseLimitNotice(reason: .maxTokens,
+            hasVisibleText: true, isSwiftQwen: true) == nil)
+        #expect(emptyResponseLimitNotice(reason: .endOfTurn,
+            hasVisibleText: false, isSwiftQwen: true) == nil)
+    }
     @Test func usageListsMaple() {
         #expect(Args.usage.contains("Maple"))
     }

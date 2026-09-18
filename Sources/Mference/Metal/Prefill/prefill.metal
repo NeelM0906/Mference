@@ -400,6 +400,54 @@ struct PrefillTokenExpertPairMSL {
     uint weight_bits_and_reserved;
 };
 
+struct PrefillDeviceGroupMSL { uint expert; uint pair_start; uint pair_count; };
+
+kernel void prefill_route_count_by_expert(
+    device const uint* ids [[buffer(0)]], device uint* counts [[buffer(1)]],
+    constant uint& pairs [[buffer(2)]], constant uint& experts [[buffer(3)]],
+    uint e [[thread_position_in_grid]]) {
+    if (e >= experts) return;
+    uint count = 0;
+    for (uint p = 0; p < pairs; ++p) count += min(ids[p], experts - 1u) == e;
+    counts[e] = count;
+}
+
+kernel void prefill_route_group_prefix(
+    device const uint* counts [[buffer(0)]],
+    device PrefillDeviceGroupMSL* groups [[buffer(1)]],
+    device uint* dispatch [[buffer(2)]], constant uint& experts [[buffer(3)]],
+    constant uint& D [[buffer(4)]], constant uint& F [[buffer(5)]]) {
+    uint offset = 0, maximum = 0;
+    for (uint e = 0; e < experts; ++e) {
+        groups[e] = {e, offset, counts[e]};
+        offset += counts[e];
+        maximum = max(maximum, counts[e]);
+    }
+    // Two MTLDispatchThreadgroupsIndirectArguments (gate/up, then down).
+    dispatch[0] = (F + 31u) / 32u;
+    dispatch[1] = (maximum + 63u) / 64u;
+    dispatch[2] = experts;
+    dispatch[3] = (D + 31u) / 32u;
+    dispatch[4] = dispatch[1];
+    dispatch[5] = experts;
+}
+
+kernel void prefill_route_scatter_by_expert(
+    device const uint* ids [[buffer(0)]], device const half* weights [[buffer(1)]],
+    device const PrefillDeviceGroupMSL* groups [[buffer(2)]],
+    device PrefillTokenExpertPairMSL* sorted [[buffer(3)]],
+    constant uint& pairs [[buffer(4)]], constant uint& experts [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]], uint e [[thread_position_in_grid]]) {
+    if (e >= experts) return;
+    uint destination = groups[e].pair_start;
+    for (uint p = 0; p < pairs; ++p) {
+        if (min(ids[p], experts - 1u) == e) {
+            sorted[destination++] = {p / top_k, e, p % top_k,
+                                     uint(as_type<ushort>(weights[p]))};
+        }
+    }
+}
+
 struct PrefillStreamedRoutedBlobsMSL {
     device const uint8_t* blob[kPrefillMaxTileExperts];
 };
@@ -821,6 +869,45 @@ kernel void prefill_grouped_routed_moe_batched_down(
     const half value = half(prefill_moe_int4_gemv_row_dev(down_W, down_s, down_b, act, d, p.F));
     down_scratch[pair_local * p.D + d] = value;
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
+}
+
+// Same arithmetic as streamed batched experts, addressed directly in the
+// immutable resident slab. All sorted pairs share one dispatch per phase.
+kernel void prefill_grouped_routed_moe_resident_phase1(
+    device const half* hidden [[buffer(0)]],
+    device const PrefillTokenExpertPairMSL* pairs [[buffer(1)]],
+    device half* act [[buffer(2)]], device half* partials [[buffer(3)]],
+    device const uint8_t* slab [[buffer(4)]],
+    constant PrefillGroupedRoutedMoEStreamedParamsMSL& p [[buffer(5)]],
+    constant uint& stride [[buffer(6)]], uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.F || gid.y >= p.pair_count) return;
+    const PrefillTokenExpertPairMSL pair = pairs[gid.y];
+    device const uint8_t* expert = slab + ulong(pair.expert) * ulong(stride);
+    device const half* x = hidden + pair.token * p.hidden_stride_elements;
+    const float gate = prefill_moe_int4_gemv_row_dev(expert + p.gate_W_off,
+        reinterpret_cast<device const bfloat*>(expert + p.gate_s_off),
+        reinterpret_cast<device const bfloat*>(expert + p.gate_b_off), x, gid.x, p.D);
+    const float up = prefill_moe_int4_gemv_row_dev(expert + p.up_W_off,
+        reinterpret_cast<device const bfloat*>(expert + p.up_s_off),
+        reinterpret_cast<device const bfloat*>(expert + p.up_b_off), x, gid.x, p.D);
+    act[gid.y * p.F + gid.x] = half(prefill_hidden_activation(gate) * up);
+}
+
+kernel void prefill_grouped_routed_moe_resident_down(
+    device const half* hidden [[buffer(0)]],
+    device const PrefillTokenExpertPairMSL* pairs [[buffer(1)]],
+    device const half* act [[buffer(2)]], device half* partials [[buffer(3)]],
+    device const uint8_t* slab [[buffer(4)]],
+    constant PrefillGroupedRoutedMoEStreamedParamsMSL& p [[buffer(5)]],
+    constant uint& stride [[buffer(6)]], uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.D || gid.y >= p.pair_count) return;
+    const PrefillTokenExpertPairMSL pair = pairs[gid.y];
+    device const uint8_t* expert = slab + ulong(pair.expert) * ulong(stride);
+    const half value = half(prefill_moe_int4_gemv_row_dev(expert + p.down_W_off,
+        reinterpret_cast<device const bfloat*>(expert + p.down_s_off),
+        reinterpret_cast<device const bfloat*>(expert + p.down_b_off),
+        act + gid.y * p.F, gid.x, p.F));
+    partials[(pair.token * p.top_k + pair.rank) * p.D + gid.x] = value;
 }
 
 kernel void prefill_dequant_int4_qmm_f16_block(

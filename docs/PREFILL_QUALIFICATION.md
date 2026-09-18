@@ -16,19 +16,19 @@ execution. Resident and larger-budget configurations keep their existing width.
 
 | Family / path | Production-dispatch evidence | Limits |
 | --- | --- | --- |
-| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, reset and decode handoff | Small loader fixture; execution/state reproducibility, not independent model-quality parity |
-| Qwen 3.6, bounded / resident experts | Same matrix plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
-| Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts alongside existing numerical/continuation checks | Installed fine-tunes need their own numerical gate |
-| Swift-Qwen | Phase 2 PR #33 includes source/template, installed-reference, numerical and MTP gates | Candidate only: two installed prefill mean-error probes missed the declared threshold; no default promotion |
-| Flash-Next, bounded / resident | `FlashNextChunkedPrefillTests`: exact logits/state, warm appends, six continuation rows and zero replay | Synthetic INT4 router fixture does not qualify every real router precision or hardware profile |
-| GLM, bounded / resident | Phase 3 PR #34: cutover/warm-appends/partial-chunks matrix, exact streamed/resident logits and cancellation/reset | Existing completed GLM installation not found; real streamed qualification remains blocked |
+| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, mid-append cancellation/dirty rejection/reset and decode handoff | Small loader fixture; execution/state reproducibility, not independent model-quality parity |
+| Qwen 3.6, bounded / resident experts | Same matrix (including actual task cancellation between layers of a warm append) plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
+| Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts and numerical/continuation checks; `7505e82` adds actual cancellation after GPU writes in all three backends, dirty rejection and exact reset/next logits | Installed fine-tunes need their own numerical gate; fixture recovery is not physical low-RAM qualification |
+| Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` and four-row tiled `ee0bfb9` pass the installed numerical/state/MTP retest without changing tolerances | Candidate only; default-effort community attempts truncate without visible answers; broader quality/latency/hardware evidence required before promotion |
+| Flash-Next, bounded / resident | `FlashNextChunkedPrefillTests`: exact logits/state, warm appends, cancellation/reset, six continuation rows and zero replay; `31f0067` installed INT8-router short gate passes both memory modes | Real long-context/TensorOps-sized chunks and wider hardware evidence remain separate |
+| GLM, bounded / resident | PR #34 matrix plus installed gate at `ed69598`: exact resident/16-slot full logits at 33/2047/2051/2083 tokens and eight continuation steps, zero replay, cancellation/dirty rejection/exact reset | [Installed evidence](families/GLM53_FLASH.md#installed-streamed-prefill-qualification-september-18-2026); not longer-context, smaller-hardware or throughput qualification |
 | DeepSeek, bounded / resident | Phase 4 PR #35: below/across/above sparse cutover, cache slots 8/16/resident, exact state and cancellation/reset; opt-in installed gate | Installed results and limitations live in `DEEPSEEK_V4_FLASH.md` |
-| MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts alongside existing golden/continuation checks | Small fixture, not a new hardware recommendation |
-| Maple | `MapleForwardRunnerTests` asserts batched execution and compares continuation logits | Existing sparse/zero fixture does not replace a broad installed-model gate |
-| Inkling | `InklingGenerationRegressionTests.shortExplanationHasNoExclamationBurst` asserts actual batched prefill and zero replay; real short regression passed on the host below | Env-gated, not run by ordinary CI; a small full-runner fixture and wider boundary matrix remain needed |
+| MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts and golden/continuation checks; `7505e82` exercises actual warm-append cancellation/reset in all three backends and compares exact next logits | Representative full-selection/5-page-spill fixture; not every sparse budget/context or new hardware qualification |
+| Maple | `MapleForwardRunnerTests` asserts batched execution, continuation logits and failure between layers/dirty rejection/reset | Existing sparse/zero fixture does not replace a broad installed-model gate |
+| Inkling | Real short generation regression plus `7505e82` installed 16-slot cancellation after routed-layer GPU writes: dirty rejection, zero replay and exact reset/next full-logit rows | Env-gated, not run by ordinary CI; a small full-runner fixture and wider resident/window-boundary matrix remain needed |
 
-PR references identify separate reviewable changes targeting `main`, not changes
-already merged into it. The all-family invariant remains **not fully qualified**
+PRs #33–36 merged into `main` on September 18 (`c67e857`). New source-release
+work is in PR #37. The all-family invariant remains **not fully qualified**
 until the outstanding cells have evidence, including OS/GPU fallback paths,
 partial-chunk cancellation across the remaining runners, and real checkpoints.
 Do not hide a missing combination behind a new unsupported-context error or
@@ -37,22 +37,28 @@ rename host-side full-model replay as batching.
 ## Roadmap status
 
 - Phase 1: actual execution and memory diagnostics landed on `main`.
-- Phase 2: Swift-Qwen implementation and initial qualification in PR #33;
-  numerical-gate investigation and broader quality/hardware qualification remain.
-- Phase 3: bounded GLM prefill implementation in PR #34; real install required
-  to finish its qualification.
-- Phase 4: DeepSeek sparse-cutover implementation in PR #35; its own report
+- Phase 2: Swift-Qwen implementation and initial qualification merged in PR #33;
+  numerical retest passes. The [matched-low screen](families/QWEN_MATCHED_QUALIFICATION_2026-09-18.md)
+  passes 54/60 cases versus base 59/60 with 6.77% fewer completion tokens;
+  broader default-effort quality/performance/hardware qualification remains.
+- Phase 3: bounded GLM prefill implementation merged in PR #34; pinned install
+  and current resident/16-slot sparse-cutover/continuation/recovery gate now
+  complete on the 256 GiB M3 Ultra; broader hardware/performance remains open.
+- Phase 4: DeepSeek sparse-cutover implementation merged in PR #35; its own report
   records the measured correctness status, separately from throughput.
 - Phase 5: execution-contract coverage extended here; the gaps above remain
   explicit. A green ordinary CI run does not execute env-gated real-model tests.
 - Phase 6: Flash-Next/GLM optimization and matched performance experiments are
   not complete. No unmeasured speedup or default change is claimed.
-- Phase 7: the Phase 2 frozen 12-task screen and UI checks are an initial
-  screen, not the final warmup-plus-three-run comparison, broad quality claim,
-  or support table for hardware not tested here.
+- Phase 7: real UI streaming, tool loops, history, cancellation and model-switch
+  recovery have been tested; a [support table](RELEASE_SUPPORT.md) distinguishes
+  established paths from candidates. The separately frozen 60-case screen has
+  run for matched-low base/Swift only, not every release profile. Neither this
+  screen nor the earlier 12-task screen or UI checks is
+  a broad quality claim or support evidence for hardware not tested here.
 
-The missing GLM installation and untested smaller-memory hardware are external
-qualification requirements. Kernel optimizations must pass correctness and
+The GLM installation blocker is resolved; smaller-memory hardware remains an
+external qualification requirement. Kernel optimizations must pass correctness and
 repeatable matched measurements before promotion. Never infer 24 GB support
 from a 256 GB host with a reduced expert-slot setting.
 
