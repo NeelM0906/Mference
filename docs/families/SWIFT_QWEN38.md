@@ -112,12 +112,14 @@ Swift 6.3.3; Phase 2 changes based on `3247c3d`):
 
 Expanded local qualification adds 65/257/1025-token prefill with a nonzero
 33-token append boundary, followed by five full-logit state probes per case.
-All top-1 choices matched; all 15 subsequent state probes met the predeclared
-max-absolute 0.25 / mean-absolute 0.01 screen. **The gate is not passed:** the
-65- and 1025-token prefill heads had mean differences 0.01387 and 0.01428,
-above 0.01 (maximum differences 0.2070 and 0.1865). The tolerance was not
-relaxed after seeing these results. These measurements are not evidence of
-bit-exact production prefill; numerical/quality qualification remains open.
+The September 16 run failed the mean-error screen for two final prefill heads.
+After the Swift-only decode-order batched projection fix, **the September 18
+retest on `d2b84f1` passes** the unchanged max-absolute 0.25 / mean-absolute
+0.01 limits. Mean differences were 0.003759, 0.003734 and 0.007409 respectively;
+all top-1 choices and all 15 subsequent state probes passed. Both the original
+failure and complete retest are retained in the qualification report. This is
+bounded numerical evidence, not bit-exact whole-model prefill or broad quality
+qualification. The base checkpoint's dispatch is unchanged.
 
 Separately, MTP-on/off greedy outputs matched at stop lengths 2, 7, 32 and 64.
 After cursor reconciliation, all 20 full-vocabulary continuation probes were
