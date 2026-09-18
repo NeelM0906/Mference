@@ -125,5 +125,32 @@ private let mppGroupedRoutedMoEAvailable: Bool = {
         }
         #expect(maxError <= 0.003, "maxError=\(maxError)")
         #expect(resident == new)
+
+        // Production resident grouping and indirect dispatch share one command
+        // buffer. Include empty groups and a partial matrix tile.
+        let grouping = try PrefillDeviceMoEGrouping(context: context)
+        let routeScratch = try PrefillDeviceMoEGrouping.Scratch(
+            device: context.device, maxPairs: pairs.count, experts: 5)
+        let ids = pairs.map { $0.expert }
+        let weights = pairs.map { $0.weight }
+        let idBuffer = try #require(context.device.makeBuffer(bytes: ids,
+            length: ids.count * MemoryLayout<UInt32>.stride, options: .storageModeShared))
+        let weightBuffer = try #require(Fp16Buffer.make(context.device, halves: weights))
+        let indirectCB = try #require(context.queue.makeCommandBuffer())
+        try grouping.encode(commandBuffer: indirectCB, ids: idBuffer, weights: weightBuffer,
+            scratch: routeScratch, rows: rows, topK: topK, hidden: d, intermediate: f)
+        let indirectParams = PrefillGroupedRoutedMoEStreamedParams(
+            groupStart: 0, groupCount: 5, d: UInt32(d), routedIntermediate: UInt32(f),
+            topK: UInt32(topK), hiddenStrideElements: UInt32(d), offsets: pool.offsets)
+        #expect(mpp.encodeResident(commandBuffer: indirectCB, hidden: hiddenBuffer,
+            sortedPairs: routeScratch.pairs, groups: routeScratch.groups,
+            activation: residentAct, routePartials: residentOutput,
+            slab: residentSlab, params: indirectParams,
+            residentExpertStride: UInt32(pool.stride), maxPairsPerGroup: rows,
+            indirectDispatch: routeScratch.dispatch))
+        indirectCB.commit()
+        indirectCB.waitUntilCompleted()
+        try #require(indirectCB.error == nil)
+        #expect(Fp16Buffer.readHalf(residentOutput, count: rows * topK * d) == new)
     }
 }

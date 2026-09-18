@@ -131,7 +131,8 @@ final class MPPGroupedRoutedMoE {
                         slab: MTLBuffer,
                         params: PrefillGroupedRoutedMoEStreamedParams,
                         residentExpertStride: UInt32,
-                        maxPairsPerGroup: Int) -> Bool {
+                        maxPairsPerGroup: Int,
+                        indirectDispatch: MTLBuffer? = nil) -> Bool {
         guard params.pairCount > 0, maxPairsPerGroup > 0,
               params.liveExpertCount == 0,
               residentExpertStride > 0,
@@ -158,23 +159,29 @@ final class MPPGroupedRoutedMoE {
         guard let first = commandBuffer.makeComputeCommandEncoder() else { return false }
         first.setComputePipelineState(phase1)
         bind(first)
-        first.dispatchThreadgroups(
-            MTLSize(width: (Int(params.routedIntermediate) + 31) / 32,
-                    height: (maxPairsPerGroup + 63) / 64,
-                    depth: Int(params.pairCount)),
-            threadsPerThreadgroup: MTLSize(width: phase1.threadExecutionWidth * 4,
-                                           height: 1, depth: 1))
+        if let indirectDispatch {
+            first.dispatchThreadgroups(indirectBuffer: indirectDispatch, indirectBufferOffset: 0,
+                threadsPerThreadgroup: MTLSize(width: phase1.threadExecutionWidth * 4, height: 1, depth: 1))
+        } else {
+            first.dispatchThreadgroups(
+                MTLSize(width: (Int(params.routedIntermediate) + 31) / 32,
+                        height: (maxPairsPerGroup + 63) / 64, depth: Int(params.pairCount)),
+                threadsPerThreadgroup: MTLSize(width: phase1.threadExecutionWidth * 4, height: 1, depth: 1))
+        }
         first.endEncoding()
 
         guard let second = commandBuffer.makeComputeCommandEncoder() else { return false }
         second.setComputePipelineState(down)
         bind(second)
-        second.dispatchThreadgroups(
-            MTLSize(width: (Int(params.d) + 31) / 32,
-                    height: (maxPairsPerGroup + 63) / 64,
-                    depth: Int(params.pairCount)),
-            threadsPerThreadgroup: MTLSize(width: down.threadExecutionWidth * 4,
-                                           height: 1, depth: 1))
+        if let indirectDispatch {
+            second.dispatchThreadgroups(indirectBuffer: indirectDispatch, indirectBufferOffset: 12,
+                threadsPerThreadgroup: MTLSize(width: down.threadExecutionWidth * 4, height: 1, depth: 1))
+        } else {
+            second.dispatchThreadgroups(
+                MTLSize(width: (Int(params.d) + 31) / 32,
+                        height: (maxPairsPerGroup + 63) / 64, depth: Int(params.pairCount)),
+                threadsPerThreadgroup: MTLSize(width: down.threadExecutionWidth * 4, height: 1, depth: 1))
+        }
         second.endEncoding()
         return true
     }
