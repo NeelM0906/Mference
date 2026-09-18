@@ -63,6 +63,12 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("would check", result.stdout)
 
+    def test_browser_origins_are_limited_to_the_selected_loopback_port(self):
+        result = self.run_launcher("--webui-port", "18490", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CORS_ALLOW_ORIGIN=http://127.0.0.1:18490;http://localhost:18490", result.stdout)
+        self.assertNotIn("CORS_ALLOW_ORIGIN=*", result.stdout)
+
     def test_platform_and_occupied_port_checks(self):
         with tempfile.TemporaryDirectory(prefix="mference-launcher-test-") as directory:
             mock_bin = Path(directory)

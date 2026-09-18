@@ -170,6 +170,7 @@ webui_environment=(
   "OPENAI_API_KEY=local"
   "ENABLE_OLLAMA_API=false"
   "WEBUI_AUTH=false"
+  "CORS_ALLOW_ORIGIN=http://127.0.0.1:$webui_port;http://localhost:$webui_port"
   "ENABLE_TITLE_GENERATION=false"
   "ENABLE_TAGS_GENERATION=false"
   "ENABLE_FOLLOW_UP_GENERATION=false"

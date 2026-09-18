@@ -5,6 +5,9 @@ its only UI. It is not a notarized application, a prebuilt binary distribution,
 or a model-weight bundle. Model licenses and download sizes are separate from
 the runtime. The default server and UI are loopback-only and must not be
 exposed through a tunnel, wildcard binding or public proxy.
+The launcher restricts Open WebUI browser origins to its selected loopback
+port; it does not retain the upstream wildcard CORS default. This is additional
+browser hardening, not authentication or a substitute for loopback binding.
 
 ## First-use path
 
