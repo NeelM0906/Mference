@@ -343,6 +343,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var dsv4Prefill: DSV4ChunkedPrefill?
     /// Internal fault-injection boundary; production leaves this unset.
     var dsv4PrefillDidCompleteLayer: ((Int) throws -> Void)?
+    /// Test-only failure seam. Prior layer work is drained at this boundary;
+    /// production leaves it nil and adds no GPU synchronization.
+    var prefillWillEncodeLayer: ((Int) throws -> Void)?
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -1638,6 +1641,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                               startPosition: startPosition,
                                               config: config)
         for (spanIndex, span) in spans.enumerated() {
+            try Task.checkCancellation()
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
             try await executePrefillChunk(
@@ -1929,6 +1933,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             outScale: embedOutScale)
 
         for L in 0..<cfg.numLayers {
+            try prefillWillEncodeLayer?(L)
+            try Task.checkCancellation()
             model.beginOpeningRoutedExpertStreamer(layer: L)
             let views = layerViews[L]
             let isLinear = cfg.layerIsLinear(L)

@@ -40,6 +40,45 @@ import Testing
         (0..<count).map { Int32(4 + ($0 * 37 + 11) % (vocab - 4)) }
     }
 
+    @Test func interruptedWarmAppendRequiresReset() async throws {
+        let (dir, ctx, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx)
+        let tokens = Self.prompt(65)
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(33), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        let reference = bits(logits)
+        runner.prefillDidCompleteLayer = { layer in
+            if layer == 0 { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        let interrupted = Task {
+            _ = try await runner.prefillChunked(tokens: tokens[33..<65], startPosition: 33,
+                outputMode: .logits, config: .production(chunkTokens: 64),
+                into: logits, onProgress: { _ in })
+        }
+        do {
+            try await interrupted.value
+            Issue.record("expected failure after a real layer wrote KV")
+        } catch is CancellationError {}
+        #expect(throws: (any Error).self) {
+            try runner.prepareForContinuation(expectedPosition: 33)
+        }
+        do {
+            try await runner.produce(token: 7, position: 33, into: logits)
+            Issue.record("dirty state must reject decode")
+        } catch is PrefillError {}
+        runner.prefillDidCompleteLayer = nil
+        runner.reset()
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(33), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        #expect(bits(logits) == reference)
+        try runner.prepareForContinuation(expectedPosition: 33)
+        try await runner.produce(token: 7, position: 33, into: logits)
+        #expect(bits(logits).allSatisfy { Float16(bitPattern: $0).isFinite })
+    }
+
     @Test func factory_selectsTheMiniCPM5RunnerWithChunkedPrefillAndFP16KV() throws {
         let dir = try MiniCPM5Parity.installToyCheckpoint()
         defer { try? FileManager.default.removeItem(at: dir) }
