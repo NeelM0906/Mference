@@ -112,6 +112,12 @@ public func run(args: Args,
         if decoder != nil { completionConfig.stopStrings = [] }
         var decodingError: Error?
         var shouldStop = false
+        var hasVisibleText = false
+        func writeVisible(_ text: String) {
+            guard !text.isEmpty else { return }
+            if text.contains(where: { !$0.isWhitespace }) { hasVisibleText = true }
+            stdout.write(Data(text.utf8))
+        }
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
@@ -130,13 +136,13 @@ public func run(args: Args,
                     let events = try structuredEvents(decoder, tokenID: tokenID, text: delta)
                     let visible = try visibleAssistantText(events)
                     let emitted = decoder == nil ? visible : stopMatcher.push(visible)
-                    if !emitted.isEmpty { stdout.write(Data(emitted.utf8)) }
+                    writeVisible(emitted)
                     if decoder != nil, stopMatcher.isStopped { shouldStop = true }
                 case .tail(let tail):
                     let events = try structuredTailEvents(decoder, text: tail)
                     let visible = try visibleAssistantText(events)
                     let emitted = decoder == nil ? visible : stopMatcher.push(visible)
-                    if !emitted.isEmpty { stdout.write(Data(emitted.utf8)) }
+                    writeVisible(emitted)
                 }
                 } catch {
                     decodingError = error
@@ -147,7 +153,11 @@ public func run(args: Args,
         if let decoder {
             let visible = try visibleAssistantText(decoder.finish())
             let emitted = stopMatcher.push(visible) + stopMatcher.finish()
-            if !emitted.isEmpty { stdout.write(Data(emitted.utf8)) }
+            writeVisible(emitted)
+        }
+        if let notice = emptyResponseLimitNotice(reason: stats.reason,
+            hasVisibleText: hasVisibleText, isSwiftQwen: tokenizer.isSwiftQwen) {
+            stderr.write(Data(("\n" + notice + "\n").utf8))
         }
 
         if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1",
@@ -307,6 +317,15 @@ public func run(args: Args,
 private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> RunResult {
     stderr.write(Data("error: \(message)\n".utf8))
     return RunResult(exitCode: code)
+}
+
+func emptyResponseLimitNotice(reason: StopReason, hasVisibleText: Bool,
+                              isSwiftQwen: Bool) -> String? {
+    guard reason == .maxTokens, !hasVisibleText else { return nil }
+    let effort = isSwiftQwen
+        ? " Swift-Qwen also supports --reasoning-effort medium or low; changing effort can change answer quality."
+        : ""
+    return "note: token limit reached before a visible answer. Increase --max-new (and --max-context if needed)." + effort
 }
 
 private func writeRuntimeDiagnostics(stats: RawDecodeResult, model: Model,
@@ -595,6 +614,11 @@ private func streamChatTurn(promptIds: [Int32],
         if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
     }
     stdout.write(Data("\n".utf8))
+    if let notice = emptyResponseLimitNotice(reason: stats.reason,
+        hasVisibleText: reply.contains(where: { !$0.isWhitespace }),
+        isSwiftQwen: tokenizer.isSwiftQwen) {
+        stderr.write(Data((notice + "\n").utf8))
+    }
     writeRuntimeDiagnostics(stats: stats, model: model, runner: runner,
                             scratch: scratch, stderr: stderr)
     if !quiet {

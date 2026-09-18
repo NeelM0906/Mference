@@ -58,6 +58,11 @@ Generation controls apply to the next request and do not require a model
 reload. They are interactive product settings, not the fixed community
 benchmark protocol.
 
+If a CLI chat exhausts its token budget before emitting visible text, stderr
+now explains the truncation and points to budget controls (and Swift's supported
+effort controls when applicable). It does not invent an answer, change settings
+automatically, or treat a truncated reply as an end-of-turn success.
+
 ## Runtime settings
 
 | Control | Values | CLI flag | Production default | Effect |

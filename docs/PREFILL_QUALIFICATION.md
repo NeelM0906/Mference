@@ -16,15 +16,15 @@ execution. Resident and larger-budget configurations keep their existing width.
 
 | Family / path | Production-dispatch evidence | Limits |
 | --- | --- | --- |
-| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, reset and decode handoff | Small loader fixture; execution/state reproducibility, not independent model-quality parity |
-| Qwen 3.6, bounded / resident experts | Same matrix plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
+| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, mid-append cancellation/dirty rejection/reset and decode handoff | Small loader fixture; execution/state reproducibility, not independent model-quality parity |
+| Qwen 3.6, bounded / resident experts | Same matrix (including actual mid-layer cancellation) plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
 | Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts alongside existing numerical/continuation checks | Installed fine-tunes need their own numerical gate |
 | Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` passes the installed numerical retest without changing tolerances | Candidate only; broader quality/latency/hardware evidence required before default promotion |
-| Flash-Next, bounded / resident | `FlashNextChunkedPrefillTests`: exact logits/state, warm appends, six continuation rows and zero replay | Synthetic INT4 router fixture does not qualify every real router precision or hardware profile |
+| Flash-Next, bounded / resident | `FlashNextChunkedPrefillTests`: exact logits/state, warm appends, cancellation/reset, six continuation rows and zero replay; `31f0067` installed INT8-router short gate passes both memory modes | Real long-context/TensorOps-sized chunks and wider hardware evidence remain separate |
 | GLM, bounded / resident | PR #34: cutover/warm-appends/partial-chunks matrix, exact streamed/resident logits and cancellation/reset; `4120744` adds an opt-in installed gate | Completed local install absent; user-approved range installation is underway, real gate still unexecuted |
 | DeepSeek, bounded / resident | Phase 4 PR #35: below/across/above sparse cutover, cache slots 8/16/resident, exact state and cancellation/reset; opt-in installed gate | Installed results and limitations live in `DEEPSEEK_V4_FLASH.md` |
-| MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts alongside existing golden/continuation checks | Small fixture, not a new hardware recommendation |
-| Maple | `MapleForwardRunnerTests` asserts batched execution and compares continuation logits | Existing sparse/zero fixture does not replace a broad installed-model gate |
+| MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts alongside existing golden/continuation checks; ordinary-KV mid-layer cancellation/reset added in `ee0bfb9` | Cancellation test does not yet cover every paged/spilled combination; no new hardware recommendation |
+| Maple | `MapleForwardRunnerTests` asserts batched execution, continuation logits and mid-layer failure/dirty rejection/reset | Existing sparse/zero fixture does not replace a broad installed-model gate |
 | Inkling | `InklingGenerationRegressionTests.shortExplanationHasNoExclamationBurst` asserts actual batched prefill and zero replay; real short regression passed on the host below | Env-gated, not run by ordinary CI; a small full-runner fixture and wider boundary matrix remain needed |
 
 PRs #33–36 merged into `main` on September 18 (`c67e857`). New source-release

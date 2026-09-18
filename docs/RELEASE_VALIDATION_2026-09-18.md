@@ -170,6 +170,7 @@ interactive activity, not a comparative performance protocol. Logs/screenshots:
 On `fa07319`, the same full-suite command above exited 0:
 
 ```text
+Build complete! (8.29s)
 Test run with 1236 tests in 221 suites passed after 280.945 seconds with 1 known issue.
 ```
 
@@ -187,6 +188,14 @@ odd chunks, nonzero append positions, production head geometry and output
 guards. Selector checks cover stable ties, complete-pool expansion and tails.
 Log: `/tmp/mference-release-glm-paired-attention.log`. Real GLM remains pending.
 
+Reproduce the targeted GLM coverage with:
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter 'Glm53DeviceSelectionTests|Glm53ForwardRunnerTests|Glm53PairedAttentionTests'
+```
+
+Exit 0; build `11.59s`.
+
 Payload token accounting was then added for ChatML/GLM/MiniCPM, separately from
 total completion usage. An initial new test used malformed tool syntax and
 failed; after correcting its fixture to the dialect's newline-delimited form,
@@ -194,6 +203,93 @@ the focused decoder/HTTP suites passed (55 tests / 6 suites, 3.052s, exit 0;
 `/tmp/mference-release-token-accounting-v2.log`). Seven Python screen tests
 also passed. Visible counts are read explicitly, never inferred by subtracting
 reasoning from completion (which would incorrectly include EOS/tool markers).
+
+Exact focused accounting command (build `6.04s`, exit 0):
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter 'ChatMLDecoderTests|Glm5DecoderTests|MiniCPM5DecoderTests|HTTPServerTests|SwiftQwenServerTests'
+```
+
+Release build commands recorded above were repeated at `048d04f`; CLI `57.25s`,
+server `6.53s`, then the full `swift build -c release --scratch-path ...`
+command `16.34s`, all exit 0. Source archive inspection passed 823 entries;
+all then-current 67 Markdown files passed link checking. Launcher, adapter,
+12-task harness and 60-task harness tests passed (8, 5, 3, 7 tests respectively).
+A broad system-Python discovery command failed importing the optional MLX
+reference-reader suite because MLX was absent from system Python. The required
+declared runner, `uv run Scripts/tests/test_swift_qwen_mlx_reference.py`, then
+passed its 4 tests in `0.028s`, exit 0, without model inference/downloads.
+
+GitHub CI run `35362494265` on `fa07319` passed both `macos-15` (Swift 6.1 floor)
+and `macos-26`, plus docs and security checks. Subsequent changes require their
+own final CI result; this does not certify a later commit automatically.
+
+### Tiled Swift projection and additional recovery gates
+
+The first Swift correctness fix regressed medium/long prefill time. Complete
+failed community attempts, settings and footers are preserved in
+[the performance experiment record](RELEASE_PERFORMANCE_2026-09-18.md).
+`ee0bfb9` uses up to four prompt rows per GPU tile to share weight reads while
+retaining per-token decode arithmetic; no host per-token/full-model replay.
+
+The same installed Swift command used for the earlier numerical gate was run
+on `ee0bfb9` with `MFERENCE_MTP=1`, unchanged tolerances and strict verification:
+
+```text
+Build complete! (1.48s)
+Test prefillAppendAndSpeculativeContinuation() passed after 77.314 seconds.
+Suite SwiftQwenInstalledQualificationTests passed after 77.314 seconds.
+Test run with 1 test in 1 suite passed after 77.314 seconds.
+```
+
+Exit 0; all three head-error values are unchanged from `d2b84f1` (mean
+0.0037590205 / 0.0037336384 / 0.0074094827). Top-1, continuation and all 20 MTP
+state probes pass; the MTP probes have zero bit mismatches. Log:
+`/tmp/mference-release-swift-tiled-qualified.log`. The resumed GLM download ran
+concurrently: these debug durations are correctness evidence, not performance.
+
+Before that commit, its exact source changes passed:
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter 'PrefillAffineTests|MultiXKernelParityTests|ProductionPrefillContractTests|MapleForwardRunnerTests|MiniCPM5ForwardRunnerTests'
+```
+
+Exit 0, build `6.05s`;
+`Test run with 26 tests in 5 suites passed after 27.507 seconds.`
+Log: `/tmp/mference-release-tiled-and-recovery-v2.log`. Projection tests compare
+every output bit with repeated decode for production shapes, ragged tails,
+nonzero offsets and output guards. New recovery tests interrupt warm appends
+after GPU state writes, reject dirty continuation/decode, then reset and
+reproduce clean results for Gemma/Qwen (eight-slot/resident), MiniCPM and Maple.
+Gemma/Qwen and MiniCPM exercise actual task cancellation, not just an injected
+error. Production adds cancellation checks without extra GPU synchronization;
+failure-injection hooks are nil outside tests. Initial test compilation exposed
+an SDK Metal-buffer Sendable annotation gap and a Float/Float16 test comparison;
+the tests were corrected without weakening runtime checks or numerical limits.
+
+The complete serial suite on `ee0bfb9` then passed (same command/environment
+as above, exit 0):
+
+```text
+Build complete! (1.51s)
+Test run with 1241 tests in 221 suites passed after 279.658 seconds with 1 known issue.
+```
+
+Log: `/tmp/mference-release-full-suite-v3.log`; the same absent optional
+Flash-Next toy fixture is the known issue. GLM installation ran concurrently;
+no speed result is inferred from test duration. Its resumed release installer
+now visibly reports saved bytes separately from bytes downloaded this run.
+
+An additional CLI notice explains an empty token-limit truncation and the
+available budget/Swift effort controls, without modifying generated content,
+sampling, exit status or the existing timing footer. Its focused verification:
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter 'CLIArgumentsTests|ChatHistoryTests'
+```
+
+Exit 0; build `6.99s`; `Test run with 34 tests in 2 suites passed after 0.004 seconds.`
+Log: `/tmp/mference-release-cli-notice.log`.
 
 ### Open gates
 
