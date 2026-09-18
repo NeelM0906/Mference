@@ -85,7 +85,10 @@ request-level controls and the remaining client-history qualification gates.
 For Swift-Qwen, use **Controls → Advanced Params → Reasoning Effort**, switch
 from Default to Custom, and enter `xhigh`, `medium`, `low`, or `none`. Default
 means `xhigh`. Reset this chat-level control to Default before switching to a
-non-Swift model; those models reject an explicit reasoning-effort parameter.
+non-Swift model. Base Qwen 3.8 now also accepts explicit efforts through the API
+and CLI for matched comparisons; other models reject them. The history adapter
+below remains Swift-only, so this does not newly qualify base-Qwen reasoning
+history replay through Open WebUI.
 
 The launcher runs the pinned Open WebUI 0.11.3 through
 `Scripts/openwebui-mference.py`. Its narrow, process-local compatibility hook

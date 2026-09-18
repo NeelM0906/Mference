@@ -238,9 +238,21 @@ guidance role are merged into one block separated by a blank line. Only
 Gemma's chat template has a distinct `developer` role; with any other family
 loaded a `developer` message is treated as a `system` message — it merges
 with adjacent system guidance instead of rendering as its own block.
+Exception: Swift-Qwen, and base Qwen 3.8 requests with an explicit
+`reasoning_effort`, use the source template and reject `developer`; use leading
+`system` guidance instead.
 Supported options include `temperature`, `top_p`, `top_k`,
 `repetition_penalty`, `seed`, `stop`, `max_tokens`,
 `max_completion_tokens`, and function-tool fields.
+
+Base and Swift Qwen 3.8 accept `reasoning_effort` values `xhigh`, `medium`, `low`,
+and `none`. An explicit value uses the source template, retains reasoning in a
+separate `reasoning_content` response/history field, and allows only exact
+rendered-prefix cache reuse. Preserve that field when replaying history.
+Omitted effort retains Swift's source-default xhigh and base Qwen's legacy
+behavior; the latter does not stream hidden reasoning. Do not treat those two
+omitted-effort policies as a matched fine-tune comparison. Other models reject
+the effort parameter. No model's sampling or MTP default is changed by this.
 
 The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,

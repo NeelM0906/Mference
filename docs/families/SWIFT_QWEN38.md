@@ -52,6 +52,13 @@ Omitting the field uses the pinned source's `xhigh` default. `none` closes the
 thinking block in the prompt. `medium` adds no effort instruction. Tools use
 the same policy and do not silently disable thinking.
 
+For matched comparisons, base `qwen38` now accepts the same explicit efforts
+through CLI/API and uses its installed source template. Its omitted-effort
+behavior is unchanged. Explicit source-template requests on both checkpoints
+return separate reasoning history and avoid legacy cache bridges. The installed
+60-case prompt-ID gate checks all four efforts before evaluation; see
+[matched qualification](QWEN_MATCHED_QUALIFICATION_2026-09-18.md).
+
 The installed Jinja template renders both ordinary and tool conversations.
 Leading `system` guidance is supported; `developer` is explicitly rejected,
 matching the source's role contract. Assistant history may include

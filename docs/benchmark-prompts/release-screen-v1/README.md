@@ -31,9 +31,10 @@ any corpus correction requires a new protocol version and complete rerun.
   tokens must not be inferred by subtracting reasoning from total completion.
   Counts describe generated channel tokens (including whitespace/buffered bytes),
   not a re-tokenization of the displayed answer. A string-stop-filtered response
-  omits visible counts because the cutoff can fall inside a token. Base-Qwen
-  hidden reasoning is not streamed, so its first emitted delta is not its first
-  generated token; do not compare that metric as raw model TTFT.
+  omits visible counts because the cutoff can fall inside a token. Legacy
+  base-Qwen hidden reasoning is not streamed, so its first emitted delta is not
+  its first generated token. Explicit base reasoning-effort requests now return
+  reasoning deltas like Swift; record which policy was used.
 - Latency summaries must distinguish all requests from successful requests;
   report median/range across the three repeats, not the best repeat.
 
@@ -62,3 +63,12 @@ thinking; those tool rows are not effort-matched. Never attribute fine-tune
 token savings or shorter reasoning policy to a kernel speedup. Flash-Next/GLM
 comparisons use their own explicit supported policies, with differences shown.
 The existing `swift-screen-v1` and frozen community prompts remain unchanged.
+
+The separately selected `matched-low.json` profiles exercise explicit low
+effort on both base and Swift with identical rendered inputs. They do not
+change this frozen corpus, budget, sampling or repetition protocol, and they
+are not a test of source-default xhigh. Summarize a completed or partial run
+with `python3 Scripts/release_screen_summary.py OUTPUT.jsonl`; missing/duplicate
+records cannot silently become a completed result, and failures remain in the
+denominator. Paired token counts conditional on both answers passing are
+reported separately from all-request counts.

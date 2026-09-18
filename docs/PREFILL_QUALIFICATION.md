@@ -21,7 +21,7 @@ execution. Resident and larger-budget configurations keep their existing width.
 | Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts and numerical/continuation checks; `7505e82` adds actual cancellation after GPU writes in all three backends, dirty rejection and exact reset/next logits | Installed fine-tunes need their own numerical gate; fixture recovery is not physical low-RAM qualification |
 | Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` and four-row tiled `ee0bfb9` pass the installed numerical/state/MTP retest without changing tolerances | Candidate only; default-effort community attempts truncate without visible answers; broader quality/latency/hardware evidence required before promotion |
 | Flash-Next, bounded / resident | `FlashNextChunkedPrefillTests`: exact logits/state, warm appends, cancellation/reset, six continuation rows and zero replay; `31f0067` installed INT8-router short gate passes both memory modes | Real long-context/TensorOps-sized chunks and wider hardware evidence remain separate |
-| GLM, bounded / resident | PR #34: cutover/warm-appends/partial-chunks matrix, exact streamed/resident logits and cancellation/reset; `4120744` adds an opt-in installed gate | Completed local install absent; user-approved range installation is underway, real gate still unexecuted |
+| GLM, bounded / resident | PR #34: cutover/warm-appends/partial-chunks matrix, exact streamed/resident logits and cancellation/reset; `4120744` adds an opt-in installed gate | User-approved pinned range install completed and verified September 18; current real-model gate still unexecuted |
 | DeepSeek, bounded / resident | Phase 4 PR #35: below/across/above sparse cutover, cache slots 8/16/resident, exact state and cancellation/reset; opt-in installed gate | Installed results and limitations live in `DEEPSEEK_V4_FLASH.md` |
 | MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts and golden/continuation checks; `7505e82` exercises actual warm-append cancellation/reset in all three backends and compares exact next logits | Representative full-selection/5-page-spill fixture; not every sparse budget/context or new hardware qualification |
 | Maple | `MapleForwardRunnerTests` asserts batched execution, continuation logits and failure between layers/dirty rejection/reset | Existing sparse/zero fixture does not replace a broad installed-model gate |
@@ -39,8 +39,8 @@ rename host-side full-model replay as batching.
 - Phase 1: actual execution and memory diagnostics landed on `main`.
 - Phase 2: Swift-Qwen implementation and initial qualification merged in PR #33;
   numerical retest passes; broader quality/hardware qualification remains.
-- Phase 3: bounded GLM prefill implementation merged in PR #34; real install required
-  to finish its qualification.
+- Phase 3: bounded GLM prefill implementation merged in PR #34; pinned install
+  now complete, current real-model gate still required to finish qualification.
 - Phase 4: DeepSeek sparse-cutover implementation merged in PR #35; its own report
   records the measured correctness status, separately from throughput.
 - Phase 5: execution-contract coverage extended here; the gaps above remain
@@ -53,8 +53,8 @@ rename host-side full-model replay as batching.
   not yet executed. Neither the earlier 12-task screen nor these UI checks is
   a broad quality claim or support evidence for hardware not tested here.
 
-The missing GLM installation and untested smaller-memory hardware are external
-qualification requirements. Kernel optimizations must pass correctness and
+The GLM installation blocker is resolved; smaller-memory hardware remains an
+external qualification requirement. Kernel optimizations must pass correctness and
 repeatable matched measurements before promotion. Never infer 24 GB support
 from a 256 GB host with a reduced expert-slot setting.
 
