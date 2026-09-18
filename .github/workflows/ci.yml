@@ -77,3 +77,5 @@ jobs:
         # defaults to US-ASCII on a bare runner and aborts on the first
         # non-ASCII byte.
         run: LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
+      - name: Check distributable source archive
+        run: python3 Scripts/check_source_archive.py
