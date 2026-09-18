@@ -75,10 +75,11 @@ import Metal
         // A throw here is itself the regression firing: the head guard reports
         // `InklingHeadError.nonFiniteLogits` for exactly the row that used to
         // be silently reported as token 0.
-        _ = try await runRawCompletion(
+        let promptIDs = tokenizer.encode(prompt, addBOS: false)
+        let result = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
-            promptIds: tokenizer.encode(prompt, addBOS: false),
+            promptIds: promptIDs,
             config: config,
             context: ctx,
             scratch: scratch,
@@ -89,6 +90,8 @@ import Metal
                 case .tail(let tail): text += tail
                 }
             }
+        #expect(result.prefillExecution?.batchedTokens == promptIDs.count)
+        #expect(result.prefillExecution?.replayedTokens == 0)
         #expect(!text.contains("!!"),
                 "exclamation-mark burst in Inkling output — a logit row went non-finite and the argmax fell back to token 0:\n\(text)")
         // A burst replaced real text mid-word, so the completion also has to

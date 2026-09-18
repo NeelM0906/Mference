@@ -40,6 +40,15 @@ struct PrefillRoutedTileSchedulerConfig: Sendable, Equatable {
         guard slotCount > 0, reservedHits >= 0 else { return false }
         return (maxPendingDepth + 1) * tileExperts + reservedHits <= slotCount
     }
+
+    /// Keep the requested overlap depth while bounding each tile by actual
+    /// cache capacity. In particular the supported 8-slot profile needs
+    /// 4-expert tiles at depth 1, not an unsupported-context error.
+    func fittingSlotBudget(slotCount: Int) -> Self? {
+        guard slotCount >= maxPendingDepth + 1 else { return nil }
+        return Self(maxPendingDepth: maxPendingDepth,
+                    tileExperts: min(tileExperts, slotCount / (maxPendingDepth + 1)))
+    }
 }
 
 struct PrefillRoutedTileScheduler: Sendable, Equatable {

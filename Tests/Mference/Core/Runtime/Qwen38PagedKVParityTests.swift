@@ -81,18 +81,23 @@ import Testing
         let logitsP = try makeLogits(ctxP)
         let config = PrefillRuntimeConfig.production(chunkTokens: 64)
 
-        _ = try await dense.prefillChunked(tokens: promptTokens[...],
+        let denseResult = try await dense.prefillChunked(tokens: promptTokens[...],
                                            startPosition: 0,
                                            outputMode: .greedyIfAvailable,
                                            config: config,
                                            into: logitsD,
                                            onProgress: { _ in })
-        _ = try await paged.prefillChunked(tokens: promptTokens[...],
+        let pagedResult = try await paged.prefillChunked(tokens: promptTokens[...],
                                            startPosition: 0,
                                            outputMode: .greedyIfAvailable,
                                            config: config,
                                            into: logitsP,
                                            onProgress: { _ in })
+        for result in [denseResult, pagedResult] {
+            #expect(result.execution?.batchedTokens == promptTokens.count)
+            #expect(result.execution?.replayedTokens == 0)
+            #expect(result.execution?.batchedChunkSizes == [64, 64, 22])
+        }
         #expect(dense.lastGreedyToken == paged.lastGreedyToken)
 
         var token = Int32(dense.lastGreedyToken % UInt32(Self.vocab))

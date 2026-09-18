@@ -82,6 +82,9 @@ import Metal
             into: logits,
             onProgress: { _ in })
         #expect(result.newPosition == 8)
+        #expect(result.execution?.batchedTokens == tokens.count)
+        #expect(result.execution?.replayedTokens == 0)
+        #expect(result.execution?.batchedChunkSizes == [tokens.count])
         if case .greedyToken(let token) = result.seed {
             #expect(token < 1024)
         } else {

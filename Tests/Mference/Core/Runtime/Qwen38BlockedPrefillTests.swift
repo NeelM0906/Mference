@@ -53,12 +53,15 @@ import Testing
                          tokens: [Int32], start: Int,
                          logits: MTLBuffer,
                          chunk: Int = 64) async throws {
-        _ = try await runner.prefillChunked(tokens: tokens[...],
+        let result = try await runner.prefillChunked(tokens: tokens[...],
                                             startPosition: start,
                                             outputMode: .greedyIfAvailable,
                                             config: .production(chunkTokens: chunk),
                                             into: logits,
                                             onProgress: { _ in })
+        #expect(result.execution?.batchedTokens == tokens.count)
+        #expect(result.execution?.replayedTokens == 0)
+        #expect(result.execution?.replayReasons.isEmpty == true)
     }
 
     /// Pool of 5 pages, 400-token prompt (7 pages): later chunks run the

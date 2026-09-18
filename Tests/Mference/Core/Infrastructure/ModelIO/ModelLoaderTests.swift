@@ -15,8 +15,8 @@ import Metal
     /// 8 experts, hidden 64, vocab 1024. Resident contains the embedding
     /// (alias: lmHead), final norm, and the tiny layer-resident tensors needed
     /// to construct `RealForwardRunner` in unit tests.
-    static func writeToySynthetic() throws -> URL {
-        let toy = ArchConfig.gemma4Toy()
+    static func writeToySynthetic(config toy: ArchConfig = .gemma4Toy(),
+                                  finiteNorms: Bool = false) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-toy-\(UUID().uuidString)")
         let exp = dir.appendingPathComponent("packed_experts")
@@ -312,6 +312,12 @@ import Metal
             for i in 0..<Int(entries[1].sizeBytes) {
                 base.advanced(by: normStart + i)
                     .assumingMemoryBound(to: UInt8.self)[0] = UInt8(0xC0 | (i & 0x3F))
+            }
+            // The loader's recognizable byte pattern includes non-finite
+            // BF16 values. Runtime tests opt into a legitimate unit norm.
+            if finiteNorms {
+                let norm = base.advanced(by: normStart).assumingMemoryBound(to: UInt16.self)
+                for i in 0..<toy.hiddenSize { norm[i] = Quantization.bf16Bits(1.0) }
             }
             for entry in entries where entry.dtype == 0 {
                 memset(base.advanced(by: Int(entry.fileOffset)), 0x11, Int(entry.sizeBytes))
