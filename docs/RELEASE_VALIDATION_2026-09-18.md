@@ -479,11 +479,23 @@ provenance, all footers and limitations are in
 
 ### Open gates
 
-- Finish GLM install and execute its installed cutover/continuation/recovery gate.
+- GLM install and current installed resident/16-slot cutover/continuation/recovery
+  gate are complete (49 receipt files, 180,843,651,789 bytes; test exit 0,
+  417.250s). [Exact commands and assertions](families/GLM53_FLASH.md#installed-streamed-prefill-qualification-september-18-2026)
+  do not establish new throughput or smaller-hardware claims.
 - Qualify and measure optimizations on matched release builds before speed claims.
-- Execute the separately frozen [60-case screen](benchmark-prompts/release-screen-v1/README.md).
+- The separately frozen [60-case screen](benchmark-prompts/release-screen-v1/README.md)
+  is complete for matched-low base/Swift: 59/60 versus 54/60 cases, with Swift
+  using 6.77% fewer completion tokens. See [commands, outcomes and limits](families/QWEN_MATCHED_QUALIFICATION_2026-09-18.md).
+  Default-effort/multi-seed and other release-profile screens remain open.
 - Complete final serial regression and both CI platform legs after all changes.
 - Record the final support limits and tagged source-release version.
 
 Passing on this 256 GiB Mac does not establish a 24 GiB hardware recommendation.
 Swift default promotion and MTP speed claims remain gated on their own evidence.
+
+The matched-Qwen implementation (`0c7532c`, protocol/docs `ed69598`) passed
+1,252 tests in 223 suites locally (268.475s, one existing known issue), a
+59.31s full release build, and both macOS 15 and macOS 26 CI legs in
+[run 35381867448](https://github.com/NeelM0906/Mference/actions/runs/35381867448).
+This does not stand in for the remaining environment-gated model checks.

@@ -107,3 +107,89 @@ differ. It is not a replication of upstream benchmarks, a general quality
 ranking, or an accepted community speed result. No post-hoc effort/cap changes
 will be made to improve the score. Default-vs-default and sufficiently budgeted
 multi-seed efficiency evaluations remain separate requirements.
+
+## Completed matched-low screen
+
+Run commit: `ed69598f1a3ea34b921e44d8fc454b6860cb534e` (same runtime as
+`0c7532c` above). Tracked tree clean; the unrelated untracked execution-plan
+document was preserved. Same hardware/toolchain as above; 98% memory free,
+619 GiB disk available, AC power and low-power mode off. No other model owner,
+download, build, tests or demanding workload ran during the screen.
+
+Exact commands, from the checkout root:
+
+```sh
+env MFERENCE_MTP=0 /tmp/mference-phase1-build.sXnNTs/release/MferenceServer \
+  --library scratch/qwen38.gturbo --library scratch/swiftqwen38.gturbo \
+  --port 18489 --max-context 4096 --prompt-cache-mode off \
+  > /tmp/mference-qwen-matched.6l3Qeo/server.log 2>&1
+python3 Scripts/release_task_screen.py --port 18489 \
+  --profiles docs/benchmark-prompts/release-screen-v1/matched-low.json \
+  --engine-commit ed69598f1a3ea34b921e44d8fc454b6860cb534e \
+  --machine-record /tmp/mference-qwen-matched.6l3Qeo/machine.txt \
+  --output /tmp/mference-qwen-matched.6l3Qeo/results.jsonl \
+  > /tmp/mference-qwen-matched.6l3Qeo/progress.log 2>&1
+python3 Scripts/release_screen_summary.py \
+  /tmp/mference-qwen-matched.6l3Qeo/results.jsonl \
+  > /tmp/mference-qwen-matched.6l3Qeo/summary.json
+```
+
+Harness and summarizer exited 0; all **480/480** expected records are present
+(120 discarded warmups, 360 measured requests). This harness has no aggregate
+timing footer; complete per-request timing, usage and responses are in the
+JSONL, not a selected fast subset. The server exited 0 after SIGINT following
+the completed run. No deviations from the frozen functional protocol; this
+was **not** the community performance protocol and no speed claim follows.
+Profiles ran serially, all base cases before all Swift cases, not randomized.
+The five run artifacts are also preserved locally under
+`scratch/qwen-matched-evidence.8fm9dG/` (ignored, no model weights), so the raw
+evidence does not depend only on temporary-directory retention.
+
+Corpus SHA-256:
+`b3ab27c38a8d0f4b5fa062801573bfa46e06e9dcb62cb16f0dfaae05514d6680`.
+Manifest SHA-256 values:
+
+- Base: `ff778735cda6cc6c077240faf095539c4a0c033c6ae33558959aded87d95ad45`.
+- Swift: `553bad0bf8ba819405bf1c6ca857cf86f734a620ade08708c248c3a66f406254`.
+
+| Measured outcome | Base-low | Swift-low |
+| --- | ---: | ---: |
+| Passing requests / 180 | 177 | 162 |
+| Cases passing all three repeats / 60 | 59 | 54 |
+| Everyday / 30 | 30 | 30 |
+| Reasoning / 30 | 30 | 30 |
+| Code reading / 30 | 30 | 30 |
+| Instructions / 30 | 30 | 30 |
+| Tool calls / 30 | 30 | 27 |
+| Synthesis / 30 | 27 | 15 |
+| Completion tokens, all measured requests | 14,526 | 13,542 |
+| Reasoning tokens, all measured requests | 12,366 | 11,301 |
+| Visible-channel tokens, all measured requests | 831 | 912 |
+
+Both profiles have 150 `stop` and 30 `tool_calls` measured finishes, with no
+truncations or request errors. Completion counts include tool payloads and
+delimiters; reasoning plus visible is not their total. Swift used **6.77% fewer
+completion tokens** and **8.61% fewer reasoning tokens**, with worse strict
+format compliance. For the 162 paired requests where both answers passed,
+completion totals were 12,936 versus 12,003 (**7.21% fewer**); this conditional
+comparison must not replace the all-request failures above.
+
+Per-case exceptions below failed on all three measured repeats; every other
+case in the frozen corpus passed all three repeats:
+
+- Base: `synthesis-overwrite` returned the correct object inside Markdown
+  fences, violating the JSON-only rubric.
+- Swift: `synthesis-stock`, `synthesis-owner`, `synthesis-dedup`,
+  `synthesis-cost` and `synthesis-overwrite` returned the correct values inside
+  Markdown fences. The scorer did not strip them or relax the rubric.
+- Swift: `tool-string` returned a valid `echo` call with a string argument,
+  `She said "hello".`, where the expected value omits the final period. The
+  prompt's sentence-final punctuation leaves an interpretive ambiguity; retain
+  the frozen failure but do not characterize it as malformed arguments or a
+  parser failure. Base emitted the expected value.
+
+Decision: keep Swift **optional**, not the recommended base-Qwen replacement.
+This short low-effort corpus shows modest token savings and a formatting
+tradeoff, not universal efficiency or broad quality parity. Source-default
+xhigh, sufficiently budgeted multi-seed tasks, representative end-to-end MTP
+performance, multi-turn tool quality and smaller-memory hardware remain open.

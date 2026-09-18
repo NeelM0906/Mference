@@ -8,8 +8,11 @@ document is the architecture contract for the `glm53Flash` family.
 
 September 18 source-release update (PR #37): deterministic GPU sparse-pool
 selection replaces prefill score readback, and paired dense causal queries
-reuse latent rows. Synthetic selector and attention gates pass; qualification
-on the current real checkpoint is pending its approved resumable installation.
+reuse latent rows. Synthetic selector and attention gates pass. The approved
+resumable installation completed September 18: 49 verified receipt files,
+180,843,651,789 bytes, at the pinned revision below. Qualification of the new
+kernels on this completed checkpoint now passes the installed resident/16-slot
+correctness gate recorded below; new matched performance remains unmeasured.
 The pinned text range plan reads 180,796,250,360 bytes and writes
 180,796,414,200 bytes, excluding the vision tower. These planned bytes are not
 a completed-install receipt. Historical measured results below do not validate
@@ -22,7 +25,7 @@ the new kernels or bounded streamed performance. See
 | Source repository | `pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit` |
 | Pinned revision | `d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3` (index SHA-256 `5e0a3768…314383`) |
 | Parameters | 320B total, 18B active (vendor figures) |
-| Download / install size | 181,944,533,258 bytes downloaded; ~181 GB on disk (computed from the shard headers, not yet measured on a produced install) |
+| Download / install size | Current text range plan: 180,796,250,360 source bytes, not cumulative network traffic including retries; completed September 18 receipt: 180,843,651,789 bytes across 49 files |
 | Status | **first light green 2026-09-11** — runner, tokenizer and resident-expert path landed; the capability gate is lifted; perf pass and the FAMILY_GATE protocol run in progress |
 
 ## Checkpoint selection
@@ -336,6 +339,54 @@ measurements. No completed GLM install was found in the current library, so
 real-checkpoint streamed qualification and new throughput/memory measurements
 remain outstanding. The measurements below are historical resident results,
 not evidence of streamed performance for this change.
+
+### Installed streamed-prefill qualification (September 18, 2026)
+
+Commit `ed69598f1a3ea34b921e44d8fc454b6860cb534e`; runtime unchanged from
+`0c7532c`. Mac Studio Mac15,14, M3 Ultra (32 CPU cores), 256 GiB;
+macOS 26.3 (25D125); Swift 6.3.3 (`swiftlang-6.3.3.1.3`). Preflight found
+98% memory free, 619 GiB disk available and no model/test/MLX/installer owner.
+All 49 completed-install receipt file sizes matched (180,843,651,789 bytes);
+both model loads then used strict SHA-256 verification. Source revision is
+`d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3`; manifest SHA-256 is
+`bee37795db54e06f2af66225c864b6cfc10d14156c893f476e24df6017e56287`.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_GLM53_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/glm53flash.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter Glm53InstalledPrefillTests \
+  > /tmp/mference-glm-installed-prefill-20260918.log 2>&1
+```
+
+Exit 0. Complete build and Swift Testing timing footer:
+
+```text
+Build complete! (4.27s)
+Test streamedMatchesResidentAcrossSparseCutover() passed after 417.250 seconds.
+Suite Glm53InstalledPrefillTests passed after 417.250 seconds.
+Test run with 1 test in 1 suite passed after 417.250 seconds.
+```
+
+One model at a time: resident first, released before the 16-slot streamed arm.
+Both use 128-token chunks, 2,112 maximum context, forced full logits and the
+same 2,083-token input. Observed heads at 33, 2,047, 2,051 and 2,083 tokens
+cover ragged warm appends and both sides of the 2,048-token sparse cutover.
+Every append reported all tokens batched and zero replay. **All four complete
+logit rows were bit-identical** between resident and streamed execution, as
+were all eight continuation logit rows and greedy choices. Valid-vocabulary
+logits were finite; padded logits were negative infinity. Reset reproduced the
+initial prefix; cancellation after layer 1 of a warm append rejected dirty
+continuation/decode, and reset restored exact clean output in both arms.
+
+No tolerance changes, skipped assertions, downloads, model copies, cache
+purges, profiling or experimental environment controls. Only documentation
+edits occurred during this correctness run. This is a debug-build correctness
+test, **not** the community performance protocol: its test duration includes
+loading, strict verification and assertions and is not a throughput result.
+It does not independently compare the new GPU selector against an upstream
+full-checkpoint implementation, certify arbitrary longer contexts, or qualify
+a physically smaller-memory Mac. Matched release performance remains open.
 
 ## Batched prefill
 
