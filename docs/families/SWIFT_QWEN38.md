@@ -78,6 +78,9 @@ enables it for qualification; the base checkpoint's existing default is unchange
 
 Detailed commands, hardware, failed gates and the frozen base-versus-Swift
 task screen are recorded in [the qualification report](SWIFT_QWEN38_QUALIFICATION.md).
+The later [budget/template/parser investigation](SWIFT_QWEN38_INVESTIGATION.md)
+separates actual token-limit truncation from independently reproduced tool-parser
+defects and audits the upstream efficiency claims and discussions.
 
 Implemented checks: pinned source metadata/dry run; tiny synthetic remote
 range install including own MTP; norm payload folds and convolution metadata;

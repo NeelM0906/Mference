@@ -5,6 +5,11 @@ evidence record, **not a published-release or all-roadmap-complete claim**.
 The user's requested deliverable is a tested source release, not a signed
 prebuilt app. No model weights are redistributed.
 
+The subsequent [Swift-Qwen investigation](families/SWIFT_QWEN38_INVESTIGATION.md)
+records a controlled token-cap diagnosis, upstream card/discussion review,
+tool-argument and reasoning-channel fixes, and their verification. Its
+background-download diagnostic timings are not performance results.
+
 ## Environment and test boundaries
 
 Mac Studio Mac15,14, Apple M3 Ultra (32 CPU cores), 256 GiB RAM; macOS 26.3
