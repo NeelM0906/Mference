@@ -252,6 +252,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     private let prefillEmbed: PrefillEmbedLookupInt4
     private let prefillRMS: PrefillRMSNorm
     private let prefillQMM: PrefillInt4QMM
+    private let prefillUsesDecodeOrder: Bool
     private let prefillMPPInt4: MPPPrefillInt4QMM
     private let prefillQKVEpilogue: PrefillQKVEpilogue
     private let prefillAttention: PrefillAttention
@@ -381,7 +382,13 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         self.fusedQKVGEMV = try FusedQKVGEMV(context: context)
         self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
         self.prefillRMS = try PrefillRMSNorm(context: context)
-        self.prefillQMM = try PrefillInt4QMM(context: context)
+        // Swift's installed numerical gate exposes error amplification across
+        // 64 layers with QMM arithmetic differing from decode. Preserve its
+        // affine factoring/reduction order while keeping a token-parallel
+        // dispatch. Base Qwen retains its existing qualified dispatch policy.
+        self.prefillUsesDecodeOrder = model.modelID == CheckpointIdentity.swiftQwen38
+        self.prefillQMM = try PrefillInt4QMM(context: context,
+                                           decodeOrder: prefillUsesDecodeOrder)
         self.prefillMPPInt4 = MPPPrefillInt4QMM(context: context)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
         self.prefillAttention = try PrefillAttention(context: context)
@@ -1314,7 +1321,7 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                                 biases: MTLBuffer, biasesOffset: Int,
                                 x: MTLBuffer, y: MTLBuffer,
                                 t: Int, n: Int, k: Int) {
-        if prefillMPPInt4.isAvailable {
+        if prefillMPPInt4.isAvailable && !prefillUsesDecodeOrder {
             let path = prefillMPPInt4.encode(commandBuffer: cb,
                                              weights: weights, weightsOffset: weightsOffset,
                                              scales: scales, scalesOffset: scalesOffset,

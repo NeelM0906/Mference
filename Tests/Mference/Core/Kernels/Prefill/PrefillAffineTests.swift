@@ -96,7 +96,8 @@ import MferenceValidationSupport
                                                          k: Int,
                                                          seed: UInt64,
                                                          maxAbsTolerance: Float = 2e-2,
-                                                         relTolerance: Float = 2e-4) throws {
+                                                         relTolerance: Float = 2e-4,
+                                                         decodeOrder: Bool = false) throws {
         precondition(k % Quantization.groupSize == 0)
         let groups = k / Quantization.groupSize
         var rng = SeedTree(seed).key("prefill-qmm-pattern-t\(t)-n\(n)-k\(k)")
@@ -122,7 +123,7 @@ import MferenceValidationSupport
 
         let ctx = try MetalContext()
         let gemv = try DequantInt4GEMV(context: ctx)
-        let qmm = try PrefillInt4QMM(context: ctx)
+        let qmm = try PrefillInt4QMM(context: ctx, decodeOrder: decodeOrder)
 
         guard let wBuf = ctx.device.makeBuffer(bytes: packed, length: packed.count, options: .storageModeShared),
               let sBuf = ctx.device.makeBuffer(bytes: scales,
@@ -167,6 +168,10 @@ import MferenceValidationSupport
         let actual = Fp16Buffer.read(qmmOut, count: t * n)
         let maxAbs = RelError.maxAbsDiff(actual, reference)
         let rel = RelError.compute(actual: actual, reference: reference)
+        if decodeOrder {
+            #expect(actual.map(\.bitPattern) == reference.map(\.bitPattern),
+                    "decode-order projection must match every output bit")
+        }
         #expect(maxAbs <= maxAbsTolerance,
                 "shape T=\(t) N=\(n) K=\(k) maxAbs=\(maxAbs) rel=\(rel)")
         #expect(rel <= relTolerance,
@@ -236,5 +241,13 @@ import MferenceValidationSupport
         // Swift Testing cannot catch precondition traps in-process, so this
         // documents the rejection contract without deliberately crashing.
         #expect(Quantization.groupSize == 64)
+    }
+
+    @Test func decodeOrderBatchedProjectionMatchesExactly() throws {
+        for (t, n, k) in [(1, 9, 64), (7, 65, 192), (33, 48, 5120),
+                           (32, 10240, 5120), (65, 5120, 17408)] {
+            try Self.runPatternQMMMatchesRepeatedGEMV(t: t, n: n, k: k,
+                seed: 0x9157, maxAbsTolerance: 0, relTolerance: 0, decodeOrder: true)
+        }
     }
 }

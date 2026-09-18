@@ -72,9 +72,13 @@ final class PrefillRMSNorm {
 
 final class PrefillInt4QMM {
     private let pso: MTLComputePipelineState
+    private let decodeOrder: Bool
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block")
+    init(context: MetalContext, decodeOrder: Bool = false) throws {
+        self.decodeOrder = decodeOrder
+        self.pso = try context.pipeline(decodeOrder
+            ? "prefill_dequant_int4_gemv_simd_block"
+            : "prefill_dequant_int4_qmm_f16_block")
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -88,6 +92,9 @@ final class PrefillInt4QMM {
                        k: Int) {
         precondition(k % Quantization.groupSize == 0,
                      "K must be a multiple of \(Quantization.groupSize)")
+        precondition(!decodeOrder || weightsOffset.isMultiple(of: 2),
+                     "decode-order INT4 projection needs two-byte aligned weights")
+        guard t > 0, n > 0, k > 0 else { return }
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(weights, offset: weightsOffset, index: 0)
@@ -102,8 +109,9 @@ final class PrefillInt4QMM {
         enc.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 6)
         enc.setBytes(&kVar, length: MemoryLayout<UInt32>.size, index: 7)
         enc.dispatchThreadgroups(
-            MTLSize(width: (n + 7) / 8, height: (t + 7) / 8, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            MTLSize(width: (n + 7) / 8, height: decodeOrder ? t : (t + 7) / 8, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: decodeOrder ? 256 : 8,
+                                           height: decodeOrder ? 1 : 8, depth: 1))
         enc.endEncoding()
     }
 }

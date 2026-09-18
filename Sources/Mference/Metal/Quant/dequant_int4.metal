@@ -198,6 +198,27 @@ static inline void dequant_int4_gemv_simd_body(
                                         rows_per_tg, tg_idx, sg_idx, lane, true);
 }
 
+// Token-parallel projection with the decode kernel's exact affine factoring
+// and reduction order. One dispatch covers every prompt row; there is no
+// host-side token loop or full-model replay.
+kernel void prefill_dequant_int4_gemv_simd_block(
+    device const uint8_t* W [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const half* X [[buffer(3)]],
+    device half* Y [[buffer(4)]],
+    constant uint& T [[buffer(5)]],
+    constant uint& N [[buffer(6)]],
+    constant uint& K [[buffer(7)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    if (tg.y >= T) return;
+    dequant_int4_gemv_simd_body_t<half>(W, scales, biases,
+        X + tg.y * K, Y + tg.y * N, N, K, 8u, tg.x, sg, lane, true);
+}
+
 static inline float shared_int4_activation(float x) {
     if (is_function_constant_defined(FC_SHARED_INT4_ACT_SILU)
         && FC_SHARED_INT4_ACT_SILU) {
