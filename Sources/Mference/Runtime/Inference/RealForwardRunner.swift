@@ -1505,6 +1505,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let step = max(1, min(config.chunkTokens, inklingChunkCapacity))
                 var offset = 0
                 while offset < tokens.count {
+                    try Task.checkCancellation()
                     let count = min(step, tokens.count - offset)
                     let lower = tokens.index(tokens.startIndex, offsetBy: offset)
                     let upper = tokens.index(lower, offsetBy: count)
@@ -4254,6 +4255,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let isDense = L < cfg.numDenseLayers
             let conv = inklingConvStates[L]
             let inNorm = try model.inputNorm(layer: L)
+            try prefillWillEncodeLayer?(L)
+            try Task.checkCancellation()
             let mlpNorm = try model.postAttnNorm(layer: L)
             let q = try model.inklingWqDu(layer: L)
             let k = try model.inklingWkDv(layer: L)
@@ -4552,6 +4555,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if let error = pending.cb.error { throw error }
             }
             for (index, range) in routedRanges.enumerated() {
+                try Task.checkCancellation()
                 let t0 = now()
                 let blob: TensorView
                 let blobSlots: [Int]

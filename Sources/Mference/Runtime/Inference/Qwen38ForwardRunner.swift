@@ -261,6 +261,9 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
     private let mlpWeightBits: Int
     private var prefillScratch: PrefillScratch?
     private var prefillChunkState = PrefillChunkCommitState()
+    /// Test-only failure seam after a drained layer. Nil preserves production
+    /// command-buffer batching; cancellation checks add no GPU synchronization.
+    var prefillDidCompleteLayer: ((Int) throws -> Void)?
 
     // Decode scratch, allocated once. FP16 unless noted. At production shape
     // (D 5120, F 17408, qDim 24*256 = 6144, gdn qkvDim 10240, valueDim 6144)
@@ -744,6 +747,12 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
                     srcOffset: local * D * MemoryLayout<Float16>.stride,
                     rows: t - local)
             }
+            if let hook = prefillDidCompleteLayer {
+                try withExtendedLifetime(tokenBuffer) { try finish(cb) }
+                try hook(index)
+                cb = try commandBuffer()
+            }
+            try Task.checkCancellation()
         }
         if let drafter = mtp?.dflash2, dflash2TapBase < startPosition + t {
             drafter.commitTapRows(t - max(0, dflash2TapBase - startPosition))
