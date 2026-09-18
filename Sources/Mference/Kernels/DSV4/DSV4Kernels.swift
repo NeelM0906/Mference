@@ -40,6 +40,7 @@ final class DSV4Kernels {
     private let oGroupPSO: MTLComputePipelineState
     private let compressEmitPSO: MTLComputePipelineState
     private let indexerScorePSO: MTLComputePipelineState
+    private let indexerSelectPSO: MTLComputePipelineState
     private let hcWeightsPSO: MTLComputePipelineState
     private let hcCollapsePSO: MTLComputePipelineState
     private let hcPlaceMixPSO: MTLComputePipelineState
@@ -106,6 +107,7 @@ final class DSV4Kernels {
             maxTotalThreadsPerThreadgroup: 256)
         self.compressEmitPSO = try context.pipeline("dsv4_compress_emit")
         self.indexerScorePSO = try context.pipeline("dsv4_indexer_score")
+        self.indexerSelectPSO = try context.pipeline("dsv4_indexer_select")
         self.hcWeightsPSO = try context.pipeline(
             "dsv4_hc_weights", constants: [],
             maxTotalThreadsPerThreadgroup: 256)
@@ -303,6 +305,27 @@ final class DSV4Kernels {
         enc.dispatchThreadgroups(
             MTLSize(width: entryCount, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Stable top-k score selection, returned in ascending entry order.
+    /// Scratch is the k-entry output itself; finite scores use the decode
+    /// reference's descending score / ascending tie-index ordering.
+    func encodeIndexerSelect(commandBuffer: MTLCommandBuffer, scores: MTLBuffer,
+                             selected: MTLBuffer, entryCount: Int, topK: Int) {
+        precondition(entryCount >= 0 && topK >= 0)
+        precondition(scores.length >= entryCount * MemoryLayout<Float>.stride)
+        precondition(selected.length >= min(entryCount, topK) * MemoryLayout<UInt32>.stride)
+        guard entryCount > 0, topK > 0 else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(indexerSelectPSO)
+        enc.setBuffer(scores, offset: 0, index: 0)
+        enc.setBuffer(selected, offset: 0, index: 1)
+        var count = UInt32(entryCount), k = UInt32(topK)
+        enc.setBytes(&count, length: 4, index: 2)
+        enc.setBytes(&k, length: 4, index: 3)
+        enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
         enc.endEncoding()
     }
 

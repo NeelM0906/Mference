@@ -171,9 +171,113 @@ global `expertStride` — plus ~4 GB resident file).
 - Prefill v1 ran the decode path token-by-token (the Qwen port's
   chunked-prefill ≡ sequential-decode guarantee is the correctness
   contract). The chunked implementation has since landed
-  (`DSV4ChunkedPrefill`): a span's eligible prefix is batched, and only
-  the remainder past the lightning-selection cutover replays
-  token-by-token.
+  (`DSV4ChunkedPrefill`): production spans are layer-major on both sides of
+  the lightning-selection cutover. GPU top-k selection replaces the mid-layer
+  score readback for prefill; decode retains its CPU reference selector.
+  Each query sees only its own emitted compressed entries, and selected entries
+  are consumed in ascending index order with lower-index tie-breaking.
+  Expert tiles remain bounded by the selected cache budget. Explicit
+  `MFERENCE_DSV4_PREFILL=off` still selects the sequential reference.
+
+## Sparse-prefill qualification (2026-09-16)
+
+The cutover removal preserves the scorer and attention kernels and the exact
+per-query compressor/ring update order. Selection uses an in-place bounded
+top-k heap on the GPU: O(k) selection storage plus one context-sized score row,
+shared across queries. It is not a multi-query attention throughput rewrite.
+
+Cancellation is checked between layers and expert tiles. Pending tile readers
+are drained before errors return, and an incomplete chunk requires reset.
+Warm-continuation preparation now checks the dirty flag before clearing
+transient state; it cannot silently reuse partially advanced layer caches.
+
+`DSV4ChunkedPrefillTests` covers synthetic below/across/above-cutover prompts,
+ragged chunks, warm appends, ring wraps, compressor boundaries, full-logit
+continuations and injected partial-chunk cancellation. The separate
+`DSV4IndexerSelectionTests` compares GPU selection with CPU score ordering,
+including cutoff ties, signed zeros, infinities and 8,193 entries.
+
+The opt-in `DSV4InstalledPrefillTests` uses a strict-verified existing install,
+one runner, and 2,083 tokens of repeated river-observation prose. It compares
+sequential decode against chunk-128 warm appends at positions 2,047, 2,051,
+2,052 and 2,083, then eight greedy continuations, requiring bit-identical full
+logits and zero production replay. Enable with `MFERENCE_DEEPSEEK_GTURBO` and
+choose `MFERENCE_DEEPSEEK_QUALIFICATION_EXPERTS=resident` or a slot count
+(default 16), after the repository safety checks. No model is downloaded.
+This is a correctness protocol, not a community benchmark or a small-memory
+hardware qualification.
+
+### Validation record
+
+Code `26139b0`; Mac Studio Mac15,14, M3 Ultra (32 CPU cores), 256 GiB;
+macOS 26.3 (25D125); Apple Swift 6.3.3 (`swiftlang-6.3.3.1.3`). The targeted
+synthetic command was:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh \
+  --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'DSV4IndexerSelectionTests|DSV4ChunkedPrefillTests'
+```
+
+Exit 0; build `5.69s`;
+`Test run with 8 tests in 2 suites passed after 15.510 seconds.`
+Cache profiles 8/16/resident pass exact state/logit checks. Earlier development
+attempts caught an async-context wait compile error and an invalid test-only
+16-token chunk setting; both were corrected before this successful run.
+
+The existing real install then ran alone, with 788 GiB free disk, memory-pressure
+free percentage 97, and all 50 receipt-file sizes checked before launch:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+MFERENCE_DEEPSEEK_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/deepseekv4flash.gturbo \
+MFERENCE_DEEPSEEK_QUALIFICATION_EXPERTS=resident \
+Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter DSV4InstalledPrefillTests
+```
+
+Exit 0; build `4.21s`. Full footer:
+
+```text
+Test sparseCutoverAndWarmAppendsMatchSequentialExactly() passed after 485.270 seconds.
+Suite DSV4InstalledPrefillTests passed after 485.270 seconds.
+Test run with 1 test in 1 suite passed after 485.270 seconds.
+```
+
+All four full-vocabulary heads and all eight continuation rows were finite and
+bit-identical to sequential decode; eight greedy continuation choices matched.
+Each warm prefill reported zero replay. This first run used resident experts.
+No downloads, model copies, cache purges or profiling were used. It was a
+debug-build correctness test with no benchmark warmup/repetition protocol;
+its total test duration is not an inference throughput result.
+
+The same installed gate also passed with **16 streamed expert slots** on the
+combined Phase 2–5 validation revision `f60a74b` (same hardware, OS and Swift).
+Preflight found 788 GiB free disk, memory-pressure free percentage 98, the
+completed installation and no other model owner. Receipt sizes had been checked;
+the loader again used full-SHA verification.
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+MFERENCE_DEEPSEEK_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/deepseekv4flash.gturbo \
+MFERENCE_DEEPSEEK_QUALIFICATION_EXPERTS=16 \
+Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter DSV4InstalledPrefillTests
+```
+
+Exit 0; build `4.30s`. Full footer:
+
+```text
+Test sparseCutoverAndWarmAppendsMatchSequentialExactly() passed after 557.306 seconds.
+Suite DSV4InstalledPrefillTests passed after 557.306 seconds.
+Test run with 1 test in 1 suite passed after 557.306 seconds.
+```
+
+All four boundary heads again had zero mismatches and zero replay, and all
+eight greedy/full-logit continuation checks passed. This closes the installed
+resident-versus-bounded correctness check for this protocol, not every context
+or smaller-memory hardware profile. The same debug-build/non-benchmark
+limitations apply; no experimental controls or profiling were enabled.
 
 ## First-install verification record
 

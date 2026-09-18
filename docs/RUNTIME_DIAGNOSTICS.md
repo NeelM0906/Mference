@@ -42,13 +42,15 @@ not count as full-model token-by-token replay. Chunk sizes describe execution,
 not an inference from the requested chunk size. GLM honors the requested chunk
 size within its 256-row scratch capacity for resident and streamed experts.
 
-For example, the DeepSeek synthetic 60-token cutover regression reports:
+For example, the DeepSeek synthetic 60-token cutover regression now reports:
 
 ```json
-{"executedMode":"mixed","batchedTokens":51,"replayedTokens":9,"batchedChunkSizes":[32,19],"replayReasons":{"deepseek_sparse_selection_cutover":9}}
+{"executedMode":"chunked","batchedTokens":60,"replayedTokens":0,"batchedChunkSizes":[32,28],"replayReasons":{}}
 ```
 
-This is a test fixture, not a real-checkpoint benchmark.
+This is a test fixture, not a real-checkpoint benchmark. Before GPU sparse
+selection, it reported 51 batched / 9 replayed tokens. Mixed reports remain
+supported for paths that actually mix execution modes.
 
 Known reasons:
 
@@ -59,7 +61,8 @@ Known reasons:
 - `glm_batched_prefill_disabled`, `glm_capture_reference`,
   `glm_dense_selection_reference`, `glm_batched_engine_unavailable`:
   other GLM eligibility/reference conditions.
-- `deepseek_sparse_selection_cutover`: the current lightning-indexer cutover.
+- `deepseek_sparse_selection_cutover`: historical lightning-indexer fallback;
+  production DeepSeek now batches above the cutover and no longer emits it.
 - `deepseek_batched_prefill_disabled`, `deepseek_batched_engine_unavailable`,
   `deepseek_expert_slots_unavailable`, `deepseek_unsupported_geometry`:
   other DeepSeek eligibility conditions.
