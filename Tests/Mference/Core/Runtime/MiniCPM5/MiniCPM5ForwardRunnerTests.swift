@@ -52,10 +52,13 @@ import Testing
         runner.prefillDidCompleteLayer = { layer in
             if layer == 0 { withUnsafeCurrentTask { $0?.cancel() } }
         }
-        let interrupted = Task {
+        // Exclusively used by this task until its value is awaited below.
+        struct SerialBuffer: @unchecked Sendable { let value: MTLBuffer }
+        let output = SerialBuffer(value: logits)
+        let interrupted = Task { @Sendable in
             _ = try await runner.prefillChunked(tokens: tokens[33..<65], startPosition: 33,
                 outputMode: .logits, config: .production(chunkTokens: 64),
-                into: logits, onProgress: { _ in })
+                into: output.value, onProgress: { _ in })
         }
         do {
             try await interrupted.value

@@ -466,6 +466,28 @@ static inline void dequant_int4_gemv_simd_multix_body(
     }
 }
 
+// Prompt-sized grid of small MultiX tiles: at most two host dispatches cover
+// the full prompt and its ragged tail, with no per-token host loop.
+kernel void prefill_dequant_int4_multix_block(
+    device const uint8_t* W [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const half* X [[buffer(3)]],
+    device half* Y [[buffer(4)]],
+    constant uint& T [[buffer(5)]],
+    constant uint& N [[buffer(6)]],
+    constant uint& K [[buffer(7)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint tile = multix_fc_t(1u);
+    const uint first = tg.y * tile;
+    if (first >= T) return;
+    dequant_int4_gemv_simd_multix_body<half>(W, scales, biases,
+        X + first * K, Y + first * N, N, K, tile, tg.x, sg, lane);
+}
+
 kernel void dequant_int4_gemv_simd_multix(
     device const uint8_t* W      [[buffer(0)]],
     device const bfloat*  scales [[buffer(1)]],

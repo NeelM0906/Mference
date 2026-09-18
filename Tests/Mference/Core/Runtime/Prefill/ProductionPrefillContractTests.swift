@@ -42,10 +42,14 @@ import Testing
         runner.prefillWillEncodeLayer = { layer in
             if layer == 1 { withUnsafeCurrentTask { $0?.cancel() } }
         }
-        let interrupted = Task {
+        // No parent access occurs until value is awaited. Metal's buffer
+        // protocol itself has no Sendable annotation on the supported SDKs.
+        struct SerialBuffer: @unchecked Sendable { let value: MTLBuffer }
+        let output = SerialBuffer(value: logits)
+        let interrupted = Task { @Sendable in
             _ = try await runner.prefillChunked(tokens: tokens[33..<65], startPosition: 33,
                 outputMode: .logits, config: .production(chunkTokens: 64),
-                into: logits, onProgress: { _ in })
+                into: output.value, onProgress: { _ in })
         }
         do {
             try await interrupted.value
