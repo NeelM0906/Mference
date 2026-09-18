@@ -148,6 +148,65 @@ struct SwiftQwenChatTests {
     }
 
     @Test(arguments: [false, true])
+    func reasoningToolExamplesCannotEmitCallsOrFailParsing(swift: Bool) async throws {
+        let tok = try await tokenizer().forCheckpoint(swift ? CheckpointIdentity.swiftQwen38 : "qwen3.8-27b-4bit")
+        let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: ["echo"],
+            startsInThought: true, idGenerator: { "call_test" })
+        var reasoning = ""
+        decoder.onReasoning = { reasoning += $0 }
+        // Even unknown/malformed or unclosed examples belong to reasoning.
+        let example = "Consider <tool_call>not a call</tool_call> or <tool_call>another example"
+        for id in tok.encode(example, addBOS: false) {
+            #expect(try decoder.consume(tokenID: id, delta: tok.decode([id], skipSpecialTokens: false)).isEmpty)
+        }
+        #expect(reasoning == example)
+        #expect(!decoder.hasToolCalls)
+        _ = try decoder.consume(tokenID: #require(tok.thinkEndID), delta: "</think>")
+        #expect(try decoder.consumeFlushedText("Answer") == [.content("Answer")])
+        _ = try decoder.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        let callBody = "\n<function=echo>\n<parameter=text>\n<think>literal</think>\n</parameter>\n</function>\n"
+        for id in tok.encode(callBody, addBOS: false) {
+            _ = try decoder.consume(tokenID: id, delta: "")
+        }
+        let events = try decoder.consume(tokenID: tok.toolCallEndID, delta: "</tool_call>")
+        guard case .toolCall(let call) = try #require(events.first) else {
+            Issue.record("Expected visible-channel call"); return
+        }
+        #expect(call.arguments == .object(["text": .string("<think>literal</think>")]))
+        #expect(decoder.hasToolCalls)
+        #expect(try decoder.finish().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func toolSchemaPreservesStringThroughDecoderAndHistory(swift: Bool) async throws {
+        let tok = try await tokenizer().forCheckpoint(swift ? CheckpointIdentity.swiftQwen38 : "qwen3.8-27b-4bit")
+        let tools: [MFTokenizer.FunctionDefinition] = [.init(name: "echo", description: "Echo text",
+            parameters: .object(["type": .string("object"), "properties": .object([
+                "text": .object(["type": .string("string")])])]))]
+        let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: ["echo"],
+            startsInThought: true, toolDefinitions: tools, idGenerator: { "call_echo" })
+        _ = try decoder.consume(tokenID: #require(tok.thinkEndID), delta: "</think>")
+        _ = try decoder.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        let payload = "\n<function=echo>\n<parameter=text>\n123\n</parameter>\n</function>\n"
+        for id in tok.encode(payload, addBOS: false) {
+            _ = try decoder.consume(tokenID: id, delta: "")
+        }
+        let events = try decoder.consume(tokenID: tok.toolCallEndID, delta: "</tool_call>")
+        guard case .toolCall(let call) = try #require(events.first) else {
+            Issue.record("Expected tool call"); return
+        }
+        #expect(call.arguments == .object(["text": .string("123")]))
+        let history: [Message] = [.init(role: .user, content: "Echo 123"),
+            .init(role: .assistant, content: nil, toolCalls: [
+                .init(id: call.id, name: call.name, arguments: call.arguments)
+            ], reasoningContent: "Use echo."),
+            .init(role: .tool, content: "123", toolCallID: call.id)]
+        let rendered = tok.decode(try tok.encodeChat(messages: history, tools: tools), skipSpecialTokens: false)
+        #expect(rendered.contains("<parameter=text>\n123\n</parameter>"))
+        #expect(try decoder.finish().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
     func reasoningIsSeparateAndIncludesDetokenizerFlush(startsInThought: Bool) async throws {
         let tok = try await tokenizer()
         let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: [], startsInThought: startsInThought)

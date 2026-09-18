@@ -391,7 +391,8 @@ public actor ServerModelSession: ServerLoadedModel {
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),
-                startsInThought: startsInThinking)
+                startsInThought: startsInThinking,
+                toolDefinitions: request.tools)
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
