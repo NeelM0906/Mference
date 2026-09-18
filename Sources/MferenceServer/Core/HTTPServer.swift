@@ -252,6 +252,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
                                                               dialect: chatDialect,
                                                               swiftQwen: backend.usesSwiftQwenTemplate,
+                                                              acceptsReasoningEffort: backend.acceptsReasoningEffort,
                                                               qwenReasoning: backend.supportsQwenReasoningEffort)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
@@ -420,6 +421,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             modelID: resolved.modelID,
                             dialect: resolved.backend.chatDialect,
                             swiftQwen: resolved.backend.usesSwiftQwenTemplate,
+                            acceptsReasoningEffort: resolved.backend.acceptsReasoningEffort,
                             qwenReasoning: resolved.backend.supportsQwenReasoningEffort)
                         let prepared = try await resolved.backend.prepare(request)
                         startStream()

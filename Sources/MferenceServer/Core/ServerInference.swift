@@ -47,6 +47,7 @@ public struct PreparedGeneration: Sendable {
 
 public protocol ServerInferenceBackend: Sendable {
     var usesSwiftQwenTemplate: Bool { get }
+    var acceptsReasoningEffort: Bool { get }
     var supportsQwenReasoningEffort: Bool { get }
     /// Everything that can reject a request must happen here, because the
     /// caller commits the response status once `generate` starts: a streaming
@@ -60,6 +61,7 @@ public protocol ServerInferenceBackend: Sendable {
 
 extension ServerInferenceBackend {
     public var usesSwiftQwenTemplate: Bool { false }
+    public var acceptsReasoningEffort: Bool { supportsQwenReasoningEffort }
     public var supportsQwenReasoningEffort: Bool { usesSwiftQwenTemplate }
     /// Backends that do not tokenize inherit a pass-through. A backend that
     /// renders a prompt must override this, or `generate` receives no tokens.
@@ -177,6 +179,7 @@ public actor ServerCoordinator {
 
 public actor ServerModelSession: ServerLoadedModel {
     public nonisolated let usesSwiftQwenTemplate: Bool
+    public nonisolated let acceptsReasoningEffort: Bool
     public nonisolated let supportsQwenReasoningEffort: Bool
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
     public nonisolated let chatDialect: ChatDialect
@@ -299,6 +302,7 @@ public actor ServerModelSession: ServerLoadedModel {
         self.model = model
         self.tokenizer = tokenizer
         self.usesSwiftQwenTemplate = tokenizer.isSwiftQwen
+        self.acceptsReasoningEffort = tokenizer.acceptsReasoningEffort
         self.supportsQwenReasoningEffort = tokenizer.supportsQwenReasoningEffort
         self.chatDialect = tokenizer.dialect
         self.modelFamily = model.config.family
@@ -401,7 +405,7 @@ public actor ServerModelSession: ServerLoadedModel {
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var reasoning = ""
-        if tokenizer.usesSourceQwenTemplate(reasoningEffort: request.reasoningEffort) {
+        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort) {
             decoder?.onReasoning = { text in
                 reasoning += text
                 onEvent(.reasoning(text))

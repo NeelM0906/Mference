@@ -110,11 +110,14 @@ struct ServerPromptCache: Sendable {
                 cachedPromptTokens: entry.kvPosition)
         }
 
-        // Source-template effort and preserved reasoning are defined by the
-        // source template. Reuse only an exact rendered prefix; the legacy
-        // hand-written bridge cannot prove equivalence for this checkpoint.
-        guard !tokenizer.isSwiftQwen, request.reasoningEffort == nil,
-              entry.reasoningEffort == nil else { return .miss }
+        // Qwen 3.8 source-template requests require an exact rendered prefix;
+        // the legacy bridge cannot prove equivalence for those checkpoints.
+        // Qwen 3.6 has its own verified source-template continuation below.
+        guard !tokenizer.isSwiftQwen else { return .miss }
+        if tokenizer.supportsQwenReasoningEffort,
+           request.reasoningEffort != nil || entry.reasoningEffort != nil {
+            return .miss
+        }
         let inputCount = entry.inputMessages.count
         guard request.messages.count > inputCount + 1,
               request.messages.prefix(inputCount)
@@ -123,6 +126,13 @@ struct ServerPromptCache: Sendable {
                 request.messages[inputCount],
                 entry.assistantTurn.message) else {
             return .miss
+        }
+        if tokenizer.usesSourceTemplate(reasoningEffort: request.reasoningEffort) {
+            return matchSourceTemplateContinuation(
+                entry: entry,
+                request: request,
+                cachedTurnIndex: inputCount,
+                tokenizer: tokenizer)
         }
         let continuation = Array(request.messages.dropFirst(inputCount + 1))
 
@@ -156,6 +166,31 @@ struct ServerPromptCache: Sendable {
                 && (cached.content ?? "").isEmpty
         }
         return incoming.content == cached.content
+    }
+
+    /// Qwen 3.6 rendered through its source template. The hand-written bridges
+    /// below end in the non-thinking generation prompt, and the recurrent
+    /// state cannot be rewound to re-render the turn, so the cached turn stays
+    /// as generated and only what follows it is prefilled. ChatML ends a
+    /// tool-call turn with `<|im_end|>` too, so both shapes stop `.endOfTurn`.
+    private func matchSourceTemplateContinuation(
+        entry: ServerPromptCacheEntry,
+        request: ValidatedChatRequest,
+        cachedTurnIndex: Int,
+        tokenizer: MFTokenizer
+    ) -> ServerPromptCacheMatch {
+        guard entry.assistantTurn.rawStopReason == .endOfTurn,
+              let bridge = try? tokenizer.encodeSourceTemplateContinuation(
+                messages: request.messages,
+                cachedTurnIndex: cachedTurnIndex,
+                tools: request.tools,
+                reasoningEffort: request.reasoningEffort),
+              bridge.first == entry.uncommittedBoundaryTokenIDs.first else {
+            return .miss
+        }
+        return .hit(
+            effectivePromptIDs: entry.kvBackedTokenIDs + bridge,
+            cachedPromptTokens: entry.kvPosition)
     }
 
     private func matchTextContinuation(

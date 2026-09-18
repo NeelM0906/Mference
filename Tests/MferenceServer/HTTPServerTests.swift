@@ -50,6 +50,26 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
     }
 }
 
+/// Qwen 3.6 opts into thinking without the Qwen 3.8 source-template capability.
+private actor OptInThinkingBackend: ServerInferenceBackend {
+    nonisolated let acceptsReasoningEffort = true
+    private(set) var received: ValidatedChatRequest?
+
+    func generate(
+        _ prepared: PreparedGeneration,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        received = prepared.request
+        onEvent(.reasoning("Check first."))
+        onEvent(.content("hello"))
+        var completion = ServerCompletion(
+            content: "hello", toolCalls: [], finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4))
+        completion.reasoningContent = "Check first."
+        return completion
+    }
+}
+
 private actor MultipleToolBackend: ServerInferenceBackend {
     func generate(
         _ prepared: PreparedGeneration,
@@ -235,6 +255,38 @@ private actor CancellableServerBackend: ServerInferenceBackend {
 
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
+    @Test(arguments: [false, true], [false, true])
+    func qwen36ThinkingUsesBackendCapabilityWithCustomAlias(stream: Bool, kwargs: Bool) async throws {
+        let backend = OptInThinkingBackend()
+        let server = MferenceHTTPServer(modelID: "qwen36-alias", queueLimit: 1,
+                                        backend: backend, chatDialect: .chatml)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        let control = kwargs
+            ? #""chat_template_kwargs":{"enable_thinking":true,"preserve_thinking":true}"#
+            : #""reasoning_effort":"medium""#
+        request.httpBody = Data("""
+        {"model":"qwen36-alias",\(control),"stream":\(stream),"messages":[
+          {"role":"user","content":"A"},
+          {"role":"assistant","content":"B","reasoning_content":"Check A"},
+          {"role":"user","content":"C"}]}
+        """.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""reasoning_content":"Check first.""#))
+        #expect(text.contains(#""content":"hello""#))
+        if stream { #expect(text.hasSuffix("data: [DONE]\n\n")) }
+        let received = await backend.received
+        #expect(received?.reasoningEffort == (kwargs ? .xhigh : .medium))
+        #expect(received?.messages[1].reasoningContent == "Check A")
+        #expect(received?.maximumCompletionTokens == 32_768)
+        try await server.shutdown()
+    }
+
     @Test(arguments: [false, true], [false, true])
     func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool, base: Bool) async throws {
         let server = MferenceHTTPServer(modelID: "custom-alias", queueLimit: 1,

@@ -251,8 +251,20 @@ separate `reasoning_content` response/history field, and allows only exact
 rendered-prefix cache reuse. Preserve that field when replaying history.
 Omitted effort retains Swift's source-default xhigh and base Qwen's legacy
 behavior; the latter does not stream hidden reasoning. Do not treat those two
-omitted-effort policies as a matched fine-tune comparison. Other models reject
-the effort parameter. No model's sampling or MTP default is changed by this.
+omitted-effort policies as a matched fine-tune comparison.
+
+Qwen 3.6 opts into its source thinking template with
+`chat_template_kwargs: {"enable_thinking": true}` or an explicit
+`reasoning_effort`. For this checkpoint, `none` disables thinking and the other
+accepted effort values enable it; omitted controls retain non-thinking
+behavior. Explicit `reasoning_effort` takes precedence over `enable_thinking`.
+Preserve `reasoning_content` in replayed assistant turns: Qwen 3.6 can continue
+the cached generated turn with a verified source-template suffix, including
+tool-result rounds. `preserve_thinking` is accepted for compatibility; source
+template history always preserves reasoning. Thinking requests without an
+explicit completion cap default to 32,768 tokens, subject to available context.
+Other models reject these thinking controls. Sampling and MTP defaults remain
+unchanged.
 
 The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,

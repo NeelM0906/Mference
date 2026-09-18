@@ -63,6 +63,9 @@ public struct MFTokenizer: @unchecked Sendable {
     public internal(set) var isBaseQwen38 = false
     /// Tool grammar is a family contract, independent of thinking policy.
     let usesJSONChatMLToolCalls: Bool
+    /// Qwen 3.6's bundled template carries the same `enable_thinking` /
+    /// `preserve_thinking` switches as Swift-Qwen's, so a request may opt in.
+    let supportsOptInThinking: Bool
     /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.
     public let bosID: Int32
@@ -171,6 +174,7 @@ public struct MFTokenizer: @unchecked Sendable {
     public init(tokenizer: any Tokenizer, family: ModelFamily?) throws {
         self.tokenizer = tokenizer
         self.usesJSONChatMLToolCalls = family == .maple
+        self.supportsOptInThinking = family == .qwen36
 
         let dialect: ChatDialect =
             if Self.specialTokenID(tokenizer, Self.inklingUserMark) != nil {
@@ -765,9 +769,10 @@ public struct MFTokenizer: @unchecked Sendable {
 
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition],
-                               reasoningEffort: QwenReasoningEffort? = nil) throws -> [Int32] {
-        guard supportsQwenReasoningEffort || reasoningEffort == nil else {
-            throw MFTokenizerError.unsupportedForDialect("reasoning_effort requires base or Swift Qwen 3.8")
+                               reasoningEffort: QwenReasoningEffort? = nil,
+                               addGenerationPrompt: Bool = true) throws -> [Int32] {
+        guard acceptsReasoningEffort || reasoningEffort == nil else {
+            throw MFTokenizerError.unsupportedForDialect("reasoning_effort is not supported by this model")
         }
         // DeepSeek ships no chat_template.jinja; its tool framing is native.
         if dialect == .deepseek {
@@ -831,13 +836,16 @@ public struct MFTokenizer: @unchecked Sendable {
         return try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
             chatTemplate: nil,
-            addGenerationPrompt: true,
+            addGenerationPrompt: addGenerationPrompt,
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
             additionalContext: usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
                 ? ["enable_thinking": reasoningEffort != .off,
                    "reasoning_effort": (reasoningEffort ?? .xhigh).rawValue,
+                   "preserve_thinking": true]
+                : usesSourceTemplate(reasoningEffort: reasoningEffort)
+                ? ["enable_thinking": reasoningEffort != .off,
                    "preserve_thinking": true]
                 : ["enable_thinking": false]
         ).map(Int32.init)

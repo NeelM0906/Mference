@@ -36,6 +36,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private var channel: Channel = .visible
     private var label = ""
     private var toolTokens: [Int32]?
+    /// The source template frames a turn as `</think>\n\n{content}`. When
+    /// reasoning is reported separately those newlines are framing, not
+    /// content: echoed back they would double the separator on re-render.
+    private var afterThoughtFraming = false
     /// DeepSeek text-stream state. DSML markers are plain text, not special
     /// tokens, so the fork scans deltas: `heldText` is a tail withheld while
     /// it could still open a marker, `dsmlText` buffers an open block.
@@ -203,6 +207,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             }
             if tokenID == tokenizer.thinkEndID {
                 channel = .visible
+                afterThoughtFraming = onReasoning != nil
                 return []
             }
             if channel == .thought {
@@ -243,7 +248,13 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = tokens
             return []
         }
-        return delta.isEmpty ? [] : [.content(delta)]
+        guard afterThoughtFraming else {
+            return delta.isEmpty ? [] : [.content(delta)]
+        }
+        let visible = String(delta.drop(while: { $0 == "\n" }))
+        guard !visible.isEmpty else { return [] }
+        afterThoughtFraming = false
+        return [.content(visible)]
     }
 
     /// GLM-5 transitions: `<think>`…`</think>` (added tokens flagged

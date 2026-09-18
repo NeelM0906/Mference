@@ -139,8 +139,22 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
     }
 }
 
+/// The Qwen model card's thinking switches, as vLLM and SGLang clients send
+/// them. `preserve_thinking` is accepted for compatibility: a source-template
+/// render always preserves reasoning history.
+public struct OpenAIChatTemplateKwargs: Codable, Equatable, Sendable {
+    public let enableThinking: Bool?
+    public let preserveThinking: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case enableThinking = "enable_thinking"
+        case preserveThinking = "preserve_thinking"
+    }
+}
+
 public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public var reasoningEffort: String? = nil
+    public var chatTemplateKwargs: OpenAIChatTemplateKwargs? = nil
     public let model: String
     public let messages: [OpenAIChatMessage]
     public let stream: Bool?
@@ -164,6 +178,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
         case reasoningEffort = "reasoning_effort"
+        case chatTemplateKwargs = "chat_template_kwargs"
         case streamOptions = "stream_options"
         case topP = "top_p"
         case maxTokens = "max_tokens"
@@ -281,33 +296,36 @@ public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
                                 dialect: ChatDialect = .gemma,
-                                swiftQwen: Bool? = nil) throws -> ValidatedChatRequest {
-        try validate(request, modelID: modelID, dialect: dialect,
-                     swiftQwen: swiftQwen, qwenReasoning: nil)
-    }
-
-    public static func validate(_ request: OpenAIChatRequest,
-                                modelID: String,
-                                dialect: ChatDialect,
-                                swiftQwen: Bool?,
-                                qwenReasoning: Bool?) throws -> ValidatedChatRequest {
+                                swiftQwen: Bool? = nil,
+                                acceptsReasoningEffort: Bool? = nil,
+                                qwenReasoning: Bool? = nil) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
         let isSwiftQwen = swiftQwen ?? (modelID.split(separator: "@").first == Substring(CheckpointIdentity.swiftQwen38))
-        let supportsEffort = qwenReasoning ?? (isSwiftQwen ||
+        let supportsQwenEffort = qwenReasoning ?? (isSwiftQwen ||
             modelID.split(separator: "@").first == Substring(CheckpointIdentity.baseQwen38))
-        if (isSwiftQwen || (supportsEffort && request.reasoningEffort != nil)),
+        let thinkingSwitch = request.chatTemplateKwargs?.enableThinking
+        if !(acceptsReasoningEffort ?? supportsQwenEffort) {
+            if request.reasoningEffort != nil {
+                throw invalid("reasoning_effort is not supported by this model",
+                              "reasoning_effort", "unsupported_value")
+            }
+            if thinkingSwitch != nil {
+                throw invalid("chat_template_kwargs.enable_thinking is not supported by this model",
+                              "chat_template_kwargs", "unsupported_value")
+            }
+        }
+        let explicitEffort = request.reasoningEffort.flatMap(QwenReasoningEffort.init(rawValue:))
+        guard request.reasoningEffort == nil || explicitEffort != nil else {
+            throw invalid("reasoning_effort must be xhigh, medium, low, or none",
+                          "reasoning_effort", "unsupported_value")
+        }
+        // `enable_thinking: true` is the source template's default effort.
+        let effort = explicitEffort
+            ?? thinkingSwitch.map { $0 ? QwenReasoningEffort.xhigh : .off }
+        if (isSwiftQwen || (supportsQwenEffort && effort != nil)),
            request.messages.contains(where: { $0.role == "developer" }) {
             throw invalid("Qwen 3.8 source-template requests require leading system guidance; developer messages are not supported",
                           "messages", "unsupported_role")
-        }
-        if !supportsEffort, request.reasoningEffort != nil {
-            throw invalid("reasoning_effort requires base or Swift Qwen 3.8",
-                          "reasoning_effort", "unsupported_value")
-        }
-        let effort = request.reasoningEffort.flatMap(QwenReasoningEffort.init(rawValue:))
-        guard request.reasoningEffort == nil || effort != nil else {
-            throw invalid("reasoning_effort must be xhigh, medium, low, or none",
-                          "reasoning_effort", "unsupported_value")
         }
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
@@ -345,7 +363,11 @@ public enum OpenAIRequestValidator {
             throw invalid("repetition_penalty must be positive",
                           "repetition_penalty", "invalid_value")
         }
-        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 4096
+        // A requested thought needs room: the Qwen model card recommends a
+        // 32,768-token output budget in thinking mode.
+        let thinkingRequested = effort != nil && effort != .off
+        let maximum = request.maxCompletionTokens ?? request.maxTokens
+            ?? (thinkingRequested ? 32_768 : 4096)
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",

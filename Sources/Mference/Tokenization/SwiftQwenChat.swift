@@ -21,10 +21,57 @@ extension MFTokenizer {
 
     public var supportsQwenReasoningEffort: Bool { isSwiftQwen || isBaseQwen38 }
 
-    /// Swift always uses its source template. Base Qwen opts into that same
-    /// contract only with an explicit effort; omitted effort keeps legacy behavior.
+    /// Whether a request may carry `reasoning_effort` at all.
+    public var acceptsReasoningEffort: Bool {
+        supportsQwenReasoningEffort || supportsOptInThinking
+    }
+
+    /// Swift always uses its source template. Base Qwen 3.8 opts into that
+    /// same contract with an explicit effort; omitted effort keeps legacy behavior.
     public func usesSourceQwenTemplate(reasoningEffort: QwenReasoningEffort?) -> Bool {
         isSwiftQwen || (isBaseQwen38 && reasoningEffort != nil)
+    }
+
+    /// Swift-Qwen always renders through its source template. Qwen 3.6 does so
+    /// only when the request opts in; an omitted effort keeps its native
+    /// non-thinking render. Its template has no effort levels: `none` closes
+    /// the thinking block and every other value opens it.
+    public func usesSourceTemplate(reasoningEffort: QwenReasoningEffort?) -> Bool {
+        usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
+            || (supportsOptInThinking && reasoningEffort != nil)
+    }
+
+    /// Tokens that follow the assistant turn at `cachedTurnIndex` in the full
+    /// render: its closing `<|im_end|>`, the new tool results or user turn, and
+    /// the generation prompt. The KV cache already holds that turn as the
+    /// model generated it, which a re-render of the parsed turn need not match
+    /// token for token, so the cache is extended rather than compared. This is
+    /// only sound because `preserve_thinking` makes the render of a turn
+    /// independent of what follows it.
+    public func encodeSourceTemplateContinuation(messages: [Message],
+                                                 cachedTurnIndex: Int,
+                                                 tools: [FunctionDefinition],
+                                                 reasoningEffort: QwenReasoningEffort?) throws -> [Int32] {
+        guard usesSourceTemplate(reasoningEffort: reasoningEffort) else {
+            throw MFTokenizerError.unsupportedForDialect("source-template KV continuation")
+        }
+        guard messages.indices.contains(cachedTurnIndex),
+              messages[cachedTurnIndex].role == .assistant,
+              cachedTurnIndex < messages.count - 1 else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "KV continuation needs a cached assistant turn followed by new messages")
+        }
+        let full = try encodeToolChat(messages: messages, tools: tools,
+                                      reasoningEffort: reasoningEffort)
+        let head = try encodeToolChat(messages: Array(messages[...cachedTurnIndex]), tools: tools,
+                                      reasoningEffort: reasoningEffort,
+                                      addGenerationPrompt: false)
+        guard let end = head.lastIndex(of: endOfTurnID), end < full.count,
+              full[...end].elementsEqual(head[...end]) else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "cached assistant turn is not a prefix of the full render")
+        }
+        return Array(full[end...])
     }
 
     public func startsInThinking(reasoningEffort: QwenReasoningEffort?,
@@ -43,7 +90,7 @@ extension MFTokenizer {
                     .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
             }
         }
-        return usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
+        return usesSourceTemplate(reasoningEffort: reasoningEffort)
             ? reasoningEffort != .off : generationPromptStartsInThinking
     }
 
@@ -61,9 +108,13 @@ extension MFTokenizer {
             return try encodeToolChat(messages: messages, tools: tools,
                                       reasoningEffort: reasoningEffort)
         }
+        if usesSourceTemplate(reasoningEffort: reasoningEffort) {
+            return try encodeToolChat(messages: messages, tools: tools,
+                                      reasoningEffort: reasoningEffort)
+        }
         guard reasoningEffort == nil else {
             throw MFTokenizerError.unsupportedForDialect(
-                "reasoning_effort requires base or Swift Qwen 3.8")
+                "reasoning_effort is not supported by this model")
         }
         if !tools.isEmpty || messages.contains(where: {
             $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
