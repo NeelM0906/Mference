@@ -32,7 +32,7 @@ model_process_pattern='(^|/)(MferenceServer|MferenceCLI|MferenceRepack|MferenceP
 
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$script_directory"
-server_binary="$repository_root/.build/release/MferenceServer"
+build_path="$repository_root/.build"
 data_directory="$HOME/Library/Application Support/Mference/open-webui"
 
 note() { printf '[mference-ui] %s\n' "$*" >&2; }
@@ -41,6 +41,7 @@ fail() { note "error: $*"; exit 1; }
 usage() {
   cat <<'USAGE'
 usage: ./mference-ui.sh [options]                      start the UI
+       ./mference-ui.sh doctor                         check prerequisites, change nothing
        ./mference-ui.sh install <family> [repack args] install a model
        ./mference-ui.sh models                         list installed models
 
@@ -52,6 +53,10 @@ usage: ./mference-ui.sh [options]                      start the UI
   --server-port <port>   MferenceServer port (default 8080).
   --webui-port <port>    Open WebUI port (default 3000).
   --max-context <tokens> Context window for every model (default 16384).
+  --build-path <dir>     Swift build directory (default .build). Useful when
+                         keeping different Xcode toolchains separate.
+  --data-dir <dir>       Open WebUI data directory (default under your Library).
+                         Use a separate directory for isolated release tests.
   --prompt-cache-mode <off|single-prefix>
                          Passed through to MferenceServer.
   --dry-run              Print what would run, start nothing, exit 0. Works
@@ -61,6 +66,10 @@ usage: ./mference-ui.sh [options]                      start the UI
 install passes any extra arguments through to MferenceRepack, so a cancelled
 download continues with:  ./mference-ui.sh install gemma4 --resume
 USAGE
+}
+
+require_value() {
+  [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "$1 needs a value; see --help"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -78,18 +87,38 @@ while [[ $# -gt 0 ]]; do
         shift
       done
       ;;
-    models) command_name=models; shift ;;
-    --library) library_roots+=("$2"); shift 2 ;;
-    --model) preload_model="$2"; shift 2 ;;
-    --server-port) server_port="$2"; shift 2 ;;
-    --webui-port) webui_port="$2"; shift 2 ;;
-    --max-context) max_context="$2"; shift 2 ;;
-    --prompt-cache-mode) prompt_cache_mode="$2"; shift 2 ;;
+    models|doctor) command_name="$1"; shift ;;
+    --library) require_value "$@"; library_roots+=("$2"); shift 2 ;;
+    --model) require_value "$@"; preload_model="$2"; shift 2 ;;
+    --server-port) require_value "$@"; server_port="$2"; shift 2 ;;
+    --webui-port) require_value "$@"; webui_port="$2"; shift 2 ;;
+    --max-context) require_value "$@"; max_context="$2"; shift 2 ;;
+    --build-path) require_value "$@"; build_path="$2"; shift 2 ;;
+    --data-dir) require_value "$@"; data_directory="$2"; shift 2 ;;
+    --prompt-cache-mode) require_value "$@"; prompt_cache_mode="$2"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) note "error: unknown option $1"; usage >&2; exit 2 ;;
   esac
 done
+
+check_positive_integer() {
+  case "$2" in ''|*[!0-9]*) fail "$1 must be a positive integer" ;; esac
+  [[ ${#2} -le 9 ]] || fail "$1 must be a positive integer of at most nine digits"
+  [[ "$((10#$2))" -gt 0 ]] || fail "$1 must be a positive integer"
+}
+check_positive_integer --server-port "$server_port"
+check_positive_integer --webui-port "$webui_port"
+check_positive_integer --max-context "$max_context"
+server_port="$((10#$server_port))"
+webui_port="$((10#$webui_port))"
+max_context="$((10#$max_context))"
+[[ "$server_port" -le 65535 && "$webui_port" -le 65535 ]] || fail "ports must be between 1 and 65535"
+[[ "$server_port" -ne "$webui_port" ]] || fail "server and UI need different ports"
+case "$prompt_cache_mode" in off|single-prefix) ;; *) fail "--prompt-cache-mode must be off or single-prefix" ;; esac
+[[ "$build_path" == /* ]] || build_path="$repository_root/$build_path"
+[[ "$data_directory" == /* ]] || data_directory="$repository_root/$data_directory"
+server_binary="$build_path/release/MferenceServer"
 
 server_arguments=(
   --port "$server_port"
@@ -153,6 +182,26 @@ webui_environment=(
 
 # --- checks and prerequisites ------------------------------------------------
 
+check_platform() {
+  [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || fail "Mference requires an Apple Silicon Mac (arm64)."
+  local os_version swift_version swift_major swift_minor
+  os_version="$(sw_vers -productVersion)"
+  [[ "${os_version%%.*}" -ge 15 ]] || fail "macOS 15 or newer is required; found $os_version"
+  command -v swift >/dev/null 2>&1 || fail "Swift is missing; install Xcode 16.3+ or matching Command Line Tools."
+  swift_version="$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9]*\.[0-9]*\).*/\1/p' | head -1)"
+  [[ -n "$swift_version" ]] || fail "could not determine Swift version; check xcode-select -p and DEVELOPER_DIR"
+  swift_major="${swift_version%%.*}"; swift_minor="${swift_version#*.}"
+  [[ "$swift_major" -gt 6 || ( "$swift_major" -eq 6 && "$swift_minor" -ge 1 ) ]] || fail "Swift 6.1+ required; found $swift_version"
+  note "macOS $os_version; Swift $swift_version; Apple Silicon"
+}
+
+check_port_free() {
+  command -v lsof >/dev/null 2>&1 || fail "lsof is needed to check that the local ports are free"
+  if [[ -n "$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null || true)" ]]; then
+    fail "port $1 is already in use; choose another port. No existing process was stopped."
+  fi
+}
+
 check_no_model_process() {
   # AGENTS.md: one model-owning process at a time. Never terminate one that is
   # already running; refuse to start instead.
@@ -166,9 +215,10 @@ check_no_model_process() {
 }
 
 ensure_server_binary() {
-  if [[ -x "$server_binary" ]]; then return 0; fi
-  note "building MferenceServer (release)"
-  (cd "$repository_root" && swift build -c release --product MferenceServer)
+  # Incremental builds are cheap when current. Merely finding an executable
+  # can silently run the previous release after a source update.
+  note "checking/building MferenceServer (release)"
+  (cd "$repository_root" && swift build -c release --scratch-path "$build_path" --product MferenceServer)
   [[ -x "$server_binary" ]] || fail "$server_binary is still missing after the build."
 }
 
@@ -242,8 +292,8 @@ repack_families() {
   local usage_source="$repository_root/Sources/MferenceRepack/Command/main.swift"
   if [[ -r "$usage_source" ]]; then
     help_text="$(cat "$usage_source")"
-  elif [[ -x "$repository_root/.build/release/MferenceRepack" ]]; then
-    help_text="$("$repository_root/.build/release/MferenceRepack" --help 2>&1 || true)"
+  elif [[ -x "$build_path/release/MferenceRepack" ]]; then
+    help_text="$("$build_path/release/MferenceRepack" --help 2>&1 || true)"
   fi
   sed -n 's/.*--model <\([A-Za-z0-9|]*\)>.*/\1/p' <<<"$help_text" | head -1 | tr '|' ' '
 }
@@ -263,6 +313,31 @@ check_family() {
 
 # --- subcommands -------------------------------------------------------------
 
+cmd_doctor() {
+  if [[ "$dry_run" -eq 1 ]]; then
+    echo "would check: Apple Silicon, macOS 15+, Swift 6.1+, no model owner, free ports $server_port/$webui_port, uv or pinned Open WebUI, disk and memory"
+    exit 0
+  fi
+  check_platform
+  check_no_model_process
+  check_port_free "$server_port"
+  check_port_free "$webui_port"
+  local binary python
+  binary="$(open_webui_binary)"
+  if [[ -n "$binary" ]]; then
+    python="$(open_webui_python "$binary")"
+    "$python" "$repository_root/Scripts/openwebui-mference.py" check
+  elif command -v uv >/dev/null 2>&1; then
+    note "uv available; first UI launch will install Open WebUI $OPEN_WEBUI_VERSION"
+  else
+    fail "UI prerequisite missing: install uv (for example: brew install uv), then run doctor again. CLI/server do not need uv."
+  fi
+  df -h "$repository_root"
+  memory_pressure -Q
+  note "prerequisites found; no build, download, model load or settings change performed."
+  note "Check free disk and memory against your chosen model. Models are separate downloads, not included with the source."
+}
+
 cmd_install() {
   local output="scratch/$install_family.gturbo"
   # bash 3.2 is what /usr/bin/env bash is on macOS, and there `"${empty[@]}"`
@@ -273,20 +348,21 @@ cmd_install() {
   if [[ "$dry_run" -eq 1 ]]; then
     echo "would check: pgrep -fl '$model_process_pattern'"
     echo "would verify: \"$install_family\" is one of: $(repack_families)"
-    echo "would run:   swift run -c release MferenceRepack --model $install_family --output $output$extra"
+    echo "would run:   swift run -c release --scratch-path $build_path MferenceRepack --model $install_family --output $output$extra"
     echo "would write: $repository_root/$output"
     exit 0
   fi
   check_family "$install_family"
+  check_platform
   check_no_model_process
   note "installing $install_family into $repository_root/$output"
-  note "downloads range from ~15 GB (gemma4) to ~148 GB (inklingsmall); check disk first"
+  note "source reads range from ~5 GB to ~360 GB; check disk first. Add --dry-run to MferenceRepack for the exact budget."
   cd "$repository_root"
   if [[ ${#repack_arguments[@]} -gt 0 ]]; then
-    swift run -c release MferenceRepack \
+    swift run -c release --scratch-path "$build_path" MferenceRepack \
       --model "$install_family" --output "$output" "${repack_arguments[@]}"
   else
-    swift run -c release MferenceRepack --model "$install_family" --output "$output"
+    swift run -c release --scratch-path "$build_path" MferenceRepack --model "$install_family" --output "$output"
   fi
   note "installed; start the UI with ./mference-ui.sh"
 }
@@ -294,12 +370,13 @@ cmd_install() {
 cmd_models() {
   if [[ "$dry_run" -eq 1 ]]; then
     echo "would check: pgrep -fl '$model_process_pattern'"
-    echo "would build: swift build -c release --product MferenceServer (if missing)"
+    echo "would build: swift build -c release --scratch-path $build_path --product MferenceServer (incremental)"
     echo "would run:   $server_binary ${list_arguments[*]}"
     exit 0
   fi
   # Listing loads no model and binds no port, but it is still an MferenceServer
   # process, so it waits its turn like everything else here.
+  check_platform
   check_no_model_process
   ensure_server_binary
   local listed
@@ -314,7 +391,7 @@ cmd_run() {
   if [[ "$dry_run" -eq 1 ]]; then
     echo "would check: pgrep -fl '$model_process_pattern'"
     echo "would ensure: open-webui $OPEN_WEBUI_VERSION (uv tool install --python 3.11 open-webui==$OPEN_WEBUI_VERSION)"
-    echo "would build: swift build -c release --product MferenceServer (if missing)"
+    echo "would build: swift build -c release --scratch-path $build_path --product MferenceServer (incremental)"
     echo "would run:   $server_binary ${server_arguments[*]}"
     echo "would wait:  http://127.0.0.1:$server_port/health"
     echo "would read:  http://127.0.0.1:$server_port/v1/models"
@@ -331,13 +408,20 @@ cmd_run() {
     exit 0
   fi
 
+  check_platform
   check_no_model_process
+  check_port_free "$server_port"
+  check_port_free "$webui_port"
   local webui_binary webui_python
   webui_binary="$(ensure_open_webui)"
   webui_python="$(open_webui_python "$webui_binary")"
+  # Check the actual interpreter's package before starting the model server.
+  "$webui_python" "$repository_root/Scripts/openwebui-mference.py" check
   ensure_server_binary
 
-  trap stop_children INT TERM EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap stop_children EXIT
   mkdir -p "$data_directory"
 
   note "starting MferenceServer on 127.0.0.1:$server_port (library mode)"
@@ -362,7 +446,7 @@ cmd_run() {
   while kill -0 "$server_pid" 2>/dev/null && kill -0 "$webui_pid" 2>/dev/null; do
     sleep 1
   done
-  note "a child exited; stopping the other."
+  fail "a child exited unexpectedly; stopping only the other process started by this launcher."
 }
 
 # --- process lifecycle -------------------------------------------------------
@@ -434,9 +518,7 @@ wait_for_webui() {
     if ! kill -0 "$webui_pid" 2>/dev/null; then
       fail "Open WebUI exited before it answered $url."
     fi
-    # Any HTTP response means it is serving; --fail is deliberately absent so a
-    # redirect or a 404 on / still counts.
-    if curl --silent --output /dev/null --max-time 2 "$url"; then
+    if curl --silent --fail --output /dev/null --max-time 2 "$url"; then
       return 0
     fi
     sleep 1
@@ -445,6 +527,7 @@ wait_for_webui() {
 }
 
 case "$command_name" in
+  doctor) cmd_doctor ;;
   install) cmd_install ;;
   models) cmd_models ;;
   run) cmd_run ;;
