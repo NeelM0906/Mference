@@ -17,7 +17,8 @@ import Metal
 /// GEMMs accumulate in a different order than the decode GEMVs, so the
 /// chunk's logits are FP16-close to sequential decode rather than identical
 /// (`Glm53ForwardRunnerTests` measures the gap; the per-token path stays the
-/// exactness reference and serves everything past `index_topk`).
+/// exactness reference). Streamed experts use the same grouped projections,
+/// one bounded blob at a time, then reduce in the same routing-rank order.
 final class Glm53PrefillEngine {
     static let capacity = 256
 
@@ -58,6 +59,7 @@ final class Glm53PrefillEngine {
     private let routePair: MTLBuffer          // u32 [C*K]
     private let segStart: MTLBuffer           // u32 [E+1]
     private let activeExperts: MTLBuffer      // u32 [E]
+    private let streamedExpertZero: MTLBuffer // immutable local blob index 0
     private let actsC: MTLBuffer              // [C*K][moeF]
     private let partialC: MTLBuffer           // fp32 [C*K][hidden]
     private let ffnGateC: MTLBuffer, ffnUpC: MTLBuffer, ffnActC: MTLBuffer
@@ -119,6 +121,8 @@ final class Glm53PrefillEngine {
         routePair = try buf(C * K * 4)
         segStart = try buf((runner.numExperts + 1) * 4)
         activeExperts = try buf(runner.numExperts * 4)
+        streamedExpertZero = try buf(4)
+        streamedExpertZero.contents().storeBytes(of: UInt32(0), as: UInt32.self)
         actsC = try buf(C * K * runner.moeF * 2)
         partialC = try buf(C * K * h * 4)
         let ffnW = max(runner.sharedF, runner.denseF)
@@ -136,7 +140,7 @@ final class Glm53PrefillEngine {
     /// wall time and, when the phase clock is on, the GPU time.
     private static let trace = ProcessInfo.processInfo.environment["MFERENCE_GLM53_PREFILL_TRACE"] == "1"
 
-    func run(tokens: ArraySlice<Int32>, startPosition p0: Int, into logits: MTLBuffer?) throws {
+    func run(tokens: ArraySlice<Int32>, startPosition p0: Int, into logits: MTLBuffer?) async throws {
         let T = tokens.count
         precondition(T > 0 && T <= Self.capacity)
         let start = Self.trace ? Date() : nil
@@ -187,10 +191,11 @@ final class Glm53PrefillEngine {
             if r.cfg.layerIsDenseFFN(L) {
                 try encodeDense(cb, layer: layer, index: L, tokens: T)
             } else {
-                cb = try encodeMoE(cb, layer: layer, index: L, tokens: T)
+                cb = try await encodeMoE(cb, layer: layer, index: L, tokens: T)
             }
             k.encodeHCPlaceMix(commandBuffer: cb, streams: streamsB, sub: mlpOutC, post: postF, comb: combF,
                                outStreams: streamsA, hcMult: hc, hidden: h, tokens: T)
+            try r.prefillDidCompleteLayer?(L)
         }
 
         // The last token's logits through the decode head kernels.
@@ -267,7 +272,7 @@ final class Glm53PrefillEngine {
         prefillNorm.encodeBF16W(commandBuffer: cb, x: latents, xOffset: latentOffset, weight: kvANorm.buffer,
                                 weightOffset: Int(kvANorm.offset), out: latents, outOffset: latentOffset,
                                 t: UInt32(T), d: UInt32(kvRank), eps: r.eps)
-        // Indexer bookkeeping (no scoring: the chunk stays below index_topk).
+        // Indexer bookkeeping; scoring/selection below handles sparse queries.
         let rowOffset = p0 * r.idxDim * 2
         k.encodeInt8GEMM(commandBuffer: cb, weights: wk, x: normedC, xStride: h, y: idxKRawC, yStride: r.idxDim,
                          m: r.idxDim, n: h, tokens: T)
@@ -352,10 +357,10 @@ final class Glm53PrefillEngine {
     /// routes, the CPU grouping by expert, then the grouped kernels. Returns
     /// the stream that continues after the sync.
     private func encodeMoE(_ cbIn: MTLCommandBuffer, layer: Glm53ForwardRunner.LayerTensors, index L: Int,
-                           tokens T: Int) throws -> MTLCommandBuffer {
+                           tokens T: Int) async throws -> MTLCommandBuffer {
         guard let router = routers[L], let bias = layer.routerBias, let sg = layer.sharedGate, let su = layer.sharedUp,
-              let sd = layer.sharedDown, let offsets = layer.expertOffsets, let slab = layer.slab else {
-            throw Glm53ForwardRunnerError.invalidConfiguration("layer \(L) has no resident MoE block")
+              let sd = layer.sharedDown, let offsets = layer.expertOffsets else {
+            throw Glm53ForwardRunnerError.invalidConfiguration("layer \(L) has no MoE block")
         }
         let h = r.hidden, f = r.sharedF, E = r.numExperts, K = r.topK
         var cb = cbIn
@@ -397,10 +402,35 @@ final class Glm53PrefillEngine {
         }
 
         cb = try r.open()
-        k.encodeGroupedMoE(commandBuffer: cb, slab: slab, offsets: offsets, x: normedC, acts: actsC, partial: partialC,
+        if let slab = layer.slab {
+            k.encodeGroupedMoE(commandBuffer: cb, slab: slab, offsets: offsets, x: normedC, acts: actsC, partial: partialC,
                            pairToken: pairToken, segStart: segStart, activeExperts: activeExperts, activeCount: active,
                            routePair: routePair, weights: routerWC, residual: sharedOutC, y: mlpOutC,
                            d: h, f: r.moeF, topK: K, tokens: T)
+        } else {
+            try r.checkSlotBudget(layer: L)
+            // Cache views are not pinned across fetches. Finish the previous
+            // blob's GPU work before any later fetch can evict/reuse its slot.
+            // Each expert is fetched once per chunk/layer and applied to all
+            // its routed tokens; this is not full-model token replay.
+            for group in 0..<active {
+                try Task.checkCancellation()
+                let blobs = try await r.fetchExperts(layer: L, experts: [Int(activePtr[group])])
+                guard let blob = blobs.first, blobs.count == 1 else {
+                    throw Glm53ForwardRunnerError.invalidConfiguration("missing streamed expert for layer \(L)")
+                }
+                cb = try r.open()
+                k.encodeGroupedExpertProjections(commandBuffer: cb, buffer: blob.buffer,
+                    baseOffset: blob.offset, expertStride: 0, offsets: offsets,
+                    x: normedC, acts: actsC, partial: partialC, pairToken: pairToken,
+                    segStart: segStart, segStartOffset: group * MemoryLayout<UInt32>.stride,
+                    activeExperts: streamedExpertZero, activeCount: 1, d: h, f: r.moeF)
+                try r.sync()
+            }
+            cb = try r.open()
+            k.encodeGroupedExpertReduce(commandBuffer: cb, partial: partialC, routePair: routePair,
+                weights: routerWC, residual: sharedOutC, y: mlpOutC, d: h, topK: K, tokens: T)
+        }
         return cb
     }
 }

@@ -336,6 +336,8 @@ import Testing
     @Test func chunkedPrefillEqualsSequentialDecodeBitForBit() async throws {
         let h = try Self.makeHarness()
         defer { h.cleanup() }
+        // Explicit reference mode still has its bit-exact replay contract.
+        h.runner.batchedPrefillEnabled = false
         let tokens = try Glm53Goldens.promptTokens(.long).map { Int32($0) }
 
         var sequential: [[Float]] = []
@@ -367,7 +369,7 @@ import Testing
                 #expect(result.execution?.executedMode == .sequential)
                 #expect(result.execution?.batchedChunkSizes == [])
                 #expect(result.execution?.replayedTokens == n)
-                #expect(result.execution?.replayReasons == ["glm_streamed_experts": n])
+                #expect(result.execution?.replayReasons == ["glm_batched_prefill_disabled": n])
                 start += n
                 if i == chunks.count - 1 { lastLogits = h.logitsRow() }
             }
@@ -464,7 +466,7 @@ import Testing
                                              config: .production(chunkTokens: 32), into: logitsB, onProgress: { _ in })
         let replayResult = try await perToken.prefillChunked(tokens: prefix, startPosition: 0, outputMode: .logits,
                                               config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
-        #expect(batchedResult.execution?.batchedChunkSizes == [n])
+        #expect(batchedResult.execution?.batchedChunkSizes == [32, n - 32])
         #expect(batchedResult.execution?.replayedTokens == 0)
         #expect(replayResult.execution?.batchedTokens == 0)
         #expect(replayResult.execution?.replayedTokens == n)
@@ -486,6 +488,72 @@ import Testing
         }
         print("  [glm53 batched prefill vs per-token] greedy agreement over 6 decode steps: \(agreed)/6")
         #expect(agreed >= 5, "decode after a batched prefill diverged from the per-token path")
+    }
+
+    @Test func streamedPrefillMatchesResidentAcrossCutoverAndWarmAppends() async throws {
+        let h = try Self.makeHarness(maxContext: 384)
+        defer { h.cleanup() }
+        let resident = try Glm53Parity.loadModel(at: h.dir, device: h.ctx.device, mode: .resident)
+        let baseline = try Glm53ForwardRunner(model: resident, context: h.ctx, maxContext: 384)
+        let out = try #require(h.ctx.device.makeBuffer(length: h.config.vocabSize * 2, options: .storageModeShared))
+        #expect(!h.runner.expertsResident && baseline.expertsResident)
+        let source = try Glm53Goldens.promptTokens(.long).map { Int32($0) }
+        // Pool boundaries, below/across/above index_topk, multiple chunks,
+        // warm appends and a partial final chunk. Same chunking in both arms.
+        let tokens = (0..<301).map { source[$0 % source.count] }
+        var position = 0
+        for length in [3, 5, 33, 260] {
+            let slice = tokens[position..<(position + length)]
+            let streamed = try await h.runner.prefillChunked(tokens: slice, startPosition: position,
+                outputMode: .logits, config: .production(chunkTokens: 128), into: h.logits, onProgress: { _ in })
+            let full = try await baseline.prefillChunked(tokens: slice, startPosition: position,
+                outputMode: .logits, config: .production(chunkTokens: 128), into: out, onProgress: { _ in })
+            #expect(streamed.execution?.batchedTokens == length)
+            #expect(streamed.execution?.replayedTokens == 0)
+            #expect(streamed.execution == full.execution)
+            #expect(h.logitsRow() == Glm53ForwardRunner.readFP16(out, count: h.config.vocabSize))
+            position += length
+            try h.runner.prepareForContinuation(expectedPosition: position)
+            try baseline.prepareForContinuation(expectedPosition: position)
+        }
+        for offset in 0..<6 {
+            let token = Int32(Self.argmax(h.logitsRow()))
+            try await h.runner.produce(token: token, position: position + offset, into: h.logits)
+            try await baseline.produce(token: token, position: position + offset, into: out)
+            #expect(h.logitsRow() == Glm53ForwardRunner.readFP16(out, count: h.config.vocabSize),
+                    "state handoff at step \(offset)")
+        }
+    }
+
+    @Test func partialBatchedChunkRequiresResetAfterCancellation() async throws {
+        let h = try Self.makeHarness()
+        defer { h.cleanup() }
+        let tokens = try Glm53Goldens.promptTokens(.long).map { Int32($0) }
+        h.runner.prefillDidCompleteLayer = { layer in
+            if layer == 1 { throw CancellationError() }
+        }
+        do {
+            _ = try await h.runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+                outputMode: .logits, config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
+            Issue.record("expected injected mid-chunk cancellation")
+        } catch is CancellationError { }
+        #expect(throws: PrefillError.self) { try h.runner.prepareForContinuation(expectedPosition: 0) }
+        do {
+            try await h.runner.produce(token: tokens[0], position: 0, into: h.logits)
+            Issue.record("dirty state must not resume decode")
+        } catch let error as PrefillError {
+            guard case .chunkedRunnerDirty = error else { throw error }
+        }
+        h.runner.prefillDidCompleteLayer = nil
+        h.runner.reset()
+        let recovered = try await h.runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
+        let first = h.logitsRow()
+        #expect(recovered.execution?.batchedTokens == tokens.count)
+        h.runner.reset()
+        _ = try await h.runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: h.logits, onProgress: { _ in })
+        #expect(h.logitsRow() == first)
     }
 
     @Test func factoryDispatchesTheFamilyToItsRunner() throws {

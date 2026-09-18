@@ -39,8 +39,8 @@ and subsequent decode tokens never contribute to the prefill report.
 Counters are local to each completed prefill call, not cumulative runner
 statistics. Token-ordered recurrent operations *within* a layer-major batch do
 not count as full-model token-by-token replay. Chunk sizes describe execution,
-not an inference from the requested chunk size; GLM's resident engine currently
-uses its own capacity.
+not an inference from the requested chunk size. GLM honors the requested chunk
+size within its 256-row scratch capacity for resident and streamed experts.
 
 For example, the DeepSeek synthetic 60-token cutover regression reports:
 
@@ -54,7 +54,8 @@ Known reasons:
 
 - `prefill_disabled`: explicitly requested sequential prefill.
 - `inkling_reference_override`: Inkling's existing sequential reference override.
-- `glm_streamed_experts`: GLM's current streamed-expert fallback.
+- `glm_streamed_experts`: historical streamed-expert fallback; production GLM
+  now batches streamed experts and no longer emits this reason.
 - `glm_batched_prefill_disabled`, `glm_capture_reference`,
   `glm_dense_selection_reference`, `glm_batched_engine_unavailable`:
   other GLM eligibility/reference conditions.

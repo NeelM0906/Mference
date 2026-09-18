@@ -288,6 +288,45 @@ Release CLI after both fixes (commit `7e0821d`, `MFERENCE_PHASES=1`):
 Prefill at that commit was the per-token path (decode speed, ~22 tok/s);
 the batched prefill below replaced it.
 
+## Streamed-prefill implementation (2026-09-16)
+
+Production prefill now uses the layer-major engine for both resident and
+bounded streamed experts. Each selected expert is fetched once per chunk/layer,
+applied to all its routed rows, and completed before its cache slot can be
+reused. The final reduction keeps the resident path's routing-rank order.
+Scratch remains capped at 256 rows; the requested chunk size is now honored
+within that cap. An interrupted partial chunk requires reset before reuse.
+Explicit reference/capture controls still report their sequential replay.
+
+Synthetic validation on `3247c3d` plus this change: the 301-token streamed /
+resident comparison crosses pool and sparse-selection boundaries, uses warm
+appends and partial chunks, reports zero replay, and has bit-identical full
+logits at every append and six continuation steps. Fault injection after a
+partially executed layer verifies dirty-state rejection and deterministic reset.
+The existing resident / sequential comparison remains within its FP16 gate
+(maximum absolute logit difference 0.001953; 6/6 greedy steps agree).
+
+Host: Mac Studio Mac15,14, M3 Ultra (32 CPU cores), 256 GiB; macOS 26.3
+(25D125); Apple Swift 6.3.3 (`swiftlang-6.3.3.1.3`). Command:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh \
+  --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter Glm53ForwardRunnerTests
+```
+
+Exit 0; `Test run with 10 tests in 1 suite passed after 18.732 seconds.`
+The full serial suite used the same command without `--filter` on the same
+code (committed as `c36a517`): build `4.42s`, exit 0;
+`Test run with 1203 tests in 209 suites passed after 256.496 seconds with 1 known issue.`
+The known issue is the existing optional Flash-Next toy checkpoint not being
+present; real-install env-gated tests were not enabled.
+These are synthetic correctness tests, not community-protocol performance
+measurements. No completed GLM install was found in the current library, so
+real-checkpoint streamed qualification and new throughput/memory measurements
+remain outstanding. The measurements below are historical resident results,
+not evidence of streamed performance for this change.
+
 ## Batched prefill
 
 `Glm53PrefillEngine` walks a chunk of up to 256 prompt tokens layer by layer
