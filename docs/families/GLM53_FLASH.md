@@ -6,6 +6,16 @@ results for running
 with SSD-streamed (or, on a 256 GB host, fully page-cached) experts. This
 document is the architecture contract for the `glm53Flash` family.
 
+September 18 source-release update (PR #37): deterministic GPU sparse-pool
+selection replaces prefill score readback, and paired dense causal queries
+reuse latent rows. Synthetic selector and attention gates pass; qualification
+on the current real checkpoint is pending its approved resumable installation.
+The pinned text range plan reads 180,796,250,360 bytes and writes
+180,796,414,200 bytes, excluding the vision tower. These planned bytes are not
+a completed-install receipt. Historical measured results below do not validate
+the new kernels or bounded streamed performance. See
+[the dated validation record](../RELEASE_VALIDATION_2026-09-18.md).
+
 | | |
 |---|---|
 | Family identifier | `glm53Flash` (`ModelFamily.glm53Flash`), install label `glm53flash` |
@@ -450,18 +460,20 @@ token puts the memory-bandwidth floor near 15 ms.
   model that differ in accumulation order (see "Batched prefill"); greedy
   continuations can differ at near-ties. The per-token path remains
   available (`MFERENCE_GLM53_BATCHED_PREFILL=0`).
-- **256 GB-class hosts.** The family's runner is built for the whole expert
-  set resident in memory (`auto` picks `.resident` when pool + core + 20 GiB
-  fit physical memory); the slot-cache mode works on smaller hosts but reads
-  ~4.75 GB of experts per token through `pread` and is not what the measured
-  figures describe.
+- **256 GB-class resident target.** `auto` picks `.resident` when pool + core
+  + 48 GiB fit physical memory (32 GiB general reserve plus 16 GiB GLM runtime
+  reserve). The bounded slot-cache path also supports batched prefill, but
+  streamed expert reads and the unqualified smaller-hardware working set are
+  not what the historical resident measurements describe.
 - **Text-only.** The vision tower, image spans and video tokens are excluded;
   the chat template's image / video / audio markers are not rendered.
 - **No MTP.** The pinned conversion omits the multi-token-prediction layer;
   speculative decoding from it is deferred.
 - **Reasoning effort** defaults to `max` as the vendor template does; `low`
   and `high` are opt-in.
-- Untested on the real model: everything under "Measured results".
+- Current real-model qualification remains pending for the September 18 kernel
+  changes and bounded streamed path; dated historical measurements remain valid
+  only for the revisions and resident configurations they record.
 
 ## Reproduction
 

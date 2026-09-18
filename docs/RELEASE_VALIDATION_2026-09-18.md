@@ -280,6 +280,12 @@ Flash-Next toy fixture is the known issue. GLM installation ran concurrently;
 no speed result is inferred from test duration. Its resumed release installer
 now visibly reports saved bytes separately from bytes downloaded this run.
 
+CI run `35366071136` on `ee0bfb9` also completed successfully: release builds,
+serial tests and launcher/adapter checks on both macOS 15 / Swift 6.1 and
+macOS 26, plus the docs/source-archive job. This is the result after correcting
+the test-only Sendable compile failure in run `35364757262`, not a suppression
+of that failure. Later revisions require their own final checks.
+
 An additional CLI notice explains an empty token-limit truncation and the
 available budget/Swift effort controls, without modifying generated content,
 sampling, exit status or the existing timing footer. Its focused verification:
@@ -290,6 +296,181 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --s
 
 Exit 0; build `6.99s`; `Test run with 34 tests in 2 suites passed after 0.004 seconds.`
 Log: `/tmp/mference-release-cli-notice.log`.
+
+### Final-build diagnostics and browser-origin checks
+
+Release CLI and server at `c9c3378` were built with the product commands above,
+exit 0 each:
+
+```text
+Build of product 'MferenceCLI' complete! (58.44s)
+Build of product 'MferenceServer' complete! (5.80s)
+```
+
+CI run `35368664968` on `c9c3378` completed successfully on both macOS 15 /
+Swift 6.1 and macOS 26, including release builds, serial tests, launcher/adapter
+checks and docs/source-archive checks. Later recovery changes are not covered
+by that earlier commit's CI result.
+
+A single loopback server was then started for **correctness diagnostics**, not
+performance (the approved GLM installer was running concurrently):
+
+```bash
+env MFERENCE_MTP=0 /tmp/mference-phase1-build.sXnNTs/release/MferenceServer --model scratch/swiftqwen38.gturbo --port 18489 --max-context 4096 --prompt-cache-mode off
+```
+
+The frozen short-explanation messages were submitted to
+`http://127.0.0.1:18489/v1/chat/completions`, non-streaming, with model
+`swift-qwen3.8-27b-int4g64`, `max_completion_tokens=1024`, temperature 0.2,
+top-k 64, top-p 0.95 and seed 20260721. Default effort, explicit `medium`, then
+explicit `low` were diagnostic follow-ups, **not** a replacement community
+benchmark or a new task-screen protocol. Each HTTP command exited 0:
+
+| Effort | Prompt tokens | Completion tokens | Reasoning payload | Visible payload | Finish |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Default (`xhigh`) | 102 | 1024 | 1024 | 0 | length |
+| medium | 60 | 1024 | 1024 | 0 | length |
+| low | 90 | 847 | 248 | 597 | stop |
+
+The default response contained coherent internal drafting and word counting,
+not a hidden completed answer lost by the decoder. Low produced a visible
+answer, but this one response is not a quality evaluation or reason to promote
+a new default. Marker/EOS tokens explain why payload counts need not sum to
+completion tokens. Complete server request footers:
+
+```text
+[2026-09-18T16:15:24Z] request chatcmpl-d923c46299f54bd58c52917de6863717 completed in 31.4s prompt=102 cached=0 completion=1024 finish=length
+[2026-09-18T16:17:04Z] request chatcmpl-52d7d8f0e2554ddfacec2c61050c88b9 completed in 29.2s prompt=60 cached=0 completion=1024 finish=length
+[2026-09-18T16:17:29Z] request chatcmpl-85857e831e3845e89b4de8c116f089a5 completed in 24.8s prompt=90 cached=0 completion=847 finish=stop
+```
+
+Responses: `/tmp/mference-release-swift-reasoning-diagnostic.json`,
+`/tmp/mference-release-swift-reasoning-medium.json`, and
+`/tmp/mference-release-swift-reasoning-low.json`. Startup/request log:
+`/tmp/mference-release-reasoning-diagnostic-server.log`.
+
+Pinned Open WebUI 0.11.3 was started manually using the launcher's loopback
+environment, existing isolated test data and secret, and this same model server.
+This is a live CORS component check, not another full launcher/browser run.
+Health returned `{"status":true}`. The following OPTIONS request was repeated
+with origins `http://127.0.0.1:18490`, `http://localhost:18490`, and
+`https://untrusted.example`:
+
+```bash
+curl -sS --max-time 10 -X OPTIONS -H 'Origin: http://127.0.0.1:18490' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' -D - -o /dev/null http://127.0.0.1:18490/api/config
+```
+
+All curl commands exited 0. Both allowed origins returned HTTP 200 and their
+exact `Access-Control-Allow-Origin`; the foreign origin returned HTTP 400 with
+no allow-origin header. UI log:
+`/tmp/mference-release-ui.4sDPjh/cors-verification.log`. Only these task-owned UI
+and server processes were stopped; their absence was confirmed before the next
+model run. Existing chats and the test database were retained.
+
+### Recovery across dense, paged, spilled and Inkling state
+
+Source committed as `7505e82`; same hardware/toolchain/build path as above.
+Before model owners: matching-process check empty, memory-free check 97%,
+disk 717–721 GiB, completed existing Inkling install. GLM range installation
+ran concurrently; these are correctness checks, **not throughput timings**.
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter 'Qwen38BlockedPrefillTests|Qwen38ForwardRunnerTests|MiniCPM5ForwardRunnerTests|InklingPrefillRecoveryTests'
+```
+
+Exit 0, build `17.01s`;
+`Test run with 22 tests in 4 suites passed after 3.606 seconds.`
+Log: `/tmp/mference-release-recovery-expanded.log`. Inkling's env gate was
+unset in this first command: its near-zero duration is a skip, not real-model
+evidence. Qwen and MiniCPM each exercise dense, paged and five-page spilled KV:
+a 400-token warm prefix, cancellation during a 33-token append after GPU state
+writes, rejection of dirty continuation/decode, reset and exact reproduction
+of the full prefix and next logits. This is a fixture state/recovery gate, not
+smaller-Mac qualification or every sparse-page-budget combination.
+
+Then the installed Inkling gate was explicitly enabled, with no other model
+owner:
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer MFERENCE_INKLING_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/inklingsmall.gturbo Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter InklingPrefillRecoveryTests
+```
+
+Source `pipenetwork/Inkling-Small-MLX-4bit`, receipt revision
+`9d6e4720ab7002af25d6129c88ccea6cd9f19372`; manifest SHA-256
+`61fdbed85a221652b229a476561cd60dd65a6c0b3b437eec0acc6e123865a58b`.
+Strict verification, 16 expert slots, context 128, chunk 32; no weight copies
+or downloads for this test. Exit 0; complete result:
+
+```text
+Build complete! (1.50s)
+[inkling recovery] strict verification; slots=16; warm=33; cancelled append=32; reset and next full-logit rows exact
+Test cancelledWarmAppendResetsKVAndConvolutions() passed after 80.243 seconds.
+Suite InklingPrefillRecoveryTests passed after 80.243 seconds.
+Test run with 1 test in 1 suite passed after 80.243 seconds.
+```
+
+Log: `/tmp/mference-release-inkling-recovery.log`. The test cancels the actual
+task before layer 3, after both dense layers and the first routed layer have
+completed their KV/convolution/expert work. Production now checks cancellation
+between chunks, layers and expert groups; existing in-flight expert cleanup
+drains before reset. It does not add production GPU waits or alter arithmetic.
+Qwen's nil test hook likewise preserves production command-buffer batching.
+
+The complete serial suite on `7505e82` then passed:
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs
+```
+
+Exit 0; complete completion lines:
+
+```text
+Build complete! (1.51s)
+Test run with 1244 tests in 222 suites passed after 281.137 seconds with 1 known issue.
+```
+
+Log: `/tmp/mference-release-full-suite-v4.log`. The known issue is still the
+absent optional Flash-Next toy checkpoint. Installed gates were unset in this
+ordinary suite; their separate executions above remain the model evidence.
+
+Release CLI and server were rebuilt on the same `7505e82` source using the
+product-specific commands above, exit 0 each. The running installer binary was
+not relinked or replaced:
+
+```text
+Build of product 'MferenceCLI' complete! (57.86s)
+Build of product 'MferenceServer' complete! (6.64s)
+```
+
+Finally, the installed Swift numerical/state/MTP command recorded above was
+repeated on `7505e82`, with `MFERENCE_MTP=1` and unchanged tolerances. Exit 0:
+
+```text
+Build complete! (1.47s)
+Test prefillAppendAndSpeculativeContinuation() passed after 77.826 seconds.
+Suite SwiftQwenInstalledQualificationTests passed after 77.826 seconds.
+Test run with 1 test in 1 suite passed after 77.826 seconds.
+```
+
+All three head errors remain exactly the values recorded for `ee0bfb9`;
+top-1/continuation checks and all 20 zero-mismatch MTP state probes pass.
+Log: `/tmp/mference-release-swift-recovery-qualified.log`. Preflight had no
+other model owner, 97% memory free and 709 GiB disk. GLM download was active,
+so this is correctness evidence only. No server or UI remained running after
+these tests; the approved resumable GLM installer continued separately.
+
+Launcher shell syntax and Python checks passed again (8 launcher, 5 adapter,
+3 legacy screen and 7 release-screen tests), exit 0. The adapter suite's printed
+version-mismatch usage error is the expected negative fixture. Markdown links
+passed for 69 files; tracked source archive inspection passed 826 entries, with
+no weights, build output or the user-owned untracked execution plan included.
+
+The four-row Swift release comparison at `c9c3378` completed separately before
+these tests: prefill median time reductions of 10.2%, 17.5% and 18.5% against
+the first exact-arithmetic fix. All 24 attempts still truncated without visible
+output, so none is an accepted completed-answer benchmark. Full commands,
+provenance, all footers and limitations are in
+[the performance record](RELEASE_PERFORMANCE_2026-09-18.md).
 
 ### Open gates
 

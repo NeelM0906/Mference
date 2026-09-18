@@ -17,15 +17,15 @@ execution. Resident and larger-budget configurations keep their existing width.
 | Family / path | Production-dispatch evidence | Limits |
 | --- | --- | --- |
 | Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, mid-append cancellation/dirty rejection/reset and decode handoff | Small loader fixture; execution/state reproducibility, not independent model-quality parity |
-| Qwen 3.6, bounded / resident experts | Same matrix (including actual mid-layer cancellation) plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
-| Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts alongside existing numerical/continuation checks | Installed fine-tunes need their own numerical gate |
-| Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` passes the installed numerical retest without changing tolerances | Candidate only; broader quality/latency/hardware evidence required before default promotion |
+| Qwen 3.6, bounded / resident experts | Same matrix (including actual task cancellation between layers of a warm append) plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
+| Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts and numerical/continuation checks; `7505e82` adds actual cancellation after GPU writes in all three backends, dirty rejection and exact reset/next logits | Installed fine-tunes need their own numerical gate; fixture recovery is not physical low-RAM qualification |
+| Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` and four-row tiled `ee0bfb9` pass the installed numerical/state/MTP retest without changing tolerances | Candidate only; default-effort community attempts truncate without visible answers; broader quality/latency/hardware evidence required before promotion |
 | Flash-Next, bounded / resident | `FlashNextChunkedPrefillTests`: exact logits/state, warm appends, cancellation/reset, six continuation rows and zero replay; `31f0067` installed INT8-router short gate passes both memory modes | Real long-context/TensorOps-sized chunks and wider hardware evidence remain separate |
 | GLM, bounded / resident | PR #34: cutover/warm-appends/partial-chunks matrix, exact streamed/resident logits and cancellation/reset; `4120744` adds an opt-in installed gate | Completed local install absent; user-approved range installation is underway, real gate still unexecuted |
 | DeepSeek, bounded / resident | Phase 4 PR #35: below/across/above sparse cutover, cache slots 8/16/resident, exact state and cancellation/reset; opt-in installed gate | Installed results and limitations live in `DEEPSEEK_V4_FLASH.md` |
-| MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts alongside existing golden/continuation checks; ordinary-KV mid-layer cancellation/reset added in `ee0bfb9` | Cancellation test does not yet cover every paged/spilled combination; no new hardware recommendation |
-| Maple | `MapleForwardRunnerTests` asserts batched execution, continuation logits and mid-layer failure/dirty rejection/reset | Existing sparse/zero fixture does not replace a broad installed-model gate |
-| Inkling | `InklingGenerationRegressionTests.shortExplanationHasNoExclamationBurst` asserts actual batched prefill and zero replay; real short regression passed on the host below | Env-gated, not run by ordinary CI; a small full-runner fixture and wider boundary matrix remain needed |
+| MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts and golden/continuation checks; `7505e82` exercises actual warm-append cancellation/reset in all three backends and compares exact next logits | Representative full-selection/5-page-spill fixture; not every sparse budget/context or new hardware qualification |
+| Maple | `MapleForwardRunnerTests` asserts batched execution, continuation logits and failure between layers/dirty rejection/reset | Existing sparse/zero fixture does not replace a broad installed-model gate |
+| Inkling | Real short generation regression plus `7505e82` installed 16-slot cancellation after routed-layer GPU writes: dirty rejection, zero replay and exact reset/next full-logit rows | Env-gated, not run by ordinary CI; a small full-runner fixture and wider resident/window-boundary matrix remain needed |
 
 PRs #33–36 merged into `main` on September 18 (`c67e857`). New source-release
 work is in PR #37. The all-family invariant remains **not fully qualified**
@@ -47,9 +47,11 @@ rename host-side full-model replay as batching.
   explicit. A green ordinary CI run does not execute env-gated real-model tests.
 - Phase 6: Flash-Next/GLM optimization and matched performance experiments are
   not complete. No unmeasured speedup or default change is claimed.
-- Phase 7: the Phase 2 frozen 12-task screen and UI checks are an initial
-  screen, not the final warmup-plus-three-run comparison, broad quality claim,
-  or support table for hardware not tested here.
+- Phase 7: real UI streaming, tool loops, history, cancellation and model-switch
+  recovery have been tested; a [support table](RELEASE_SUPPORT.md) distinguishes
+  established paths from candidates. The separately frozen 60-case screen is
+  not yet executed. Neither the earlier 12-task screen nor these UI checks is
+  a broad quality claim or support evidence for hardware not tested here.
 
 The missing GLM installation and untested smaller-memory hardware are external
 qualification requirements. Kernel optimizations must pass correctness and
