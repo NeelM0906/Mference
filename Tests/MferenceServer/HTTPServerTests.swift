@@ -39,7 +39,8 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
             content: "hello",
             toolCalls: [],
             finishReason: "stop",
-            usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4),
+            usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4,
+                               completionTokensDetails: .init(reasoningTokens: 0, visibleTokens: 1)),
             diagnostics: diagnostics)
         completion.reasoningContent = usesSwiftQwenTemplate ? "Check first." : nil
         return completion
@@ -241,13 +242,16 @@ struct HTTPServerTests {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = Data("""
-        {"model":"custom-alias","reasoning_effort":"low","messages":[{"role":"user","content":"Hi"}],"stream":\(stream)}
+        {"model":"custom-alias","reasoning_effort":"low","messages":[{"role":"user","content":"Hi"}],"stream":\(stream),"stream_options":{"include_usage":true}}
         """.utf8)
         let (data, response) = try await URLSession.shared.data(for: request)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         let text = String(decoding: data, as: UTF8.self)
         #expect(text.contains(#""reasoning_content":"Check first.""#))
         #expect(text.contains(#""content":"hello""#))
+        #expect(text.contains(#""completion_tokens_details""#))
+        #expect(text.contains(#""visible_tokens":1"#))
+        #expect(text.contains(#""reasoning_tokens":0"#))
         if stream { #expect(text.hasSuffix("data: [DONE]\n\n")) }
         try await server.shutdown()
     }

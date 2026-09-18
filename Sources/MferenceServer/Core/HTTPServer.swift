@@ -712,7 +712,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
 
     private func usageObject(_ usage: OpenAIUsage) -> [String: Any] {
-        [
+        var object: [String: Any] = [
             "prompt_tokens": usage.promptTokens,
             "completion_tokens": usage.completionTokens,
             "total_tokens": usage.totalTokens,
@@ -720,6 +720,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 "cached_tokens": usage.promptTokensDetails.cachedTokens,
             ],
         ]
+        if let details = usage.completionTokensDetails {
+            var values: [String: Any] = ["reasoning_tokens": details.reasoningTokens]
+            if let visible = details.visibleTokens { values["visible_tokens"] = visible }
+            object["completion_tokens_details"] = values
+        }
+        return object
     }
 
     private func toolCallObject(_ call: ParsedToolCall) -> [String: Any] {

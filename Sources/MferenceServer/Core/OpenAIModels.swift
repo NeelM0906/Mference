@@ -178,6 +178,20 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
 }
 
 public struct OpenAIUsage: Codable, Equatable, Sendable {
+    public struct CompletionTokensDetails: Codable, Equatable, Sendable {
+        public let reasoningTokens: Int
+        public let visibleTokens: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case reasoningTokens = "reasoning_tokens"
+            case visibleTokens = "visible_tokens"
+        }
+
+        public init(reasoningTokens: Int, visibleTokens: Int?) {
+            self.reasoningTokens = reasoningTokens
+            self.visibleTokens = visibleTokens
+        }
+    }
     public struct PromptTokensDetails: Codable, Equatable, Sendable {
         public let cachedTokens: Int
 
@@ -194,22 +208,26 @@ public struct OpenAIUsage: Codable, Equatable, Sendable {
     public let completionTokens: Int
     public let totalTokens: Int
     public let promptTokensDetails: PromptTokensDetails
+    public let completionTokensDetails: CompletionTokensDetails?
 
     enum CodingKeys: String, CodingKey {
         case promptTokens = "prompt_tokens"
         case completionTokens = "completion_tokens"
         case totalTokens = "total_tokens"
         case promptTokensDetails = "prompt_tokens_details"
+        case completionTokensDetails = "completion_tokens_details"
     }
 
     public init(promptTokens: Int,
                 completionTokens: Int,
                 totalTokens: Int,
-                cachedTokens: Int = 0) {
+                cachedTokens: Int = 0,
+                completionTokensDetails: CompletionTokensDetails? = nil) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.totalTokens = totalTokens
         self.promptTokensDetails = PromptTokensDetails(cachedTokens: cachedTokens)
+        self.completionTokensDetails = completionTokensDetails
     }
 }
 

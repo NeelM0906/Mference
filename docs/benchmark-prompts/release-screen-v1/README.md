@@ -27,6 +27,13 @@ any corpus correction requires a new protocol version and complete rerun.
   and visible token counts where the server explicitly reports them. Missing
   counts are null, not zero or character-based estimates. A tool-only answer
   has no first-visible-text time. Failed/truncated requests are not fast wins.
+  Payload counts exclude channel delimiters, tool payloads and EOS, so visible
+  tokens must not be inferred by subtracting reasoning from total completion.
+  Counts describe generated channel tokens (including whitespace/buffered bytes),
+  not a re-tokenization of the displayed answer. A string-stop-filtered response
+  omits visible counts because the cutoff can fall inside a token. Base-Qwen
+  hidden reasoning is not streamed, so its first emitted delta is not its first
+  generated token; do not compare that metric as raw model TTFT.
 - Latency summaries must distinguish all requests from successful requests;
   report median/range across the three repeats, not the best repeat.
 

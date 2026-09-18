@@ -385,7 +385,9 @@ public actor ServerModelSession: ServerLoadedModel {
 
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
-        let decoder = tokenizer.isSwiftQwen || needsToolTemplate || startsInThinking
+        let countsPayloadTokens = tokenizer.dialect == .chatml
+            || tokenizer.dialect == .glm5 || tokenizer.dialect == .minicpm
+        let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),
@@ -515,7 +517,11 @@ public actor ServerModelSession: ServerLoadedModel {
             usage: OpenAIUsage(promptTokens: result.prefillTokens,
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
-                               cachedTokens: result.cachedPromptTokens),
+                               cachedTokens: result.cachedPromptTokens,
+                               completionTokensDetails: decoder?.payloadTokenCounts.map {
+                                   .init(reasoningTokens: $0.reasoning,
+                                         visibleTokens: stopMatcher.isStopped ? nil : $0.visible)
+                               }),
             diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
                 result: result,
                 memory: .capture(model: model, producer: runner, scratch: scratch)) : nil)

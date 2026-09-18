@@ -222,6 +222,16 @@ Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream": true` for streaming. Set
 `"stream_options": {"include_usage": true}` to receive a final usage chunk.
 
+For ChatML (including base/Swift Qwen), GLM and MiniCPM, usage also includes
+`completion_tokens_details.reasoning_tokens` and the Mference extension
+`visible_tokens`. These count generated payload tokens in each channel,
+including whitespace and buffered byte tokens, not re-tokenized rendered text.
+They exclude channel markers, tool payloads and EOS; their sum need not equal
+`completion_tokens`. Visible counts are omitted when a string stop trims an
+answer inside a token. Unsupported dialects omit the details object rather
+than reporting invented zeros. Reasoning token accounting does not imply that
+every checkpoint streams its hidden reasoning text.
+
 Requests may contain system, developer, user, assistant, and tool messages.
 Guidance must precede the conversation, and consecutive messages of the same
 guidance role are merged into one block separated by a blank line. Only

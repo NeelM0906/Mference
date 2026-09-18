@@ -165,6 +165,38 @@ interactive activity, not a comparative performance protocol. Logs/screenshots:
 
 ## Remaining release gates
 
+### Subsequent regression results
+
+On `fa07319`, the same full-suite command above exited 0:
+
+```text
+Test run with 1236 tests in 221 suites passed after 280.945 seconds with 1 known issue.
+```
+
+Log: `/tmp/mference-release-full-suite-v2.log`. The known issue and installed
+test-gate limitations are unchanged. This includes the GLM deterministic GPU
+selection and paired-query attention checks, plus installer-progress tests.
+The targeted GLM checks on the preceding change also passed:
+
+```text
+Test run with 12 tests in 3 suites passed after 20.808 seconds.
+```
+
+These synthetic attention checks include bit-exact paired/unpaired FP16 output,
+odd chunks, nonzero append positions, production head geometry and output
+guards. Selector checks cover stable ties, complete-pool expansion and tails.
+Log: `/tmp/mference-release-glm-paired-attention.log`. Real GLM remains pending.
+
+Payload token accounting was then added for ChatML/GLM/MiniCPM, separately from
+total completion usage. An initial new test used malformed tool syntax and
+failed; after correcting its fixture to the dialect's newline-delimited form,
+the focused decoder/HTTP suites passed (55 tests / 6 suites, 3.052s, exit 0;
+`/tmp/mference-release-token-accounting-v2.log`). Seven Python screen tests
+also passed. Visible counts are read explicitly, never inferred by subtracting
+reasoning from completion (which would incorrectly include EOS/tool markers).
+
+### Open gates
+
 - Finish GLM install and execute its installed cutover/continuation/recovery gate.
 - Qualify and measure optimizations on matched release builds before speed claims.
 - Execute the separately frozen [60-case screen](benchmark-prompts/release-screen-v1/README.md).

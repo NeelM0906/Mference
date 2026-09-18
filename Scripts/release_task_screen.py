@@ -112,9 +112,7 @@ def read_stream(reply, started, clock=time.monotonic):
     reasoning_tokens = details.get("reasoning_tokens")
     completion_tokens = (usage or {}).get("completion_tokens")
     # Do not estimate token counts from characters or silently call missing data zero.
-    visible_tokens = None
-    if not calls and reasoning_tokens is not None and completion_tokens is not None:
-        visible_tokens = completion_tokens - reasoning_tokens
+    visible_tokens = details.get("visible_tokens")
     return response, {"first_model_delta_seconds": first_delta,
                       "first_visible_answer_seconds": first_visible,
                       "completed_seconds": clock() - started,

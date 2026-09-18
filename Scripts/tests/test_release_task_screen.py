@@ -51,7 +51,7 @@ class ReleaseScreenTests(unittest.TestCase):
         events = [delta({"role": "assistant"}), delta({"reasoning_content": "think"}),
                   delta({"content": "4"}), delta({}, "stop"),
                   {"choices": [], "usage": {"completion_tokens": 7,
-                    "completion_tokens_details": {"reasoning_tokens": 6}}}]
+                    "completion_tokens_details": {"reasoning_tokens": 6, "visible_tokens": 1}}}]
         times = iter([1, 2, 3, 4, 5])
         result, metrics = screen.read_stream(stream(events), 0, lambda: next(times))
         self.assertEqual(result["choices"][0]["message"]["content"], "4")
@@ -60,6 +60,13 @@ class ReleaseScreenTests(unittest.TestCase):
         self.assertEqual(metrics["completed_seconds"], 5)
         self.assertEqual(metrics["visible_tokens"], 1)
         self.assertEqual(metrics["reasoning_tokens"], 6)
+
+    def test_visible_tokens_are_not_completion_minus_reasoning(self):
+        events = [delta({"content": "4"}, "stop"),
+                  {"choices": [], "usage": {"completion_tokens": 7,
+                    "completion_tokens_details": {"reasoning_tokens": 3}}}]
+        _, metrics = screen.read_stream(stream(events), 0, lambda: 1)
+        self.assertIsNone(metrics["visible_tokens"])
 
     def test_fragmented_tool_call_and_missing_usage(self):
         events = [delta({"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "add", "arguments": '{"a":'}}]}),
