@@ -102,7 +102,7 @@ public func run(args: Args,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: args.reasoningEffort, promptIDs: promptIds)
-        let decoder = args.messagesFile != nil && (tokenizer.isSwiftQwen || startsInThinking)
+        let decoder = args.messagesFile != nil && (tokenizer.usesSourceQwenTemplate(reasoningEffort: args.reasoningEffort) || startsInThinking)
             ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                          allowedTools: [],
                                          startsInThought: startsInThinking)
@@ -564,12 +564,12 @@ private func streamChatTurn(promptIds: [Int32],
     var reasoning = ""
     let startsInThinking = tokenizer.startsInThinking(
         reasoningEffort: reasoningEffort, promptIDs: promptIds)
-    let decoder = tokenizer.isSwiftQwen || startsInThinking
+    let decoder = tokenizer.usesSourceQwenTemplate(reasoningEffort: reasoningEffort) || startsInThinking
         ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                      allowedTools: [],
                                      startsInThought: startsInThinking)
         : nil
-    if tokenizer.isSwiftQwen {
+    if tokenizer.usesSourceQwenTemplate(reasoningEffort: reasoningEffort) {
         decoder?.onReasoning = { reasoning += $0 }
     }
     var completionConfig = config

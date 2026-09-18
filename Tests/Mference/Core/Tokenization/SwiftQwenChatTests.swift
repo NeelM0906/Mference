@@ -59,6 +59,7 @@ struct SwiftQwenChatTests {
     @Test func rendersMatchIndependentJinjaOracle() async throws {
         struct Oracle: Decodable { let name: String; let effort: String; let render: String }
         let tok = try await tokenizer()
+        let base = try tok.forCheckpoint(CheckpointIdentity.baseQwen38)
         let url = try #require(Bundle.module.url(forResource: "oracle", withExtension: "json",
                                                subdirectory: "Fixtures/SwiftQwenTemplate"))
         let cases = try JSONDecoder().decode([Oracle].self, from: Data(contentsOf: url))
@@ -68,6 +69,7 @@ struct SwiftQwenChatTests {
             #expect(tok.decode(ids, skipSpecialTokens: false) == item.render,
                     "\(item.name)/\(item.effort)")
             #expect(ids == tok.encode(item.render, addBOS: false))
+            #expect(try base.encodeChat(messages: messages(item.name), reasoningEffort: effort) == ids)
             #expect(tok.startsInThinking(reasoningEffort: effort) == (effort != .off))
         }
         #expect(try tok.encodeChat(messages: messages("single")) ==
@@ -96,10 +98,41 @@ struct SwiftQwenChatTests {
         let base = try tok.forCheckpoint("qwen3.8-27b-4bit")
         #expect(!base.isSwiftQwen)
         #expect(tok.isSwiftQwen)
+        #expect(base.supportsQwenReasoningEffort)
+        #expect(try base.encodeChat(messages: messages("single"), reasoningEffort: .low) ==
+            tok.encodeChat(messages: messages("single"), reasoningEffort: .low))
+        let other = try tok.forCheckpoint("qwen3.6-35b-a3b")
+        #expect(!other.supportsQwenReasoningEffort)
         #expect(throws: MFTokenizerError.self) {
-            try base.encodeChat(messages: messages("single"), reasoningEffort: .low)
+            try other.encodeChat(messages: messages("single"), reasoningEffort: .low)
         }
         #expect(throws: (any Error).self) { try tok.encodeChat(messages: []) }
+    }
+
+    @Test func matchedToolsAndBaseLegacyDefaults() async throws {
+        let swift = try await tokenizer()
+        let base = try swift.forCheckpoint(CheckpointIdentity.baseQwen38)
+        let input = messages("single")
+        let legacy = try base.encodeChat(messages: input)
+        #expect(base.decode(legacy, skipSpecialTokens: false) == "<|im_start|>user\n Hi <|im_end|>\n<|im_start|>assistant\n<think>\n")
+        let tools: [MFTokenizer.FunctionDefinition] = [.init(name: "lookup", description: "Lookup",
+            parameters: .object(["type": .string("object"), "properties": .object([
+                "query": .object(["type": .string("string")])])]))]
+        for effort in QwenReasoningEffort.allCases {
+            for name in ["single", "history", "tool_result"] {
+                let actual = try base.encodeChat(messages: messages(name), tools: tools, reasoningEffort: effort)
+                let expected = try swift.encodeChat(messages: messages(name), tools: tools, reasoningEffort: effort)
+                #expect(actual == expected)
+                #expect(base.startsInThinking(reasoningEffort: effort, promptIDs: actual) == (effort != .off))
+            }
+            #expect(throws: MFTokenizerError.self) {
+                try base.encodeChat(messages: [.init(role: .developer, content: "Guide"),
+                    .init(role: .user, content: "Hi")], reasoningEffort: effort)
+            }
+        }
+        #expect(try base.encodeChat(messages: input) == legacy)
+        #expect(base.decode(try base.encodeChat(messages: input, tools: tools), skipSpecialTokens: false)
+            .hasSuffix("<think>\n\n</think>\n\n"))
     }
 
     @Test func toolHistorySuffixDoesNotHideBaseQwenVisibleAnswer() async throws {

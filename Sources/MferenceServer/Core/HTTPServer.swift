@@ -251,7 +251,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
             let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
                                                               dialect: chatDialect,
-                                                              swiftQwen: backend.usesSwiftQwenTemplate)
+                                                              swiftQwen: backend.usesSwiftQwenTemplate,
+                                                              qwenReasoning: backend.supportsQwenReasoningEffort)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -418,7 +419,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             decoded,
                             modelID: resolved.modelID,
                             dialect: resolved.backend.chatDialect,
-                            swiftQwen: resolved.backend.usesSwiftQwenTemplate)
+                            swiftQwen: resolved.backend.usesSwiftQwenTemplate,
+                            qwenReasoning: resolved.backend.supportsQwenReasoningEffort)
                         let prepared = try await resolved.backend.prepare(request)
                         startStream()
                         let completion = try await resolved.backend

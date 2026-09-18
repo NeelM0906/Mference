@@ -7,11 +7,14 @@ import Testing
 
 private actor ScriptedServerBackend: ServerInferenceBackend {
     nonisolated let usesSwiftQwenTemplate: Bool
+    nonisolated let supportsQwenReasoningEffort: Bool
     let delayNanoseconds: UInt64
     let diagnostics: RuntimeDiagnostics?
 
-    init(delayNanoseconds: UInt64 = 0, includeDiagnostics: Bool = false, includeReasoning: Bool = false) {
-        self.usesSwiftQwenTemplate = includeReasoning
+    init(delayNanoseconds: UInt64 = 0, includeDiagnostics: Bool = false, includeReasoning: Bool = false,
+         baseQwen: Bool = false) {
+        self.usesSwiftQwenTemplate = includeReasoning && !baseQwen
+        self.supportsQwenReasoningEffort = includeReasoning
         self.delayNanoseconds = delayNanoseconds
         if includeDiagnostics {
             let result = RawDecodeResult(
@@ -33,7 +36,7 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
         if delayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: delayNanoseconds)
         }
-        if usesSwiftQwenTemplate { onEvent(.reasoning("Check first.")) }
+        if supportsQwenReasoningEffort { onEvent(.reasoning("Check first.")) }
         onEvent(.content("hello"))
         var completion = ServerCompletion(
             content: "hello",
@@ -42,7 +45,7 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
             usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4,
                                completionTokensDetails: .init(reasoningTokens: 0, visibleTokens: 1)),
             diagnostics: diagnostics)
-        completion.reasoningContent = usesSwiftQwenTemplate ? "Check first." : nil
+        completion.reasoningContent = supportsQwenReasoningEffort ? "Check first." : nil
         return completion
     }
 }
@@ -232,10 +235,10 @@ private actor CancellableServerBackend: ServerInferenceBackend {
 
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
-    @Test(arguments: [false, true])
-    func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool) async throws {
+    @Test(arguments: [false, true], [false, true])
+    func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool, base: Bool) async throws {
         let server = MferenceHTTPServer(modelID: "custom-alias", queueLimit: 1,
-                                        backend: ScriptedServerBackend(includeReasoning: true))
+                                        backend: ScriptedServerBackend(includeReasoning: true, baseQwen: base))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)

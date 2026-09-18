@@ -1,6 +1,6 @@
 import Foundation
 
-/// The pinned Swift-Qwen template's request-level choices. "none" closes the
+/// The pinned Qwen 3.8 template's request-level choices. "none" closes the
 /// thinking block; medium deliberately adds no effort instruction.
 public enum QwenReasoningEffort: String, Codable, Sendable, CaseIterable {
     case xhigh, medium, low
@@ -12,10 +12,19 @@ extension MFTokenizer {
     public func forCheckpoint(_ modelID: String) throws -> Self {
         var value = self
         value.isSwiftQwen = modelID == CheckpointIdentity.swiftQwen38
-        if value.isSwiftQwen, value.dialect != .chatml {
-            throw MFTokenizerError.unsupportedForDialect("Swift-Qwen requires ChatML")
+        value.isBaseQwen38 = modelID == CheckpointIdentity.baseQwen38
+        if value.supportsQwenReasoningEffort, value.dialect != .chatml {
+            throw MFTokenizerError.unsupportedForDialect("Qwen 3.8 requires ChatML")
         }
         return value
+    }
+
+    public var supportsQwenReasoningEffort: Bool { isSwiftQwen || isBaseQwen38 }
+
+    /// Swift always uses its source template. Base Qwen opts into that same
+    /// contract only with an explicit effort; omitted effort keeps legacy behavior.
+    public func usesSourceQwenTemplate(reasoningEffort: QwenReasoningEffort?) -> Bool {
+        isSwiftQwen || (isBaseQwen38 && reasoningEffort != nil)
     }
 
     public func startsInThinking(reasoningEffort: QwenReasoningEffort?,
@@ -34,26 +43,27 @@ extension MFTokenizer {
                     .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
             }
         }
-        return isSwiftQwen ? reasoningEffort != .off : generationPromptStartsInThinking
+        return usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
+            ? reasoningEffort != .off : generationPromptStartsInThinking
     }
 
     /// Uses the installed source template for both ordinary and tool chat.
     /// No hand-written framing or forced thinking-off path for Swift-Qwen.
     public func encodeChat(messages: [Message], tools: [FunctionDefinition] = [],
                            reasoningEffort: QwenReasoningEffort? = nil) throws -> [Int32] {
-        if isSwiftQwen {
+        if usesSourceQwenTemplate(reasoningEffort: reasoningEffort) {
             // The source rejects developer turns. Do not silently rewrite their
             // role or discard their instructions.
             guard !messages.contains(where: { $0.role == .developer }) else {
                 throw MFTokenizerError.invalidChatTemplate(
-                    "Swift-Qwen's pinned template does not accept developer messages; use a leading system message")
+                    "Qwen 3.8's source template does not accept developer messages; use a leading system message")
             }
             return try encodeToolChat(messages: messages, tools: tools,
                                       reasoningEffort: reasoningEffort)
         }
         guard reasoningEffort == nil else {
             throw MFTokenizerError.unsupportedForDialect(
-                "reasoning_effort is currently supported only for Swift-Qwen")
+                "reasoning_effort requires base or Swift Qwen 3.8")
         }
         if !tools.isEmpty || messages.contains(where: {
             $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
