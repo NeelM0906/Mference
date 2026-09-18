@@ -18,6 +18,7 @@
 
 <p align="center">
   <a href="#try-it">Quick start</a> ·
+  <a href="docs/RELEASE_SUPPORT.md">Checkpoint choices & limits</a> ·
   <a href="docs/OPENAI_SERVER.md">Local server</a> ·
   <a href="docs/OPEN_WEBUI.md">The UI</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
@@ -158,7 +159,7 @@ troubleshooting are in [docs/OPEN_WEBUI.md](docs/OPEN_WEBUI.md).
 
 Install more families the same way (`./mference-ui.sh install qwen36`,
 `maple`, `qwen38`, `deepseekv4flash`, `inklingsmall`, `qwen38flashnext`,
-`minicpm5`),
+`minicpm5`, `glm53flash`),
 and they appear in the model picker. `./mference-ui.sh models` shows what the
 server would expose without loading anything.
 

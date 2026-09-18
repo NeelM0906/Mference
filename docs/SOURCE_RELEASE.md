@@ -11,6 +11,9 @@ browser hardening, not authentication or a substitute for loopback binding.
 
 ## First-use path
 
+Use [checkpoint choices and limits](RELEASE_SUPPORT.md) to distinguish the
+first-use recommendation from optional qualification candidates.
+
 1. Install Xcode 16.3+ or matching Command Line Tools (Swift 6.1+), on an
    Apple Silicon Mac running macOS 15 or newer. For the UI, install `uv` too.
 2. Clone the repository or extract the tagged source archive and enter it.
