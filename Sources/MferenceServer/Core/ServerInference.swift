@@ -383,7 +383,8 @@ public actor ServerModelSession: ServerLoadedModel {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let startsInThinking = tokenizer.startsInThinking(reasoningEffort: request.reasoningEffort)
+        let startsInThinking = tokenizer.startsInThinking(
+            reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let decoder = tokenizer.isSwiftQwen || needsToolTemplate || startsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,

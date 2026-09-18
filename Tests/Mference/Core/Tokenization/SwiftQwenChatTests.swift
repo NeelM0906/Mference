@@ -102,6 +102,24 @@ struct SwiftQwenChatTests {
         #expect(throws: (any Error).self) { try tok.encodeChat(messages: []) }
     }
 
+    @Test func toolHistorySuffixDoesNotHideBaseQwenVisibleAnswer() async throws {
+        let tok = try await tokenizer().forCheckpoint("qwen3.8-27b-4bit")
+        let history = messages("tool_result") + [.init(role: .assistant, content: "Found A"),
+                                                 .init(role: .user, content: "What is 7 times 3?")]
+        let ids = try tok.encodeChat(messages: history)
+        #expect(tok.generationPromptStartsInThinking)
+        #expect(tok.decode(ids, skipSpecialTokens: false).hasSuffix("<think>\n\n</think>\n\n"))
+        let starts = tok.startsInThinking(reasoningEffort: nil, promptIDs: ids)
+        #expect(!starts)
+        let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: [], startsInThought: starts)
+        #expect(try decoder.consume(tokenID: 12, delta: "21") == [.content("21")])
+        let plain = try tok.encodeChat(messages: [.init(role: .user, content: "Hi")])
+        #expect(tok.startsInThinking(reasoningEffort: nil, promptIDs: plain))
+        // An earlier marker must not override an unmarked generation suffix.
+        let historical = tok.encode("</think>\n<|im_start|>assistant\n", addBOS: false)
+        #expect(tok.startsInThinking(reasoningEffort: nil, promptIDs: historical))
+    }
+
     @Test(arguments: [false, true], [false, true])
     func thinkingDoesNotSelectJSONToolSyntax(startsInThought: Bool, swift: Bool) async throws {
         let candidate = try await tokenizer()

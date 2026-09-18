@@ -100,7 +100,8 @@ public func run(args: Args,
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
-        let startsInThinking = tokenizer.startsInThinking(reasoningEffort: args.reasoningEffort)
+        let startsInThinking = tokenizer.startsInThinking(
+            reasoningEffort: args.reasoningEffort, promptIDs: promptIds)
         let decoder = args.messagesFile != nil && (tokenizer.isSwiftQwen || startsInThinking)
             ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                          allowedTools: [],
@@ -542,7 +543,8 @@ private func streamChatTurn(promptIds: [Int32],
                             stderr: FileHandle) async throws -> MFTokenizer.Message {
     var reply = ""
     var reasoning = ""
-    let startsInThinking = tokenizer.startsInThinking(reasoningEffort: reasoningEffort)
+    let startsInThinking = tokenizer.startsInThinking(
+        reasoningEffort: reasoningEffort, promptIDs: promptIds)
     let decoder = tokenizer.isSwiftQwen || startsInThinking
         ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                      allowedTools: [],

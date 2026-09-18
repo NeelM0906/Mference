@@ -18,8 +18,23 @@ extension MFTokenizer {
         return value
     }
 
-    public func startsInThinking(reasoningEffort: QwenReasoningEffort?) -> Bool {
-        isSwiftQwen ? reasoningEffort != .off : generationPromptStartsInThinking
+    public func startsInThinking(reasoningEffort: QwenReasoningEffort?,
+                                 promptIDs: [Int32]? = nil) -> Bool {
+        // The actual generation suffix wins over a family's ordinary-chat
+        // default. In particular base Qwen opens thinking for ordinary chat,
+        // but its tool/history template explicitly closes it. Initializing the
+        // decoder as thinking in that case silently discards the visible answer.
+        if let promptIDs {
+            for id in promptIDs.reversed() {
+                if id == thinkStartID { return true }
+                if id == thinkEndID { return false }
+                // Inspect only trailing whitespace, never markers in history
+                // or user text before the assistant-generation boundary.
+                if !decode([id], skipSpecialTokens: false)
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
+            }
+        }
+        return isSwiftQwen ? reasoningEffort != .off : generationPromptStartsInThinking
     }
 
     /// Uses the installed source template for both ordinary and tool chat.
