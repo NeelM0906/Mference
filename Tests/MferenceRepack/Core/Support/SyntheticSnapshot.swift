@@ -601,6 +601,7 @@ enum SyntheticSnapshot {
     }
 
     static func buildQwen38(at dir: String,
+                            originalBF16: Bool = false,
                             seed: UInt64 = 0x0038_D0C5_E11A_B1E5) throws -> Snapshot {
         try? FileManager.default.removeItem(atPath: dir)
         try FileManager.default.createDirectory(atPath: dir,
@@ -706,6 +707,53 @@ enum SyntheticSnapshot {
         appendUnquantizedBF16(name: "vision_tower.patch_embed.proj.weight",
                               shape: [arch.hidden, arch.hidden], into: &tensors, rng: &rng)
 
+        if originalBF16 {
+            var source: [(String, String, [Int], [UInt8])] = []
+            for (name, dtype, shape, bytes) in tensors {
+                if name.hasSuffix(".scales") || name.hasSuffix(".biases") { continue }
+                let renamed = name.replacingOccurrences(of: "language_model.model.", with: "model.language_model.")
+                    .replacingOccurrences(of: "language_model.lm_head.", with: "lm_head.")
+                    .replacingOccurrences(of: "vision_tower.", with: "model.visual.")
+                var logical = shape
+                if dtype == "U32" {
+                    logical[logical.count - 1] *= 8
+                    appendUnquantizedBF16(name: renamed, shape: logical, into: &source, rng: &rng)
+                } else {
+                    if name.hasSuffix(".conv1d.weight") { logical = [shape[0], 1, shape[1]] }
+                    source.append((renamed, dtype, logical, bytes))
+                }
+            }
+            // The same 15 dense MTP tensors as the pinned Swift checkpoint.
+            for (name, shape) in [
+                ("fc.weight", [arch.hidden, 2 * arch.hidden]),
+                ("norm.weight", [arch.hidden]),
+                ("pre_fc_norm_embedding.weight", [arch.hidden]),
+                ("pre_fc_norm_hidden.weight", [arch.hidden]),
+                ("layers.0.input_layernorm.weight", [arch.hidden]),
+                ("layers.0.post_attention_layernorm.weight", [arch.hidden]),
+                ("layers.0.self_attn.q_norm.weight", [arch.headDim]),
+                ("layers.0.self_attn.k_norm.weight", [arch.headDim]),
+                ("layers.0.self_attn.q_proj.weight", [2 * arch.numHeads * arch.headDim, arch.hidden]),
+                ("layers.0.self_attn.k_proj.weight", [arch.numKVHeads * arch.headDim, arch.hidden]),
+                ("layers.0.self_attn.v_proj.weight", [arch.numKVHeads * arch.headDim, arch.hidden]),
+                ("layers.0.self_attn.o_proj.weight", [arch.hidden, arch.numHeads * arch.headDim]),
+                ("layers.0.mlp.gate_proj.weight", [arch.intermediate, arch.hidden]),
+                ("layers.0.mlp.up_proj.weight", [arch.intermediate, arch.hidden]),
+                ("layers.0.mlp.down_proj.weight", [arch.hidden, arch.intermediate])
+            ] {
+                appendUnquantizedBF16(name: "mtp." + name, shape: shape, into: &source, rng: &rng)
+            }
+            // Existing pre-quantized fixtures use arbitrary passthrough bytes.
+            // Original-source quantization needs finite numeric BF16 values.
+            tensors = source.map { name, dtype, shape, bytes in
+                let finite = (0..<(bytes.count / 2)).flatMap { i -> [UInt8] in
+                    let bits = UInt16(0x3d00 + i % 128) | (i % 2 == 0 ? 0 : 0x8000)
+                    return [UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)]
+                }
+                return (name, dtype, shape, finite)
+            }
+        }
+
         // -- Encode safetensors.
         let shardName = "model-00001-of-00001.safetensors"
         let shardPath = (dir as NSString).appendingPathComponent(shardName)
@@ -737,12 +785,13 @@ enum SyntheticSnapshot {
             "rms_norm_eps": 1e-6,
             "hidden_act": "silu"
         ]
-        let config: [String: Any] = [
+        var config: [String: Any] = [
             "architectures": ["Qwen3_5ForConditionalGeneration"],
             "model_type": "qwen3_5",
             "quantization": ["bits": 4, "group_size": arch.groupSize, "mode": "affine"],
             "text_config": textConfig
         ]
+        if originalBF16 { config.removeValue(forKey: "quantization") }
         let configData = try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
         try configData.write(to: URL(fileURLWithPath: (dir as NSString).appendingPathComponent("config.json")))
 

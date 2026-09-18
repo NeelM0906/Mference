@@ -20,6 +20,7 @@ public enum ExpertCacheSlotChoice: Equatable, Sendable {
 }
 
 public struct Args: Equatable, Sendable {
+    public var reasoningEffort: QwenReasoningEffort?
     public var model: String
     public var prompt: String?
     public var messagesFile: String?
@@ -74,7 +75,9 @@ public struct Args: Equatable, Sendable {
                 verification: ModelIntegrityPolicy = .fullSha256,
                 kvPaged: String = "auto",
                 kvTopKPages: Int = 60,
-                kvPoolPages: Int? = nil) {
+                kvPoolPages: Int? = nil,
+                reasoningEffort: QwenReasoningEffort? = nil) {
+        self.reasoningEffort = reasoningEffort
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -179,6 +182,8 @@ extension Args {
                                 ~59 s inside the first prefill;
                                 trusted-receipt checks file sizes against the
                                 receipt written at install time instead.
+      --reasoning-effort <mode>  Swift-Qwen chat: xhigh (source default), medium,
+                                low, or none. Not applied to raw prompts.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -206,6 +211,7 @@ extension Args {
         var kvPaged = "auto"
         var kvTopKPages = 60
         var kvPoolPages: Int? = nil
+        var reasoningEffort: QwenReasoningEffort?
 
         var index = 0
         while index < argv.count {
@@ -271,6 +277,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 temperature = parsed
+            case "--reasoning-effort":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = QwenReasoningEffort(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                reasoningEffort = parsed
             case "--top-k":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), (0...256).contains(parsed) else {
@@ -339,6 +351,9 @@ extension Args {
         }
 
         guard let model else { throw ArgsError.requiredMissing("--model") }
+        if reasoningEffort != nil && prompt != nil {
+            throw ArgsError.invalidValue(flag: "--reasoning-effort", value: "requires chat or messages, not raw --prompt")
+        }
         if prompt != nil && messagesFile != nil {
             throw ArgsError.mutuallyExclusive("--prompt", "--messages-file")
         }
@@ -378,7 +393,8 @@ extension Args {
                     verification: verification,
                     kvPaged: kvPaged,
                     kvTopKPages: kvTopKPages,
-                    kvPoolPages: kvPoolPages)
+                    kvPoolPages: kvPoolPages,
+                    reasoningEffort: reasoningEffort)
     }
 
     private static func takeValue(_ argv: [String],

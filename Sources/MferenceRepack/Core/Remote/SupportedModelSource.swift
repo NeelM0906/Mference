@@ -174,6 +174,22 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 15_400_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// Reasoning-efficient fine-tune, kept distinct from the base Qwen control.
+    /// Text and MTP are quantized in flight; vision is not installed.
+    /// Qualification status and license provenance: docs/families/SWIFT_QWEN38.md.
+    public static let swiftQwen38 = SupportedModelSource(
+        name: "swiftqwen38",
+        displayName: "Swift-Qwen3.8 27B (qualification candidate)",
+        repoID: "ukisai/Swift-Qwen3.8-27b",
+        revision: "1b30aaaf753fe5c1cb51ada2ea0367a53445359c",
+        sourceIndexSHA256:
+            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
+        modelID: "swift-qwen3.8-27b-int4g64",
+        approximateDownloadBytes: 55_562_855_904,
+        installedBytes: 16_000_000_000,
+        reserveBytes: 2_147_483_648,
+        kind: .originalRepoQuantize)
+
     /// Revision and index hash are not yet pinned (the upload has not been
     /// fingerprinted); the installer resolves HEAD and prints the computed
     /// index SHA-256 to record here. Byte estimates follow
@@ -332,7 +348,7 @@ public struct SupportedModelSource: Sendable, Equatable {
         reserveBytes: 2_147_483_648)
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, qwen36Original, qwen38, deepseekV4Flash, inklingSmall,
+        gemma4, qwen36, qwen36Original, qwen38, swiftQwen38, deepseekV4Flash, inklingSmall,
         maple, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
     ]
 

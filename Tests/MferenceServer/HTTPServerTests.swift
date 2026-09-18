@@ -6,10 +6,12 @@ import Testing
 @testable import MferenceServerCore
 
 private actor ScriptedServerBackend: ServerInferenceBackend {
+    nonisolated let usesSwiftQwenTemplate: Bool
     let delayNanoseconds: UInt64
     let diagnostics: RuntimeDiagnostics?
 
-    init(delayNanoseconds: UInt64 = 0, includeDiagnostics: Bool = false) {
+    init(delayNanoseconds: UInt64 = 0, includeDiagnostics: Bool = false, includeReasoning: Bool = false) {
+        self.usesSwiftQwenTemplate = includeReasoning
         self.delayNanoseconds = delayNanoseconds
         if includeDiagnostics {
             let result = RawDecodeResult(
@@ -31,13 +33,16 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
         if delayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: delayNanoseconds)
         }
+        if usesSwiftQwenTemplate { onEvent(.reasoning("Check first.")) }
         onEvent(.content("hello"))
-        return ServerCompletion(
+        var completion = ServerCompletion(
             content: "hello",
             toolCalls: [],
             finishReason: "stop",
             usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4),
             diagnostics: diagnostics)
+        completion.reasoningContent = usesSwiftQwenTemplate ? "Check first." : nil
+        return completion
     }
 }
 
@@ -226,6 +231,26 @@ private actor CancellableServerBackend: ServerInferenceBackend {
 
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
+    @Test(arguments: [false, true])
+    func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool) async throws {
+        let server = MferenceHTTPServer(modelID: "custom-alias", queueLimit: 1,
+                                        backend: ScriptedServerBackend(includeReasoning: true))
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data("""
+        {"model":"custom-alias","reasoning_effort":"low","messages":[{"role":"user","content":"Hi"}],"stream":\(stream)}
+        """.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""reasoning_content":"Check first.""#))
+        #expect(text.contains(#""content":"hello""#))
+        if stream { #expect(text.hasSuffix("data: [DONE]\n\n")) }
+        try await server.shutdown()
+    }
     @Test(arguments: [false, true])
     func healthModelsAndNonStreamingCompletion(includeDiagnostics: Bool) async throws {
         let server = MferenceHTTPServer(

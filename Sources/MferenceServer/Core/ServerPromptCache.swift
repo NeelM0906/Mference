@@ -49,6 +49,7 @@ struct ServerPromptCache: Sendable {
         content: String,
         calls: [ParsedToolCall],
         result: RawDecodeResult,
+        reasoningContent: String? = nil,
         stopStringFiltered: Bool = false
     ) {
         guard result.kvPosition == result.kvBackedTokenIDs.count,
@@ -70,7 +71,8 @@ struct ServerPromptCache: Sendable {
         let assistant = MFTokenizer.Message(
             role: .assistant,
             content: calls.isEmpty ? content : nil,
-            toolCalls: historicalCalls)
+            toolCalls: historicalCalls,
+            reasoningContent: reasoningContent)
         entry = ServerPromptCacheEntry(
             domain: domain,
             inputMessages: request.messages,
@@ -106,6 +108,10 @@ struct ServerPromptCache: Sendable {
                 cachedPromptTokens: entry.kvPosition)
         }
 
+        // Swift-Qwen's effort and preserved reasoning are defined by the
+        // source template. Reuse only an exact rendered prefix; the legacy
+        // hand-written bridge cannot prove equivalence for this checkpoint.
+        guard !tokenizer.isSwiftQwen else { return .miss }
         let inputCount = entry.inputMessages.count
         guard request.messages.count > inputCount + 1,
               request.messages.prefix(inputCount)
@@ -137,6 +143,7 @@ struct ServerPromptCache: Sendable {
         guard incoming.role == .assistant,
               cached.role == .assistant,
               incoming.toolCalls == cached.toolCalls,
+              incoming.reasoningContent == cached.reasoningContent,
               incoming.toolCallID == cached.toolCallID,
               incoming.name == cached.name else {
             return false

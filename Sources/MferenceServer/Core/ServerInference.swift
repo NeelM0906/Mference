@@ -4,10 +4,12 @@ import Mference
 
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
+    case reasoning(String)
     case toolCall(ParsedToolCall)
 }
 
 public struct ServerCompletion: Equatable, Sendable {
+    public var reasoningContent: String? = nil
     public let content: String
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
@@ -44,6 +46,7 @@ public struct PreparedGeneration: Sendable {
 }
 
 public protocol ServerInferenceBackend: Sendable {
+    var usesSwiftQwenTemplate: Bool { get }
     /// Everything that can reject a request must happen here, because the
     /// caller commits the response status once `generate` starts: a streaming
     /// request has `200` and the SSE head on the wire by then, and no status
@@ -55,6 +58,7 @@ public protocol ServerInferenceBackend: Sendable {
 }
 
 extension ServerInferenceBackend {
+    public var usesSwiftQwenTemplate: Bool { false }
     /// Backends that do not tokenize inherit a pass-through. A backend that
     /// renders a prompt must override this, or `generate` receives no tokens.
     public func prepare(_ request: ValidatedChatRequest) async throws -> PreparedGeneration {
@@ -170,23 +174,15 @@ public actor ServerCoordinator {
 }
 
 public actor ServerModelSession: ServerLoadedModel {
+    public nonisolated let usesSwiftQwenTemplate: Bool
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
     public nonisolated let chatDialect: ChatDialect
     /// Family-derived API model identifier used when --model-id is absent.
     public nonisolated var defaultModelID: String {
-        switch modelFamily {
-        case .gemma4: return "gemma-4-26b-a4b-it"
-        case .qwen36: return "qwen3.6-35b-a3b"
-        case .qwen38: return "qwen3.8-27b-4bit"
-        case .deepseekV4Flash: return "deepseek-v4-flash-2bit-dq"
-        case .inklingSmall: return "inkling-small-4bit"
-        case .maple: return "maple-preview-2bit-mlx"
-        case .qwen38flashnext: return "qwen3.8-flash-next-int4g64"
-        case .minicpm5: return "minicpm5-2b-int4g64"
-        case .glm53Flash: return "glm-5.3-flash-mlx-mixed-4-8bit"
-        }
+        ServerFamilyModelID.modelID(for: modelFamily, checkpointID: checkpointID)
     }
     private nonisolated let modelFamily: ModelFamily
+    private nonisolated let checkpointID: String
 
     private let context: MetalContext
     private let model: Model
@@ -208,7 +204,7 @@ public actor ServerModelSession: ServerLoadedModel {
             throw MFTokenizerError.missingToolTemplate
         }
         let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
-        let tokenizer = try await MFTokenizer.load(from: tokenizerFolder, family: family)
+        let tokenizer = try await MFTokenizer.load(forModelDirectory: modelDirectory)
         // DeepSeek ships no chat_template.jinja — its chat framing is native
         // Swift — so the prompt-cache identity hashes a pinned constant that
         // changes only when that native render does. Every other dialect
@@ -299,8 +295,10 @@ public actor ServerModelSession: ServerLoadedModel {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
+        self.usesSwiftQwenTemplate = tokenizer.isSwiftQwen
         self.chatDialect = tokenizer.dialect
         self.modelFamily = model.config.family
+        self.checkpointID = model.modelID
         self.runner = runner
         self.scratch = scratch
         self.prefillConfig = prefillConfig
@@ -318,11 +316,12 @@ public actor ServerModelSession: ServerLoadedModel {
                 $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
             }
         let promptIDs: [Int32]
-        if needsToolTemplate {
-            promptIDs = try tokenizer.encodeToolChat(messages: request.messages, tools: request.tools)
-        } else {
-            let rendered = try tokenizer.applyChatTemplate(request.messages)
-            promptIDs = tokenizer.encode(rendered, addBOS: false)
+        do {
+            promptIDs = try tokenizer.encodeChat(messages: request.messages, tools: request.tools,
+                                                reasoningEffort: request.reasoningEffort)
+        } catch {
+            throw ServerRequestError.invalid(message: String(describing: error),
+                                              param: "messages", code: "invalid_chat_template")
         }
         guard promptIDs.count < maxContext else {
             throw ServerRequestError.invalid(
@@ -384,14 +383,22 @@ public actor ServerModelSession: ServerLoadedModel {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate || tokenizer.generationPromptStartsInThinking
+        let startsInThinking = tokenizer.startsInThinking(reasoningEffort: request.reasoningEffort)
+        let decoder = tokenizer.isSwiftQwen || needsToolTemplate || startsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),
-                startsInThought: tokenizer.generationPromptStartsInThinking)
+                startsInThought: startsInThinking)
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
+        var reasoning = ""
+        if tokenizer.isSwiftQwen {
+            decoder?.onReasoning = { text in
+                reasoning += text
+                onEvent(.reasoning(text))
+            }
+        }
         var calls: [ParsedToolCall] = []
         var decodingError: Error?
         var shouldStop = false
@@ -496,10 +503,11 @@ public actor ServerModelSession: ServerLoadedModel {
                 content: content,
                 calls: calls,
                 result: result,
+                reasoningContent: reasoning.isEmpty ? nil : reasoning,
                 stopStringFiltered: stopMatcher.isStopped)
         }
         completed = true
-        return ServerCompletion(
+        var completion = ServerCompletion(
             content: content,
             toolCalls: calls,
             finishReason: reason,
@@ -510,5 +518,7 @@ public actor ServerModelSession: ServerLoadedModel {
             diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
                 result: result,
                 memory: .capture(model: model, producer: runner, scratch: scratch)) : nil)
+        completion.reasoningContent = reasoning.isEmpty ? nil : reasoning
+        return completion
     }
 }

@@ -72,6 +72,27 @@ picker the next time the UI starts. Supported families are `gemma4`, `qwen36`,
 `minicpm5mlx`; the launcher reads that list out of `MferenceRepack`'s own help,
 so it cannot drift.
 
+The optional `swiftqwen38` selector installs a separately identified
+[Swift-Qwen qualification candidate](families/SWIFT_QWEN38.md), not a replacement
+of `qwen38`. Its server reasoning policy defaults to `xhigh`; see that page for
+request-level controls and the remaining client-history qualification gates.
+
+For Swift-Qwen, use **Controls → Advanced Params → Reasoning Effort**, switch
+from Default to Custom, and enter `xhigh`, `medium`, `low`, or `none`. Default
+means `xhigh`. Reset this chat-level control to Default before switching to a
+non-Swift model; those models reject an explicit reasoning-effort parameter.
+
+The launcher runs the pinned Open WebUI 0.11.3 through
+`Scripts/openwebui-mference.py`. Its narrow, process-local compatibility hook
+preserves `reasoning_content` when Open WebUI rebuilds Swift-Qwen assistant
+history, including native tool loops. Without it, upstream 0.11.3 displays
+reasoning but drops it from generic OpenAI-compatible replay. The hook changes
+no installed package files, other models, tool permissions, branding, or chat
+storage. It runs a single loopback worker and refuses an unqualified package
+version rather than silently losing history. When launching Open WebUI by hand,
+use the script with that package environment's Python and the same launcher
+environment, including `WEBUI_SECRET_KEY`.
+
 Downloads range from ~5 GB (MiniCPM5-2B) to ~360 GB read for Flash-Next.
 Check disk first, and read [docs/DEEPSEEK_V4_FLASH.md](DEEPSEEK_V4_FLASH.md) or
 [docs/INKLING_SMALL.md](INKLING_SMALL.md) before installing either of those two.
@@ -345,8 +366,9 @@ will not pipe an installer into a shell on your behalf. Install `uv`, re-run,
 and Open WebUI is installed automatically.
 
 **Open WebUI version mismatch.** The launcher pins one version and prints a
-one-line notice when a different one is installed. It does not reinstall or
-downgrade. To match the pin:
+notice when a different one is installed; the reasoning-history adapter then
+refuses to run an unqualified version. It does not reinstall or downgrade.
+To match the pin:
 `uv tool install --python 3.11 --force "open-webui==<pinned version>"`, with the
 version from the notice or from `OPEN_WEBUI_VERSION` at the top of
 `mference-ui.sh`.

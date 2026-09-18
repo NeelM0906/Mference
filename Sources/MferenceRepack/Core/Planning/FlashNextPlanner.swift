@@ -402,12 +402,24 @@ enum FlashNextPlanner {
         case .qwen36:
             return isNormWeight(sourceName)
                 && !sourceName.hasSuffix(".linear_attn.norm.weight")
+        case .qwen38:
+            // Qwen3_5RMSNorm stores zero-centered gains; the gated DeltaNet
+            // norm is ordinary RMSNorm. MTP's seven norms also use +1, matching
+            // the independent MTPAttachTool contract. Restrict to known sites.
+            return sourceName == "model.language_model.norm.weight"
+                || sourceName == "mtp.norm.weight"
+                || sourceName == "mtp.pre_fc_norm_embedding.weight"
+                || sourceName == "mtp.pre_fc_norm_hidden.weight"
+                || sourceName.hasSuffix(".input_layernorm.weight")
+                || sourceName.hasSuffix(".post_attention_layernorm.weight")
+                || sourceName.hasSuffix(".self_attn.q_norm.weight")
+                || sourceName.hasSuffix(".self_attn.k_norm.weight")
         case .minicpm5:
             // `LlamaRMSNorm` (transformers v5.6.2) is plain `w * x_hat`, and
             // the vendor's own MLX conversion stores the bare weights. No
             // fold. See docs/families/MINICPM5.md.
             return false
-        case .gemma4, .qwen38, .deepseekV4Flash, .inklingSmall, .maple, .glm53Flash:
+        case .gemma4, .deepseekV4Flash, .inklingSmall, .maple, .glm53Flash:
             // No original-repo entry exists for these, so no conversion has
             // been compared and no fold can be justified. A family arriving
             // here must check its own norm convention first.
@@ -440,6 +452,18 @@ enum FlashNextPlanner {
 
     private static func isForcedBF16(_ name: String) -> Bool {
         name.contains("norm") || name.hasSuffix(".conv1d.weight")
+    }
+
+    /// Original PyTorch depthwise convolution is [channels, 1, taps]; the
+    /// runtime/MLX index uses [channels, taps, 1]. Moving the singleton axis
+    /// changes only metadata, not the contiguous payload's byte order.
+    static func residentShape(_ shape: [UInt64], name: String,
+                              family: RepackModelFamily) throws -> [UInt64] {
+        guard family == .qwen38, name.hasSuffix(".conv1d.weight") else { return shape }
+        guard shape.count == 3, shape[0] > 0, shape[1] == 1, shape[2] == 4 else {
+            throw RepackError.configurationInvalid(detail: "invalid original Qwen convolution shape for \(name): \(shape)")
+        }
+        return [shape[0], shape[2], 1]
     }
 
     private static func planResidentFile(path: String,
@@ -477,6 +501,7 @@ enum FlashNextPlanner {
                 throw RepackError.missingTensor(name: name)
             }
             let entryName = emitted[index]
+            let shape = try residentShape(tensor.shape, name: name, family: family)
             if quantizesResident(tensor) {
                 let bits = policy.bits(forTensorNamed: entryName)
                 let rows = tensor.shape[0]
@@ -512,7 +537,7 @@ enum FlashNextPlanner {
                 entries.append(ResidentEntry(
                     name: entryName,
                     dtype: 0,
-                    logicalShape4: RepackPlanner.padTo4(tensor.shape),
+                    logicalShape4: RepackPlanner.padTo4(shape),
                     fileOffset: weightOffset,
                     sizeBytes: weightBytes,
                     scaleOffset: scaleOffset,
@@ -546,7 +571,7 @@ enum FlashNextPlanner {
                 entries.append(ResidentEntry(
                     name: entryName,
                     dtype: dtypeCode(tensor.dtype),
-                    logicalShape4: RepackPlanner.padTo4(tensor.shape),
+                    logicalShape4: RepackPlanner.padTo4(shape),
                     fileOffset: offset,
                     sizeBytes: tensor.sizeBytes,
                     scaleOffset: 0, scaleSize: 0,

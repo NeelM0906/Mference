@@ -250,7 +250,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
             let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
-                                                              dialect: chatDialect)
+                                                              dialect: chatDialect,
+                                                              swiftQwen: backend.usesSwiftQwenTemplate)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -287,6 +288,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         return try await backend.generate(prepared) { event in
                             guard request.stream else { return }
                             switch event {
+                            case .reasoning(let text):
+                                self.writeStreamChunk(contextBox.value,
+                                    self.chunk(id: responseID, created: created, model: modelID,
+                                               delta: ["reasoning_content": text], finishReason: nil))
                             case .content(let text):
                                 self.writeStreamChunk(
                                     contextBox.value,
@@ -412,13 +417,18 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         let request = try OpenAIRequestValidator.validate(
                             decoded,
                             modelID: resolved.modelID,
-                            dialect: resolved.backend.chatDialect)
+                            dialect: resolved.backend.chatDialect,
+                            swiftQwen: resolved.backend.usesSwiftQwenTemplate)
                         let prepared = try await resolved.backend.prepare(request)
                         startStream()
                         let completion = try await resolved.backend
                             .generate(prepared) { event in
                                 guard request.stream else { return }
                                 switch event {
+                                case .reasoning(let text):
+                                    self.writeStreamChunk(contextBox.value,
+                                        self.chunk(id: responseID, created: created, model: resolved.modelID,
+                                                   delta: ["reasoning_content": text], finishReason: nil))
                                 case .content(let text):
                                     self.writeStreamChunk(
                                         contextBox.value,
@@ -489,6 +499,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         ]
         if !completion.toolCalls.isEmpty {
             message["tool_calls"] = completion.toolCalls.map(toolCallObject)
+        }
+        if let reasoning = completion.reasoningContent {
+            message["reasoning_content"] = reasoning
         }
         let object: [String: Any] = [
             "id": id,
