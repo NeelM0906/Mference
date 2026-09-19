@@ -48,12 +48,24 @@ The CLI and server expose these generation controls:
 | Maximum response | 1 up to the remaining context | `--max-new` | 1,024 tokens | Caps generated tokens, including hidden reasoning. A request may use only the context space left after formatting the prompt; a limit reached during reasoning can leave the visible answer empty. |
 | Maximum context | 4K, 8K, 16K, 32K, 64K, 128K | `--max-context` | CLI 4K; server/UI 16K | Sets prompt plus response capacity. Maple supports 128000 tokens in the runtime, CLI, and server; other family or product limits may differ. A selectable context is not a fresh hardware qualification. |
 | Qwen 3.8 reasoning effort | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Swift: `xhigh`; base: unchanged legacy policy when omitted | Base/Swift Qwen 3.8 only; chat/messages mode, not raw completion. Server field: `reasoning_effort`. An explicit value selects the installed source template for either checkpoint. `medium` adds no effort instruction; `none` closes thinking in the prompt. Other checkpoints reject this explicit parameter. |
-| Temperature | 0...2 | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
-| Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
-| Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
+| Temperature | 0...2 | `--temperature` | 0.8 | `0` is greedy; positive values sample. |
+| Top-K | Off or 1...256 | `--top-k` | 40 | Keeps at most K candidates. CLI `0` turns it off. |
+| Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Keeps the nucleus after Top-K, normalized over that candidate set. |
+| Min-P | 0...1 | `--min-p` | 0.05 | Removes candidates below this fraction of the peak probability, before temperature. `0` disables it. |
+| Repetition penalty | Positive finite | `--repetition-penalty` or `--repeat-penalty` | 1 | Divides positive seen-token logits and multiplies nonpositive ones. |
+| Presence penalty | -2...2 | `--presence-penalty` | 0 | Subtracts once per seen token, after repetition penalty. |
+| Frequency penalty | -2...2 | `--frequency-penalty` | 0 | Subtracts the penalty times each token's count. |
+| Penalty window | -1 or nonnegative | `--repeat-last-n` | 64 | All penalties use the most recent N prompt/generated tokens. `0` disables penalties; `-1` uses all current history. |
 
-With positive temperature, a CLI Top-P below `1` requires Top-K between `1`
-and `256`. To disable both truncation controls, pass `--top-k 0 --top-p 1`.
+All model families use llama.cpp's built-in sampling preset. The active chain
+is repetition/frequency/presence penalties → Top-K → Top-P → Min-P →
+temperature. Seeded output is reproducible within Mference, not guaranteed
+identical to llama.cpp's RNG or different weight formats. Thinking and context
+or output limits retain their existing defaults. See
+[the reference and compatibility details](LLAMA_SAMPLING.md).
+
+With positive temperature, a CLI or server Top-P below `1` requires Top-K between `1`
+and `256`. To disable all truncation controls, pass `--top-k 0 --top-p 1 --min-p 0`.
 Generation controls apply to the next request and do not require a model
 reload. They are interactive product settings, not the fixed community
 benchmark protocol.

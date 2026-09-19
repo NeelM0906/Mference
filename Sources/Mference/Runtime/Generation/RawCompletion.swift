@@ -43,7 +43,7 @@ public struct RawCompletionScratch: @unchecked Sendable {
     let outToken: MTLBuffer
     let sampler: Sampler
     /// Caller-owned logits, probability and output-token buffer capacities.
-    var diagnosticBufferBytes: UInt64 { uniqueBufferBytes([logits, probs, outToken]) }
+    var diagnosticBufferBytes: UInt64 { uniqueBufferBytes([logits, probs, outToken]) + sampler.diagnosticBufferBytes }
 
     public init(context: MetalContext, vocab: Int, logitSoftcap: Float = 30.0) throws {
         guard let logits = context.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
@@ -68,7 +68,7 @@ extension GenerationConfig {
     /// (`RealForwardRunner.lastGreedyToken`) instead of sampling from the
     /// logits buffer. Anything else needs real logits.
     public var isPureGreedy: Bool {
-        temperature == 0 && repetitionPenalty == 1
+        temperature == 0 && (repeatLastN == 0 || (repetitionPenalty == 1 && presencePenalty == 0 && frequencyPenalty == 0))
     }
 
 }

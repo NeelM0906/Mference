@@ -241,9 +241,29 @@ with adjacent system guidance instead of rendering as its own block.
 Exception: Swift-Qwen, and base Qwen 3.8 requests with an explicit
 `reasoning_effort`, use the source template and reject `developer`; use leading
 `system` guidance instead.
-Supported options include `temperature`, `top_p`, `top_k`,
-`repetition_penalty`, `seed`, `stop`, `max_tokens`,
-`max_completion_tokens`, and function-tool fields.
+Supported options include `temperature`, `top_p`, `top_k`, `min_p`,
+`presence_penalty`, `frequency_penalty`, `repetition_penalty` (alias
+`repeat_penalty`), `repeat_last_n`, `seed`, `stop`, `max_tokens`,
+`max_completion_tokens`, and function-tool fields. Conflicting repetition
+aliases are rejected.
+
+All families default to temperature `0.8`, Top-K `40`, Top-P `0.95`, Min-P
+`0.05`, repetition penalty `1.0`, presence/frequency penalties `0.0`, and a
+64-token penalty window. These match llama.cpp's built-in sampling defaults,
+before any GGUF metadata or application overrides. Explicit request values
+win. Min-P accepts `0...1`; zero disables it. Presence and frequency each
+accept finite values in `-2...2`. `repeat_last_n: 0` disables all history
+penalties; `-1` uses the complete effective history. The window includes
+cached and newly prefetched prompt tokens plus generated tokens.
+
+The chain is penalties → Top-K → normalized Top-P → Min-P → temperature.
+Penalties act on post-softcap logits: positive seen-token logits are divided
+by repetition penalty, nonpositive logits multiplied; then subtract
+`count * frequency_penalty + presence_penalty`. Counts are restricted to the
+penalty window. Nonzero penalties with an enabled window require the logits
+path even at temperature zero. See [sampling compatibility](LLAMA_SAMPLING.md).
+Top-K accepts `0` (off) or `1...256`; with positive temperature, disabling
+Top-K requires `top_p: 1`. Full-vocabulary Min-P remains supported.
 
 Base and Swift Qwen 3.8 accept `reasoning_effort` values `xhigh`, `medium`, `low`,
 and `none`. An explicit value uses the source template, retains reasoning in a
@@ -265,6 +285,25 @@ template history always preserves reasoning. Thinking requests without an
 explicit completion cap default to 32,768 tokens, subject to available context.
 Other models reject these thinking controls. Sampling and MTP defaults remain
 unchanged.
+
+For Qwen 3.6's recommended general-thinking sampling profile, send these
+explicit options along with `model` and `messages`:
+
+```json
+{
+  "chat_template_kwargs": {"enable_thinking": true},
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 20,
+  "min_p": 0.0,
+  "presence_penalty": 1.5,
+  "repetition_penalty": 1.0
+}
+```
+
+These options change sampling policy only, not thinking templates, reasoning
+history, tool parsing, or prompt-cache continuation. Presence penalty does
+not guarantee that every semantic or textual repetition loop is eliminated.
 
 The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,

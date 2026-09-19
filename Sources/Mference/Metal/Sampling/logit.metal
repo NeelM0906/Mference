@@ -52,12 +52,29 @@ inline float logit_softmax_exp(float x) {
     return fast::exp(x);
 }
 
+// Penalties act on the model's final logits, after softcap. No inverse or
+// second clamp: a negative penalty may legitimately boost a logit above cap.
+inline float penalized_logit(float raw, float softcap, uint count,
+                             float repetition, float frequency, float presence) {
+    float z = softcap_value(raw, softcap);
+    if (count > 0) {
+        z = z <= 0.0f ? z * repetition : z / repetition;
+        z -= float(count) * frequency + presence;
+    }
+    return z;
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void logit_softcap_softmax(
     device const half*  logits   [[buffer(0)]],   // [V] FP16
     device       half*  probs    [[buffer(1)]],   // [V] FP16
     constant     uint&  V        [[buffer(2)]],
     constant     float& softcap  [[buffer(3)]],
+    device const uint* history_counts [[buffer(4)]],
+    constant float& repetition [[buffer(5)]],
+    constant float& frequency [[buffer(6)]],
+    constant float& presence [[buffer(7)]],
+    constant uint& has_history [[buffer(8)]],
     uint  lid              [[thread_position_in_threadgroup]],
     uint  lsize            [[threads_per_threadgroup]],
     uint  simd_lane_id     [[thread_index_in_simdgroup]],
@@ -76,7 +93,8 @@ void logit_softcap_softmax(
     float d = 0.0f;
 
     for (uint i = lid; i < V; i += lsize) {
-        float z  = softcap_value(float(logits[i]), softcap);
+        float z = penalized_logit(float(logits[i]), softcap, has_history ? history_counts[i] : 0,
+                                  repetition, frequency, presence);
         float mn = max(m, z);
         // Guard against the (-inf, -inf) → (-inf, NaN) case on the first iter.
         float scale = (m == -INFINITY) ? 0.0f : logit_softmax_exp(m - mn);
@@ -122,7 +140,8 @@ void logit_softcap_softmax(
     const float inv_d_final = final_inv_d;
 
     for (uint i = lid; i < V; i += lsize) {
-        float z = softcap_value(float(logits[i]), softcap);
+        float z = penalized_logit(float(logits[i]), softcap, has_history ? history_counts[i] : 0,
+                                  repetition, frequency, presence);
         probs[i] = half(logit_softmax_exp(z - m_final) * inv_d_final);
     }
 }
@@ -135,10 +154,8 @@ void logit_softcap_softmax(
 //   temperature == 0   greedy argmax (the top-k / top-p / rng inputs are
 //                      ignored; the argmax of probs is also the argmax of
 //                      logits because softmax is monotonic).
-//   temperature  > 0   top-p filters against the full normalized probability
-//                      distribution, top-k caps the surviving set, then
-//                      temperature reweights only that final categorical
-//                      draw. This matches mlx-lm's sampler-chain order.
+//   temperature  > 0   Top-K, Top-P normalized over the retained K, Min-P,
+//                      then temperature. This is llama.cpp's default order.
 //
 // xorshift64 is chosen for two reasons: it has a single 64-bit state (cheap
 // to seed and to broadcast through threadgroup memory) and the output is bit-
@@ -193,6 +210,7 @@ void sample(
     constant     float&   top_p        [[buffer(5)]],
     constant     uint64_t& seed        [[buffer(6)]],
     constant     uint&    position     [[buffer(7)]],
+    constant     float&   min_p        [[buffer(8)]],
     uint  lid              [[thread_position_in_threadgroup]],
     uint  lsize            [[threads_per_threadgroup]],
     uint  simd_lane_id     [[thread_index_in_simdgroup]],
@@ -260,13 +278,27 @@ void sample(
     // this path replaces it for the common plain-temperature case.
     // ------------------------------------------------------------------
     if (top_k == 0u && (top_p <= 0.0f || top_p >= 1.0f)) {
+        threadgroup float peak_probability;
+        if (min_p > 0.0f) {
+            float peak = 0.0f;
+            for (uint i = lid; i < V; i += lsize) peak = max(peak, float(probs[i]));
+            peak = simd_max(peak);
+            if (simd_lane_id == 0) partial_val[simd_group_id] = peak;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (simd_group_id == 0) {
+                peak = simd_max(simd_lane_id < simdgroups ? partial_val[simd_lane_id] : 0.0f);
+                if (simd_lane_id == 0) peak_probability = peak;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        float minimum = min_p > 0.0f ? min_p * peak_probability : 0.0f;
         float inv_t = 1.0f / temperature;
         float best_v = -INFINITY;
         uint  best_i = 0xFFFFFFFFu;
 
         for (uint i = lid; i < V; i += lsize) {
             float p = float(probs[i]);
-            if (!(p > 0.0f)) continue;
+            if (!(p > 0.0f) || p < minimum) continue;
             float s = inv_t * log(p) + lmhead_gumbel_for(seed, position, i);
             if (s > best_v) {
                 best_v = s;
@@ -304,7 +336,7 @@ void sample(
     //
     // 1. Find the top-k threshold by repeatedly extracting the max and
     //    storing it in a small threadgroup buffer (k <= kSampleTopMaxK).
-    // 2. Top-p truncates against the full-vocabulary probability mass.
+    // 2. Top-P normalizes the Top-K set; Min-P filters relative to its peak.
     // 3. Temperature reweights the survivors as p^(1/T).
     // 4. CDF inverse-transform sample with the seeded PRNG.
     //
@@ -394,26 +426,28 @@ void sample(
                && isfinite(topk_val[kept])) {
             kept += 1;
         }
-        // mlx-lm applies Top-P before Top-K. The probabilities still carry
-        // their full-vocabulary normalization here, so comparing the raw
-        // descending cumulative mass to top_p produces the same intersection
-        // without sorting the entire vocabulary. If Top-64 holds less than
-        // top_p mass, all 64 survive and Top-K is the limiting filter.
+        float topk_mass = 0.0f;
+        for (uint i = 0; i < kept; ++i) topk_mass += topk_val[i];
         if (top_p > 0.0f && top_p < 1.0f) {
             float cum = 0.0f;
             uint  cut = kept;
             for (uint i = 0; i < kept; ++i) {
                 cum += topk_val[i];
-                if (cum >= top_p) { cut = i + 1; break; }
+                if (cum >= top_p * topk_mass) { cut = i + 1; break; }
             }
             kept = cut;
         }
 
-        // MLX applies temperature in categorical_sampling after both filters.
+        if (min_p > 0.0f) {
+            uint cut = 1;
+            while (cut < kept && topk_val[cut] >= min_p * topk_val[0]) ++cut;
+            kept = cut;
+        }
+
+        // Peak-relative weights avoid underflow at low positive temperatures.
+        float peak = topk_val[0];
         for (uint i = 0; i < kept; ++i) {
-            if (temperature != 1.0f) {
-                topk_val[i] = pow(topk_val[i], inv_temp);
-            }
+            topk_val[i] = pow(topk_val[i] / peak, inv_temp);
         }
 
         // Sum the reweighted surviving mass for inverse-CDF sampling.
@@ -553,6 +587,8 @@ void sample_topk64_final(
     constant float& temperature [[buffer(4)]],
     constant float& top_p [[buffer(5)]],
     constant uint64_t& seed [[buffer(6)]],
+    constant float& min_p [[buffer(7)]],
+    constant uint& top_k [[buffer(8)]],
     uint lid [[thread_position_in_threadgroup]]) {
     threadgroup float values[1024];
     threadgroup uint indices[1024];
@@ -566,18 +602,20 @@ void sample_topk64_final(
 
     if (lid == 0) {
         uint kept = 0;
-        while (kept < 64
+        while (kept < top_k
                && indices[kept] != 0xFFFFFFFFu
                && isfinite(values[kept])) {
             kept += 1;
         }
 
+        float topk_mass = 0.0f;
+        for (uint i = 0; i < kept; ++i) topk_mass += values[i];
         if (top_p > 0.0f && top_p < 1.0f) {
             float cumulative = 0.0f;
             uint cut = kept;
             for (uint i = 0; i < kept; ++i) {
                 cumulative += values[i];
-                if (cumulative >= top_p) {
+                if (cumulative >= top_p * topk_mass) {
                     cut = i + 1;
                     break;
                 }
@@ -585,11 +623,16 @@ void sample_topk64_final(
             kept = cut;
         }
 
+        if (min_p > 0.0f) {
+            uint cut = 1;
+            while (cut < kept && values[cut] >= min_p * values[0]) ++cut;
+            kept = cut;
+        }
+
         float inv_temperature = 1.0f / temperature;
+        float peak = values[0];
         for (uint i = 0; i < kept; ++i) {
-            if (temperature != 1.0f) {
-                values[i] = pow(values[i], inv_temperature);
-            }
+            values[i] = pow(values[i] / peak, inv_temperature);
         }
 
         float surviving = 0.0f;

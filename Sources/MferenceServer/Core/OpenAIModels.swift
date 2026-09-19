@@ -170,6 +170,9 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let parallelToolCalls: Bool?
     public let topK: Int?
     public let repetitionPenalty: Float?
+    public var repeatPenalty: Float? = nil
+    public var repeatLastN: Int? = nil
+    public var minP: Float? = nil
     public let n: Int?
     public let logprobs: Bool?
     public let presencePenalty: Float?
@@ -187,6 +190,9 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case parallelToolCalls = "parallel_tool_calls"
         case topK = "top_k"
         case repetitionPenalty = "repetition_penalty"
+        case repeatPenalty = "repeat_penalty"
+        case repeatLastN = "repeat_last_n"
+        case minP = "min_p"
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
     }
@@ -333,35 +339,59 @@ public enum OpenAIRequestValidator {
         guard request.logprobs != true else {
             throw invalid("logprobs are not supported", "logprobs", "unsupported_value")
         }
-        guard request.presencePenalty == nil || request.presencePenalty == 0 else {
-            throw invalid("presence_penalty must be zero", "presence_penalty", "unsupported_value")
+        // A supplied field is always the value validated and used; only an
+        // omitted one falls back to the shared sampling defaults.
+        let defaults = GenerationConfig.defaults
+        let presencePenalty = request.presencePenalty ?? defaults.presencePenalty
+        guard presencePenalty.isFinite, (-2...2).contains(presencePenalty) else {
+            throw invalid("presence_penalty must be finite and between -2 and 2",
+                          "presence_penalty", "invalid_value")
         }
-        guard request.frequencyPenalty == nil || request.frequencyPenalty == 0 else {
-            throw invalid("frequency_penalty must be zero", "frequency_penalty", "unsupported_value")
+        let minP = request.minP ?? defaults.minP
+        guard minP.isFinite, (0...1).contains(minP) else {
+            throw invalid("min_p must be finite and between 0 and 1", "min_p", "invalid_value")
+        }
+        let frequencyPenalty = request.frequencyPenalty ?? defaults.frequencyPenalty
+        guard frequencyPenalty.isFinite, (-2...2).contains(frequencyPenalty) else {
+            throw invalid("frequency_penalty must be finite and between -2 and 2",
+                          "frequency_penalty", "invalid_value")
+        }
+        let repeatLastN = request.repeatLastN ?? defaults.repeatLastN
+        guard repeatLastN >= -1 else {
+            throw invalid("repeat_last_n must be -1 or nonnegative", "repeat_last_n", "invalid_value")
         }
         guard request.parallelToolCalls != false else {
             throw invalid("parallel_tool_calls=false is not supported",
                           "parallel_tool_calls", "unsupported_value")
         }
 
-        let temperature = request.temperature ?? 0.2
-        guard temperature >= 0, temperature <= 2 else {
+        let temperature = request.temperature ?? defaults.temperature
+        guard temperature.isFinite, temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
                           "temperature", "invalid_value")
         }
-        let topP = request.topP ?? 0.95
-        guard topP > 0, topP <= 1 else {
+        // On the wire "off" is top_p 1 / top_k 0; GenerationConfig spells it nil.
+        let topP = request.topP ?? defaults.topP ?? 1
+        guard topP.isFinite, topP > 0, topP <= 1 else {
             throw invalid("top_p must be greater than 0 and at most 1",
                           "top_p", "invalid_value")
         }
-        let topK = request.topK ?? 64
-        guard (1...256).contains(topK) else {
-            throw invalid("top_k must be between 1 and 256", "top_k", "invalid_value")
+        let topK = request.topK ?? defaults.topK ?? 0
+        guard (0...256).contains(topK) else {
+            throw invalid("top_k must be between 0 and 256", "top_k", "invalid_value")
         }
-        let repetitionPenalty = request.repetitionPenalty ?? 1
-        guard repetitionPenalty > 0 else {
+        guard temperature == 0 || topK != 0 || topP == 1 else {
+            throw invalid("top_p below one requires top_k between 1 and 256", "top_p", "unsupported_value")
+        }
+        if let old = request.repetitionPenalty, let alias = request.repeatPenalty, old != alias {
+            throw invalid("repeat_penalty and repetition_penalty must agree when both are supplied",
+                          "repeat_penalty", "invalid_value")
+        }
+        let repetitionPenalty = request.repeatPenalty ?? request.repetitionPenalty
+            ?? defaults.repetitionPenalty
+        guard repetitionPenalty.isFinite, repetitionPenalty > 0, (1 / repetitionPenalty).isFinite else {
             throw invalid("repetition_penalty must be positive",
-                          "repetition_penalty", "invalid_value")
+                          request.repeatPenalty != nil ? "repeat_penalty" : "repetition_penalty", "invalid_value")
         }
         // A requested thought needs room: the Qwen model card recommends a
         // 32,768-token output budget in thinking mode.
@@ -394,9 +424,13 @@ public enum OpenAIRequestValidator {
         let messages = try validateMessages(request.messages, dialect: dialect)
         let config = GenerationConfig(maxNewTokens: maximum,
                                       temperature: temperature,
-                                      topK: topK,
+                                      topK: topK == 0 ? nil : topK,
                                       topP: topP,
                                       repetitionPenalty: repetitionPenalty,
+                                      presencePenalty: presencePenalty,
+                                      frequencyPenalty: frequencyPenalty,
+                                      repeatLastN: repeatLastN,
+                                      minP: minP,
                                       seed: request.seed,
                                       stopStrings: request.stop?.values ?? [])
         return ValidatedChatRequest(reasoningEffort: effort, messages: messages,

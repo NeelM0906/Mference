@@ -5,6 +5,132 @@ import Testing
 
 @Suite("OpenAI request validation")
 struct OpenAIValidationTests {
+    @Test func samplingDefaultsAreSharedAcrossModelFamilies() throws {
+        let data = Data(#"{"model":"custom-alias","messages":[{"role":"user","content":"Hi"}]}"#.utf8)
+        let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        for dialect: ChatDialect in [.gemma, .chatml, .deepseek, .inkling, .glm5, .minicpm] {
+            let request = try OpenAIRequestValidator.validate(decoded, modelID: "custom-alias", dialect: dialect)
+            let c = request.generationConfig
+            #expect(c.temperature == 0.8 && c.topK == 40 && c.topP == 0.95 && c.minP == 0.05)
+            #expect(c.repetitionPenalty == 1 && c.presencePenalty == 0 && c.frequencyPenalty == 0)
+            #expect(c.repeatLastN == 64)
+            #expect(request.maximumCompletionTokens == 4096)
+        }
+    }
+
+    @Test func penaltyAliasesAndWindowAreValidated() throws {
+        for fields in [#""repeat_penalty":1.1,"repetition_penalty":1.2"#,
+                       #""repeat_last_n":-2"#] {
+            #expect(throws: ServerRequestError.self) {
+                _ = try OpenAIRequestValidator.validate(samplingRequest(fields), modelID: "qwen36-alias",
+                    dialect: .chatml, acceptsReasoningEffort: true, qwenReasoning: false)
+            }
+        }
+        let r = try OpenAIRequestValidator.validate(
+            samplingRequest(#""repeat_penalty":1.0,"repeat_last_n":-1"#), modelID: "qwen36-alias",
+            dialect: .chatml, acceptsReasoningEffort: true, qwenReasoning: false)
+        #expect(r.generationConfig.repeatLastN == -1)
+    }
+    @Test func llamaSamplingFieldsReachGeneration() throws {
+        let data = Data(#"{"model":"m","messages":[{"role":"user","content":"Hi"}],"min_p":0.05,"frequency_penalty":0.75}"#.utf8)
+        let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let request = try OpenAIRequestValidator.validate(decoded, modelID: "m")
+        #expect(request.generationConfig.temperature == 0.8)
+        #expect(request.generationConfig.topK == 40)
+        #expect(request.generationConfig.topP == 0.95)
+        #expect(request.generationConfig.minP == 0.05)
+        #expect(request.generationConfig.frequencyPenalty == 0.75)
+        #expect(request.generationConfig.repeatLastN == 64)
+    }
+    @Test func omittedSamplingFieldsUseSharedDefaultsAndRequestValuesWin() throws {
+        func config(_ fields: String) throws -> GenerationConfig {
+            let body = #"{"model":"m","messages":[{"role":"user","content":"Hi"}]"# + fields + "}"
+            let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(body.utf8))
+            return try OpenAIRequestValidator.validate(decoded, modelID: "m").generationConfig
+        }
+        let d = GenerationConfig.defaults
+        let omitted = try config("")
+        #expect(omitted.temperature == d.temperature && omitted.topK == d.topK && omitted.topP == d.topP)
+        #expect(omitted.minP == d.minP && omitted.repetitionPenalty == d.repetitionPenalty)
+        #expect(omitted.presencePenalty == d.presencePenalty && omitted.frequencyPenalty == d.frequencyPenalty)
+        #expect(omitted.repeatLastN == d.repeatLastN)
+
+        // Every value differs from its default: a default leaking past a
+        // client-supplied field fails here.
+        let explicit = try config(#","temperature":0.3,"top_k":7,"top_p":0.6,"min_p":0.2,"#
+            + #""repetition_penalty":1.2,"presence_penalty":0.4,"frequency_penalty":-0.3,"repeat_last_n":128"#)
+        #expect(explicit.temperature == 0.3 && explicit.topK == 7 && explicit.topP == 0.6 && explicit.minP == 0.2)
+        #expect(explicit.repetitionPenalty == 1.2 && explicit.presencePenalty == 0.4)
+        #expect(explicit.frequencyPenalty == -0.3 && explicit.repeatLastN == 128)
+        try explicit.validate()
+
+        // An explicit zero is a value, not an omission.
+        let zeros = try config(#","temperature":0,"min_p":0,"repeat_last_n":0,"top_k":0,"top_p":1"#)
+        #expect(zeros.temperature == 0 && zeros.minP == 0 && zeros.repeatLastN == 0)
+        #expect(zeros.topK == nil && zeros.topP == 1)
+    }
+
+    @Test func recommendedSamplingFieldsAreValidatedAndPropagated() throws {
+        for value in ["-2.0", "-1.5", "0.0", "1.5", "2.0"] {
+            let request = try samplingRequest(#""presence_penalty":\#(value),"min_p":0.0"#)
+            let validated = try OpenAIRequestValidator.validate(
+                request, modelID: "qwen36-alias", dialect: .chatml,
+                acceptsReasoningEffort: true, qwenReasoning: false)
+            #expect(validated.generationConfig.presencePenalty == Float(value))
+            #expect(validated.generationConfig.minP == 0)
+            #expect(validated.generationConfig.repetitionPenalty == 1)
+            #expect(validated.generationConfig.temperature == 1)
+            #expect(validated.generationConfig.topP == 0.95)
+            #expect(validated.generationConfig.topK == 20)
+            #expect(validated.reasoningEffort == .xhigh)
+            try validated.generationConfig.validate()
+        }
+        for fields in ["", #""presence_penalty":0,"min_p":0"#] {
+            let validated = try OpenAIRequestValidator.validate(
+                samplingRequest(fields), modelID: "qwen36-alias", dialect: .chatml,
+                acceptsReasoningEffort: true, qwenReasoning: false)
+            #expect(validated.generationConfig.presencePenalty == 0)
+            #expect(validated.generationConfig.minP == (fields.isEmpty ? 0.05 : 0))
+        }
+    }
+
+    @Test func samplingValidationRejectsInvalidAndNonfiniteValues() throws {
+        for field in ["presence_penalty", "frequency_penalty", "min_p"] {
+            let numbers = field == "min_p" ? ["-0.1", "1.01"] : ["-2.01", "2.01"]
+            for value in numbers + [#""NaN""#, #""Infinity""#, #""-Infinity""#] {
+                let request = try samplingRequest("\"\(field)\":\(value)", allowNonfinite: true)
+                do {
+                    _ = try OpenAIRequestValidator.validate(
+                        request, modelID: "qwen36-alias", dialect: .chatml,
+                        acceptsReasoningEffort: true, qwenReasoning: false)
+                    Issue.record("accepted invalid \(field)=\(value)")
+                } catch let error as ServerRequestError {
+                    #expect(error.envelope.error.param == field)
+                    #expect(error.envelope.error.code == "invalid_value")
+                }
+            }
+        }
+        for field in ["presence_penalty", "frequency_penalty", "min_p"] {
+            #expect(throws: DecodingError.self) {
+                _ = try samplingRequest("\"\(field)\":\"NaN\"")
+            }
+        }
+    }
+
+    private func samplingRequest(_ fields: String, allowNonfinite: Bool = false) throws -> OpenAIChatRequest {
+        let decoder = JSONDecoder()
+        if allowNonfinite {
+            decoder.nonConformingFloatDecodingStrategy = .convertFromString(
+                positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+        }
+        let extra = fields.isEmpty ? "" : "," + fields
+        return try decoder.decode(OpenAIChatRequest.self, from: Data("""
+        {"model":"qwen36-alias","messages":[{"role":"user","content":"Hi"}],
+         "chat_template_kwargs":{"enable_thinking":true},"temperature":1.0,
+         "top_p":0.95,"top_k":20,"repetition_penalty":1.0\(extra)}
+        """.utf8))
+    }
+
     @Test func capturedOpenCodeInitialRequestValidates() throws {
         let request = try fixture("opencode-1.15.11-initial.json")
         let validated = try OpenAIRequestValidator.validate(

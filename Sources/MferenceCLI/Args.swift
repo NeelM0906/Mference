@@ -32,6 +32,10 @@ public struct Args: Equatable, Sendable {
     public var topK: Int?
     public var topP: Float?
     public var repetitionPenalty: Float
+    public var presencePenalty: Float
+    public var frequencyPenalty: Float
+    public var repeatLastN: Int
+    public var minP: Float
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
@@ -61,10 +65,14 @@ public struct Args: Equatable, Sendable {
                 systemPrompt: String? = nil,
                 maxNew: Int = 1_024,
                 maxContext: Int = 4096,
-                temperature: Float = 0.2,
-                topK: Int? = 64,
-                topP: Float? = 0.95,
-                repetitionPenalty: Float = 1.0,
+                temperature: Float = GenerationConfig.defaults.temperature,
+                topK: Int? = GenerationConfig.defaults.topK,
+                topP: Float? = GenerationConfig.defaults.topP,
+                repetitionPenalty: Float = GenerationConfig.defaults.repetitionPenalty,
+                presencePenalty: Float = GenerationConfig.defaults.presencePenalty,
+                frequencyPenalty: Float = GenerationConfig.defaults.frequencyPenalty,
+                repeatLastN: Int = GenerationConfig.defaults.repeatLastN,
+                minP: Float = GenerationConfig.defaults.minP,
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
@@ -89,6 +97,10 @@ public struct Args: Equatable, Sendable {
         self.topK = topK
         self.topP = topP
         self.repetitionPenalty = repetitionPenalty
+        self.presencePenalty = presencePenalty
+        self.frequencyPenalty = frequencyPenalty
+        self.repeatLastN = repeatLastN
+        self.minP = minP
         self.expertCacheSlots = expertCacheSlots
         self.rdadvise = rdadvise
         self.prefillChunk = prefillChunk
@@ -126,6 +138,8 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 }
 
 extension Args {
+    private static let samplingDefaults = GenerationConfig.defaults
+
     public static let usage = """
     MferenceCLI — Gemma 4 / Qwen 3.6 / DeepSeek V4 Flash / Inkling-Small / Maple / GLM-5.3 Flash text generation
 
@@ -150,10 +164,15 @@ extension Args {
                                 (default 60 ≈ 3.8k attended tokens/layer).
       --kv-pool-pages <n|auto>  Resident pool per full-attention layer in
                                 pages (default auto: sized from RAM).
-      --temperature <float>     Sampling temperature (default 0.2; 0 = greedy).
-      --top-k <int>             Top-k truncation, 1...256 (default 64; 0 = off).
-      --top-p <float>           Nucleus truncation (default 0.95).
-      --repetition-penalty <f>  Repetition penalty (default 1.0).
+      --temperature <float>     Sampling temperature (default \(samplingDefaults.temperature); 0 = greedy).
+      --top-k <int>             Top-k truncation, 1...256 (default \(samplingDefaults.topK ?? 0); 0 = off).
+      --top-p <float>           Nucleus truncation (default \(samplingDefaults.topP ?? 1)).
+      --min-p <float>           Peak-relative cutoff, 0...1 (default \(samplingDefaults.minP)).
+      --repetition-penalty <f>  Repetition penalty (default \(samplingDefaults.repetitionPenalty)).
+      --repeat-penalty <f>      Alias for --repetition-penalty
+      --presence-penalty <f>    Once per seen token, -2...2 (default \(samplingDefaults.presencePenalty)).
+      --frequency-penalty <f>   Per token occurrence, -2...2 (default \(samplingDefaults.frequencyPenalty)).
+      --repeat-last-n <int>     Penalty window (default \(samplingDefaults.repeatLastN); 0 off, -1 all).
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
       --rdadvise <mode>         Expert read-ahead advice: off, default,
@@ -196,10 +215,16 @@ extension Args {
         var systemPrompt: String?
         var maxNew = 1_024
         var maxContext = 4096
-        var temperature: Float = 0.2
-        var topK: Int? = 64
-        var topP: Float? = 0.95
-        var repetitionPenalty: Float = 1.0
+        // Starting values only: each flag below overwrites its own, so an
+        // explicit flag always wins over the shared sampling defaults.
+        var temperature = samplingDefaults.temperature
+        var topK = samplingDefaults.topK
+        var topP = samplingDefaults.topP
+        var repetitionPenalty = samplingDefaults.repetitionPenalty
+        var presencePenalty = samplingDefaults.presencePenalty
+        var frequencyPenalty = samplingDefaults.frequencyPenalty
+        var repeatLastN = samplingDefaults.repeatLastN
+        var minP = samplingDefaults.minP
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
@@ -273,7 +298,7 @@ extension Args {
                 }
             case "--temperature":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed >= 0 else {
+                guard let parsed = Float(value), parsed.isFinite, parsed >= 0 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 temperature = parsed
@@ -295,9 +320,28 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 topP = parsed
-            case "--repetition-penalty":
+            case "--min-p":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed > 0 else {
+                guard let parsed = Float(value), parsed.isFinite, (0...1).contains(parsed) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                minP = parsed
+            case "--presence-penalty", "--frequency-penalty":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Float(value), parsed.isFinite, (-2...2).contains(parsed) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                if flag == "--presence-penalty" { presencePenalty = parsed }
+                else { frequencyPenalty = parsed }
+            case "--repeat-last-n":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Int(value), parsed >= -1 else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                repeatLastN = parsed
+            case "--repetition-penalty", "--repeat-penalty":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Float(value), parsed.isFinite, parsed > 0, (1 / parsed).isFinite else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 repetitionPenalty = parsed
@@ -383,6 +427,10 @@ extension Args {
                     topK: topK,
                     topP: topP,
                     repetitionPenalty: repetitionPenalty,
+                    presencePenalty: presencePenalty,
+                    frequencyPenalty: frequencyPenalty,
+                    repeatLastN: repeatLastN,
+                    minP: minP,
                     seed: seed,
                     stops: stops,
                     quiet: quiet,

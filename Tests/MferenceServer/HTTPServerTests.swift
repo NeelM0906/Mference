@@ -51,7 +51,8 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
 }
 
 /// Qwen 3.6 opts into thinking without the Qwen 3.8 source-template capability.
-private actor OptInThinkingBackend: ServerInferenceBackend {
+private actor OptInThinkingBackend: ServerLoadedModel {
+    nonisolated let chatDialect: ChatDialect = .chatml
     nonisolated let acceptsReasoningEffort = true
     private(set) var received: ValidatedChatRequest?
 
@@ -255,6 +256,125 @@ private actor CancellableServerBackend: ServerInferenceBackend {
 
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
+    @Test(arguments: [false, true], [false, true])
+    func recommendedSamplingProfileIsAccepted(stream: Bool, libraryMode: Bool) async throws {
+        let backend = OptInThinkingBackend()
+        let server = samplingServer(backend: backend, libraryMode: libraryMode)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data("""
+        {"model":"qwen36-alias","messages":[{"role":"user","content":"Reply with READY."}],
+         "chat_template_kwargs":{"enable_thinking":true},"stream":\(stream),
+         "temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.0,
+         "presence_penalty":1.5,"repetition_penalty":1.0,"seed":777,"max_completion_tokens":32}
+        """.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let received = await backend.received
+        try await server.shutdown()
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(received?.reasoningEffort == .xhigh)
+        #expect(received?.generationConfig.temperature == 1)
+        #expect(received?.generationConfig.topP == 0.95)
+        #expect(received?.generationConfig.topK == 20)
+        #expect(received?.generationConfig.repetitionPenalty == 1)
+        #expect(received?.generationConfig.seed == 777)
+        #expect(received?.maximumCompletionTokens == 32)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""content":"hello""#))
+        #expect(!text.contains(#""error""#))
+        if stream { #expect(text.hasSuffix("data: [DONE]\n\n")) }
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func outOfRangeMinPIsRejectedOverHTTP(stream: Bool, libraryMode: Bool) async throws {
+        let backend = OptInThinkingBackend()
+        let server = samplingServer(backend: backend, libraryMode: libraryMode)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data("""
+        {"model":"qwen36-alias","messages":[{"role":"user","content":"hi"}],
+         "stream":\(stream),"min_p":1.1}
+        """.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let received = await backend.received
+        try await server.shutdown()
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        #expect(received == nil)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""param":"min_p""#))
+        #expect(text.contains(#""code":"invalid_value""#))
+        #expect(!text.contains("data: [DONE]"))
+    }
+
+    private func samplingServer(backend: OptInThinkingBackend,
+                                libraryMode: Bool) -> MferenceHTTPServer {
+        if libraryMode {
+            let entry = ServerLibraryEntry(
+                modelID: "qwen36-alias", familyModelID: "qwen3.6-35b-a3b",
+                basename: "qwen36.gturbo",
+                directory: URL(fileURLWithPath: "/unused/qwen36.gturbo"), family: .qwen36)
+            let library = ServerModelLibrary(index: ServerLibraryIndex(entries: [entry])) { _ in backend }
+            return MferenceHTTPServer(library: library, queueLimit: 1)
+        }
+        return MferenceHTTPServer(modelID: "qwen36-alias", queueLimit: 1,
+                                  backend: backend, chatDialect: .chatml)
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func penaltiesAndMinPReachTheBackend(stream: Bool, libraryMode: Bool) async throws {
+        let backend = OptInThinkingBackend()
+        let server = samplingServer(backend: backend, libraryMode: libraryMode)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data("""
+        {"model":"qwen36-alias","messages":[{"role":"user","content":"hi"}],
+         "chat_template_kwargs":{"enable_thinking":true},"stream":\(stream),
+         "temperature":1.0,"top_p":0.95,"top_k":20,"min_p":0.25,
+         "presence_penalty":1.5,"frequency_penalty":0.75,"repeat_penalty":1.1,"repeat_last_n":32}
+        """.utf8)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let received = await backend.received
+        try await server.shutdown()
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(received?.generationConfig.presencePenalty == 1.5)
+        #expect(received?.generationConfig.minP == 0.25)
+        #expect(received?.generationConfig.frequencyPenalty == 0.75)
+        #expect(received?.generationConfig.repetitionPenalty == 1.1)
+        #expect(received?.generationConfig.repeatLastN == 32)
+    }
+
+    @Test(arguments: [#""presence_penalty":2.01"#, #""presence_penalty":-2.01"#,
+                      #""presence_penalty":"NaN""#, #""min_p":"Infinity""#])
+    func invalidSamplingFieldsFailBeforeStreaming(fields: String) async throws {
+        let backend = OptInThinkingBackend()
+        let server = samplingServer(backend: backend, libraryMode: false)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data("""
+        {"model":"qwen36-alias","messages":[{"role":"user","content":"hi"}],
+         "stream":true,\(fields)}
+        """.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let received = await backend.received
+        try await server.shutdown()
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        #expect(received == nil)
+        _ = try JSONDecoder().decode(OpenAIErrorEnvelope.self, from: data)
+        #expect(!String(decoding: data, as: UTF8.self).contains("data: [DONE]"))
+    }
+
     @Test(arguments: [false, true], [false, true])
     func qwen36ThinkingUsesBackendCapabilityWithCustomAlias(stream: Bool, kwargs: Bool) async throws {
         let backend = OptInThinkingBackend()

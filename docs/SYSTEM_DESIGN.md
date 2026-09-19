@@ -360,14 +360,20 @@ reads); other families keep speculation off. All three are byte-identical to
 their disabled paths.
 
 After layer 30, the tied 4-bit head has two output modes. A pure-greedy
-configuration (temperature `0` and repetition penalty `1`) returns the argmax
-token directly. Other configurations write the full logits vector for the
-sampler.
+configuration (temperature `0` with penalties disabled) returns the argmax
+token directly. Other configurations write the full
+logits vector for the sampler.
 
-Sampling applies Top-P to the full distribution, then Top-K, then temperature.
-The default Top-K `64` path uses a specialized 1,024-to-64 reduction.
+Sampling follows llama.cpp's default order: penalties, Top-K, normalized
+Top-P, Min-P, then temperature. Top-K up to `64`, including the default `40`,
+uses the existing specialized 1,024-to-64 reduction and truncates its final set.
 A pure-greedy configuration bypasses the sampler through the fused head. In the
-logits path, temperature `0` selects the argmax after any repetition penalty.
+logits path, temperature `0` selects the argmax after repetition, presence and
+frequency penalties. The default penalty window contains the last 64 prompt
+or generated tokens. The host updates token counts; the GPU applies penalties
+after softcap and before softmax, without modifying raw logits or clipping
+penalized values back to the softcap range. Presence acts once per seen token;
+frequency multiplies its count. `repeat_last_n=0` disables all penalties.
 
 ## Metal execution
 
