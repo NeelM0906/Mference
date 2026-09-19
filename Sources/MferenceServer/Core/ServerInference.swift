@@ -10,6 +10,8 @@ public enum ServerInferenceEvent: Equatable, Sendable {
 
 public struct ServerCompletion: Equatable, Sendable {
     public var reasoningContent: String? = nil
+    /// Operator timing; excluded from the OpenAI wire response.
+    public var prefillSeconds: Double? = nil
     public let content: String
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
@@ -216,7 +218,9 @@ public actor ServerModelSession: ServerLoadedModel {
         // changes only when that native render does. Every other dialect
         // still requires the bundled template.
         let templateData: Data
-        if tokenizer.dialect == .glm5 {
+        if tokenizer.dialect == .gemma {
+            templateData = try MFTokenizer.gemmaChatTemplateData()
+        } else if tokenizer.dialect == .glm5 {
             // GLM-5.3 ships a chat_template.jinja but the dialect renders
             // natively (`Glm5ChatTemplate.swift`); the identity follows the
             // native render, not the sidecar.
@@ -326,7 +330,8 @@ public actor ServerModelSession: ServerLoadedModel {
         let promptIDs: [Int32]
         do {
             promptIDs = try tokenizer.encodeChat(messages: request.messages, tools: request.tools,
-                                                reasoningEffort: request.reasoningEffort)
+                                                reasoningEffort: request.reasoningEffort,
+                                                preserveThinking: request.preserveThinking)
         } catch {
             throw ServerRequestError.invalid(message: String(describing: error),
                                               param: "messages", code: "invalid_chat_template")
@@ -357,6 +362,11 @@ public actor ServerModelSession: ServerLoadedModel {
             }
         }
 
+        let recovery = (runner as? any GemmaPrefixRecovering).flatMap {
+            $0.supportsGemmaPrefixRecovery && tokenizer.dialect == .gemma ? $0 : nil
+        }
+        var recoveryOutcome = promptCacheMode == .off ? "cache_disabled" : "cold_or_incompatible_history"
+        var captureOutcome: String?
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
         if promptCacheMode == .singlePrefix {
@@ -364,13 +374,21 @@ public actor ServerModelSession: ServerLoadedModel {
                 domain: promptCacheDomain,
                 request: request,
                 renderedPromptIDs: promptIDs,
-                tokenizer: tokenizer) {
+                tokenizer: tokenizer,
+                gemmaRecoverablePrefix: recovery.map { capable in { limit in
+                    let available = capable.gemmaRecoverablePrefix(upTo: limit)
+                    if available == 0 { recoveryOutcome = "state_unavailable" }
+                    return available
+                } }) {
             case .miss:
                 promptCache.invalidate()
                 effectivePromptIDs = promptIDs
                 completionStart = .reset
             case .hit(let effective, let cached):
                 effectivePromptIDs = effective
+                if let recovery, cached != runner.continuationPosition {
+                    recoveryOutcome = try recovery.recoverGemmaPrefix(to: cached).rawValue + "_prefix"
+                } else { recoveryOutcome = "full_prefix" }
                 completionStart = .resume(cachedPromptTokens: cached)
             }
         } else {
@@ -395,7 +413,7 @@ public actor ServerModelSession: ServerLoadedModel {
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let countsPayloadTokens = tokenizer.dialect == .chatml
             || tokenizer.dialect == .glm5 || tokenizer.dialect == .minicpm
-        let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
+        let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking || tokenizer.dialect == .gemma
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),
@@ -415,6 +433,16 @@ public actor ServerModelSession: ServerLoadedModel {
         var decodingError: Error?
         var shouldStop = false
 
+        var checkpoint: (position: Int, capture: () throws -> Void)?
+        if promptCacheMode == .singlePrefix, let recovery,
+           let boundary = try tokenizer.gemmaRecoveryBoundary(messages: request.messages,
+                tools: request.tools, reasoningEffort: request.reasoningEffort,
+                preserveThinking: request.preserveThinking, promptIDs: effectivePromptIDs) {
+            checkpoint = (boundary, {
+                captureOutcome = try recovery.captureGemmaPrefix() ? "captured" : "unavailable"
+            })
+        }
+
         let result = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
@@ -424,6 +452,7 @@ public actor ServerModelSession: ServerLoadedModel {
             scratch: scratch,
             prefillConfig: prefillConfig,
             start: completionStart,
+            prefillCheckpoint: checkpoint,
             shouldStop: { shouldStop }) { progress in
                 guard decodingError == nil else { return }
                 do {
@@ -508,6 +537,7 @@ public actor ServerModelSession: ServerLoadedModel {
         } else {
             reason = "stop"
         }
+        try Task.checkCancellation()
         if promptCacheMode == .singlePrefix {
             promptCache.publish(
                 domain: promptCacheDomain,
@@ -517,6 +547,7 @@ public actor ServerModelSession: ServerLoadedModel {
                 result: result,
                 reasoningContent: reasoning.isEmpty ? nil : reasoning,
                 stopStringFiltered: stopMatcher.isStopped)
+            if promptCache.entry == nil { recovery?.discardGemmaPrefix() }
         }
         completed = true
         var completion = ServerCompletion(
@@ -533,8 +564,11 @@ public actor ServerModelSession: ServerLoadedModel {
                                }),
             diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
                 result: result,
-                memory: .capture(model: model, producer: runner, scratch: scratch)) : nil)
+                memory: .capture(model: model, producer: runner, scratch: scratch),
+                gemmaRecovery: recovery.map { .init(outcome: recoveryOutcome,
+                    capture: captureOutcome, allocatedBytes: $0.gemmaRecoveryBytes) }) : nil)
         completion.reasoningContent = reasoning.isEmpty ? nil : reasoning
+        completion.prefillSeconds = result.prefillSeconds
         return completion
     }
 }

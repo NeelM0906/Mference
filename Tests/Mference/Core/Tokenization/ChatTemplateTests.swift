@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Mference
 
-/// Hand-authored Gemma 4 chat template. Loads the IT tokenizer (cached after
+/// Canonical Gemma 4 chat template. Loads the IT tokenizer (cached after
 /// first run). Verifies turn-marker structure as a string and that the prompt
 /// encodes to the right special-token ids.
 @Suite("ChatTemplate")

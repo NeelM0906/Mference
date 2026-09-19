@@ -32,12 +32,12 @@ extension MFTokenizer {
         isSwiftQwen || (isBaseQwen38 && reasoningEffort != nil)
     }
 
-    /// Swift-Qwen always renders through its source template. Qwen 3.6 does so
+    /// Gemma and Swift-Qwen always render through their source templates. Qwen 3.6 does so
     /// only when the request opts in; an omitted effort keeps its native
     /// non-thinking render. Its template has no effort levels: `none` closes
     /// the thinking block and every other value opens it.
     public func usesSourceTemplate(reasoningEffort: QwenReasoningEffort?) -> Bool {
-        usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
+        dialect == .gemma || usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
             || (supportsOptInThinking && reasoningEffort != nil)
     }
 
@@ -76,6 +76,14 @@ extension MFTokenizer {
 
     public func startsInThinking(reasoningEffort: QwenReasoningEffort?,
                                  promptIDs: [Int32]? = nil) -> Bool {
+        if dialect == .gemma {
+            // Ordinary thinking starts at the model header and generates its
+            // channel opener. A tool result instead pre-opens the thought.
+            guard let promptIDs,
+                  let marker = promptIDs.lastIndex(of: channelStartID) else { return false }
+            return decode(Array(promptIDs[marker...]), skipSpecialTokens: false)
+                == "<|channel>thought\n"
+        }
         // The actual generation suffix wins over a family's ordinary-chat
         // default. In particular base Qwen opens thinking for ordinary chat,
         // but its tool/history template explicitly closes it. Initializing the
@@ -94,10 +102,16 @@ extension MFTokenizer {
             ? reasoningEffort != .off : generationPromptStartsInThinking
     }
 
-    /// Uses the installed source template for both ordinary and tool chat.
-    /// No hand-written framing or forced thinking-off path for Swift-Qwen.
+    /// Selects the family's source template for both ordinary and tool chat:
+    /// bundled for Gemma and installed for source-template Qwen checkpoints.
     public func encodeChat(messages: [Message], tools: [FunctionDefinition] = [],
-                           reasoningEffort: QwenReasoningEffort? = nil) throws -> [Int32] {
+                           reasoningEffort: QwenReasoningEffort? = nil,
+                           preserveThinking: Bool = false) throws -> [Int32] {
+        if dialect == .gemma {
+            return try encodeToolChat(messages: messages, tools: tools,
+                                      reasoningEffort: reasoningEffort,
+                                      preserveThinking: preserveThinking)
+        }
         if usesSourceQwenTemplate(reasoningEffort: reasoningEffort) {
             // The source rejects developer turns. Do not silently rewrite their
             // role or discard their instructions.
@@ -122,5 +136,21 @@ extension MFTokenizer {
             return try encodeToolChat(messages: messages, tools: tools)
         }
         return encode(try applyChatTemplate(messages), addBOS: false)
+    }
+}
+
+extension MFTokenizer {
+    /// Capture before the generated thought channel. Derive the generation
+    /// suffix from this exact template invocation; history may itself contain
+    /// thought-channel tokens. Tool continuations keep the active turn's image.
+    public func gemmaRecoveryBoundary(messages: [Message], tools: [FunctionDefinition],
+                                      reasoningEffort: QwenReasoningEffort?,
+                                      preserveThinking: Bool, promptIDs: [Int32]) throws -> Int? {
+        guard dialect == .gemma, messages.last?.role == .user else { return nil }
+        let history = try encodeToolChat(messages: messages, tools: tools,
+            reasoningEffort: reasoningEffort, preserveThinking: preserveThinking,
+            addGenerationPrompt: false)
+        guard promptIDs.starts(with: history) else { return nil }
+        return promptIDs[history.count...].firstIndex(of: channelStartID) ?? promptIDs.count
     }
 }

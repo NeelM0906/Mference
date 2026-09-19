@@ -4,6 +4,39 @@ import Testing
 @testable import Mference
 
 extension RawCompletionLoopTests {
+    @Test(arguments: [false, true])
+    func checkpointSplitsOnlyPrefillAndPreservesAccounting(chunked: Bool) async throws {
+        let context = try MetalContext()
+        let tokenizer = try await MFTokenizer.load(from: GemmaThinkingTests.fixtureFolder(), family: .gemma4)
+        let prompt: [Int32] = [1, 2, 3, 4, 5, 6, 7]
+        let producer = ContinuationProducer(vocabSize: tokenizer.vocabSize,
+            terminalToken: tokenizer.eosID, position: 2)
+        let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
+        producer.reportsEachBatch = chunked
+        var checkpoints: [Int] = []
+        var progress: [Int] = []
+        let result = try await runRawCompletion(producer: producer, tokenizer: tokenizer,
+            promptIds: prompt, config: .init(maxNewTokens: 1, temperature: 0),
+            context: context, scratch: scratch, prefillConfig: chunked ? .defaultChunked : .off,
+            start: .resume(cachedPromptTokens: 2), prefillCheckpoint: (4, {
+                checkpoints.append(producer.continuationPosition)
+            })) { event in
+                if case .prefill(let done, _) = event { progress.append(done) }
+            }
+        #expect(checkpoints == [4])
+        #expect(producer.resetCalls == 0)
+        #expect(result.kvBackedTokenIDs == prompt)
+        #expect(result.cachedPromptTokens == 2)
+        #expect(result.computedPrefillTokens == 5)
+        #expect(result.uncommittedBoundaryTokenIDs == [tokenizer.eosID])
+        #expect(progress == progress.sorted() && progress.last == prompt.count)
+        #expect(result.prefillExecution?.computedTokens == 5)
+        if chunked {
+            #expect(producer.prefillRanges == [2..<4, 4..<7])
+            #expect(result.prefillExecution?.batchedChunkSizes == [2, 3])
+        }
+    }
+
     final class ContinuationProducer: ChunkedPrefillRunner, ContinuableLogitProducer,
         @unchecked Sendable
     {
@@ -14,6 +47,7 @@ extension RawCompletionLoopTests {
         private(set) var prepareCalls: [Int] = []
         private(set) var prefillRanges: [Range<Int>] = []
         var reportedExecution: PrefillExecutionReport?
+        var reportsEachBatch = false
 
         init(vocabSize: Int, terminalToken: Int32, position: Int) {
             self.vocabSize = vocabSize
@@ -54,8 +88,14 @@ extension RawCompletionLoopTests {
             continuationPosition += tokens.count
             onProgress(tokens.count)
             writeTerminal(to: logits)
+            var execution = reportedExecution
+            if reportsEachBatch {
+                var actual = PrefillExecutionReport()
+                actual.recordBatch(tokens.count)
+                execution = actual
+            }
             return PrefillResult(newPosition: continuationPosition,
-                                 seed: .logitsWritten, execution: reportedExecution)
+                                 seed: .logitsWritten, execution: execution)
         }
 
         private func writeTerminal(to logits: MTLBuffer) {

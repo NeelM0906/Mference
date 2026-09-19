@@ -290,6 +290,7 @@ public enum ServerRequestError: Error, Equatable, Sendable {
 
 public struct ValidatedChatRequest: Sendable {
     public var reasoningEffort: QwenReasoningEffort? = nil
+    public var preserveThinking: Bool = false
     public let messages: [MFTokenizer.Message]
     public let tools: [MFTokenizer.FunctionDefinition]
     public let stream: Bool
@@ -397,7 +398,7 @@ public enum OpenAIRequestValidator {
         // 32,768-token output budget in thinking mode.
         let thinkingRequested = effort != nil && effort != .off
         let maximum = request.maxCompletionTokens ?? request.maxTokens
-            ?? (thinkingRequested ? 32_768 : 4096)
+            ?? (thinkingRequested && dialect != .gemma ? 32_768 : 4096)
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
@@ -433,7 +434,9 @@ public enum OpenAIRequestValidator {
                                       minP: minP,
                                       seed: request.seed,
                                       stopStrings: request.stop?.values ?? [])
-        return ValidatedChatRequest(reasoningEffort: effort, messages: messages,
+        return ValidatedChatRequest(reasoningEffort: effort,
+                                    preserveThinking: request.chatTemplateKwargs?.preserveThinking ?? false,
+                                    messages: messages,
                                     tools: tools,
                                     stream: request.stream ?? false,
                                     includeUsage: request.streamOptions?.includeUsage ?? false,

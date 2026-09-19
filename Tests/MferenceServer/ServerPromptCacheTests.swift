@@ -68,7 +68,7 @@ struct ServerPromptCacheTests {
         fp16RingEnabled: true,
         templateSHA256: "template")
 
-    @Test func textContinuationUsesActualGeneratedHistoryAndOnlyPrefillsSuffix() async throws {
+    @Test func gemmaNewUserHistoryDoesNotUseLegacyAppendBridge() async throws {
         let tokenizer = try await MFTokenizer.load()
         let initial = request(messages: [
             MFTokenizer.Message(role: .user, content: "first"),
@@ -103,15 +103,15 @@ struct ServerPromptCacheTests {
             renderedPromptIDs: rendered,
             tokenizer: tokenizer)
 
-        guard case .hit(let effective, let cached) = match else {
-            Issue.record("expected text continuation hit")
-            return
-        }
-        let bridge = tokenizer.encodeTextContinuation(userContent: "second")
-        #expect(cached == kvBacked.count)
-        #expect(effective == kvBacked + bridge)
+        // Accepted canonical-template contract: the generation-only empty
+        // thought block is absent from historical assistant text. The old
+        // append bridge retained it. Without a runtime recovery capability,
+        // this cache matcher must decline that non-canonical full-position hit.
+        // Gemma partial-prefix recovery has its own runner-backed proof.
+        #expect(match == .miss)
         #expect(!rendered.prefix(kvBacked.count).elementsEqual(kvBacked))
-        #expect(effective[cached] == tokenizer.endOfTurnID)
+        #expect(tokenizer.decode(rendered, skipSpecialTokens: false)
+            .contains("<|turn>model\nanswer<turn|>\n<|turn>user\nsecond"))
     }
 
     @Test func capturedOpenCodeToolResultUsesFrozenToolBoundary() async throws {

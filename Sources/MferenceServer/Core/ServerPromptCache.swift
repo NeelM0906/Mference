@@ -30,6 +30,7 @@ struct ServerPromptCacheEntry: Sendable, Equatable {
     let uncommittedBoundaryTokenIDs: [Int32]
     let kvPosition: Int
     var reasoningEffort: QwenReasoningEffort? = nil
+    var preserveThinking: Bool = false
 }
 
 enum ServerPromptCacheMatch: Sendable, Equatable {
@@ -84,14 +85,16 @@ struct ServerPromptCache: Sendable {
             kvBackedTokenIDs: result.kvBackedTokenIDs,
             uncommittedBoundaryTokenIDs: result.uncommittedBoundaryTokenIDs,
             kvPosition: result.kvPosition,
-            reasoningEffort: request.reasoningEffort)
+            reasoningEffort: request.reasoningEffort,
+            preserveThinking: request.preserveThinking)
     }
 
     func match(
         domain: ServerPromptCacheDomain,
         request: ValidatedChatRequest,
         renderedPromptIDs: [Int32],
-        tokenizer: MFTokenizer
+        tokenizer: MFTokenizer,
+        gemmaRecoverablePrefix: ((Int) -> Int)? = nil
     ) -> ServerPromptCacheMatch {
         guard let entry,
               entry.domain == domain,
@@ -102,12 +105,48 @@ struct ServerPromptCache: Sendable {
             return .miss
         }
 
+        if tokenizer.dialect == .gemma {
+            let wasThinking = (entry.reasoningEffort ?? .off) != .off
+            let isThinking = (request.reasoningEffort ?? .off) != .off
+            guard wasThinking == isThinking,
+                  entry.preserveThinking == request.preserveThinking else { return .miss }
+        }
+
         if renderedPromptIDs.count > entry.kvPosition,
            renderedPromptIDs.prefix(entry.kvPosition)
             .elementsEqual(entry.kvBackedTokenIDs) {
             return .hit(
                 effectivePromptIDs: renderedPromptIDs,
                 cachedPromptTokens: entry.kvPosition)
+        }
+
+        if tokenizer.dialect == .gemma {
+            let inputCount = entry.inputMessages.count
+            guard request.messages.count > inputCount + 1,
+                  request.messages.prefix(inputCount).elementsEqual(entry.inputMessages),
+                  assistantMatches(request.messages[inputCount], entry.assistantTurn.message) else {
+                return .miss
+            }
+            // Only tool results from this same user turn may append to the
+            // generated prefix. A new user must use the canonical re-render,
+            // which can remove earlier thoughts.
+            let continuation = Array(request.messages.dropFirst(inputCount + 1))
+            let toolMatch = matchToolContinuation(entry: entry, request: request,
+                continuation: continuation, tokenizer: tokenizer)
+            if case .hit = toolMatch { return toolMatch }
+            // Results may arrive together with a new user message. Such a
+            // request starts a new turn too, and must use canonical recovery
+            // rather than the append-only tool bridge.
+            guard continuation.contains(where: { $0.role == .user }),
+                  let gemmaRecoverablePrefix else { return .miss }
+            let common = zip(entry.kvBackedTokenIDs, renderedPromptIDs).prefix { $0 == $1 }.count
+            // Leave at least one token for the next-token logits. Only the
+            // backend can prove which ring rows or snapshot remain available.
+            let limit = min(common, renderedPromptIDs.count - 1)
+            guard limit > 0 else { return .miss }
+            let cached = gemmaRecoverablePrefix(limit)
+            guard cached > 0, cached <= limit else { return .miss }
+            return .hit(effectivePromptIDs: renderedPromptIDs, cachedPromptTokens: cached)
         }
 
         // Qwen 3.8 source-template requests require an exact rendered prefix;
@@ -240,7 +279,9 @@ struct ServerPromptCache: Sendable {
             cachedMessages: entry.inputMessages,
             assistant: entry.assistantTurn.message,
             incomingMessages: request.messages,
-            tools: request.tools),
+            tools: request.tools,
+            reasoningEffort: request.reasoningEffort,
+            preserveThinking: request.preserveThinking),
               bridge.first == entry.uncommittedBoundaryTokenIDs.first else {
             return .miss
         }

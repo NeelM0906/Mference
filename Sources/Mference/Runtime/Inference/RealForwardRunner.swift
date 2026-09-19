@@ -157,7 +157,7 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
-public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, FusedHeadLogitProducer, @unchecked Sendable {
+public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, GemmaPrefixRecovering, FusedHeadLogitProducer, @unchecked Sendable {
     /// Per-layer fp32 short-convolution states, one buffer per conv site.
     /// k/v carry the last K-1 KV-stream inputs; attn/mlp the last K-1
     /// sublayer outputs.
@@ -1014,6 +1014,47 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 "continuation expected KV position \(expectedPosition), current \(kv.position)")
         }
         resetTransientState()
+    }
+
+    public var supportsGemmaPrefixRecovery: Bool { model.config.family == .gemma4 && kv != nil }
+    public var gemmaRecoveryBytes: UInt64 { kv?.gemmaRecoveryBytes ?? 0 }
+    // Fault-injection seam, reached only after GPU work completed.
+    var gemmaRecoveryWillCopyLayer: ((GemmaPrefixRecoverySource, Int) throws -> Void)?
+
+    public func gemmaRecoverablePrefix(upTo limit: Int) -> Int {
+        guard supportsGemmaPrefixRecovery, !Task.isCancelled else { return 0 }
+        do { try prefillChunkState.requireClean(operation: "Gemma prefix availability") }
+        catch { return 0 }
+        return kv?.gemmaRecoverablePrefix(upTo: limit) ?? 0
+    }
+
+    public func discardGemmaPrefix() { kv?.discardGemmaRecovery() }
+
+    public func captureGemmaPrefix() throws -> Bool {
+        try Task.checkCancellation()
+        try prefillChunkState.requireClean(operation: "Gemma prefix capture")
+        guard supportsGemmaPrefixRecovery, let kv else { return false }
+        prefillChunkState.markDirty(startPosition: kv.position, tokenCount: 1)
+        let captured = try kv.captureGemmaRecovery { layer in
+            try self.gemmaRecoveryWillCopyLayer?(.current, layer)
+        }
+        prefillChunkState.markCommitted()
+        return captured
+    }
+
+    public func recoverGemmaPrefix(to position: Int) throws -> GemmaPrefixRecoverySource {
+        try Task.checkCancellation()
+        try prefillChunkState.requireClean(operation: "Gemma prefix recovery")
+        guard supportsGemmaPrefixRecovery, let kv,
+              kv.gemmaRecoverablePrefix(upTo: position) == position else {
+            throw PrefillError.prefillCursorMismatch("Gemma prefix state is unavailable")
+        }
+        prefillChunkState.markDirty(startPosition: position, tokenCount: 1)
+        let source = try kv.recoverGemmaPrefix(to: position) { layer in
+            try self.gemmaRecoveryWillCopyLayer?(.snapshot, layer)
+        }
+        resetTransientState()
+        return source
     }
 
     private func resetTransientState() {

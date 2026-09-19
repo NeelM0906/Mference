@@ -238,12 +238,22 @@ flowchart LR
 
 ## Instruction framing
 
-The CLI's `--messages-file` mode uses the pinned text-only Gemma 4 chat
-format. It accepts user and assistant messages plus optional leading system
-guidance. Assistant messages
-render with Gemma's `model` role. The separate loopback server uses the pinned
-upstream Jinja template for developer messages, function declarations,
-assistant tool calls, and tool results.
+Gemma 4 CLI chat/message modes and the loopback server use the same canonical
+Google Jinja template, bundled with the app at revision
+`35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122`. The installed tokenizer vocabulary
+and model receipt remain unchanged; cache identity hashes the effective app
+resource. Assistant messages render with Gemma's `model` role. The template
+also frames developer messages, function declarations, assistant tool calls,
+and tool results. Thinking is opt-in, with separate `reasoning_content` output
+and template-driven historical thought stripping. The decoder starts from
+the actual generation suffix, including an already open thought after a tool
+result. Tool syntax within thoughts remains reasoning text.
+
+The local Swift Jinja snapshot in `Vendor/swift-jinja` corrects whitespace
+handling at lexer boundaries so literal braces in the unchanged canonical
+template do not introduce extra prompt spaces. Independent Python fixtures
+check the resulting bytes and token IDs; upstream Jinja tests and existing
+Qwen template regressions also run through the package test wrapper.
 
 The runtime stops generation on `<eos>` (token 1), `<turn|>` (token 106), or
 `<|tool_response>` (token 50). The app and CLI treat the third token as a
@@ -480,7 +490,17 @@ the five architectures is explicitly enumerated with its own pinned checkpoint,
 compile-time baseline, and manifest contract; a new family merges only after
 passing the [family acceptance gate](FAMILY_GATE.md). The optional HTTP server owns one
 warm model, serializes generation, and retains one verified conversational KV
-prefix by default. It binds to loopback unless the user explicitly selects the
+prefix by default. Gemma additionally retains one server-only SWA recovery
+image at the active user turn's pre-thought boundary, derived from the pinned
+template. New-user thought stripping resumes from the longest valid current
+prefix or that image, replaying only the remaining canonical suffix. Recovery
+validates physical ring rows, restores K and V separately, and commits the cursor
+after all copies complete. Full-attention rows stay in place. The image has at
+most `2 * 25 * 4096 * 1023 = 209510400` payload bytes for the pinned model:
+the next query supplies its own row of the 1,024-token window. It is provisional
+until the request succeeds and is released on reset/failure/model replacement.
+Tool rounds retain it; new user turns replace it. Other families and CLI
+reset behavior do not use this capability. The server binds to loopback unless the user explicitly selects the
 machine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).
 
 Mference is a research system. The CLI and server expose a small set of typed

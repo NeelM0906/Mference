@@ -201,8 +201,9 @@ extension Args {
                                 ~59 s inside the first prefill;
                                 trusted-receipt checks file sizes against the
                                 receipt written at install time instead.
-      --reasoning-effort <mode>  Base/Swift Qwen 3.8 chat: xhigh, medium,
-                                low, or none. Not applied to raw prompts.
+      --reasoning-effort <mode>  Gemma 4 / Qwen chat: xhigh, medium, low,
+                                or none. Gemma 4 and Qwen 3.6 use binary
+                                on/off aliases. Not applied to raw prompts.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """

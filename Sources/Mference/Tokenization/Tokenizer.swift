@@ -50,9 +50,9 @@ public enum ChatDialect: String, Sendable {
 /// end-of-turn) and adapts encode/decode to Int32 to match the buffer types
 /// kernels consume.
 ///
-/// Mference owns the minimal chat framing because the upstream
-/// `tokenizer_config.json` has no `chat_template`. Literal control-token text in
-/// user content is accepted as a trusted-input research-runtime limitation.
+/// Gemma uses the revision-pinned template bundled with the application;
+/// installed vocabulary and weights remain unchanged. Literal control-token
+/// text in user content is a trusted-input research-runtime limitation.
 public struct MFTokenizer: @unchecked Sendable {
     public static let modelID = "google/gemma-4-26B-A4B-it"
     public static let chatTemplateIdentity = "gemma4-it-text-no-tools-v1"
@@ -63,8 +63,7 @@ public struct MFTokenizer: @unchecked Sendable {
     public internal(set) var isBaseQwen38 = false
     /// Tool grammar is a family contract, independent of thinking policy.
     let usesJSONChatMLToolCalls: Bool
-    /// Qwen 3.6's bundled template carries the same `enable_thinking` /
-    /// `preserve_thinking` switches as Swift-Qwen's, so a request may opt in.
+    /// Loaded checkpoints with a binary opt-in thinking control.
     let supportsOptInThinking: Bool
     /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.
@@ -174,7 +173,7 @@ public struct MFTokenizer: @unchecked Sendable {
     public init(tokenizer: any Tokenizer, family: ModelFamily?) throws {
         self.tokenizer = tokenizer
         self.usesJSONChatMLToolCalls = family == .maple
-        self.supportsOptInThinking = family == .qwen36
+        self.supportsOptInThinking = family == .qwen36 || family == .gemma4
 
         let dialect: ChatDialect =
             if Self.specialTokenID(tokenizer, Self.inklingUserMark) != nil {
@@ -692,20 +691,16 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     private func gemmaChatTemplate(_ messages: [Message]) throws -> String {
-        var s = Self.bosMark
         for (index, message) in messages.enumerated() {
-            guard let rawContent = message.content else {
+            guard message.content != nil else {
                 throw MFTokenizerError.invalidChatTemplate("text-only messages require content")
             }
-            let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.role == .system && index != 0 {
                 throw MFTokenizerError.invalidChatTemplate("system message must be first")
             }
-            let role = message.role == .assistant ? "model" : message.role.rawValue
-            s += Self.turnOpen + role + "\n" + content + Self.turnClose + "\n"
         }
-        s += Self.turnOpen + "model\n<|channel>thought\n<channel|>"
-        return s
+        return decode(try encodeToolChat(messages: messages, tools: []),
+                      skipSpecialTokens: false)
     }
 
     private func chatMLChatTemplate(_ messages: [Message]) throws -> String {
@@ -770,6 +765,7 @@ public struct MFTokenizer: @unchecked Sendable {
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition],
                                reasoningEffort: QwenReasoningEffort? = nil,
+                               preserveThinking: Bool = false,
                                addGenerationPrompt: Bool = true) throws -> [Int32] {
         guard acceptsReasoningEffort || reasoningEffort == nil else {
             throw MFTokenizerError.unsupportedForDialect("reasoning_effort is not supported by this model")
@@ -792,7 +788,7 @@ public struct MFTokenizer: @unchecked Sendable {
         if dialect == .glm5 {
             return encode(try glm5Render(messages: messages, tools: tools), addBOS: false)
         }
-        guard tokenizer.hasChatTemplate else {
+        guard dialect == .gemma || tokenizer.hasChatTemplate else {
             throw MFTokenizerError.missingToolTemplate
         }
         let upstreamMessages: [Tokenizers.Message] = try messages.map { message in
@@ -835,12 +831,16 @@ public struct MFTokenizer: @unchecked Sendable {
         }
         return try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
-            chatTemplate: nil,
+            chatTemplate: dialect == .gemma
+                ? .literal(String(decoding: try Self.gemmaChatTemplateData(), as: UTF8.self)) : nil,
             addGenerationPrompt: addGenerationPrompt,
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
+            additionalContext: dialect == .gemma
+                ? ["enable_thinking": reasoningEffort != nil && reasoningEffort != .off,
+                   "preserve_thinking": preserveThinking]
+                : usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
                 ? ["enable_thinking": reasoningEffort != .off,
                    "reasoning_effort": (reasoningEffort ?? .xhigh).rawValue,
                    "preserve_thinking": true]
@@ -1062,7 +1062,9 @@ public struct MFTokenizer: @unchecked Sendable {
         cachedMessages: [Message],
         assistant: Message,
         incomingMessages: [Message],
-        tools: [FunctionDefinition]
+        tools: [FunctionDefinition],
+        reasoningEffort: QwenReasoningEffort? = nil,
+        preserveThinking: Bool = false
     ) throws -> [Int32] {
         // The ChatML template's `<think>` stripping depends on each assistant
         // turn's position relative to the last user query, so a re-rendered
@@ -1075,38 +1077,31 @@ public struct MFTokenizer: @unchecked Sendable {
         }
         let prefix = try encodeToolChat(
             messages: cachedMessages + [assistant],
-            tools: tools)
-        let full = try encodeToolChat(messages: incomingMessages, tools: tools)
-        let callCount = assistant.toolCalls.count
-        let starts = prefix.indices.filter { prefix[$0] == toolCallStartID }
-        guard callCount > 0, starts.count >= callCount,
-              let callEnd = prefix.lastIndex(of: toolCallEndID) else {
+            tools: tools, reasoningEffort: reasoningEffort,
+            preserveThinking: preserveThinking, addGenerationPrompt: false)
+        let full = try encodeToolChat(messages: incomingMessages, tools: tools,
+                                     reasoningEffort: reasoningEffort,
+                                     preserveThinking: preserveThinking)
+        // The pinned template closes this specific unfinished assistant turn
+        // with the sampled tool-response boundary. Match its whole rendered
+        // lineage, not a globally unique function/argument sequence: identical
+        // calls and literal tool syntax in thoughts are both valid.
+        guard !assistant.toolCalls.isEmpty,
+              prefix.last == toolResponseID,
+              prefix.dropLast().last == toolCallEndID,
+              incomingMessages.prefix(cachedMessages.count).elementsEqual(cachedMessages),
+              full.count >= prefix.count,
+              full.prefix(prefix.count - 1).elementsEqual(prefix.dropLast()) else {
             throw MFTokenizerError.invalidChatTemplate(
-                "cached assistant tool-call boundary is missing")
+                "cached assistant tool-call lineage does not match the rendered history")
         }
-        let callStart = starts[starts.count - callCount]
-        let callSequence = Array(prefix[callStart...callEnd])
-        let matches = full.subsequenceStartIndices(matching: callSequence)
-        guard matches.count == 1 else {
-            throw MFTokenizerError.invalidChatTemplate(
-                "cached assistant tool-call boundary is ambiguous")
-        }
-        let suffixStart = matches[0] + callSequence.count
+        let suffixStart = prefix.count - 1
         let suffix = Array(full[suffixStart...])
         guard suffix.first == toolResponseID else {
             throw MFTokenizerError.invalidChatTemplate(
                 "tool-result continuation does not begin at the KV boundary")
         }
         return suffix
-    }
-}
-
-private extension Array where Element: Equatable {
-    func subsequenceStartIndices(matching needle: [Element]) -> [Int] {
-        guard !needle.isEmpty, needle.count <= count else { return [] }
-        return indices.dropLast(needle.count - 1).filter { start in
-            self[start..<(start + needle.count)].elementsEqual(needle)
-        }
     }
 }
 

@@ -123,14 +123,37 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenizer.dialect == .glm5 {
             return try consumeGlm5(tokenID: tokenID, delta: delta)
         }
-        if tokenID == tokenizer.channelStartID {
-            label = ""
-            channel = .label
-            return []
-        }
-        if tokenID == tokenizer.channelEndID {
-            channel = .visible
-            return []
+        if toolTokens == nil {
+            if tokenID == tokenizer.channelStartID {
+                label = ""
+                channel = .label
+                return []
+            }
+            if tokenID == tokenizer.channelEndID {
+                channel = .visible
+                return []
+            }
+            if channel == .label {
+                label += delta
+                guard let newline = label.firstIndex(of: "\n") else { return [] }
+                let name = label[..<newline].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let content = String(label[label.index(after: newline)...])
+                channel = name == "final" || name == "answer" ? .visible : .thought
+                label = ""
+                if channel == .visible { return content.isEmpty ? [] : [.content(content)] }
+                if !content.isEmpty { onReasoning?(content) }
+                return []
+            }
+            // Native tool markers discussed in reasoning are text, not calls.
+            if channel == .thought {
+                if tokenID == tokenizer.toolCallStartID || tokenID == tokenizer.toolCallEndID {
+                    // Streaming detokenization omits special-token text. The
+                    // token itself is literal reasoning here and must survive
+                    // replay through the canonical template.
+                    onReasoning?(tokenizer.decode([tokenID], skipSpecialTokens: false))
+                } else if !delta.isEmpty { onReasoning?(delta) }
+                return []
+            }
         }
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
@@ -173,24 +196,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = tokens
             return []
         }
-        switch channel {
-        case .thought:
-            return []
-        case .visible:
-            return delta.isEmpty ? [] : [.content(delta)]
-        case .label:
-            label += delta
-            guard let newline = label.firstIndex(of: "\n") else { return [] }
-            let name = label[..<newline].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let contentStart = label.index(after: newline)
-            let content = String(label[contentStart...])
-            channel = name == "final" || name == "answer" ? .visible : .thought
-            label = ""
-            if channel == .visible, !content.isEmpty {
-                return [.content(content)]
-            }
-            return []
-        }
+        return delta.isEmpty ? [] : [.content(delta)]
     }
 
     /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
