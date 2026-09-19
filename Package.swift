@@ -18,6 +18,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+        // Local snapshot of Swift Jinja 2.5.1; see Vendor/swift-jinja/README.md.
+        .package(path: "Vendor/swift-jinja"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.99.0"),
     ],
     targets: [
@@ -76,6 +78,11 @@ let package = Package(
             dependencies: ["Mference", "MferenceValidationSupport", "MferenceRepackCore", "MferenceCLICore"],
             path: "Tests/Mference/Core",
             resources: [.copy("Tokenization/Fixtures")]
+        ),
+        .testTarget(
+            name: "JinjaCompatibilityTests",
+            dependencies: [.product(name: "Jinja", package: "swift-jinja")],
+            path: "Vendor/swift-jinja/Tests/JinjaTests"
         ),
         .testTarget(
             name: "MferenceRepackTests",
