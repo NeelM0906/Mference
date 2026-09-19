@@ -141,13 +141,13 @@ for attribution and terms. Model weights are not bundled with Mference.
 The following table covers the complete graph reported by
 `swift package show-dependencies` from the checked-in
 [`Package.resolved`](Package.resolved). Remote revisions are recorded there;
-the local Jinja snapshot records its revision in
+the local Jinja snapshot records its revision and patch in
 [`Vendor/swift-jinja/README.md`](Vendor/swift-jinja/README.md).
 
 | Package | Version | License in locked checkout |
 | --- | --- | --- |
 | [swift-transformers](https://github.com/huggingface/swift-transformers) | 1.3.3 | Apache-2.0 |
-| [swift-jinja](https://github.com/huggingface/swift-jinja) | Local 2.5.1 snapshot | [Apache-2.0](Vendor/swift-jinja/LICENSE) |
+| [swift-jinja](https://github.com/huggingface/swift-jinja) | Local 2.5.1 snapshot with whitespace lexer fix | [Apache-2.0](Vendor/swift-jinja/LICENSE) |
 | [swift-huggingface](https://github.com/huggingface/swift-huggingface) | 0.9.0 | Apache-2.0 |
 | [EventSource](https://github.com/mattt/EventSource) | 1.4.1 | MIT |
 | [swift-nio](https://github.com/apple/swift-nio) | 2.99.0 | Apache-2.0; upstream NOTICE applies |

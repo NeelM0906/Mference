@@ -32,7 +32,7 @@ public enum Lexer: Sendable {
     public static func tokenize(_ source: String) throws
         -> [Token]
     {
-        let preprocessed = preprocess(source)
+        let preprocessed = source
         var tokens: [Token] = []
         tokens.reserveCapacity(preprocessed.count / 4)
 
@@ -48,12 +48,40 @@ public enum Lexer: Sendable {
                 }
             }
 
-            let (token, newPosition) = try extractToken(
+            // Consume trim markers at lexical boundaries, before interpreting
+            // tags. Rewriting source text first can merge a literal '{' with
+            // a tag delimiter and force an incorrect protective output space.
+            var trimFollowingWhitespace = false
+            if inTag, preprocessed[position...].hasPrefix("-}}")
+                || preprocessed[position...].hasPrefix("-%}") {
+                position = preprocessed.index(after: position)
+                trimFollowingWhitespace = true
+            }
+            let tagPosition = position
+            var (token, newPosition) = try extractToken(
                 from: preprocessed,
                 at: position,
                 inTag: inTag,
                 curlyBracketDepth: curlyBracketDepth
             )
+
+            var trimPreviousWhitespace = false
+            if token.kind == .openExpression || token.kind == .openStatement {
+                if newPosition < preprocessed.endIndex, preprocessed[newPosition] == "-" {
+                    trimPreviousWhitespace = true
+                    newPosition = preprocessed.index(after: newPosition)
+                }
+            } else if token.kind == .comment {
+                trimPreviousWhitespace = preprocessed[tagPosition...].hasPrefix("{#-")
+                trimFollowingWhitespace = preprocessed[tagPosition..<newPosition].hasSuffix("-#}")
+            }
+            if trimPreviousWhitespace, let previous = tokens.last, previous.kind == .text {
+                let text = previous.value.reversed().drop(while: { $0.isWhitespace }).reversed()
+                tokens[tokens.count - 1] = Token(kind: .text, value: String(text)[...], position: previous.position)
+            }
+            if trimFollowingWhitespace {
+                newPosition = skipWhitespace(in: preprocessed, at: newPosition)
+            }
 
             switch token.kind {
             case .openExpression, .openStatement:
@@ -104,54 +132,6 @@ public enum Lexer: Sendable {
             }
         }
         return pos
-    }
-
-    private static func preprocess(_ template: String) -> String {
-        // Optimized preprocessing with single pass
-        var result = template
-
-        // Handle whitespace control
-
-        // Note: We must avoid merging a literal '{' with the delimiter.
-        // For example, "{<newline>{%-" should become "{ {%" not "{{%" (which would be parsed as "{{" + "%").
-        // Since Swift Regex doesn't support lookbehind
-        // (see https://github.com/swiftlang/swift-evolution/blob/main/proposals/0448-regex-lookbehind-assertions.md),
-        // we use a multi-step approach:
-
-        // 1. Handle closing delimiters (these don't have the merging issue)
-        result = result.replacing(#/-%}\s*/#, with: "%}")
-        result = result.replacing(#/-}}\s*/#, with: "}}")
-        result = result.replacing(#/-#}\s*/#, with: "#}")
-
-        // 2. For opening delimiters, we need to be careful about preceding '{'
-        // When preceded by '{', we keep a single space to prevent token merging.
-        // When preceded by other characters, we strip the whitespace entirely.
-
-        // Handle {%- : if preceded by '{', keep one space; otherwise strip whitespace
-        result = result.replacing(#/\{\s+\{%-/#, with: "{ {%")
-        result = result.replacing(#/([^\{])\s*\{%-/#) { match in
-            "\(match.1){%"
-        }
-        result = result.replacing(#/^\s*\{%-/#, with: "{%")
-
-        // Handle {{- : if preceded by '{', keep one space; otherwise strip whitespace
-        result = result.replacing(#/\{\s+\{\{-/#, with: "{ {{")
-        result = result.replacing(#/([^\{])\s*\{\{-/#) { match in
-            "\(match.1){{"
-        }
-        result = result.replacing(#/^\s*\{\{-/#, with: "{{")
-
-        // Handle {#- the same way.
-        // Comments render nothing,
-        // so the kept space becomes literal output after a '{',
-        // the same deviation from jinja2 as for statements and expressions.
-        result = result.replacing(#/\{\s+\{#-/#, with: "{ {#")
-        result = result.replacing(#/([^\{])\s*\{#-/#) { match in
-            "\(match.1){#"
-        }
-        result = result.replacing(#/^\s*\{#-/#, with: "{#")
-
-        return result
     }
 
     private static func extractToken(

@@ -18,7 +18,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
-        // Local snapshot of Swift Jinja 2.5.1; see Vendor/swift-jinja/README.md.
+        // Preserve canonical template bytes, including whitespace next to '{'.
         .package(path: "Vendor/swift-jinja"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.99.0"),
     ],
@@ -75,7 +75,8 @@ let package = Package(
         ),
         .testTarget(
             name: "MferenceTestsCore",
-            dependencies: ["Mference", "MferenceValidationSupport", "MferenceRepackCore", "MferenceCLICore"],
+            dependencies: ["Mference", "MferenceValidationSupport", "MferenceRepackCore", "MferenceCLICore",
+                           .product(name: "Jinja", package: "swift-jinja")],
             path: "Tests/Mference/Core",
             resources: [.copy("Tokenization/Fixtures")]
         ),
