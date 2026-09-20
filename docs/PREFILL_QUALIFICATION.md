@@ -56,7 +56,10 @@ rename host-side full-model replay as batching.
 - Phase 5: execution-contract coverage extended here; the gaps above remain
   explicit. A green ordinary CI run does not execute env-gated real-model tests.
 - Phase 6: Flash-Next/GLM optimization and matched performance experiments are
-  not complete. No unmeasured speedup or default change is claimed.
+  not complete. [Flash-Next resident measurements](RELEASE_PERFORMANCE_2026-09-20.md)
+  now pass completed-answer gates and show lower prefill-plus-decode time,
+  but short/medium prefill regresses. Streamed/GLM comparisons and native MTP
+  integration remain open. No unmeasured speedup or default change is claimed.
 - Phase 7: real UI streaming, tool loops, history, cancellation and model-switch
   recovery have been tested; a [support table](RELEASE_SUPPORT.md) distinguishes
   established paths from candidates. The separately frozen 60-case screen has

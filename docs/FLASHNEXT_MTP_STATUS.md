@@ -17,6 +17,13 @@ head and its full hidden bundle for subsequent drafting.
 
 ## Implemented foundations
 
+- `FlashNextMTPWeights` strictly resolves all 29 resident tensors and the
+  separate layer-0 auxiliary expert pool. It checks shapes, BF16/INT4/INT8
+  payload and companion sizes before matrix dispatch, preserves each matrix's
+  stored dtype, and applies the two pre-FC `1 + w` norm folds exactly once.
+  Pool geometry, canonical paths, file size and the selected install-integrity
+  policy are checked without borrowing the trunk's layout. It returns a
+  verified stream layout; it does not allocate a draft cache or run a draft.
 - `FlashNextMTPInputFusion` composes the existing RMSNorm, projection and add
   encoders. It expects already-folded norm weights. It has no caller in ordinary
   generation and allocates no scratch unless explicitly constructed.
@@ -36,10 +43,10 @@ for which synthetic and installed checks have actually executed.
 
 ## Remaining integration and gates
 
-1. Strictly load the sidecar's fusion/norm tensors, one-layer HC/QSA/MoE block
-   and its own expert pool, preserving tensor dtype and install integrity.
-   The auxiliary pool does not have the trunk's `layout.json`; its manifest
-   metadata must be checked, not blindly treated as the trunk layout.
+1. Connect the validated sidecar to a one-layer HC/QSA/MoE draft runner and
+   open its expert pool with the selected bounded/resident memory policy.
+   The loader is tested against the installed sidecar; executing that layer
+   and qualifying its cache/state lifecycle remain separate work.
 2. Preserve the target's final full hidden bundle at both cold-prefill and
    warm/decode boundaries; align the draft token and position convention.
 3. Implement target verification and accepted-prefix replay/rollback. Ordinary
@@ -53,7 +60,7 @@ for which synthetic and installed checks have actually executed.
    and bounded-memory profiles. Keep MTP off unless its benefit exceeds run
    variability without changing the target result or memory guarantees.
 
-The input-fusion and rollback components alone satisfy none of the final
+The loader, input-fusion and rollback components alone satisfy none of the final
 speed/default-promotion gates. No additional model download is needed for the
 current host's installed sidecar.
 
@@ -68,7 +75,8 @@ loaded into a second inference process for this inspection.
 
 The pre-FC norm shapes are `[2560]` and `[10240]`; both projection matrices are
 `[2560,2560]`, matching the input-fusion component's whole-bundle/shared-matrix
-contract. Shared attention/HC norm suffixes are recognized by `normWeight`,
-but the two pre-FC names are not: their explicit fold remains part of the
-unimplemented sidecar loader. Metadata consistency is not numerical parity
-or evidence that a native draft decode has run.
+contract. The loader at `49deb89` adds the two exact pre-FC names to the
+zero-centered policy without changing the trunk suffix set. The installed
+loader gate passes with INT8 router/shared-gate matrices, INT4 projections,
+and full-SHA verification of the auxiliary pool. Metadata/loading consistency
+is not numerical parity or evidence that a native draft decode has run.

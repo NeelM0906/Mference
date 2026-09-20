@@ -95,7 +95,7 @@ extension Model {
     /// and there are a few hundred of them, so the copies cost single-digit
     /// megabytes against a 175 GB install.
     ///
-    /// Names outside `zeroCenteredNormSuffixes`, and every family outside
+    /// Names outside `isZeroCenteredNorm`, and every family outside
     /// `zeroCenteredNormFamilies`, return the mapped tensor untouched: this
     /// accessor is safe to route all norm reads through.
     public func normWeight(name: String) throws -> TensorView {

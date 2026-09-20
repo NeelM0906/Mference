@@ -11,6 +11,11 @@ its production runner, INT8-router install, family gate, and frozen-protocol
 measurements landed on 2026-09-10. The checklists below retain the bring-up
 history and mark the remaining performance work explicitly.
 
+September 20: [matched resident measurements](../RELEASE_PERFORMANCE_2026-09-20.md)
+complete all three frozen generation cases with identical answers across
+versions. Lower generation time includes a short/medium-prefill regression;
+streamed comparisons and native MTP remain separate gates.
+
 September 18 source-release update (PR #37): resident prefill route grouping
 now stays on the GPU; bounded prefill overlaps one expert tile's GPU work with
 the next tile's I/O in disjoint cache slots. The short installed INT8-router

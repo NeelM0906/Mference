@@ -8,6 +8,60 @@ The additional September 20 work follows that merge in
 [PR #38](https://github.com/NeelM0906/Mference/pull/38), on
 `codex/roadmap-qualification`. No source release is published.
 
+The pre-loader head `15713e7` passed macOS 15 / Swift 6.1, macOS 26, docs and
+security checks ([CI run](https://github.com/NeelM0906/Mference/actions/runs/35539493702)).
+Its completed-answer resident performance record is
+[reported separately](RELEASE_PERFORMANCE_2026-09-20.md), including the
+short/medium-prefill regressions. Newer code requires its own CI result.
+
+## Native Flash-Next MTP loader qualification
+
+Code `49deb89`; same Mac Studio, OS/toolchain and safety protocol below.
+This adds a strict sidecar loader, not enabled speculative decoding. The
+synthetic fixture carries a separate one-layer expert pool and all 29 resident
+tensors. Coverage includes absent sidecars, pre-folded norm pass-through,
+exact cached pre-FC folding, mixed matrix dtypes, malformed dimensions and
+companion ranges, bad pool geometry/path/count, truncation and SHA mismatch.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'FlashNextMTPWeightsTests|FlashNextResidentLoadTests|FlashNextMTPInputFusionTests|FlashNextCheckpointTests' \
+  > /tmp/mference-mtp-loader-20260920.log 2>&1
+```
+
+Exit 0; `Build complete! (14.38s)`;
+`Test run with 24 tests in 4 suites passed after 3.415 seconds.`
+The installed gate was disabled in this first invocation.
+
+The existing completed INT8-router Flash-Next install was then checked:
+57 receipt file sizes matched, 98% memory free, 619 GiB disk available, no
+other model/test owner. No download, model copy, profiling or cache purge.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_FLASHNEXT_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/qwen38flashnext-r8.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter FlashNextMTPWeightsTests \
+  > /tmp/mference-mtp-installed-loader-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (1.41s)
+Test installedSidecarLoadsWithNativeDtypes() passed after 2.237 seconds.
+Suite FlashNextMTPWeightsTests passed after 3.556 seconds.
+Test run with 7 tests in 1 suite passed after 3.556 seconds.
+```
+
+All 29 resident entries resolve with expected geometry, including the actual
+INT8 router/shared gate and INT4 FC projection. The auxiliary pool's SHA-256
+passes and its 512-expert, 2,768,896-byte-stride layout is validated. The test
+does not open all trunk experts, allocate a draft KV/cache, run a native draft
+or establish acceptance/performance. Full draft-runner/reference/verification
+gates remain in [MTP status](FLASHNEXT_MTP_STATUS.md).
+
 ## Environment and protocol
 
 Mac Studio Mac15,14; M3 Ultra, 32 CPU cores, 256 GiB; macOS 26.3 (25D125);
