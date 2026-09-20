@@ -398,6 +398,22 @@ static inline void router_topk_select_softmax_par(
     }
 }
 
+// Small Flash-Next qualification models use top-6 softmax, not Gemma's
+// sqrt-softplus top-6 rule. Keep their output width equal to their buffers.
+kernel void router_topk_select_softmax_k6_par(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    router_topk_select_softmax_par<6, kRouterMaxPerLane>(
+        logits, per_expert_scale, out_indices, out_weights,
+        router_fc_num_experts(num_experts), sg_idx, lane);
+}
+
 kernel void router_topk_select_k8_par(
     device const float* logits [[buffer(0)]],
     device const bfloat* per_expert_scale [[buffer(1)]],

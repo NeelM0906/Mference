@@ -604,7 +604,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                    specializedNumExperts: UInt32(numExperts),
                                    specializedTopK: UInt32(topK))
         }
-        self.moeBF16 = try FlashNextMoE(context: context)
+        self.moeBF16 = try FlashNextMoE(context: context, routerTopK: topK)
         // The gated norm's activation is SIGMOID for this family
         // (`output_gate_type`), where Qwen 3.6 and Qwen 3.8 use silu. Everything
         // else about the GDN block is the Qwen 3.8 geometry, fused Hv=48 decode

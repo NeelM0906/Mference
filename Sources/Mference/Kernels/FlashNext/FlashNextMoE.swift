@@ -25,19 +25,23 @@ final class FlashNextMoE {
     private let phase2PSO: MTLComputePipelineState
     private let sharedGatePSO: MTLComputePipelineState
     private let routerSelectPSO: MTLComputePipelineState
+    private let routerTopK: Int
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, routerTopK: Int = 10) throws {
+        precondition([6, 8, 10].contains(routerTopK))
+        self.routerTopK = routerTopK
         self.phase1PSO = try context.pipeline("flashnext_moe_phase1_gate_up_bf16")
         self.phase1SubsetPSO =
             try context.pipeline("flashnext_moe_phase1_gate_up_bf16_subset")
         self.phase2PSO = try context.pipeline("flashnext_moe_phase2_down_reduce_bf16")
         self.sharedGatePSO = try context.pipeline("flashnext_moe_shared_gate_scale")
-        // The shipped wide selection kernel. `RouterWideTopK10Tests` gates it
-        // against `FlashNextRouterReference` at 512/top-10, so this runner takes
-        // it as given rather than re-deriving a selection.
-        self.routerSelectPSO = try context.pipeline("router_topk_select_k10_par")
+        // Production keeps the shipped 512/top-10 selector. Smaller parity
+        // configurations must select/normalize/write their declared width.
+        let routerName = routerTopK == 6 ? "router_topk_select_softmax_k6_par"
+            : "router_topk_select_k\(routerTopK)_par"
+        self.routerSelectPSO = try context.pipeline(routerName)
         guard let function = context.library.makeFunction(
                 name: "flashnext_moe_phase1_gate_up_bf16") else {
             throw MetalError.noDevice
@@ -179,6 +183,9 @@ final class FlashNextMoE {
                             outWeights: MTLBuffer,
                             outWeightsOffset: Int = 0,
                             numExperts: UInt32) {
+        precondition(Int(numExperts) >= routerTopK && numExperts <= (routerTopK == 10 ? 512 : 256))
+        precondition(outIndicesOffset >= 0 && outIndicesOffset + routerTopK * 4 <= outIndices.length)
+        precondition(outWeightsOffset >= 0 && outWeightsOffset + routerTopK * 2 <= outWeights.length)
         var expertCount = numExperts
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(routerSelectPSO)
