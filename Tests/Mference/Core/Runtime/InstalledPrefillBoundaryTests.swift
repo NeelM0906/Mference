@@ -124,6 +124,33 @@ import Testing
         }
         func append(_ start: Int, _ end: Int) async throws {
             if start > 0 { try producer.prepareForContinuation(expectedPosition: start) }
+            let flash = producer as? FlashNextForwardRunner
+            var captured = 0
+            var lastCapturedRow: [UInt16]?
+            flash?.consumeTargetHiddenRows = { batch in
+                #expect(batch.startPosition == start + captured)
+                let upper = batch.startPosition + batch.tokens.count
+                try #require(batch.startPosition >= start && upper <= end)
+                #expect(batch.tokens == Array(tokens[batch.startPosition..<upper]))
+                let width = model.config.residualStreamWidth
+                #expect(batch.buffer.length == batch.tokens.count * width * 2)
+                let copy = try #require(context.device.makeBuffer(length: batch.buffer.length, options: .storageModeShared))
+                let command = try #require(context.queue.makeCommandBuffer())
+                let blit = try #require(command.makeBlitCommandEncoder())
+                blit.copy(from: batch.buffer, sourceOffset: 0, to: copy, destinationOffset: 0, size: copy.length)
+                blit.endEncoding()
+                command.commit()
+                command.waitUntilCompleted()
+                try #require(command.error == nil)
+                let bits = Array(UnsafeBufferPointer(start: copy.contents().assumingMemoryBound(to: UInt16.self), count: copy.length / 2))
+                #expect(bits.allSatisfy { Float16(bitPattern: $0).isFinite })
+                for row in batch.tokens.indices {
+                    #expect(bits[(row * width)..<((row + 1) * width)].contains { Float16(bitPattern: $0) != 0 })
+                }
+                lastCapturedRow = Array(bits.suffix(width))
+                captured += batch.tokens.count
+            }
+            defer { flash?.consumeTargetHiddenRows = nil }
             let result = try await runner.prefillChunked(tokens: tokens[start..<end],
                 startPosition: start, outputMode: .logits, config: runtime.prefillConfig,
                 into: output, onProgress: { _ in })
@@ -131,6 +158,10 @@ import Testing
             #expect(result.execution?.replayedTokens == 0)
             #expect(result.execution?.batchedChunkSizes.reduce(0, +) == end - start)
             #expect(result.newPosition == end)
+            if let flash {
+                #expect(captured == end - start)
+                #expect(lastCapturedRow == (try targetHidden(flash)))
+            }
             log("\(profile.family) append=\(start)..<\(end) chunks=\(result.execution?.batchedChunkSizes ?? [])")
         }
         let modeLabel = profile.family == .maple && resident ? "slots=16"
