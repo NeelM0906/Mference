@@ -12,9 +12,82 @@ import Testing
         let output: MTLBuffer
 
         func bits() -> [UInt16] {
-            Array(UnsafeBufferPointer(start: output.contents().assumingMemoryBound(to: UInt16.self),
-                                      count: model.config.vocabSize))
+            let values = Array(UnsafeBufferPointer(start: output.contents().assumingMemoryBound(to: UInt16.self),
+                                                   count: model.config.vocabSize))
+            #expect(values.allSatisfy { Float16(bitPattern: $0).isFinite })
+            #expect(values.contains { Float16(bitPattern: $0) != 0 })
+            return values
         }
+
+        func hiddenBits(_ snapshot: FlashNextForwardRunner.TargetHiddenBundle) throws -> [UInt16] {
+            let readback = try #require(context.device.makeBuffer(length: snapshot.buffer.length,
+                                                                 options: .storageModeShared))
+            let cb = try #require(context.queue.makeCommandBuffer())
+            let blit = try #require(cb.makeBlitCommandEncoder())
+            blit.copy(from: snapshot.buffer, sourceOffset: 0, to: readback,
+                      destinationOffset: 0, size: readback.length)
+            blit.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+            #expect(cb.error == nil)
+            let values = Array(UnsafeBufferPointer(start: readback.contents().assumingMemoryBound(to: UInt16.self),
+                                                   count: readback.length / 2))
+            #expect(values.allSatisfy { Float16(bitPattern: $0).isFinite })
+            #expect(values.contains { Float16(bitPattern: $0) != 0 })
+            return values
+        }
+    }
+
+    @Test func targetBundleIsUnmixedOwnedAndUnavailableBeforeCommit() async throws {
+        let h = try make()
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+        #expect(throws: FlashNextForwardRunnerError.self) { _ = try h.runner.captureTargetHiddenBundle() }
+        h.runner.capture = .init()
+        try await h.runner.produce(token: 7, position: 0, into: h.output)
+        let snapshot = try h.runner.captureTargetHiddenBundle()
+        let bits = try h.hiddenBits(snapshot)
+        #expect(snapshot.processedTokenCount == 1)
+        #expect(bits.count == h.model.config.residualStreamWidth)
+        let reference = try #require(h.runner.capture?.floats["layer03.stream_out"])
+        #expect(reference.allSatisfy { $0.isFinite })
+        #expect(bits.map { Float(Float16(bitPattern: $0)) } == reference)
+        h.runner.capture = nil
+        try await h.runner.produce(token: 11, position: 1, into: h.output)
+        #expect(try h.hiddenBits(snapshot) == bits, "caller owns a copy, not mutable decode scratch")
+        h.runner.reset()
+        #expect(throws: FlashNextForwardRunnerError.self) { _ = try h.runner.captureTargetHiddenBundle() }
+    }
+
+    @Test(arguments: [3, 35])
+    func targetBundleSurvivesPrefillWarmAppendAndRollback(prefixCount: Int) async throws {
+        let h = try make()
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+        let tokens = (0..<prefixCount).map { Int32(4 + ($0 * 17) % 53) }
+        for (position, token) in tokens.enumerated() {
+            try await h.runner.produce(token: token, position: position, into: h.output)
+        }
+        let sequential = try h.hiddenBits(h.runner.captureTargetHiddenBundle())
+        h.runner.reset()
+        _ = try await h.runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: h.output, onProgress: { _ in })
+        let snapshot = try h.runner.captureTargetHiddenBundle()
+        #expect(snapshot.processedTokenCount == prefixCount)
+        let prefilling = try h.hiddenBits(snapshot)
+        // Batched arithmetic may round differently; use the same two-FP16-
+        // precision-unit bound as the finite prefill gate. Ownership and
+        // checkpoint restoration below remain bit-exact, without tolerances.
+        let expected = sequential.map { Float(Float16(bitPattern: $0)) }
+        let actual = prefilling.map { Float(Float16(bitPattern: $0)) }
+        let delta = zip(actual, expected).map { abs($0 - $1) }.max() ?? .infinity
+        let scale = expected.map { abs($0) }.max() ?? 0
+        #expect(scale > 0 && delta <= scale / 512, "last ragged prefill row, not row zero or mixed state")
+        let checkpoint = try h.runner.captureDecodeCheckpoint()
+        _ = try await h.runner.prefillChunked(tokens: [Int32(7), 11, 19][...], startPosition: prefixCount,
+            outputMode: .logits, config: .production(chunkTokens: 64), into: h.output, onProgress: { _ in })
+        #expect(try h.runner.captureTargetHiddenBundle().processedTokenCount == prefixCount + 3)
+        #expect(try h.hiddenBits(snapshot) == prefilling, "scratch resize must not invalidate owned copies")
+        try h.runner.restoreDecodeCheckpoint(checkpoint)
+        #expect(try h.hiddenBits(h.runner.captureTargetHiddenBundle()) == prefilling)
     }
 
     private func make() throws -> Harness {
@@ -104,6 +177,7 @@ import Testing
             Issue.record("expected interrupted append")
         } catch is CancellationError { }
         #expect(throws: PrefillError.self) { _ = try h.runner.captureDecodeCheckpoint() }
+        #expect(throws: PrefillError.self) { _ = try h.runner.captureTargetHiddenBundle() }
         h.runner.prefillDidCompleteLayer = nil
         try h.runner.restoreDecodeCheckpoint(clean)
         try h.runner.prepareForContinuation(expectedPosition: 3)
@@ -126,6 +200,7 @@ import Testing
             Issue.record("expected interruption after GDN and PLE advanced")
         } catch is CancellationError { }
         #expect(throws: PrefillError.self) { _ = try h.runner.captureDecodeCheckpoint() }
+        #expect(throws: PrefillError.self) { _ = try h.runner.captureTargetHiddenBundle() }
         #expect(throws: PrefillError.self) { try h.runner.prepareForContinuation(expectedPosition: 1) }
         h.runner.decodeWillEncodeLayer = nil
         do {

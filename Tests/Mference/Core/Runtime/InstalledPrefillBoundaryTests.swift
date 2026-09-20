@@ -102,6 +102,26 @@ import Testing
             for i in 1..<validVocab where values[i] > values[best] { best = i }
             return Int32(best)
         }
+        func targetHidden(_ flash: FlashNextForwardRunner) throws -> [UInt16] {
+            let hidden = try flash.captureTargetHiddenBundle()
+            #expect(hidden.processedTokenCount == flash.continuationPosition)
+            #expect(hidden.buffer.length == model.config.residualStreamWidth * 2)
+            let readback = try #require(context.device.makeBuffer(length: hidden.buffer.length,
+                                                                 options: .storageModeShared))
+            let command = try #require(context.queue.makeCommandBuffer())
+            let blit = try #require(command.makeBlitCommandEncoder())
+            blit.copy(from: hidden.buffer, sourceOffset: 0, to: readback,
+                      destinationOffset: 0, size: readback.length)
+            blit.endEncoding()
+            command.commit()
+            command.waitUntilCompleted()
+            #expect(command.error == nil)
+            let bits = Array(UnsafeBufferPointer(start: readback.contents().assumingMemoryBound(to: UInt16.self),
+                                                count: readback.length / 2))
+            #expect(bits.allSatisfy { Float16(bitPattern: $0).isFinite })
+            #expect(bits.contains { Float16(bitPattern: $0) != 0 })
+            return bits
+        }
         func append(_ start: Int, _ end: Int) async throws {
             if start > 0 { try producer.prepareForContinuation(expectedPosition: start) }
             let result = try await runner.prefillChunked(tokens: tokens[start..<end],
@@ -133,6 +153,7 @@ import Testing
         var continuation: [Int32] = []
         var tail: [[UInt16]] = []
         let flash = producer as? FlashNextForwardRunner
+        let committedHidden = try flash.map { try targetHidden($0) }
         let checkpoint = try flash?.captureDecodeCheckpoint()
         for step in 0..<8 {
             let token = greedy()
@@ -142,6 +163,7 @@ import Testing
         }
         if let flash, let checkpoint {
             try flash.restoreDecodeCheckpoint(checkpoint)
+            #expect(try targetHidden(flash) == committedHidden)
             let clean = try flash.captureDecodeCheckpoint()
             // A rejected draft includes EOS and crosses a pooled-indexer block
             // boundary above the sparse cutover. Its rows must become invisible.
@@ -150,12 +172,13 @@ import Testing
                 try await flash.produce(token: token, position: count + step, into: output)
             }
             try flash.restoreDecodeCheckpoint(clean)
+            #expect(try targetHidden(flash) == committedHidden)
             try flash.prepareForContinuation(expectedPosition: count)
             for (step, token) in continuation.enumerated() {
                 try await flash.produce(token: token, position: count + step, into: output)
                 #expect(snapshot() == tail[step], "installed rollback full logits, step \(step)")
             }
-            log("\(label) rejected-draft rollback: eight full logit rows exact")
+            log("\(label) rejected-draft rollback: full HC bundle and eight full logit rows exact")
         }
         producer.reset()
         try await append(0, 33)

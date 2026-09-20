@@ -408,6 +408,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private let gdnOut: MTLBuffer
 
     private var position = 0
+    /// The final, unmixed HC row for the last committed token. Prefill and
+    /// decode use different scratch buffers. Retaining this view costs no GPU
+    /// copy in ordinary generation; native-MTP callers request an owned copy.
+    private var committedHiddenSource: (buffer: MTLBuffer, offset: Int)?
     private let checkpointOwner = UUID()
     private var checkpointEpoch: UInt64 = 0
     /// Internal cancellation seam; absent in normal generation.
@@ -895,6 +899,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     public func reset() {
         checkpointEpoch &+= 1
         position = 0
+        committedHiddenSource = nil
         prefillChunkState.reset()
         deviceGroupedPrefillLayers = 0
         tensorOpsPrefillEncodings = 0
@@ -939,6 +944,49 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         fileprivate let pleHistory: [Int]
         fileprivate let sequentialPrefill: Bool
         fileprivate let buffers: [MTLBuffer]
+        fileprivate let hidden: TargetHiddenBundle?
+    }
+
+    /// Full FP16 [hcCount * hiddenSize] target state, BEFORE the final global
+    /// mixer, paired with an unambiguous prefix length. The next input token
+    /// belongs at `processedTokenCount`; aligning it with a draft KV cursor is
+    /// the verifier's responsibility, not an implicit shift in this accessor.
+    struct TargetHiddenBundle {
+        let processedTokenCount: Int
+        let buffer: MTLBuffer
+    }
+
+    func captureTargetHiddenBundle() throws -> TargetHiddenBundle {
+        try prefillChunkState.requireClean(operation: "captureTargetHiddenBundle")
+        guard position > 0, committedHiddenSource != nil else {
+            throw FlashNextForwardRunnerError.invalidInput("no committed target hidden bundle")
+        }
+        try joinPendingMoE()
+        guard let result = try makeTargetHiddenCopy() else {
+            throw FlashNextForwardRunnerError.invalidInput("no committed target hidden bundle")
+        }
+        guard let cb = ctx.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot capture target hidden bundle")
+        }
+        encodeTargetHiddenCopy(result, using: blit)
+        blit.endEncoding()
+        try finish(cb)
+        return result
+    }
+
+    private func makeTargetHiddenCopy() throws -> TargetHiddenBundle? {
+        guard committedHiddenSource != nil else { return nil }
+        guard let copy = ctx.device.makeBuffer(length: bundle * MemoryLayout<Float16>.stride,
+                                               options: .storageModePrivate) else {
+            throw MetalError.noDevice
+        }
+        return TargetHiddenBundle(processedTokenCount: position, buffer: copy)
+    }
+
+    private func encodeTargetHiddenCopy(_ copy: TargetHiddenBundle, using blit: MTLBlitCommandEncoder) {
+        guard let source = committedHiddenSource else { return }
+        blit.copy(from: source.buffer, sourceOffset: source.offset, to: copy.buffer,
+                  destinationOffset: 0, size: copy.buffer.length)
     }
 
     private func checkpointBuffers() -> [MTLBuffer] {
@@ -967,6 +1015,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             }
             return copy
         }
+        let hidden = try makeTargetHiddenCopy()
         guard let cb = ctx.queue.makeCommandBuffer(),
               let blit = cb.makeBlitCommandEncoder() else {
             throw FlashNextForwardRunnerError.commandFailed("cannot capture decode checkpoint")
@@ -975,11 +1024,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             blit.copy(from: source, sourceOffset: 0, to: copy, destinationOffset: 0,
                       size: source.length)
         }
+        if let hidden { encodeTargetHiddenCopy(hidden, using: blit) }
         blit.endEncoding()
         try finish(cb)
         return DecodeCheckpoint(owner: checkpointOwner, epoch: checkpointEpoch,
             position: position, pleHistory: pleHistory,
-            sequentialPrefill: inSequentialPrefill, buffers: copies)
+            sequentialPrefill: inSequentialPrefill, buffers: copies, hidden: hidden)
     }
 
     func restoreDecodeCheckpoint(_ checkpoint: DecodeCheckpoint) throws {
@@ -1008,6 +1058,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         blit.endEncoding()
         try finish(cb)
         position = checkpoint.position
+        committedHiddenSource = checkpoint.hidden.map { ($0.buffer, 0) }
         pleHistory = checkpoint.pleHistory
         inSequentialPrefill = checkpoint.sequentialPrefill
         prefillChunkState.markCommitted()
@@ -1298,6 +1349,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         }
         try finish(cb)
         position += t
+        committedHiddenSource = (scratch.hyper, (t - 1) * bundle * half)
         prefillChunkState.markCommitted()
     }
 
@@ -1892,6 +1944,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
         }
         position += 1
+        committedHiddenSource = (hyper, 0)
         prefillChunkState.markCommitted()
     }
 
