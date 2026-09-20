@@ -59,11 +59,9 @@ extension Model {
     ///     (2026-09-01 parity harness), not inferred: it is the one norm in
     ///     this stack that is not zero-centered, and baking it would add one
     ///     to an already-full-form weight.
-    ///   * the MTP sidecar's `pre_fc_norm_embedding` and `pre_fc_norm_hidden`:
-    ///     these are not trunk sites and are not in this allowlist. A future
-    ///     native drafter must fold them explicitly. MTP attention/HC names
-    ///     sharing the suffixes below already follow this accessor's policy
-    ///     if requested; the accessor does not itself enable draft decoding.
+    /// The MTP sidecar's two pre-FC norms are exact-name additions below;
+    /// MTP attention/HC names share the trunk suffixes. Resolving any of these
+    /// weights does not itself enable draft decoding.
     ///
     /// The reference RMSNorm upcasts internally —
     /// `_norm(x.float()) * (1 + w.float())`, cast back afterwards — so a
@@ -83,7 +81,9 @@ extension Model {
 
     /// Whether `name` is one of the norms the `(1 + w)` bake applies to.
     static func isZeroCenteredNorm(_ name: String) -> Bool {
-        zeroCenteredNormSuffixes.contains { name.hasSuffix($0) }
+        name == "mtp.pre_fc_norm_embedding.weight"
+            || name == "mtp.pre_fc_norm_hidden.weight"
+            || zeroCenteredNormSuffixes.contains { name.hasSuffix($0) }
     }
 
     /// Resolve a norm weight, applying the family's `(1 + w)` bake when the

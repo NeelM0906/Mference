@@ -54,7 +54,7 @@ enum FlashNextToySynthetic {
     }
 
     /// Build the toy directory in a temp dir and return its URL.
-    static func write() throws -> URL {
+    static func write(includeMTP: Bool = false) throws -> URL {
         let toy = ArchConfig.qwen38FlashNextToy()
         let la = toy.linearAttention
         let fn = toy.flashNext
@@ -205,6 +205,28 @@ enum FlashNextToySynthetic {
                 specs.append(int64Spec("\(prefix).ple.ple_embedding.ngram_heads_vocab_sizes",
                                        count: Pool.ngramHeads))
             }
+        }
+
+        if includeMTP {
+            // The draft mirrors the full-attention layer, never a GDN/PLE
+            // layer. Copy tensor specifications, not production model bytes.
+            let fullPrefix = "\(trunk)layers.3."
+            let mixerPrefix = "\(trunk)hyper_connection_mixer."
+            let draft = specs.compactMap { spec -> ResidentSpec? in
+                let name: String
+                if spec.name.hasPrefix(fullPrefix) {
+                    name = "mtp.layers.0." + spec.name.dropFirst(fullPrefix.count)
+                } else if spec.name.hasPrefix(mixerPrefix) {
+                    name = "mtp.hyper_connection_mixer." + spec.name.dropFirst(mixerPrefix.count)
+                } else { return nil }
+                return ResidentSpec(name: name, dtype: spec.dtype, shape: spec.shape,
+                    weightBytes: spec.weightBytes, scaleBytes: spec.scaleBytes, biasBytes: spec.biasBytes)
+            }
+            specs += draft
+            specs += [int4AffineSpec("mtp.fc_embedding.weight", rows: d, cols: d),
+                      int4AffineSpec("mtp.fc_hidden.weight", rows: d, cols: d),
+                      bf16Spec("mtp.pre_fc_norm_embedding.weight", shape: [UInt32(d), 0, 0, 0], count: d),
+                      bf16Spec("mtp.pre_fc_norm_hidden.weight", shape: [UInt32(bundle), 0, 0, 0], count: bundle)]
         }
 
         // 2. Serialize the resident index + payload.
@@ -378,6 +400,20 @@ enum FlashNextToySynthetic {
             Pool.file: ["size": poolData.size, "sha256": poolData.sha256],
         ]
         for (rel, sha) in layerShaByName { files[rel] = ["size": layerBytes, "sha256": sha] }
+        if includeMTP {
+            let aux = dir.appendingPathComponent("packed_experts_mtp")
+            try FileManager.default.createDirectory(at: aux, withIntermediateDirectories: true)
+            let url = aux.appendingPathComponent("layer_00.bin")
+            var payload = Data(count: layerBytes)
+            for expert in 0..<toy.numExperts {
+                let blob = expertBlob(expert).bytes
+                payload.replaceSubrange(expert * Int(expertStride)..<(expert * Int(expertStride) + blob.count),
+                                        with: blob)
+            }
+            try payload.write(to: url)
+            files["packed_experts_mtp/layer_00.bin"] = ["size": layerBytes,
+                                                       "sha256": try Sha256Verifier.hashFile(at: url)]
+        }
 
         let archDict: [String: Any] = [
             "hiddenSize": toy.hiddenSize, "ffnIntermediate": toy.intermediateSize,
@@ -420,7 +456,7 @@ enum FlashNextToySynthetic {
             "requiredAxes": ["hyperConnectionsLowRank", "attentionIndexer",
                              "pleNgramEmbedding"],
         ]
-        let manifestRoot: [String: Any] = [
+        var manifestRoot: [String: Any] = [
             "magic": "GTURBO", "versionMajor": 1, "versionMinor": 0,
             "flags": ["streamingPresent": true, "turboQuantKV": false,
                       "aneSharedExpert": false],
@@ -431,9 +467,14 @@ enum FlashNextToySynthetic {
             "numLayers": toy.numLayers,
             "expertStride": expertStride,
             "plePool": plePoolBlock(),
-            "sidecars": ["mtp": ["carried": false, "tensorCount": 0],
+            "sidecars": ["mtp": ["carried": includeMTP, "tensorCount": includeMTP ? 31 : 0],
                          "vision": ["carried": false, "tensorCount": 0]],
         ]
+        if includeMTP {
+            manifestRoot["auxiliaryExpertPools"] = [["name": "mtp", "directory": "packed_experts_mtp",
+                "expertsPerLayer": toy.numExperts, "expertStride": expertStride,
+                "layers": [["layer": 0, "file": "layer_00.bin"]]]]
+        }
         let manifestData = try JSONSerialization.data(
             withJSONObject: manifestRoot,
             options: [.sortedKeys, .withoutEscapingSlashes])
