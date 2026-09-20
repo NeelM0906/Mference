@@ -74,6 +74,37 @@ import Testing
         #expect(bounded == resident)
     }
 
+    @Test func nativeLayerTracksIndependentFP32Composition() throws {
+        let h = try make()
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+        let reference = try FlashNextMTPReference(model: h.model, device: h.context.device)
+        func floats(_ buffer: MTLBuffer, count: Int) -> [Float] {
+            let p = buffer.contents().assumingMemoryBound(to: Float16.self)
+            return (0..<count).map { Float(p[$0]) }
+        }
+        func compare(_ actual: [UInt16], _ expected: [Float], label: String) {
+            #expect(actual.count == expected.count)
+            #expect(expected.allSatisfy { $0.isFinite })
+            let scale = expected.map { abs($0) }.max() ?? 0
+            let error = zip(actual, expected).map { abs(Float(Float16(bitPattern: $0)) - $1) }.max() ?? .infinity
+            // Same FP16-vs-FP32 semantic tier as family integration gates, not
+            // bit parity or an exact speculative-verifier tolerance.
+            #expect(scale > 0 && error <= scale * 0.05)
+            print("[MTP FP32 composition] \(label) maxAbs=\(error) scale=\(scale)")
+        }
+        for row in 0..<40 {
+            let output = try h.append(row)
+            let expected = try reference.append(embedding: floats(h.embedding, count: h.model.config.hiddenSize),
+                hidden: floats(h.hidden, count: h.model.config.residualStreamWidth))
+            compare(try h.bits(output.hidden), expected.hidden, label: "row=\(row) hidden")
+            let actualLogits = try h.bits(h.logits)
+            compare(actualLogits, expected.logits, label: "row=\(row) logits")
+            let predicted = actualLogits.indices.max { Float16(bitPattern: actualLogits[$0]) < Float16(bitPattern: actualLogits[$1]) }
+            let desired = expected.logits.indices.max { expected.logits[$0] < expected.logits[$1] }
+            #expect(predicted == desired)
+        }
+    }
+
     @Test(arguments: [false, true])
     func rejectedBranchRestoresCacheAndOwnedOutputs(resident: Bool) throws {
         let h = try make(resident: resident)
@@ -143,5 +174,57 @@ import Testing
         #expect(throws: FlashNextForwardRunnerError.self) {
             _ = try FlashNextMTPDraftRunner(model: h.model, context: h.context, maxContext: 2, policy: .bounded(slots: 5))
         }
+    }
+
+    @Test func installedDraftExecutesAndRestoresItsOwnState() throws {
+        guard let path = ProcessInfo.processInfo.environment["MFERENCE_FLASHNEXT_GTURBO"] else { return }
+        let context = try MetalContext()
+        let model = try Model.load(directoryURL: URL(fileURLWithPath: path), device: context.device,
+            streamingMode: .pread(slotCount: 16))
+        let cfg = model.config
+        let eValues = (0..<cfg.hiddenSize).map { Float16(Float($0 % 19 - 9) / 16) }
+        let hValues = (0..<cfg.residualStreamWidth).map { Float16(Float($0 % 23 - 11) / 8) }
+        let embedding = try #require(context.device.makeBuffer(bytes: eValues, length: eValues.count * 2, options: .storageModeShared))
+        let hidden = try #require(context.device.makeBuffer(bytes: hValues, length: hValues.count * 2, options: .storageModeShared))
+        let logits = try #require(context.device.makeBuffer(length: cfg.vocabSize * 2, options: .storageModeShared))
+        func run(resident: Bool) throws -> [[UInt16]] {
+            let runner = try FlashNextMTPDraftRunner(model: model, context: context, maxContext: 8,
+                policy: resident ? .resident : .bounded(slots: 16))
+            func append(_ position: Int) throws -> [UInt16] {
+                logits.contents().assumingMemoryBound(to: Float16.self).update(repeating: .nan, count: cfg.vocabSize)
+                let output = try runner.append(embedding: embedding, targetHidden: hidden, at: position, into: logits)
+                #expect(output.processedRows == position + 1)
+                let readback = try #require(context.device.makeBuffer(length: output.hidden.length, options: .storageModeShared))
+                let cb = try #require(context.queue.makeCommandBuffer())
+                let blit = try #require(cb.makeBlitCommandEncoder())
+                blit.copy(from: output.hidden, sourceOffset: 0, to: readback, destinationOffset: 0, size: readback.length)
+                blit.endEncoding()
+                cb.commit()
+                cb.waitUntilCompleted()
+                try #require(cb.error == nil)
+                let hc = Array(UnsafeBufferPointer(start: readback.contents().assumingMemoryBound(to: UInt16.self), count: cfg.residualStreamWidth))
+                let head = Array(UnsafeBufferPointer(start: logits.contents().assumingMemoryBound(to: UInt16.self), count: cfg.vocabSize))
+                #expect(hc.allSatisfy { Float16(bitPattern: $0).isFinite })
+                #expect(head.allSatisfy { Float16(bitPattern: $0).isFinite })
+                #expect(hc.contains { Float16(bitPattern: $0) != 0 })
+                #expect(head.contains { Float16(bitPattern: $0) != 0 })
+                return hc + head
+            }
+            let first = try append(0)
+            let checkpoint = try runner.checkpoint()
+            let second = try append(1)
+            _ = try append(2)
+            try runner.restore(checkpoint)
+            #expect(try append(1) == second)
+            runner.reset()
+            #expect(try append(0) == first)
+            return [first, second]
+        }
+        let bounded = try run(resident: false)
+        let resident = try run(resident: true)
+        #expect(bounded == resident)
+        print("[installed MTP draft] resident/16-slot finite HC + full logits, rollback and reset exact")
+        // Inputs are deterministic probes, not target-aligned hidden states.
+        // Do not report this as acceptance, end-to-end generation or speed.
     }
 }
