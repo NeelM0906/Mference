@@ -245,3 +245,40 @@ checkpoint after a rejected four-token draft (including EOS) reproduces all
 eight subsequent full logit rows exactly. This closes the installed rollback
 component gate, not native MTP integration, acceptance or speed qualification.
 Documentation and CPU-only script checks ran concurrently; not a speed test.
+
+## Full regression after the new runtime/parser changes
+
+Code `3462477`, documentation head `13a0367`; same hardware/toolchain and
+98%-free / 619-GiB preflight. No installed-model gates or other model owner.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-full-v2-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (1.43s)
+Test run with 1264 tests in 227 suites passed after 269.850 seconds with 1 known issue.
+```
+
+The known issue is still the absent optional Flash-Next toy checkpoint.
+This run includes the new synthetic checkpoint, fusion, Inkling and parser
+tests. It does not replace the separate installed-checkpoint gates above.
+Launcher tests (8), UI-adapter tests (5), and evaluation-script tests (16)
+also pass. Markdown validation checks 74 files; the source archive checker
+validates 845 entries. Source archive validation does not bundle local weights
+or claim an actual end-user installation on another physical Mac.
+
+Release products were then rebuilt serially from `13a0367` (same production
+code as the full test run):
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift build -c release --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-release-v2-20260920.log 2>&1
+```
+
+Exit 0; complete footer: `Build complete! (58.02s)`.

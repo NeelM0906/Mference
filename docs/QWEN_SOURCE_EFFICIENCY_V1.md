@@ -102,3 +102,29 @@ Raw evidence is retained locally at
 It is not bundled in the source release. This hash identifies the unchanged
 original run, not a new aggregate result after the parser fix. The separate
 default-policy screen remains unexecuted.
+
+### Separate live boolean-parser recheck
+
+Release `13a0367a78916f6c11fdfeb119baa03dabb04677`, same host/toolchain,
+98% memory free and 619 GiB disk before launch. Both seven-file install
+receipts matched; strict verification. The server used the exact command
+above, with output instead at `boolean-recheck-server.log` in the same
+evidence directory. No other model owner, builds, downloads or profiling.
+
+The unchanged `tool-boolean` case was repeated for both profiles and all five
+seeds, with the same xhigh/sampling/cap/context/MTP/cache policy: **10/10 pass**,
+all finishing with a tool call and JSON boolean `false`. Runner exit 0 and
+final footer `{"passed": 10, "expected": 10}`; server exited 0 after all replies.
+The temporary diagnostic runner command was:
+
+```sh
+python3 scratch/qwen-seed-evidence.CzLD25/boolean_recheck.py \
+  --port 18489 --engine-commit 13a0367a78916f6c11fdfeb119baa03dabb04677 \
+  --output scratch/qwen-seed-evidence.CzLD25/boolean-recheck.jsonl \
+  > scratch/qwen-seed-evidence.CzLD25/boolean-recheck-progress.log 2>&1
+```
+
+Raw recheck SHA-256:
+`bfd10443cfedb1f0a9d4c93a3d494be7671b7b7125dd7c142676ce482012e16e`.
+This is targeted regression evidence, not a new aggregate 60-case score.
+The original base 297/300 and Swift 293/300 results remain unchanged.
