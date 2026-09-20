@@ -15,8 +15,10 @@ September 18 source-release update (PR #37): resident prefill route grouping
 now stays on the GPU; bounded prefill overlaps one expert tile's GPU work with
 the next tile's I/O in disjoint cache slots. The short installed INT8-router
 gate passes in resident and 16-slot modes, with zero replay and exact 16-token
-greedy continuation. New matched speed and real long-context/TensorOps-size
-qualification remain pending; **native MTP is still not implemented**. See
+greedy continuation. The [September 20 installed gate](../RELEASE_VALIDATION_2026-09-20.md)
+also passes 1,024-token chunks with observed TensorOps encodings and exact
+resident/16-slot logits across the sparse boundary. New matched speed and
+wider-context/hardware qualification remain pending; **native MTP is still not implemented**. See
 [the dated validation record](../RELEASE_VALIDATION_2026-09-18.md) and
 [current support boundaries](../RELEASE_SUPPORT.md). Older roadmap statements
 below describe their dated measurements, not the status of this update.
