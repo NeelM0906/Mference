@@ -35,6 +35,15 @@ head and its full hidden bundle for subsequent drafting.
   Checkpoints retain it across rollback; reset/dirty state rejects capture.
   Ordinary generation performs no extra GPU copy. This is not a draft-token
   position-alignment or speculative-verification implementation.
+- An internal opt-in consumer can receive **every** unmixed target row from
+  each normal prefill chunk and decode step, with its original tokens and
+  absolute positions. Copies are owned; no target replay is introduced.
+  Consumption happens after GPU completion but before target commit, so an
+  exception leaves the target dirty. The orchestrator must restore/reset both
+  target and consumer state. Ordinary generation has no consumer or GPU copy.
+  The installed resident/16-slot boundary test checks every emitted row for
+  finite/nonzero values, exact tokens/positions/counts and exact last-row
+  equality with the separate snapshot accessor, including 1,024-token chunks.
 - Checkpoints belong to one runner and one branch of its history. Reset or
   restoration invalidates older checkpoints, preventing resurrection of KV
   rows overwritten by a different continuation.
@@ -72,8 +81,13 @@ for which synthetic and installed checks have actually executed.
 2. Connect the preserved target bundle to the drafter and qualify the next
    token/position convention at cold-prefill and warm/decode boundaries.
    Priming requires all preceding draft KV rows, not just the final target HC
-   row. Capture/consume the required target prefill rows without replaying the
-   whole target model; the current last-row accessor alone is insufficient.
+   row. The all-row capture primitive is now implemented; connect its rows
+   and shifted token embeddings to the draft. In the pinned
+   [upstream prefill worker](https://github.com/sgl-project/sglang/blob/745de73ba3c136b6f99b7a3e2177ed1a8eef4a56/python/sglang/srt/speculative/eagle_worker_v2.py#L928-L1045),
+   embeddings shift one token left, using the next prompt chunk's first token
+   or the target's next generated token at the tail. A chunk's last pair must
+   not be invented from its last token. This remains an unimplemented and
+   unqualified integration, not an enabled speculative path.
 3. Implement target verification and accepted-prefix replay/rollback. Ordinary
    chunked prefill is not automatically an exact speculative verifier: its
    numerical and greedy equivalence must be demonstrated for this use.

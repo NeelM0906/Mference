@@ -125,6 +125,148 @@ match the independent scalar result exactly; the INT8 router's maximum error
 is 1.7881393e-7 at scale 0.5538577. No acceptance, end-to-end native MTP output
 or native MTP speed claim follows from these component checks.
 
+### Full serial recheck of native components and safety fixes
+
+At `84bfefca8378c027b2dd3ec421f76951aa661017`, with the same hardware,
+toolchain and fresh 98%-free / 619-GiB single-owner preflight:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-full-native-components-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (5.93s)
+Test run with 1286 tests in 231 suites passed after 277.594 seconds with 2 known issues.
+```
+
+Both known issues are explicitly retained: the absent optional Flash-Next toy
+checkpoint and the native-draft row-zero unrounded-FP32 precision gate above.
+No installed-model environment gate was enabled. This run does not qualify
+native MTP or subsequent code. CPU-only documentation/archive and launcher/
+evaluation-script checks ran during part of this correctness run; no timing
+comparison is claimed. Source archive validation passes 853 entries; launcher
+tests 8/8, UI adapter 5/5 and evaluation tooling 16/16 pass. All 75 Markdown
+files' local links/anchors resolve.
+
+### Installed GLM recheck after ragged-tile correction
+
+Code `84bfefc`, documentation head `491909e`. Same machine/toolchain; fresh
+98%-free / 619-GiB single-owner preflight and all 49 receipt-file sizes verified.
+Both model arms load with strict SHA verification, serially. Source/docs work
+continued during this already-built correctness test; no concurrent build,
+model process, download, profiler or performance measurement.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_GLM53_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/glm53flash.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter Glm53InstalledPrefillTests \
+  > /tmp/mference-glm-ragged-installed-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (1.41s)
+Test streamedMatchesResidentAcrossSparseCutover() passed after 417.209 seconds.
+Suite Glm53InstalledPrefillTests passed after 417.209 seconds.
+Test run with 1 test in 1 suite passed after 417.209 seconds.
+```
+
+With chunk size 128 and sparse cutover 2,048, heads at 33/2047/2051/2083
+tokens and all eight continuation full logit rows match exactly between
+resident and 16-slot modes. Every prefill segment reports zero replay.
+Partial-layer cancellation, dirty-state rejection and exact reset/recovery
+pass in both arms. This reconfirms the installed numerical/state gate after
+the INT8 matrix-unit ragged-read guard; it is not a speed measurement.
+
+### Owned all-row target capture
+
+`25f84f8` adds the opt-in target-row consumer needed to prime a native draft
+without replaying the target model. `ae8478b` records its intermediate-state
+numerical budget. The consumer receives owned full HC rows, original tokens
+and positions after GPU completion but before target commit. Failure leaves
+the target dirty; the owner must recover consumer state separately. Tests
+cover cold chunks, ragged warm append, decode, scratch resize, ownership after
+reset/replay, and consumer failure followed by exact target rollback. No
+ordinary-generation caller or draft alignment/verification is enabled.
+
+On the same hardware/toolchain and fresh 98%-free / 619-GiB preflight:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter FlashNextCheckpointTests \
+  > /tmp/mference-target-rows-v2-20260920.log 2>&1
+```
+
+At `ae8478b`, exit 0; complete timing footer:
+
+```text
+Build complete! (5.96s)
+Suite FlashNextCheckpointTests passed after 2.163 seconds.
+Test run with 9 tests in 1 suite passed after 2.164 seconds.
+```
+
+**New test development limit:** extending the prior final-row semantic check
+to all 44 intermediate HC rows initially failed at row 21: max absolute error
+11.0, reference scale 5296.0 (0.208%). The original `/512` bound was insufficient
+for this raw intermediate row. The new all-row semantic test explicitly uses
+`scale / 256` (four FP16 precision units, 0.390625%); existing final-row/head
+`/512` and exact same-path ownership/rollback checks are unchanged. This is
+not exact sequential equivalence and must not qualify a speculative verifier.
+The initial checkpoint-suite run at `25f84f8` exited 1, build 11.16s,
+9 tests / 1 suite failed after 2.187s with one issue; log
+`/tmp/mference-target-rows-20260920.log`. The diagnostic rerun used the same
+environment/scratch path and `--filter allTargetRowsAreOwnedOrderedAndDoNotReplayPrefill`:
+exit 1, build 5.94s, one test / suite failed after 0.370s with that same issue;
+log `/tmp/mference-target-row-drift-20260920.log`.
+
+At `ae8478b`, the ordinary installed Flash-Next path and native components
+were rechecked together, after all 57 receipt-file sizes and the same safety
+checks passed. Command: the same environment/scratch path, additionally
+`MFERENCE_FLASHNEXT_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/qwen38flashnext-r8.gturbo`,
+filter `'InstalledPrefillBoundaryTests|FlashNextCheckpointTests|installedDraftExecutesAndRestoresItsOwnState|installedMTPProjectionsMatchScalarDots'`,
+log `/tmp/mference-target-rows-installed-20260920.log`. Exit 0:
+
+```text
+Build complete! (1.42s)
+Suite FlashNextCheckpointTests passed after 2.159 seconds.
+Suite FlashNextMTPDraftRunnerTests passed after 3.281 seconds.
+Suite FlashNextWeightsTests passed after 6.140 seconds.
+Test memoryProfilesMatchAcrossBoundaries(name:) with 5 test cases passed after 95.200 seconds.
+Suite InstalledPrefillBoundaryTests passed after 95.200 seconds.
+Test run with 12 tests in 4 suites passed after 106.782 seconds.
+```
+
+Only the Flash-Next installed environment gate was enabled. That run leaves
+the new all-row consumer off in the installed test; the synthetic consumer
+gates execute, and installed finite last-HC capture, exact rejected-draft
+rollback/full logits, sparse boundaries and native component gates pass.
+The subsequent `fc12fcf` installed test explicitly consumes all target rows.
+It ran with the same environment, scratch path and verified 57-file install,
+filter `InstalledPrefillBoundaryTests`, log
+`/tmp/mference-all-target-rows-installed-20260920.log`. Exit 0:
+
+```text
+Build complete! (6.19s)
+Test memoryProfilesMatchAcrossBoundaries(name:) with 5 test cases passed after 95.681 seconds.
+Suite InstalledPrefillBoundaryTests passed after 95.681 seconds.
+Test run with 1 test in 1 suite passed after 95.681 seconds.
+```
+
+Only Flash-Next was enabled. Both resident and 16-slot arms now verify every
+captured row is finite/nonzero, each batch's tokens/absolute positions/counts
+are exact, and each append's last captured row matches the separate owned
+last-bundle accessor byte for byte. The long append uses chunks `[1024, 990]`;
+all previous sparse-boundary/full-logit/rollback/recovery gates still pass.
+This validates the capture primitive with actual target states, not the
+not-yet-connected shifted embedding pairs, native acceptance or speed.
+
 ## Native Flash-Next MTP loader qualification
 
 Code `49deb89`; same Mac Studio, OS/toolchain and safety protocol below.
