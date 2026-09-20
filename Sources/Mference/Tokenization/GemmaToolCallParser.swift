@@ -28,7 +28,11 @@ public typealias GemmaToolCallParserError = ToolCallParserError
 public struct GemmaToolCallParser: Sendable {
     public static let maximumBytes = 256 * 1024
 
-    public init() {}
+    private let allowsPythonNull: Bool
+
+    public init(allowsPythonNull: Bool = false) {
+        self.allowsPythonNull = allowsPythonNull
+    }
 
     public static func isRepresentableObjectKey(_ key: String) -> Bool {
         !key.isEmpty && key.allSatisfy {
@@ -42,7 +46,7 @@ public struct GemmaToolCallParser: Sendable {
         guard text.utf8.count <= Self.maximumBytes else {
             throw ToolCallParserError.oversized
         }
-        var parser = Parser(text)
+        var parser = Parser(text, allowsPythonNull: allowsPythonNull)
         try parser.consume("call:")
         let name = try parser.identifier()
         guard allowedTools.contains(name) else {
@@ -60,10 +64,12 @@ public struct GemmaToolCallParser: Sendable {
 
 private struct Parser {
     private let characters: [Character]
+    private let allowsPythonNull: Bool
     private var index = 0
 
-    init(_ text: String) {
+    init(_ text: String, allowsPythonNull: Bool) {
         characters = Array(text)
+        self.allowsPythonNull = allowsPythonNull
     }
 
     var isAtEnd: Bool { index == characters.count }
@@ -127,6 +133,7 @@ private struct Parser {
         if takeWord("true") { return .bool(true) }
         if takeWord("false") { return .bool(false) }
         if takeWord("null") { return .null }
+        if allowsPythonNull, takeWord("None") { return .null }
         return try number()
     }
 

@@ -148,11 +148,20 @@ the completed install. Interrupted model downloads can be continued with
 See the [source-release checklist](docs/SOURCE_RELEASE.md) for checks,
 troubleshooting and release limitations.
 
+The separate Gemma QAT checkpoint can be installed with
+`./mference-ui.sh install gemma4qat` into `$HOME/llm-models/gemma4qat.gturbo`.
+It preserves native group-32 weights and BF16 routers, uses its installed
+checkpoint chat template and generation settings, and keeps a distinct model
+ID alongside the original Gemma. See the
+[QAT controls and qualification status](docs/RUNTIME_CONTROLS.md#gemma-qat) and
+[QAT installation guidance](docs/OPEN_WEBUI.md#gemma-qat-installation), with
+[checkpoint details and measured limits](docs/families/GEMMA4_QAT.md).
+
 The UI is [Open WebUI](https://github.com/open-webui/open-webui), installed
 on first launch as a pinned Python tool (the launcher uses `uv`; it prints
 the install command if `uv` is missing). Behind it, `MferenceServer` runs in
-library mode: it lists every installed model it finds in the checkout's
-`scratch/`, in `~/Library/Application Support/Mference`, or under the
+library mode: it lists runnable installs it finds in the checkout's
+`scratch/`, in `~/llm-models`, in `~/Library/Application Support/Mference`, or under the
 `Mference.libraryRoot` default, and swaps the loaded model in-process when
 you pick a different one. Exactly one model is ever resident. The launcher also
 registers each model in Open WebUI with its builtin tool schemas switched off,

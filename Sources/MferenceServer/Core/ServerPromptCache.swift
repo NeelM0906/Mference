@@ -131,13 +131,19 @@ struct ServerPromptCache: Sendable {
             // generated prefix. A new user must use the canonical re-render,
             // which can remove earlier thoughts.
             let continuation = Array(request.messages.dropFirst(inputCount + 1))
-            let toolMatch = matchToolContinuation(entry: entry, request: request,
-                continuation: continuation, tokenizer: tokenizer)
-            if case .hit = toolMatch { return toolMatch }
+            if !tokenizer.isGemmaQAT {
+                let toolMatch = matchToolContinuation(entry: entry, request: request,
+                    continuation: continuation, tokenizer: tokenizer)
+                if case .hit = toolMatch { return toolMatch }
+            }
             // Results may arrive together with a new user message. Such a
             // request starts a new turn too, and must use canonical recovery
             // rather than the append-only tool bridge.
-            guard continuation.contains(where: { $0.role == .user }),
+            // QAT's source can normalize even the current tool-call turn
+            // (thought closure whitespace and the non-thinking channel).
+            // Its resumed input must equal a fresh source render; appending a
+            // bridge to raw generated tokens cannot establish that equality.
+            guard tokenizer.isGemmaQAT || continuation.contains(where: { $0.role == .user }),
                   let gemmaRecoverablePrefix else { return .miss }
             let common = zip(entry.kvBackedTokenIDs, renderedPromptIDs).prefix { $0 == $1 }.count
             // Leave at least one token for the next-token logits. Only the

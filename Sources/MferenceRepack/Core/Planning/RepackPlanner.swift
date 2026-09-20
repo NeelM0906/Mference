@@ -344,6 +344,7 @@ enum RepackPlanner {
         for h in shardHeaders {
             for t in h.tensors { registry[t.name] = t }
         }
+        try GemmaQATSource.validateInventory(arch: arch, metadata: meta, registry: registry)
 
         // Original-repo BF16 sources are planned by their own planner: the
         // tensor inventory, the fused-expert split and the row pool have no

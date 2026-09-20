@@ -8,7 +8,7 @@ import MferenceValidationSupport
     private static let d = ArchConfig.gemma4_26B_A4B.hiddenSize
     private static let eps: Float = 1e-6
 
-    @Test func fusedPostAttentionSetup_matchesPrimitiveChainBitwise_realShape() throws {
+    @Test(arguments: [false, true]) func fusedPostAttentionSetup_matchesPrimitiveChainBitwise_realShape(sourceFP16: Bool) throws {
         var rng = SplitMix64(seed: 0x9057_A77E)
         let hidden = (0..<Self.d).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
         let attn = (0..<Self.d).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
@@ -17,8 +17,8 @@ import MferenceValidationSupport
         let wPre2 = (0..<Self.d).map { _ in Quantization.bf16Bits(rng.uniform(0.5, 1.5)) }
 
         let ctx = try MetalContext()
-        let rms = try RMSNorm(context: ctx)
-        let fused = try FusedPostAttentionSetup(context: ctx)
+        let rms = try RMSNorm(context: ctx, sourceFP16: sourceFP16)
+        let fused = try FusedPostAttentionSetup(context: ctx, sourceFP16: sourceFP16)
 
         guard
             let hiddenLegacy = ctx.device.makeBuffer(bytes: hidden, length: Self.bytes(Self.d), options: .storageModeShared),

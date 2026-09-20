@@ -1355,6 +1355,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     /// Named rather than "unknown family" so the failure points at the missing
     /// kernels instead of reading as a corrupt install.
     case familyRunnerNotImplemented(family: String, missingAxes: [String])
+    case checkpointRunnerNotImplemented(detail: String)
     /// The install declares no `manifest.plePool` block, or none for the layer
     /// the arch says carries a PLE n-gram embedding.
     case plePoolMissing(layer: Int)
@@ -1402,6 +1403,8 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
         case .familyRunnerNotImplemented(let family, let missingAxes):
             return "family \(family) is installed but its runner is not implemented; "
                 + "missing axes: \(missingAxes.joined(separator: ", "))"
+        case .checkpointRunnerNotImplemented(let detail):
+            return detail
         case .plePoolMissing(let layer):
             return "manifest.plePool has no row-lookup pool for PLE layer \(layer)"
         case .plePoolInvalid(let detail):

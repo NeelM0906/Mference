@@ -20,6 +20,14 @@ public enum ExpertCacheSlotChoice: Equatable, Sendable {
 }
 
 public struct Args: Equatable, Sendable {
+    enum SamplingOption: CaseIterable, Sendable {
+        case temperature, topK, topP, repetitionPenalty, presencePenalty
+        case frequencyPenalty, repeatLastN, minP
+    }
+    // Parsing records omission until the installed checkpoint is known.
+    // Direct initialization supplies concrete values; later property writes
+    // are explicit overrides even when they equal a shared default or zero.
+    var omittedSamplingOptions: Set<SamplingOption> = []
     public var reasoningEffort: QwenReasoningEffort?
     public var model: String
     public var prompt: String?
@@ -28,14 +36,14 @@ public struct Args: Equatable, Sendable {
     public var systemPrompt: String?
     public var maxNew: Int
     public var maxContext: Int
-    public var temperature: Float
-    public var topK: Int?
-    public var topP: Float?
-    public var repetitionPenalty: Float
-    public var presencePenalty: Float
-    public var frequencyPenalty: Float
-    public var repeatLastN: Int
-    public var minP: Float
+    public var temperature: Float { didSet { omittedSamplingOptions.remove(.temperature) } }
+    public var topK: Int? { didSet { omittedSamplingOptions.remove(.topK) } }
+    public var topP: Float? { didSet { omittedSamplingOptions.remove(.topP) } }
+    public var repetitionPenalty: Float { didSet { omittedSamplingOptions.remove(.repetitionPenalty) } }
+    public var presencePenalty: Float { didSet { omittedSamplingOptions.remove(.presencePenalty) } }
+    public var frequencyPenalty: Float { didSet { omittedSamplingOptions.remove(.frequencyPenalty) } }
+    public var repeatLastN: Int { didSet { omittedSamplingOptions.remove(.repeatLastN) } }
+    public var minP: Float { didSet { omittedSamplingOptions.remove(.minP) } }
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
@@ -153,6 +161,11 @@ extension Args {
       --messages-file <path>    JSON chat messages with role and content fields.
       --chat                    Interactive multi-turn chat on stdin.
 
+    Sampling defaults below apply to existing checkpoints. Gemma QAT
+    uses its verified local generation_config.json: temperature 1, top-k 64,
+    top-p 0.95, min-p 0 and neutral penalties. Explicit flags take precedence.
+    QAT chat uses its installed checkpoint template; preserve_thinking=true is unsupported.
+
     options:
       --system <string>         System message for --chat (repeatable).
       --max-new <int>           Generated-token limit (default 1024).
@@ -218,6 +231,7 @@ extension Args {
         var maxContext = 4096
         // Starting values only: each flag below overwrites its own, so an
         // explicit flag always wins over the shared sampling defaults.
+        var providedSamplingOptions: Set<SamplingOption> = []
         var temperature = samplingDefaults.temperature
         var topK = samplingDefaults.topK
         var topP = samplingDefaults.topP
@@ -302,6 +316,7 @@ extension Args {
                 guard let parsed = Float(value), parsed.isFinite, parsed >= 0 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                providedSamplingOptions.insert(.temperature)
                 temperature = parsed
             case "--reasoning-effort":
                 let value = try takeValue(argv, &index, flag: flag)
@@ -314,37 +329,47 @@ extension Args {
                 guard let parsed = Int(value), (0...256).contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                providedSamplingOptions.insert(.topK)
                 topK = parsed == 0 ? nil : parsed
             case "--top-p":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed > 0, parsed <= 1 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                providedSamplingOptions.insert(.topP)
                 topP = parsed
             case "--min-p":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed.isFinite, (0...1).contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                providedSamplingOptions.insert(.minP)
                 minP = parsed
             case "--presence-penalty", "--frequency-penalty":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed.isFinite, (-2...2).contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
-                if flag == "--presence-penalty" { presencePenalty = parsed }
-                else { frequencyPenalty = parsed }
+                if flag == "--presence-penalty" {
+                    providedSamplingOptions.insert(.presencePenalty)
+                    presencePenalty = parsed
+                } else {
+                    providedSamplingOptions.insert(.frequencyPenalty)
+                    frequencyPenalty = parsed
+                }
             case "--repeat-last-n":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value), parsed >= -1 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                providedSamplingOptions.insert(.repeatLastN)
                 repeatLastN = parsed
             case "--repetition-penalty", "--repeat-penalty":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed.isFinite, parsed > 0, (1 / parsed).isFinite else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                providedSamplingOptions.insert(.repetitionPenalty)
                 repetitionPenalty = parsed
             case "--seed":
                 let value = try takeValue(argv, &index, flag: flag)
@@ -417,7 +442,7 @@ extension Args {
                 flag: "--top-p",
                 value: "\(topP) requires --top-k between 1 and 256")
         }
-        return Args(model: model,
+        var result = Args(model: model,
                     prompt: prompt,
                     messagesFile: messagesFile,
                     chat: chat,
@@ -444,6 +469,27 @@ extension Args {
                     kvTopKPages: kvTopKPages,
                     kvPoolPages: kvPoolPages,
                     reasoningEffort: reasoningEffort)
+        result.omittedSamplingOptions = Set(SamplingOption.allCases).subtracting(providedSamplingOptions)
+        return result
+    }
+
+    /// Resolve after tokenizer/asset validation, before runner/head selection.
+    func generationConfig(defaults: GenerationConfig,
+                          maxNewTokens: Int) throws -> GenerationConfig {
+        var config = defaults
+        config.maxNewTokens = maxNewTokens
+        config.seed = seed
+        config.stopStrings = stops
+        if !omittedSamplingOptions.contains(.temperature) { config.temperature = temperature }
+        if !omittedSamplingOptions.contains(.topK) { config.topK = topK }
+        if !omittedSamplingOptions.contains(.topP) { config.topP = topP }
+        if !omittedSamplingOptions.contains(.repetitionPenalty) { config.repetitionPenalty = repetitionPenalty }
+        if !omittedSamplingOptions.contains(.presencePenalty) { config.presencePenalty = presencePenalty }
+        if !omittedSamplingOptions.contains(.frequencyPenalty) { config.frequencyPenalty = frequencyPenalty }
+        if !omittedSamplingOptions.contains(.repeatLastN) { config.repeatLastN = repeatLastN }
+        if !omittedSamplingOptions.contains(.minP) { config.minP = minP }
+        try config.validate()
+        return config
     }
 
     private static func takeValue(_ argv: [String],

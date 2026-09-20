@@ -305,8 +305,11 @@ public enum OpenAIRequestValidator {
                                 dialect: ChatDialect = .gemma,
                                 swiftQwen: Bool? = nil,
                                 acceptsReasoningEffort: Bool? = nil,
-                                qwenReasoning: Bool? = nil) throws -> ValidatedChatRequest {
+                                qwenReasoning: Bool? = nil,
+                                gemmaQAT: Bool = false,
+                                generationDefaults: GenerationConfig = .defaults) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
+        try validateGemmaQATControls(request, isGemmaQAT: gemmaQAT)
         let isSwiftQwen = swiftQwen ?? (modelID.split(separator: "@").first == Substring(CheckpointIdentity.swiftQwen38))
         let supportsQwenEffort = qwenReasoning ?? (isSwiftQwen ||
             modelID.split(separator: "@").first == Substring(CheckpointIdentity.baseQwen38))
@@ -341,8 +344,8 @@ public enum OpenAIRequestValidator {
             throw invalid("logprobs are not supported", "logprobs", "unsupported_value")
         }
         // A supplied field is always the value validated and used; only an
-        // omitted one falls back to the shared sampling defaults.
-        let defaults = GenerationConfig.defaults
+        // omitted one falls back to the selected checkpoint's sampling defaults.
+        let defaults = generationDefaults
         let presencePenalty = request.presencePenalty ?? defaults.presencePenalty
         guard presencePenalty.isFinite, (-2...2).contains(presencePenalty) else {
             throw invalid("presence_penalty must be finite and between -2 and 2",
@@ -442,6 +445,15 @@ public enum OpenAIRequestValidator {
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum)
+    }
+
+    /// Library queues can reject this checkpoint-level unsupported control
+    /// before loading a model or committing streaming response headers.
+    static func validateGemmaQATControls(_ request: OpenAIChatRequest, isGemmaQAT: Bool) throws {
+        if isGemmaQAT, request.chatTemplateKwargs?.preserveThinking == true {
+            throw invalid("Gemma QAT does not support preserve_thinking=true",
+                          "chat_template_kwargs", "unsupported_value")
+        }
     }
 
     private static func validateTool(_ tool: OpenAITool,

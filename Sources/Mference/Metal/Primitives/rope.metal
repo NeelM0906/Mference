@@ -5,6 +5,9 @@ constant uint FC_ROPE_HEAD_DIM [[function_constant(50)]];
 constant uint FC_ROPE_NUM_HEADS [[function_constant(51)]];
 constant uint FC_ROPE_ROTATED_PAIRS [[function_constant(52)]];
 constant bool FC_ROPE_USE_FC [[function_constant(53)]];
+constant bool FC_ROPE_SOURCE_FP16 [[function_constant(111)]];
+constant bool kRopeSourceFP16 = is_function_constant_defined(FC_ROPE_SOURCE_FP16)
+    ? FC_ROPE_SOURCE_FP16 : false;
 
 static inline uint rope_head_dim(constant uint& runtime_value) {
     return (is_function_constant_defined(FC_ROPE_USE_FC) &&
@@ -35,12 +38,16 @@ static inline void apply_neox_pair(
     uint half_dim,
     uint frequency_divisor,
     float position,
-    float theta
+    float theta,
+    bool proportional = false
 ) {
     const float exponent = -float(2u * pair) / float(frequency_divisor);
-    const float angle = position * pow(theta, exponent);
-    const float cosine = cos(angle);
-    const float sine = sin(angle);
+    const float frequency = kRopeSourceFP16 && proportional
+        ? precise::divide(1.0f, precise::pow(theta, -exponent))
+        : pow(theta, exponent);
+    const float angle = position * frequency;
+    const float cosine = kRopeSourceFP16 ? fast::cos(angle) : cos(angle);
+    const float sine = kRopeSourceFP16 ? fast::sin(angle) : sin(angle);
     const uint lower = pair;
     const uint upper = half_dim + pair;
     const float x0 = float(head[lower]);
@@ -123,5 +130,5 @@ kernel void rope_proportional_neox(
         + token_index * heads * dimension
         + head_index * dimension;
     apply_neox_pair(head, pair, half_dimension, dimension,
-                    float(position), theta);
+                    float(position), theta, true);
 }

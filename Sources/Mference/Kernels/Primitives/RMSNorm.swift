@@ -24,30 +24,31 @@ final class RMSNorm {
     private let psoNoScalePerHead512: MTLComputePipelineState
     private let psoBF16Grouped: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
-        self.psoNoScale  = try context.pipeline("rmsnorm_no_scale")
-        self.psoBF16PerHead    = try context.pipeline("rmsnorm_bf16w_perhead")
-        self.psoNoScalePerHead = try context.pipeline("rmsnorm_no_scale_perhead")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        self.psoBF16     = try context.pipeline("rmsnorm_bf16w", constants: precision)
+        self.psoNoScale  = try context.pipeline("rmsnorm_no_scale", constants: precision)
+        self.psoBF16PerHead    = try context.pipeline("rmsnorm_bf16w_perhead", constants: precision)
+        self.psoNoScalePerHead = try context.pipeline("rmsnorm_no_scale_perhead", constants: precision)
         self.psoBF16D2816 = try Self.specializedPipeline(context,
                                                          "rmsnorm_bf16w",
-                                                         d: 2816)
+                                                         d: 2816, sourceFP16: sourceFP16)
         self.psoNoScaleD2816 = try Self.specializedPipeline(context,
                                                             "rmsnorm_no_scale",
-                                                            d: 2816)
+                                                            d: 2816, sourceFP16: sourceFP16)
         self.psoBF16PerHead256 = try Self.specializedPipeline(context,
                                                               "rmsnorm_bf16w_perhead",
-                                                              d: 256)
+                                                              d: 256, sourceFP16: sourceFP16)
         self.psoBF16PerHead512 = try Self.specializedPipeline(context,
                                                               "rmsnorm_bf16w_perhead",
-                                                              d: 512)
+                                                              d: 512, sourceFP16: sourceFP16)
         self.psoNoScalePerHead256 = try Self.specializedPipeline(context,
                                                                  "rmsnorm_no_scale_perhead",
-                                                                 d: 256)
+                                                                 d: 256, sourceFP16: sourceFP16)
         self.psoNoScalePerHead512 = try Self.specializedPipeline(context,
                                                                  "rmsnorm_no_scale_perhead",
-                                                                 d: 512)
-        self.psoBF16Grouped = try context.pipeline("rmsnorm_bf16w_grouped")
+                                                                 d: 512, sourceFP16: sourceFP16)
+        self.psoBF16Grouped = try context.pipeline("rmsnorm_bf16w_grouped", constants: precision)
     }
 
     /// Qwen4-Exp group RMSNorm: `rows * groups` independent normalizations of
@@ -201,10 +202,10 @@ final class RMSNorm {
 
     private static func specializedPipeline(_ context: MetalContext,
                                             _ name: String,
-                                            d: UInt32) throws -> MTLComputePipelineState {
+                                            d: UInt32, sourceFP16: Bool) throws -> MTLComputePipelineState {
         try context.pipeline(
             name,
-            constants: [
+            constants: Quantization.gemmaSourceConstants(enabled: sourceFP16) + [
                 MetalFunctionConstant(index: 30, value: .uint32(d)),
                 MetalFunctionConstant(index: 31, value: .bool(true)),
             ])

@@ -50,19 +50,8 @@ public func run(args: Args,
                 2)
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
-        let config = GenerationConfig(
-            maxNewTokens: effectiveMaxNew,
-            temperature: args.temperature,
-            topK: args.topK,
-            topP: args.topP,
-            repetitionPenalty: args.repetitionPenalty,
-            presencePenalty: args.presencePenalty,
-            frequencyPenalty: args.frequencyPenalty,
-            repeatLastN: args.repeatLastN,
-            minP: args.minP,
-            seed: args.seed,
-            stopStrings: args.stops,
-            extraStopTokens: [])
+        let config = try args.generationConfig(defaults: tokenizer.generationDefaults,
+                                               maxNewTokens: effectiveMaxNew)
         let prefillChunkTokens: Int
         switch args.prefillChunk {
         case .fixed(let n):
@@ -392,19 +381,8 @@ private func runChat(args: Args,
         let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
                                                          modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
-        let baseConfig = GenerationConfig(
-            maxNewTokens: args.maxNew,
-            temperature: args.temperature,
-            topK: args.topK,
-            topP: args.topP,
-            repetitionPenalty: args.repetitionPenalty,
-            presencePenalty: args.presencePenalty,
-            frequencyPenalty: args.frequencyPenalty,
-            repeatLastN: args.repeatLastN,
-            minP: args.minP,
-            seed: args.seed,
-            stopStrings: args.stops,
-            extraStopTokens: [])
+        let baseConfig = try args.generationConfig(defaults: tokenizer.generationDefaults,
+                                                   maxNewTokens: args.maxNew)
         // Interactive chat has no prompt at load time, so `auto` keeps the
         // production default; a fixed size applies to every turn's prefill.
         let prefillChunkTokens: Int

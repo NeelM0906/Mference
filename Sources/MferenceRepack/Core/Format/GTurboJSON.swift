@@ -240,7 +240,8 @@ enum GTurboJSON {
         // GLM-5.3-Flash's router gate is unquantized BF16; the manifest
         // records the slot as such rather than the 8-bit default a BF16
         // tensor would otherwise leave in place.
-        if arch.family == .glm53Flash {
+        if arch.family == .glm53Flash
+            || (arch.family == .gemma4 && bitWidths.router == 16) {
             quantDict["router"] = [
                 "weightBits": 16,
                 "scheme": "unquantized",

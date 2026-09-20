@@ -54,6 +54,15 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("--scratch-path /tmp/mference-test-build", result.stdout)
         self.assertIn("--resume", result.stdout)
 
+    def test_qat_install_targets_home_library(self):
+        result = self.run_launcher("install", "gemma4qat", "--resume", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = Path.home() / "llm-models" / "gemma4qat.gturbo"
+        self.assertIn(f"would write: {target}", result.stdout)
+        self.assertIn(f'--output "{target}"', result.stdout)
+        self.assertIn("--resume", result.stdout)
+        self.assertNotIn("scratch/gemma4qat.gturbo", result.stdout)
+
     def test_isolated_data_and_doctor_dry_run(self):
         result = self.run_launcher("--data-dir", "/tmp/mference-test-data", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)

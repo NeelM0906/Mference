@@ -31,6 +31,23 @@ at revision `eba96c16158f032821b0bf374ea1421cfddef0a9`. Both upstream trees
 carry the MIT license. The applicable Apple and DeepGrove copyright notices
 are preserved in [`LICENSE-MLX`](LICENSE-MLX).
 
+Gemma QAT's attention arithmetic in
+`Sources/Mference/Metal/Attention/gemma_qat_attention.metal` and
+`Sources/Mference/Metal/Attention/gemma_qat_prefill_attention.metal` is adapted from
+Apple MLX 0.32.2's `sdpa_vector.h`, `gemv.h` and `softmax.h`, with Mference's
+KV layout and runtime dispatch. These portions also use the MIT license;
+see [`LICENSE-MLX`](LICENSE-MLX).
+
+Gemma QAT's router reduction in `Sources/Mference/Metal/MoE/moe.metal` and
+`Sources/Mference/Metal/Prefill/prefill.metal` adapts MLX 0.32.2's `gemv.h`
+reduction order to Mference's dispatch. These portions also use the MIT
+license; see [`LICENSE-MLX`](LICENSE-MLX).
+
+The QAT affine projection helper in those same files and in
+`Sources/Mference/Metal/TensorCore/tensorops.metal` follows MLX 0.32.2's
+`quantized.h` FP16 input summation and SIMD accumulation order. These portions
+also use the MIT license; see [`LICENSE-MLX`](LICENSE-MLX).
+
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a

@@ -32,6 +32,12 @@ metadata automatically. Explicit Mference request/CLI values override defaults.
 The values are declared once, in `GenerationConfig.init`; the CLI and server
 read `GenerationConfig.defaults` only for a parameter the caller omitted.
 
+The later, separate Gemma QAT checkpoint is an explicit exception: its CLI and
+server paths use the verified installed generation settings (temperature 1, Top-K 64,
+Top-P 0.95, Min-P off and neutral penalties). Explicit controls still override
+that profile. The sampler calculations and original checkpoint defaults stay
+unchanged; see [QAT controls](RUNTIME_CONTROLS.md#gemma-qat).
+
 1. On post-softcap model logits, count occurrences in the most recent
    `repeat_last_n` prompt/generated tokens. `0` disables all penalties; `-1`
    uses the complete effective history. For each seen token, divide positive

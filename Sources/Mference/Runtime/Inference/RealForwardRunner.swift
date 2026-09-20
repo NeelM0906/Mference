@@ -346,6 +346,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Test-only failure seam. Prior layer work is drained at this boundary;
     /// production leaves it nil and adds no GPU synchronization.
     var prefillWillEncodeLayer: ((Int) throws -> Void)?
+    /// Numerical diagnosis only. Nil in production; enabled captures wait for
+    /// the existing commands without changing their math or routing choices.
+    var gemmaDecodeTrace: ((Int, Int, String, [Float]) -> Void)?
+    /// Numerical diagnosis at existing prefill completion boundaries only.
+    /// Nil during normal execution; never changes the batched dispatch.
+    var gemmaPrefillTrace: ((Int, Int, String, [Float]) -> Void)?
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -528,6 +534,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// *current* token (PILOT router-lookahead) is the only way this pays, and
     /// `speculativeExpertPredictor` is where it plugs in.
     private var previousTokenExperts: [[Int]] = []
+    /// Read-only numerical qualification evidence from the existing decode
+    /// readback. Does not add GPU work or alter routing/prefetch decisions.
+    var lastDecodeRoutedExperts: [[Int]] { previousTokenExperts }
     private var pendingSpeculation: SpeculativeExpertPrefetch?
     /// Overrides the predictor for a layer. The seam a real predictor plugs
     /// into, and what lets tests drive the reserve/read/join/confirm machinery
@@ -583,48 +592,58 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens)
 
         let silu = cfg.hiddenActivation == "silu"
-        self.embedInt4 = try EmbedLookupInt4(context: context)
-        self.rms       = try RMSNorm(context: context)
+        let int4GroupSize = model.affineInt4GroupSize
+        let sourceFP16 = model.modelID == CheckpointIdentity.gemma4QAT
+        self.embedInt4 = try EmbedLookupInt4(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.rms       = try RMSNorm(context: context, sourceFP16: sourceFP16)
         self.int4      = try DequantInt4GEMV(
             context: context,
-            additionalShapes: cfg.decodeInt4GEMVShapes)
-        self.attention = try Attention(context: context)
+            additionalShapes: cfg.decodeInt4GEMVShapes,
+            groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.attention = try Attention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil)
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
                                                   siluActivation: silu,
                                                   specializedD: cfg.hiddenSize,
-                                                  specializedF: cfg.intermediateSize)
+                                                  specializedF: cfg.intermediateSize,
+                                                  groupSize: int4GroupSize, sourceFP16: sourceFP16)
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
                                  specializedD: UInt32(cfg.hiddenSize),
                                  specializedF: UInt32(cfg.moeIntermediateSize),
                                  specializedNumExperts: UInt32(cfg.numExperts),
-                                 specializedTopK: UInt32(cfg.topKExperts))
+                                 specializedTopK: UInt32(cfg.topKExperts),
+                                 groupSize: int4GroupSize,
+                                 routerBF16: model.hasBF16Router, sourceFP16: sourceFP16)
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
-                                              maxVocab: cfg.vocabSize)
-        self.fusedQKVGEMV = try FusedQKVGEMV(context: context)
-        self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context)
-        self.fusedPostAttentionSetup = try FusedPostAttentionSetup(context: context)
-        self.fusedTail = try FusedLayerTail(context: context)
-        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
-        self.prefillRMS = try PrefillRMSNorm(context: context)
-        self.prefillQMM = try PrefillInt4QMM(context: context)
-        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context)
-        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
-        self.prefillAttention = try PrefillAttention(context: context)
-        self.prefillPostAttention = try PrefillPostAttentionSetup(context: context)
-        self.prefillRouter = try PrefillRouter(context: context)
+                                              maxVocab: cfg.vocabSize,
+                                              groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.fusedQKVGEMV = try FusedQKVGEMV(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context, sourceFP16: sourceFP16)
+        self.fusedPostAttentionSetup = try FusedPostAttentionSetup(context: context, sourceFP16: sourceFP16)
+        self.fusedTail = try FusedLayerTail(context: context, sourceFP16: sourceFP16)
+        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.prefillRMS = try PrefillRMSNorm(context: context, sourceFP16: sourceFP16)
+        self.prefillQMM = try PrefillInt4QMM(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context, sourceFP16: sourceFP16)
+        self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil)
+        self.prefillPostAttention = try PrefillPostAttentionSetup(context: context, sourceFP16: sourceFP16)
+        self.prefillRouter = try PrefillRouter(context: context, routerBF16: model.hasBF16Router, sourceFP16: sourceFP16)
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
             weightBits: model.sharedExpertWeightBits,
-            siluActivation: silu)
+            siluActivation: silu,
+            groupSize: int4GroupSize, sourceFP16: sourceFP16)
         self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(context: context,
-                                                             siluActivation: silu)
-        self.prefillMoE = try PrefillMoE(context: context)
-        self.prefillLayerTail = try PrefillLayerTail(context: context)
+                                                             siluActivation: silu,
+                                                             groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.prefillMoE = try PrefillMoE(context: context, sourceFP16: sourceFP16)
+        self.prefillLayerTail = try PrefillLayerTail(context: context, sourceFP16: sourceFP16)
         self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(context: context,
-                                                               maxD: cfg.hiddenSize)
+                                                               maxD: cfg.hiddenSize,
+                                                               groupSize: int4GroupSize, sourceFP16: sourceFP16)
 
         // Qwen 3.6 kernels, keyed off the data flags so architectures that
         // never dispatch them pay no PSO compile cost.
@@ -943,9 +962,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if cfg.routerScaled {
-            // Pre-fold 1/sqrt(D) into router.scale per layer. Each layer gets
-            // its own BF16 [D] buffer — the kernel reads `effective_scale[i]`
-            // and we pay for the multiply once per generation, not per token.
+            // Preserve each checkpoint's scale arithmetic: source FP16 for
+            // QAT, existing BF16 folding for original Gemma. Stored router
+            // weights and scale assets remain untouched.
             var perLayer: [MTLBuffer] = []
             perLayer.reserveCapacity(cfg.numLayers)
             let invSqrtD = Float(1.0) / Float(D).squareRoot()
@@ -961,8 +980,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     .assumingMemoryBound(to: UInt16.self)
                 let dst = buf.contents().assumingMemoryBound(to: UInt16.self)
                 for i in 0..<dInts {
-                    let v = Quantization.bf16ToFloat(src[i]) * invSqrtD
-                    dst[i] = Quantization.bf16Bits(v)
+                    let scale = Quantization.bf16ToFloat(src[i])
+                    dst[i] = sourceFP16
+                        ? (Float16(scale) * Float16(invSqrtD)).bitPattern
+                        : Quantization.bf16Bits(scale * invSqrtD)
                 }
                 buf.label = "effective_scale.L\(L)"
                 perLayer.append(buf)
@@ -1830,6 +1851,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let t = tokens.count
         let emb = model.embedding
 
+        func trace(_ layer: Int, _ stages: [(String, MTLBuffer, Int)]) throws {
+            guard cfg.family == .gemma4, let observer = gemmaPrefillTrace else { return }
+            guard let copy = ctx.queue.makeCommandBuffer(),
+                  let blit = copy.makeBlitCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            var snapshots: [(String, MTLBuffer, Int)] = []
+            for (stage, buffer, width) in stages {
+                let bytes = t * width * MemoryLayout<Float16>.stride
+                precondition(bytes <= buffer.length)
+                if buffer.storageMode == .private {
+                    guard let readable = ctx.device.makeBuffer(length: bytes, options: .storageModeShared) else {
+                        throw ModelError.residentBufferWrapFailed
+                    }
+                    blit.copy(from: buffer, sourceOffset: 0, to: readable, destinationOffset: 0, size: bytes)
+                    snapshots.append((stage, readable, width))
+                } else {
+                    snapshots.append((stage, buffer, width))
+                }
+            }
+            blit.endEncoding()
+            copy.commit()
+            waitForCompletion(copy)
+            if let error = copy.error { throw error }
+            for (stage, buffer, width) in snapshots {
+                for row in 0..<t {
+                    let values = UnsafeBufferPointer(
+                        start: buffer.contents().advanced(by: row * width * MemoryLayout<Float16>.stride)
+                            .assumingMemoryBound(to: Float16.self), count: width)
+                    observer(startPosition + row, layer, stage, values.map(Float.init))
+                }
+            }
+        }
+
         func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
                                   family: PrefillProjectionFamily,
                                   weights: TensorView,
@@ -1856,7 +1911,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     m: tokenCount,
                     n: rows,
                     k: columns)
-                if path == .affineThreadgroupF16 {
+                if path == .affineThreadgroupF16 || path == .sourceAffineF16 {
                     return
                 }
             }
@@ -2313,6 +2368,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         throw error
                     }
 
+                    if gemmaPrefillTrace != nil {
+                        try trace(L, [
+                            ("input_norm", scratch.normed, D), ("query", scratch.q, qDim),
+                            ("key", scratch.kStage, kvDim), ("value", scratch.vStage, kvDim),
+                            ("attention", scratch.attentionOutput, qDim), ("attention_projection", scratch.h1, D),
+                            ("post_attention", scratch.hidden, D), ("dense_input", scratch.denseX, D),
+                            ("routed_input", scratch.routedX, D), ("router_input", scratch.routerX, D),
+                            ("routing_weights", scratch.routeWeights, cfg.topKExperts),
+                        ])
+                    }
+
                     // The shared branch depends only on routedX, which the
                     // completed attention/router command has already
                     // produced. Submit it before CPU route grouping and SSD
@@ -2601,6 +2667,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     if let error = sharedCB.error {
                         throw error
                     }
+                    if gemmaPrefillTrace != nil {
+                        try trace(L, [("shared_output", scratch.h1, D), ("routed_output", scratch.h2, D),
+                                      ("layer_output", scratch.hidden, D)])
+                    }
                     if L + 1 < cfg.numLayers {
                         guard let nextCB = ctx.queue.makeCommandBuffer() else {
                             throw ModelError.residentBufferWrapFailed
@@ -2697,6 +2767,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
             : 1.0
+        func trace(_ layer: Int, _ stage: String, _ buffer: MTLBuffer, _ count: Int, offset: Int = 0) {
+            guard let observer = gemmaDecodeTrace else { return }
+            let values = UnsafeBufferPointer(start: buffer.contents().advanced(by: offset).assumingMemoryBound(to: Float16.self),
+                                             count: count)
+            observer(position, layer, stage, values.map(Float.init))
+        }
         struct PendingRoutedCommand {
             let cb: MTLCommandBuffer
             /// The layer's attention+router+shared-expert buffer. Always
@@ -3063,6 +3139,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitForRouterSignal(routerSignal, fallback: cb)
+            if gemmaDecodeTrace != nil, cfg.family == .gemma4 {
+                waitForCompletion(cb)
+                trace(L, "input_norm", normed, cfg.hiddenSize)
+                trace(L, "query", qScratch, Int(qDim))
+                if let key = kv?.kSlot(layer: L, position: position),
+                   let value = kv?.vSlot(layer: L, position: position) {
+                    trace(L, "key", key.buffer, Int(kvDim), offset: key.offset)
+                    trace(L, "value", value.buffer, Int(kvDim), offset: value.offset)
+                }
+                trace(L, "attention", attnOut, Int(qDim))
+                trace(L, "attention_projection", oOut, cfg.hiddenSize)
+                trace(L, "post_attention", hidden, cfg.hiddenSize)
+                trace(L, "dense_input", denseX, cfg.hiddenSize)
+                trace(L, "routed_input", routedX, cfg.hiddenSize)
+                trace(L, "router_input", routerInput, cfg.hiddenSize)
+                trace(L, "shared_output", h1Buf, cfg.hiddenSize)
+                trace(L, "shared_activations", denseScratchAct, Int(sharedProj.gate.rows))
+                gemmaDecodeTrace?(position, L, "router_logits", moe.routerLogitSnapshot)
+                trace(L, "routing_weights", outWeights, cfg.topKExperts)
+            }
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             if let pending = pendingRoutedCommand {
                 finishPendingRoutedCommand(pending, waitIfNeeded: false)
@@ -3334,6 +3430,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     [weak self, layer = plannedFetch.layer] success in
                     self?.eagerFetchCompleted(seq, success: success, layer: layer)
                 }
+            }
+            if gemmaDecodeTrace != nil, cfg.family == .gemma4 {
+                waitForCompletion(routedCB)
+                trace(L, "routed_activations", moeActs, Int(topK * FmoE))
+                trace(L, "routed_output", h2Buf, cfg.hiddenSize)
+                trace(L, "layer_output", hidden, cfg.hiddenSize)
             }
             if Self.slotMapDebugCompare, slotMapArmed,
                slotMapAllHit.contents().load(as: UInt32.self) == 1 {

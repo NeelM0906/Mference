@@ -1,11 +1,128 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef MFERENCE_GEMMA_SOURCE_FP16
+#define MFERENCE_GEMMA_SOURCE_FP16
+// Preserve the source activation boundary before learned scaling. The original
+// Gemma checkpoint keeps its existing fused arithmetic unless explicitly set.
+constant bool FC_GEMMA_SOURCE_FP16 [[function_constant(110)]];
+constant bool kGemmaSourceFP16 = is_function_constant_defined(FC_GEMMA_SOURCE_FP16)
+    ? FC_GEMMA_SOURCE_FP16 : false;
+static inline half gemma_weighted_norm(float x, float inv, float weight) {
+    return kGemmaSourceFP16 ? half(x * inv) * half(weight) : half(x * inv * weight);
+}
+static inline half gemma_scaled_embedding(float value, float scale) {
+    return kGemmaSourceFP16 ? half(value) * half(scale) : half(value * scale);
+}
+
+// MLX's quantized GEMV forms its affine-bias input sum in FP16 quads.
+static inline float gemma_source_quad_sum(half4 x) {
+    const half a = x.x + x.y;
+    const half b = a + x.z;
+    return float(half(b + x.w));
+}
+static inline half gemma_source_geglu(float gate_value, float up_value) {
+    // Gate/up projections are FP16 tensors in the source, even when fused.
+    volatile half gate = half(gate_value);
+    volatile half up = half(up_value);
+    // Preserve source half stores across fast-math contraction, particularly
+    // 1 + tanh(x): its rounded negative tail is exactly zero in the source.
+    volatile half cube = half(float(gate) * float(gate) * float(gate));
+    volatile half term = half(0.044715f) * cube;
+    volatile half sum = gate + term;
+    volatile half inner = half(0.7978845608028654f) * sum;
+    // FP16 tanh has already rounded to +/-1 at these bounds. Keep that
+    // exact source result while avoiding fast-tanh's positive exp overflow.
+    volatile half curve = half(tanh(clamp(float(inner), -20.0f, 20.0f)));
+    volatile half shifted = half(1.0h + curve);
+    volatile half scaled = half(0.5h * gate);
+    volatile half activation = scaled * shifted;
+    return half(activation * up);
+}
+static inline float gemma_source_bias_correction(
+    device const half* x, device const bfloat* biases, uint width, uint group_size
+) {
+    float correction = 0.0f;
+    for (uint k = 0; k < width; k += 4u) {
+        const half4 quad(x[k], x[k + 1u], x[k + 2u], x[k + 3u]);
+        const float exact = float(quad.x) + float(quad.y) + float(quad.z) + float(quad.w);
+        correction = fma(float(biases[k / group_size]),
+                        gemma_source_quad_sum(quad) - exact, correction);
+    }
+    return correction;
+}
+#endif
+
+#ifndef MFERENCE_GEMMA_SOURCE_PROJECTION
+#define MFERENCE_GEMMA_SOURCE_PROJECTION
+// QAT's source GEMV rounds the input sum in half quads, accumulates four
+// products at a time, and adds each complete affine sub-result. Callers of
+// this path compile this module with safe math: fast-math compilation does
+// not preserve the source's FP16 rounding boundaries.
+static inline float gemma_source_projection_row(
+    device const uint8_t* weights,
+    device const bfloat* scales,
+    device const bfloat* biases,
+    device const half* x,
+    uint width, uint group_size, bool fast_shape, uint lane
+) {
+    device const ushort* packed_weights = (device const ushort*)weights;
+    const uint values = fast_shape ? 16u : 8u;
+    float result = 0.0f;
+    for (uint base = lane * values; base < width; base += 32u * values) {
+        float sum = 0.0f, dot = 0.0f;
+        for (uint i = 0; i < values; i += 4u) {
+            const uint k = base + i;
+            const ushort packed = packed_weights[k / 4u];
+            sum += x[k] + x[k + 1u] + x[k + 2u] + x[k + 3u];
+            dot += float(x[k]) * (packed & 15u)
+                + (float(x[k + 1u]) / 16.0f) * (packed & 240u)
+                + (float(x[k + 2u]) / 256.0f) * (packed & 3840u)
+                + (float(x[k + 3u]) / 4096.0f) * (packed & 61440u);
+        }
+        const uint group = base / group_size;
+        result += float(half(scales[group])) * dot + sum * float(half(biases[group]));
+    }
+    return simd_sum(result);
+}
+#endif
+
+// QAT requires the source GEMV's affine accumulation even when query rows
+// are batched. The normal MPP tensor product uses a different reduction tree.
+// Keep the query/output tile dispatch, and use one SIMD per output row for
+// this checkpoint; all other profiles retain the tensor operation below.
+template <typename OutT>
+static inline void gemma_qat_affine_projection_tile(
+    device const uint8_t* weights, device const bfloat* scales,
+    device const bfloat* biases, device const half* x, device OutT* output,
+    uint M, uint N, uint K, uint groupSize, uint3 grid, uint tid, uint threads
+) {
+    const uint lane = tid % 32u, simd = tid / 32u;
+    const uint groups = K / groupSize;
+    for (uint localM = 0; localM < 64u; ++localM) {
+        const uint m = grid.y * 64u + localM;
+        if (m >= M) break;
+        for (uint localN = simd; localN < 32u; localN += threads / 32u) {
+            const uint n = grid.x * 32u + localN;
+            if (n >= N) continue;
+            const float result = gemma_source_projection_row(
+                weights + n * (K / 2u), scales + n * groups, biases + n * groups,
+                x + m * K, K, groupSize, N % 8u == 0u && K % 512u == 0u, lane);
+            if (lane == 0u) output[m * N + n] = OutT(result);
+        }
+    }
+}
+
 #if defined(__HAVE_TENSOR__)
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
 
-constant constexpr uint kW4A8GroupSize = 64;
+#ifndef MFERENCE_AFFINE_GROUP_SIZE
+#define MFERENCE_AFFINE_GROUP_SIZE
+constant uint FC_AFFINE_GROUP_SIZE [[function_constant(108)]];
+constant uint kAffineGroupSize = is_function_constant_defined(FC_AFFINE_GROUP_SIZE)
+    ? FC_AFFINE_GROUP_SIZE : 64u;
+#endif
 constant constexpr int kMPPAffineTileM = 64;
 constant constexpr int kMPPAffineTileN = 32;
 constant constexpr int kMPPAffineTileK = 64;
@@ -22,6 +139,11 @@ kernel void mpp_prefill_affine_threadgroup_f16(
     uint3 tgid                          [[threadgroup_position_in_grid]],
     uint3 lid3                          [[thread_position_in_threadgroup]],
     uint3 threads3                      [[threads_per_threadgroup]]) {
+    if (kGemmaSourceFP16) {
+        gemma_qat_affine_projection_tile(packedWeights, scales, biases,
+            activations, output, M, N, K, kAffineGroupSize, tgid, lid3.x, threads3.x);
+        return;
+    }
     constexpr auto descriptor = matmul2d_descriptor(
         kMPPAffineTileM, kMPPAffineTileN, kMPPAffineTileK,
         false, true, false);
@@ -51,10 +173,10 @@ kernel void mpp_prefill_affine_threadgroup_f16(
     }
 
     const uint rowBytes = K / 2u;
-    const uint groupsPerRow = K / kW4A8GroupSize;
+    const uint groupsPerRow = K / kAffineGroupSize;
     const uint lid = lid3.x;
     const uint threads = threads3.x;
-    for (uint group = 0; group < groupsPerRow; ++group) {
+    for (uint group = 0; group < K / uint(kMPPAffineTileK); ++group) {
         for (int element = 0; element < groupProduct.get_capacity(); ++element) {
             groupProduct[element] = 0.0f;
         }
@@ -70,8 +192,9 @@ kernel void mpp_prefill_affine_threadgroup_f16(
                 const uint q = (globalK & 1u) == 0u
                     ? uint(packed & 0x0fu)
                     : uint(packed >> 4);
-                const float scale = float(scales[globalN * groupsPerRow + group]);
-                const float bias = float(biases[globalN * groupsPerRow + group]);
+                const uint scaleIndex = globalN * groupsPerRow + globalK / kAffineGroupSize;
+                const float scale = float(scales[scaleIndex]);
+                const float bias = float(biases[scaleIndex]);
                 weightTile[linear] = half(fma(float(q), scale, bias));
             } else {
                 weightTile[linear] = half(0.0f);
@@ -99,7 +222,8 @@ kernel void mpp_prefill_affine_threadgroup_f16(
         const uint globalN = tgid.x * uint(kMPPAffineTileN) + uint(position[0]);
         const uint globalM = tgid.y * uint(kMPPAffineTileM) + uint(position[1]);
         if (globalM < M && globalN < N) {
-            output[globalM * N + globalN] = half(accumulator[element]);
+            float value = accumulator[element];
+            output[globalM * N + globalN] = half(value);
         }
     }
 }
@@ -118,6 +242,11 @@ kernel void mpp_prefill_affine_threadgroup_f32(
     uint3 tgid                          [[threadgroup_position_in_grid]],
     uint3 lid3                          [[thread_position_in_threadgroup]],
     uint3 threads3                      [[threads_per_threadgroup]]) {
+    if (kGemmaSourceFP16) {
+        gemma_qat_affine_projection_tile(packedWeights, scales, biases,
+            activations, output, M, N, K, kAffineGroupSize, tgid, lid3.x, threads3.x);
+        return;
+    }
     constexpr auto descriptor = matmul2d_descriptor(
         kMPPAffineTileM, kMPPAffineTileN, kMPPAffineTileK,
         false, true, false);
@@ -146,10 +275,10 @@ kernel void mpp_prefill_affine_threadgroup_f32(
     }
 
     const uint rowBytes = K / 2u;
-    const uint groupsPerRow = K / kW4A8GroupSize;
+    const uint groupsPerRow = K / kAffineGroupSize;
     const uint lid = lid3.x;
     const uint threads = threads3.x;
-    for (uint group = 0; group < groupsPerRow; ++group) {
+    for (uint group = 0; group < K / uint(kMPPAffineTileK); ++group) {
         for (int element = 0; element < groupProduct.get_capacity(); ++element) {
             groupProduct[element] = 0.0f;
         }
@@ -165,10 +294,11 @@ kernel void mpp_prefill_affine_threadgroup_f32(
                     globalN * rowBytes + (globalK >> 1)];
                 const uint q = (globalK & 1u) == 0u
                     ? uint(packed & 0x0fu) : uint(packed >> 4);
+                const uint scaleIndex = globalN * groupsPerRow + globalK / kAffineGroupSize;
                 weightTile[linear] = half(fma(
                     float(q),
-                    float(scales[globalN * groupsPerRow + group]),
-                    float(biases[globalN * groupsPerRow + group])));
+                    float(scales[scaleIndex]),
+                    float(biases[scaleIndex])));
             } else {
                 weightTile[linear] = half(0.0f);
             }
@@ -194,7 +324,8 @@ kernel void mpp_prefill_affine_threadgroup_f32(
         const uint globalM = tgid.y * uint(kMPPAffineTileM)
             + uint(position[1]);
         if (globalM < M && globalN < N) {
-            output[globalM * N + globalN] = accumulator[element];
+            float value = accumulator[element];
+            output[globalM * N + globalN] = value;
         }
     }
 }

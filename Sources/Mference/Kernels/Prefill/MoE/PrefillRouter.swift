@@ -34,8 +34,12 @@ final class PrefillRouter {
 
     private let pso: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_router_gemma4_block")
+    init(context: MetalContext, routerBF16: Bool = false, sourceFP16: Bool = false) throws {
+        self.pso = try context.pipeline("prefill_router_gemma4_block",
+            constants: [MetalFunctionConstant(index: 109, value: .bool(routerBF16))]
+                + Quantization.gemmaSourceConstants(enabled: sourceFP16),
+            maxTotalThreadsPerThreadgroup: nil,
+            safeMathModule: sourceFP16 && routerBF16 ? "prefill" : nil)
     }
 
     func encodeGemma4Block(commandBuffer: MTLCommandBuffer,

@@ -50,8 +50,8 @@ public enum ChatDialect: String, Sendable {
 /// end-of-turn) and adapts encode/decode to Int32 to match the buffer types
 /// kernels consume.
 ///
-/// Gemma uses the revision-pinned template bundled with the application;
-/// installed vocabulary and weights remain unchanged. Literal control-token
+/// Original Gemma uses the revision-pinned template bundled with the application;
+/// QAT uses its verified installed source template. Literal control-token
 /// text in user content is a trusted-input research-runtime limitation.
 public struct MFTokenizer: @unchecked Sendable {
     public static let modelID = "google/gemma-4-26B-A4B-it"
@@ -61,6 +61,9 @@ public struct MFTokenizer: @unchecked Sendable {
     public let dialect: ChatDialect
     public internal(set) var isSwiftQwen = false
     public internal(set) var isBaseQwen38 = false
+    public internal(set) var isGemmaQAT = false
+    var localTokenizerFolder: URL?
+    var installedGemmaTemplate: Data?
     /// Tool grammar is a family contract, independent of thinking policy.
     let usesJSONChatMLToolCalls: Bool
     /// Loaded checkpoints with a binary opt-in thinking control.
@@ -84,6 +87,9 @@ public struct MFTokenizer: @unchecked Sendable {
     public let thinkEndID: Int32?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
+    /// Omitted controls use the installed QAT source profile. Other checkpoints
+    /// retain the existing shared defaults; explicit caller settings still win.
+    public internal(set) var generationDefaults = GenerationConfig.defaults
 
     /// Maple's and Qwen 3.8's pinned prompts open a live `<think>` block. The
     /// initializer resolves this EOS relationship only when the caller
@@ -120,6 +126,15 @@ public struct MFTokenizer: @unchecked Sendable {
                             environment: [String: String] = ProcessInfo.processInfo.environment) async throws -> MFTokenizer {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let checkpointID = try ManifestReader.peekModelID(directoryURL: modelDirectory)
+        if checkpointID == CheckpointIdentity.gemma4QAT {
+            _ = try ManifestReader.load(directoryURL: modelDirectory, expecting: .gemma4_26B_A4B)
+            // QAT never uses an environment override or remote fallback. The
+            // manifest above has verified these exact installed sidecars.
+            let folder = modelDirectory.appendingPathComponent("tokenizer", isDirectory: true)
+            let loaded = try await load(from: folder, family: family)
+            try GemmaQATCheckpoint.validateTokenizer(loaded)
+            return try loaded.forCheckpoint(checkpointID)
+        }
         if let folder = tokenizerFolder(forModelDirectory: modelDirectory, environment: environment) {
             let loaded = try await load(from: folder, family: family)
             return try loaded.forCheckpoint(checkpointID)
@@ -159,7 +174,9 @@ public struct MFTokenizer: @unchecked Sendable {
     static func loadUncached(from folder: URL,
                              family: ModelFamily?) async throws -> MFTokenizer {
         let underlying = try await AutoTokenizer.from(modelFolder: folder)
-        return try MFTokenizer(tokenizer: underlying, family: family)
+        var value = try MFTokenizer(tokenizer: underlying, family: family)
+        value.localTokenizerFolder = folder.standardizedFileURL
+        return value
     }
 
     private static func hasTokenizerJSON(in folder: URL, fileManager: FileManager) -> Bool {
@@ -770,6 +787,14 @@ public struct MFTokenizer: @unchecked Sendable {
         guard acceptsReasoningEffort || reasoningEffort == nil else {
             throw MFTokenizerError.unsupportedForDialect("reasoning_effort is not supported by this model")
         }
+        if isGemmaQAT {
+            guard !preserveThinking else {
+                throw MFTokenizerError.unsupportedForDialect("Gemma QAT does not support preserve_thinking=true")
+            }
+            guard !messages.isEmpty else {
+                throw MFTokenizerError.invalidChatTemplate("Gemma QAT requires at least one message")
+            }
+        }
         // DeepSeek ships no chat_template.jinja; its tool framing is native.
         if dialect == .deepseek {
             return try encodeDeepseekToolChat(messages: messages, tools: tools)
@@ -829,10 +854,15 @@ public struct MFTokenizer: @unchecked Sendable {
                 ] as [String: any Sendable],
             ]
         }
+        if isGemmaQAT {
+            return try encodeGemmaQATChat(messages: upstreamMessages, tools: upstreamTools,
+                enableThinking: reasoningEffort != nil && reasoningEffort != .off,
+                addGenerationPrompt: addGenerationPrompt)
+        }
         return try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
             chatTemplate: dialect == .gemma
-                ? .literal(String(decoding: try Self.gemmaChatTemplateData(), as: UTF8.self)) : nil,
+                ? .literal(String(decoding: try effectiveGemmaChatTemplateData(), as: UTF8.self)) : nil,
             addGenerationPrompt: addGenerationPrompt,
             truncation: false,
             maxLength: nil,

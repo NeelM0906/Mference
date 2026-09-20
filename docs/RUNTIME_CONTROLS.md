@@ -39,6 +39,44 @@ dropped until it does. The system message and the message just typed are never
 dropped; if that pair alone still does not fit, the turn is refused and the
 conversation is left untouched.
 
+### Gemma QAT
+
+The separate `gemma4qat` checkpoint uses the existing
+`$HOME/llm-models/gemma4qat.gturbo` installation:
+
+```bash
+.build/release/MferenceCLI --model "$HOME/llm-models/gemma4qat.gturbo" \
+  --prompt "The capital of France is" --max-new 64 --seed 42
+.build/release/MferenceCLI --model "$HOME/llm-models/gemma4qat.gturbo" \
+  --chat --reasoning-effort medium --max-new 256 --seed 42
+```
+
+Omitted controls use the verified installed `generation_config.json`:
+temperature 1, Top-K 64 and Top-P 0.95. Min-P is off, repetition penalty is 1,
+and presence/frequency penalties are zero. Explicit flags override these
+values, including `--temperature 0` for greedy decoding and `--min-p 0`.
+These defaults apply to CLI raw/chat/messages and the selected server model,
+including custom aliases and library swaps. The original Gemma retains its
+existing defaults. QAT requires its installed
+tokenizer and assets; it does not fall back to a remote tokenizer or an
+environment override.
+
+Raw completion applies no chat template and can include model-generated
+channel text. The qualified raw greedy prompt `The capital of France is`
+repeats in both Mference and the pinned FP16 reference; QAT is not inherently
+loop-free. Chat uses the pinned checkpoint's own template. Thinking is off
+when omitted; `medium`, `low` and `xhigh` all enable the same binary mode.
+The source drops ordinary assistant reasoning and replays tool-call reasoning
+only within the active user turn. QAT rejects `preserve_thinking=true`;
+omitted/false follows the source policy. Clients still send complete tool
+history, including reasoning and matching tool-call IDs.
+
+No reinstall is needed for this runtime update. Kernel, CLI chat and both server modes
+have passed scoped qualification on M2, including tools and cache recovery.
+M2 timing observations and a separate short-chat CLI peak-memory measurement
+are recorded. General loop reduction, other hardware and wider-context resource
+limits remain unverified.
+
 ## Generation controls
 
 The CLI and server expose these generation controls:
@@ -49,16 +87,17 @@ The CLI and server expose these generation controls:
 | Maximum context | 4K, 8K, 16K, 32K, 64K, 128K | `--max-context` | CLI 4K; server/UI 16K | Sets prompt plus response capacity. Maple supports 128000 tokens in the runtime, CLI, and server; other family or product limits may differ. A selectable context is not a fresh hardware qualification. |
 | Qwen 3.8 reasoning effort | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Swift: `xhigh`; base: unchanged legacy policy when omitted | Base/Swift Qwen 3.8; chat/messages mode, not raw completion. Server field: `reasoning_effort`. An explicit value selects the installed source template for either checkpoint. `medium` adds no effort instruction; `none` closes thinking in the prompt. |
 | Gemma 4 / Qwen 3.6 thinking | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Off | The first three aliases enable the same binary thinking mode; `none` disables it. Chat/messages mode only. The server also accepts `chat_template_kwargs.enable_thinking`; explicit effort wins. CLI stdout contains the visible answer, while interactive history retains reasoning for template replay. Gemma's template strips earlier ordinary reasoning at a new user turn. CLI turns still reset/re-prefill; CLI completion defaults remain 1,024 tokens. |
-| Temperature | 0...2 | `--temperature` | 0.8 | `0` is greedy; positive values sample. |
-| Top-K | Off or 1...256 | `--top-k` | 40 | Keeps at most K candidates. CLI `0` turns it off. |
+| Temperature | 0...2 | `--temperature` | 0.8; QAT 1 | `0` is greedy; positive values sample. |
+| Top-K | Off or 1...256 | `--top-k` | 40; QAT 64 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Keeps the nucleus after Top-K, normalized over that candidate set. |
-| Min-P | 0...1 | `--min-p` | 0.05 | Removes candidates below this fraction of the peak probability, before temperature. `0` disables it. |
+| Min-P | 0...1 | `--min-p` | 0.05; QAT 0 | Removes candidates below this fraction of the peak probability, before temperature. `0` disables it. |
 | Repetition penalty | Positive finite | `--repetition-penalty` or `--repeat-penalty` | 1 | Divides positive seen-token logits and multiplies nonpositive ones. |
 | Presence penalty | -2...2 | `--presence-penalty` | 0 | Subtracts once per seen token, after repetition penalty. |
 | Frequency penalty | -2...2 | `--frequency-penalty` | 0 | Subtracts the penalty times each token's count. |
 | Penalty window | -1 or nonnegative | `--repeat-last-n` | 64 | All penalties use the most recent N prompt/generated tokens. `0` disables penalties; `-1` uses all current history. |
 
-All model families use llama.cpp's built-in sampling preset. The active chain
+Existing checkpoints use llama.cpp's built-in sampling preset; QAT
+uses the source defaults described above. The active chain
 is repetition/frequency/presence penalties → Top-K → Top-P → Min-P →
 temperature. Seeded output is reproducible within Mference, not guaranteed
 identical to llama.cpp's RNG or different weight formats. Thinking and context

@@ -69,9 +69,9 @@ To run the two halves by hand, start the server yourself and give Open WebUI the
 ./mference-ui.sh install qwen36 --resume   # extra arguments reach MferenceRepack
 ```
 
-The install runs `MferenceRepack` into `scratch/<family>.gturbo`, which is one
+The install normally runs `MferenceRepack` into `scratch/<family>.gturbo`, which is one
 of the roots library mode scans, so a model installed this way appears in the
-picker the next time the UI starts. Supported families are `gemma4`, `qwen36`,
+picker the next time the UI starts. Supported selectors are `gemma4`, `gemma4qat`, `qwen36`,
 `qwen38`, `deepseekv4flash`, `inklingsmall`, `maple`, `qwen38flashnext`, and
 `minicpm5`, `glm53flash`, and `swiftqwen38`, plus the two quantizer-control installs `qwen36original` and
 `minicpm5mlx`; the launcher reads that list out of `MferenceRepack`'s own help,
@@ -81,6 +81,52 @@ The optional `swiftqwen38` selector installs a separately identified
 [Swift-Qwen qualification candidate](families/SWIFT_QWEN38.md), not a replacement
 of `qwen38`. Its server reasoning policy defaults to `xhigh`; see that page for
 request-level controls and the remaining client-history qualification gates.
+
+### Gemma QAT installation
+
+`gemma4qat` installs the pinned
+`mlx-community/gemma-4-26B-A4B-it-qat-q4_0-mlx-aligned` checkpoint separately
+at `$HOME/llm-models/gemma4qat.gturbo`. A `.gturbo` installation is a directory.
+The original `gemma4` selector and installation are unchanged.
+
+```bash
+./mference-ui.sh install gemma4qat --dry-run  # prints the actual destination
+./mference-ui.sh install gemma4qat
+./mference-ui.sh install gemma4qat --resume  # continues a saved partial install
+.build/release/MferenceRepack --verify-install \
+  --input-gturbo "$HOME/llm-models/gemma4qat.gturbo"
+```
+
+For source/layout and disk checks, use the repacker's own dry-run:
+
+```bash
+.build/release/MferenceRepack --model gemma4qat \
+  --output "$HOME/llm-models/gemma4qat.gturbo" --dry-run
+```
+
+The measured installation is about 15.84 GB (15,835,171,794 bytes on the
+validation machine after verification), plus the installer's 1 GiB free-space
+reserve and bounded transfer/metadata staging. Receipt size can vary with the
+destination path. The dry-run reports
+payload, required assets, aligned output, and reserves separately. These are
+storage quantities, not measured peak inference memory.
+
+Native INT4 group-32 weights, BF16 companions and BF16 routers are copied
+without requantization. The source config, tokenizer, tokenizer config, chat
+template and generation config are required and covered by install hashes.
+The checkpoint's model identity is
+`gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned`, regardless of directory name.
+
+QAT uses the checkpoint's installed chat template and sampling settings; see
+[QAT controls and current qualification](RUNTIME_CONTROLS.md#gemma-qat).
+Library discovery lists it separately in `/v1/models` and the picker. The
+existing Gemma remains available. QAT thinking is off by default, and
+`preserve_thinking=true` is unsupported. M2 timing observations and a separate
+short-chat CLI peak-memory measurement are recorded in the
+[QAT model guide](families/GEMMA4_QAT.md); general loop reduction, other hardware
+and wider-context resource limits remain unverified.
+The source pin, measured files, resume proof and qualification limits are kept
+in the author's local validation record, which is not part of the repository.
 
 For Swift-Qwen, use **Controls → Advanced Params → Reasoning Effort**, switch
 from Default to Custom, and enter `xhigh`, `medium`, `low`, or `none`. Default
@@ -213,12 +259,13 @@ defaults. Nothing in it is sent anywhere — both processes are loopback-only.
 exactly as [the server guide](OPENAI_SERVER.md) describes: one model per process,
 named by `--model`.
 
-With `--library`, the server scans for completed installs and serves all of
-them:
+With `--library`, the server scans for completed installs and serves those
+with runtime support:
 
 - `--library` with no value scans the default roots: the `Mference.libraryRoot`
-  user default (or the `MFERENCE_LIBRARY_ROOT` environment variable) if set, the
-  package checkout's `scratch/`, and `~/Library/Application Support/Mference`.
+  user default (or the `MFERENCE_LIBRARY_ROOT` environment variable) if set,
+  `~/llm-models`, the package checkout's `scratch/`, and
+  `~/Library/Application Support/Mference`. Duplicate roots are scanned once.
 - `--library <dir>` scans that root instead, and repeats. Combine explicit roots
   with the defaults by passing a bare `--library` as well.
 - Each root contributes itself and its immediate subdirectories, so a root may
@@ -270,10 +317,10 @@ A family the repacker can install but no runner can execute yet is **skipped**,
 not listed as unusable. Listing it would put a permanently failing entry in the
 model picker. The skip line names it, and the moment its capability gate lifts
 the install is listed with no code change and no configuration — library mode
-lists whatever the runtime accepts. There is no such family today —
-`ManifestReader.familiesWithoutRunner` ships empty, and `qwen38flashnext` was
-the last entry, lifted on 2026-09-10. The skip line above is the format the
-next port will produce; the mechanism is kept for it.
+lists whatever the runtime accepts. Gemma QAT is now listed after its required
+assets and install receipt pass validation. Missing or malformed files remain
+incomplete-install errors. A missing QAT selection never falls back to the
+original Gemma.
 
 ### Error statuses in library mode
 

@@ -22,19 +22,21 @@ final class FusedQKVEpilogue {
         Shape(headDim: 512, numQHeads: 16, numKVHeads: 2, rotatedPairs: 64),
     ]
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("fused_qkv_epilogue")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        self.pso = try context.pipeline("fused_qkv_epilogue", constants: precision,
+            maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "fused" : nil)
         var variants: [Shape: MTLComputePipelineState] = [:]
         for shape in Self.realDecodeShapes {
             variants[shape] = try context.pipeline(
                 "fused_qkv_epilogue",
-                constants: [
+                constants: precision + [
                     MetalFunctionConstant(index: 82, value: .uint32(shape.headDim)),
                     MetalFunctionConstant(index: 83, value: .uint32(shape.numQHeads)),
                     MetalFunctionConstant(index: 84, value: .uint32(shape.numKVHeads)),
                     MetalFunctionConstant(index: 85, value: .uint32(shape.rotatedPairs)),
                     MetalFunctionConstant(index: 86, value: .bool(true)),
-                ])
+                ], maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "fused" : nil)
         }
         self.specializedPSOs = variants
     }

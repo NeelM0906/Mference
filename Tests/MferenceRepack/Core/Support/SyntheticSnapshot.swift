@@ -38,19 +38,22 @@ enum SyntheticSnapshot {
         let numExperts: Int = 2
         let topK: Int = 2
         let slidingWindow: Int = 128
-        let groupSize: Int = 64
+        let groupSize: Int
         // layer 0 = sliding, layer 1 = full
         let layerTypes: [String] = ["sliding_attention", "full_attention"]
+
+        init(groupSize: Int = 64) { self.groupSize = groupSize }
     }
 
     /// Build the snapshot. `seed` controls the pseudo-random payload bytes so
     /// tests can pre-compute byte-fidelity expectations.
-    static func build(at dir: String, seed: UInt64 = 0xA17B_EEF1_5FAC_E202) throws -> Snapshot {
+    static func build(at dir: String, seed: UInt64 = 0xA17B_EEF1_5FAC_E202,
+                      gemmaQAT: Bool = false) throws -> Snapshot {
         try? FileManager.default.removeItem(atPath: dir)
         try FileManager.default.createDirectory(atPath: dir,
                                                 withIntermediateDirectories: true)
 
-        let arch = Arch()
+        let arch = Arch(groupSize: gemmaQAT ? 32 : 64)
         var rng = SplitMix64(seed: seed)
 
         // Build the inventory: (name, dtype, shape, payload)
@@ -95,10 +98,15 @@ enum SyntheticSnapshot {
                                   shape: [isFull ? arch.globalHeadDim : arch.headDim],
                                   into: &tensors, rng: &rng)
 
-            // Router proj — 8-bit affine
-            appendQuantizedWeight(name: prefix + ".router.proj",
+            if gemmaQAT {
+                appendUnquantizedBF16(name: prefix + ".router.proj.weight",
+                                      shape: [arch.numExperts, arch.hidden],
+                                      into: &tensors, rng: &rng)
+            } else {
+                appendQuantizedWeight(name: prefix + ".router.proj",
                                   outerShape: [arch.numExperts], innerLogical: arch.hidden,
                                   bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+            }
             appendUnquantizedBF16(name: prefix + ".router.scale",
                                   shape: [arch.hidden], into: &tensors, rng: &rng)
             appendUnquantizedBF16(name: prefix + ".router.per_expert_scale",
@@ -109,13 +117,13 @@ enum SyntheticSnapshot {
             // Shared-expert mlp — 8-bit affine
             appendQuantizedWeight(name: prefix + ".mlp.gate_proj",
                                   outerShape: [arch.intermediate], innerLogical: arch.hidden,
-                                  bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: gemmaQAT ? 4 : 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".mlp.up_proj",
                                   outerShape: [arch.intermediate], innerLogical: arch.hidden,
-                                  bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: gemmaQAT ? 4 : 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".mlp.down_proj",
                                   outerShape: [arch.hidden], innerLogical: arch.intermediate,
-                                  bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: gemmaQAT ? 4 : 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
             // Routed experts — 4-bit affine, leading dim = numExperts
             appendQuantizedWeight(name: prefix + ".experts.switch_glu.gate_proj",
@@ -144,7 +152,8 @@ enum SyntheticSnapshot {
         appendUnquantizedBF16(name: "language_model.model.norm.weight",
                               shape: [arch.hidden], into: &tensors, rng: &rng)
 
-        // Multimodal tensors included to prove the text-only repacker drops them.
+        // Original fixtures include a vision tower; the selected QAT is text-only.
+        if !gemmaQAT {
         appendUnquantizedBF16(name: "vision_tower.encoder.layers.0.input_layernorm.weight",
                               shape: [arch.hidden], into: &tensors, rng: &rng)
         appendQuantizedWeight(name: "vision_tower.encoder.layers.0.self_attn.q_proj.linear",
@@ -153,6 +162,7 @@ enum SyntheticSnapshot {
         appendQuantizedWeight(name: "embed_vision.embedding_projection",
                               outerShape: [arch.hidden], innerLogical: arch.hidden, bits: 4,
                               groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        }
 
         // -- Encode safetensors.
         let shardName = "model-00001-of-00001.safetensors"
@@ -161,7 +171,7 @@ enum SyntheticSnapshot {
 
         // -- Write config.json with bit-width overrides for mlp + router.
         var overrides: [String: [String: Any]] = [:]
-        for li in 0..<arch.numLayers {
+        for li in 0..<arch.numLayers where !gemmaQAT {
             let prefix = "language_model.model.layers.\(li)"
             for k in ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"] {
                 overrides[prefix + "." + k] = ["bits": 8, "group_size": arch.groupSize]

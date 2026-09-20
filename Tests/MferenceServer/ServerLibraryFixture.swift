@@ -6,6 +6,47 @@ import Mference
 /// against real manifests and receipts. Nothing here is loadable — the weight
 /// files are absent and no test ever asks a runtime to open one.
 enum ServerLibraryFixture {
+    /// A format-valid QAT installation fixture with real, tiny files and a
+    /// complete receipt. It is never passed to a model runner.
+    static func makeQATInstall(in root: URL, named name: String) throws -> URL {
+        let directory = try makeCompleteInstall(in: root, named: name)
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
+        manifest["modelID"] = CheckpointIdentity.gemma4QAT
+        manifest["sourceSnapshotHash"] = "sha256:7dbbeef0345505798abcf0ac54434116a48c2f1e7aad828071c17a7a871adfe7"
+        var quant: [String: Any] = [:]
+        for slot in ["embedding", "attention", "sharedExpert", "routedExpert"] {
+            var value = quantSlot(4)
+            value["groupSize"] = 32
+            quant[slot] = value
+        }
+        quant["router"] = ["weightBits": 16, "scheme": "unquantized",
+            "scaleType": "none", "biasType": "none", "groupSize": 0]
+        manifest["quant"] = quant
+        var files = manifest["files"] as! [String: Any]
+        for name in Array(files.keys) {
+            let data = name.hasSuffix("layout.json") ? Data("{}".utf8) : Data()
+            try data.write(to: directory.appendingPathComponent(name))
+            files[name] = ["size": data.count, "sha256": Sha256Verifier.hashData(data)]
+        }
+        let tokenizer = directory.appendingPathComponent("tokenizer")
+        try FileManager.default.createDirectory(at: tokenizer, withIntermediateDirectories: true)
+        for name in GemmaQATCheckpoint.requiredAssets {
+            let data = Data("{}".utf8)
+            try data.write(to: tokenizer.appendingPathComponent(name))
+            files["tokenizer/" + name] = ["size": data.count, "sha256": Sha256Verifier.hashData(data)]
+        }
+        manifest["files"] = files
+        try writeManifestAndReceipt(manifest, in: directory)
+        let manifestData = try Data(contentsOf: manifestURL)
+        files["manifest.json"] = ["size": manifestData.count, "sha256": Sha256Verifier.hashData(manifestData)]
+        let receiptURL = directory.appendingPathComponent("verified-install.json")
+        var receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: receiptURL)) as! [String: Any]
+        receipt["files"] = files
+        try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]).write(to: receiptURL)
+        return directory
+    }
+
     static func makeRoot(_ tag: String) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mference-library-\(tag)-\(UUID().uuidString)",

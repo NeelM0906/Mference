@@ -8,7 +8,7 @@ import MferenceValidationSupport
     private static let d = ArchConfig.gemma4_26B_A4B.hiddenSize
     private static let eps: Float = 1e-6
 
-    @Test func blockPostAttentionSetupMatchesRepeatedScalarFusedRows() throws {
+    @Test(arguments: [false, true]) func blockPostAttentionSetupMatchesRepeatedScalarFusedRows(sourceFP16: Bool) throws {
         let rows = 3
         let hiddenStride = Self.d + 11
         let attnStride = Self.d + 17
@@ -30,8 +30,8 @@ import MferenceValidationSupport
         let wPre2 = (0..<Self.d).map { _ in Quantization.bf16Bits(rng.uniform(0.5, 1.5)) }
 
         let ctx = try MetalContext()
-        let scalar = try FusedPostAttentionSetup(context: ctx)
-        let block = try PrefillPostAttentionSetup(context: ctx)
+        let scalar = try FusedPostAttentionSetup(context: ctx, sourceFP16: sourceFP16)
+        let block = try PrefillPostAttentionSetup(context: ctx, sourceFP16: sourceFP16)
         guard
             let wPostBuf = ctx.device.makeBuffer(bytes: wPost,
                                                  length: wPost.count * MemoryLayout<UInt16>.size,

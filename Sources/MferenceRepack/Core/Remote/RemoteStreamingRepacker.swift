@@ -68,13 +68,20 @@ public struct RemoteStreamingRepackResult: Sendable {
     public let reusedBytes: UInt64
     public let downloadedThisRunBytes: UInt64
     public let dryRun: Bool
+    /// QAT assets/layout, plus actual manifest/receipt bytes after completion.
+    public let supportingFileBytes: UInt64
+    /// Additional bounded staging/manifest allowance used by the space check.
+    public let metadataReserveBytes: UInt64
+    /// Unique source metadata/assets, separate from resumable payload ranges.
+    public let sourceMetadataBytes: UInt64
 
     /// Bytes the install writes: the resident file plus every packed-expert
-    /// layer blob. Sidecars (manifest, layout, tokenizer) are negligible.
+    /// layer blob. QAT includes its required supporting files explicitly.
     public var outputBytes: UInt64 {
         plan.resident.totalSize
             + plan.allExpertLayers.reduce(UInt64(0)) { $0 + $1.fileSize }
             + plan.plePools.reduce(UInt64(0)) { $0 + $1.fileSize }
+            + supportingFileBytes
     }
     public var residentEntryCount: Int { plan.resident.entries.count }
     public var expertLayerCount: Int { plan.layers.count }
@@ -265,9 +272,20 @@ public final class RemoteStreamingRepacker {
                 to: paths.checkpointFile,
                 parentDirectory: paths.parentDirectory)
         }
+        let isQAT = GemmaQATSource.applies(arch: snapshot.arch, metadata: snapshot.metadata)
+        let assetBytes = isQAT ? try await prepareQATAssets(snapshot: snapshot, remote: remote) : 0
+        let qatLayoutBytes = isQAT ? UInt64(try GTurboJSON.encodeLayout(
+            plan: plan, expertStride: plan.layers.first?.expertStride ?? 0).count) : 0
+        let supportingBytes = assetBytes + qatLayoutBytes
+        let sourceMetadataBytes = isQAT ? snapshot.metadataSourceBytes + assetBytes
+            - (snapshot.remoteFiles["config.json"]?.size ?? 0) : 0
+        // Required assets remain in bounded metadata staging until publication.
+        // One MiB additionally covers the index, manifest and receipt metadata.
+        let metadataReserve: UInt64 = isQAT ? assetBytes + 1_048_576 : 0
         let outputBytes = plan.resident.totalSize
             + plan.allExpertLayers.reduce(UInt64(0)) { $0 + $1.fileSize }
             + plan.plePools.reduce(UInt64(0)) { $0 + $1.fileSize }
+            + supportingBytes
         progress(.planning(downloadBytes: rangePlan.remoteBytesToDownload,
                            outputBytes: outputBytes))
         let reusedDestinationBytes = checkpoint.completedRanges.reduce(UInt64(0)) {
@@ -279,7 +297,7 @@ public final class RemoteStreamingRepacker {
         let diskRequirement = try DiskSpaceChecker.requireAvailable(
             path: paths.parentDirectory,
             bytes: remainingOutputBytes + UInt64(options.rangeChunkBytes),
-            reserveBytes: options.minFreeReserveBytes)
+            reserveBytes: options.minFreeReserveBytes + metadataReserve)
         progress(.checkingDisk(diskRequirement))
         try Task.checkCancellation()
 
@@ -308,7 +326,10 @@ public final class RemoteStreamingRepacker {
                                                    $0 + $1.sourceBytes
                                                },
                                                downloadedThisRunBytes: 0,
-                                               dryRun: true)
+                                               dryRun: true,
+                                               supportingFileBytes: supportingBytes,
+                                               metadataReserveBytes: metadataReserve,
+                                               sourceMetadataBytes: sourceMetadataBytes)
         }
 
         if saved == nil {
@@ -419,6 +440,19 @@ public final class RemoteStreamingRepacker {
             try data.write(to: URL(fileURLWithPath: auditPath))
         }
 
+        let finalMetadataBytes: UInt64
+        if isQAT {
+            finalMetadataBytes = try ["manifest.json", "verified-install.json"].reduce(0) {
+                let attributes = try FileManager.default.attributesOfItem(
+                    atPath: (options.outputDir as NSString).appendingPathComponent($1))
+                guard let size = attributes[.size] as? NSNumber else {
+                    throw RepackError.configurationInvalid(detail: "missing completed metadata file size")
+                }
+                return $0 + size.uint64Value
+            }
+        } else {
+            finalMetadataBytes = 0
+        }
         return RemoteStreamingRepackResult(outputDir: options.outputDir,
                                            resolvedCommit: snapshot.resolvedCommit,
                                            plan: plan,
@@ -429,7 +463,10 @@ public final class RemoteStreamingRepacker {
                                            reusedBytes: reusedBytes,
                                            downloadedThisRunBytes:
                                                audit.remoteBytesDownloaded - payloadDownloadStart,
-                                           dryRun: false)
+                                           dryRun: false,
+                                           supportingFileBytes: supportingBytes + finalMetadataBytes,
+                                           metadataReserveBytes: metadataReserve,
+                                           sourceMetadataBytes: sourceMetadataBytes)
     }
 
     private func validateOptions() throws {
@@ -576,6 +613,20 @@ public final class RemoteStreamingRepacker {
                                            partialDir: String,
                                            progress: @Sendable (ModelInstallProgress) -> Void) async throws {
         let tokenizerDir = (partialDir as NSString).appendingPathComponent("tokenizer")
+        if GemmaQATSource.applies(arch: snapshot.arch, metadata: snapshot.metadata) {
+            try Posix.mkdirP(tokenizerDir)
+            for name in GemmaQATSource.requiredAssets {
+                try Task.checkCancellation()
+                let src = (snapshot.metadataDirectory as NSString).appendingPathComponent(name)
+                let dst = (tokenizerDir as NSString).appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: dst) {
+                    try FileManager.default.removeItem(atPath: dst)
+                }
+                try FileManager.default.copyItem(atPath: src, toPath: dst)
+                try recordOutputFile(relativePath: "tokenizer/" + name, path: dst, progress: progress)
+            }
+            return
+        }
         for filename in ["config.json"] {
             try Task.checkCancellation()
             let src = (snapshot.metadataDirectory as NSString).appendingPathComponent(filename)
@@ -632,6 +683,33 @@ public final class RemoteStreamingRepacker {
         return false
     }
 
+    /// Fetch and validate required small files before any weight transfer. A
+    /// damaged resume may have recreated staging; refetch config in that case.
+    private func prepareQATAssets(snapshot: RemoteSnapshot,
+                                  remote: HuggingFaceRemoteSource) async throws -> UInt64 {
+        try Posix.mkdirP(snapshot.metadataDirectory)
+        let pinned = remote.pinned(commit: snapshot.resolvedCommit)
+        var bytes: UInt64 = 0
+        for name in GemmaQATSource.requiredAssets {
+            try Task.checkCancellation()
+            let path = (snapshot.metadataDirectory as NSString).appendingPathComponent(name)
+            if name != "config.json" || !FileManager.default.fileExists(atPath: path) {
+                let info = try await pinned.resolveFileInfo(filename: name, audit: audit)
+                guard info.resolvedCommit == snapshot.resolvedCommit else {
+                    throw RepackError.remoteProtocolInvalid(detail: "Gemma QAT \(name) commit differs from weights")
+                }
+                try await pinned.fetchSmallFile(filename: name, info: info,
+                    capBytes: name == "tokenizer.json" ? 64 * 1024 * 1024 : 4 * 1024 * 1024,
+                    outputPath: path, audit: audit)
+            }
+            try GemmaQATSource.validateAsset(name: name, path: path,
+                pinned: options.repoID == SupportedModelSource.gemma4QAT.repoID)
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            bytes += (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        }
+        return bytes
+    }
+
     private func writeManifest(plan: RepackPlan,
                                partialDir: String,
                                metadata: IndexLoader.SourceMetadata,
@@ -663,6 +741,11 @@ public final class RemoteStreamingRepacker {
                 || e.name.hasSuffix(".ffn.gate.weight"),
                let s = e.quantSpec {
                 bits.router = s.bits
+            }
+            if plan.arch.family == .gemma4,
+               e.name.hasSuffix(".router.proj.weight"),
+               e.quantSpec == nil, e.sourceWeight.dtype == .bf16 {
+                bits.router = 16
             }
             if e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
                 || e.name.hasSuffix(".mlp.shared_experts.gate_proj.weight")

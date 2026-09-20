@@ -112,6 +112,20 @@ routers, shared experts, norms, and scalar parameters. Each `layer_XX.bin`
 contains 128 fixed-stride routed-expert blobs for one layer. `layout.json`
 describes the packed subregions within each blob.
 
+The separate `gemma4qat` installation uses the same text architecture and
+directory layout, with INT4 affine groups of 32 and BF16 routers without
+quantization companions. Its source `chat_template.jinja` and
+`generation_config.json` are required alongside config/tokenizer files.
+Install integrity is validated independently of entry-point readiness. CLI and
+server paths use the native group-32/BF16 profile and verified local generation
+settings. QAT chat uses its installed source template, with a separate cache
+identity and exact source-prefix recovery. Its launcher destination
+is `~/llm-models/gemma4qat.gturbo`. The qualified QAT FP16 path preserves the
+source affine reduction and activation rounding in batched prefill and decode.
+QAT's batched resident projections use SIMD affine reductions; other profiles
+retain their existing tensor-operation dispatch. Prompt batching and streamed
+experts remain enabled.
+
 The expert stride is page aligned, and each sub-tensor has its own offset.
 Metal kernels bind subregions of an existing buffer instead of creating one
 buffer per tensor.

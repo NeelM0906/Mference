@@ -9,6 +9,17 @@ import Testing
 /// contract: a source added to `SupportedModelSource.all` but left out of the
 /// usage line would be installable by hand and rejected by the launcher.
 @Suite struct RepackUsageFamiliesTests {
+    @Test func qatSourceIsPinnedAndSeparateFromCurrentGemma() throws {
+        let source = try #require(SupportedModelSource.named("gemma4qat"))
+        #expect(source.repoID == "mlx-community/gemma-4-26B-A4B-it-qat-q4_0-mlx-aligned")
+        #expect(source.revision == "745a97a754ed4b7713163c7d0e9c11da41809e0c")
+        #expect(source.sourceIndexSHA256 == "7dbbeef0345505798abcf0ac54434116a48c2f1e7aad828071c17a7a871adfe7")
+        #expect(source.modelID == "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned")
+        #expect(source.kind == .preQuantized)
+        #expect(source.modelID != SupportedModelSource.gemma4.modelID)
+        #expect(SupportedModelSource.default == .gemma4)
+    }
+
     @Test func usageListsEverySupportedModelSourceInOrder() throws {
         let usageSource = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Sources/MferenceRepack/Command/main.swift")

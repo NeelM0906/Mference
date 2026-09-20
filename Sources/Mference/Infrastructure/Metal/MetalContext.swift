@@ -51,9 +51,11 @@ public final class MetalContext: @unchecked Sendable {
         var name: String
         var constants: [MetalFunctionConstant]
         var maxTotalThreadsPerThreadgroup: Int?
+        var safeMathModule: String?
     }
 
     private var pipelineCache: [PipelineCacheKey: MTLComputePipelineState] = [:]
+    private var safeMathLibraries: [String: MTLLibrary] = [:]
     private let pipelineCacheLock = NSLock()
 
     public init() throws {
@@ -91,6 +93,8 @@ public final class MetalContext: @unchecked Sendable {
     /// Bundle locations for runtime shader modules.
     private static let shaderSubdirectories: [String: String] = [
         "attention": "Metal/Attention",
+        "gemma_qat_attention": "Metal/Attention",
+        "gemma_qat_prefill_attention": "Metal/Attention",
         "dequant_int4": "Metal/Quant",
         "dequant_int8": "Metal/Quant",
         "dflash2": "Metal/DFlash2",
@@ -191,7 +195,8 @@ public final class MetalContext: @unchecked Sendable {
 
     public func pipeline(_ name: String,
                          constants: [MetalFunctionConstant],
-                         maxTotalThreadsPerThreadgroup hint: Int?) throws -> MTLComputePipelineState {
+                         maxTotalThreadsPerThreadgroup hint: Int?,
+                         safeMathModule: String? = nil) throws -> MTLComputePipelineState {
         if let hint {
             precondition(hint > 0, "maxTotalThreadsPerThreadgroup must be positive")
         }
@@ -201,13 +206,15 @@ public final class MetalContext: @unchecked Sendable {
         }
         let key = PipelineCacheKey(name: name,
                                    constants: sortedConstants,
-                                   maxTotalThreadsPerThreadgroup: hint)
+                                   maxTotalThreadsPerThreadgroup: hint,
+                                   safeMathModule: safeMathModule)
         pipelineCacheLock.lock()
         let cached = pipelineCache[key]
         pipelineCacheLock.unlock()
         if let cached { return cached }
 
-        guard library.functionNames.contains(name) else {
+        let selectedLibrary = try safeMathModule.map { try safeMathLibrary(module: $0) } ?? library
+        guard selectedLibrary.functionNames.contains(name) else {
             throw MetalError.missingFunction(name)
         }
 
@@ -226,7 +233,7 @@ public final class MetalContext: @unchecked Sendable {
             }
         }
 
-        let fn = try library.makeFunction(name: name, constantValues: values)
+        let fn = try selectedLibrary.makeFunction(name: name, constantValues: values)
         let p: MTLComputePipelineState
         if let hint {
             let descriptor = MTLComputePipelineDescriptor()
@@ -243,6 +250,18 @@ public final class MetalContext: @unchecked Sendable {
         pipelineCache[key] = p
         pipelineCacheLock.unlock()
         return p
+    }
+
+    /// Some checkpoint profiles require the source's strict rounding behavior.
+    /// Compile only their requested module; ordinary pipelines retain the
+    /// existing shared library and a separate cache identity.
+    private func safeMathLibrary(module: String) throws -> MTLLibrary {
+        pipelineCacheLock.lock()
+        defer { pipelineCacheLock.unlock() }
+        if let cached = safeMathLibraries[module] { return cached }
+        let compiled = try Self.moduleLibrary(device: device, module: module, safeMath: true)
+        safeMathLibraries[module] = compiled
+        return compiled
     }
 
     private static func constantSortKey(_ value: MetalFunctionConstant.Value) -> String {

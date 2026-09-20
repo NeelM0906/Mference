@@ -1,6 +1,58 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef MFERENCE_GEMMA_SOURCE_FP16
+#define MFERENCE_GEMMA_SOURCE_FP16
+// Preserve the source activation boundary before learned scaling. The original
+// Gemma checkpoint keeps its existing fused arithmetic unless explicitly set.
+constant bool FC_GEMMA_SOURCE_FP16 [[function_constant(110)]];
+constant bool kGemmaSourceFP16 = is_function_constant_defined(FC_GEMMA_SOURCE_FP16)
+    ? FC_GEMMA_SOURCE_FP16 : false;
+static inline half gemma_weighted_norm(float x, float inv, float weight) {
+    return kGemmaSourceFP16 ? half(x * inv) * half(weight) : half(x * inv * weight);
+}
+static inline half gemma_scaled_embedding(float value, float scale) {
+    return kGemmaSourceFP16 ? half(value) * half(scale) : half(value * scale);
+}
+
+// MLX's quantized GEMV forms its affine-bias input sum in FP16 quads.
+static inline float gemma_source_quad_sum(half4 x) {
+    const half a = x.x + x.y;
+    const half b = a + x.z;
+    return float(half(b + x.w));
+}
+static inline half gemma_source_geglu(float gate_value, float up_value) {
+    // Gate/up projections are FP16 tensors in the source, even when fused.
+    volatile half gate = half(gate_value);
+    volatile half up = half(up_value);
+    // Preserve source half stores across fast-math contraction, particularly
+    // 1 + tanh(x): its rounded negative tail is exactly zero in the source.
+    volatile half cube = half(float(gate) * float(gate) * float(gate));
+    volatile half term = half(0.044715f) * cube;
+    volatile half sum = gate + term;
+    volatile half inner = half(0.7978845608028654f) * sum;
+    // FP16 tanh has already rounded to +/-1 at these bounds. Keep that
+    // exact source result while avoiding fast-tanh's positive exp overflow.
+    volatile half curve = half(tanh(clamp(float(inner), -20.0f, 20.0f)));
+    volatile half shifted = half(1.0h + curve);
+    volatile half scaled = half(0.5h * gate);
+    volatile half activation = scaled * shifted;
+    return half(activation * up);
+}
+static inline float gemma_source_bias_correction(
+    device const half* x, device const bfloat* biases, uint width, uint group_size
+) {
+    float correction = 0.0f;
+    for (uint k = 0; k < width; k += 4u) {
+        const half4 quad(x[k], x[k + 1u], x[k + 2u], x[k + 3u]);
+        const float exact = float(quad.x) + float(quad.y) + float(quad.z) + float(quad.w);
+        correction = fma(float(biases[k / group_size]),
+                        gemma_source_quad_sum(quad) - exact, correction);
+    }
+    return correction;
+}
+#endif
+
 // ============================================================================
 // logit.metal — output-head kernels (#12, #13 in the inventory).
 //
@@ -657,7 +709,13 @@ void sample_topk64_final(
 // Fused greedy lm-head path. Eight SIMD groups each evaluate one INT4 row;
 // a second dispatch reduces the per-threadgroup argmax summaries.
 constant constexpr uint kLMHeadRowsPerTG = 8;
-constant constexpr uint kLMHeadGroupSize = 64;
+#ifndef MFERENCE_AFFINE_GROUP_SIZE
+#define MFERENCE_AFFINE_GROUP_SIZE
+constant uint FC_AFFINE_GROUP_SIZE [[function_constant(108)]];
+constant uint kAffineGroupSize = is_function_constant_defined(FC_AFFINE_GROUP_SIZE)
+    ? FC_AFFINE_GROUP_SIZE : 64u;
+#endif
+constant uint kLMHeadGroupSize = kAffineGroupSize;
 constant constexpr uint kLMHeadRowSummaryStride = 2;
 constant uint FC_HEAD_D [[function_constant(10)]];
 constant uint FC_HEAD_V [[function_constant(11)]];
@@ -689,12 +747,13 @@ inline float lmhead_int4_gemv_row_simd_dev(device const uint8_t*    W,
     device const bfloat*  b_row = biases + uint(row) * n_groups;
 
     float acc = 0.0f;
-    const uint full_blocks = n_groups / 4u;
+    const uint full_blocks = kGemmaSourceFP16 ? (D + 255u) / 256u : D / 256u;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
+        if (kGemmaSourceFP16 && byte_base * 2u >= D) continue;
         device const ushort* wp = (device const ushort*)(W_row + byte_base);
         const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
-        const uint g  = blk * 4u + (lane >> 3);
+        const uint g  = (byte_base * 2u) / kLMHeadGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
@@ -711,16 +770,21 @@ inline float lmhead_int4_gemv_row_simd_dev(device const uint8_t*    W,
         dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
         dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
         dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
-        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
         acc = fma(s, dot, acc);
         acc = fma(b, sum, acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint tile = full_blocks * 4u; tile * 64u < D; ++tile) {
+        const uint elem = tile * 64u + lane * 2u;
+        if (elem >= D) continue;
+        const uint g = elem / kLMHeadGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kLMHeadGroupSize / 2) + lane];
-        const float x0 = float(x[g * kLMHeadGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kLMHeadGroupSize + lane * 2u + 1u]);
+        const uint8_t byte = W_row[elem / 2u];
+        const float x0 = float(x[elem]);
+        const float x1 = float(x[elem + 1u]);
         float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
         dot = fma(float(uint(byte >> 4)), x1, dot);
         const float sum = x0 + x1;
@@ -888,12 +952,13 @@ void lm_head_greedy_int4_rows_chunk_raw_multix(
         float accs[kLMHeadMultiXMaxT];
         for (uint t = 0; t < kLMHeadMultiXMaxT; ++t) { accs[t] = 0.0f; }
 
-        const uint full_blocks = n_groups / 4u;
+        const uint full_blocks = kGemmaSourceFP16 ? (D + 255u) / 256u : D / 256u;
         for (uint blk = 0; blk < full_blocks; ++blk) {
             const uint byte_base = blk * 128u + simd_lane_id * 4u;
+            if (kGemmaSourceFP16 && byte_base * 2u >= D) continue;
             device const ushort* wp = (device const ushort*)(W_row + byte_base);
             const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
-            const uint g  = blk * 4u + (simd_lane_id >> 3);
+            const uint g  = (byte_base * 2u) / kLMHeadGroupSize;
             const float s = float(s_row[g]);
             const float b = float(b_row[g]);
             const uint elem = byte_base * 2u;
@@ -912,19 +977,24 @@ void lm_head_greedy_int4_rows_chunk_raw_multix(
                 dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
                 dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
                 dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
-                const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+                const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
                 accs[t] = fma(s, dot, accs[t]);
                 accs[t] = fma(b, sum, accs[t]);
             }
         }
-        for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        for (uint tile = full_blocks * 4u; tile * 64u < D; ++tile) {
+            const uint elem = tile * 64u + simd_lane_id * 2u;
+            if (elem >= D) continue;
+            const uint g = elem / kLMHeadGroupSize;
             const float s = float(s_row[g]);
             const float b = float(b_row[g]);
-            const uint8_t byte = W_row[g * (kLMHeadGroupSize / 2) + simd_lane_id];
+            const uint8_t byte = W_row[elem / 2u];
             for (uint t = 0; t < T; ++t) {
                 device const half* xt = x_normed + t * D;
-                const float x0 = float(xt[g * kLMHeadGroupSize + simd_lane_id * 2u]);
-                const float x1 = float(xt[g * kLMHeadGroupSize + simd_lane_id * 2u + 1u]);
+                const float x0 = float(xt[elem]);
+                const float x1 = float(xt[elem + 1u]);
                 float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
                 dot = fma(float(uint(byte >> 4)), x1, dot);
                 const float sum = x0 + x1;

@@ -384,6 +384,8 @@ final class PrefillGroupedRoutedMoE {
     private let residentPhase1PSO: MTLComputePipelineState
     private let residentDownPSO: MTLComputePipelineState
     private let streamedArgEncoder: MTLArgumentEncoder
+    private let projectionLanes: Int
+    private let threadsPerThreadgroup: MTLSize
 
     func makeStreamedArgumentBuffer(device: MTLDevice,
                                            binding: PrefillStreamedTileBinding) throws -> PrefillStreamedTileArgumentBuffer {
@@ -402,17 +404,32 @@ final class PrefillGroupedRoutedMoE {
         return PrefillStreamedTileArgumentBuffer(buffer: buffer)
     }
 
-    init(context: MetalContext, siluActivation: Bool = false) throws {
-        let activationConstants: [MetalFunctionConstant] = siluActivation
+    init(context: MetalContext, siluActivation: Bool = false,
+         groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) throws {
+        // Source projections reduce one row across a SIMD group. Pair rows
+        // remain batched in the grid's second dimension.
+        self.projectionLanes = sourceFP16 ? 32 : 1
+        self.threadsPerThreadgroup = sourceFP16
+            ? MTLSize(width: 32, height: 4, depth: 1)
+            : MTLSize(width: 8, height: 8, depth: 1)
+        let quantizationConstants = Quantization.int4Constants(groupSize: groupSize)
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        let activationConstants: [MetalFunctionConstant] = quantizationConstants + (siluActivation
             ? [MetalFunctionConstant(index: 77, value: .bool(true))]
-            : []
+            : [])
         self.batchedPhase1PSO = try context.pipeline(
             "prefill_grouped_routed_moe_batched_phase1",
-            constants: activationConstants)
-        self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down")
+            constants: activationConstants, maxTotalThreadsPerThreadgroup: nil,
+            safeMathModule: sourceFP16 ? "prefill" : nil)
+        self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down",
+            constants: quantizationConstants, maxTotalThreadsPerThreadgroup: nil,
+            safeMathModule: sourceFP16 ? "prefill" : nil)
         self.residentPhase1PSO = try context.pipeline(
-            "prefill_grouped_routed_moe_resident_phase1", constants: activationConstants)
-        self.residentDownPSO = try context.pipeline("prefill_grouped_routed_moe_resident_down")
+            "prefill_grouped_routed_moe_resident_phase1", constants: activationConstants,
+            maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "prefill" : nil)
+        self.residentDownPSO = try context.pipeline("prefill_grouped_routed_moe_resident_down",
+            constants: quantizationConstants, maxTotalThreadsPerThreadgroup: nil,
+            safeMathModule: sourceFP16 ? "prefill" : nil)
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
             throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
         }
@@ -463,8 +480,9 @@ final class PrefillGroupedRoutedMoE {
             var stride = stride
             encoder.setBytes(&p, length: MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.stride, index: 5)
             encoder.setBytes(&stride, length: 4, index: 6)
-            encoder.dispatchThreads(MTLSize(width: Int(width), height: Int(params.pairCount), depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            encoder.dispatchThreads(MTLSize(width: Int(width) * projectionLanes,
+                                           height: Int(params.pairCount), depth: 1),
+                                    threadsPerThreadgroup: threadsPerThreadgroup)
             encoder.endEncoding()
         }
     }
@@ -509,10 +527,10 @@ final class PrefillGroupedRoutedMoE {
                 for view in binding.views {
                     enc.useResource(view.buffer, usage: .read)
                 }
-                enc.dispatchThreads(MTLSize(width: Int(p.routedIntermediate),
+                enc.dispatchThreads(MTLSize(width: Int(p.routedIntermediate) * projectionLanes,
                                             height: Int(p.pairCount),
                                             depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+                                    threadsPerThreadgroup: threadsPerThreadgroup)
                 enc.endEncoding()
             }
 
@@ -533,10 +551,10 @@ final class PrefillGroupedRoutedMoE {
                 for view in binding.views {
                     enc.useResource(view.buffer, usage: .read)
                 }
-                enc.dispatchThreads(MTLSize(width: Int(p.d),
+                enc.dispatchThreads(MTLSize(width: Int(p.d) * projectionLanes,
                                             height: Int(p.pairCount),
                                             depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+                                    threadsPerThreadgroup: threadsPerThreadgroup)
                 enc.endEncoding()
             }
 

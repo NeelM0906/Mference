@@ -97,6 +97,11 @@ private func makeLibrary(
 
 @Suite("Library model identifiers")
 struct ServerFamilyModelIDTests {
+    @Test func gemmaQATKeepsItsOwnAPIIdentity() {
+        let qat = "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned"
+        #expect(ServerFamilyModelID.modelID(for: .gemma4, checkpointID: qat) == qat)
+        #expect(ServerFamilyModelID.modelID(for: .gemma4) == "gemma-4-26b-a4b-it")
+    }
     /// Every family the runtime knows has an identifier, including the ones
     /// whose runner is still gated: library mode has to be able to name an
     /// install it declines.
@@ -635,6 +640,29 @@ struct ServerLibraryArgumentTests {
 
 @Suite("Library mode HTTP", .serialized)
 struct LibraryHTTPServerTests {
+    @Test func missingQATIsReportedBeforeStreamingWithoutLoadingAnotherModel() async throws {
+        let root = try ServerLibraryFixture.makeRoot("qat-http")
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "original")
+        let index = ServerLibraryDiscovery.discover(roots: [root])
+        #expect(index.entries.map(\.modelID) == ["gemma-4-26b-a4b-it"])
+        #expect(index.skipped.isEmpty)
+        let log = LibraryEventLog()
+        let library = makeLibrary(index, log: log)
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        for stream in [false, true] {
+            let (data, response) = try await post(port: port,
+                body: "{\"model\":\"gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned\",\"stream\":\(stream),\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+            #expect(response.statusCode == 404)
+            #expect(response.value(forHTTPHeaderField: "Content-Type")?.contains("application/json") == true)
+            let text = String(decoding: data, as: UTF8.self)
+            #expect(text.contains("model_not_found"))
+            #expect(log.events.isEmpty)
+        }
+        try await server.shutdown()
+    }
     private func post(port: Int, body: String) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(
             url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)

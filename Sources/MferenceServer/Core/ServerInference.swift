@@ -48,6 +48,8 @@ public struct PreparedGeneration: Sendable {
 }
 
 public protocol ServerInferenceBackend: Sendable {
+    var isGemmaQAT: Bool { get }
+    var generationDefaults: GenerationConfig { get }
     var usesSwiftQwenTemplate: Bool { get }
     var acceptsReasoningEffort: Bool { get }
     var supportsQwenReasoningEffort: Bool { get }
@@ -62,6 +64,8 @@ public protocol ServerInferenceBackend: Sendable {
 }
 
 extension ServerInferenceBackend {
+    public var isGemmaQAT: Bool { false }
+    public var generationDefaults: GenerationConfig { .defaults }
     public var usesSwiftQwenTemplate: Bool { false }
     public var acceptsReasoningEffort: Bool { supportsQwenReasoningEffort }
     public var supportsQwenReasoningEffort: Bool { usesSwiftQwenTemplate }
@@ -180,6 +184,8 @@ public actor ServerCoordinator {
 }
 
 public actor ServerModelSession: ServerLoadedModel {
+    public nonisolated let isGemmaQAT: Bool
+    public nonisolated let generationDefaults: GenerationConfig
     public nonisolated let usesSwiftQwenTemplate: Bool
     public nonisolated let acceptsReasoningEffort: Bool
     public nonisolated let supportsQwenReasoningEffort: Bool
@@ -219,7 +225,7 @@ public actor ServerModelSession: ServerLoadedModel {
         // still requires the bundled template.
         let templateData: Data
         if tokenizer.dialect == .gemma {
-            templateData = try MFTokenizer.gemmaChatTemplateData()
+            templateData = try tokenizer.effectiveGemmaChatTemplateData()
         } else if tokenizer.dialect == .glm5 {
             // GLM-5.3 ships a chat_template.jinja but the dialect renders
             // natively (`Glm5ChatTemplate.swift`); the identity follows the
@@ -305,6 +311,8 @@ public actor ServerModelSession: ServerLoadedModel {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
+        self.isGemmaQAT = tokenizer.isGemmaQAT
+        self.generationDefaults = tokenizer.generationDefaults
         self.usesSwiftQwenTemplate = tokenizer.isSwiftQwen
         self.acceptsReasoningEffort = tokenizer.acceptsReasoningEffort
         self.supportsQwenReasoningEffort = tokenizer.supportsQwenReasoningEffort

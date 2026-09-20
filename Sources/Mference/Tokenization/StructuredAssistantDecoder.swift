@@ -171,7 +171,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = nil
             let text = tokenizer.decode(tokens, skipSpecialTokens: false)
             do {
-                let call = try GemmaToolCallParser().parse(
+                let call = try GemmaToolCallParser(allowsPythonNull: tokenizer.isGemmaQAT).parse(
                     text, allowedTools: allowedTools, id: idGenerator())
                 emittedCalls += 1
                 return [.toolCall(call)]

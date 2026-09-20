@@ -168,13 +168,18 @@ The server accepts only function tools. Omit `tool_choice` or set it to `auto`
 to allow calls. Set it to `none` to disable them. The server does not support
 `required`, named tool selection, or `parallel_tool_calls: false`.
 
-Gemma tool-result continuation retains the generated reasoning/KV and prefills
+Original Gemma tool-result continuation retains the generated reasoning/KV and prefills
 only the verified results and next generation suffix. Repeated function names
 and arguments, including multiple calls in one response, are valid. A new
 user turn uses Google's canonical history policy; it cannot take the tool-loop
 append path to retain thoughts that the template strips. This also corrects
 legacy non-thinking history: the empty thought block used to start generation
 is not inserted into prior assistant messages by the canonical template.
+
+QAT uses its own installed source template. That template may normalize the
+current tool-call turn, so QAT reuse requires an actual matching source prefix;
+the server recovers that prefix and recomputes the remaining source-rendered
+tokens. Resumed input matches a fresh source render.
 
 ## Errors
 
@@ -333,6 +338,16 @@ canonical formatting trims message content and keeps tool responses inside
 the model turn. The effective template has its own cache identity. A missing
 or damaged template resource requires rebuilding/reinstalling the application,
 not the model weights.
+
+The separate `gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned` checkpoint instead uses
+its verified installed template and generation settings, including through a
+custom alias or library swap. Its thinking switch follows the same opt-in
+rules, but its source drops ordinary assistant reasoning and retains tool-call
+reasoning only after the latest user message. Omitted/false
+`preserve_thinking` follows that source policy; `true` returns JSON 400 before
+streaming, including while queued. After tool results, the source suffix does
+not pre-open a thought channel. Reasoning, visible content and tool calls still
+use the same separate API fields. See [QAT defaults and qualification](RUNTIME_CONTROLS.md#gemma-qat).
 
 For Qwen 3.6's recommended general-thinking sampling profile, send these
 explicit options along with `model` and `messages`:

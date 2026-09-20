@@ -30,7 +30,8 @@ public final class SharedExpertInt4 {
                 siluActivation: Bool = false,
                 useFusedGateUp: Bool = true,
                 specializedD: Int? = nil,
-                specializedF: Int? = nil) throws {
+                specializedF: Int? = nil,
+                groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) throws {
         let specializedShapes: [(m: Int, n: Int)]
         if let d = specializedD, let f = specializedF {
             specializedShapes = [(m: f, n: d), (m: d, n: f)]
@@ -38,16 +39,20 @@ public final class SharedExpertInt4 {
             specializedShapes = []
         }
         self.int4 = try DequantInt4GEMV(context: context,
-                                        additionalShapes: specializedShapes)
+                                        additionalShapes: specializedShapes,
+                                        groupSize: groupSize, sourceFP16: sourceFP16)
         self.geluMulPSO = try context.pipeline(
-            siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
-        let activationConstants = [
+            siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16",
+            constants: Quantization.gemmaSourceConstants(enabled: sourceFP16))
+        let activationConstants = Quantization.int4Constants(groupSize: groupSize)
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16) + [
             MetalFunctionConstant(index: 27, value: .bool(siluActivation)),
         ]
         self.fusedGateUpActPSO = useFusedGateUp
             ? try context.pipeline("shared_int4_gate_up_act_simd",
                                    constants: activationConstants,
-                                   maxTotalThreadsPerThreadgroup: 256)
+                                   maxTotalThreadsPerThreadgroup: 256,
+                                   safeMathModule: sourceFP16 ? "dequant_int4" : nil)
             : nil
         if useFusedGateUp, let d = specializedD, let f = specializedF {
             self.specializedFusedGateUpActPSO = try context.pipeline(
@@ -57,7 +62,8 @@ public final class SharedExpertInt4 {
                     MetalFunctionConstant(index: 21, value: .uint32(UInt32(d))),
                     MetalFunctionConstant(index: 22, value: .bool(true)),
                 ],
-                maxTotalThreadsPerThreadgroup: 256)
+                maxTotalThreadsPerThreadgroup: 256,
+                safeMathModule: sourceFP16 ? "dequant_int4" : nil)
             self.specializedD = UInt32(d)
             self.specializedF = UInt32(f)
         } else {
@@ -178,12 +184,13 @@ public final class SharedExpertRuntime {
     public init(context: MetalContext, weightBits: Int,
                 siluActivation: Bool = false,
                 specializedD: Int? = nil,
-                specializedF: Int? = nil) throws {
+                specializedF: Int? = nil,
+                groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) throws {
         self.weightBits = weightBits
         switch weightBits {
         case 4: self.implementation = .int4(try SharedExpertInt4(
             context: context, siluActivation: siluActivation,
-            specializedD: specializedD, specializedF: specializedF))
+            specializedD: specializedD, specializedF: specializedF, groupSize: groupSize, sourceFP16: sourceFP16))
         case 8: self.implementation = .int8(try SharedExpertInt8(
             context: context, siluActivation: siluActivation))
         default: throw SharedExpertError.unsupportedWeightBits(weightBits)

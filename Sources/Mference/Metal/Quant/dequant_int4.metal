@@ -1,23 +1,80 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef MFERENCE_GEMMA_SOURCE_FP16
+#define MFERENCE_GEMMA_SOURCE_FP16
+// Preserve the source activation boundary before learned scaling. The original
+// Gemma checkpoint keeps its existing fused arithmetic unless explicitly set.
+constant bool FC_GEMMA_SOURCE_FP16 [[function_constant(110)]];
+constant bool kGemmaSourceFP16 = is_function_constant_defined(FC_GEMMA_SOURCE_FP16)
+    ? FC_GEMMA_SOURCE_FP16 : false;
+static inline half gemma_weighted_norm(float x, float inv, float weight) {
+    return kGemmaSourceFP16 ? half(x * inv) * half(weight) : half(x * inv * weight);
+}
+static inline half gemma_scaled_embedding(float value, float scale) {
+    return kGemmaSourceFP16 ? half(value) * half(scale) : half(value * scale);
+}
+
+// MLX's quantized GEMV forms its affine-bias input sum in FP16 quads.
+static inline float gemma_source_quad_sum(half4 x) {
+    const half a = x.x + x.y;
+    const half b = a + x.z;
+    return float(half(b + x.w));
+}
+static inline half gemma_source_geglu(float gate_value, float up_value) {
+    // Gate/up projections are FP16 tensors in the source, even when fused.
+    volatile half gate = half(gate_value);
+    volatile half up = half(up_value);
+    // Preserve source half stores across fast-math contraction, particularly
+    // 1 + tanh(x): its rounded negative tail is exactly zero in the source.
+    volatile half cube = half(float(gate) * float(gate) * float(gate));
+    volatile half term = half(0.044715f) * cube;
+    volatile half sum = gate + term;
+    volatile half inner = half(0.7978845608028654f) * sum;
+    // FP16 tanh has already rounded to +/-1 at these bounds. Keep that
+    // exact source result while avoiding fast-tanh's positive exp overflow.
+    volatile half curve = half(tanh(clamp(float(inner), -20.0f, 20.0f)));
+    volatile half shifted = half(1.0h + curve);
+    volatile half scaled = half(0.5h * gate);
+    volatile half activation = scaled * shifted;
+    return half(activation * up);
+}
+static inline float gemma_source_bias_correction(
+    device const half* x, device const bfloat* biases, uint width, uint group_size
+) {
+    float correction = 0.0f;
+    for (uint k = 0; k < width; k += 4u) {
+        const half4 quad(x[k], x[k + 1u], x[k + 2u], x[k + 3u]);
+        const float exact = float(quad.x) + float(quad.y) + float(quad.z) + float(quad.w);
+        correction = fma(float(biases[k / group_size]),
+                        gemma_source_quad_sum(quad) - exact, correction);
+    }
+    return correction;
+}
+#endif
+
 // ============================================================================
 // dequant_int4 — MLX `affine` 4-bit dequant.
 //
 // Layout (per row of length N):
 //   W       : N/2 bytes. Low nibble of byte k = component 2k (unsigned 0..15),
 //             high nibble = component 2k+1.
-//   scales  : N/64 BF16, one per group of 64.
-//   biases  : N/64 BF16, one per group of 64.
-//   value   : w[i] = float(nibble[i]) * scale[i/64] + bias[i/64].
+//   scales/biases: N/G BF16, with G=32 for Gemma QAT and G=64 by default.
+//   value   : w[i] = float(nibble[i]) * scale[i/G] + bias[i/G].
 //
-// Affine factoring for GEMV (sum over a group of 64):
+// Affine factoring for GEMV (sum over one storage group):
 //   sum_k (q_k * s + b) * x_k = s * sum_k(q_k * x_k) + b * sum_k x_k
 // so scale and bias each cost one mul + one FMA per group instead of per
 // element; the per-element inner loop keeps the scalar path's FMA count.
 // ============================================================================
 
-constant constexpr uint kGroupSize = 64;
+#ifndef MFERENCE_AFFINE_GROUP_SIZE
+#define MFERENCE_AFFINE_GROUP_SIZE
+constant uint FC_AFFINE_GROUP_SIZE [[function_constant(108)]];
+constant uint kAffineGroupSize = is_function_constant_defined(FC_AFFINE_GROUP_SIZE)
+    ? FC_AFFINE_GROUP_SIZE : 64u;
+#endif
+constant uint kGroupSize = kAffineGroupSize;
 constant uint FC_INT4_M [[function_constant(20)]];
 constant uint FC_INT4_N [[function_constant(21)]];
 constant bool FC_INT4_USE_FC [[function_constant(22)]];
@@ -60,11 +117,45 @@ static inline uint int4_qkv_fc_n(constant uint& N) {
 inline uint nib_lo(uint8_t b) { return uint(b & 0x0F); }
 inline uint nib_hi(uint8_t b) { return uint(b >> 4); }
 
+#ifndef MFERENCE_GEMMA_SOURCE_PROJECTION
+#define MFERENCE_GEMMA_SOURCE_PROJECTION
+// QAT's source GEMV rounds the input sum in half quads, accumulates four
+// products at a time, and adds each complete affine sub-result. Callers of
+// this path compile this module with safe math: fast-math compilation does
+// not preserve the source's FP16 rounding boundaries.
+static inline float gemma_source_projection_row(
+    device const uint8_t* weights,
+    device const bfloat* scales,
+    device const bfloat* biases,
+    device const half* x,
+    uint width, uint group_size, bool fast_shape, uint lane
+) {
+    device const ushort* packed_weights = (device const ushort*)weights;
+    const uint values = fast_shape ? 16u : 8u;
+    float result = 0.0f;
+    for (uint base = lane * values; base < width; base += 32u * values) {
+        float sum = 0.0f, dot = 0.0f;
+        for (uint i = 0; i < values; i += 4u) {
+            const uint k = base + i;
+            const ushort packed = packed_weights[k / 4u];
+            sum += x[k] + x[k + 1u] + x[k + 2u] + x[k + 3u];
+            dot += float(x[k]) * (packed & 15u)
+                + (float(x[k + 1u]) / 16.0f) * (packed & 240u)
+                + (float(x[k + 2u]) / 256.0f) * (packed & 3840u)
+                + (float(x[k + 3u]) / 4096.0f) * (packed & 61440u);
+        }
+        const uint group = base / group_size;
+        result += float(half(scales[group])) * dot + sum * float(half(biases[group]));
+    }
+    return simd_sum(result);
+}
+#endif
+
 
 kernel void embed_lookup_int4(
     device const uint8_t* table     [[buffer(0)]],   // [V, D/2] nibbles
-    device const bfloat*  scales    [[buffer(1)]],   // [V, D/64] BF16
-    device const bfloat*  biases    [[buffer(2)]],   // [V, D/64] BF16
+    device const bfloat*  scales    [[buffer(1)]],   // [V, D/G] BF16
+    device const bfloat*  biases    [[buffer(2)]],   // [V, D/G] BF16
     device half*          out       [[buffer(3)]],   // [D] FP16
     constant uint&        token_id  [[buffer(4)]],
     constant uint&        D         [[buffer(5)]],
@@ -80,14 +171,14 @@ kernel void embed_lookup_int4(
     uint    q    = (gid & 1u) ? uint(byte >> 4) : uint(byte & 0xFu);
     float   s    = float(row_s[gid / kGroupSize]);
     float   b    = float(row_b[gid / kGroupSize]);
-    out[gid] = half((float(q) * s + b) * out_scale);
+    out[gid] = gemma_scaled_embedding(float(q) * s + b, out_scale);
 }
 
 // y[m] = sum_{n} W[m, n] * x[n]. One-SIMD-per-row variant: 32 threads
 // cooperate on a single output row, each handling 2 elements per group of 64
 // (one byte → two nibbles). simd_sum reduces across the group; lane 0 writes.
 //
-// Requires N % 64 == 0 (per group of 64). Validated at the wrapper.
+// Requires N % G == 0. A group-32 tail activates only its first 16 lanes.
 // Each threadgroup handles eight consecutive rows, one SIMD per row. The
 // larger work unit gives the scheduler enough independent rows while sharing
 // the L1-cached input-vector reads.
@@ -120,19 +211,29 @@ static inline float dequant_int4_gemv_simd_body_t(
     device const bfloat*  s_row = scales + uint(row) * n_groups;
     device const bfloat*  b_row = biases + uint(row) * n_groups;
 
+    if (kGemmaSourceFP16) {
+        const float result = gemma_source_projection_row(
+            W_row, s_row, b_row, x, N, kGroupSize, M % 8u == 0u && N % 512u == 0u, lane);
+        if (store_output && lane == 0u) y[row] = OutT(result);
+        return result;
+    }
+
     float acc = 0.0f;
     // The vectorized row path reads
-    // weights a uint (4 bytes = 8 nibbles) and x as half4 in 4-group (128-byte)
-    // blocks, with a scalar byte-per-lane remainder. Within a block the 32
-    // lanes split 8-per-group, each handling 8 contiguous elements of one
-    // 64-element group, so the affine factoring s·Σqx + b·Σx is preserved
+    // weights a uint (4 bytes = 8 nibbles) and x as half4 in 128-byte blocks,
+    // with a scalar byte-per-lane remainder. Within a block the 32 lanes
+    // split 8-per-group (G=64) or 4-per-group (G=32), each handling eight
+    // elements from one pair, so the affine factoring s·Σqx + b·Σx is preserved
     // (simd_sum aggregates; s/b are constant within a group). Aligned: row
     // stride N/2 and weightsOffset are multiples of 4; x is
-    // half4-aligned (lane*8 elements). N=2816/4096/8192 → 44/64/128 groups, all
-    // exact 4-blocks; the remainder covers any non-multiple-of-4 group count.
-    const uint full_blocks = n_groups / 4;
+    // half4-aligned (lane*8 elements). N=2816/4096/8192 has exact 256-value
+    // blocks; the remainder also covers widths such as 704 and 2112.
+    // A SIMD block always covers 256 values. Its storage has four group-64
+    // pairs or eight group-32 pairs; each lane's eight values stay in one pair.
+    const uint full_blocks = kGemmaSourceFP16 ? (N + 255u) / 256u : N / 256u;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
+        if (kGemmaSourceFP16 && byte_base * 2u >= N) continue;
         // Read the 4-byte weight chunk as two ushorts. The resident weight
         // tensors are 2-byte aligned but NOT 4-byte aligned (BF16 scale/bias
         // regions leave a 2-aligned weightsOffset), so a `uint*` load would be
@@ -141,7 +242,7 @@ static inline float dequant_int4_gemv_simd_body_t(
         // vs byte-by-byte.
         device const ushort* wp = (device const ushort*)(W_row + byte_base);
         const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
-        const uint g  = blk * 4u + (lane >> 3);
+        const uint g  = (byte_base * 2u) / kGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
@@ -158,16 +259,21 @@ static inline float dequant_int4_gemv_simd_body_t(
         dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
         dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
         dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
-        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
         acc = fma(s, dot, acc);
         acc = fma(b, sum, acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint tile = full_blocks * 4u; tile * 64u < N; ++tile) {
+        const uint elem = tile * 64u + lane * 2u;
+        if (elem >= N) continue;
+        const uint g = elem / kGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kGroupSize / 2) + lane];
-        const float x0 = float(x[g * kGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kGroupSize + lane * 2u + 1u]);
+        const uint8_t byte = W_row[elem / 2u];
+        const float x0 = float(x[elem]);
+        const float x1 = float(x[elem + 1u]);
         float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
         dot = fma(float(uint(byte >> 4)), x1, dot);
         const float sum = x0 + x1;
@@ -261,8 +367,8 @@ kernel void shared_int4_gate_up_act_simd(
     if (lane == 0u && row < MM) {
         const half roundedGate = half(gateValue);
         const half roundedUp = half(upValue);
-        act[row] = half(shared_int4_activation(float(roundedGate))
-                        * float(roundedUp));
+        act[row] = kGemmaSourceFP16 ? gemma_source_geglu(roundedGate, roundedUp)
+            : half(shared_int4_activation(float(roundedGate)) * float(roundedUp));
     }
 }
 
@@ -414,12 +520,13 @@ static inline void dequant_int4_gemv_simd_multix_body(
     float accs[kMultiXMaxT];
     for (uint t = 0; t < kMultiXMaxT; ++t) { accs[t] = 0.0f; }
 
-    const uint full_blocks = n_groups / 4;
+    const uint full_blocks = kGemmaSourceFP16 ? (N + 255u) / 256u : N / 256u;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
+        if (kGemmaSourceFP16 && byte_base * 2u >= N) continue;
         device const ushort* wp = (device const ushort*)(W_row + byte_base);
         const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
-        const uint g  = blk * 4u + (lane >> 3);
+        const uint g  = (byte_base * 2u) / kGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
@@ -438,19 +545,24 @@ static inline void dequant_int4_gemv_simd_multix_body(
             dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
             dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
             dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
-            const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+            const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
             accs[t] = fma(s, dot, accs[t]);
             accs[t] = fma(b, sum, accs[t]);
         }
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint tile = full_blocks * 4u; tile * 64u < N; ++tile) {
+        const uint elem = tile * 64u + lane * 2u;
+        if (elem >= N) continue;
+        const uint g = elem / kGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kGroupSize / 2) + lane];
+        const uint8_t byte = W_row[elem / 2u];
         for (uint t = 0; t < T; ++t) {
             device const half* xt = x + t * N;
-            const float x0 = float(xt[g * kGroupSize + lane * 2u]);
-            const float x1 = float(xt[g * kGroupSize + lane * 2u + 1u]);
+            const float x0 = float(xt[elem]);
+            const float x1 = float(xt[elem + 1u]);
             float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
             dot = fma(float(uint(byte >> 4)), x1, dot);
             const float sum = x0 + x1;

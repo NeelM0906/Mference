@@ -19,6 +19,7 @@ final class DequantInt4GEMV {
     ]
 
     private let pipeline: MTLComputePipelineState
+    private let groupSize: Int
     private let specializedPipelines: [Shape: MTLComputePipelineState]
     /// FP32-output variant, unspecialized. Only the store type differs, so the
     /// result is bit-identical to `pipeline` for rows inside FP16 range.
@@ -28,15 +29,21 @@ final class DequantInt4GEMV {
     /// non-Gemma model's decode shapes. Measured: an unspecialized
     /// 4096x2048 GEMV runs at 102 GB/s, the specialized one at 141 GB/s.
     init(context: MetalContext,
-         additionalShapes: [(m: Int, n: Int)] = []) throws {
+         additionalShapes: [(m: Int, n: Int)] = [],
+         groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) throws {
+        self.groupSize = groupSize
+        let quantizationConstants = Quantization.int4Constants(groupSize: groupSize)
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16)
         self.pipeline = try context.pipeline(
             "dequant_int4_gemv_simd",
-            constants: [],
-            maxTotalThreadsPerThreadgroup: 512)
+            constants: quantizationConstants,
+            maxTotalThreadsPerThreadgroup: 512,
+            safeMathModule: sourceFP16 ? "dequant_int4" : nil)
         self.f32OutPipeline = try context.pipeline(
             "dequant_int4_gemv_simd_f32out",
-            constants: [],
-            maxTotalThreadsPerThreadgroup: 512)
+            constants: quantizationConstants,
+            maxTotalThreadsPerThreadgroup: 512,
+            safeMathModule: sourceFP16 ? "dequant_int4" : nil)
 
         let shapes = Self.realDecodeShapes
             + additionalShapes.map { Shape(m: UInt32($0.m), n: UInt32($0.n)) }
@@ -44,12 +51,13 @@ final class DequantInt4GEMV {
         for shape in shapes {
             specializedPipelines[shape] = try context.pipeline(
                 "dequant_int4_gemv_simd",
-                constants: [
+                constants: quantizationConstants + [
                     MetalFunctionConstant(index: 20, value: .uint32(shape.m)),
                     MetalFunctionConstant(index: 21, value: .uint32(shape.n)),
                     MetalFunctionConstant(index: 22, value: .bool(true)),
                 ],
-                maxTotalThreadsPerThreadgroup: 512)
+                maxTotalThreadsPerThreadgroup: 512,
+                safeMathModule: sourceFP16 ? "dequant_int4" : nil)
         }
         self.specializedPipelines = specializedPipelines
     }
@@ -68,8 +76,8 @@ final class DequantInt4GEMV {
                 m: UInt32,
                 n: UInt32,
                 outputFloat32: Bool = false) {
-        precondition(n % UInt32(Quantization.groupSize) == 0,
-                     "N must be a multiple of \(Quantization.groupSize)")
+        precondition(n % UInt32(groupSize) == 0,
+                     "N must be a multiple of \(groupSize)")
         // The kernel reads packed weights through a `ushort*`; the repacker
         // guarantees two-byte sub-tensor alignment but not four-byte alignment.
         precondition(weightsOffset % 2 == 0,

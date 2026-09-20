@@ -9,6 +9,7 @@ final class FusedQKVGEMV {
     }
 
     private let pso: MTLComputePipelineState
+    private let groupSize: Int
     private let specializedPSOs: [Shape: MTLComputePipelineState]
 
     private static let realDecodeShapes: [Shape] = [
@@ -16,21 +17,26 @@ final class FusedQKVGEMV {
         Shape(qRows: 8192, kvRows: 1024, n: 2816),
     ]
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) throws {
+        self.groupSize = groupSize
+        let quantizationConstants = Quantization.int4Constants(groupSize: groupSize)
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16)
         self.pso = try context.pipeline("dequant_int4_qkv_gemv_simd",
-                                        constants: [],
-                                        maxTotalThreadsPerThreadgroup: 512)
+                                        constants: quantizationConstants,
+                                        maxTotalThreadsPerThreadgroup: 512,
+                                        safeMathModule: sourceFP16 ? "dequant_int4" : nil)
         var variants: [Shape: MTLComputePipelineState] = [:]
         for shape in Self.realDecodeShapes {
             variants[shape] = try context.pipeline(
                 "dequant_int4_qkv_gemv_simd",
-                constants: [
+                constants: quantizationConstants + [
                     MetalFunctionConstant(index: 23, value: .uint32(shape.qRows)),
                     MetalFunctionConstant(index: 24, value: .uint32(shape.kvRows)),
                     MetalFunctionConstant(index: 25, value: .uint32(shape.n)),
                     MetalFunctionConstant(index: 26, value: .bool(true)),
                 ],
-                maxTotalThreadsPerThreadgroup: 512)
+                maxTotalThreadsPerThreadgroup: 512,
+                safeMathModule: sourceFP16 ? "dequant_int4" : nil)
         }
         self.specializedPSOs = variants
     }
@@ -52,8 +58,8 @@ final class FusedQKVGEMV {
                        qRows: UInt32,
                        kvRows: UInt32,
                        n: UInt32) {
-        precondition(n % UInt32(Quantization.groupSize) == 0,
-                     "N must be a multiple of \(Quantization.groupSize)")
+        precondition(n % UInt32(groupSize) == 0,
+                     "N must be a multiple of \(groupSize)")
         precondition(qWeightsOffset % 2 == 0 &&
                      kWeightsOffset % 2 == 0 &&
                      vWeightsOffset % 2 == 0,

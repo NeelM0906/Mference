@@ -5,22 +5,28 @@ final class PrefillSharedExpert {
     enum BlockPath: Sendable, Equatable {
         case repeatedRows
         case tensorOpsInt4
+        case sourceAffineInt4
     }
 
     private let shared: SharedExpertRuntime
     private let weightBits: Int
+    private let sourceFP16: Bool
     private let tensorOpsInt4: MPPPrefillInt4QMM
     private let blockActivationPSO: MTLComputePipelineState
     private let qwenScalarGatePSO: MTLComputePipelineState
 
-    init(context: MetalContext, weightBits: Int = 8, siluActivation: Bool = false) throws {
+    init(context: MetalContext, weightBits: Int = 8, siluActivation: Bool = false,
+         groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) throws {
         self.weightBits = weightBits
+        self.sourceFP16 = sourceFP16
         self.shared = try SharedExpertRuntime(context: context,
                                               weightBits: weightBits,
-                                              siluActivation: siluActivation)
-        self.tensorOpsInt4 = MPPPrefillInt4QMM(context: context)
+                                              siluActivation: siluActivation,
+                                              groupSize: groupSize, sourceFP16: sourceFP16)
+        self.tensorOpsInt4 = MPPPrefillInt4QMM(context: context, groupSize: groupSize, sourceFP16: sourceFP16)
         self.blockActivationPSO = try context.pipeline(
-            siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
+            siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16",
+            constants: Quantization.gemmaSourceConstants(enabled: sourceFP16))
         self.qwenScalarGatePSO = try context.pipeline("prefill_qwen_shared_scalar_gate")
     }
 
@@ -139,9 +145,9 @@ final class PrefillSharedExpert {
                 x: x, xOffset: xOffset,
                 y: scratchUp, yOffset: scratchUpOffset,
                 m: queryCount, n: intermediate, k: d)
-            precondition(gatePath == .affineThreadgroupF16
-                            && upPath == .affineThreadgroupF16,
-                         "validated TensorOps shared-expert projection became unavailable")
+            let expectedPath: MPPPrefillInt4QMM.Path = sourceFP16 ? .sourceAffineF16 : .affineThreadgroupF16
+            precondition(gatePath == expectedPath && upPath == expectedPath,
+                         "validated batched shared-expert projection became unavailable")
 
             guard let activation = cb.makeComputeCommandEncoder() else {
                 throw SharedExpertInt8Error.dimensionMismatch("encoder allocation failed")
@@ -166,9 +172,9 @@ final class PrefillSharedExpert {
                 x: scratchAct, xOffset: scratchActOffset,
                 y: y, yOffset: yOffset,
                 m: queryCount, n: d, k: intermediate)
-            precondition(downPath == .affineThreadgroupF16,
-                         "validated TensorOps shared-expert down projection became unavailable")
-            return .tensorOpsInt4
+            precondition(downPath == expectedPath,
+                         "validated batched shared-expert down projection became unavailable")
+            return sourceFP16 ? .sourceAffineInt4 : .tensorOpsInt4
         }
 
         for row in 0..<queryCount {

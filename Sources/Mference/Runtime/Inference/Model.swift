@@ -60,6 +60,17 @@ public struct Model {
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
     public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
 
+    /// QAT validates the same group geometry for every INT4 role. Other
+    /// formats retain the group-64 specialization, including families whose
+    /// attention weights are not INT4 at all.
+    var affineInt4GroupSize: Int {
+        modelID == CheckpointIdentity.gemma4QAT
+            ? manifest.quant!.attention.groupSize : Quantization.groupSize
+    }
+    var hasBF16Router: Bool {
+        modelID == CheckpointIdentity.gemma4QAT
+    }
+
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex
     let packedExpertsLayout: PackedExpertsLayout
@@ -815,6 +826,12 @@ extension Model {
         stats.eagerSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - eagerShaStart
 
         let residentIndex = try ResidentIndexReader.load(fileURL: weightsURL)
+        let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
+        if manifest.modelID == CheckpointIdentity.gemma4QAT {
+            try GemmaQATCheckpoint.validateRuntimeLayout(
+                residentIndex: residentIndex, layout: layout,
+                manifest: manifest, expected: expecting)
+        }
 
         // The resident index must account for the complete weights file.
         let attrs = try FileManager.default.attributesOfItem(atPath: weightsURL.path)
@@ -854,7 +871,6 @@ extension Model {
             device: device,
             tensorSpans: tensorSpans)
 
-        let layout = try PackedExpertsLayoutReader.load(directoryURL: directoryURL)
         if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try validateTrustedReceiptLayerLayout(directoryURL: directoryURL,

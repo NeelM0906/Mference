@@ -13,6 +13,21 @@ extension MFTokenizer {
         var value = self
         value.isSwiftQwen = modelID == CheckpointIdentity.swiftQwen38
         value.isBaseQwen38 = modelID == CheckpointIdentity.baseQwen38
+        value.isGemmaQAT = modelID == CheckpointIdentity.gemma4QAT
+        value.installedGemmaTemplate = nil
+        value.generationDefaults = .defaults
+        if value.isGemmaQAT {
+            guard value.dialect == .gemma, let folder = value.localTokenizerFolder else {
+                throw MFTokenizerError.missingToolTemplate
+            }
+            let template = try Data(contentsOf: folder.appendingPathComponent("chat_template.jinja"))
+            guard Sha256Verifier.hashData(template) == GemmaQATCheckpoint.chatTemplateSHA256 else {
+                throw MFTokenizerError.invalidChatTemplate("Gemma QAT installed template differs from the pinned checkpoint")
+            }
+            value.installedGemmaTemplate = template
+            value.generationDefaults = try GemmaQATCheckpoint.generationDefaults(
+                from: Data(contentsOf: folder.appendingPathComponent("generation_config.json")))
+        }
         if value.supportsQwenReasoningEffort, value.dialect != .chatml {
             throw MFTokenizerError.unsupportedForDialect("Qwen 3.8 requires ChatML")
         }

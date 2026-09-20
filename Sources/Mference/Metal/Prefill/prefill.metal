@@ -1,13 +1,171 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef MFERENCE_GEMMA_SOURCE_ROUTER_DOT
+#define MFERENCE_GEMMA_SOURCE_ROUTER_DOT
+// MLX 0.32.2 gemv.h reduction, adapted to one physical SIMD per expert.
+// Copyright © 2023-2024 Apple Inc. MIT license; see LICENSE-MLX.
+// The pinned 128x2816 router uses eight logical SIMD groups, four contiguous
+// values per lane, then an ordered merge. Compile its entry points safely.
+static inline float gemma_source_router_dot(
+    device const bfloat* row, device const half* input,
+    device const half* scale, uint D, uint lane
+) {
+    float total = 0.0f;
+    for (uint group = 0; group < 8u; ++group) {
+        float sum = 0.0f;
+        for (uint base = group * 128u + lane * 4u; base < D; base += 1024u) {
+            for (uint j = 0; j < 4u; ++j) {
+                const half x = input[base + j] * scale[base + j];
+                sum += float(half(row[base + j])) * float(x);
+            }
+        }
+        for (ushort delta = 16; delta > 0; delta >>= 1) sum += simd_shuffle_down(sum, delta);
+        total = group == 0 ? sum : total + sum;
+    }
+    return total;
+}
+#endif
+
+#ifndef MFERENCE_GEMMA_SOURCE_NORM
+#define MFERENCE_GEMMA_SOURCE_NORM
+// Preserve MLX's four-contiguous-value partials and SIMD merge order while
+// retaining our 256-thread dispatch. Explicit stores and precise division
+// preserve its arithmetic inside the shared fast-math library.
+// The pointer template handles resident/device and fused/threadgroup inputs.
+template <typename InputPointer>
+static inline float gemma_source_norm_inv(
+    InputPointer x, uint D, float eps, uint lane, uint sg, uint sgs,
+    threadgroup float* partial
+) {
+    const uint groups = min(32u, (D + 127u) / 128u);
+    for (uint group = sg; group < groups; group += sgs) {
+        volatile float acc = 0.0f;
+        for (uint base = (group * 32u + lane) * 4u; base < D; base += 4096u) {
+            for (uint j = 0; j < 4u; ++j) {
+                const float v = base + j < D ? float(x[base + j]) : 0.0f;
+                acc = acc + v * v;
+            }
+        }
+        const float sum = simd_sum(float(acc));
+        if (lane == 0u) partial[group] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u) {
+        const float sum = simd_sum(lane < groups ? partial[lane] : 0.0f);
+        if (lane == 0u) {
+            volatile float mean = precise::divide(sum, float(D));
+            volatile float regularized = mean + eps;
+            partial[0] = precise::rsqrt(regularized);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return partial[0];
+}
+#endif
+
+
+#ifndef MFERENCE_GEMMA_SOURCE_FP16
+#define MFERENCE_GEMMA_SOURCE_FP16
+// Preserve the source activation boundary before learned scaling. The original
+// Gemma checkpoint keeps its existing fused arithmetic unless explicitly set.
+constant bool FC_GEMMA_SOURCE_FP16 [[function_constant(110)]];
+constant bool kGemmaSourceFP16 = is_function_constant_defined(FC_GEMMA_SOURCE_FP16)
+    ? FC_GEMMA_SOURCE_FP16 : false;
+static inline half gemma_weighted_norm(float x, float inv, float weight) {
+    return kGemmaSourceFP16 ? half(x * inv) * half(weight) : half(x * inv * weight);
+}
+static inline half gemma_scaled_embedding(float value, float scale) {
+    return kGemmaSourceFP16 ? half(value) * half(scale) : half(value * scale);
+}
+
+// MLX's quantized GEMV forms its affine-bias input sum in FP16 quads.
+static inline float gemma_source_quad_sum(half4 x) {
+    const half a = x.x + x.y;
+    const half b = a + x.z;
+    return float(half(b + x.w));
+}
+static inline half gemma_source_geglu(float gate_value, float up_value) {
+    // Gate/up projections are FP16 tensors in the source, even when fused.
+    volatile half gate = half(gate_value);
+    volatile half up = half(up_value);
+    // Preserve source half stores across fast-math contraction, particularly
+    // 1 + tanh(x): its rounded negative tail is exactly zero in the source.
+    volatile half cube = half(float(gate) * float(gate) * float(gate));
+    volatile half term = half(0.044715f) * cube;
+    volatile half sum = gate + term;
+    volatile half inner = half(0.7978845608028654f) * sum;
+    // FP16 tanh has already rounded to +/-1 at these bounds. Keep that
+    // exact source result while avoiding fast-tanh's positive exp overflow.
+    volatile half curve = half(tanh(clamp(float(inner), -20.0f, 20.0f)));
+    volatile half shifted = half(1.0h + curve);
+    volatile half scaled = half(0.5h * gate);
+    volatile half activation = scaled * shifted;
+    return half(activation * up);
+}
+static inline float gemma_source_bias_correction(
+    device const half* x, device const bfloat* biases, uint width, uint group_size
+) {
+    float correction = 0.0f;
+    for (uint k = 0; k < width; k += 4u) {
+        const half4 quad(x[k], x[k + 1u], x[k + 2u], x[k + 3u]);
+        const float exact = float(quad.x) + float(quad.y) + float(quad.z) + float(quad.w);
+        correction = fma(float(biases[k / group_size]),
+                        gemma_source_quad_sum(quad) - exact, correction);
+    }
+    return correction;
+}
+#endif
+
+#ifndef MFERENCE_GEMMA_ROUTING_PRECISION
+#define MFERENCE_GEMMA_ROUTING_PRECISION
+static inline float gemma_source_weighted_expert(float value, half weight) {
+    // A fused projection must retain both source tensor-store boundaries.
+    volatile half projected = half(value);
+    volatile half product = projected * weight;
+    return float(product);
+}
+
+static inline void gemma_source_softmax8(
+    thread const float* descending_scores, thread half* probabilities
+) {
+    // Pinned MLX's argpartition is an ascending sort. Its default FP16
+    // softmax uses two lanes with four ascending values each, half partial
+    // sums and a half reciprocal. Keep our descending route-slot order while
+    // reproducing that source normalization order and precision.
+    volatile half exps[8];
+    for (uint i = 0; i < 8u; ++i) {
+        volatile half shifted = half(descending_scores[i]) - half(descending_scores[0]);
+        exps[i] = fast::exp(shifted);
+    }
+    volatile half lower = 0.0h;
+    volatile half upper = 0.0h;
+    for (uint i = 0; i < 4u; ++i) lower = lower + exps[7u - i];
+    for (uint i = 0; i < 4u; ++i) upper = upper + exps[3u - i];
+    volatile half total = lower + upper;
+    volatile half inverse = 1.0h / total;
+    for (uint i = 0; i < 8u; ++i) probabilities[i] = exps[i] * inverse;
+}
+#endif
+
 #if defined(__HAVE_TENSOR__)
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
 #endif
 
 constant constexpr uint kPrefillGroupSize = 64;
-constant constexpr uint kPrefillRmsMaxSimdGroups = 8;
+#ifndef MFERENCE_AFFINE_GROUP_SIZE
+#define MFERENCE_AFFINE_GROUP_SIZE
+constant uint FC_AFFINE_GROUP_SIZE [[function_constant(108)]];
+constant uint kAffineGroupSize = is_function_constant_defined(FC_AFFINE_GROUP_SIZE)
+    ? FC_AFFINE_GROUP_SIZE : 64u;
+#endif
+constant constexpr uint kPrefillRmsMaxSimdGroups = 32;
+#ifndef MFERENCE_ROUTER_BF16
+#define MFERENCE_ROUTER_BF16
+constant bool FC_ROUTER_BF16 [[function_constant(109)]];
+constant bool kRouterBF16 = is_function_constant_defined(FC_ROUTER_BF16) && FC_ROUTER_BF16;
+#endif
 constant constexpr uint kPrefillPostMaxD = 4096;
 // Flash-Next routes over 512 experts. The bound only sizes the threadgroup
 // score staging array (2 KiB at 512) and clamps `num_experts`; for the shipped
@@ -99,16 +257,16 @@ kernel void prefill_embed_lookup_int4_block(
     if (t >= T || d >= D) return;
 
     const uint token = tokens[t];
-    const uint groups_per_row = D / kPrefillGroupSize;
+    const uint groups_per_row = D / kAffineGroupSize;
     device const uint8_t* row_q = table  + token * (D / 2u);
     device const bfloat*  row_s = scales + token * groups_per_row;
     device const bfloat*  row_b = biases + token * groups_per_row;
 
     const uint8_t byte = row_q[d >> 1];
     const uint q = (d & 1u) == 0u ? uint(byte & 0x0Fu) : uint(byte >> 4);
-    const float s = float(row_s[d / kPrefillGroupSize]);
-    const float b = float(row_b[d / kPrefillGroupSize]);
-    out[t * D + d] = half((float(q) * s + b) * out_scale);
+    const float s = float(row_s[d / kAffineGroupSize]);
+    const float b = float(row_b[d / kAffineGroupSize]);
+    out[t * D + d] = gemma_scaled_embedding(float(q) * s + b, out_scale);
 }
 
 static inline float prefill_rms_block_inv(
@@ -122,6 +280,8 @@ static inline float prefill_rms_block_inv(
     uint simdgroups,
     threadgroup float* partial
 ) {
+    if (kGemmaSourceFP16) return gemma_source_norm_inv(x, D, eps, simd_lane_id,
+        simd_group_id, simdgroups, partial);
     float acc = 0.0f;
     for (uint i = lid; i < D; i += lsize) {
         float v = float(x[i]);
@@ -166,7 +326,7 @@ void prefill_rmsnorm_bf16w_block(
     const float inv = prefill_rms_block_inv(xr, D, eps, lid, lsize, lane, sg, sgs, partial);
 
     for (uint i = lid; i < D; i += lsize) {
-        yr[i] = half(float(xr[i]) * inv * float(weight[i]));
+        yr[i] = gemma_weighted_norm(float(xr[i]), inv, float(weight[i]));
     }
 }
 
@@ -199,7 +359,7 @@ void prefill_rmsnorm_bf16w_perhead_block(
     const float inv = prefill_rms_block_inv(xh, head_dim, eps, lid, lsize, lane, sg, sgs, partial);
 
     for (uint i = lid; i < head_dim; i += lsize) {
-        yh[i] = half(float(xh[i]) * inv * float(weight[i]));
+        yh[i] = gemma_weighted_norm(float(xh[i]), inv, float(weight[i]));
     }
 }
 
@@ -276,7 +436,7 @@ void prefill_post_attn_setup_block(
                                                  lid, lsize, lane, sg, sgs,
                                                  partial);
     for (uint i = lid; i < D; i += lsize) {
-        attn_norm_tg[i] = half(float(attn_row[i]) * attn_inv * float(w_post_attn[i]));
+        attn_norm_tg[i] = gemma_weighted_norm(float(attn_row[i]), attn_inv, float(w_post_attn[i]));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -288,26 +448,31 @@ void prefill_post_attn_setup_block(
         float hf = float(h);
         acc = fma(hf, hf, acc);
     }
-    acc = simd_sum(acc);
-    if (lane == 0) {
-        partial[sg] = acc;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    if (sg == 0) {
-        float sum = (lane < sgs) ? partial[lane] : 0.0f;
-        sum = simd_sum(sum);
+    if (kGemmaSourceFP16) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        gemma_source_norm_inv(hidden_tg, D, rms_eps, lane, sg, sgs, partial);
+    } else {
+        acc = simd_sum(acc);
         if (lane == 0) {
-            partial[0] = rsqrt(sum / float(D) + rms_eps);
+            partial[sg] = acc;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (sg == 0) {
+            float sum = (lane < sgs) ? partial[lane] : 0.0f;
+            sum = simd_sum(sum);
+            if (lane == 0) {
+                partial[0] = rsqrt(sum / float(D) + rms_eps);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float hidden_inv = partial[0];
     for (uint i = lid; i < D; i += lsize) {
         const float h = float(hidden_tg[i]) * hidden_inv;
-        dense_row[i] = half(h * float(w_pre_ffn[i]));
-        routed_row[i] = half(h * float(w_pre_ffn2[i]));
+        dense_row[i] = gemma_weighted_norm(float(hidden_tg[i]), hidden_inv, float(w_pre_ffn[i]));
+        routed_row[i] = gemma_weighted_norm(float(hidden_tg[i]), hidden_inv, float(w_pre_ffn2[i]));
         router_row[i] = half(h);
     }
 }
@@ -347,7 +512,7 @@ void prefill_layer_tail_block(
                                                lid, lsize, lane, sg, sgs,
                                                partial);
     for (uint i = lid; i < D; i += lsize) {
-        tmp_tg[i] = half(float(h2_row[i]) * inv_h2 * float(w_postffn2[i]));
+        tmp_tg[i] = gemma_weighted_norm(float(h2_row[i]), inv_h2, float(w_postffn2[i]));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -356,29 +521,33 @@ void prefill_layer_tail_block(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    float acc = 0.0f;
-    for (uint i = lid; i < D; i += lsize) {
-        float v = float(h12_tg[i]);
-        acc = fma(v, v, acc);
-    }
-    acc = simd_sum(acc);
-    if (lane == 0) {
-        partial[sg] = acc;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    if (sg == 0) {
-        float sum = (lane < sgs) ? partial[lane] : 0.0f;
-        sum = simd_sum(sum);
-        if (lane == 0) {
-            partial[0] = rsqrt(sum / float(D) + rms_eps);
+    if (kGemmaSourceFP16) {
+        gemma_source_norm_inv(h12_tg, D, rms_eps, lane, sg, sgs, partial);
+    } else {
+        float acc = 0.0f;
+        for (uint i = lid; i < D; i += lsize) {
+            float v = float(h12_tg[i]);
+            acc = fma(v, v, acc);
         }
+        acc = simd_sum(acc);
+        if (lane == 0) {
+            partial[sg] = acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (sg == 0) {
+            float sum = (lane < sgs) ? partial[lane] : 0.0f;
+            sum = simd_sum(sum);
+            if (lane == 0) {
+                partial[0] = rsqrt(sum / float(D) + rms_eps);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float inv_h12 = partial[0];
     for (uint i = lid; i < D; i += lsize) {
-        tmp_tg[i] = half(float(h12_tg[i]) * inv_h12 * float(w_postffn[i]));
+        tmp_tg[i] = gemma_weighted_norm(float(h12_tg[i]), inv_h12, float(w_postffn[i]));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -519,7 +688,7 @@ static inline float prefill_moe_int4_gemv_row_dev(
     uint row,
     uint N
 ) {
-    const uint groups = N / kPrefillGroupSize;
+    const uint groups = N / kAffineGroupSize;
     const uint row_bytes = N / 2u;
     device const uint8_t* W_row = W + row * row_bytes;
     device const bfloat* s_row = S + row * groups;
@@ -529,17 +698,23 @@ static inline float prefill_moe_int4_gemv_row_dev(
     for (uint g = 0; g < groups; ++g) {
         const float scale = float(s_row[g]);
         const float bias = float(b_row[g]);
-        device const uint8_t* Wg = W_row + g * (kPrefillGroupSize / 2u);
-        device const half* xg = x + g * kPrefillGroupSize;
+        device const uint8_t* Wg = W_row + g * (kAffineGroupSize / 2u);
+        device const half* xg = x + g * kAffineGroupSize;
         float dot_qx = 0.0f;
         float sum_x = 0.0f;
-        for (uint k = 0; k < kPrefillGroupSize / 2u; ++k) {
+        for (uint k = 0; k < kAffineGroupSize / 2u; ++k) {
             const uint8_t packed = Wg[k];
             const float x0 = float(xg[2u * k]);
             const float x1 = float(xg[2u * k + 1u]);
             dot_qx = fma(float(uint(packed & 0x0Fu)), x0, dot_qx);
             dot_qx = fma(float(uint(packed >> 4)), x1, dot_qx);
             sum_x += x0 + x1;
+        }
+        if (kGemmaSourceFP16) {
+            sum_x = 0.0f;
+            for (uint k = 0; k < kAffineGroupSize; k += 4u) {
+                sum_x += gemma_source_quad_sum(half4(xg[k], xg[k + 1u], xg[k + 2u], xg[k + 3u]));
+            }
         }
         acc = fma(scale, dot_qx, acc);
         acc = fma(bias, sum_x, acc);
@@ -555,7 +730,7 @@ static inline float prefill_moe_int4_gemv_row_tg(
     uint row,
     uint N
 ) {
-    const uint groups = N / kPrefillGroupSize;
+    const uint groups = N / kAffineGroupSize;
     const uint row_bytes = N / 2u;
     device const uint8_t* W_row = W + row * row_bytes;
     device const bfloat* s_row = S + row * groups;
@@ -565,17 +740,23 @@ static inline float prefill_moe_int4_gemv_row_tg(
     for (uint g = 0; g < groups; ++g) {
         const float scale = float(s_row[g]);
         const float bias = float(b_row[g]);
-        device const uint8_t* Wg = W_row + g * (kPrefillGroupSize / 2u);
-        threadgroup const half* xg = x + g * kPrefillGroupSize;
+        device const uint8_t* Wg = W_row + g * (kAffineGroupSize / 2u);
+        threadgroup const half* xg = x + g * kAffineGroupSize;
         float dot_qx = 0.0f;
         float sum_x = 0.0f;
-        for (uint k = 0; k < kPrefillGroupSize / 2u; ++k) {
+        for (uint k = 0; k < kAffineGroupSize / 2u; ++k) {
             const uint8_t packed = Wg[k];
             const float x0 = float(xg[2u * k]);
             const float x1 = float(xg[2u * k + 1u]);
             dot_qx = fma(float(uint(packed & 0x0Fu)), x0, dot_qx);
             dot_qx = fma(float(uint(packed >> 4)), x1, dot_qx);
             sum_x += x0 + x1;
+        }
+        if (kGemmaSourceFP16) {
+            sum_x = 0.0f;
+            for (uint k = 0; k < kAffineGroupSize; k += 4u) {
+                sum_x += gemma_source_quad_sum(half4(xg[k], xg[k + 1u], xg[k + 2u], xg[k + 3u]));
+            }
         }
         acc = fma(scale, dot_qx, acc);
         acc = fma(bias, sum_x, acc);
@@ -607,31 +788,51 @@ kernel void prefill_router_gemma4_block(
     const uint KK = min(top_k, kPrefillRouterMaxTopK);
     device const half* row_hidden = hidden + row * hidden_stride;
 
-    for (uint e = tid; e < NE; e += tg_size) {
-        const uint n_groups = D / kPrefillGroupSize;
-        device const uint8_t* W_row = W + e * D;
-        device const bfloat* s_row = scales + e * n_groups;
-        device const bfloat* b_row = biases + e * n_groups;
-
-        float acc = 0.0f;
-        for (uint g = 0; g < n_groups; ++g) {
-            float s = float(s_row[g]);
-            float b = float(b_row[g]);
-            device const uint8_t* Wg = W_row + g * kPrefillGroupSize;
-            device const half* xg = row_hidden + g * kPrefillGroupSize;
-            device const bfloat* eg = effective_scale + g * kPrefillGroupSize;
-            float dot_qx = 0.0f;
-            float sum_x = 0.0f;
-            for (uint k = 0; k < kPrefillGroupSize; ++k) {
-                float q = float(uint(Wg[k]));
-                float xv = float(xg[k]) * float(eg[k]);
-                dot_qx = fma(q, xv, dot_qx);
-                sum_x += xv;
-            }
-            acc = fma(s, dot_qx, acc);
-            acc = fma(b, sum_x, acc);
+    if (kRouterBF16 && kGemmaSourceFP16) {
+        const uint lane = tid % 32u, group = tid / 32u;
+        for (uint e = group; e < NE; e += tg_size / 32u) {
+            const float score = gemma_source_router_dot(
+                reinterpret_cast<device const bfloat*>(W) + e * D, row_hidden,
+                reinterpret_cast<device const half*>(effective_scale), D, lane);
+            if (lane == 0) scores[e] = float(half(score));
         }
-        scores[e] = acc;
+    } else {
+        for (uint e = tid; e < NE; e += tg_size) {
+            float acc = 0.0f;
+            if (kRouterBF16) {
+                device const bfloat* W_row = reinterpret_cast<device const bfloat*>(W) + e * D;
+                for (uint col = 0; col < D; ++col) {
+                    const float x = kGemmaSourceFP16
+                        ? float(half(row_hidden[col] * reinterpret_cast<device const half*>(effective_scale)[col]))
+                        : float(row_hidden[col]) * float(effective_scale[col]);
+                    const float w = kGemmaSourceFP16 ? float(half(W_row[col])) : float(W_row[col]);
+                    acc = fma(w, x, acc);
+                }
+            } else {
+                const uint n_groups = D / kPrefillGroupSize;
+                device const uint8_t* W_row = W + e * D;
+                device const bfloat* s_row = scales + e * n_groups;
+                device const bfloat* b_row = biases + e * n_groups;
+                for (uint g = 0; g < n_groups; ++g) {
+                    float s = float(s_row[g]);
+                    float b = float(b_row[g]);
+                    device const uint8_t* Wg = W_row + g * kPrefillGroupSize;
+                    device const half* xg = row_hidden + g * kPrefillGroupSize;
+                    device const bfloat* eg = effective_scale + g * kPrefillGroupSize;
+                    float dot_qx = 0.0f;
+                    float sum_x = 0.0f;
+                    for (uint k = 0; k < kPrefillGroupSize; ++k) {
+                        float q = float(uint(Wg[k]));
+                        float xv = float(xg[k]) * float(eg[k]);
+                        dot_qx = fma(q, xv, dot_qx);
+                        sum_x += xv;
+                    }
+                    acc = fma(s, dot_qx, acc);
+                    acc = fma(b, sum_x, acc);
+                }
+            }
+            scores[e] = kGemmaSourceFP16 ? float(half(acc)) : acc;
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -645,10 +846,11 @@ kernel void prefill_router_gemma4_block(
 
         for (uint e = 0; e < NE; ++e) {
             float s = scores[e];
-            if (KK > 0 && s <= top_score[KK - 1]) continue;
+            if (KK > 0 && (s < top_score[KK - 1] ||
+                (!kGemmaSourceFP16 && s == top_score[KK - 1]))) continue;
             uint pos = KK;
             for (uint i = 0; i < KK; ++i) {
-                if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
+                if (s > top_score[i] || (s == top_score[i] && (kGemmaSourceFP16 ? e > top_idx[i] : e < top_idx[i]))) {
                     pos = i;
                     break;
                 }
@@ -662,6 +864,10 @@ kernel void prefill_router_gemma4_block(
             top_score[pos] = s;
         }
 
+        half source_probabilities[8];
+        if (kGemmaSourceFP16 && KK == 8u) {
+            gemma_source_softmax8(top_score, source_probabilities);
+        }
         float max_s = top_score[0];
         float sum_exp = 0.0f;
         float exps[kPrefillRouterMaxTopK];
@@ -675,7 +881,9 @@ kernel void prefill_router_gemma4_block(
             const float w = exps[i] / sum_exp;
             const float gain = float(per_expert_scale[expert_idx]);
             out_indices[row * top_k + i] = expert_idx;
-            out_weights[row * top_k + i] = half(w * gain);
+            out_weights[row * top_k + i] = (kGemmaSourceFP16 && KK == 8u)
+                ? source_probabilities[i] * half(gain)
+                : (kGemmaSourceFP16 ? half(w) * half(gain) : half(w * gain));
         }
     }
 }
@@ -693,12 +901,28 @@ kernel void prefill_moe_reduce_token_major(
     const uint t = gid.y;
     if (t >= T || d >= D) return;
 
+    if (kGemmaSourceFP16) {
+        volatile half acc = 0.0h;
+        for (uint rank = top_k; rank > 0u; --rank) {
+            const uint r = rank - 1u;
+            const uint partial_index = (t * top_k + r) * D + d;
+            const half product = half(gemma_source_weighted_expert(
+                float(route_partials[partial_index]), route_weights[t * top_k + r]));
+            acc = acc + product;
+        }
+        h2[t * D + d] = acc;
+        return;
+    }
+
     float acc = 0.0f;
     for (uint r = 0; r < top_k; ++r) {
         const uint partial_index = (t * top_k + r) * D + d;
-        acc = fma(float(route_weights[t * top_k + r]),
-                  float(route_partials[partial_index]),
-                  acc);
+        if (kGemmaSourceFP16) {
+            acc += gemma_source_weighted_expert(float(route_partials[partial_index]), route_weights[t * top_k + r]);
+        } else {
+            acc = fma(float(route_weights[t * top_k + r]),
+                      float(route_partials[partial_index]), acc);
+        }
     }
     h2[t * D + d] = half(acc);
 }
@@ -797,6 +1021,53 @@ kernel void inkling_prefill_expert_down_accum(
     acc[index] = fma(pair_weights[p.pair_start + t], value, acc[index]);
 }
 
+#ifndef MFERENCE_GEMMA_SOURCE_PROJECTION
+#define MFERENCE_GEMMA_SOURCE_PROJECTION
+// QAT's source GEMV rounds the input sum in half quads, accumulates four
+// products at a time, and adds each complete affine sub-result. Callers of
+// this path compile this module with safe math: fast-math compilation does
+// not preserve the source's FP16 rounding boundaries.
+static inline float gemma_source_projection_row(
+    device const uint8_t* weights,
+    device const bfloat* scales,
+    device const bfloat* biases,
+    device const half* x,
+    uint width, uint group_size, bool fast_shape, uint lane
+) {
+    device const ushort* packed_weights = (device const ushort*)weights;
+    const uint values = fast_shape ? 16u : 8u;
+    float result = 0.0f;
+    for (uint base = lane * values; base < width; base += 32u * values) {
+        float sum = 0.0f, dot = 0.0f;
+        for (uint i = 0; i < values; i += 4u) {
+            const uint k = base + i;
+            const ushort packed = packed_weights[k / 4u];
+            sum += x[k] + x[k + 1u] + x[k + 2u] + x[k + 3u];
+            dot += float(x[k]) * (packed & 15u)
+                + (float(x[k + 1u]) / 16.0f) * (packed & 240u)
+                + (float(x[k + 2u]) / 256.0f) * (packed & 3840u)
+                + (float(x[k + 3u]) / 4096.0f) * (packed & 61440u);
+        }
+        const uint group = base / group_size;
+        result += float(half(scales[group])) * dot + sum * float(half(biases[group]));
+    }
+    return simd_sum(result);
+}
+#endif
+
+static inline float prefill_grouped_moe_projection_row(
+    device const uint8_t* W, device const bfloat* S, device const bfloat* B,
+    device const half* x, uint row, uint width, uint lane
+) {
+    if (kGemmaSourceFP16) {
+        const uint groups = width / kAffineGroupSize;
+        return gemma_source_projection_row(W + row * (width / 2u),
+            S + row * groups, B + row * groups, x,
+            width, kAffineGroupSize, width % 512u == 0u, lane);
+    }
+    return prefill_moe_int4_gemv_row_dev(W, S, B, x, row, width);
+}
+
 kernel void prefill_grouped_routed_moe_batched_phase1(
     device const half*                                   hidden               [[buffer(0)]],
     device const PrefillTokenExpertPairMSL*              sorted_pairs         [[buffer(1)]],
@@ -805,7 +1076,8 @@ kernel void prefill_grouped_routed_moe_batched_phase1(
     constant PrefillGroupedRoutedMoEStreamedParamsMSL&   p                    [[buffer(10)]],
     uint2                                                gid                  [[thread_position_in_grid]]
 ) {
-    const uint f = gid.x;
+    const uint f = kGemmaSourceFP16 ? gid.x / 32u : gid.x;
+    const uint lane = gid.x % 32u;
     const uint pair_local = gid.y;
     if (f >= p.F || pair_local >= p.pair_count) return;
 
@@ -828,14 +1100,16 @@ kernel void prefill_grouped_routed_moe_batched_phase1(
     device const bfloat* up_s = reinterpret_cast<device const bfloat*>(expert + p.up_s_off);
     device const bfloat* up_b = reinterpret_cast<device const bfloat*>(expert + p.up_b_off);
 
-    const float gate = prefill_moe_int4_gemv_row_dev(gate_W, gate_s, gate_b, x, f, p.D);
-    const float up = prefill_moe_int4_gemv_row_dev(up_W, up_s, up_b, x, f, p.D);
+    const float gate = prefill_grouped_moe_projection_row(gate_W, gate_s, gate_b, x, f, p.D, lane);
+    const float up = prefill_grouped_moe_projection_row(up_W, up_s, up_b, x, f, p.D, lane);
+    if (kGemmaSourceFP16 && lane != 0u) return;
     const uint row_elements = p.pair_count * p.F;
     const uint index = pair_local * p.F + f;
     gate_up_act_scratch[index] = half(gate);
     gate_up_act_scratch[row_elements + index] = half(up);
     gate_up_act_scratch[2u * row_elements + index] =
-        half(prefill_hidden_activation(gate) * up);
+        (kGemmaSourceFP16 ? gemma_source_geglu(half(gate), half(up))
+            : half(prefill_hidden_activation(gate) * up));
 }
 
 kernel void prefill_grouped_routed_moe_batched_down(
@@ -847,7 +1121,8 @@ kernel void prefill_grouped_routed_moe_batched_down(
     constant PrefillGroupedRoutedMoEStreamedParamsMSL&   p                    [[buffer(10)]],
     uint2                                                gid                  [[thread_position_in_grid]]
 ) {
-    const uint d = gid.x;
+    const uint d = kGemmaSourceFP16 ? gid.x / 32u : gid.x;
+    const uint lane = gid.x % 32u;
     const uint pair_local = gid.y;
     if (d >= p.D || pair_local >= p.pair_count) return;
 
@@ -866,7 +1141,8 @@ kernel void prefill_grouped_routed_moe_batched_down(
     device const bfloat* down_s = reinterpret_cast<device const bfloat*>(expert + p.down_s_off);
     device const bfloat* down_b = reinterpret_cast<device const bfloat*>(expert + p.down_b_off);
     device const half* act = gate_up_act_scratch + 2u * p.pair_count * p.F + pair_local * p.F;
-    const half value = half(prefill_moe_int4_gemv_row_dev(down_W, down_s, down_b, act, d, p.F));
+    const half value = half(prefill_grouped_moe_projection_row(down_W, down_s, down_b, act, d, p.F, lane));
+    if (kGemmaSourceFP16 && lane != 0u) return;
     down_scratch[pair_local * p.D + d] = value;
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
 }
@@ -880,17 +1156,21 @@ kernel void prefill_grouped_routed_moe_resident_phase1(
     device const uint8_t* slab [[buffer(4)]],
     constant PrefillGroupedRoutedMoEStreamedParamsMSL& p [[buffer(5)]],
     constant uint& stride [[buffer(6)]], uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= p.F || gid.y >= p.pair_count) return;
+    const uint f = kGemmaSourceFP16 ? gid.x / 32u : gid.x;
+    const uint lane = gid.x % 32u;
+    if (f >= p.F || gid.y >= p.pair_count) return;
     const PrefillTokenExpertPairMSL pair = pairs[gid.y];
     device const uint8_t* expert = slab + ulong(pair.expert) * ulong(stride);
     device const half* x = hidden + pair.token * p.hidden_stride_elements;
-    const float gate = prefill_moe_int4_gemv_row_dev(expert + p.gate_W_off,
+    const float gate = prefill_grouped_moe_projection_row(expert + p.gate_W_off,
         reinterpret_cast<device const bfloat*>(expert + p.gate_s_off),
-        reinterpret_cast<device const bfloat*>(expert + p.gate_b_off), x, gid.x, p.D);
-    const float up = prefill_moe_int4_gemv_row_dev(expert + p.up_W_off,
+        reinterpret_cast<device const bfloat*>(expert + p.gate_b_off), x, f, p.D, lane);
+    const float up = prefill_grouped_moe_projection_row(expert + p.up_W_off,
         reinterpret_cast<device const bfloat*>(expert + p.up_s_off),
-        reinterpret_cast<device const bfloat*>(expert + p.up_b_off), x, gid.x, p.D);
-    act[gid.y * p.F + gid.x] = half(prefill_hidden_activation(gate) * up);
+        reinterpret_cast<device const bfloat*>(expert + p.up_b_off), x, f, p.D, lane);
+    if (kGemmaSourceFP16 && lane != 0u) return;
+    act[gid.y * p.F + f] = (kGemmaSourceFP16 ? gemma_source_geglu(half(gate), half(up))
+            : half(prefill_hidden_activation(gate) * up));
 }
 
 kernel void prefill_grouped_routed_moe_resident_down(
@@ -900,14 +1180,17 @@ kernel void prefill_grouped_routed_moe_resident_down(
     device const uint8_t* slab [[buffer(4)]],
     constant PrefillGroupedRoutedMoEStreamedParamsMSL& p [[buffer(5)]],
     constant uint& stride [[buffer(6)]], uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= p.D || gid.y >= p.pair_count) return;
+    const uint d = kGemmaSourceFP16 ? gid.x / 32u : gid.x;
+    const uint lane = gid.x % 32u;
+    if (d >= p.D || gid.y >= p.pair_count) return;
     const PrefillTokenExpertPairMSL pair = pairs[gid.y];
     device const uint8_t* expert = slab + ulong(pair.expert) * ulong(stride);
-    const half value = half(prefill_moe_int4_gemv_row_dev(expert + p.down_W_off,
+    const half value = half(prefill_grouped_moe_projection_row(expert + p.down_W_off,
         reinterpret_cast<device const bfloat*>(expert + p.down_s_off),
         reinterpret_cast<device const bfloat*>(expert + p.down_b_off),
-        act + gid.y * p.F, gid.x, p.F));
-    partials[(pair.token * p.top_k + pair.rank) * p.D + gid.x] = value;
+        act + gid.y * p.F, d, p.F, lane));
+    if (kGemmaSourceFP16 && lane != 0u) return;
+    partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
 }
 
 kernel void prefill_dequant_int4_qmm_f16_block(
@@ -920,13 +1203,29 @@ kernel void prefill_dequant_int4_qmm_f16_block(
     constant uint&        N      [[buffer(6)]],
     constant uint&        K      [[buffer(7)]],
     uint2                 tid    [[thread_position_in_threadgroup]],
-    uint2                 tgid   [[threadgroup_position_in_grid]]
+    uint2                 tgid   [[threadgroup_position_in_grid]],
+    uint                  simd   [[simdgroup_index_in_threadgroup]],
+    uint                  lane   [[thread_index_in_simdgroup]]
 ) {
+    if (kGemmaSourceFP16) {
+        const uint n = tgid.x * 8u + simd;
+        if (n >= N) return;
+        const uint groups = K / kAffineGroupSize;
+        for (uint row = 0; row < 8u; ++row) {
+            const uint t = tgid.y * 8u + row;
+            if (t >= T) break;
+            const float result = gemma_source_projection_row(
+                W + n * (K / 2u), scales + n * groups, biases + n * groups,
+                X + t * K, K, kAffineGroupSize, N % 8u == 0u && K % 512u == 0u, lane);
+            if (lane == 0u) Y[t * N + n] = half(result);
+        }
+        return;
+    }
     const uint n = tgid.x * 8u + tid.x;
     const uint t = tgid.y * 8u + tid.y;
     if (t >= T || n >= N) return;
 
-    const uint groups = K / kPrefillGroupSize;
+    const uint groups = K / kAffineGroupSize;
     const uint row_bytes = K / 2u;
     device const uint8_t* w_row = W + n * row_bytes;
     device const bfloat* s_row = scales + n * groups;
@@ -937,8 +1236,8 @@ kernel void prefill_dequant_int4_qmm_f16_block(
     for (uint g = 0; g < groups; ++g) {
         const float scale = float(s_row[g]);
         const float bias = float(b_row[g]);
-        const uint group_base = g * kPrefillGroupSize;
-        for (uint kk = 0; kk < kPrefillGroupSize; ++kk) {
+        const uint group_base = g * kAffineGroupSize;
+        for (uint kk = 0; kk < kAffineGroupSize; ++kk) {
             const uint k = group_base + kk;
             const uint8_t packed = w_row[k >> 1];
             const uint q = (k & 1u) == 0u ? uint(packed & 0x0Fu) : uint(packed >> 4);
@@ -955,13 +1254,16 @@ static inline void prefill_rope_apply_neox_pair(
     uint half_dim,
     uint freq_divisor,
     float position,
-    float theta_base
+    float theta_base,
+    bool proportional = false
 ) {
     const float exponent = -float(2u * i) / float(freq_divisor);
-    const float freq = pow(theta_base, exponent);
+    const float freq = kGemmaSourceFP16 && proportional
+        ? precise::divide(1.0f, precise::pow(theta_base, -exponent))
+        : pow(theta_base, exponent);
     const float angle = position * freq;
-    const float c = cos(angle);
-    const float s = sin(angle);
+    const float c = kGemmaSourceFP16 ? fast::cos(angle) : cos(angle);
+    const float s = kGemmaSourceFP16 ? fast::sin(angle) : sin(angle);
 
     const uint i0 = i;
     const uint i1 = half_dim + i;
@@ -1011,7 +1313,7 @@ kernel void prefill_rope_proportional_neox_block(
     const uint half_dim = head_dim / 2u;
     device half* head_ptr = data + t * token_stride_elems + h * head_dim;
     prefill_rope_apply_neox_pair(head_ptr, i, half_dim, head_dim,
-                                 float(start_position + t), theta_base);
+                                 float(start_position + t), theta_base, true);
 }
 
 // Qwen-style partial RoPE: rotation confined to the first `rotary_dim`

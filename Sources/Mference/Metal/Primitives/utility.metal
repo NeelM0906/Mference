@@ -14,7 +14,8 @@ void gelu_mul_fp16(
     if (tid >= count) return;
     const float g = float(gate[tid]);
     const float u = float(up[tid]);
-    out[tid] = half(gelu_pytorch_tanh(g) * u);
+    out[tid] = kGemmaSourceFP16 ? gemma_source_geglu(gate[tid], up[tid])
+        : half(gelu_pytorch_tanh(g) * u);
 }
 
 // SwiGLU counterpart for architectures with silu hidden activation (Qwen 3.6).

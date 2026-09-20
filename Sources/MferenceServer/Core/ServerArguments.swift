@@ -27,11 +27,11 @@ public struct ServerArguments: Equatable, Sendable {
 
       --model <dir>          Model directory. Required unless --library is
                              given, where it preloads one install instead.
-      --library [dir]        Serve every completed install found under <dir>,
+      --library [dir]        Serve runnable completed installs under <dir>,
                              repeatable. With no value, scans the default
                              roots: the Mference.libraryRoot default (or
-                             MFERENCE_LIBRARY_ROOT), the package checkout's
-                             scratch/, and
+                             MFERENCE_LIBRARY_ROOT), ~/llm-models,
+                             the package checkout's scratch/, and
                              ~/Library/Application Support/Mference.
                              Starting with nothing installed is fine: the
                              model list is then empty.
@@ -39,6 +39,8 @@ public struct ServerArguments: Equatable, Sendable {
                              model that is not resident unloads the current one
                              and loads it in place. One model is loaded at a
                              time and no second process is ever started.
+                             Gemma QAT has its own model ID, installed chat
+                             template and sampling defaults.
       --list-models          With --library: print the installs discovery found
                              — identifier, family, installed bytes, and path —
                              then exit 0 without binding a port or loading a
