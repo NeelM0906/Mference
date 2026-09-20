@@ -27,8 +27,10 @@ execution. Resident and larger-budget configurations keep their existing width.
 | Maple | Existing fixture plus installed 16/8-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps, cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); resident-expert mode is not implemented by this runner; not every context/hardware |
 | Inkling | Short generation/recovery gates plus installed resident/16-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps and cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); env-gated, not ordinary CI; small nonzero full-runner fixture and wider hardware remain separate |
 
-PRs #33–36 merged into `main` on September 18 (`c67e857`). New source-release
-work is in PR #37. The all-family invariant remains **not fully qualified**
+PRs #33–36 merged into `main` on September 18 (`c67e857`); PR #37 merged on
+September 20 (`049bdcd`). Further qualification is in
+[PR #38](https://github.com/NeelM0906/Mference/pull/38).
+The all-family invariant remains **not fully qualified**
 until the outstanding cells have evidence, including OS/GPU fallback paths,
 partial-chunk cancellation across the remaining runners, and real checkpoints.
 Do not hide a missing combination behind a new unsupported-context error or

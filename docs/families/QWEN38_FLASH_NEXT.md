@@ -18,7 +18,9 @@ gate passes in resident and 16-slot modes, with zero replay and exact 16-token
 greedy continuation. The [September 20 installed gate](../RELEASE_VALIDATION_2026-09-20.md)
 also passes 1,024-token chunks with observed TensorOps encodings and exact
 resident/16-slot logits across the sparse boundary. New matched speed and
-wider-context/hardware qualification remain pending; **native MTP is still not implemented**. See
+wider-context/hardware qualification remain pending; **native MTP decoding is not enabled**.
+The [MTP implementation boundary](../FLASHNEXT_MTP_STATUS.md) separates the
+new input-fusion/rollback foundations from the remaining decoder and gates. See
 [the dated validation record](../RELEASE_VALIDATION_2026-09-18.md) and
 [current support boundaries](../RELEASE_SUPPORT.md). Older roadmap statements
 below describe their dated measurements, not the status of this update.

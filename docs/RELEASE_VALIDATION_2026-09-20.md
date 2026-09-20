@@ -1,9 +1,12 @@
 # Release qualification — September 20, 2026
 
-Continuation of [September 18](RELEASE_VALIDATION_2026-09-18.md), in PR #37.
+Continuation of [September 18](RELEASE_VALIDATION_2026-09-18.md).
 The previous head `4a100e8` passed macOS 15 / Swift 6.1, macOS 26, docs and
 security checks ([CI run](https://github.com/NeelM0906/Mference/actions/runs/35384943818)).
-The PR is not merged and no source release is published.
+PR #37 merged on September 20 at `049bdcd74f3f43fd858a5e7cd88a9e134b4cc701`.
+The additional September 20 work follows that merge in
+[PR #38](https://github.com/NeelM0906/Mference/pull/38), on
+`codex/roadmap-qualification`. No source release is published.
 
 ## Environment and protocol
 
@@ -13,8 +16,8 @@ Swift 6.3.3 (`swiftlang-6.3.3.1.3`), developer directory
 Preflight: 97–98% memory free, 619 GiB available disk, no existing model owner.
 Receipt file sizes were checked before every installed-model launch; the
 loader then used full SHA-256 verification. No downloads/copies of weights,
-cache purges, worktrees, profiling or experimental controls. The old temporary
-build directory had expired and was rebuilt from the pinned package lock.
+cache purges, worktrees, profiling or experimental controls. The temporary
+dependency workspace required resolution/rebuild using the pinned package lock.
 The user-owned untracked execution-plan document is untouched.
 
 These are correctness tests, not the community speed protocol. Only one model
@@ -132,3 +135,29 @@ predeclared separately from the frozen low-budget/default-policy screen.
 Native Flash-Next MTP, matched release performance and remaining hardware
 coverage still require their own implementation/evidence; these checks do not
 close the entire roadmap.
+
+## Full regression and release build before the five-seed run
+
+Runtime `c8f3298`, documentation head `8c46ad3`, same environment as above.
+Commands ran serially, with no installed-model environment gate enabled:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-full-20260920.log 2>&1
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift build -c release --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-release-build-20260920.log 2>&1
+```
+
+Both exited 0. Full test footer:
+
+```text
+Build complete! (3.79s)
+Test run with 1253 tests in 224 suites passed after 268.488 seconds with 1 known issue.
+```
+
+The known issue remains the absent optional Flash-Next toy checkpoint. Release
+build footer: `Build complete! (86.09s)`. Installed boundary gates above ran
+separately; they are not implicitly covered by the full package invocation.
+Later MTP checkpoint work must be tested separately; it is not in this binary.
