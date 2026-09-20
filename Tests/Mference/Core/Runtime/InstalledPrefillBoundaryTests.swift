@@ -126,11 +126,30 @@ import Testing
         }
         var continuation: [Int32] = []
         var tail: [[UInt16]] = []
+        let flash = producer as? FlashNextForwardRunner
+        let checkpoint = try flash?.captureDecodeCheckpoint()
         for step in 0..<8 {
             let token = greedy()
             continuation.append(token)
             try await producer.produce(token: token, position: count + step, into: output)
             tail.append(snapshot())
+        }
+        if let flash, let checkpoint {
+            try flash.restoreDecodeCheckpoint(checkpoint)
+            let clean = try flash.captureDecodeCheckpoint()
+            // A rejected draft includes EOS and crosses a pooled-indexer block
+            // boundary above the sparse cutover. Its rows must become invisible.
+            let wrong = [Int32(model.config.flashNext.pleEosTokenID), 7, 11, 19]
+            for (step, token) in wrong.enumerated() {
+                try await flash.produce(token: token, position: count + step, into: output)
+            }
+            try flash.restoreDecodeCheckpoint(clean)
+            try flash.prepareForContinuation(expectedPosition: count)
+            for (step, token) in continuation.enumerated() {
+                try await flash.produce(token: token, position: count + step, into: output)
+                #expect(snapshot() == tail[step], "installed rollback full logits, step \(step)")
+            }
+            log("\(label) rejected-draft rollback: eight full logit rows exact")
         }
         producer.reset()
         try await append(0, 33)

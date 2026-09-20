@@ -408,6 +408,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private let gdnOut: MTLBuffer
 
     private var position = 0
+    private let checkpointOwner = UUID()
+    private var checkpointEpoch: UInt64 = 0
+    /// Internal cancellation seam; absent in normal generation.
+    var decodeWillEncodeLayer: ((Int) throws -> Void)?
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillScratch?
     /// Internal correctness seam: drain the layer before injecting a failure.
@@ -889,6 +893,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     // MARK: - Lifecycle
 
     public func reset() {
+        checkpointEpoch &+= 1
         position = 0
         prefillChunkState.reset()
         deviceGroupedPrefillLayers = 0
@@ -920,6 +925,93 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 "continuation expects position \(expectedPosition) but the runner "
                 + "is at \(position)")
         }
+    }
+
+    /// Foundation for native draft verification, not an enabled MTP decoder.
+    /// KV/indexer rows are append-only: rewinding the cursor hides speculative
+    /// rows. Recurrent state and PLE history must instead be restored exactly.
+    /// Snapshots are runner-local and all become stale on reset or restoration;
+    /// a checkpoint from a discarded branch must never resurrect overwritten KV.
+    struct DecodeCheckpoint {
+        fileprivate let owner: UUID
+        fileprivate let epoch: UInt64
+        fileprivate let position: Int
+        fileprivate let pleHistory: [Int]
+        fileprivate let sequentialPrefill: Bool
+        fileprivate let buffers: [MTLBuffer]
+    }
+
+    private func checkpointBuffers() -> [MTLBuffer] {
+        var buffers: [MTLBuffer] = []
+        for layer in 0..<cfg.numLayers where cfg.layerIsLinear(layer) {
+            if let state = gdnState {
+                buffers.append(state.stateBuffer(layer: layer))
+                buffers.append(state.convTailBuffer(layer: layer))
+            } else if let state = genericGDNState[layer] {
+                buffers.append(state.recurrent)
+                buffers.append(state.convTail)
+            }
+        }
+        if let pleScratch { buffers.append(pleScratch.convState) }
+        return buffers
+    }
+
+    func captureDecodeCheckpoint() throws -> DecodeCheckpoint {
+        try prefillChunkState.requireClean(operation: "captureDecodeCheckpoint")
+        try joinPendingMoE()
+        let sources = checkpointBuffers()
+        let copies = try sources.map { source -> MTLBuffer in
+            guard let copy = ctx.device.makeBuffer(length: source.length,
+                                                   options: .storageModePrivate) else {
+                throw MetalError.noDevice
+            }
+            return copy
+        }
+        guard let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot capture decode checkpoint")
+        }
+        for (source, copy) in zip(sources, copies) {
+            blit.copy(from: source, sourceOffset: 0, to: copy, destinationOffset: 0,
+                      size: source.length)
+        }
+        blit.endEncoding()
+        try finish(cb)
+        return DecodeCheckpoint(owner: checkpointOwner, epoch: checkpointEpoch,
+            position: position, pleHistory: pleHistory,
+            sequentialPrefill: inSequentialPrefill, buffers: copies)
+    }
+
+    func restoreDecodeCheckpoint(_ checkpoint: DecodeCheckpoint) throws {
+        guard checkpoint.owner == checkpointOwner,
+              checkpoint.epoch == checkpointEpoch,
+              checkpoint.position <= position else {
+            throw FlashNextForwardRunnerError.invalidInput("foreign, stale or future decode checkpoint")
+        }
+        try joinPendingMoE()
+        // Scratch can be resized between capture and restore. Resolve the
+        // current PLE state buffer, not a reference to retired scratch storage.
+        let destinations = checkpointBuffers()
+        guard destinations.count == checkpoint.buffers.count,
+              zip(destinations, checkpoint.buffers).allSatisfy({ $0.length == $1.length }) else {
+            throw FlashNextForwardRunnerError.invalidInput("decode checkpoint state layout changed")
+        }
+        guard let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot restore decode checkpoint")
+        }
+        prefillChunkState.markDirty(startPosition: checkpoint.position, tokenCount: 1)
+        for (destination, copy) in zip(destinations, checkpoint.buffers) {
+            blit.copy(from: copy, sourceOffset: 0, to: destination, destinationOffset: 0,
+                      size: destination.length)
+        }
+        blit.endEncoding()
+        try finish(cb)
+        position = checkpoint.position
+        pleHistory = checkpoint.pleHistory
+        inSequentialPrefill = checkpoint.sequentialPrefill
+        prefillChunkState.markCommitted()
+        checkpointEpoch &+= 1
     }
 
     // MARK: - Entry points
@@ -1764,6 +1856,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         guard var head = ctx.queue.makeCommandBuffer() else {
             throw FlashNextForwardRunnerError.commandFailed("no command buffer")
         }
+        // A cancelled/failed token can advance recurrent state and PLE before
+        // the cursor commits. It must not be used as a new clean checkpoint.
+        prefillChunkState.markDirty(startPosition: p, tokenCount: 1)
         encodeEmbedRow(commandBuffer: head, token: UInt32(token))
         try captureFloats(&head, "embed_out", embedRow, count: hidden)
         hc.encodeTileEmbedding(commandBuffer: head, embedding: embedRow,
@@ -1773,6 +1868,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
+            try decodeWillEncodeLayer?(L)
             try await encodeLayer(L, token: Int(token), position: p)
         }
 
@@ -1796,6 +1892,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
         }
         position += 1
+        prefillChunkState.markCommitted()
     }
 
     private func encodeLayer(_ L: Int, token: Int, position p: Int) async throws {
