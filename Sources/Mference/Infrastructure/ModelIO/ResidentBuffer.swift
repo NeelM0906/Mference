@@ -15,17 +15,11 @@ final class ResidentBuffer {
         let start: UInt64
         let end: UInt64
         let buffer: MTLBuffer
+        /// The first logical chunk byte within the page-aligned Metal buffer.
+        let bufferOffset: UInt64
     }
 
     let chunks: [Chunk]
-
-    /// Backwards-compatible single-chunk accessor for regions that fit in one
-    /// buffer (every family before Qwen 3.8, and all test fixtures).
-    var buffer: MTLBuffer {
-        precondition(chunks.count == 1,
-                     "resident region is chunked; resolve through chunk(containing:)")
-        return chunks[0].buffer
-    }
 
     /// `tensorSpans` are region-relative `[start, end)` byte spans that must
     /// not be split across chunks (a tensor plus its companions). They are
@@ -34,15 +28,22 @@ final class ResidentBuffer {
          fileOffset: UInt64,
          residentSize: UInt64,
          device: MTLDevice,
-         tensorSpans: [(start: UInt64, end: UInt64)] = []) throws {
-        let limit = UInt64(device.maxBufferLength)
+         tensorSpans: [(start: UInt64, end: UInt64)] = [],
+         maximumBufferLength: UInt64? = nil) throws {
+        let limit = min(maximumBufferLength ?? UInt64(device.maxBufferLength), UInt64(device.maxBufferLength))
+        let page = UInt64(getpagesize())
+        guard residentSize > 0, fileOffset <= UInt64(Int.max) - (page - 1),
+              residentSize <= UInt64(Int.max) - fileOffset - (page - 1) else {
+            throw ModelError.indexCorrupt(detail: "invalid resident mapped region")
+        }
         let ranges: [(start: UInt64, end: UInt64)]
-        if residentSize <= limit {
+        if Self.mappedSize(fileOffset: fileOffset, start: 0, end: residentSize, page: page) <= limit {
             ranges = [(0, residentSize)]
         } else {
             ranges = try Self.chunkRanges(regionSize: residentSize,
                                           limit: limit,
-                                          tensorSpans: tensorSpans)
+                                          tensorSpans: tensorSpans,
+                                          fileOffset: fileOffset, page: page)
         }
         self.chunks = try ranges.map { range in
             try Chunk(fileURL: fileURL,
@@ -65,7 +66,9 @@ final class ResidentBuffer {
     /// Trailing region bytes after the last span ride in the final chunk.
     static func chunkRanges(regionSize: UInt64,
                            limit: UInt64,
-                           tensorSpans: [(start: UInt64, end: UInt64)])
+                           tensorSpans: [(start: UInt64, end: UInt64)],
+                           fileOffset: UInt64 = 0,
+                           page: UInt64 = UInt64(getpagesize()))
         throws -> [(start: UInt64, end: UInt64)] {
         guard !tensorSpans.isEmpty else {
             throw ModelError.indexCorrupt(
@@ -77,8 +80,11 @@ final class ResidentBuffer {
         var chunkStart: UInt64 = 0
         var chunkEnd: UInt64 = 0
         for span in sorted {
+            guard span.start < span.end, span.end <= regionSize else {
+                throw ModelError.indexCorrupt(detail: "invalid resident tensor span")
+            }
             let extended = max(chunkEnd, span.end)
-            if extended - chunkStart > limit {
+            if Self.mappedSize(fileOffset: fileOffset, start: chunkStart, end: extended, page: page) > limit {
                 guard chunkEnd > chunkStart else {
                     throw ModelError.indexCorrupt(
                         detail: "resident tensor span \(span.start)..<\(span.end) " +
@@ -87,7 +93,7 @@ final class ResidentBuffer {
                 ranges.append((chunkStart, chunkEnd))
                 chunkStart = min(span.start, chunkEnd)
                 chunkEnd = span.end
-                guard chunkEnd - chunkStart <= limit else {
+                guard Self.mappedSize(fileOffset: fileOffset, start: chunkStart, end: chunkEnd, page: page) <= limit else {
                     throw ModelError.indexCorrupt(
                         detail: "resident tensor span \(span.start)..<\(span.end) " +
                                 "exceeds the device buffer limit \(limit)")
@@ -97,16 +103,25 @@ final class ResidentBuffer {
             }
         }
         // Cover any padding after the last tensor if it still fits.
-        let tail = regionSize > chunkEnd && regionSize - chunkStart <= limit
+        let tail = regionSize > chunkEnd && Self.mappedSize(
+            fileOffset: fileOffset, start: chunkStart, end: regionSize, page: page) <= limit
             ? regionSize : chunkEnd
         ranges.append((chunkStart, tail))
         return ranges
+    }
+
+    private static func mappedSize(fileOffset: UInt64, start: UInt64, end: UInt64, page: UInt64) -> UInt64 {
+        let alignedStart = (fileOffset + start) / page * page
+        let alignedEnd = (fileOffset + end + page - 1) / page * page
+        return alignedEnd - alignedStart
     }
 }
 
 private extension ResidentBuffer.Chunk {
     /// `mmap` the page-aligned window covering the chunk's file range and
-    /// wrap it so the chunk's first byte is byte 0 of the buffer.
+    /// wrap the aligned base, preserving the logical start as bufferOffset.
+    /// Passing base + sliceShift to bytesNoCopy is invalid for Metal: CPU
+    /// contents() can appear correct while GPU address translation is wrong.
     init(fileURL: URL,
          regionFileOffset: UInt64,
          start: UInt64,
@@ -124,7 +139,7 @@ private extension ResidentBuffer.Chunk {
         let chunkSize = end - start
         let alignedOffset = (fileOffset / UInt64(pageSize)) * UInt64(pageSize)
         let sliceShift = Int(fileOffset - alignedOffset)
-        let mappedLen = sliceShift + Int(chunkSize)
+        let mappedLen = (sliceShift + Int(chunkSize) + pageSize - 1) / pageSize * pageSize
         let mapped = mmap(nil, mappedLen, PROT_READ, MAP_PRIVATE,
                           fd, off_t(alignedOffset))
         if mapped == MAP_FAILED {
@@ -134,15 +149,13 @@ private extension ResidentBuffer.Chunk {
 
         _ = posix_madvise(base, mappedLen, POSIX_MADV_RANDOM)
 
-        let sliceStart = base.advanced(by: sliceShift)
-
         // Capture pointer + length for the deallocator. Do NOT capture self
         // here — that would create a retain cycle through the MTLBuffer.
         nonisolated(unsafe) let captureBase = base
         let captureLen = mappedLen
         guard let buf = device.makeBuffer(
-            bytesNoCopy: sliceStart,
-            length: Int(chunkSize),
+            bytesNoCopy: base,
+            length: mappedLen,
             options: .storageModeShared,
             deallocator: { _, _ in
                 munmap(captureBase, captureLen)
@@ -152,6 +165,6 @@ private extension ResidentBuffer.Chunk {
             throw ModelError.residentBufferWrapFailed
         }
 
-        self.init(start: start, end: end, buffer: buf)
+        self.init(start: start, end: end, buffer: buf, bufferOffset: UInt64(sliceShift))
     }
 }

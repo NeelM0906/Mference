@@ -241,7 +241,12 @@ enum FlashNextToySynthetic {
             nameAbsOffsets.append(UInt32(stringTableBase + cursor))
             cursor += n.utf8.count
         }
-        let indexBytes = UInt64(stringTableBase + stringTable.count)
+        // ResidentBuffer wraps the payload with Metal bytesNoCopy, whose
+        // starting address must be page-aligned. Match the production writer;
+        // an unaligned synthetic index can make GPU reads observe wrong bytes
+        // even though CPU-side resident accessors see the expected values.
+        let rawIndexBytes = UInt64(stringTableBase + stringTable.count)
+        let indexBytes = (rawIndexBytes + 16_383) / 16_384 * 16_384
 
         var entries: [ResidentEntry] = []
         var payloadCursor = indexBytes
