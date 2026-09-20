@@ -94,11 +94,12 @@ final class FlashNextMTPDraftRunner {
         // INT8 kernels here produce FP32 gating logits, not FP16 block
         // activations. Reject an unsupported conversion at construction rather
         // than reaching a matvec precondition after draft state has advanced.
-        let blockMatrices = [weights.embeddingProjection, weights.hiddenProjection,
+        var blockMatrices = [weights.embeddingProjection, weights.hiddenProjection,
             weights.attentionHC.mixDown, weights.attentionHC.mixUp,
             weights.mlpHC.mixDown, weights.mlpHC.mixUp, weights.mixer.mixDown, weights.mixer.mixUp,
             weights.attention.q, weights.attention.k, weights.attention.v, weights.attention.o,
             weights.sharedGateProjection, weights.sharedUp, weights.sharedDown]
+        blockMatrices += [weights.attentionHC.inject, weights.mlpHC.inject].compactMap { $0 }
         guard blockMatrices.allSatisfy({ matrix in
             if case .int8 = matrix { return false }; return true
         }) else {
