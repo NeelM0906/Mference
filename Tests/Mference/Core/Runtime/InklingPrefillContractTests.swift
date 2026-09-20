@@ -36,6 +36,18 @@ import Testing
             #expect(result.newPosition == end)
             try runner.prepareForContinuation(expectedPosition: end)
         }
+        let boundaries = [3, 31, 35, 67, 83]
+        var sequential: [[UInt16]] = []
+        if resident {
+            for (position, token) in tokens.enumerated() {
+                try await runner.produce(token: token, position: position, into: output)
+                if boundaries.contains(position + 1) { sequential.append(row()) }
+            }
+            for step in 0..<4 {
+                try await runner.produce(token: Int32(7 + 11 * step), position: 83 + step, into: output)
+                sequential.append(row())
+            }
+        }
         var expected: [[UInt16]] = []
         for pass in 0..<2 {
             runner.reset()
@@ -43,7 +55,7 @@ import Testing
             var start = 0
             // Ragged warm chunks cross the local ring, relative-bias extent
             // and the deliberately small global log-scaling threshold.
-            for end in [3, 31, 35, 67, 83] {
+            for end in boundaries {
                 try await append(start, end)
                 rows.append(row())
                 start = end
@@ -54,6 +66,25 @@ import Testing
             }
             if pass == 0 { expected = rows }
             else { #expect(rows == expected, "reset restores all four convolution and KV states") }
+        }
+        for (index, pair) in zip(expected, sequential).enumerated() {
+            var maxError: Float = 0
+            var dot: Double = 0, aa: Double = 0, bb: Double = 0
+            for (a, b) in zip(pair.0.prefix(250), pair.1.prefix(250)) {
+                let actual = Float(Float16(bitPattern: a))
+                let reference = Float(Float16(bitPattern: b))
+                maxError = max(maxError, abs(actual - reference))
+                dot += Double(actual) * Double(reference)
+                aa += Double(actual) * Double(actual)
+                bb += Double(reference) * Double(reference)
+            }
+            let cosine = dot / max((aa * bb).squareRoot(), 1e-20)
+            // Different routed reductions have FP16 stores in different places.
+            // Fixed pre-run bounds: absolute error plus direction, not a
+            // tolerance inferred from whichever result this invocation gives.
+            #expect(maxError <= 0.002)
+            #expect(cosine >= 0.999)
+            print("[Inkling CI prefill] row=\(index) maxAbs=\(maxError) cosine=\(cosine)")
         }
         runner.reset()
         try await append(0, 3)
