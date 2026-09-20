@@ -56,3 +56,19 @@ for which synthetic and installed checks have actually executed.
 The input-fusion and rollback components alone satisfy none of the final
 speed/default-promotion gates. No additional model download is needed for the
 current host's installed sidecar.
+
+## Installed metadata inspection
+
+Read-only inspection of `scratch/qwen38flashnext-r8.gturbo` on September 20
+confirms 29 resident `mtp.*` entries. The manifest's `tensorCount=31` counts
+source tensors, including the two fused routed-expert tensors stored in the
+auxiliary pool; it is **not** the resident-entry count. The auxiliary layer
+contains 512 experts with a 2,768,896-byte stride. No weights were changed or
+loaded into a second inference process for this inspection.
+
+The pre-FC norm shapes are `[2560]` and `[10240]`; both projection matrices are
+`[2560,2560]`, matching the input-fusion component's whole-bundle/shared-matrix
+contract. Shared attention/HC norm suffixes are recognized by `normWeight`,
+but the two pre-FC names are not: their explicit fold remains part of the
+unimplemented sidecar loader. Metadata consistency is not numerical parity
+or evidence that a native draft decode has run.

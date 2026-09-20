@@ -59,8 +59,11 @@ extension Model {
     ///     (2026-09-01 parity harness), not inferred: it is the one norm in
     ///     this stack that is not zero-centered, and baking it would add one
     ///     to an already-full-form weight.
-    ///   * the `mtp.*` sidecar's norms: MTP draft decode is out of scope for
-    ///     v1, and its norms need the same treatment when it lands.
+    ///   * the MTP sidecar's `pre_fc_norm_embedding` and `pre_fc_norm_hidden`:
+    ///     these are not trunk sites and are not in this allowlist. A future
+    ///     native drafter must fold them explicitly. MTP attention/HC names
+    ///     sharing the suffixes below already follow this accessor's policy
+    ///     if requested; the accessor does not itself enable draft decoding.
     ///
     /// The reference RMSNorm upcasts internally —
     /// `_norm(x.float()) * (1 + w.float())`, cast back afterwards — so a

@@ -391,9 +391,11 @@ enum FlashNextPlanner {
     /// 10 `self_attn.k_norm`, and the final `norm`), while all 30
     /// `linear_attn.norm` tensors are already byte-identical unfolded.
     ///
-    /// Flash-Next is deliberately excluded: it has no community conversion to
-    /// mirror, its first-light run produced coherent output with the bare
-    /// weights, and folding would change every byte of an install that ships.
+    /// Flash-Next is deliberately excluded at repack: its runtime loader owns
+    /// the zero-centered-norm conversion, gated by the manifest's
+    /// `zeroCenteredNormsBakedAtInstall` flag. Folding here without publishing
+    /// that convention would add one twice. Its MTP pre-FC norms require
+    /// explicit treatment by the native drafter, not an inference from fluency.
     static func foldsNormBias(_ sourceName: String,
                               family: RepackModelFamily) -> Bool {
         switch family {
