@@ -414,6 +414,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     /// Nil in production, where resident layers remain in one command buffer.
     var prefillDidCompleteLayer: ((Int) throws -> Void)?
     private(set) var deviceGroupedPrefillLayers = 0
+    /// Successful TensorOps encodings, not a prediction from requested size.
+    /// Read after a completed prefill; a failed command is not qualification.
+    private(set) var tensorOpsPrefillEncodings = 0
+    var tensorOpsPrefillAvailable: Bool { prefillMPPGroupedMoE.isAvailable }
     /// The MoE sub-block's command buffer, committed without a wait so the CPU
     /// can start the next layer's work while it runs. Joined before anything
     /// else touches `hyper`.
@@ -888,6 +892,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         position = 0
         prefillChunkState.reset()
         deviceGroupedPrefillLayers = 0
+        tensorOpsPrefillEncodings = 0
         inSequentialPrefill = false
         try? joinPendingMoE()
         gdnState?.reset()
@@ -1494,6 +1499,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 indirectDispatch: grouping.dispatch) else {
                 throw FlashNextForwardRunnerError.commandFailed("resident grouped TensorOps encoding failed")
             }
+            tensorOpsPrefillEncodings += 1
         } else {
             try prefillGroupedMoE.encodeResidentBatched(commandBuffer: cb, hidden: scratch.mixed,
                 sortedPairs: grouping.pairs, activation: scratch.routedMatrixAct,
@@ -1557,6 +1563,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 residentExpertStride: UInt32(resident.slotStride),
                 maxPairsPerGroup: routes.maxPairsPerExpert)
             precondition(encoded, "resident grouped TensorOps encoding failed")
+            tensorOpsPrefillEncodings += 1
             try finish(cb)
         } else if cacheSlotCount == nil {
             guard let cb = ctx.queue.makeCommandBuffer() else {
@@ -1679,6 +1686,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 routePartials: scratch.routePartials,
                 argumentBuffer: argument, binding: binding,
                 params: mppParams, maxPairsPerGroup: maxPairs) {
+                tensorOpsPrefillEncodings += 1
                 return argument.buffer
             }
         }

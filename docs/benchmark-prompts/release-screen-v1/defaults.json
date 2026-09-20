@@ -1,0 +1,12 @@
+[
+  {
+    "label": "base-default",
+    "model": "qwen3.8-27b-4bit",
+    "source_revision": "legacy receipt lacks revision; index matches pin 3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+  },
+  {
+    "label": "swift-default",
+    "model": "swift-qwen3.8-27b-int4g64",
+    "source_revision": "1b30aaaf753fe5c1cb51ada2ea0367a53445359c"
+  }
+]

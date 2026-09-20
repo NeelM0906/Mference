@@ -105,6 +105,7 @@ import Testing
             #expect(result.execution?.replayedTokens == 0)
             #expect(result.execution?.batchedChunkSizes.reduce(0, +) == end - start)
             #expect(result.newPosition == end)
+            log("\(profile.family) append=\(start)..<\(end) chunks=\(result.execution?.batchedChunkSizes ?? [])")
         }
         let modeLabel = profile.family == .maple && resident ? "slots=16"
             : (resident ? "resident" : "slots=\(profile.slots)")
@@ -120,6 +121,8 @@ import Testing
         }
         if let flash = producer as? FlashNextForwardRunner {
             #expect((flash.deviceGroupedPrefillLayers > 0) == resident)
+            #expect((flash.tensorOpsPrefillEncodings > 0) == flash.tensorOpsPrefillAvailable)
+            log("\(label) TensorOps available=\(flash.tensorOpsPrefillAvailable) encodings=\(flash.tensorOpsPrefillEncodings)")
         }
         var continuation: [Int32] = []
         var tail: [[UInt16]] = []

@@ -100,6 +100,7 @@ import Testing
             #expect(runner.deviceGroupedPrefillLayers == 0)
         }
         let chunkedPrompt = Self.bits(logits, count: vocab)
+        #expect(runner.tensorOpsPrefillEncodings == 0, "toy geometry uses the portable path")
         try await runner.produce(token: continuation, position: prompt.count,
                                  into: logits)
         let chunkedNext = Self.bits(logits, count: vocab)
