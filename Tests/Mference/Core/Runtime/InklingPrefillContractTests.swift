@@ -13,7 +13,7 @@ import Testing
             expecting: cfg, streamingMode: resident ? .resident : .pread(slotCount: 8))
         let runtime = try ForwardRunnerFactory.make(model: model, context: context, maxContext: 128,
             runtimeConfiguration: RuntimeConfiguration(expertCacheSlots: 8,
-                prefillChunkTokens: 16, forceLogitsHead: true))
+                prefillChunkTokens: 32, forceLogitsHead: true))
         let runner = try #require(runtime.producer as? RealForwardRunner)
         let output = try #require(context.device.makeBuffer(length: cfg.vocabSize * 2,
                                                             options: .storageModeShared))

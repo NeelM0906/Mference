@@ -198,7 +198,7 @@ enum InklingToySynthetic {
         try write(JSONSerialization.data(withJSONObject: layout, options: [.sortedKeys]),
                   path: "packed_experts/layout.json")
         let arch: [String: Any] = [
-            "hiddenSize": 64, "ffnIntermediate": 64, "moeIntermediate": 64,
+            "hiddenSize": 64, "ffnIntermediate": 64, "moeIntermediateSize": 64,
             "numHeads": 4, "numKVHeads": 2, "numFullKVHeads": 2, "headDim": 32, "fullHeadDim": 32,
             "vocabSize": 256, "slidingWindow": 32, "finalLogitSoftcap": 0,
             "ropeTheta": 0, "fullRopeTheta": 0, "partialRotaryFactor": 0,

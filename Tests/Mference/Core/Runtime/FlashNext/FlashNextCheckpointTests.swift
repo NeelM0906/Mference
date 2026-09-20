@@ -91,7 +91,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: h.directory) }
         let tokens: [Int32] = [7, 11, 19]
         _ = try await h.runner.prefillChunked(tokens: tokens[...], startPosition: 0,
-            outputMode: .logits, config: .production(chunkTokens: 8), into: h.output, onProgress: { _ in })
+            outputMode: .logits, config: .production(chunkTokens: 32), into: h.output, onProgress: { _ in })
         let checkpoint = try h.runner.captureDecodeCheckpoint()
         try await h.runner.produce(token: 23, position: 3, into: h.output)
         let expected = h.bits()
@@ -100,7 +100,7 @@ import Testing
         h.runner.prefillDidCompleteLayer = { if $0 == 2 { throw CancellationError() } }
         do {
             _ = try await h.runner.prefillChunked(tokens: [Int32(43), 47][...], startPosition: 3,
-                outputMode: .logits, config: .production(chunkTokens: 32), into: h.output, onProgress: { _ in })
+                outputMode: .logits, config: .production(chunkTokens: 64), into: h.output, onProgress: { _ in })
             Issue.record("expected interrupted append")
         } catch is CancellationError { }
         #expect(throws: PrefillError.self) { _ = try h.runner.captureDecodeCheckpoint() }
