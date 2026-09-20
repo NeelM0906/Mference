@@ -956,6 +956,35 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         let buffer: MTLBuffer
     }
 
+    /// Owned, unmixed FP16 [tokens.count, hcCount * hiddenSize] rows from one
+    /// ordinary target batch. This is the data needed to prime a native draft
+    /// cache without replaying the target. It does not shift embeddings/tokens
+    /// or establish the draft's positional convention.
+    struct TargetHiddenRows {
+        let startPosition: Int
+        let tokens: [Int32]
+        let buffer: MTLBuffer
+    }
+
+    /// Internal opt-in consumer; nil adds no GPU allocation/copy. Called after
+    /// GPU completion but BEFORE target commit, so a consumer failure leaves
+    /// the target dirty. The owner must reset or restore BOTH target and draft;
+    /// target checkpoints cannot rewind arbitrary consumer-owned state.
+    var consumeTargetHiddenRows: ((TargetHiddenRows) throws -> Void)?
+
+    private func copyTargetRows(_ source: MTLBuffer, tokens: ArraySlice<Int32>,
+                                startPosition: Int, command: MTLCommandBuffer) throws -> TargetHiddenRows? {
+        guard consumeTargetHiddenRows != nil else { return nil }
+        let byteCount = tokens.count * bundle * MemoryLayout<Float16>.stride
+        guard let copy = ctx.device.makeBuffer(length: byteCount, options: .storageModePrivate),
+              let blit = command.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot copy target hidden rows")
+        }
+        blit.copy(from: source, sourceOffset: 0, to: copy, destinationOffset: 0, size: byteCount)
+        blit.endEncoding()
+        return TargetHiddenRows(startPosition: startPosition, tokens: Array(tokens), buffer: copy)
+    }
+
     func captureTargetHiddenBundle() throws -> TargetHiddenBundle {
         try prefillChunkState.requireClean(operation: "captureTargetHiddenBundle")
         guard position > 0, committedHiddenSource != nil else {
@@ -1347,7 +1376,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                           x: scratch.mixed, xOffset: (t - 1) * hidden * half,
                           y: logits, rows: cfg.vocabSize, cols: hidden)
         }
+        let targetRows = try copyTargetRows(scratch.hyper, tokens: tokens,
+                                           startPosition: startPosition, command: cb)
         try finish(cb)
+        if let targetRows { try consumeTargetHiddenRows?(targetRows) }
         position += t
         committedHiddenSource = (scratch.hyper, (t - 1) * bundle * half)
         prefillChunkState.markCommitted()
@@ -1939,7 +1971,15 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                           x: mixed, y: logits,
                           rows: cfg.vocabSize, cols: hidden)
         }
+        let targetRows: TargetHiddenRows?
+        if consumeTargetHiddenRows != nil {
+            targetRows = try copyTargetRows(hyper, tokens: [token][...],
+                                           startPosition: p, command: tailCB)
+        } else {
+            targetRows = nil
+        }
         try finish(tailCB)
+        if let targetRows { try consumeTargetHiddenRows?(targetRows) }
         if capture != nil, let logits {
             capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
         }

@@ -101,6 +101,87 @@ import Testing
         return Harness(directory: directory, context: context, model: model, runner: runner, output: output)
     }
 
+    @Test func allTargetRowsAreOwnedOrderedAndDoNotReplayPrefill() async throws {
+        let h = try make()
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+        let tokens: [Int32] = (0..<44).map { Int32(4 + ($0 * 17) % 53) }
+        var batches: [FlashNextForwardRunner.TargetHiddenRows] = []
+        h.runner.consumeTargetHiddenRows = { batches.append($0) }
+        let first = try await h.runner.prefillChunked(tokens: tokens.prefix(40), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: h.output, onProgress: { _ in })
+        #expect(first.execution?.batchedTokens == 40 && first.execution?.replayedTokens == 0)
+        let warm = try await h.runner.prefillChunked(tokens: tokens[40..<43], startPosition: 40,
+            outputMode: .logits, config: .production(chunkTokens: 64), into: h.output, onProgress: { _ in })
+        #expect(warm.execution?.batchedTokens == 3 && warm.execution?.replayedTokens == 0)
+        try await h.runner.produce(token: tokens[43], position: 43, into: h.output)
+        #expect(batches.map(\.startPosition) == [0, 32, 40, 43])
+        #expect(batches.map { $0.tokens.count } == [32, 8, 3, 1])
+        #expect(batches.flatMap(\.tokens) == tokens)
+        let width = h.model.config.residualStreamWidth
+        var captured: [[UInt16]] = []
+        for batch in batches {
+            #expect(batch.buffer.length == batch.tokens.count * width * 2)
+            let bits = try h.hiddenBits(.init(processedTokenCount: batch.startPosition + batch.tokens.count,
+                                               buffer: batch.buffer))
+            for row in batch.tokens.indices {
+                captured.append(Array(bits[(row * width)..<((row + 1) * width)]))
+            }
+        }
+        #expect(captured.last == (try h.hiddenBits(h.runner.captureTargetHiddenBundle())))
+        h.runner.consumeTargetHiddenRows = nil
+        h.runner.reset()
+        // Independently capture each sequential target row. This is a semantic
+        // tolerance check, not an exact speculative-verifier claim.
+        for (position, token) in tokens.enumerated() {
+            try await h.runner.produce(token: token, position: position, into: h.output)
+            let reference = try h.hiddenBits(h.runner.captureTargetHiddenBundle())
+            let expected = reference.map { Float(Float16(bitPattern: $0)) }
+            let actual = captured[position].map { Float(Float16(bitPattern: $0)) }
+            let scale = expected.map { abs($0) }.max()!
+            let error = zip(actual, expected).map { abs($0 - $1) }.max()!
+            #expect(scale > 0 && error <= scale / 512, "target hidden row \(position)")
+        }
+        var preserved: [UInt16] = []
+        for batch in batches {
+            preserved += try h.hiddenBits(.init(processedTokenCount: 0, buffer: batch.buffer))
+        }
+        #expect(preserved == captured.flatMap { $0 }, "owned rows survive scratch resize, reset and replay")
+    }
+
+    @Test(arguments: [false, true])
+    func targetRowConsumerFailureRequiresRollbackOrReset(prefill: Bool) async throws {
+        let h = try make()
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+        try await h.runner.produce(token: 7, position: 0, into: h.output)
+        let checkpoint = try h.runner.captureDecodeCheckpoint()
+        try await h.runner.produce(token: 11, position: 1, into: h.output)
+        let expected = h.bits()
+        try h.runner.restoreDecodeCheckpoint(checkpoint)
+        let retry = try h.runner.captureDecodeCheckpoint()
+        var calls = 0
+        h.runner.consumeTargetHiddenRows = { rows in
+            #expect(rows.startPosition == 1 && rows.tokens == [11])
+            calls += 1
+            throw CancellationError()
+        }
+        do {
+            if prefill {
+                _ = try await h.runner.prefillChunked(tokens: [Int32(11)][...], startPosition: 1,
+                    outputMode: .logits, config: .production(chunkTokens: 32), into: h.output, onProgress: { _ in })
+            } else {
+                try await h.runner.produce(token: 11, position: 1, into: h.output)
+            }
+            Issue.record("expected target-row consumer failure")
+        } catch is CancellationError { }
+        #expect(calls == 1 && h.runner.continuationPosition == 1)
+        #expect(throws: PrefillError.self) { try h.runner.prepareForContinuation(expectedPosition: 1) }
+        #expect(throws: PrefillError.self) { _ = try h.runner.captureTargetHiddenBundle() }
+        h.runner.consumeTargetHiddenRows = nil
+        try h.runner.restoreDecodeCheckpoint(retry)
+        try await h.runner.produce(token: 11, position: 1, into: h.output)
+        #expect(h.bits() == expected)
+    }
+
     @Test(arguments: [3, 35])
     func rejectedDraftRestoresRecurrentAndPLEState(prefixCount: Int) async throws {
         let h = try make()
