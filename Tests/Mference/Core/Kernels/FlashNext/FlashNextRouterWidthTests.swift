@@ -3,11 +3,11 @@ import Testing
 @testable import Mference
 
 @Suite struct FlashNextRouterWidthTests {
-    @Test(arguments: [6, 8, 10])
+    @Test(arguments: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     func selectsAndWritesOnlyTheConfiguredWidth(topK: Int) throws {
         let context = try MetalContext()
         let kernel = try FlashNextMoE(context: context, routerTopK: topK)
-        let experts = topK == 6 ? 8 : topK == 8 ? 32 : 512
+        let experts = topK <= 6 ? 8 : topK <= 8 ? 32 : 512
         // Unequal top-k logits expose normalization over the wrong width.
         let logits: [Float] = (0..<experts).map { Float(($0 * 17 + 11) % experts) / Float(experts) }
         let expected = FlashNextRouterReference.select(logits: logits, k: topK)

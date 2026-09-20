@@ -30,7 +30,7 @@ final class FlashNextMoE {
     private let reusableRoutedArgBuffer: MTLBuffer
 
     init(context: MetalContext, routerTopK: Int = 10) throws {
-        precondition([6, 8, 10].contains(routerTopK))
+        precondition((1...Self.routedBlobSlots).contains(routerTopK))
         self.routerTopK = routerTopK
         self.phase1PSO = try context.pipeline("flashnext_moe_phase1_gate_up_bf16")
         self.phase1SubsetPSO =
@@ -39,8 +39,8 @@ final class FlashNextMoE {
         self.sharedGatePSO = try context.pipeline("flashnext_moe_shared_gate_scale")
         // Production keeps the shipped 512/top-10 selector. Smaller parity
         // configurations must select/normalize/write their declared width.
-        let routerName = routerTopK == 6 ? "router_topk_select_softmax_k6_par"
-            : "router_topk_select_k\(routerTopK)_par"
+        let routerName = routerTopK == 10 ? "router_topk_select_k10_par"
+            : "flashnext_router_topk_select"
         self.routerSelectPSO = try context.pipeline(routerName)
         guard let function = context.library.makeFunction(
                 name: "flashnext_moe_phase1_gate_up_bf16") else {
@@ -183,7 +183,7 @@ final class FlashNextMoE {
                             outWeights: MTLBuffer,
                             outWeightsOffset: Int = 0,
                             numExperts: UInt32) {
-        precondition(Int(numExperts) >= routerTopK && numExperts <= (routerTopK == 10 ? 512 : 256))
+        precondition(Int(numExperts) >= routerTopK && numExperts <= 512)
         precondition(outIndicesOffset >= 0 && outIndicesOffset + routerTopK * 4 <= outIndices.length)
         precondition(outWeightsOffset >= 0 && outWeightsOffset + routerTopK * 2 <= outWeights.length)
         var expertCount = numExperts
@@ -194,6 +194,10 @@ final class FlashNextMoE {
         enc.setBuffer(outIndices, offset: outIndicesOffset, index: 2)
         enc.setBuffer(outWeights, offset: outWeightsOffset, index: 3)
         enc.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+        if routerTopK != 10 {
+            var k = UInt32(routerTopK)
+            enc.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 5)
+        }
         enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: 32, height: 1,
                                                                 depth: 1))
