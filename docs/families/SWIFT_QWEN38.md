@@ -150,7 +150,8 @@ Still required before promotion:
    [matched-low screen](QWEN_MATCHED_QUALIFICATION_2026-09-18.md) and
    [five-seed xhigh screen](../QWEN_SOURCE_EFFICIENCY_V1.md) now record token
    savings alongside quality failures. Neither is broad quality certification.
-   Default-policy qualification remains separate. Base Qwen is a task-quality control,
+   The separately recorded default-policy screen passes all 60 Swift cases,
+   with policy differences and corpus limits explicit. Base Qwen is a task-quality control,
    not a numerical reference for different fine-tuned weights.
 
 Until these pass, limit token-savings claims to the measured protocols, do not

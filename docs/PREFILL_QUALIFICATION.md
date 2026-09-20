@@ -16,8 +16,8 @@ execution. Resident and larger-budget configurations keep their existing width.
 
 | Family / path | Production-dispatch evidence | Limits |
 | --- | --- | --- |
-| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, mid-append cancellation/dirty rejection/reset and decode handoff | Small loader fixture; execution/state reproducibility, not independent model-quality parity |
-| Qwen 3.6, bounded / resident experts | Same matrix (including actual task cancellation between layers of a warm append) plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
+| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, cancellation/reset and decode handoff; installed resident/eight-slot gate at `ba14ff4` matches all full logits across 1,024-token window and eight continuation steps, zero replay | [Installed evidence](RELEASE_VALIDATION_2026-09-20.md); not independent upstream quality parity or fresh physical low-RAM qualification |
+| Qwen 3.6, bounded / resident experts | Same synthetic matrix plus `QwenRunnerTests`/hybrid-state parity; installed resident/eight-slot gate at `ba14ff4` matches ragged append heads and eight full continuation rows, with cancellation/dirty rejection/exact reset | [Installed evidence](RELEASE_VALIDATION_2026-09-20.md); reduced slots are not smaller-RAM hardware qualification |
 | Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts and numerical/continuation checks; `7505e82` adds actual cancellation after GPU writes in all three backends, dirty rejection and exact reset/next logits | Installed fine-tunes need their own numerical gate; fixture recovery is not physical low-RAM qualification |
 | Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` and four-row tiled `ee0bfb9` pass the installed numerical/state/MTP retest without changing tolerances | Candidate only; default-effort community attempts truncate without visible answers; broader quality/latency/hardware evidence required before promotion |
 | Flash-Next, bounded / resident | Synthetic state gates, installed short A/B, plus `c8f3298`: actual TensorOps encodings with 1,024-token chunks; exact resident/16-slot logits across 2,048-token cutover, eight continuation rows and cancellation/reset | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); wider contexts, old-OS real fallback and physical hardware remain separate |
@@ -44,8 +44,10 @@ rename host-side full-model replay as batching.
   passes 54/60 cases versus base 59/60 with 6.77% fewer completion tokens;
   the [five-seed xhigh screen](QWEN_SOURCE_EFFICIENCY_V1.md) passes 293/300
   attempts versus base 297/300 with 14.992% fewer completion tokens. A parser
-  compatibility issue is fixed separately; default-policy/performance/hardware
-  qualification remains.
+  compatibility issue is fixed separately. The default-policy screen passes
+  Swift 180/180 versus base 177/180 with 20.088% fewer completion tokens; its
+  policies differ and the base failures share one punctuation ambiguity.
+  Broader quality/performance/hardware qualification remains.
 - Phase 3: bounded GLM prefill implementation merged in PR #34; pinned install
   and current resident/16-slot sparse-cutover/continuation/recovery gate now
   complete on the 256 GiB M3 Ultra; broader hardware/performance remains open.

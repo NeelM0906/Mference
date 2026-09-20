@@ -282,3 +282,50 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 ```
 
 Exit 0; complete footer: `Build complete! (58.02s)`.
+
+## Default-policy screen and eight-slot installed regression
+
+The [default-policy screen](QWEN_SOURCE_EFFICIENCY_V1.md)
+completed all 480 requests: Swift 180/180 measured passes, base 177/180, with
+20.088% fewer Swift completion tokens. Policies differ; all three base failures
+share one ambiguous punctuation item. Both model-server sessions were stopped
+after their final request, before the next model test.
+
+Commit `ba14ff4a2a2173088c36b48ca58d202fbaf639fd` adds opt-in installed coverage
+for the eight-slot Gemma/Qwen prefill fix already on main. Same hardware and
+toolchain; preflight 98% memory free, 619 GiB disk, no model owner; all 37 Gemma
+and 47 Qwen receipt-file sizes verified, then full SHA-256 loading. Each arm
+returns before the next loads; no simultaneous model owners.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_GEMMA4_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/gemma4.gturbo \
+  MFERENCE_QWEN36_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/qwen36.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter InstalledPrefillBoundaryTests \
+  > /tmp/mference-gemma-qwen36-boundary-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (13.19s)
+Test memoryProfilesMatchAcrossBoundaries(name:) with 5 test cases passed after 59.968 seconds.
+Suite InstalledPrefillBoundaryTests passed after 59.969 seconds.
+Test run with 1 test in 1 suite passed after 59.969 seconds.
+```
+
+Only Gemma and Qwen 3.6 gates are enabled. Gemma uses 128-token chunks and
+heads 33/1023/1027/1059 across its 1,024-token window; Qwen uses 64-token
+chunks and ragged heads 33/127/131/163. **All four boundary and eight
+continuation full logit rows match exactly between resident and eight-slot
+modes for both checkpoints.** All tokens are batched with zero replay.
+Cancellation after partially advanced state, dirty reuse rejection and exact
+reset pass in all four arms. These are correctness checks, not speed or
+physical eight-GB-Mac qualification. Documentation editing continued during
+the already-built tests; no performance inference is drawn from their timing.
+
+CI for PR head `0832751` also passed both macOS 15 / Swift 6.1 and macOS 26,
+docs and security checks ([run](https://github.com/NeelM0906/Mference/actions/runs/35538016328)).
+Subsequent test/document/comment-only changes require a fresh final-head CI
+run; this historical success is not silently relabeled as a result for them.

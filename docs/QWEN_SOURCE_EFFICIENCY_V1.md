@@ -118,7 +118,7 @@ Raw evidence is retained locally at
 `2c1d06e5640a1da4b78c3808b096c2641d1cc206c5bf2b39b2c4587bcabf5848`.
 It is not bundled in the source release. This hash identifies the unchanged
 original run, not a new aggregate result after the parser fix. The separate
-default-policy screen remains unexecuted.
+default-policy screen is recorded below.
 
 ### Separate live boolean-parser recheck
 
@@ -145,3 +145,69 @@ Raw recheck SHA-256:
 `bfd10443cfedb1f0a9d4c93a3d494be7671b7b7125dd7c142676ce482012e16e`.
 This is targeted regression evidence, not a new aggregate 60-case score.
 The original base 297/300 and Swift 293/300 results remain unchanged.
+
+## Completed default-policy screen — September 20
+
+The separately frozen `defaults.json` profiles now complete all **480/480**
+requests: one discarded warmup and three measured repeats per case/profile.
+This is the unchanged `release-screen-v1` protocol, not a rerun of the xhigh
+experiment. Binary `13a0367`, same M3 Ultra / 256 GiB, macOS 26.3 and Swift
+6.3.3; 98% memory free, 619 GiB disk, both seven-file receipts checked and
+strict verification. Machine-record documentation head is `0832751`; later
+test/document/comment-only edits did not rebuild or change the running binary.
+No other model owner, downloads, builds, profiling or demanding workloads.
+Light source/document editing, GitHub and upstream-reference checks continued.
+
+```sh
+env MFERENCE_MTP=0 /tmp/mference-phase1-build.sXnNTs/release/MferenceServer \
+  --library scratch/qwen38.gturbo --library scratch/swiftqwen38.gturbo \
+  --port 18489 --max-context 4096 --prompt-cache-mode off \
+  > scratch/qwen-default-evidence.UPJUs6/server.log 2>&1
+python3 Scripts/release_task_screen.py --port 18489 \
+  --profiles docs/benchmark-prompts/release-screen-v1/defaults.json \
+  --engine-commit 13a0367a78916f6c11fdfeb119baa03dabb04677 \
+  --machine-record scratch/qwen-default-evidence.UPJUs6/machine.txt \
+  --output scratch/qwen-default-evidence.UPJUs6/results.jsonl \
+  > scratch/qwen-default-evidence.UPJUs6/progress.log 2>&1
+python3 Scripts/release_screen_summary.py \
+  scratch/qwen-default-evidence.UPJUs6/results.jsonl \
+  > scratch/qwen-default-evidence.UPJUs6/summary.json
+```
+
+Runner and summary exit 0; server exits 0 after the final reply. Completion
+summary: `complete=true`, `received_records=480`, `expected_records=480`.
+No CLI timing footer applies; every request's timings and usage are retained.
+Both profiles have 150 measured `stop` and 30 measured `tool_calls` finishes;
+no transport errors, empty-answer failures or truncations occurred. Warmups
+are excluded from every count in this table:
+
+| Metric | Base default | Swift default |
+| --- | ---: | ---: |
+| Passing measured attempts | 177/180 | 180/180 |
+| Cases passing all three repeats | 59/60 | 60/60 |
+| Completion tokens, all measured attempts | 16,368 | 13,080 |
+| Reasoning tokens, all measured attempts | 14,286 | 10,812 |
+| Visible tokens, all measured attempts | 783 | 939 |
+
+Swift uses **20.088% fewer completion tokens** and **24.318% fewer reasoning
+tokens** here. For the 177 paired successful attempts, completion totals are
+16,281 versus 12,768 (21.577% fewer); this conditional statistic does not
+replace the all-attempt result. Base's only failing case, `tool-string`, adds
+the period discussed above in all three measured repetitions. The rubric is
+unchanged; this ambiguous item does not establish a substantive quality gap.
+Swift passes all ten tool cases, including booleans, under the corrected parser.
+
+Omitted effort deliberately means different template/reasoning policies:
+base tools disable thinking, Swift follows source-default xhigh. Greedy
+sampling is the frozen screen's setting, not the app's default sampler.
+Do not attribute this comparison's savings solely to fine-tuning. Base's
+legacy hidden reasoning is not streamed, so first model-delta time is also
+not directly comparable with Swift's reasoning deltas. No latency ranking is
+claimed. Three identical greedy repeats remain 60 tasks, not 180 independent
+questions. The prior matched-low and xhigh failures still stand.
+
+Raw results SHA-256:
+`17db9fde3b6062cc0594d45db1aa98b411156f9ab14a0dd52219f11eec827da2`.
+This closes the declared bounded default-policy screen, not broad quality,
+long-form completed-answer performance, quantization impact, or new physical
+smaller-memory qualification. Swift remains optional.
