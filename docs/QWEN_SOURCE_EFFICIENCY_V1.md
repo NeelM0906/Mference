@@ -39,3 +39,66 @@ Neither experiment changes the product default recommendation. Swift promotion
 requires successful quality and completed-answer performance evidence, not
 token savings alone. The prior matched-low comparison remains separately
 [recorded](families/QWEN_MATCHED_QUALIFICATION_2026-09-18.md).
+
+## Completed five-seed run — September 20
+
+Engine `8c46ad3ec6e594ccbd786d8d7ceeb618020f558f` (runtime `c8f3298`),
+Mac Studio M3 Ultra / 256 GiB, macOS 26.3 (25D125), Swift 6.3.3. Preflight
+reported 98% memory free and 619 GiB available disk; both completed receipts
+were checked. Full SHA-256 verification, one model owner, no model downloads.
+Exact commands:
+
+```sh
+env MFERENCE_MTP=0 /tmp/mference-phase1-build.sXnNTs/release/MferenceServer \
+  --library scratch/qwen38.gturbo --library scratch/swiftqwen38.gturbo \
+  --port 18489 --max-context 8192 --prompt-cache-mode off \
+  > scratch/qwen-seed-evidence.CzLD25/server.log 2>&1
+python3 Scripts/qwen_efficiency_screen.py --port 18489 \
+  --engine-commit 8c46ad3ec6e594ccbd786d8d7ceeb618020f558f \
+  --machine-record scratch/qwen-seed-evidence.CzLD25/machine.txt \
+  --output scratch/qwen-seed-evidence.CzLD25/results.jsonl \
+  > scratch/qwen-seed-evidence.CzLD25/progress.log 2>&1
+```
+
+Screen exit 0; complete summary: 600 received / 600 expected. Server exited 0
+after termination following the last response. There is no CLI timing footer
+for this HTTP experiment; per-request timings remain in the raw JSONL.
+Source edits and CPU-only debug builds occurred during this fixed-binary run.
+No concurrent model tests or GPU inference occurred; **latency is not a
+benchmark result**. The declared settings, seeds, corpus and scoring did not
+change. All 600 requests completed: 501 `stop`, 99 `tool_calls`, no truncations
+or transport errors.
+
+| Metric | Base xhigh | Swift xhigh |
+| --- | ---: | ---: |
+| Passing attempts | 297/300 | 293/300 |
+| Cases passing every seed | 57/60 | 57/60 |
+| Completion tokens, all attempts | 26,474 | 22,505 |
+| Reasoning tokens, all attempts | 22,662 | 18,721 |
+| Visible tokens, all attempts | 1,626 | 1,569 |
+
+Swift used **14.992% fewer completion tokens** and **17.390% fewer reasoning
+tokens** in this corpus. These totals include failures. Completion usage also
+includes tool/structural tokens, so reasoning plus visible counts need not
+equal completion counts. This supports token savings under this policy, not
+equal quality or lower completed-answer latency in general.
+
+The ten failures are preserved without rescoring:
+
+- Base `tool-order`, seed 20260920: claims the supplied lookup tool is absent.
+- Base `tool-boolean`, seed 20260924, and Swift `tool-boolean`, seeds 20260920,
+  20260921, 20260923, 20260924: XML `False` became a JSON string. This exposed
+  a schema-aware parser compatibility gap, not five independent reasoning
+  errors. The subsequent fix and targeted rerun are separate evidence.
+- Base `tool-string`, seed 20260923, and Swift `tool-string`, seeds 20260920,
+  20260924: an extra final period. The prompt's punctuation is ambiguous, but
+  its frozen exact-match rubric is retained; the parser must not remove text.
+- Swift `code-slice`, seed 20260920: valid JSON but incorrect Python slice
+  result `[2, 4, 5]` instead of `[2, 4]`.
+
+Raw evidence is retained locally at
+`scratch/qwen-seed-evidence.CzLD25/results.jsonl`; SHA-256
+`2c1d06e5640a1da4b78c3808b096c2641d1cc206c5bf2b39b2c4587bcabf5848`.
+It is not bundled in the source release. This hash identifies the unchanged
+original run, not a new aggregate result after the parser fix. The separate
+default-policy screen remains unexecuted.

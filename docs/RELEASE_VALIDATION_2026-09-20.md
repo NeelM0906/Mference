@@ -161,3 +161,87 @@ The known issue remains the absent optional Flash-Next toy checkpoint. Release
 build footer: `Build complete! (86.09s)`. Installed boundary gates above ran
 separately; they are not implicitly covered by the full package invocation.
 Later MTP checkpoint work must be tested separately; it is not in this binary.
+
+## Checkpoint, input-fusion, Inkling and boolean-parser regression
+
+Commit `3462477e170e1ee289b40ddd48d33a0384af17af`; same machine/toolchain,
+98% memory free, 619 GiB available disk, no other model owner. No installed
+weights are needed: fixtures generate small nonzero test weights locally.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'FlashNextCheckpointTests|FlashNextMTPInputFusionTests|InklingPrefillContractTests|QwenToolCallParserTests|ChatMLDecoderTests|FlashNextChunkedPrefillTests' \
+  > /tmp/mference-focused-v4-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (5.94s)
+Test run with 40 tests in 6 suites passed after 3.831 seconds.
+```
+
+- Flash-Next rollback restores exact full logits after rejected drafts, PLE
+  EOS-history changes, pooled-index boundaries and interrupted decode/prefill.
+  Foreign, stale and discarded-branch snapshots are rejected. The scratch
+  resize test uses supported 32-to-64-token chunks.
+- Native MTP input fusion matches its independent scalar oracle exactly
+  (`maxAbs=0`) for BF16/INT4 at hidden sizes 64 and 2,560. This tests only input
+  fusion, not an integrated or independently qualified native MTP decoder.
+- The nonzero Inkling fixture compares resident and eight-slot production
+  batching across a 32-token window and relative-bias/log-scaling boundaries.
+  Nine full boundary/continuation rows are bit-identical between profiles and
+  after reset. Against sequential execution, maximum absolute error is
+  `1.5258789e-05`, minimum cosine `0.9999999783216431`; the predeclared bounds
+  remain 0.002 and 0.999. Cancellation, dirty rejection and recovery pass.
+- Qwen's XML parser recognizes case-insensitive true/false only for an explicit
+  boolean schema. Declared strings, ambiguous schemas and unrecognized values
+  are unchanged; token-by-token streaming uses the same contract. It does not
+  evaluate Python literals or silently coerce arbitrary malformed arguments.
+
+Development runs initially aborted on unsupported 8- then 16-token fixture
+chunks (`PrefillRuntimeConfig.swift:247: Precondition failed: unsupported
+prefill chunk size`, exit 1). The supported minimum is 32. The next run failed
+with one fixture manifest `keyNotFound(moeIntermediateSize)` error (exit 1,
+40 tests / six suites / 3.144 seconds); the field spelling was corrected.
+No runtime guard or numerical tolerance was relaxed. The test command also
+rebuilt debug dependencies when replacing the earlier manual compiler flags.
+
+## Five-seed Swift-Qwen token/quality screen
+
+The [separate source-policy report](QWEN_SOURCE_EFFICIENCY_V1.md) records all
+600 completed requests, settings, failures and raw-evidence hash. Base passed
+297/300 and Swift 293/300; Swift used 14.992% fewer completion tokens. The
+fixed binary predates the boolean-parser correction. Do not rescore this run
+or infer new whole-corpus quality from a targeted parser recheck.
+
+## Installed Flash-Next rollback recheck
+
+Commit `3462477`; same machine and preflight (98% memory free, 619 GiB disk),
+all 57 receipt sizes verified, strict SHA-256 loader. No other model owner.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_FLASHNEXT_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/qwen38flashnext-r8.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'InstalledPrefillBoundaryTests|FlashNextChunkedPrefillTests' \
+  > /tmp/mference-flashnext-rollback-20260920.log 2>&1
+```
+
+Exit 0; complete build and installed-suite/aggregate timing footer:
+
+```text
+Build complete! (1.43s)
+Test memoryProfilesMatchAcrossBoundaries(name:) with 3 test cases passed after 93.365 seconds.
+Suite InstalledPrefillBoundaryTests passed after 93.365 seconds.
+Test run with 7 tests in 2 suites passed after 95.316 seconds.
+```
+
+Only the Flash-Next installed parameter was enabled. All previous long-chunk,
+2,048-token sparse-boundary, TensorOps, continuation and cancellation/reset
+assertions pass again. In **both resident and 16-slot modes**, restoring a
+checkpoint after a rejected four-token draft (including EOS) reproduces all
+eight subsequent full logit rows exactly. This closes the installed rollback
+component gate, not native MTP integration, acceptance or speed qualification.
+Documentation and CPU-only script checks ran concurrently; not a speed test.

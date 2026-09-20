@@ -25,7 +25,7 @@ execution. Resident and larger-budget configurations keep their existing width.
 | DeepSeek, bounded / resident | Phase 4 PR #35: below/across/above sparse cutover, cache slots 8/16/resident, exact state and cancellation/reset; opt-in installed gate | Installed results and limitations live in `DEEPSEEK_V4_FLASH.md` |
 | MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts and golden/continuation checks; `7505e82` exercises actual warm-append cancellation/reset in all three backends and compares exact next logits | Representative full-selection/5-page-spill fixture; not every sparse budget/context or new hardware qualification |
 | Maple | Existing fixture plus installed 16/8-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps, cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); resident-expert mode is not implemented by this runner; not every context/hardware |
-| Inkling | Short generation/recovery gates plus installed resident/16-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps and cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); env-gated, not ordinary CI; small nonzero full-runner fixture and wider hardware remain separate |
+| Inkling | Nonzero CI fixture at `3462477`: resident/eight-slot exact boundary, continuation and recovery results plus bounded sequential-reference error; installed resident/16-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps and cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); installed weights remain env-gated; wider hardware/context qualification is separate |
 
 PRs #33–36 merged into `main` on September 18 (`c67e857`); PR #37 merged on
 September 20 (`049bdcd`). Further qualification is in
@@ -42,7 +42,10 @@ rename host-side full-model replay as batching.
 - Phase 2: Swift-Qwen implementation and initial qualification merged in PR #33;
   numerical retest passes. The [matched-low screen](families/QWEN_MATCHED_QUALIFICATION_2026-09-18.md)
   passes 54/60 cases versus base 59/60 with 6.77% fewer completion tokens;
-  broader default-effort quality/performance/hardware qualification remains.
+  the [five-seed xhigh screen](QWEN_SOURCE_EFFICIENCY_V1.md) passes 293/300
+  attempts versus base 297/300 with 14.992% fewer completion tokens. A parser
+  compatibility issue is fixed separately; default-policy/performance/hardware
+  qualification remains.
 - Phase 3: bounded GLM prefill implementation merged in PR #34; pinned install
   and current resident/16-slot sparse-cutover/continuation/recovery gate now
   complete on the 256 GiB M3 Ultra; broader hardware/performance remains open.
