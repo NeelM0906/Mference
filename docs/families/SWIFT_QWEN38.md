@@ -145,13 +145,19 @@ Still required before promotion:
 2. Broader Open WebUI native-tool-loop acceptance beyond the verified server
    tool round trip and browser history/parameter checks.
 3. MTP state parity, acceptance and latency per supported hardware profile.
-4. Broader base-versus-Swift task quality, token usage and repeated latency at
-   matched policies beyond the recorded 12-task screen, including quantization-
-   quality impact. Base Qwen is a task-quality control,
+4. Broader base-versus-Swift task quality and repeated completed-answer latency,
+   including quantization-quality impact. The frozen 60-case
+   [matched-low screen](QWEN_MATCHED_QUALIFICATION_2026-09-18.md) and
+   [five-seed xhigh screen](../QWEN_SOURCE_EFFICIENCY_V1.md) now record token
+   savings alongside quality failures. Neither is broad quality certification.
+   Default-policy qualification remains separate. Base Qwen is a task-quality control,
    not a numerical reference for different fine-tuned weights.
 
-Until these pass, do not claim token savings, quality preservation or a faster
-runtime from the source model's name/card, and do not promote it to the default.
+Until these pass, limit token-savings claims to the measured protocols, do not
+claim quality preservation or faster completed answers, and do not promote it
+to the default. The xhigh run also exposed a case-insensitive boolean XML
+parser compatibility gap; its correction does not retroactively change that
+run's scores.
 
 ### Independent runtime comparison
 
