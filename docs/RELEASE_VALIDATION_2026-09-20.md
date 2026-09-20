@@ -269,6 +269,58 @@ all previous sparse-boundary/full-logit/rollback/recovery gates still pass.
 This validates the capture primitive with actual target states, not the
 not-yet-connected shifted embedding pairs, native acceptance or speed.
 
+### Full regression after all-row capture
+
+Runtime/test code `fc12fcf` (documentation head became `8d9969a` during the
+already-built run); same machine/toolchain, 98% memory free, 619 GiB disk and
+no model owner at launch. No installed gates enabled.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-full-target-rows-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (1.47s)
+Test run with 1288 tests in 231 suites passed after 277.572 seconds with 2 known issues.
+```
+
+The two known issues are unchanged: absent optional upstream toy fixture and
+the native-draft row-zero FP32 precision gap. The later `28ce980` only narrows
+that test's known-issue window and corrects documentation; production code is
+unchanged. Its affected test requires a separate recheck below. Light source/
+documentation work continued during this test; no speed inference is drawn.
+
+At `28ce980cf8f4c5d7d650dafb1460aaa5c4ed0fdf`, the affected native suite was
+re-run after a fresh identical single-owner preflight, with the same test
+environment/scratch path and `--filter FlashNextMTPDraftRunnerTests`, log
+`/tmp/mference-native-bounded-issue-20260920.log`. Exit 0:
+
+```text
+Build complete! (7.20s)
+Suite FlashNextMTPDraftRunnerTests passed after 5.082 seconds with 1 known issue.
+Test run with 6 tests in 1 suite passed after 5.082 seconds with 1 known issue.
+```
+
+Its installed environment gate was disabled; the separately reported installed
+component tests above are the real-weight evidence. All four package products
+were then rebuilt serially at that same revision:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift build -c release --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-release-native-components-20260920.log 2>&1
+```
+
+Exit 0; complete footer: `Build complete! (56.83s)`.
+The rebuilt CLI, installer and server each exit 0 for `--help`; these launch
+checks do not load a model. Markdown links (75 files) and distributable archive
+contents (853 entries) pass again. The release build is not native-MTP
+qualification, a signed package, a published source release or final-head CI.
+
 ## Native Flash-Next MTP loader qualification
 
 Code `49deb89`; same Mac Studio, OS/toolchain and safety protocol below.
