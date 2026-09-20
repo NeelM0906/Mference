@@ -62,6 +62,141 @@ does not open all trunk experts, allocate a draft KV/cache, run a native draft
 or establish acceptance/performance. Full draft-runner/reference/verification
 gates remain in [MTP status](FLASHNEXT_MTP_STATUS.md).
 
+Before the subsequent alignment/target-state changes, code `49deb89` also
+passed the full serial suite: exit 0, build 1.41s, **1,271 tests in 228 suites
+after 270.633s, one known issue** (absent optional Flash-Next toy checkpoint).
+Command: `env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs`,
+log `/tmp/mference-full-mtp-loader-20260920.log`. The all-product release build
+at `d029137` exited 0, `Build complete! (58.03s)`; command
+`env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build -c release --scratch-path /tmp/mference-phase1-build.sXnNTs`,
+log `/tmp/mference-release-mtp-loader-20260920.log`.
+
+## Resident GPU alignment and target-state follow-up
+
+**Correction to earlier synthetic evidence:** the Flash-Next synthetic fixture
+had an unaligned resident index. `ResidentBuffer` passed the shifted mapping
+address directly to Metal's `bytesNoCopy` API. CPU reads could look correct
+while GPU reads used incorrect bytes: the audit observed a zero embedding and
+NaNs after PLE. Earlier byte-equality checks could compare identical NaN bits;
+they did **not** establish numerical prefill parity. The independently
+installed-model gates, which use production-aligned installs, are separate
+evidence and are not replaced by these synthetic results.
+
+`d4f5dd4` wraps the page-aligned mapping base, carries its logical byte offset
+into every weight/scale/bias `TensorView`, and includes page overhead when
+splitting at the device buffer limit. No weight files are rewritten and no
+resident-weight copy is introduced. The fixture now follows production index
+alignment. A real GPU compute test compares every payload byte at offsets
+0/137 and across a forced 32 KiB buffer limit; CPU-only tests are insufficient.
+
+With finite, nonzero fixture activations, chunked and sequential reductions
+are not bit-exact. The original short/40-token probes measured worst logit
+error 0.0078125, relative error 0.000677–0.000679, matching top choices. The
+replacement gate explicitly requires finite/nonzero rows, error no greater
+than `max(abs(reference)) / 512` (two FP16 relative-precision units), and exact
+greedy choices over eight more steps. This is a correction of invalid synthetic
+evidence, **not preservation of the previous zero-tolerance claim**. The existing
+installed-model 5% bound is unchanged. Same-execution rollback, snapshot
+ownership and reset still require byte equality.
+
+`5d260d7` captures an owned copy of the last committed **full, unmixed** target
+HC bundle, with its processed-token count. It covers decode, ragged chunked
+prefill, warm append/scratch resize, rejected drafts, reset and dirty-state
+rejection. Ordinary generation retains a view and performs no additional GPU
+copy. Checkpoints preserve the bundle as well as recurrent/PLE state. This
+does not implement a native drafter or prove chunked speculative verification.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'ResidentBufferTests|FlashNextCheckpointTests|FlashNextChunkedPrefillTests|FlashNextMTPWeightsTests|FlashNextResidentLoadTests' \
+  > /tmp/mference-resident-alignment-v3-20260920.log 2>&1
+```
+
+Exit 0; build 6.01s; **34 tests in five suites passed after 5.968s**. Same environment,
+98% memory free and 619 GiB disk; no other model owner or downloads. Initial
+hidden-state tests exposed the NaNs; fixing alignment then exposed finite
+rounding differences in the previous invalid bit-parity assertions. One test
+macro rejected a key-path predicate and was changed to its equivalent closure.
+Those failed attempts remain in `/tmp/mference-target-hidden-20260920.log`,
+`/tmp/mference-target-hidden-audit-20260920.log`, and
+`/tmp/mference-resident-alignment{,-v2}-20260920.log`. Diagnostic captures ran
+only in correctness tests, never in the performance protocol.
+
+The first full-suite rerun then stopped with exit 1 / signal 5 at the Qwen
+fixture's GDN two-byte-alignment precondition. Seven other synthetic/parity
+builders also used raw, non-page-aligned index lengths. They now follow the
+production writer's 16 KiB index alignment. The direct unaligned-buffer GPU
+test remains, so aligning the fixtures does not remove coverage of the bug.
+A further test compares every weight/scale/bias view through forced 64 KiB
+resident chunks against the original single mapping.
+
+Fixture correction `b4325a4`: the first padding edit to Inkling's custom
+`Data` builder shrank its padded region during string-table replacement;
+the second full attempt exited 1 / signal 5. Restricting replacement to the
+actual string bytes fixes that fixture-writing error. No runtime tolerance
+changed. The focused follow-up passed **29 tests in five suites after 18.577s**,
+build 5.95s, exit 0:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'ResidentBufferTests|InklingPrefillContractTests|QwenRunnerTests|DecodeOverlapTests' \
+  > /tmp/mference-aligned-fixtures-20260920.log 2>&1
+```
+
+Full-attempt logs are `/tmp/mference-full-alignment-20260920.log` and
+`/tmp/mference-full-alignment-v2-20260920.log`.
+
+The fresh full serial suite at `b4325a4` passes: exit 0, build 0.15s, **1,275 tests in
+228 suites after 271.169 seconds, one known issue** (the same absent optional
+Flash-Next reference fixture). No installed-model environment gate was set.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-full-alignment-v3-20260920.log 2>&1
+```
+
+The installed Flash-Next recheck then passed at the same code revision. Fresh
+preflight: 98% memory free, 619 GiB disk, no model/test owner, all 57 receipt
+file sizes verified. The loader used full SHA-256 verification.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_FLASHNEXT_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/qwen38flashnext-r8.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'InstalledPrefillBoundaryTests|FlashNextMTPWeightsTests|FlashNextCheckpointTests|ResidentBufferTests' \
+  > /tmp/mference-installed-alignment-20260920.log 2>&1
+```
+
+Exit 0; complete build and installed/aggregate timing footer:
+
+```text
+Build complete! (1.44s)
+Test installedSidecarLoadsWithNativeDtypes() passed after 2.204 seconds.
+Test memoryProfilesMatchAcrossBoundaries(name:) with 5 test cases passed after 92.996 seconds.
+Suite InstalledPrefillBoundaryTests passed after 92.997 seconds.
+Test run with 19 tests in 4 suites passed after 98.162 seconds.
+```
+
+Only the Flash-Next installed gate was enabled; four other family parameters
+returned without loading weights. Resident and 16-slot modes pass sparse-boundary,
+eight-step continuation and cancellation/reset checks. Ordinary and rejected-draft
+rollback restore the finite, nonzero full HC bundle byte-for-byte; rejected-draft
+rollback also reproduces all eight full logit rows exactly. Actual sidecar dtypes
+and pool SHA pass again. This does not run a native drafter or qualify its speed.
+All release products were rebuilt from `b4325a4` after that test completed:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift build -c release --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  > /tmp/mference-release-alignment-20260920.log 2>&1
+```
+
+Exit 0; complete footer: `Build complete! (55.74s)`. Fresh remote CI is still
+required; earlier green CI does not qualify this newer loader path.
+
 ## Environment and protocol
 
 Mac Studio Mac15,14; M3 Ultra, 32 CPU cores, 256 GiB; macOS 26.3 (25D125);

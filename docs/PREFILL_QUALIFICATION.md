@@ -36,6 +36,13 @@ partial-chunk cancellation across the remaining runners, and real checkpoints.
 Do not hide a missing combination behind a new unsupported-context error or
 rename host-side full-model replay as batching.
 
+September 20 evidence correction: `d4f5dd4` fixes unaligned resident GPU
+mappings and the Flash-Next synthetic fixture. Earlier synthetic NaN-bit
+equality is not numerical parity. The replacement finite/nonzero gate asserts
+bounded FP16-scale error and exact greedy continuation; rollback remains
+byte-exact. Installed aligned-checkpoint evidence is separate. See the
+[detailed correction](RELEASE_VALIDATION_2026-09-20.md#resident-gpu-alignment-and-target-state-follow-up).
+
 ## Roadmap status
 
 - Phase 1: actual execution and memory diagnostics landed on `main`.

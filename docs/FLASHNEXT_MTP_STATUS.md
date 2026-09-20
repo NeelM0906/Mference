@@ -30,6 +30,11 @@ head and its full hidden bundle for subsequent drafting.
 - `FlashNextForwardRunner` can checkpoint recurrent GDN state, convolution
   tails, PLE state/history and the sequence cursor. KV and indexer rows are
   append-only; rollback hides discarded rows by rewinding the cursor.
+- Target-state capture returns an owned FP16 copy of the full, unmixed HC
+  bundle and the processed-token count after prefill, warm append or decode.
+  Checkpoints retain it across rollback; reset/dirty state rejects capture.
+  Ordinary generation performs no extra GPU copy. This is not a draft-token
+  position-alignment or speculative-verification implementation.
 - Checkpoints belong to one runner and one branch of its history. Reset or
   restoration invalidates older checkpoints, preventing resurrection of KV
   rows overwritten by a different continuation.
@@ -47,8 +52,8 @@ for which synthetic and installed checks have actually executed.
    open its expert pool with the selected bounded/resident memory policy.
    The loader is tested against the installed sidecar; executing that layer
    and qualifying its cache/state lifecycle remain separate work.
-2. Preserve the target's final full hidden bundle at both cold-prefill and
-   warm/decode boundaries; align the draft token and position convention.
+2. Connect the preserved target bundle to the drafter and qualify the next
+   token/position convention at cold-prefill and warm/decode boundaries.
 3. Implement target verification and accepted-prefix replay/rollback. Ordinary
    chunked prefill is not automatically an exact speculative verifier: its
    numerical and greedy equivalence must be demonstrated for this use.
@@ -63,6 +68,10 @@ for which synthetic and installed checks have actually executed.
 The loader, input-fusion and rollback components alone satisfy none of the final
 speed/default-promotion gates. No additional model download is needed for the
 current host's installed sidecar.
+
+The corrected finite synthetic prefill gate has bounded numerical drift, not
+byte-exact sequential equivalence. It must not be used to justify an exact
+speculative verifier; see the alignment correction in the dated validation log.
 
 ## Installed metadata inspection
 
