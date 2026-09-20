@@ -57,8 +57,13 @@ import Testing
     private static func runArm(path: String, profile: Profile, resident: Bool) async throws -> Result {
         let context = try MetalContext()
         let url = URL(fileURLWithPath: path)
+        // Maple's runner requires bounded slots; it does not implement the
+        // resident-expert binding. Compare its supported 16/8-slot profiles.
+        let mode: ExpertStreamingMode = profile.family == .maple
+            ? .pread(slotCount: resident ? 16 : profile.slots)
+            : (resident ? .resident : .pread(slotCount: profile.slots))
         let model = try Model.load(directoryURL: url, device: context.device,
-            streamingMode: resident ? .resident : .pread(slotCount: profile.slots))
+            streamingMode: mode)
         try #require(model.config.family == profile.family)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: url)
         let count = try #require(profile.boundaries.last)
@@ -101,7 +106,9 @@ import Testing
             #expect(result.execution?.batchedChunkSizes.reduce(0, +) == end - start)
             #expect(result.newPosition == end)
         }
-        let label = "\(profile.family) \(resident ? "resident" : "slots=\(profile.slots)")"
+        let modeLabel = profile.family == .maple && resident ? "slots=16"
+            : (resident ? "resident" : "slots=\(profile.slots)")
+        let label = "\(profile.family) \(modeLabel)"
         log("\(label) strict verified, chunk=\(profile.chunk)")
         var heads: [[UInt16]] = []
         var start = 0
@@ -146,7 +153,7 @@ import Testing
     }
 
     @Test(arguments: ["maple", "inkling", "flashnext"])
-    func residentAndStreamedBoundaries(name: String) async throws {
+    func memoryProfilesMatchAcrossBoundaries(name: String) async throws {
         let profile = Profile.named(name)
         guard let path = ProcessInfo.processInfo.environment[profile.gate] else { return }
         let resident = try await Self.runArm(path: path, profile: profile, resident: true)
@@ -154,8 +161,8 @@ import Testing
         #expect(resident.continuation == streamed.continuation, "eight greedy continuation tokens")
         for (index, pair) in zip(resident.heads + resident.tail, streamed.heads + streamed.tail).enumerated() {
             let mismatches = zip(pair.0, pair.1).filter { $0 != $1 }.count
-            Self.log("\(name) row=\(index) resident/streamed mismatches=\(mismatches)")
-            #expect(mismatches == 0, "full logits resident/streamed row \(index)")
+            Self.log("\(name) row=\(index) memory-profile mismatches=\(mismatches)")
+            #expect(mismatches == 0, "full logits across memory profiles, row \(index)")
         }
     }
 }
