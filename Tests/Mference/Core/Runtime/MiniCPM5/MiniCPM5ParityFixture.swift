@@ -101,7 +101,8 @@ enum MiniCPM5Parity {
             nameOffsets.append(UInt32(stringTableBase + stringTable.count))
             stringTable.append(contentsOf: name.utf8)
         }
-        let indexBytes = UInt64(stringTableBase + stringTable.count)
+        // Match the production writer's page-aligned resident payload.
+        let indexBytes = (UInt64(stringTableBase + stringTable.count) + 16_383) / 16_384 * 16_384
 
         var placed: [Placed] = []
         var cursor = indexBytes

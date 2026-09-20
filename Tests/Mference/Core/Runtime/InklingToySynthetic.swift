@@ -122,7 +122,7 @@ enum InklingToySynthetic {
         let names = tensors.map(\.name)
         let strings = Data(names.joined().utf8)
         let stringBase = GTurboBinary.indexHeaderBytes + tensors.count * GTurboBinary.indexEntryBytes
-        let indexBytes = stringBase + strings.count
+        let indexBytes = (stringBase + strings.count + 16_383) / 16_384 * 16_384
         var cursor = indexBytes
         var entries: [ResidentEntry] = []
         for tensor in tensors {
@@ -150,7 +150,7 @@ enum InklingToySynthetic {
                 nameOffset += entry.name.utf8.count
             }
         }
-        resident.replaceSubrange(stringBase..<indexBytes, with: strings)
+        resident.replaceSubrange(stringBase..<(stringBase + strings.count), with: strings)
         for (tensor, entry) in zip(tensors, entries) {
             for (bytes, offset) in [(tensor.weights, entry.fileOffset), (tensor.scales, entry.scaleOffset),
                                      (tensor.biases, entry.biasOffset)] where !bytes.isEmpty {

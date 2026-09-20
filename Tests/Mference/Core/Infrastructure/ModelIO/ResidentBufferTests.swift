@@ -99,4 +99,41 @@ import Metal
             #expect(Data(bytes: output.contents(), count: size) == payload[Int(chunk.start)..<Int(chunk.end)])
         }
     }
+
+    @Test func modelViewsIncludeChunkOffsetsForWeightsAndCompanions() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let directory = try FlashNextToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = try Model.load(directoryURL: directory, device: device,
+                                      expecting: .qwen38FlashNextToy())
+        let index = original.residentIndex
+        let region = index.header.indexSize
+        let spans = index.entries.values.map { entry -> (start: UInt64, end: UInt64) in
+            var lo = entry.fileOffset, hi = entry.fileOffset + entry.sizeBytes
+            for (offset, length) in [(entry.scaleOffset, entry.scaleSize), (entry.biasOffset, entry.biasSize)] where length > 0 {
+                lo = min(lo, offset)
+                hi = max(hi, offset + length)
+            }
+            return (lo - region, hi - region)
+        }
+        let storage = try ResidentBuffer(fileURL: directory.appendingPathComponent("model_weights.bin"),
+            fileOffset: region, residentSize: index.header.residentSize, device: device,
+            tensorSpans: spans, maximumBufferLength: 65_536)
+        #expect(storage.chunks.count > 1)
+        #expect(storage.chunks.contains { $0.bufferOffset > 0 })
+        #expect(storage.chunks.allSatisfy { $0.buffer.length <= 65_536 })
+        let split = Model(device: device, config: original.config, streamingMode: original.streamingMode,
+            expertCachePolicy: original.expertCachePolicy, integrityPolicy: original.integrityPolicy,
+            residentBuffer: storage, residentIndex: index, packedExpertsLayout: original.packedExpertsLayout,
+            manifest: original.manifest, directoryURL: directory)
+        for name in index.entries.keys {
+            let a = try original.resident(name: name), b = try split.resident(name: name)
+            for (aOffset, bOffset, length) in [(a.offset, b.offset, a.length),
+                (a.scaleOffset, b.scaleOffset, a.scaleLength), (a.biasOffset, b.biasOffset, a.biasLength)] where length > 0 {
+                let expected = Data(bytes: a.buffer.contents().advanced(by: Int(aOffset)), count: Int(length))
+                let actual = Data(bytes: b.buffer.contents().advanced(by: Int(bOffset)), count: Int(length))
+                #expect(actual == expected, "\(name): chunked tensor slice")
+            }
+        }
+    }
 }
