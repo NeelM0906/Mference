@@ -214,9 +214,17 @@ enum InklingToySynthetic {
             "routerGateBias": true, "routerNormAfterTopK": true, "routerGlobalScale": true,
             "unpaddedVocabSize": 250,
         ]
+        func quantSlot(_ bits: Int) -> [String: Any] {
+            ["weightBits": bits, "scheme": "affine", "scaleType": "bf16",
+             "biasType": "bf16", "groupSize": 64]
+        }
         let manifest: [String: Any] = ["magic": "GTURBO", "versionMajor": 1, "versionMinor": 0,
             "flags": ["streamingPresent": true, "turboQuantKV": false, "aneSharedExpert": false],
             "modelID": "inkling-nonzero-toy", "arch": arch, "files": files,
+            // Same slot metadata as the pinned Inkling install. The router's
+            // actual unquantized BF16 dtype is carried by its resident entry.
+            "quant": ["embedding": quantSlot(4), "attention": quantSlot(4),
+                      "router": quantSlot(8), "sharedExpert": quantSlot(4), "routedExpert": quantSlot(4)],
             "expertsPerLayer": cfg.numExperts, "numLayers": cfg.numLayers, "expertStride": stride]
         try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
             .write(to: directory.appendingPathComponent("manifest.json"))
