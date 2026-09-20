@@ -66,6 +66,8 @@ final class FlashNextMTPDraftRunner {
     private(set) var position = 0
     /// Correctness-only failure seam after attention/indexer GPU writes.
     var didPrepareAttention: (() throws -> Void)?
+    /// Correctness-only stage readback; nil performs no allocation or copies.
+    var didCaptureStages: (([String: [Float]]) -> Void)?
 
     init(model: Model, context: MetalContext, maxContext: Int, policy: ExpertPolicy) throws {
         let cfg = model.config
@@ -209,12 +211,23 @@ final class FlashNextMTPDraftRunner {
         guard let owned = context.device.makeBuffer(length: cfg.residualStreamWidth * 2,
                                                      options: .storageModePrivate) else { throw MetalError.noDevice }
         let cb = try command()
+        var captures: [String: (MTLBuffer, Bool)] = [:]
+        func capture(_ name: String, _ buffer: MTLBuffer, on command: MTLCommandBuffer, fp32: Bool = false) throws {
+            guard didCaptureStages != nil else { return }
+            guard let copy = context.device.makeBuffer(length: buffer.length, options: .storageModeShared),
+                  let blit = command.makeBlitCommandEncoder() else { throw failure("cannot capture draft stage") }
+            blit.copy(from: buffer, sourceOffset: 0, to: copy, destinationOffset: 0, size: buffer.length)
+            blit.endEncoding()
+            captures[name] = (copy, fp32)
+        }
         dirty = true
         fusion.encode(commandBuffer: cb, embedding: embedding, targetHidden: targetHidden,
             embeddingNorm: weights.embeddingNorm.buffer, embeddingNormOffset: Int(weights.embeddingNorm.offset),
             hiddenNorm: weights.hiddenNorm.buffer, hiddenNormOffset: Int(weights.hiddenNorm.offset),
             embeddingProjection: weights.embeddingProjection, hiddenProjection: weights.hiddenProjection, output: hyper)
+        try capture("fusion", hyper, on: cb)
         hc.encodeMix(commandBuffer: cb, weights: weights.attentionHC, scratch: hcScratch, hyper: hyper, mixed: mixed, rows: 1)
+        try capture("attention_mix", mixed, on: cb)
         hc.encodeInjectGate(commandBuffer: cb, weights: weights.attentionHC, scratch: hcScratch, rows: 1)
         indexer.encodeProjection(commandBuffer: cb, weight: weights.indexerProjection,
             x: mixed, xOffset: 0, hidden: d, scratch: indexScratch, rows: 1)
@@ -240,13 +253,17 @@ final class FlashNextMTPDraftRunner {
         }
         attention.encodeGateAndProject(commandBuffer: cb, weights: weights.attention, scratch: attentionScratch,
             out: block, outOffset: 0, rows: 1)
+        try capture("attention", block, on: cb)
         hc.encodeInjectAccumulate(commandBuffer: cb, scratch: hcScratch, hyper: hyper, block: block, rows: 1)
+        try capture("post_attention", hyper, on: cb)
         hc.encodeMix(commandBuffer: cb, weights: weights.mlpHC, scratch: hcScratch, hyper: hyper, mixed: mixed, rows: 1)
+        try capture("mlp_mix", mixed, on: cb)
         hc.encodeInjectGate(commandBuffer: cb, weights: weights.mlpHC, scratch: hcScratch, rows: 1)
         matvec.encode(commandBuffer: cb, matrix: weights.router, x: mixed, y: routerLogits,
             rows: cfg.numExperts, cols: d, outputFloat32: true)
         router.encodeRouterSelect(commandBuffer: cb, logits: routerLogits, perExpertScale: routerScale,
             outIndices: routeIDs, outWeights: routeWeights, numExperts: UInt32(cfg.numExperts))
+        try capture("router", routerLogits, on: cb, fp32: true)
         encodeShared(commandBuffer: cb)
         try finish(cb)
         try didPrepareAttention?()
@@ -271,6 +288,7 @@ final class FlashNextMTPDraftRunner {
             routedOffsets: weights.expertOffsets, acts: acts, routingWeights: routeWeights,
             residual: zero, y: routed, d: UInt32(d), f: UInt32(cfg.moeIntermediateSize), topK: UInt32(k))
         elementwise.encodeResidualAdd(commandBuffer: tail, hidden: routed, delta: sharedOutput, count: d)
+        try capture("moe", routed, on: tail)
         hc.encodeInjectAccumulate(commandBuffer: tail, scratch: hcScratch, hyper: hyper, block: routed, rows: 1)
         hc.encodeMix(commandBuffer: tail, weights: weights.mixer, scratch: hcScratch, hyper: hyper, mixed: mixed, rows: 1)
         matvec.encode(commandBuffer: tail, matrix: head, x: mixed, y: logits, rows: cfg.vocabSize, cols: d)
@@ -280,6 +298,12 @@ final class FlashNextMTPDraftRunner {
         try finish(tail)
         position += 1
         dirty = false
+        didCaptureStages?(captures.mapValues { buffer, fp32 in
+            if fp32 {
+                return Array(UnsafeBufferPointer(start: buffer.contents().assumingMemoryBound(to: Float.self), count: buffer.length / 4))
+            }
+            return UnsafeBufferPointer(start: buffer.contents().assumingMemoryBound(to: Float16.self), count: buffer.length / 2).map(Float.init)
+        })
         return Output(processedRows: position, hidden: owned)
     }
 

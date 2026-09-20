@@ -12,9 +12,13 @@ final class FlashNextMTPReference {
     private var values: [Float] = []
     private var indexKeys: [Float] = []
     private var position = 0
+    private(set) var stages: [String: [Float]] = [:]
+    /// A separate precision probe, not a replacement for the unrounded oracle.
+    private let roundFusionStores: Bool
 
-    init(model: Model, device: MTLDevice) throws {
+    init(model: Model, device: MTLDevice, roundFusionStores: Bool = false) throws {
         self.model = model
+        self.roundFusionStores = roundFusionStores
         let weights = try FlashNextMTPWeights(model: model)
         pool = try PreadExpertStreamer(layout: weights.expertLayout, device: device, slotCount: 1)
     }
@@ -58,20 +62,25 @@ final class FlashNextMTPReference {
         let d = cfg.hiddenSize, bundle = cfg.residualStreamWidth
         let geometry = FlashNextHyperConnectionReference.Geometry(hidden: d, hcCount: fn.hcCount,
             lowRank: fn.hcLowRank, eps: 1e-6)
-        let e = FlashNextIndexerReference.rmsNorm(embedding, offset: 0, count: d,
-            weight: try read("mtp.pre_fc_norm_embedding.weight", norm: true), eps: 1e-6)
-        let h = FlashNextIndexerReference.rmsNorm(hidden, offset: 0, count: bundle,
-            weight: try read("mtp.pre_fc_norm_hidden.weight", norm: true), eps: 1e-6)
-        let projectedE = FlashNextRouterReference.matVec(try read("mtp.fc_embedding.weight"), rows: d, cols: d, x: e)
+        func store(_ values: [Float]) -> [Float] {
+            roundFusionStores ? values.map { Float(Float16($0)) } : values
+        }
+        let e = store(FlashNextIndexerReference.rmsNorm(embedding, offset: 0, count: d,
+            weight: try read("mtp.pre_fc_norm_embedding.weight", norm: true), eps: 1e-6))
+        let h = store(FlashNextIndexerReference.rmsNorm(hidden, offset: 0, count: bundle,
+            weight: try read("mtp.pre_fc_norm_hidden.weight", norm: true), eps: 1e-6))
+        let projectedE = store(FlashNextRouterReference.matVec(try read("mtp.fc_embedding.weight"), rows: d, cols: d, x: e))
         let hiddenFC = try read("mtp.fc_hidden.weight")
         var hyper: [Float] = []
         for stream in 0..<fn.hcCount {
             let input = Array(h[(stream * d)..<((stream + 1) * d)])
-            let row = FlashNextRouterReference.matVec(hiddenFC, rows: d, cols: d, x: input)
-            hyper += zip(projectedE, row).map { $0 + $1 }
+            let row = store(FlashNextRouterReference.matVec(hiddenFC, rows: d, cols: d, x: input))
+            hyper += store(zip(projectedE, row).map { $0 + $1 })
         }
         let attentionMix = FlashNextHyperConnectionReference.gatedResidual(hyper,
             try hc("mtp.layers.0.attn_hyper_connection"), rows: 1, g: geometry)
+        stages["fusion"] = hyper
+        stages["attention_mix"] = attentionMix.mixed
         let prefix = "mtp.layers.0.self_attn."
         let rotary = Int(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor)
         let selected = FlashNextIndexerReference.run(x: attentionMix.mixed, hidden: d, rows: 1, startPosition: position,
@@ -91,20 +100,25 @@ final class FlashNextMTPReference {
                 rotaryDim: rotary, theta: Float(cfg.fullRopeTheta), eps: 1e-6))
         keys = attention.keys
         values = attention.values
+        stages["attention"] = attention.out
         hyper = FlashNextHyperConnectionReference.injectBlock(hyper, block: attention.out,
             inject: attentionMix.inject!, rows: 1, g: geometry)
+        stages["post_attention"] = hyper
         let mlpMix = FlashNextHyperConnectionReference.gatedResidual(hyper,
             try hc("mtp.layers.0.mlp_hyper_connection"), rows: 1, g: geometry)
+        stages["mlp_mix"] = mlpMix.mixed
         let mlp = "mtp.layers.0.mlp."
         let routeLogits = FlashNextRouterReference.matVec(try read(mlp + "gate.weight"),
             rows: cfg.numExperts, cols: d, x: mlpMix.mixed)
         let routes = FlashNextRouterReference.select(logits: routeLogits, k: cfg.topKExperts)
+        stages["router"] = routeLogits
         let output = try FlashNextExpertReference.block(experts: routes.indices.map { try expert($0) },
             weights: routes.weights,
             shared: .init(gateRow: read(mlp + "shared_expert_gate.weight"),
                 gateProj: read(mlp + "shared_expert.gate_proj.weight"),
                 upProj: read(mlp + "shared_expert.up_proj.weight"), downProj: read(mlp + "shared_expert.down_proj.weight")),
             x: mlpMix.mixed, hidden: d, moeIntermediate: cfg.moeIntermediateSize, sharedIntermediate: cfg.intermediateSize)
+        stages["moe"] = output
         hyper = FlashNextHyperConnectionReference.injectBlock(hyper, block: output, inject: mlpMix.inject!, rows: 1, g: geometry)
         let headInput = FlashNextHyperConnectionReference.gatedResidual(hyper,
             try hc("mtp.hyper_connection_mixer", injection: false), rows: 1, g: geometry).mixed
