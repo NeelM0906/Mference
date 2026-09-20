@@ -10,9 +10,120 @@ The additional September 20 work follows that merge in
 
 The pre-loader head `15713e7` passed macOS 15 / Swift 6.1, macOS 26, docs and
 security checks ([CI run](https://github.com/NeelM0906/Mference/actions/runs/35539493702)).
-Its completed-answer resident performance record is
+The later mapping/state head `71358f8` also passes both platforms, docs and
+security ([CI run](https://github.com/NeelM0906/Mference/actions/runs/35542860662)).
+Subsequent native-draft/reference and ragged-tile fixes require fresh validation.
+The `15713e7` completed-answer resident performance record is
 [reported separately](RELEASE_PERFORMANCE_2026-09-20.md), including the
 short/medium-prefill regressions. Newer code requires its own CI result.
+
+## Native layer, reference-width and ragged-tile follow-up
+
+Code `6c6184e`, with subsequent precision diagnostics at `84bfefc`; Mac Studio
+Mac15,14, M3 Ultra (32 CPU cores), 256 GiB, macOS 26.3 (25D125), Apple Swift
+6.3.3 (`swiftlang-6.3.3.1.3`). Every launch checked OS/toolchain, 619 GiB free
+disk, 98% memory free and absence of another model/test/installer owner.
+No downloads, model copies, cache purges, profiling or experimental controls.
+These are debug correctness checks, not performance measurements.
+
+Three independent fixes precede the native-layer probe:
+
+- `04686fb` derives the test reference's packed width from shape and payload:
+  actual INT8 router/shared-gate rows must not be decoded as INT4. Offset and
+  scalar-byte tests cover INT4/INT8, BF16 and FP32.
+- `04686fb` / `d53decb` fix a second synthetic-fixture defect: Flash-Next's
+  selector unconditionally wrote ten IDs/weights even for a toy top-six or
+  optional BF16 top-two configuration. The bounded fallback now supports
+  widths 1–10, writes exactly the declared width and is tested with adjacent
+  rows, offsets and canaries. The installed 512-expert/top-ten path is unchanged.
+  Earlier synthetic state/parity evidence predating this correction must not
+  be treated as a fully qualified numerical reference.
+- `afee4b6` prevents GLM INT8 matrix-unit prefill from reading beyond a ragged
+  input tile: inactive rows are explicitly zero-filled. Scalar/MMA comparisons
+  cover lengths 1/31/32/33/37/63/64/65 with exactly sized strided inputs,
+  nonzero offsets, immutable input and output canaries. This is a read-bound
+  safety correction, not a throughput claim.
+
+The initial focused invocation at `6c6184e` was:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'FlashNextWeightsTests|FlashNextRouterWidthTests|FlashNextMTPDraftRunnerTests|FlashNextCheckpointTests|FlashNextChunkedPrefillTests|Glm53KernelShapeTests' \
+  > /tmp/mference-native-draft-focused-20260920.log 2>&1
+```
+
+**Exit 1**; complete timing/error footer:
+
+```text
+Build complete! (14.25s)
+Expectation failed: (scale > 0 → true) && (error <= scale * 0.05 → false)
+Test run with 32 tests in 6 suites failed after 16.571 seconds with 1 issue.
+```
+
+Only row zero's hidden bundle in the new FP32 native-layer composition fails:
+maximum absolute error 0.5524912 at scale 10.497804 (5.263%, limit 5%). All
+other 39 hidden rows, all 40 logit rows and all 40 greedy choices pass. The
+router-width, GLM ragged-shape and draft cache lifecycle tests pass.
+
+Stage tracing at `84bfefc` identifies fusion-store sensitivity, not different
+selected experts: the first GPU fused row is **exactly** reproduced by a
+scalar oracle with the FP16 normalization, FC and addition stores. Its maximum
+difference from the unrounded fusion is 0.0010652542 at scale 2.894411. Using
+those independently computed rounded fusion values while retaining the rest
+of the FP32 composition reduces row zero's hidden error to 0.042897224 at
+scale 9.904379 (0.433%); all 40 rounded-fusion composition rows meet 5%.
+This characterizes the discrepancy; it does not resolve the original
+unrounded gate. That exact row-zero 5% expectation remains a reported known
+issue; all other assertions remain ordinary failures. Native MTP remains
+unqualified, disconnected from CLI/server generation and disabled. The
+optional stage-capture hook creates no GPU buffers or copies in its nil path.
+
+The diagnostic development commands use the same environment/scratch path
+and `--filter nativeLayerTracksIndependentFP32Composition`. Logs and complete
+footers (each exits 1 with that same single expectation):
+
+```text
+/tmp/mference-native-stage-trace-20260920.log
+Build complete! (10.08s)
+Test run with 1 test in 1 suite failed after 2.138 seconds with 1 issue.
+/tmp/mference-native-fusion-trace-20260920.log
+Build complete! (6.01s)
+Test run with 1 test in 1 suite failed after 2.210 seconds with 1 issue.
+/tmp/mference-native-storage-trace-20260920.log
+Build complete! (6.00s)
+Test run with 1 test in 1 suite failed after 3.964 seconds with 1 issue.
+```
+
+The completed installed sidecar was then exercised at `6c6184e` after verifying
+all 57 receipt-file sizes, with strict SHA loading:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_FLASHNEXT_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/qwen38flashnext-r8.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter 'installedDraftExecutesAndRestoresItsOwnState|installedMTPProjectionsMatchScalarDots' \
+  > /tmp/mference-native-draft-installed-20260920.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (1.41s)
+Test installedDraftExecutesAndRestoresItsOwnState() passed after 3.181 seconds.
+Suite FlashNextMTPDraftRunnerTests passed after 3.181 seconds.
+Test installedMTPProjectionsMatchScalarDots() passed after 6.144 seconds.
+Suite FlashNextWeightsTests passed after 6.144 seconds.
+Test run with 2 tests in 2 suites passed after 9.326 seconds.
+```
+
+Both native-draft backends produce finite nonzero full HC and full-vocabulary
+logits for the synthetic installed-weight probes; resident/16-slot results,
+rollback and reset match exactly. These inputs are **not target-aligned model
+states**. Actual INT4 embedding/hidden FC and INT8 shared gate projection dots
+match the independent scalar result exactly; the INT8 router's maximum error
+is 1.7881393e-7 at scale 0.5538577. No acceptance, end-to-end native MTP output
+or native MTP speed claim follows from these component checks.
 
 ## Native Flash-Next MTP loader qualification
 

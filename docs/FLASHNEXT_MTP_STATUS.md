@@ -41,6 +41,15 @@ head and its full hidden bundle for subsequent drafting.
 - Interrupted decode now marks sequence state dirty, just as interrupted
   chunked prefill does. Ordinary continuation must reset; an internal verifier
   may restore a previously committed checkpoint.
+- The internal `FlashNextMTPDraftRunner` now connects fusion, one HC/QSA/MoE
+  layer, the native mixer and the shared output head. It opens only the separate
+  auxiliary expert pool, using an explicit bounded or resident policy. Its
+  contiguous draft-row cursor, owned output bundles and runner-local checkpoint
+  epochs prevent skipped cache priming or resurrection of discarded branches.
+  Its mechanical resident/bounded, rollback, reset and dirty-state tests pass.
+  Installed INT4 projections / INT8 gates and finite native-layer output probes
+  also pass, including exact resident/16-slot replay. These probe inputs are
+  synthetic, not aligned target states. It is not called by CLI/server generation.
 
 These are implementation boundaries, not a passed native-MTP qualification.
 The [dated validation record](RELEASE_VALIDATION_2026-09-20.md) is authoritative
@@ -48,12 +57,23 @@ for which synthetic and installed checks have actually executed.
 
 ## Remaining integration and gates
 
-1. Connect the validated sidecar to a one-layer HC/QSA/MoE draft runner and
-   open its expert pool with the selected bounded/resident memory policy.
-   The loader is tested against the installed sidecar; executing that layer
-   and qualifying its cache/state lifecycle remain separate work.
+1. Resolve the new one-layer runner's unrounded-FP32 numerical gate. On the
+   synthetic 40-row probe, row zero's hidden bundle differs by 5.263%, above
+   the unchanged 5% limit; all other hidden rows, all logits and all 40 greedy
+   choices pass. An independent scalar oracle reproduces the first fused row
+   exactly when it includes the actual FP16 normalization/projection/add stores;
+   with just those stores modeled, all 40 full-layer comparisons pass 5% and
+   row zero's hidden error falls to 0.433%. The original row-zero expectation
+   remains an explicit known issue, not a passed qualification or a raised
+   tolerance. Stage readback is opt-in and allocates/copies nothing when absent.
+   The test-only FP32 composition uses separately transcribed
+   HC, QSA, attention and expert arithmetic; it is not an upstream full-MTP
+   golden or a target-alignment/acceptance gate.
 2. Connect the preserved target bundle to the drafter and qualify the next
    token/position convention at cold-prefill and warm/decode boundaries.
+   Priming requires all preceding draft KV rows, not just the final target HC
+   row. Capture/consume the required target prefill rows without replaying the
+   whole target model; the current last-row accessor alone is insufficient.
 3. Implement target verification and accepted-prefix replay/rollback. Ordinary
    chunked prefill is not automatically an exact speculative verifier: its
    numerical and greedy equivalence must be demonstrated for this use.

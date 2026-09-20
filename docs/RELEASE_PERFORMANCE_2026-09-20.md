@@ -127,5 +127,107 @@ long 3 baseline [stop=endOfTurn prefill=2940tok/15.68s new=635tok decode=31.32s 
 long 3 candidate [stop=endOfTurn prefill=2940tok/9.67s new=635tok decode=31.48s tok/s=20.169]
 ```
 
-Streamed Flash-Next and matched GLM measurements remain separate outstanding
-gates. This resident result does not qualify physical smaller-memory hardware.
+## Flash-Next 16-slot: separate matched measurement
+
+Candidate `b4325a4c9669594f3478aa85491313e8a4dd7777`, not the resident
+experiment's `15713e7`. All 24 processes exited 0 and reached
+`stop=endOfTurn`. All eight outputs per case have the same SHA-256 as the
+resident outputs above. The three unique answers were read again: complete,
+non-repeating, with the same limited-quality caveats.
+
+Medians and min–max across three measured repetitions, excluding one warmup
+per case/arm. Generation time remains **prefill plus decode**, excluding
+startup, loading and integrity checks.
+
+| Case (prompt / new tokens) | Baseline prefill, s | Candidate prefill, s | Baseline generation, s | Candidate generation, s | Median generation reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short (62 / 521) | 27.11 (27.10–27.20) | 26.85 (26.82–27.00) | 64.04 (63.98–64.07) | 63.70 (63.69–64.05) | 0.5% |
+| Medium (426 / 557) | 28.75 (28.63–28.77) | 28.06 (28.03–28.11) | 68.93 (68.69–69.07) | 68.12 (68.07–68.32) | 1.2% |
+| Long (2940 / 635) | 39.59 (39.46–39.60) | 37.14 (37.08–37.15) | 93.93 (93.88–94.08) | 91.78 (91.47–91.84) | 2.3% |
+
+| Case | Baseline decode tok/s | Candidate decode tok/s |
+| --- | ---: | ---: |
+| Short | 14.104 (14.098–14.164) | 14.126 (14.061–14.141) |
+| Medium | 13.870 (13.816–13.903) | 13.905 (13.851–13.910) |
+| Long | 11.689 (11.627–11.697) | 11.623 (11.609–11.674) |
+
+The short generation ranges overlap: the 0.5% median difference is not a
+robust completed-answer improvement. Medium and long ranges are disjoint
+here, but the reductions are modest (1.2% and 2.3%). Long prefill falls 6.2%;
+decode ranges overlap in every case, and the long decode median is slightly
+slower. This does **not** establish a streamed decode speedup or inherit the
+resident experiment's larger gains.
+
+### Streamed provenance and commands
+
+Same M3 Ultra / 256 GiB, macOS 26.3 (25D125), Swift 6.3.3 toolchain and AC/
+normal-power settings as above. Initial preflight: 98% memory free, 619 GiB
+disk, no model/test/installer owner, all 57 install receipt sizes verified.
+Each fresh process uses default full-SHA verification; per-launch process,
+memory and disk checks passed. The manifest, prompts, seeds, context, token
+allowance and sampling match the resident experiment; the explicit cache
+policy is now **16 slots**. Native MTP remains off.
+
+Baseline executable/provenance are unchanged. The candidate all-product
+release build exited 0, `Build complete! (55.74s)`, log
+`/tmp/mference-release-alignment-20260920.log`. Candidate executable SHA-256:
+`44304df747f3ce8651c0de42ec1eff812a2e7c5309007c166900c70f8cdc51d1`.
+All 26 bundled Metal sources were checked against `b4325a4` during the batch;
+neither executable nor resources changed. After measurement, only binaries/
+resource bundles were preserved at
+`/tmp/mference-release-streamed-qualified.fGHHDY`; no model weights copied.
+
+Protocol extensions/limitations: case-major order, baseline then candidate
+alternation, three measured repetitions, no cache purge, profiling,
+experimental controls, downloads, concurrent builds/tests or other model
+owner. Light source/doc edits, commits and read-only GitHub checks continued.
+Those later router/reference/native-draft/GLM fixes are **not** measured here.
+Filesystem/cache state was not reset or controlled as a cold-SSD experiment.
+A 16-slot run on 256 GiB does not qualify a physical smaller-memory Mac.
+
+Executed orchestration (exit 0):
+
+```bash
+bash /tmp/mference-release-compare.sh qwen38flashnext-r8 16 /tmp/mference-release-bench-flash-streamed.jJkIRX /tmp/mference-release-baseline.olcDV9/MferenceCLI c67e857-source-equivalent-d769a7e-build /tmp/mference-phase1-build.sXnNTs/release/MferenceCLI b4325a4c9669594f3478aa85491313e8a4dd7777
+```
+
+Each case/seed pair above, repetitions 0–3, uses this CLI command form for both
+executables:
+
+```bash
+/tmp/mference-phase1-build.sXnNTs/release/MferenceCLI --model scratch/qwen38flashnext-r8.gturbo --messages-file docs/benchmark-prompts/real-generation-v1/short-explanation.json --max-new 1024 --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95 --seed 20260721 --expert-cache-slots 16
+```
+
+Raw stdout/stderr, exact commands, exits, preflights, hashes and machine record:
+`/tmp/mference-release-bench-flash-streamed.jJkIRX`. The strict 24-record
+summary is `summary.json` there. Full timing footers follow; repetition 0 is
+warmup, 1–3 measured, every exit is 0.
+
+```text
+short 0 baseline [stop=endOfTurn prefill=62tok/27.30s new=521tok decode=38.44s tok/s=13.554]
+short 0 candidate [stop=endOfTurn prefill=62tok/26.84s new=521tok decode=36.83s tok/s=14.146]
+short 1 baseline [stop=endOfTurn prefill=62tok/27.10s new=521tok decode=36.94s tok/s=14.104]
+short 1 candidate [stop=endOfTurn prefill=62tok/26.82s new=521tok decode=36.88s tok/s=14.126]
+short 2 baseline [stop=endOfTurn prefill=62tok/27.11s new=521tok decode=36.96s tok/s=14.098]
+short 2 candidate [stop=endOfTurn prefill=62tok/26.85s new=521tok decode=36.84s tok/s=14.141]
+short 3 baseline [stop=endOfTurn prefill=62tok/27.20s new=521tok decode=36.78s tok/s=14.164]
+short 3 candidate [stop=endOfTurn prefill=62tok/27.00s new=521tok decode=37.05s tok/s=14.061]
+medium 0 baseline [stop=endOfTurn prefill=426tok/29.39s new=557tok decode=41.86s tok/s=13.306]
+medium 0 candidate [stop=endOfTurn prefill=426tok/28.07s new=557tok decode=40.24s tok/s=13.842]
+medium 1 baseline [stop=endOfTurn prefill=426tok/28.63s new=557tok decode=40.06s tok/s=13.903]
+medium 1 candidate [stop=endOfTurn prefill=426tok/28.06s new=557tok decode=40.06s tok/s=13.905]
+medium 2 baseline [stop=endOfTurn prefill=426tok/28.77s new=557tok decode=40.16s tok/s=13.870]
+medium 2 candidate [stop=endOfTurn prefill=426tok/28.11s new=557tok decode=40.21s tok/s=13.851]
+medium 3 baseline [stop=endOfTurn prefill=426tok/28.75s new=557tok decode=40.32s tok/s=13.816]
+medium 3 candidate [stop=endOfTurn prefill=426tok/28.03s new=557tok decode=40.04s tok/s=13.910]
+long 0 baseline [stop=endOfTurn prefill=2940tok/43.13s new=635tok decode=56.64s tok/s=11.212]
+long 0 candidate [stop=endOfTurn prefill=2940tok/37.07s new=635tok decode=54.71s tok/s=11.606]
+long 1 baseline [stop=endOfTurn prefill=2940tok/39.59s new=635tok decode=54.29s tok/s=11.697]
+long 1 candidate [stop=endOfTurn prefill=2940tok/37.08s new=635tok decode=54.39s tok/s=11.674]
+long 2 baseline [stop=endOfTurn prefill=2940tok/39.46s new=635tok decode=54.62s tok/s=11.627]
+long 2 candidate [stop=endOfTurn prefill=2940tok/37.15s new=635tok decode=54.63s tok/s=11.623]
+long 3 baseline [stop=endOfTurn prefill=2940tok/39.60s new=635tok decode=54.33s tok/s=11.689]
+long 3 candidate [stop=endOfTurn prefill=2940tok/37.14s new=635tok decode=54.70s tok/s=11.609]
+```
+
+Matched GLM measurements and physical smaller-memory qualification remain open.

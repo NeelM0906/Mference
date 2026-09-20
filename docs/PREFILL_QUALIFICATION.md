@@ -63,9 +63,11 @@ byte-exact. Installed aligned-checkpoint evidence is separate. See the
 - Phase 5: execution-contract coverage extended here; the gaps above remain
   explicit. A green ordinary CI run does not execute env-gated real-model tests.
 - Phase 6: Flash-Next/GLM optimization and matched performance experiments are
-  not complete. [Flash-Next resident measurements](RELEASE_PERFORMANCE_2026-09-20.md)
+  not complete. [Flash-Next resident and 16-slot measurements](RELEASE_PERFORMANCE_2026-09-20.md)
   now pass completed-answer gates and show lower prefill-plus-decode time,
-  but short/medium prefill regresses. Streamed/GLM comparisons and native MTP
+  but resident short/medium prefill regresses. The separate 16-slot revision
+  has modest 0.5%/1.2%/2.3% median generation-time reductions; short-case and
+  all decode ranges overlap. GLM comparisons and native MTP
   integration remain open. No unmeasured speedup or default change is claimed.
 - Phase 7: real UI streaming, tool loops, history, cancellation and model-switch
   recovery have been tested; a [support table](RELEASE_SUPPORT.md) distinguishes
