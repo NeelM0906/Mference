@@ -29,6 +29,9 @@ public final class Environment: @unchecked Sendable {
 
     /// Settings that adjust the behavior of built-in filters.
     public struct Policies: Sendable {
+        /// Text emitted for an explicit null expression. Python Jinja2 emits
+        /// `None`; the default preserves this engine's existing empty output.
+        public var nullOutput: String
         /// The serializer corresponding to Jinja2's `json.dumps_function` policy.
         public var jsonSerializer: JSON.Serializer
 
@@ -39,10 +42,12 @@ public final class Environment: @unchecked Sendable {
         /// Creates policies with Transformers-compatible defaults.
         public init(
             jsonSerializer: JSON.Serializer = .standard,
-            jsonDumpsOptions: JSON.DumpsOptions = .init(ensureASCII: false)
+            jsonDumpsOptions: JSON.DumpsOptions = .init(ensureASCII: false),
+            nullOutput: String = ""
         ) {
             self.jsonSerializer = jsonSerializer
             self.jsonDumpsOptions = jsonDumpsOptions
+            self.nullOutput = nullOutput
         }
 
         /// Plain JSON with non-ASCII characters and insertion order preserved.
@@ -200,7 +205,11 @@ public enum Interpreter {
 
         case let .expression(expr):
             let value = try evaluateExpression(expr, env: env)
-            buffer.append(value.description)
+            if case .null = value {
+                buffer.append(env.policies.nullOutput)
+            } else {
+                buffer.append(value.description)
+            }
 
         case let .statement(stmt):
             try executeStatementWithOutput(stmt, env: env, into: &buffer)
@@ -264,7 +273,9 @@ public enum Interpreter {
             } else if let alternate = alternate {
                 return try evaluateExpression(alternate, env: env)
             } else {
-                return .null
+                // Jinja2's omitted else is undefined, distinct from an
+                // explicit `else none` when null expressions are rendered.
+                return .undefined
             }
 
         case let .member(object, property, computed):

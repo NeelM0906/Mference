@@ -13,7 +13,14 @@ The local lexer consumes whitespace controls at token boundaries, preserving
 literal braces without rewriting delimiters or quoted string contents.
 Google's bundled template is unmodified.
 
-Only `Sources/Jinja/Lexer.swift` differs from the upstream source snapshot.
+`Sources/Jinja/Interpreter.swift` also distinguishes an omitted conditional
+else (undefined) from explicit null, and provides a scoped null-output policy.
+Gemma QAT uses that policy to emit Python Jinja2's `None` for null tool
+arguments. Other checkpoints retain the existing empty null output. The QAT
+source template is unmodified and its bytes and token IDs are compared against
+an independent Python oracle in `GemmaQATChatTests`.
+
+`Sources/Jinja/Lexer.swift` and `Sources/Jinja/Interpreter.swift` differ from the upstream source snapshot.
 Mference's `GemmaJinjaWhitespaceTests` covers the defect, and
 `GemmaThinkingTests` compares all canonical prompt bytes and IDs against an
 independent Python oracle. The root package's `JinjaCompatibilityTests` target

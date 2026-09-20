@@ -147,7 +147,7 @@ the local Jinja snapshot records its revision and patch in
 | Package | Version | License in locked checkout |
 | --- | --- | --- |
 | [swift-transformers](https://github.com/huggingface/swift-transformers) | 1.3.3 | Apache-2.0 |
-| [swift-jinja](https://github.com/huggingface/swift-jinja) | Local 2.5.1 snapshot with whitespace lexer fix | [Apache-2.0](Vendor/swift-jinja/LICENSE) |
+| [swift-jinja](https://github.com/huggingface/swift-jinja) | Local 2.5.1 snapshot with whitespace and null-rendering fixes | [Apache-2.0](Vendor/swift-jinja/LICENSE) |
 | [swift-huggingface](https://github.com/huggingface/swift-huggingface) | 0.9.0 | Apache-2.0 |
 | [EventSource](https://github.com/mattt/EventSource) | 1.4.1 | MIT |
 | [swift-nio](https://github.com/apple/swift-nio) | 2.99.0 | Apache-2.0; upstream NOTICE applies |
