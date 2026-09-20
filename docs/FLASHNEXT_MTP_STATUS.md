@@ -74,7 +74,8 @@ for which synthetic and installed checks have actually executed.
    with just those stores modeled, all 40 full-layer comparisons pass 5% and
    row zero's hidden error falls to 0.433%. The original row-zero expectation
    remains an explicit known issue, not a passed qualification or a raised
-   tolerance. Stage readback is opt-in and allocates/copies nothing when absent.
+   tolerance; drift above 6% is a hard regression even on that row. Stage
+   readback is opt-in and allocates/copies nothing when absent.
    The test-only FP32 composition uses separately transcribed
    HC, QSA, attention and expert arithmetic; it is not an upstream full-MTP
    golden or a target-alignment/acceptance gate.

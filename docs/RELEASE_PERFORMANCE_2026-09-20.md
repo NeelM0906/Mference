@@ -137,7 +137,12 @@ non-repeating, with the same limited-quality caveats.
 
 Medians and min–max across three measured repetitions, excluding one warmup
 per case/arm. Generation time remains **prefill plus decode**, excluding
-startup, loading and integrity checks.
+process startup and work completed during initial model loading. **Unlike
+resident mode, bounded experts are opened lazily: first-touch expert SHA-256
+verification inside prefill is included in these footers.** These are matched
+fresh-process first-request measurements, not isolated kernel time or warm
+server requests. Do not subtract an inferred hash cost or compare these
+prefill durations directly with resident mode as a kernel-only difference.
 
 | Case (prompt / new tokens) | Baseline prefill, s | Candidate prefill, s | Baseline generation, s | Candidate generation, s | Median generation reduction |
 | --- | ---: | ---: | ---: | ---: | ---: |

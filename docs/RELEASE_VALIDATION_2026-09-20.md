@@ -75,7 +75,9 @@ of the FP32 composition reduces row zero's hidden error to 0.042897224 at
 scale 9.904379 (0.433%); all 40 rounded-fusion composition rows meet 5%.
 This characterizes the discrepancy; it does not resolve the original
 unrounded gate. That exact row-zero 5% expectation remains a reported known
-issue; all other assertions remain ordinary failures. Native MTP remains
+issue; all other assertions remain ordinary failures. A follow-up narrows the
+known-issue handling to at most 6% on that one row; larger drift remains a
+hard failure rather than being hidden as the same known issue. Native MTP remains
 unqualified, disconnected from CLI/server generation and disabled. The
 optional stage-capture hook creates no GPU buffers or copies in its nil path.
 

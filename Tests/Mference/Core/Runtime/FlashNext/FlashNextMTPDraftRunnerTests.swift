@@ -93,11 +93,13 @@ import Testing
             #expect(scale > 0 && error.isFinite)
             // Same FP16-vs-FP32 semantic tier as family integration gates, not
             // bit parity or an exact speculative-verifier tolerance.
-            if knownFusionSensitivity {
+            if knownFusionSensitivity && error <= scale * 0.06 {
                 // Preserve the failing unrounded 5% gate, specifically for
                 // row zero. The independent rounded-fusion oracle below is
                 // separately required to pass. This known precision gap is
                 // NOT native-MTP qualification; see FLASHNEXT_MTP_STATUS.md.
+                // A larger (>6%) regression is an ordinary failure, not
+                // covered by this characterized 5.263% precision issue.
                 withKnownIssue("Native draft row-zero FP32 hidden gate: FP16 fusion rounding is amplified; native MTP remains unqualified", isIntermittent: true) {
                     #expect(error <= scale * 0.05)
                 }
