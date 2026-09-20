@@ -97,7 +97,7 @@ import Testing
             return Int32(best)
         }
         func append(_ start: Int, _ end: Int) async throws {
-            try producer.prepareForContinuation(expectedPosition: start)
+            if start > 0 { try producer.prepareForContinuation(expectedPosition: start) }
             let result = try await runner.prefillChunked(tokens: tokens[start..<end],
                 startPosition: start, outputMode: .logits, config: runtime.prefillConfig,
                 into: output, onProgress: { _ in })
