@@ -15,6 +15,12 @@ import Testing
 
         static func named(_ name: String) -> Profile {
             switch name {
+            case "gemma4":
+                return Profile(gate: "MFERENCE_GEMMA4_GTURBO", family: .gemma4,
+                    boundaries: [33, 1023, 1027, 1059], chunk: 128, slots: 8)
+            case "qwen36":
+                return Profile(gate: "MFERENCE_QWEN36_GTURBO", family: .qwen36,
+                    boundaries: [33, 127, 131, 163], chunk: 64, slots: 8)
             case "maple":
                 return Profile(gate: "MFERENCE_MAPLE_GTURBO", family: .maple,
                     boundaries: [33, 511, 515, 547], chunk: 64, slots: 8)
@@ -174,7 +180,7 @@ import Testing
         return Result(heads: heads, tail: tail, continuation: continuation)
     }
 
-    @Test(arguments: ["maple", "inkling", "flashnext"])
+    @Test(arguments: ["gemma4", "qwen36", "maple", "inkling", "flashnext"])
     func memoryProfilesMatchAcrossBoundaries(name: String) async throws {
         let profile = Profile.named(name)
         guard let path = ProcessInfo.processInfo.environment[profile.gate] else { return }

@@ -40,6 +40,23 @@ requires successful quality and completed-answer performance evidence, not
 token savings alone. The prior matched-low comparison remains separately
 [recorded](families/QWEN_MATCHED_QUALIFICATION_2026-09-18.md).
 
+### Upstream reports versus local diagnosis
+
+Rechecked September 20: in [discussion #7](https://huggingface.co/ukisai/Swift-Qwen3.8-27b/discussions/7),
+a user reports higher reasoning-token use on AIME 2026 under a different
+sampling/precision setup. The publisher requests its documented five-seed
+protocol and acknowledges a math-token training-penalty bug. This establishes
+that savings are not guaranteed for every workload; it does not identify the
+cause of Mference's local failures or make this small corpus an AIME replica.
+
+For the observed XML `False` issue, the pinned
+[SGLang Qwen parser](https://github.com/sgl-project/sglang/blob/745de73ba3c136b6f99b7a3e2177ed1a8eef4a56/python/sglang/srt/function_call/qwen3_coder_detector.py)
+already converts case-insensitive boolean spellings using the parameter schema.
+Mference adopts that narrow compatibility behavior only for explicitly declared
+booleans and recognizable true/false values. It does **not** adopt coercion of
+other strings to false or general Python-literal evaluation. The JSON wire
+argument remains properly typed; a declared string stays a string.
+
 ## Completed five-seed run — September 20
 
 Engine `8c46ad3ec6e594ccbd786d8d7ceeb618020f558f` (runtime `c8f3298`),
