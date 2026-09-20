@@ -786,9 +786,14 @@ kernel void glm53p_int8_gemm_mma(
         for (uint e = tid; e < kG53PTokenTile * segs; e += 128u) {
             const uint row = e / segs;
             const uint seg = e - row * segs;
-            // Rows past T are in-bounds scratch whose results are never stored.
-            const half4 v0 = *((device const half4*)(X + (t0 + row) * x_stride + n0 + seg * 8u));
-            const half4 v1 = *((device const half4*)(X + (t0 + row) * x_stride + n0 + seg * 8u + 4u));
+            // A ragged final tile need not have 32 allocated input rows.
+            // Zero inactive rows before the collective MMA, matching the
+            // scalar path; masking only output stores cannot make reads safe.
+            half4 v0 = half4(0.0h), v1 = half4(0.0h);
+            if (row < tn) {
+                v0 = *((device const half4*)(X + (t0 + row) * x_stride + n0 + seg * 8u));
+                v1 = *((device const half4*)(X + (t0 + row) * x_stride + n0 + seg * 8u + 4u));
+            }
             threadgroup float* dst = xt + row * kG53PXTStride + seg * 8u;
             *((threadgroup float4*)dst) = float4(v0);
             *((threadgroup float4*)(dst + 4)) = float4(v1);
