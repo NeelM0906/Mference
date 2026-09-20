@@ -47,6 +47,7 @@ public struct PreparedGeneration: Sendable {
 
 public protocol ServerInferenceBackend: Sendable {
     var usesSwiftQwenTemplate: Bool { get }
+    var supportsQwenReasoningEffort: Bool { get }
     /// Everything that can reject a request must happen here, because the
     /// caller commits the response status once `generate` starts: a streaming
     /// request has `200` and the SSE head on the wire by then, and no status
@@ -59,6 +60,7 @@ public protocol ServerInferenceBackend: Sendable {
 
 extension ServerInferenceBackend {
     public var usesSwiftQwenTemplate: Bool { false }
+    public var supportsQwenReasoningEffort: Bool { usesSwiftQwenTemplate }
     /// Backends that do not tokenize inherit a pass-through. A backend that
     /// renders a prompt must override this, or `generate` receives no tokens.
     public func prepare(_ request: ValidatedChatRequest) async throws -> PreparedGeneration {
@@ -175,6 +177,7 @@ public actor ServerCoordinator {
 
 public actor ServerModelSession: ServerLoadedModel {
     public nonisolated let usesSwiftQwenTemplate: Bool
+    public nonisolated let supportsQwenReasoningEffort: Bool
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
     public nonisolated let chatDialect: ChatDialect
     /// Family-derived API model identifier used when --model-id is absent.
@@ -296,6 +299,7 @@ public actor ServerModelSession: ServerLoadedModel {
         self.model = model
         self.tokenizer = tokenizer
         self.usesSwiftQwenTemplate = tokenizer.isSwiftQwen
+        self.supportsQwenReasoningEffort = tokenizer.supportsQwenReasoningEffort
         self.chatDialect = tokenizer.dialect
         self.modelFamily = model.config.family
         self.checkpointID = model.modelID
@@ -383,17 +387,21 @@ public actor ServerModelSession: ServerLoadedModel {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let startsInThinking = tokenizer.startsInThinking(reasoningEffort: request.reasoningEffort)
-        let decoder = tokenizer.isSwiftQwen || needsToolTemplate || startsInThinking
+        let startsInThinking = tokenizer.startsInThinking(
+            reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
+        let countsPayloadTokens = tokenizer.dialect == .chatml
+            || tokenizer.dialect == .glm5 || tokenizer.dialect == .minicpm
+        let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),
-                startsInThought: startsInThinking)
+                startsInThought: startsInThinking,
+                toolDefinitions: request.tools)
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var reasoning = ""
-        if tokenizer.isSwiftQwen {
+        if tokenizer.usesSourceQwenTemplate(reasoningEffort: request.reasoningEffort) {
             decoder?.onReasoning = { text in
                 reasoning += text
                 onEvent(.reasoning(text))
@@ -514,7 +522,11 @@ public actor ServerModelSession: ServerLoadedModel {
             usage: OpenAIUsage(promptTokens: result.prefillTokens,
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
-                               cachedTokens: result.cachedPromptTokens),
+                               cachedTokens: result.cachedPromptTokens,
+                               completionTokensDetails: decoder?.payloadTokenCounts.map {
+                                   .init(reasoningTokens: $0.reasoning,
+                                         visibleTokens: stopMatcher.isStopped ? nil : $0.visible)
+                               }),
             diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
                 result: result,
                 memory: .capture(model: model, producer: runner, scratch: scratch)) : nil)

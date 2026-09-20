@@ -12,6 +12,28 @@ struct QwenToolCallParserTests {
         try parser.parse(body, allowedTools: allowedTools ?? tools, id: "call_test")
     }
 
+    @Test(arguments: ["123", "true", "false", "null", "1.25", "[1,2]", "{\"a\":1}", " 123 ", "\"quoted\"", ""])
+    func declaredStringsAreNeverInferredAsJSON(_ raw: String) throws {
+        let body = "<function=run_query>\n<parameter=q>\n\(raw)\n</parameter>\n</function>"
+        let schemas: [String: JSONValue] = ["run_query": .object([
+            "properties": .object(["q": .object(["type": .string("string")])])
+        ])]
+        let call = try parser.parse(body, allowedTools: tools, id: "test", toolSchemas: schemas)
+        #expect(call.arguments == .object(["q": .string(raw)]))
+    }
+
+    @Test func declaredNumericAndUnspecifiedArgumentsRetainTypes() throws {
+        let body = "<function=run_query>\n<parameter=limit>\n25\n</parameter>\n<parameter=active>\ntrue\n</parameter>\n</function>"
+        let schemas: [String: JSONValue] = ["run_query": .object([
+            "properties": .object(["limit": .object(["type": .string("integer")])])
+        ])]
+        let call = try parser.parse(body, allowedTools: tools, id: "test", toolSchemas: schemas)
+        #expect(call.arguments == .object(["limit": .integer(25), "active": .bool(true)]))
+        #expect(throws: ToolCallParserError.unknownTool("run_query")) {
+            try parser.parse(body, allowedTools: [], id: "test", toolSchemas: schemas)
+        }
+    }
+
     @Test("Happy path with a single string parameter")
     func singleStringParameter() throws {
         let call = try parse("""

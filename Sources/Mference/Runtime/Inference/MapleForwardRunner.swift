@@ -25,6 +25,8 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
     private static let layerCount = 24
     private static let topK = 8
     private static let epsilon: Float = 1e-6
+    /// Failure injection at a drained prefill-layer boundary; nil in production.
+    var prefillWillEncodeLayer: ((Int) throws -> Void)?
 
     private struct PrefillScratch {
         let capacity: Int
@@ -402,6 +404,7 @@ public final class MapleForwardRunner: ContinuableLogitProducer, ContextWindowRe
         for (index, layer) in layers.enumerated() {
             try Task.checkCancellation()
             let projections = try commandBuffer()
+            try prefillWillEncodeLayer?(index)
             for row in chunk.indices {
                 let vectorOffset = scratch.vectorOffset(row)
                 let kvOffset = scratch.kvOffset(row)

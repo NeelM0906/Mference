@@ -338,6 +338,42 @@ import Testing
         #expect(bits(logits).allSatisfy { $0 == 0 })
     }
 
+    @Test func interruptedWarmAppendRequiresReset() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let runner = try MapleForwardRunner(model: fixture.model(), context: fixture.context,
+                                            maxContext: 8)
+        let logits = try makeLogits(fixture.context)
+        let tokens: [Int32] = [0, 0, 0, 0]
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(2), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        let reference = bits(logits)
+        runner.prefillWillEncodeLayer = { if $0 == 1 { throw CancellationError() } }
+        do {
+            _ = try await runner.prefillChunked(tokens: tokens[2..<4], startPosition: 2,
+                outputMode: .logits, config: .production(chunkTokens: 64),
+                into: logits, onProgress: { _ in })
+            Issue.record("expected cancellation after the first layer")
+        } catch is CancellationError {}
+        #expect(throws: (any Error).self) {
+            try runner.prepareForContinuation(expectedPosition: 2)
+        }
+        do {
+            try await runner.produce(token: 0, position: 2, into: logits)
+            Issue.record("dirty state must reject decode")
+        } catch is PrefillError {}
+        runner.prefillWillEncodeLayer = nil
+        runner.reset()
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(2), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        #expect(bits(logits) == reference)
+        try runner.prepareForContinuation(expectedPosition: 2)
+        try await runner.produce(token: 0, position: 2, into: logits)
+        #expect(bits(logits).allSatisfy { Float16(bitPattern: $0).isFinite })
+    }
+
     @Test func mapleChunkedPrefill_matchesSequentialLogitsAndContinuation() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

@@ -6,6 +6,29 @@ import Testing
 
 @Suite("Server prompt cache")
 struct ServerPromptCacheTests {
+    @Test(arguments: [false, true], [false, true])
+    func explicitBaseEffortNeverUsesLegacyBridge(before: Bool, after: Bool) async throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Mference/Core/Tokenization/Fixtures/ChatMLTokenizer")
+        let tok = try await MFTokenizer.load(from: fixture, family: .qwen38)
+            .forCheckpoint(CheckpointIdentity.baseQwen38)
+        var initial = request(messages: [.init(role: .user, content: "A")])
+        initial.reasoningEffort = before ? .low : nil
+        var cache = ServerPromptCache()
+        cache.publish(domain: domain, request: initial, content: "B", calls: [],
+            result: rawResult(prompt: [1], kvBacked: [1, 2], boundary: tok.endOfTurnID, reason: .endOfTurn))
+        var continuation = request(messages: initial.messages + [.init(role: .assistant, content: "B"),
+            .init(role: .user, content: "C")])
+        continuation.reasoningEffort = after ? .medium : nil
+        let match = cache.match(domain: domain, request: continuation,
+            renderedPromptIDs: [1, 9, 3, 4], tokenizer: tok)
+        if before || after { #expect(match == .miss) }
+        else if case .hit = match {} else { Issue.record("Legacy bridge must remain available") }
+        if case .hit = cache.match(domain: domain, request: continuation,
+            renderedPromptIDs: [1, 2, 3, 4], tokenizer: tok) {} else {
+            Issue.record("Exact rendered prefixes remain reusable")
+        }
+    }
     @Test func swiftQwenHistoryIsPreservedAndBaseDomainCannotReuseIt() async throws {
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Mference/Core/Tokenization/Fixtures/ChatMLTokenizer")

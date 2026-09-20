@@ -72,9 +72,33 @@ final class PrefillRMSNorm {
 
 final class PrefillInt4QMM {
     private let pso: MTLComputePipelineState
+    private let decodeOrder: Bool
+    private let decodeOrderPipelines: [MTLComputePipelineState]
+    private static let decodeTileTokens = 4
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block")
+    init(context: MetalContext, decodeOrder: Bool = false) throws {
+        self.decodeOrder = decodeOrder
+        if decodeOrder {
+            // Safe math preserves each token's decode reduction while a small
+            // register tile shares packed-weight reads, as in MTP verification.
+            let library = try MetalContext.moduleLibrary(device: context.device,
+                module: "dequant_int4", safeMath: true)
+            let pipelines = try (1...Self.decodeTileTokens).map { tokens in
+                let values = MTLFunctionConstantValues()
+                var count = UInt32(tokens)
+                var enabled = true
+                values.setConstantValue(&count, type: .uint, index: 45)
+                values.setConstantValue(&enabled, type: .bool, index: 46)
+                let function = try library.makeFunction(
+                    name: "prefill_dequant_int4_multix_block", constantValues: values)
+                return try context.device.makeComputePipelineState(function: function)
+            }
+            self.decodeOrderPipelines = pipelines
+            self.pso = pipelines[Self.decodeTileTokens - 1]
+        } else {
+            self.decodeOrderPipelines = []
+            self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block")
+        }
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -88,6 +112,9 @@ final class PrefillInt4QMM {
                        k: Int) {
         precondition(k % Quantization.groupSize == 0,
                      "K must be a multiple of \(Quantization.groupSize)")
+        precondition(!decodeOrder || weightsOffset.isMultiple(of: 2),
+                     "decode-order INT4 projection needs two-byte aligned weights")
+        guard t > 0, n > 0, k > 0 else { return }
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(weights, offset: weightsOffset, index: 0)
@@ -101,9 +128,27 @@ final class PrefillInt4QMM {
         enc.setBytes(&tVar, length: MemoryLayout<UInt32>.size, index: 5)
         enc.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 6)
         enc.setBytes(&kVar, length: MemoryLayout<UInt32>.size, index: 7)
-        enc.dispatchThreadgroups(
-            MTLSize(width: (n + 7) / 8, height: (t + 7) / 8, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+        if decodeOrder {
+            let tiles = t / Self.decodeTileTokens
+            if tiles > 0 {
+                enc.dispatchThreadgroups(MTLSize(width: (n + 7) / 8, height: tiles, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
+            let tail = t % Self.decodeTileTokens
+            if tail > 0 {
+                let row = tiles * Self.decodeTileTokens
+                enc.setComputePipelineState(decodeOrderPipelines[tail - 1])
+                enc.setBuffer(x, offset: xOffset + row * k * MemoryLayout<Float16>.stride, index: 3)
+                enc.setBuffer(y, offset: yOffset + row * n * MemoryLayout<Float16>.stride, index: 4)
+                tVar = UInt32(tail)
+                enc.setBytes(&tVar, length: MemoryLayout<UInt32>.size, index: 5)
+                enc.dispatchThreadgroups(MTLSize(width: (n + 7) / 8, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            }
+        } else {
+            enc.dispatchThreadgroups(MTLSize(width: (n + 7) / 8, height: (t + 7) / 8, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+        }
         enc.endEncoding()
     }
 }

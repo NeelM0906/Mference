@@ -1,7 +1,61 @@
-# Swift-Qwen qualification record — 2026-09-16
+# Swift-Qwen qualification record — updated 2026-09-18
 
 Status: candidate, not promoted. This records successes **and failed gates**;
 passing package tests does not imply full model qualification.
+
+## September 18 numerical correction and retest
+
+The previously failed installed prefill gate below now passes on `d2b84f1`.
+No thresholds changed. Swift-only batched INT4 projections now preserve the
+decode kernel's affine factoring and reduction order. They still dispatch the
+whole prompt block, without host-side full-model replay. The base checkpoint's
+projection selection is unchanged. This addresses arithmetic differences that
+compound through the fine-tuned network; it does not establish bit-exact
+whole-model prefill or a performance improvement.
+
+Host: Mac Studio Mac15,14, Apple M3 Ultra, 32 CPU cores, 256 GiB RAM;
+macOS 26.3 (25D125); Swift 6.3.3 (`swiftlang-6.3.3.1.3 clang-2100.1.1.101`).
+Safety checks found no existing model owner, 97% memory free and more than
+760 GiB disk free. The existing completed Swift install was reused.
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer MFERENCE_SWIFT_QWEN_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/swiftqwen38.gturbo MFERENCE_MTP=1 Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter SwiftQwenInstalledQualificationTests
+```
+
+Exit **0**, build `13.40s`. Full footer:
+
+```text
+Test prefillAppendAndSpeculativeContinuation() passed after 81.928 seconds.
+Suite SwiftQwenInstalledQualificationTests passed after 81.929 seconds.
+Test run with 1 test in 1 suite passed after 81.929 seconds.
+```
+
+| Prompt | Max absolute | Mean absolute | Top-1 | Result |
+| --- | ---: | ---: | --- | --- |
+| 65 | 0.037109375 | 0.0037590205 | Same | Pass |
+| 257 | 0.025390625 | 0.0037336384 | Same | Pass |
+| 1025 | 0.046875 | 0.0074094827 | Same | Pass |
+
+All 15 subsequent full-logit state probes and all 20 MTP reconciliation probes
+passed, including stop lengths 2/7/32/64. The log is
+`/tmp/mference-release-swift-qualified-final.log`.
+The separate affine/golden/paged/blocked regression command was:
+
+```bash
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter 'PrefillAffineTests|Qwen38ForwardRunnerTests|Qwen38BlockedPrefillTests|Qwen38PagedKVParityTests'
+```
+
+Exit 0; `Test run with 20 tests in 4 suites passed after 19.264 seconds.`
+New kernel checks require bit-identical batched-versus-decode projections,
+including production-size matrices. No diagnostic tracing remains enabled.
+
+Protocol limits: these are debug-build correctness tests, not performance
+measurements. The separately approved GLM range-streaming installation ran
+concurrently and may affect wall time. The non-default build scratch directory
+avoids incompatible toolchain artifacts; no cache was purged. MTP was explicitly
+enabled for correctness only and remains off by default. Broader task quality,
+matched latency, long contexts and other hardware profiles remain unqualified.
+The September 16 failures below remain as historical evidence.
 
 ## Environment
 
@@ -97,8 +151,8 @@ finite logits and matching top-1. Both failing rows were final prefill heads:
 | 1025 | 0.18652344 | 0.014277136 | Same | Fail mean limit |
 
 All 15 state-probe rows passed (worst max 0.15039062, worst mean 0.007820662).
-No threshold was loosened after execution. The failed gate remains opt-in and
-visible; it prevents a blanket numerical-qualification claim.
+No threshold was loosened after execution. This historical failure was corrected
+and retested on September 18 above; the suite remains opt-in.
 
 In the same run, explicit native MTP stop/rewind checks at 2/7/32/64 generated
 tokens matched plain greedy output; all 20 full-logit state probes after cursor
@@ -162,8 +216,8 @@ favorable cases from different revisions. Original evidence is preserved in
 `/tmp/mference-phase2-task-screen-v1.jsonl` and
 `/tmp/mference-phase2-task-screen-v1-corrected.jsonl`.
 
-Conclusion: integration, bounded functional comparison and local MTP
-stop/rewind evidence are available. The failed numerical screen, wider task
+September 16 conclusion: integration, bounded functional comparison and local MTP
+stop/rewind evidence were available. At that time the numerical screen, wider task
 coverage, native UI tool execution, long contexts and other hardware profiles
 remain open. Base installation/default recommendation and Swift's MTP-off
 default are unchanged.

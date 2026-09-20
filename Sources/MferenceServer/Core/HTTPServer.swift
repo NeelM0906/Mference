@@ -251,7 +251,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
             let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
                                                               dialect: chatDialect,
-                                                              swiftQwen: backend.usesSwiftQwenTemplate)
+                                                              swiftQwen: backend.usesSwiftQwenTemplate,
+                                                              qwenReasoning: backend.supportsQwenReasoningEffort)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -418,7 +419,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             decoded,
                             modelID: resolved.modelID,
                             dialect: resolved.backend.chatDialect,
-                            swiftQwen: resolved.backend.usesSwiftQwenTemplate)
+                            swiftQwen: resolved.backend.usesSwiftQwenTemplate,
+                            qwenReasoning: resolved.backend.supportsQwenReasoningEffort)
                         let prepared = try await resolved.backend.prepare(request)
                         startStream()
                         let completion = try await resolved.backend
@@ -712,7 +714,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
 
     private func usageObject(_ usage: OpenAIUsage) -> [String: Any] {
-        [
+        var object: [String: Any] = [
             "prompt_tokens": usage.promptTokens,
             "completion_tokens": usage.completionTokens,
             "total_tokens": usage.totalTokens,
@@ -720,6 +722,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 "cached_tokens": usage.promptTokensDetails.cachedTokens,
             ],
         ]
+        if let details = usage.completionTokensDetails {
+            var values: [String: Any] = ["reasoning_tokens": details.reasoningTokens]
+            if let visible = details.visibleTokens { values["visible_tokens"] = visible }
+            object["completion_tokens_details"] = values
+        }
+        return object
     }
 
     private func toolCallObject(_ call: ParsedToolCall) -> [String: Any] {

@@ -5,8 +5,8 @@ import Testing
 
 /// Qwen 3.8 dense runtime integration against the qwen38 toy fixture:
 /// factory dispatch, deterministic decode replay across runner instances,
-/// KV + GDN state reset correctness, and the sequential-replay prefill v1
-/// matching pure decode.
+/// KV + GDN state reset correctness, and batched production prefill matching
+/// the explicit sequential-decode reference on this fixture.
 @Suite struct Qwen38ForwardRunnerTests {
     private static let vocab = 1024
 
@@ -117,9 +117,8 @@ import Testing
         #expect(runner.lastGreedyToken == first)
     }
 
-    /// Prefill v1 is a sequential decode replay, so prefilling a prompt then
-    /// decoding must match pure decode from a fresh state exactly (shared
-    /// KV + GDN recurrent state + conv tail).
+    /// Batched prefill followed by decode must match the sequential reference
+    /// on this short fixture (shared KV + GDN recurrent state + conv tail).
     @Test func prefillChunked_matchesPureDecode() async throws {
         let (dir, ctx, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: dir) }

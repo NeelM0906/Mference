@@ -62,7 +62,7 @@ import Metal
     /// Load the real install against an explicitly pinned baseline and build the
     /// production `FlashNextForwardRunner` via the real factory. Returns nil when
     /// the env gate is absent so the suite skips cleanly.
-    private static func loadHarness(maxContext: Int) async throws -> Harness? {
+    private static func loadHarness(maxContext: Int, resident: Bool = false) async throws -> Harness? {
         guard let path = installPath() else { return nil }
         let modelURL = URL(fileURLWithPath: path)
         let context = try MetalContext()
@@ -86,7 +86,7 @@ import Metal
             directoryURL: modelURL,
             device: context.device,
             expecting: cfg,
-            streamingMode: .pread(slotCount: runtime.expertCacheSlots),
+            streamingMode: resident ? .resident : .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: integrity)
         let firstLoadSeconds = Date().timeIntervalSince(loadStart)
@@ -292,9 +292,10 @@ import Metal
     /// Current-build A/B against scalar replay on the real INT8-router install.
     /// This does not need an external reference: both sides share the exact
     /// weights and decode path, isolating the prefill implementation itself.
-    @Test func chunkedPrefillMatchesSequentialOnRealInstall() async throws {
+    @Test(arguments: [false, true])
+    func chunkedPrefillMatchesSequentialOnRealInstall(resident: Bool) async throws {
         guard Self.installPath() != nil else { return }
-        guard let h = try await Self.loadHarness(maxContext: 256),
+        guard let h = try await Self.loadHarness(maxContext: 256, resident: resident),
               let runner = h.runner as? FlashNextForwardRunner else { return }
         let prompt = try Self.shortBenchmarkPrompt(h)
         let vocab = h.model.config.vocabSize
@@ -353,7 +354,7 @@ import Metal
         let nextArgmax = Self.argmax(sequentialNext)
         let chunkedNextArgmax = Self.argmax(chunkedNext)
         let rolloutStatus = sequentialRollout == chunkedRollout ? "exact" : "DIFF"
-        let report = "[flashnext-prefill-ab] prompt=\(prompt.count) "
+        let report = "[flashnext-prefill-ab] resident=\(resident) prompt=\(prompt.count) "
             + "prompt_max_abs=\(promptMaxAbs) relative=\(promptRelative) "
             + "prompt_argmax=\(promptArgmax)/\(chunkedPromptArgmax) "
             + "next_max_abs=\(nextMaxAbs) relative=\(nextRelative) "
@@ -365,6 +366,7 @@ import Metal
         #expect(result.seed == .logitsWritten)
         #expect(result.execution?.batchedTokens == prompt.count)
         #expect(result.execution?.replayedTokens == 0)
+        #expect((runner.deviceGroupedPrefillLayers > 0) == resident)
         #expect(chunkedPromptArgmax == promptArgmax)
         #expect(chunkedNextArgmax == nextArgmax)
         #expect(sequentialRollout == chunkedRollout)

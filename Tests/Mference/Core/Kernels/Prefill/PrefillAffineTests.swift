@@ -96,7 +96,8 @@ import MferenceValidationSupport
                                                          k: Int,
                                                          seed: UInt64,
                                                          maxAbsTolerance: Float = 2e-2,
-                                                         relTolerance: Float = 2e-4) throws {
+                                                         relTolerance: Float = 2e-4,
+                                                         decodeOrder: Bool = false) throws {
         precondition(k % Quantization.groupSize == 0)
         let groups = k / Quantization.groupSize
         var rng = SeedTree(seed).key("prefill-qmm-pattern-t\(t)-n\(n)-k\(k)")
@@ -122,7 +123,11 @@ import MferenceValidationSupport
 
         let ctx = try MetalContext()
         let gemv = try DequantInt4GEMV(context: ctx)
-        let qmm = try PrefillInt4QMM(context: ctx)
+        let qmm = try PrefillInt4QMM(context: ctx, decodeOrder: decodeOrder)
+        let padding = decodeOrder ? 32 : 0
+        let sentinel = Float16(-997)
+        let paddedX = Array(repeating: sentinel, count: padding) + x
+            + Array(repeating: sentinel, count: padding)
 
         guard let wBuf = ctx.device.makeBuffer(bytes: packed, length: packed.count, options: .storageModeShared),
               let sBuf = ctx.device.makeBuffer(bytes: scales,
@@ -131,9 +136,10 @@ import MferenceValidationSupport
               let bBuf = ctx.device.makeBuffer(bytes: biases,
                                                length: biases.count * MemoryLayout<UInt16>.size,
                                                options: .storageModeShared),
-              let xBuf = Fp16Buffer.make(ctx.device, halves: x),
+              let xBuf = Fp16Buffer.make(ctx.device, halves: paddedX),
               let gemvOut = Fp16Buffer.make(ctx.device, count: t * n),
-              let qmmOut = Fp16Buffer.make(ctx.device, count: t * n) else {
+              let qmmOut = Fp16Buffer.make(ctx.device,
+                halves: Array(repeating: sentinel, count: t * n + 2 * padding)) else {
             Issue.record("alloc failed for shape T=\(t) N=\(n) K=\(k)")
             return
         }
@@ -145,7 +151,7 @@ import MferenceValidationSupport
                         scales: sBuf,
                         biases: bBuf,
                         x: xBuf,
-                        xOffset: row * k * MemoryLayout<Float16>.size,
+                        xOffset: (padding + row * k) * MemoryLayout<Float16>.size,
                         y: gemvOut,
                         yOffset: row * n * MemoryLayout<Float16>.size,
                         m: UInt32(n),
@@ -156,17 +162,27 @@ import MferenceValidationSupport
                    scales: sBuf,
                    biases: bBuf,
                    x: xBuf,
+                   xOffset: padding * MemoryLayout<Float16>.size,
                    y: qmmOut,
+                   yOffset: padding * MemoryLayout<Float16>.size,
                    t: t,
                    n: n,
                    k: k)
         cb.commit()
         cb.waitUntilCompleted()
+        #expect(cb.error == nil)
 
         let reference = Fp16Buffer.read(gemvOut, count: t * n)
-        let actual = Fp16Buffer.read(qmmOut, count: t * n)
+        let guarded = Fp16Buffer.read(qmmOut, count: t * n + 2 * padding)
+        #expect(guarded.prefix(padding).allSatisfy { $0 == Float(sentinel) })
+        #expect(guarded.suffix(padding).allSatisfy { $0 == Float(sentinel) })
+        let actual = Array(guarded.dropFirst(padding).prefix(t * n))
         let maxAbs = RelError.maxAbsDiff(actual, reference)
         let rel = RelError.compute(actual: actual, reference: reference)
+        if decodeOrder {
+            #expect(actual.map(\.bitPattern) == reference.map(\.bitPattern),
+                    "decode-order projection must match every output bit")
+        }
         #expect(maxAbs <= maxAbsTolerance,
                 "shape T=\(t) N=\(n) K=\(k) maxAbs=\(maxAbs) rel=\(rel)")
         #expect(rel <= relTolerance,
@@ -236,5 +252,14 @@ import MferenceValidationSupport
         // Swift Testing cannot catch precondition traps in-process, so this
         // documents the rejection contract without deliberately crashing.
         #expect(Quantization.groupSize == 64)
+    }
+
+    @Test func decodeOrderBatchedProjectionMatchesExactly() throws {
+        for (t, n, k) in [(1, 9, 64), (2, 9, 64), (3, 9, 64), (4, 9, 64),
+                           (7, 65, 192), (33, 48, 5120),
+                           (32, 10240, 5120), (65, 5120, 17408)] {
+            try Self.runPatternQMMMatchesRepeatedGEMV(t: t, n: n, k: k,
+                seed: 0x9157, maxAbsTolerance: 0, relTolerance: 0, decodeOrder: true)
+        }
     }
 }

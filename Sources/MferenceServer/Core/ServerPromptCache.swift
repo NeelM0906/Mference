@@ -29,6 +29,7 @@ struct ServerPromptCacheEntry: Sendable, Equatable {
     let kvBackedTokenIDs: [Int32]
     let uncommittedBoundaryTokenIDs: [Int32]
     let kvPosition: Int
+    var reasoningEffort: QwenReasoningEffort? = nil
 }
 
 enum ServerPromptCacheMatch: Sendable, Equatable {
@@ -82,7 +83,8 @@ struct ServerPromptCache: Sendable {
                 rawStopReason: result.reason),
             kvBackedTokenIDs: result.kvBackedTokenIDs,
             uncommittedBoundaryTokenIDs: result.uncommittedBoundaryTokenIDs,
-            kvPosition: result.kvPosition)
+            kvPosition: result.kvPosition,
+            reasoningEffort: request.reasoningEffort)
     }
 
     func match(
@@ -108,10 +110,11 @@ struct ServerPromptCache: Sendable {
                 cachedPromptTokens: entry.kvPosition)
         }
 
-        // Swift-Qwen's effort and preserved reasoning are defined by the
+        // Source-template effort and preserved reasoning are defined by the
         // source template. Reuse only an exact rendered prefix; the legacy
         // hand-written bridge cannot prove equivalence for this checkpoint.
-        guard !tokenizer.isSwiftQwen else { return .miss }
+        guard !tokenizer.isSwiftQwen, request.reasoningEffort == nil,
+              entry.reasoningEffort == nil else { return .miss }
         let inputCount = entry.inputMessages.count
         guard request.messages.count > inputCount + 1,
               request.messages.prefix(inputCount)

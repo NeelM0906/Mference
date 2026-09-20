@@ -555,6 +555,68 @@ kernel void glm53p_latent_attention_causal(
     }
 }
 
+// Two causal queries share each latent row load, keeping the original eight
+// SIMD partitions and per-query online-softmax/reduction order. Scratch is
+// reused during each query's reduction rather than doubled (fits 32 KiB GPUs).
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void glm53p_latent_attention_causal_pair(
+    device const half* q_lat [[buffer(0)]], device const half* latents [[buffer(1)]],
+    device half* out [[buffer(2)]], constant uint& kv_dim [[buffer(3)]],
+    constant uint& base [[buffer(4)]], constant uint& H [[buffer(5)]],
+    constant float& scale [[buffer(6)]], constant uint& rows [[buffer(7)]],
+    uint2 tgp [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float acc_tg[8 * 512];
+    threadgroup float m_tg[8];
+    threadgroup float d_tg[8];
+    const uint h = tgp.x, first = tgp.y * 2u, per = kv_dim / 32u;
+    float q[2][16], acc[2][16];
+    float m[2] = {-FLT_MAX / 2.0f, -FLT_MAX / 2.0f};
+    float denom[2] = {0.0f, 0.0f};
+    for (uint query = 0; query < 2u; ++query) {
+        for (uint i = 0; i < per; ++i) {
+            q[query][i] = first + query < rows
+                ? float(q_lat[((first + query) * H + h) * kv_dim + lane * per + i]) : 0.0f;
+            acc[query][i] = 0.0f;
+        }
+    }
+    const uint end = base + min(first + 2u, rows);
+    for (uint r = sg; r < end; r += 8u) {
+        device const half* k = latents + r * kv_dim + lane * per;
+        float kv[16];
+        for (uint i = 0; i < per; ++i) kv[i] = float(k[i]);
+        for (uint query = 0; query < 2u; ++query) {
+            if (first + query < rows && r < base + first + query + 1u) {
+                float dot = 0.0f;
+                for (uint i = 0; i < per; ++i) dot = fma(q[query][i], kv[i], dot);
+                dot = simd_sum(dot) * scale;
+                const float new_m = max(m[query], dot);
+                const float rescale = exp(m[query] - new_m);
+                const float w = exp(dot - new_m);
+                denom[query] = fma(denom[query], rescale, w);
+                for (uint i = 0; i < per; ++i) acc[query][i] = fma(acc[query][i], rescale, kv[i] * w);
+                m[query] = new_m;
+            }
+        }
+    }
+    for (uint query = 0; query < 2u && first + query < rows; ++query) {
+        for (uint i = 0; i < per; ++i) acc_tg[sg * kv_dim + lane * per + i] = acc[query][i];
+        if (lane == 0) { m_tg[sg] = m[query]; d_tg[sg] = denom[query]; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float M = -FLT_MAX / 2.0f;
+        for (uint s = 0; s < 8u; ++s) M = max(M, m_tg[s]);
+        float Dn = 0.0f;
+        for (uint s = 0; s < 8u; ++s) Dn = fma(d_tg[s], exp(m_tg[s] - M), Dn);
+        const float inv = Dn > 0.0f ? 1.0f / Dn : 0.0f;
+        for (uint d = tid; d < kv_dim; d += 256u) {
+            float o = 0.0f;
+            for (uint s = 0; s < 8u; ++s) o = fma(acc_tg[s * kv_dim + d], exp(m_tg[s] - M), o);
+            out[((first + query) * H + h) * kv_dim + d] = half(o * inv);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 // LayerNorm with gain and bias for T rows (grid T threadgroups x 256).
 [[kernel, max_total_threads_per_threadgroup(256)]]
 kernel void glm53p_layernorm_bias_batched(
@@ -891,4 +953,64 @@ kernel void glm53p_latent_attention_selected(
         for (uint s = 0; s < 8u; ++s) o = fma(acc_tg[s * kv_dim + d], exp(m_tg[s] - M), o);
         out[(uint(t) * H + h) * kv_dim + d] = half(o * inv);
     }
+}
+
+// Stable descending pool selection (score descending, pool ID ascending),
+// matching Glm53Selection. Each query owns its heap/output and mark row.
+// The heap root is the worst selected pool; expansion is position-ordered.
+inline bool glm53p_pool_better(device const float* scores, uint a, uint b) {
+    return scores[a] != scores[b] ? scores[a] > scores[b] : a < b;
+}
+
+kernel void glm53p_select_pools(
+    device const float* scores [[buffer(0)]],
+    device uint* selected [[buffer(1)]], device uint* counts [[buffer(2)]],
+    device uchar* marks [[buffer(3)]],
+    constant uint& pools [[buffer(4)]], constant uint& stride [[buffer(5)]],
+    constant uint& base [[buffer(6)]], constant uint& rows [[buffer(7)]],
+    constant uint& pool_size [[buffer(8)]], constant uint& top_k [[buffer(9)]],
+    constant uint& include_tail [[buffer(10)]], uint t [[thread_position_in_grid]]) {
+    if (t >= rows) return;
+    const uint visible = base + t + 1u;
+    if (visible <= top_k) { counts[t] = 0xFFFFFFFFu; return; }
+    const uint complete = visible / pool_size;
+    const uint wanted = min(top_k / pool_size, complete);
+    device const float* row = scores + t * pools;
+    device uint* heap = selected + t * stride;
+    device uchar* flags = marks + t * pools;
+    for (uint i = 0; i < complete; ++i) flags[i] = 0;
+    uint size = 0;
+    for (uint pool = 0; pool < complete && wanted > 0; ++pool) {
+        if (size < wanted) {
+            uint child = size++;
+            heap[child] = pool;
+            while (child > 0) {
+                const uint parent = (child - 1u) / 2u;
+                if (!glm53p_pool_better(row, heap[parent], heap[child])) break;
+                const uint tmp = heap[parent]; heap[parent] = heap[child]; heap[child] = tmp;
+                child = parent;
+            }
+        } else if (glm53p_pool_better(row, pool, heap[0])) {
+            heap[0] = pool;
+            uint parent = 0;
+            while (parent * 2u + 1u < size) {
+                uint child = parent * 2u + 1u;
+                if (child + 1u < size && glm53p_pool_better(row, heap[child], heap[child + 1u])) ++child;
+                if (!glm53p_pool_better(row, heap[parent], heap[child])) break;
+                const uint tmp = heap[parent]; heap[parent] = heap[child]; heap[child] = tmp;
+                parent = child;
+            }
+        }
+    }
+    for (uint i = 0; i < size; ++i) flags[heap[i]] = 1;
+    uint count = 0;
+    for (uint pool = 0; pool < complete; ++pool) {
+        if (flags[pool]) {
+            for (uint offset = 0; offset < pool_size; ++offset) heap[count++] = pool * pool_size + offset;
+        }
+    }
+    if (include_tail) {
+        for (uint token = complete * pool_size; token < visible; ++token) heap[count++] = token;
+    }
+    counts[t] = count;
 }

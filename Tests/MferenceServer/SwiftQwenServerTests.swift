@@ -4,10 +4,11 @@ import Testing
 @testable import MferenceServerCore
 
 @Suite struct SwiftQwenServerTests {
-    @Test func effortAndHistoricalReasoningSurviveValidation() throws {
+    @Test(arguments: [CheckpointIdentity.swiftQwen38, CheckpointIdentity.baseQwen38])
+    func effortAndHistoricalReasoningSurviveValidation(model: String) throws {
         for effort in ["xhigh", "medium", "low", "none"] {
             let data = Data("""
-            {"model":"swift-qwen3.8-27b-int4g64","reasoning_effort":"\(effort)","messages":[
+            {"model":"\(model)","reasoning_effort":"\(effort)","messages":[
               {"role":"user","content":"A"},
               {"role":"assistant","content":"B","reasoning_content":"Check A"},
               {"role":"user","content":"C"}]}
@@ -16,6 +17,30 @@ import Testing
             let validated = try OpenAIRequestValidator.validate(request, modelID: request.model, dialect: .chatml)
             #expect(validated.reasoningEffort?.rawValue == effort)
             #expect(validated.messages[1].reasoningContent == "Check A")
+        }
+    }
+
+    @Test func aliasCapabilitiesAndBaseExplicitRoleContract() throws {
+        let data = Data(#"{"model":"alias","reasoning_effort":"low","messages":[{"role":"user","content":"Hi"}]}"#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        #expect(try OpenAIRequestValidator.validate(request, modelID: "alias", dialect: .chatml,
+            swiftQwen: false, qwenReasoning: true).reasoningEffort == .low)
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(request, modelID: "alias", dialect: .chatml,
+                swiftQwen: false, qwenReasoning: false)
+        }
+        for effort in ["", "\"reasoning_effort\":\"low\","] {
+            let body = Data("""
+            {"model":"qwen3.8-27b-4bit",\(effort)"messages":[{"role":"developer","content":"Guide"},{"role":"user","content":"Hi"}]}
+            """.utf8)
+            let base = try JSONDecoder().decode(OpenAIChatRequest.self, from: body)
+            if effort.isEmpty {
+                #expect(try OpenAIRequestValidator.validate(base, modelID: base.model, dialect: .chatml).reasoningEffort == nil)
+            } else {
+                #expect(throws: ServerRequestError.self) {
+                    try OpenAIRequestValidator.validate(base, modelID: base.model, dialect: .chatml)
+                }
+            }
         }
     }
 

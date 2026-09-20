@@ -11,13 +11,15 @@ import Testing
 @Suite struct MiniCPM5ForwardRunnerTests {
     private static let vocab = 128
 
-    private func makeRunner(maxContext: Int = 128) throws -> (URL, MetalContext, MiniCPM5ForwardRunner) {
+    private func makeRunner(maxContext: Int = 128,
+                            runtimeConfiguration: RuntimeConfiguration = .production) throws -> (URL, MetalContext, MiniCPM5ForwardRunner) {
         let dir = try MiniCPM5Parity.installToyCheckpoint()
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir, device: ctx.device,
                                    expecting: .miniCPM5Toy())
         let runner = try MiniCPM5ForwardRunner(model: model, context: ctx,
-                                               maxContext: maxContext)
+                                               maxContext: maxContext,
+                                               runtimeConfiguration: runtimeConfiguration)
         return (dir, ctx, runner)
     }
 
@@ -38,6 +40,61 @@ import Testing
 
     private static func prompt(_ count: Int) -> [Int32] {
         (0..<count).map { Int32(4 + ($0 * 37 + 11) % (vocab - 4)) }
+    }
+
+    @Test("cancelled warm append requires reset across KV backends",
+          arguments: ["dense", "paged", "spilled"])
+    func interruptedWarmAppendRequiresReset(backend: String) async throws {
+        let runtime = RuntimeConfiguration(kvPagedPolicy: backend == "dense" ? .off : .on,
+            kvTopKPages: 0, kvSinkPages: 1, kvRecentPages: 2,
+            kvPoolPagesPerLayer: backend == "spilled" ? 5 : nil)
+        let (dir, ctx, runner) = try makeRunner(maxContext: 512, runtimeConfiguration: runtime)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx)
+        let tokens = Self.prompt(433)
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(400), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        let reference = bits(logits)
+        try await runner.produceExactPrefill(token: 7, position: 400, into: logits)
+        let referenceNext = bits(logits)
+        runner.reset()
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(400), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        runner.prefillDidCompleteLayer = { layer in
+            if layer == 0 { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        // Exclusively used by this task until its value is awaited below.
+        struct SerialBuffer: @unchecked Sendable { let value: MTLBuffer }
+        let output = SerialBuffer(value: logits)
+        let interrupted = Task { @Sendable in
+            _ = try await runner.prefillChunked(tokens: tokens[400..<433], startPosition: 400,
+                outputMode: .logits, config: .production(chunkTokens: 64),
+                into: output.value, onProgress: { _ in })
+        }
+        do {
+            try await interrupted.value
+            Issue.record("expected failure after a real layer wrote KV")
+        } catch is CancellationError {}
+        #expect(throws: PrefillError.self) {
+            try runner.prepareForContinuation(expectedPosition: 400)
+        }
+        do {
+            try await runner.produce(token: 7, position: 400, into: logits)
+            Issue.record("dirty state must reject decode")
+        } catch let error as PrefillError {
+            guard case .chunkedRunnerDirty = error else { throw error }
+        }
+        runner.prefillDidCompleteLayer = nil
+        runner.reset()
+        _ = try await runner.prefillChunked(tokens: tokens.prefix(400), startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64),
+            into: logits, onProgress: { _ in })
+        #expect(bits(logits) == reference)
+        try runner.prepareForContinuation(expectedPosition: 400)
+        try await runner.produceExactPrefill(token: 7, position: 400, into: logits)
+        #expect(bits(logits) == referenceNext)
     }
 
     @Test func factory_selectsTheMiniCPM5RunnerWithChunkedPrefillAndFP16KV() throws {

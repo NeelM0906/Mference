@@ -18,6 +18,7 @@
 
 <p align="center">
   <a href="#try-it">Quick start</a> ·
+  <a href="docs/RELEASE_SUPPORT.md">Checkpoint choices & limits</a> ·
   <a href="docs/OPENAI_SERVER.md">Local server</a> ·
   <a href="docs/OPEN_WEBUI.md">The UI</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
@@ -43,7 +44,7 @@ into a slot cache, long-context KV pages spill to SSD, and Flash-Next's
 families remain fully resident but share the same native runtime, verified
 installer, model contract, and serving layer.
 
-Mference currently runs eight pinned instruction checkpoints:
+Mference supports a curated set of pinned instruction checkpoints:
 
 - **[Gemma 4 26B-A4B](https://ai.google.dev/gemma/docs/core/model_card_4)** —
   26B total, ~3.88B active per token, in ~2 GB of memory.
@@ -118,13 +119,28 @@ compile-time baseline, and manifest contract. New families merge through the
 
 ## Try it
 
+This is a **source release for Apple Silicon Macs**, not a signed Mac app or
+a bundle of model weights. You need macOS 15+, Swift 6.1+ (Xcode 16.3+ or
+matching Command Line Tools), and `uv` for the browser UI. Install `uv` first
+if needed, for example with `brew install uv` if you already use Homebrew.
+The CLI/server do not need Python or `uv`.
+
 ```bash
 git clone https://github.com/NeelM0906/Mference.git
 cd Mference
+./mference-ui.sh doctor          # checks prerequisites without downloading or changing settings
 swift build -c release
 ./mference-ui.sh install gemma4    # streams and repacks the pinned checkpoint (~14 GB)
 ./mference-ui.sh                   # starts the server and the UI, opens http://127.0.0.1:3000
 ```
+
+First use is not instant: the build, pinned UI dependency installation, model
+download and integrity verification take time. Gemma's install is about 14 GB;
+keep additional space for the build and UI dependencies. Later launches reuse
+the completed install. Interrupted model downloads can be continued with
+`./mference-ui.sh install gemma4 --resume`; do not delete and download again.
+See the [source-release checklist](docs/SOURCE_RELEASE.md) for checks,
+troubleshooting and release limitations.
 
 The UI is [Open WebUI](https://github.com/open-webui/open-webui), installed
 on first launch as a pinned Python tool (the launcher uses `uv`; it prints
@@ -143,7 +159,7 @@ troubleshooting are in [docs/OPEN_WEBUI.md](docs/OPEN_WEBUI.md).
 
 Install more families the same way (`./mference-ui.sh install qwen36`,
 `maple`, `qwen38`, `deepseekv4flash`, `inklingsmall`, `qwen38flashnext`,
-`minicpm5`),
+`minicpm5`, `glm53flash`),
 and they appear in the model picker. `./mference-ui.sh models` shows what the
 server would expose without loading anything.
 
@@ -311,7 +327,7 @@ template with hidden reasoning, and GLM-5.3's `[gMASK]<sop>` turns with
   need no Python
 - Free storage for the model install (~6.6 GB Maple, ~14.3 GB Gemma 4,
   ~19.6 GB Qwen 3.6; the largest families require substantially more, up to
-  ~175 GB for Flash-Next)
+  ~175 GB for Flash-Next and ~181 GB for GLM)
 - An internet connection for the first install
 
 The shader library is compiled from source at startup, and the choice of

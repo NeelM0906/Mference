@@ -1,0 +1,14 @@
+[
+  {
+    "label": "base-low",
+    "model": "qwen3.8-27b-4bit",
+    "reasoning_effort": "low",
+    "source_revision": "legacy receipt: revision unknown; source index sha256:13b840162b4cb35c66fef7df072f7dbb4717908204364f5e5d9f9655a2758fa8 matches configured pin 3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+  },
+  {
+    "label": "swift-low",
+    "model": "swift-qwen3.8-27b-int4g64",
+    "reasoning_effort": "low",
+    "source_revision": "1b30aaaf753fe5c1cb51ada2ea0367a53445359c"
+  }
+]

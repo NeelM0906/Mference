@@ -59,6 +59,7 @@ struct SwiftQwenChatTests {
     @Test func rendersMatchIndependentJinjaOracle() async throws {
         struct Oracle: Decodable { let name: String; let effort: String; let render: String }
         let tok = try await tokenizer()
+        let base = try tok.forCheckpoint(CheckpointIdentity.baseQwen38)
         let url = try #require(Bundle.module.url(forResource: "oracle", withExtension: "json",
                                                subdirectory: "Fixtures/SwiftQwenTemplate"))
         let cases = try JSONDecoder().decode([Oracle].self, from: Data(contentsOf: url))
@@ -68,6 +69,7 @@ struct SwiftQwenChatTests {
             #expect(tok.decode(ids, skipSpecialTokens: false) == item.render,
                     "\(item.name)/\(item.effort)")
             #expect(ids == tok.encode(item.render, addBOS: false))
+            #expect(try base.encodeChat(messages: messages(item.name), reasoningEffort: effort) == ids)
             #expect(tok.startsInThinking(reasoningEffort: effort) == (effort != .off))
         }
         #expect(try tok.encodeChat(messages: messages("single")) ==
@@ -96,10 +98,59 @@ struct SwiftQwenChatTests {
         let base = try tok.forCheckpoint("qwen3.8-27b-4bit")
         #expect(!base.isSwiftQwen)
         #expect(tok.isSwiftQwen)
+        #expect(base.supportsQwenReasoningEffort)
+        #expect(try base.encodeChat(messages: messages("single"), reasoningEffort: .low) ==
+            tok.encodeChat(messages: messages("single"), reasoningEffort: .low))
+        let other = try tok.forCheckpoint("qwen3.6-35b-a3b")
+        #expect(!other.supportsQwenReasoningEffort)
         #expect(throws: MFTokenizerError.self) {
-            try base.encodeChat(messages: messages("single"), reasoningEffort: .low)
+            try other.encodeChat(messages: messages("single"), reasoningEffort: .low)
         }
         #expect(throws: (any Error).self) { try tok.encodeChat(messages: []) }
+    }
+
+    @Test func matchedToolsAndBaseLegacyDefaults() async throws {
+        let swift = try await tokenizer()
+        let base = try swift.forCheckpoint(CheckpointIdentity.baseQwen38)
+        let input = messages("single")
+        let legacy = try base.encodeChat(messages: input)
+        #expect(base.decode(legacy, skipSpecialTokens: false) == "<|im_start|>user\n Hi <|im_end|>\n<|im_start|>assistant\n<think>\n")
+        let tools: [MFTokenizer.FunctionDefinition] = [.init(name: "lookup", description: "Lookup",
+            parameters: .object(["type": .string("object"), "properties": .object([
+                "query": .object(["type": .string("string")])])]))]
+        for effort in QwenReasoningEffort.allCases {
+            for name in ["single", "history", "tool_result"] {
+                let actual = try base.encodeChat(messages: messages(name), tools: tools, reasoningEffort: effort)
+                let expected = try swift.encodeChat(messages: messages(name), tools: tools, reasoningEffort: effort)
+                #expect(actual == expected)
+                #expect(base.startsInThinking(reasoningEffort: effort, promptIDs: actual) == (effort != .off))
+            }
+            #expect(throws: MFTokenizerError.self) {
+                try base.encodeChat(messages: [.init(role: .developer, content: "Guide"),
+                    .init(role: .user, content: "Hi")], reasoningEffort: effort)
+            }
+        }
+        #expect(try base.encodeChat(messages: input) == legacy)
+        #expect(base.decode(try base.encodeChat(messages: input, tools: tools), skipSpecialTokens: false)
+            .hasSuffix("<think>\n\n</think>\n\n"))
+    }
+
+    @Test func toolHistorySuffixDoesNotHideBaseQwenVisibleAnswer() async throws {
+        let tok = try await tokenizer().forCheckpoint("qwen3.8-27b-4bit")
+        let history = messages("tool_result") + [.init(role: .assistant, content: "Found A"),
+                                                 .init(role: .user, content: "What is 7 times 3?")]
+        let ids = try tok.encodeChat(messages: history)
+        #expect(tok.generationPromptStartsInThinking)
+        #expect(tok.decode(ids, skipSpecialTokens: false).hasSuffix("<think>\n\n</think>\n\n"))
+        let starts = tok.startsInThinking(reasoningEffort: nil, promptIDs: ids)
+        #expect(!starts)
+        let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: [], startsInThought: starts)
+        #expect(try decoder.consume(tokenID: 12, delta: "21") == [.content("21")])
+        let plain = try tok.encodeChat(messages: [.init(role: .user, content: "Hi")])
+        #expect(tok.startsInThinking(reasoningEffort: nil, promptIDs: plain))
+        // An earlier marker must not override an unmarked generation suffix.
+        let historical = tok.encode("</think>\n<|im_start|>assistant\n", addBOS: false)
+        #expect(tok.startsInThinking(reasoningEffort: nil, promptIDs: historical))
     }
 
     @Test(arguments: [false, true], [false, true])
@@ -127,6 +178,65 @@ struct SwiftQwenChatTests {
         #expect(call.name == "add")
         #expect(call.arguments == .object(["a": .integer(2), "b": .integer(3)]))
         _ = try decoder.finish()
+    }
+
+    @Test(arguments: [false, true])
+    func reasoningToolExamplesCannotEmitCallsOrFailParsing(swift: Bool) async throws {
+        let tok = try await tokenizer().forCheckpoint(swift ? CheckpointIdentity.swiftQwen38 : "qwen3.8-27b-4bit")
+        let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: ["echo"],
+            startsInThought: true, idGenerator: { "call_test" })
+        var reasoning = ""
+        decoder.onReasoning = { reasoning += $0 }
+        // Even unknown/malformed or unclosed examples belong to reasoning.
+        let example = "Consider <tool_call>not a call</tool_call> or <tool_call>another example"
+        for id in tok.encode(example, addBOS: false) {
+            #expect(try decoder.consume(tokenID: id, delta: tok.decode([id], skipSpecialTokens: false)).isEmpty)
+        }
+        #expect(reasoning == example)
+        #expect(!decoder.hasToolCalls)
+        _ = try decoder.consume(tokenID: #require(tok.thinkEndID), delta: "</think>")
+        #expect(try decoder.consumeFlushedText("Answer") == [.content("Answer")])
+        _ = try decoder.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        let callBody = "\n<function=echo>\n<parameter=text>\n<think>literal</think>\n</parameter>\n</function>\n"
+        for id in tok.encode(callBody, addBOS: false) {
+            _ = try decoder.consume(tokenID: id, delta: "")
+        }
+        let events = try decoder.consume(tokenID: tok.toolCallEndID, delta: "</tool_call>")
+        guard case .toolCall(let call) = try #require(events.first) else {
+            Issue.record("Expected visible-channel call"); return
+        }
+        #expect(call.arguments == .object(["text": .string("<think>literal</think>")]))
+        #expect(decoder.hasToolCalls)
+        #expect(try decoder.finish().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func toolSchemaPreservesStringThroughDecoderAndHistory(swift: Bool) async throws {
+        let tok = try await tokenizer().forCheckpoint(swift ? CheckpointIdentity.swiftQwen38 : "qwen3.8-27b-4bit")
+        let tools: [MFTokenizer.FunctionDefinition] = [.init(name: "echo", description: "Echo text",
+            parameters: .object(["type": .string("object"), "properties": .object([
+                "text": .object(["type": .string("string")])])]))]
+        let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: ["echo"],
+            startsInThought: true, toolDefinitions: tools, idGenerator: { "call_echo" })
+        _ = try decoder.consume(tokenID: #require(tok.thinkEndID), delta: "</think>")
+        _ = try decoder.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        let payload = "\n<function=echo>\n<parameter=text>\n123\n</parameter>\n</function>\n"
+        for id in tok.encode(payload, addBOS: false) {
+            _ = try decoder.consume(tokenID: id, delta: "")
+        }
+        let events = try decoder.consume(tokenID: tok.toolCallEndID, delta: "</tool_call>")
+        guard case .toolCall(let call) = try #require(events.first) else {
+            Issue.record("Expected tool call"); return
+        }
+        #expect(call.arguments == .object(["text": .string("123")]))
+        let history: [Message] = [.init(role: .user, content: "Echo 123"),
+            .init(role: .assistant, content: nil, toolCalls: [
+                .init(id: call.id, name: call.name, arguments: call.arguments)
+            ], reasoningContent: "Use echo."),
+            .init(role: .tool, content: "123", toolCallID: call.id)]
+        let rendered = tok.decode(try tok.encodeChat(messages: history, tools: tools), skipSpecialTokens: false)
+        #expect(rendered.contains("<parameter=text>\n123\n</parameter>"))
+        #expect(try decoder.finish().isEmpty)
     }
 
     @Test(arguments: [false, true])

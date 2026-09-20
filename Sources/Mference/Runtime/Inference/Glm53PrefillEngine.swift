@@ -7,8 +7,8 @@ import Metal
 ///
 /// Queries at or below `index_topk` attend densely and causally (the pooled
 /// indexer's selection is exhaustive there); later queries score every
-/// visible pool on the GPU and the CPU picks each query's set with the decode
-/// path's rule, one readback per sparse layer. The one readback per MoE
+/// visible pool and select each query's set on the GPU with the decode
+/// path's stable ordering rule. The one readback per MoE
 /// layer is the router's chunk of indices, which the CPU groups by expert.
 ///
 /// State handoff is the decode path's: conv tails (GDN tail update), the KDA
@@ -50,6 +50,7 @@ final class Glm53PrefillEngine {
     private let scoresC: MTLBuffer             // fp32 [C][maxPools]
     private let selectedC: MTLBuffer           // u32 [C][selStride]
     private let countsC: MTLBuffer             // u32 [C]
+    private let selectionMarksC: MTLBuffer     // byte [C][maxPools]
     private let maxPools: Int
     private let selStride: Int
     private let routerLogitsC: MTLBuffer      // fp32 [C][E]
@@ -114,6 +115,7 @@ final class Glm53PrefillEngine {
         scoresC = try buf(C * maxPools * 4)
         selectedC = try buf(C * selStride * 4)
         countsC = try buf(C * 4)
+        selectionMarksC = try buf(C * maxPools)
         routerLogitsC = try buf(C * runner.numExperts * 4)
         routerIdxC = try buf(C * K * 4)
         routerWC = try buf(C * K * 2)
@@ -133,8 +135,8 @@ final class Glm53PrefillEngine {
 
     /// Runs `tokens` (at most `capacity`) at positions `p0...`. Queries at or
     /// below `index_topk` attend densely; later ones through the pooled
-    /// indexer's per-query selection (scored on the GPU, chosen on the CPU
-    /// with `Glm53Selection.selectTokens`, one readback per sparse layer).
+    /// indexer's per-query selection (scored and chosen on the GPU with
+    /// `Glm53Selection.selectTokens` retained as the independent CPU oracle).
     /// Writes the last token's logits when asked.
     /// `MFERENCE_GLM53_PREFILL_TRACE=1` prints one line per chunk with its
     /// wall time and, when the phase clock is on, the GPU time.
@@ -288,7 +290,7 @@ final class Glm53PrefillEngine {
         }
         k.encodeHeadedGEMV(commandBuffer: cb, weights: embedQ, x: qC, y: qLatC, heads: heads, m: kvRank, n: r.qkDim,
                            tokens: T)
-        var stream = cb
+        let stream = cb
         if p0 + T <= r.idxTopK {
             // Every query sees at most index_topk tokens: the selection is exhaustive.
             k.encodeLatentAttentionCausal(commandBuffer: stream, qLatent: qLatC, latents: latents, out: oLatC, heads: heads,
@@ -308,27 +310,11 @@ final class Glm53PrefillEngine {
                                  heads: r.idxHeads, dim: r.idxDim, pools: pools, tokens: T,
                                  headScale: 1 / Float(r.idxDim).squareRoot(),
                                  weightScale: 1 / Float(r.idxHeads).squareRoot())
-            try r.sync()
-            // Per-query selection on the CPU, the decode path's rule.
-            let scoresPtr = scoresC.contents().bindMemory(to: Float.self, capacity: T * maxPools)
-            let selPtr = selectedC.contents().bindMemory(to: UInt32.self, capacity: T * selStride)
-            let cntPtr = countsC.contents().bindMemory(to: UInt32.self, capacity: T)
-            for t in 0..<T {
-                let visible = p0 + t + 1
-                if visible <= r.idxTopK {
-                    cntPtr[t] = Glm53Kernels.attendAll
-                    continue
-                }
-                let complete = visible / r.kPool
-                let row = (0..<complete).map { scoresPtr[t * pools + $0] }
-                let picks = Glm53Selection.selectTokens(poolScores: row, cached: visible, kPool: r.kPool,
-                                                        indexTopK: r.idxTopK,
-                                                        alwaysSelectTail: r.g53.indexKPoolAlwaysSelectTail)
-                precondition(picks.count <= selStride)
-                for (i, tok) in picks.enumerated() { selPtr[t * selStride + i] = UInt32(tok) }
-                cntPtr[t] = UInt32(picks.count)
-            }
-            stream = try r.open()
+            try k.encodePoolSelection(commandBuffer: stream, scores: scoresC,
+                selected: selectedC, counts: countsC, marks: selectionMarksC,
+                pools: pools, selectionStride: selStride, base: p0, tokens: T,
+                poolSize: r.kPool, topK: r.idxTopK,
+                includeTail: r.g53.indexKPoolAlwaysSelectTail)
             k.encodeLatentAttentionSelected(commandBuffer: stream, qLatent: qLatC, latents: latents, selected: selectedC,
                                             counts: countsC, out: oLatC, heads: heads, latentDim: kvRank, base: p0,
                                             selectionStride: selStride, tokens: T, scale: Float(r.cfg.attentionScale))

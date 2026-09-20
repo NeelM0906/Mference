@@ -35,8 +35,9 @@ group-64 during the install (~5 GB read, ~1.4 GB written); minicpm5mlx is the
 vendor's own MLX INT4 conversion of the same checkpoint, the W2.1b control.
 
 glm53flash reads PipeNetwork's pre-quantized mixed 4/8-bit MLX conversion of
-GLM-5.3-Flash (~182 GB; check disk first). The family's runner is not yet
-implemented, so an install is refused by axis name at load until it lands.
+GLM-5.3-Flash (~181 GB; check disk first). Resident and bounded streamed
+prefill are implemented; see docs/families/GLM53_FLASH.md and the prefill
+qualification matrix for the validated profiles and remaining limits.
 
 The installer streams the selected checkpoint (default: the supported Gemma 4
 checkpoint) from Hugging Face and repackages it without materializing the
@@ -44,6 +45,25 @@ source checkpoint on disk. Set HF_TOKEN only if Hugging Face requests
 authentication. A cancelled or interrupted download can be continued with
 --resume or removed with --discard-partial.
 """
+
+/// Range callbacks may arrive from transfer workers. Throttle payload-only
+/// updates while always reporting phase transitions and completed payloads.
+private final class InstallProgressPrinter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastPayloadTime = -Double.infinity
+
+    func report(_ progress: ModelInstallProgress) {
+        lock.lock()
+        defer { lock.unlock() }
+        if case let .copyingPayload(reused, downloaded, total) = progress {
+            let now = ProcessInfo.processInfo.systemUptime
+            let complete = Double(reused) + Double(downloaded) >= Double(total)
+            if !complete && now - lastPayloadTime < 2 { return }
+            lastPayloadTime = now
+        }
+        FileHandle.standardError.write(Data(("[install] " + progress.statusLine + "\n").utf8))
+    }
+}
 
 private struct Arguments {
     var model = SupportedModelSource.default
@@ -254,7 +274,10 @@ private func run(_ values: [String]) async -> Int32 {
         dryRunSpaceCheck: arguments.dryRun,
         sidecarPolicy: SidecarPolicy(carryMTP: !arguments.skipMTP))
     do {
-        let result = try await RemoteStreamingRepacker(options: options).run()
+        let printer = InstallProgressPrinter()
+        let result = try await RemoteStreamingRepacker(options: options).run { progress in
+            printer.report(progress)
+        }
         if result.dryRun {
             print("Dry run for \(source.displayName)")
             print("Source revision: \(result.resolvedCommit)")
