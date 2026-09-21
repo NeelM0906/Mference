@@ -29,11 +29,21 @@ enum ServerLog {
     }
 
     static func requestFailed(id: String, status: UInt, streaming: Bool, error: any Error) {
+        write(requestFailureMessage(id: id, status: status, streaming: streaming, error: error))
+    }
+
+    /// Cancellation is an expected lifecycle outcome (disconnect or shutdown),
+    /// not evidence of a model/server fault. This only classifies operator
+    /// logs; it does not change the HTTP/SSE response or suppress other errors.
+    static func requestFailureMessage(id: String, status: UInt, streaming: Bool, error: any Error) -> String {
+        if error is CancellationError {
+            return "request \(id) cancelled streaming=\(streaming)"
+        }
         let detail = switch error {
         case let error as ServerRequestError: describe(error)
         default: String(describing: error)
         }
-        write("request \(id) failed status=\(status) streaming=\(streaming) error=\(detail)")
+        return "request \(id) failed status=\(status) streaming=\(streaming) error=\(detail)"
     }
 
     static func streamAborted(id: String, reason: String) {

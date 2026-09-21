@@ -11,6 +11,8 @@ commands are in [Source release](SOURCE_RELEASE.md).
   server and the launcher for pinned Open WebUI 0.11.3.
 - Source-faithful Swift-Qwen identity/template/reasoning handling, boolean tool
   argument correction, explicit truncation reporting and UI history adapter.
+- Expected request cancellation has its own operator-log classification;
+  genuine generation failures retain their status and detail.
 - Production batched prefill and truthful execution/memory diagnostics,
   with installed sparse/window-boundary and recovery evidence.
 - Flash-Next routing/target-state/rollback improvements and GLM INT8 ragged-tile
