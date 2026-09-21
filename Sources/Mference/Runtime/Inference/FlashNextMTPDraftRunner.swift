@@ -60,6 +60,9 @@ final class FlashNextMTPDraftRunner {
     private let sharedOutput: MTLBuffer
     private let sharedScalar: MTLBuffer
     private let head: FlashNextWeightMatrix
+    private let embedInt4: EmbedLookupInt4
+    private let embedBF16: MTLComputePipelineState
+    private let embeddingRow: MTLBuffer
     private let owner = UUID()
     private var epoch: UInt64 = 0
     private var dirty = false
@@ -108,6 +111,10 @@ final class FlashNextMTPDraftRunner {
             throw FlashNextForwardRunnerError.invalidConfiguration("MTP block activations require BF16 or INT4 projections")
         }
         try FlashNextMTPWeights.validate(model.lmHead, name: "lm_head.weight", rows: cfg.vocabSize, columns: d)
+        try FlashNextMTPWeights.validate(model.embedding, name: "embed_tokens.weight", rows: cfg.vocabSize, columns: d)
+        if case .int8 = FlashNextWeightMatrix.from(model.embedding) {
+            throw FlashNextForwardRunnerError.invalidConfiguration("MTP embedding requires BF16 or INT4 weights")
+        }
         let headMatrix = FlashNextWeightMatrix.from(model.lmHead)
         if case .int8 = headMatrix {
             throw FlashNextForwardRunnerError.invalidConfiguration("MTP output head requires BF16 or INT4 weights")
@@ -140,6 +147,8 @@ final class FlashNextMTPDraftRunner {
         router = try FlashNextMoE(context: context, routerTopK: cfg.topKExperts)
         silu = try context.pipeline("silu_mul_fp16")
         head = headMatrix
+        embedInt4 = try EmbedLookupInt4(context: context)
+        embedBF16 = try context.pipeline("flashnext_embed_row_bf16")
         switch policy {
         case .bounded(let slots):
             streamed = try PreadExpertStreamer(layout: weights.expertLayout, device: context.device, slotCount: slots)
@@ -154,6 +163,7 @@ final class FlashNextMTPDraftRunner {
             return b
         }
         hyper = try buffer(cfg.residualStreamWidth)
+        embeddingRow = try buffer(d)
         mixed = try buffer(d)
         block = try buffer(d)
         routed = try buffer(d)
@@ -193,6 +203,43 @@ final class FlashNextMTPDraftRunner {
         position = checkpoint.position
         dirty = false
         epoch &+= 1
+    }
+
+    /// The shifted token is explicit: at target position i the native draft
+    /// consumes embedding(token[i + 1]), not embedding(token[i]).
+    func append(token: Int32, targetHidden: MTLBuffer,
+                at expectedPosition: Int, into logits: MTLBuffer) throws -> Output {
+        guard token >= 0, Int(token) < model.config.vocabSize,
+              !dirty, expectedPosition == position, position < maxContext else {
+            throw failure("invalid shifted token or draft position")
+        }
+        try Task.checkCancellation()
+        let cb = try command()
+        let tensor = model.embedding
+        let d = model.config.hiddenSize
+        switch FlashNextWeightMatrix.from(tensor) {
+        case .int4:
+            embedInt4.encode(commandBuffer: cb, table: tensor.buffer,
+                tableOffset: Int(tensor.offset), scales: tensor.buffer,
+                scalesOffset: Int(tensor.scaleOffset), biases: tensor.buffer,
+                biasesOffset: Int(tensor.biasOffset), out: embeddingRow,
+                tokenId: UInt32(token), d: UInt32(d), outScale: 1)
+        case .bf16(let buffer, let offset):
+            guard let enc = cb.makeComputeCommandEncoder() else { throw failure("cannot encode draft embedding") }
+            enc.setComputePipelineState(embedBF16)
+            enc.setBuffer(buffer, offset: offset, index: 0)
+            enc.setBuffer(embeddingRow, offset: 0, index: 1)
+            var row = UInt32(token), width = UInt32(d)
+            enc.setBytes(&row, length: 4, index: 2)
+            enc.setBytes(&width, length: 4, index: 3)
+            enc.dispatchThreads(MTLSize(width: d, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: min(d, min(embedBF16.maxTotalThreadsPerThreadgroup, 256)), height: 1, depth: 1))
+            enc.endEncoding()
+        case .int8:
+            throw failure("unsupported draft embedding dtype")
+        }
+        try finish(cb)
+        return try append(embedding: embeddingRow, targetHidden: targetHidden, at: expectedPosition, into: logits)
     }
 
     /// Append exactly one aligned row. This primitive never synthesizes missing

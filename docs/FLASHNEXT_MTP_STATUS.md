@@ -59,6 +59,16 @@ head and its full hidden bundle for subsequent drafting.
   Installed INT4 projections / INT8 gates and finite native-layer output probes
   also pass, including exact resident/16-slot replay. These probe inputs are
   synthetic, not aligned target states. It is not called by CLI/server generation.
+- `FlashNextMTPPrimer` now consumes captured target rows and pairs row `i`
+  with the embedding of token `i + 1` at draft position `i`. One owned tail
+  row waits for the next chunk's first token or an explicit target-selected
+  token; a later append must match that token. It primes every preceding draft
+  KV row without replaying the target. Runner-local checkpoints preserve the
+  pending tail, token expectation and draft cursor. Cancellation requires
+  restoring both target and primer. Synthetic cold/warm/decode partition,
+  ownership, invalid-input and paired-recovery checks pass byte-for-byte.
+  This internal alignment component has no CLI/server caller; it does not
+  verify proposals, sample tokens or claim a generation speedup.
 
 These are implementation boundaries, not a passed native-MTP qualification.
 The [dated validation record](RELEASE_VALIDATION_2026-09-20.md) is authoritative
@@ -79,16 +89,15 @@ for which synthetic and installed checks have actually executed.
    The test-only FP32 composition uses separately transcribed
    HC, QSA, attention and expert arithmetic; it is not an upstream full-MTP
    golden or a target-alignment/acceptance gate.
-2. Connect the preserved target bundle to the drafter and qualify the next
-   token/position convention at cold-prefill and warm/decode boundaries.
-   Priming requires all preceding draft KV rows, not just the final target HC
-   row. The all-row capture primitive is now implemented; connect its rows
-   and shifted token embeddings to the draft. In the pinned
+2. Qualify the aligned drafter against independent same-weight native output.
+   The target-row-to-draft connection, complete prefix priming and shifted
+   token/position checks are implemented internally. In the pinned
    [upstream prefill worker](https://github.com/sgl-project/sglang/blob/745de73ba3c136b6f99b7a3e2177ed1a8eef4a56/python/sglang/srt/speculative/eagle_worker_v2.py#L928-L1045),
    embeddings shift one token left, using the next prompt chunk's first token
    or the target's next generated token at the tail. A chunk's last pair must
-   not be invented from its last token. This remains an unimplemented and
-   unqualified integration, not an enabled speculative path.
+   not be invented from its last token. The primer enforces this convention;
+   it is not an enabled speculative generation path or an upstream numerical
+   golden. See the [September 21 record](RELEASE_VALIDATION_2026-09-21.md).
 3. Implement target verification and accepted-prefix replay/rollback. Ordinary
    chunked prefill is not automatically an exact speculative verifier: its
    numerical and greedy equivalence must be demonstrated for this use.
