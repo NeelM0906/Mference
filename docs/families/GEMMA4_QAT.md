@@ -191,3 +191,30 @@ not all contexts or a server peak, and establishes no minimum-RAM guarantee.
 The real tool-loop server separately reported a current footprint of
 2,338,606,392 bytes and 22,937,600 bytes of recovery-buffer capacity after a
 request. Full counters and scope are kept in the local validation record.
+
+## Shadow prefetch during decode (2026-09-21)
+
+Gemma 4 and Gemma 4 QAT keep 16 expert slots per layer, so only 8% of decode
+layer steps find all eight routed experts in memory and the GPU waits for the
+SSD for roughly half of decode. On hosts from 16 GiB to below 24 GiB both
+checkpoints now use shadow prefetch with a budget of four speculative reads per
+layer; `--shadow-budget` sets it on the CLI and the server, and `0` turns it
+off. It reads into the existing slots, so it costs no memory.
+
+| M2 MacBook Air 16 GiB, 160 decoded tokens, greedy | Off | Budget 1 | Budget 2 | Budget 4 |
+| --- | ---: | ---: | ---: | ---: |
+| Gemma 4 decode (tok/s) | 6.86 | 7.22 | 7.63 | 7.70 |
+| Gemma 4 all-hit layer steps | 7.9% | 14.4% | 19.2% | 24.0% |
+| Gemma 4 QAT decode (tok/s) | 6.44 | 6.77 | 7.16 | 7.11 |
+| Gemma 4 QAT all-hit layer steps | 7.9% | 15.7% | 21.5% | 27.9% |
+| Metal allocation, either checkpoint | unchanged | unchanged | unchanged | unchanged |
+
+Output is byte-identical at every budget. Budget 4 brings no more speed than
+budget 2 here while reading about half as much again from the SSD (about 40 GB
+against 26 GB of speculative reads for 160 tokens), because with 16 slots a
+step still waits whenever any one of its experts is missing. The slot count is
+what limits Gemma: with 32 slots the all-hit rate reaches 37% without prefetch
+and 55–61% with it, at a cost of about 1.6 GB, which is why 32 slots is not the
+default. These are single diagnostic runs with brief pauses on a fanless Mac;
+an earlier, hotter session showed no clear gain for Gemma 4 (4.96 / 6.12 / 4.26
+tok/s off against 5.35 / 5.20 / 5.44 with budget 2).

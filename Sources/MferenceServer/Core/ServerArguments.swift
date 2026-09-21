@@ -16,6 +16,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let promptCacheMode: ServerPromptCacheMode
     /// `--verify`; see `ModelIntegrityPolicy`.
     public let verification: ModelIntegrityPolicy
+    /// `--shadow-budget`; nil keeps the family default.
+    public let shadowBudget: Int?
     /// nil when `--library` was absent, which keeps single-model mode exactly
     /// as it was.
     public let library: ServerLibraryOption?
@@ -65,6 +67,11 @@ public struct ServerArguments: Equatable, Sendable {
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
+      --shadow-budget <0...8>
+                             Speculative expert prefetch during decode: reads
+                             issued per layer ahead of the router; 0 turns it off.
+                             Default: 4 for Qwen 3.6 and Gemma 4 on hosts with 16
+                             to under 24 GiB, 2 for DeepSeek-V4-Flash, off elsewhere.
       --verify <mode>        Model integrity on load and model swap: auto
                              (default) checks file sizes against the install
                              receipt when it validates and hashes otherwise;
@@ -82,6 +89,7 @@ public struct ServerArguments: Equatable, Sendable {
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
         var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
+        var shadowBudget: Int?
         var libraryRoots: [String] = []
         var wantsDefaultLibraryRoots = false
         var listModels = false
@@ -151,6 +159,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--prompt-cache-mode must be off or single-prefix")
                 }
                 promptCacheMode = parsed
+            case "--shadow-budget":
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedShadowPrefetchBudgets.contains(parsed) else {
+                    throw ServerArgumentError.invalid("--shadow-budget must be 0 through 8")
+                }
+                shadowBudget = parsed
             case "--verify":
                 guard let parsed = ModelIntegrityPolicy(verifyFlag: value) else {
                     throw ServerArgumentError.invalid(
@@ -191,6 +205,7 @@ public struct ServerArguments: Equatable, Sendable {
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
                                verification: verification,
+                               shadowBudget: shadowBudget,
                                library: library,
                                listModels: listModels)
     }

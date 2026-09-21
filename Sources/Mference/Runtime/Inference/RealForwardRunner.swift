@@ -439,6 +439,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// actually miss: LFU is already the eviction policy, so the resident slots
     /// are by construction the LFU favourites and a miss is by definition a
     /// non-favourite.
+    struct SpeculativePrefetchPlan: Equatable {
+        let mode: SpeculativePrefetchMode
+        /// Shadow mode: speculative reads issued per layer.
+        let shadowBudget: Int
+    }
+
     enum SpeculativePrefetchMode: String {
         /// No speculation at all (default).
         case off
@@ -462,33 +468,47 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// recall but slower end-to-end from joins and unthrottled reads.
         case shadow
 
-        /// The mode a runner starts in: `MFERENCE_SPEC_PREFETCH` wins in either
-        /// direction, otherwise shadow prefetch where it has been measured to
-        /// pay, byte-identical to no speculation in both cases.
+        /// The prefetch a runner starts with. An explicit `--shadow-budget`
+        /// decides everything (0 turns speculation off, a positive value selects
+        /// shadow prefetch with that budget); otherwise `MFERENCE_SPEC_PREFETCH`
+        /// and `MFERENCE_SHADOW_BUDGET` apply; otherwise the family default.
+        /// Every mode is byte-identical to no speculation.
         ///
-        /// DeepSeek-V4-Flash: community A/B 2026-08-07, short +18%, long +13%
-        /// (docs/experiments/summaries/14-dsv4-shadow-prefetch.md).
+        /// DeepSeek-V4-Flash: shadow, budget 2 (community A/B 2026-08-07, short
+        /// +18%, long +13%; docs/experiments/summaries/14-dsv4-shadow-prefetch.md).
         ///
-        /// Qwen 3.6 on hosts from 16 GiB to below 24 GiB, the 32-slot tier: the
-        /// GPU idles about half of decode waiting for expert reads, and shadow
-        /// prefetch raised the all-hit layer rate from 22% to 45% and decode
-        /// from 6.9 to 8.8 tok/s with no memory cost (M2 16 GiB diagnostic runs,
-        /// 2026-09-21). From 24 GiB the file cache holds the whole pool and the
-        /// earlier pilot lost there; below 16 GiB the 16-slot cache is
-        /// unmeasured, and Gemma's 16 slots showed no gain. Those stay off.
-        static func resolve(environmentValue: String?,
-                            family: ModelFamily,
-                            physicalMemoryBytes: UInt64) -> SpeculativePrefetchMode {
-            if let environmentValue { return parse(environmentValue) }
+        /// Qwen 3.6 and Gemma 4 on hosts from 16 GiB to below 24 GiB: shadow,
+        /// budget 4. There the GPU idles about half of decode waiting for expert
+        /// reads; on an M2 with 16 GiB (diagnostic runs, 2026-09-21) Qwen 3.6
+        /// decoded 7.35 / 8.91 / 9.62 / 10.55 tok/s at off / 1 / 2 / 4, and Gemma
+        /// 4 and Gemma 4 QAT gained about 11% from budget 2 with nothing more at
+        /// 4, at no memory cost in any case. Hosts from 24 GiB can hold the pool
+        /// in the file cache, and smaller hosts are unmeasured, so both stay off.
+        static func plan(requestedShadowBudget: Int?,
+                         environment: [String: String],
+                         family: ModelFamily,
+                         physicalMemoryBytes: UInt64) -> SpeculativePrefetchPlan {
             let gib = UInt64(1) << 30
+            let measuredTier = physicalMemoryBytes >= 16 * gib && physicalMemoryBytes < 24 * gib
+            let familyMode: SpeculativePrefetchMode
+            let familyBudget: Int
             switch family {
             case .deepseekV4Flash:
-                return .shadow
-            case .qwen36:
-                return physicalMemoryBytes >= 16 * gib && physicalMemoryBytes < 24 * gib ? .shadow : .off
+                familyMode = .shadow; familyBudget = 2
+            case .qwen36, .gemma4:
+                familyMode = measuredTier ? .shadow : .off; familyBudget = 4
             default:
-                return .off
+                familyMode = .off; familyBudget = 2
             }
+            if let requestedShadowBudget {
+                return requestedShadowBudget > 0
+                    ? SpeculativePrefetchPlan(mode: .shadow, shadowBudget: requestedShadowBudget)
+                    : SpeculativePrefetchPlan(mode: .off, shadowBudget: familyBudget)
+            }
+            let environmentBudget = environment["MFERENCE_SHADOW_BUDGET"].flatMap(Int.init).flatMap { $0 > 0 ? $0 : nil }
+            return SpeculativePrefetchPlan(
+                mode: environment["MFERENCE_SPEC_PREFETCH"].map(parse) ?? familyMode,
+                shadowBudget: environmentBudget ?? familyBudget)
         }
 
         static func parse(_ raw: String?) -> SpeculativePrefetchMode {
@@ -503,15 +523,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// Shadow mode: speculative reads issued per layer, taken from the front
-    /// of the pilot's weight-ranked prediction list. Env-tunable while the
-    /// knob is being characterized; the measured best becomes the constant.
-    private static let shadowIssueBudget: Int = {
-        if let raw = ProcessInfo.processInfo.environment["MFERENCE_SHADOW_BUDGET"],
-           let parsed = Int(raw), parsed > 0 {
-            return parsed
-        }
-        return 2
-    }()
+    /// of the pilot's weight-ranked prediction list. Resolved with the mode.
+    var shadowIssueBudget = 2
     var speculativePrefetchMode = SpeculativePrefetchMode.parse(
         ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"])
     /// S3 experiment gate: run all-hit layers' routed FFN entirely on-GPU
@@ -607,10 +620,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.routerEvent = context.device.makeSharedEvent()
         self.eagerFetchEvent = context.device.makeSharedEvent()
         self.maxContext = maxContext
-        self.speculativePrefetchMode = .resolve(
-            environmentValue: ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"],
+        let prefetchPlan = SpeculativePrefetchMode.plan(
+            requestedShadowBudget: runtimeConfiguration.shadowPrefetchBudget,
+            environment: ProcessInfo.processInfo.environment,
             family: model.config.family,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+        self.speculativePrefetchMode = prefetchPlan.mode
+        self.shadowIssueBudget = prefetchPlan.shadowBudget
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
@@ -1335,7 +1351,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // The prediction list is weight-ranked; a strict per-layer issue
             // budget keeps speculation from flooding the SSD or evicting
             // more slots than a right guess earns back.
-            missing = Array(missing.prefix(Self.shadowIssueBudget))
+            missing = Array(missing.prefix(shadowIssueBudget))
         }
         guard !missing.isEmpty else {
             record.complete(bytes: 0)

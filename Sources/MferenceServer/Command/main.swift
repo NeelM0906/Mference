@@ -40,11 +40,13 @@ do {
         let maxContext = arguments.maxContext
         let promptCacheMode = arguments.promptCacheMode
         let verification = arguments.verification
+        let shadowBudget = arguments.shadowBudget
         let library = ServerModelLibrary(index: index) { directory in
             try await ServerModelSession.load(modelDirectory: directory,
                                               maxContext: maxContext,
                                               promptCacheMode: promptCacheMode,
-                                              integrityPolicy: verification)
+                                              integrityPolicy: verification,
+                                              shadowPrefetchBudget: shadowBudget)
         }
         // `--model` alongside `--library` preloads one install; without it the
         // first request pays the load. Either way exactly one model is ever
@@ -68,7 +70,8 @@ do {
             modelDirectory: explicitModelURL,
             maxContext: arguments.maxContext,
             promptCacheMode: arguments.promptCacheMode,
-            integrityPolicy: arguments.verification)
+            integrityPolicy: arguments.verification,
+            shadowPrefetchBudget: arguments.shadowBudget)
         let modelID = arguments.modelIDOverride ?? backend.defaultModelID
         server = MferenceHTTPServer(
             modelID: modelID,

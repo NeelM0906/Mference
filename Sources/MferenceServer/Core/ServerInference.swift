@@ -212,6 +212,7 @@ public actor ServerModelSession: ServerLoadedModel {
     static func runtimeConfiguration(
         family: ModelFamily,
         expertCacheSlots: Int,
+        shadowPrefetchBudget: Int? = nil,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> RuntimeConfiguration {
@@ -219,13 +220,15 @@ public actor ServerModelSession: ServerLoadedModel {
             expertCacheSlots: expertCacheSlots,
             prefillChunkTokens: RuntimeConfiguration.defaultServerPrefillChunkTokens(
                 for: family, physicalMemoryBytes: physicalMemoryBytes, environment: environment),
-            forceLogitsHead: true)
+            forceLogitsHead: true,
+            shadowPrefetchBudget: shadowPrefetchBudget)
     }
 
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix,
-                            integrityPolicy: ModelIntegrityPolicy = .trustedReceiptWhenValid) async throws -> ServerModelSession {
+                            integrityPolicy: ModelIntegrityPolicy = .trustedReceiptWhenValid,
+                            shadowPrefetchBudget: Int? = nil) async throws -> ServerModelSession {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
@@ -265,7 +268,8 @@ public actor ServerModelSession: ServerLoadedModel {
         case .resident:
             configSlots = RuntimeConfiguration.allowedExpertCacheSlots.max()!
         }
-        let runtime = runtimeConfiguration(family: family, expertCacheSlots: configSlots)
+        let runtime = runtimeConfiguration(family: family, expertCacheSlots: configSlots,
+                                           shadowPrefetchBudget: shadowPrefetchBudget)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,

@@ -53,6 +53,7 @@ public struct Args: Equatable, Sendable {
     public var systemPrompt: String?
     public var reusePrefix: Bool
     public var showReasoning: Bool
+    public var shadowBudget: Int?
     public var maxNew: Int
     public var maxContext: Int
     public var temperature: Float { didSet { omittedSamplingOptions.remove(.temperature) } }
@@ -93,6 +94,7 @@ public struct Args: Equatable, Sendable {
                 systemPrompt: String? = nil,
                 reusePrefix: Bool = false,
                 showReasoning: Bool = false,
+                shadowBudget: Int? = nil,
                 maxNew: Int = 1_024,
                 maxContext: Int = 4096,
                 temperature: Float = GenerationConfig.defaults.temperature,
@@ -123,6 +125,7 @@ public struct Args: Equatable, Sendable {
         self.systemPrompt = systemPrompt
         self.reusePrefix = reusePrefix
         self.showReasoning = showReasoning
+        self.shadowBudget = shadowBudget
         self.maxNew = maxNew
         self.maxContext = maxContext
         self.temperature = temperature
@@ -238,6 +241,12 @@ extension Args {
       --flash-head              Enable Maple's approximate sparse decode head.
                                 Prefill remains exact; unsupported models use
                                 the exact head.
+      --shadow-budget <0...8>   Speculative expert prefetch during decode: reads
+                                issued per layer ahead of the router. 0 turns it
+                                off. Default: 4 for Qwen 3.6 and Gemma 4 on
+                                hosts with 16 to under 24 GiB, 2 for
+                                DeepSeek-V4-Flash, off elsewhere. Output is
+                                identical at every value.
       --verify <mode>           Model integrity: auto (default) checks file
                                 sizes against the receipt written at install
                                 time when that receipt validates, and hashes
@@ -261,6 +270,7 @@ extension Args {
         var systemPrompt: String?
         var reusePrefix = false
         var showReasoning = false
+        var shadowBudget: Int?
         var maxNew = 1_024
         var maxContext = 4096
         // Starting values only: each flag below overwrites its own, so an
@@ -440,6 +450,13 @@ extension Args {
                 } else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+            case "--shadow-budget":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedShadowPrefetchBudgets.contains(parsed) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                shadowBudget = parsed
             case "--verify":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let policy = ModelIntegrityPolicy(verifyFlag: value) else {
@@ -494,6 +511,7 @@ extension Args {
                     systemPrompt: systemPrompt,
                     reusePrefix: reusePrefix,
                     showReasoning: showReasoning,
+                    shadowBudget: shadowBudget,
                     maxNew: maxNew,
                     maxContext: maxContext,
                     temperature: temperature,

@@ -72,7 +72,8 @@ public func run(args: Args,
             useMapleFlashHead: args.flashHead,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
-            kvPoolPagesPerLayer: args.kvPoolPages)
+            kvPoolPagesPerLayer: args.kvPoolPages,
+            shadowPrefetchBudget: args.shadowBudget)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -394,7 +395,8 @@ private func runChat(args: Args,
             useMapleFlashHead: args.flashHead,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
-            kvPoolPagesPerLayer: args.kvPoolPages)
+            kvPoolPagesPerLayer: args.kvPoolPages,
+            shadowPrefetchBudget: args.shadowBudget)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)

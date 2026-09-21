@@ -300,23 +300,25 @@ of decode and waits for expert reads for the rest (10.4 s busy, 10.3 s gap over
 160 tokens).
 
 Shadow prefetch, the accepted DeepSeek-V4-Flash default, predicts the next
-layer's experts and reads them without ever blocking a real plan. It is now
-the Qwen 3.6 default on hosts from 16 GiB to below 24 GiB;
-`MFERENCE_SPEC_PREFETCH=off` restores the previous behavior.
+layer's experts and reads them into the existing slots without ever blocking a
+real plan. It is the Qwen 3.6 default on hosts from 16 GiB to below 24 GiB,
+with a budget of four speculative reads per layer; `--shadow-budget` sets it on
+the CLI and the server, and `--shadow-budget 0` restores the previous behavior.
 
-| M2 MacBook Air 16 GiB, 160 decoded tokens, greedy | Off | Shadow |
-| --- | ---: | ---: |
-| Decode, five pairings (tok/s) | 6.61 / 7.70 / 5.15 / 7.92 | 7.57 / 9.09 / 9.57 / 9.08 |
-| Mean | 6.85 | 8.83 |
-| All-hit layer steps | 22.3% | 44.8% |
-| GPU gap | 10.3–15.8 s | 7.4–8.2 s |
-| Peak memory footprint | 2,551.6 MB | 2,552.6 MB |
+| M2 MacBook Air 16 GiB, 160 decoded tokens, greedy | Off | Budget 1 | Budget 2 | Budget 4 |
+| --- | ---: | ---: | ---: | ---: |
+| Decode, one sweep (tok/s) | 7.35 | 8.91 | 9.62 | 10.55 |
+| All-hit layer steps | 22.3% | 36.9% | 44.8% | 50.4% |
 
-Predictor recall was 83.9%, the speculative reads use the existing expert
-slots, and the generated text is byte-identical in every run. These are short
-diagnostic runs with brief pauses on a fanless Mac, not the community-protocol
-A/B; the off runs vary widely, so read the gain as roughly 15–45% rather than
-as one number. Hosts with 24 GiB or more keep it off: the file cache holds the
-whole pool there and the earlier pilot predictor lost. Gemma 4, with 16 slots
-per layer and experts twice as large, showed no clear gain in the same runs
-and stays off.
+Off against budget 2 was also paired four more times: 6.61 / 7.70 / 5.15 / 7.92
+tok/s off and 7.57 / 9.09 / 9.57 / 9.08 with prefetch, a GPU gap of 10.3–15.8 s
+against 7.4–8.2 s, 83.9% predictor recall, and a peak memory footprint of
+2,551.6 MB against 2,552.6 MB. The speculative reads use the existing expert
+slots, and the generated text is byte-identical in every run.
+
+These are short diagnostic runs with brief pauses on a fanless Mac, not the
+community-protocol A/B. Decode speed varies widely between runs there, so read
+the gains as a range; the all-hit rate is exactly reproducible and rises with
+the budget. Hosts with 24 GiB or more keep prefetch off, because the file cache
+holds the whole pool there and the earlier pilot predictor lost, and hosts
+below 16 GiB are unmeasured.

@@ -191,32 +191,53 @@ import Metal
         #expect(Mode.parse("nonsense") == .off)
     }
 
-    @Test func speculativePrefetchDefault_isShadowForQwen36OnTheMeasuredMemoryTier() {
-        typealias Mode = RealForwardRunner.SpeculativePrefetchMode
-        let gib = UInt64(1) << 30
-        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 16 * gib) == .shadow)
-        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 18 * gib) == .shadow)
-        // Unmeasured tiers keep the previous behavior: 16 slots below 16 GiB,
-        // and a file cache that holds the whole pool from 24 GiB.
-        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 8 * gib) == .off)
-        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 24 * gib) == .off)
+    private typealias PrefetchMode = RealForwardRunner.SpeculativePrefetchMode
+    private static let gib = UInt64(1) << 30
+
+    private func prefetchPlan(budget: Int? = nil, environment: [String: String] = [:],
+                              family: ModelFamily, gib memory: UInt64) -> RealForwardRunner.SpeculativePrefetchPlan {
+        PrefetchMode.plan(requestedShadowBudget: budget, environment: environment,
+                          family: family, physicalMemoryBytes: memory * Self.gib)
+    }
+
+    @Test func speculativePrefetchDefault_isShadowBudgetFourForQwen36AndGemmaOnTheMeasuredMemoryTier() {
+        for family in [ModelFamily.qwen36, .gemma4] {
+            #expect(prefetchPlan(family: family, gib: 16) == .init(mode: .shadow, shadowBudget: 4))
+            #expect(prefetchPlan(family: family, gib: 18) == .init(mode: .shadow, shadowBudget: 4))
+            // Unmeasured tiers keep the previous behavior.
+            #expect(prefetchPlan(family: family, gib: 8).mode == .off)
+            #expect(prefetchPlan(family: family, gib: 24).mode == .off)
+        }
     }
 
     @Test func speculativePrefetchDefault_keepsTheOtherFamiliesAsTheyWere() {
-        typealias Mode = RealForwardRunner.SpeculativePrefetchMode
-        let gib = UInt64(1) << 30
-        #expect(Mode.resolve(environmentValue: nil, family: .deepseekV4Flash, physicalMemoryBytes: 16 * gib) == .shadow)
-        #expect(Mode.resolve(environmentValue: nil, family: .deepseekV4Flash, physicalMemoryBytes: 128 * gib) == .shadow)
-        #expect(Mode.resolve(environmentValue: nil, family: .gemma4, physicalMemoryBytes: 16 * gib) == .off)
-        #expect(Mode.resolve(environmentValue: nil, family: .qwen38, physicalMemoryBytes: 16 * gib) == .off)
+        #expect(prefetchPlan(family: .deepseekV4Flash, gib: 16) == .init(mode: .shadow, shadowBudget: 2))
+        #expect(prefetchPlan(family: .deepseekV4Flash, gib: 128) == .init(mode: .shadow, shadowBudget: 2))
+        #expect(prefetchPlan(family: .qwen38, gib: 16).mode == .off)
+        #expect(prefetchPlan(family: .inklingSmall, gib: 16).mode == .off)
     }
 
-    @Test func speculativePrefetchDefault_yieldsToTheEnvironmentInBothDirections() {
-        typealias Mode = RealForwardRunner.SpeculativePrefetchMode
-        let gib = UInt64(1) << 30
-        #expect(Mode.resolve(environmentValue: "off", family: .qwen36, physicalMemoryBytes: 16 * gib) == .off)
-        #expect(Mode.resolve(environmentValue: "shadow", family: .gemma4, physicalMemoryBytes: 16 * gib) == .shadow)
-        #expect(Mode.resolve(environmentValue: "nonsense", family: .deepseekV4Flash, physicalMemoryBytes: 16 * gib) == .off)
+    @Test func speculativePrefetchBudgetArgument_decidesModeAndBudgetOnEveryHost() {
+        #expect(prefetchPlan(budget: 0, family: .qwen36, gib: 16).mode == .off)
+        #expect(prefetchPlan(budget: 0, family: .deepseekV4Flash, gib: 16).mode == .off)
+        #expect(prefetchPlan(budget: 3, family: .gemma4, gib: 24) == .init(mode: .shadow, shadowBudget: 3))
+        #expect(prefetchPlan(budget: 6, family: .qwen38, gib: 8) == .init(mode: .shadow, shadowBudget: 6))
+    }
+
+    @Test func speculativePrefetchEnvironment_overridesTheFamilyDefault() {
+        #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "off"], family: .qwen36, gib: 16).mode == .off)
+        #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "shadow"], family: .qwen38, gib: 16)
+                == .init(mode: .shadow, shadowBudget: 2))
+        #expect(prefetchPlan(environment: ["MFERENCE_SHADOW_BUDGET": "6"], family: .gemma4, gib: 16)
+                == .init(mode: .shadow, shadowBudget: 6))
+        #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "nonsense"], family: .deepseekV4Flash, gib: 16).mode == .off)
+    }
+
+    @Test func speculativePrefetchBudgetArgument_beatsTheEnvironment() {
+        let environment = ["MFERENCE_SPEC_PREFETCH": "off", "MFERENCE_SHADOW_BUDGET": "6"]
+        #expect(prefetchPlan(budget: 3, environment: environment, family: .qwen36, gib: 16)
+                == .init(mode: .shadow, shadowBudget: 3))
+        #expect(prefetchPlan(budget: 0, environment: ["MFERENCE_SPEC_PREFETCH": "shadow"], family: .qwen36, gib: 16).mode == .off)
     }
 
     /// The overlap probe is what makes "io exposed" trustworthy: it must report

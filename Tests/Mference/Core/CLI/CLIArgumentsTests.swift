@@ -134,7 +134,7 @@ import Mference
 
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
-            "--model", "--prompt", "--messages-file", "--chat", "--system", "--reuse-prefix", "--show-reasoning",
+            "--model", "--prompt", "--messages-file", "--chat", "--system", "--reuse-prefix", "--show-reasoning", "--shadow-budget",
             "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--repeat-penalty", "--min-p", "--presence-penalty", "--frequency-penalty", "--repeat-last-n",
@@ -242,6 +242,19 @@ import Mference
     @Test func showReasoningRequiresChatMode() {
         #expect(throws: ArgsError.invalidValue(flag: "--show-reasoning", value: "requires --chat")) {
             _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--show-reasoning"])
+        }
+    }
+
+    @Test func shadowBudgetIsUnsetUnlessGiven() throws {
+        #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi"]).shadowBudget == nil)
+        #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--shadow-budget", "4"]).shadowBudget == 4)
+        #expect(try Args.parse(["--model", "m.gturbo", "--chat", "--shadow-budget", "0"]).shadowBudget == 0)
+    }
+
+    @Test(arguments: ["9", "-1", "two", ""])
+    func shadowBudgetRejectsValuesOutsideZeroToEight(value: String) {
+        #expect(throws: ArgsError.invalidValue(flag: "--shadow-budget", value: value)) {
+            _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--shadow-budget", value])
         }
     }
 

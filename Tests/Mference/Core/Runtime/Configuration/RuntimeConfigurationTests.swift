@@ -75,6 +75,12 @@ import Testing
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "1000"]) == 1024)
     }
 
+    @Test func shadowPrefetchBudgetIsUnsetUnlessRequested() {
+        #expect(RuntimeConfiguration.production.shadowPrefetchBudget == nil)
+        #expect(RuntimeConfiguration(shadowPrefetchBudget: 0).shadowPrefetchBudget == 0)
+        #expect(RuntimeConfiguration(shadowPrefetchBudget: 4).shadowPrefetchBudget == 4)
+    }
+
     @Test func retainedControlsReachTypedRuntime() {
         let runtime = RuntimeConfiguration(
             expertCacheSlots: 32,

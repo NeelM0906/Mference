@@ -34,6 +34,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// with RAM to spare but not enough to cache the whole expert pool.
     public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
     public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024, 2048, 4096]
+    /// `--shadow-budget`: 0 turns speculative expert prefetch off, 1...8 selects
+    /// shadow prefetch with that many speculative reads per layer.
+    public static let allowedShadowPrefetchBudgets = 0...8
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy
@@ -53,6 +56,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// Pool residency per full-attention layer, in pages. `nil` sizes the
     /// pool to the full context (everything resident; SSD tier idle).
     public let kvPoolPagesPerLayer: Int?
+    /// `--shadow-budget`; nil keeps the family default.
+    public let shadowPrefetchBudget: Int?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -66,11 +71,14 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 kvTopKPages: Int = 60,
                 kvSinkPages: Int = 2,
                 kvRecentPages: Int = 4,
-                kvPoolPagesPerLayer: Int? = nil) {
+                kvPoolPagesPerLayer: Int? = nil,
+                shadowPrefetchBudget: Int? = nil) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
                      "unsupported prefill chunk size")
+        precondition(shadowPrefetchBudget.map(Self.allowedShadowPrefetchBudgets.contains) ?? true,
+                     "unsupported shadow prefetch budget")
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.rdadvisePolicy = rdadvisePolicy
@@ -86,6 +94,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.kvSinkPages = kvSinkPages
         self.kvRecentPages = kvRecentPages
         self.kvPoolPagesPerLayer = kvPoolPagesPerLayer
+        self.shadowPrefetchBudget = shadowPrefetchBudget
     }
 
     public static var production: RuntimeConfiguration {
