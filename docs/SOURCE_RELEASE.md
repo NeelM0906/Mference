@@ -75,6 +75,8 @@ establish support or performance on a physically smaller-memory Mac.
 This checklist is a release requirement, not a statement that every gate or
 every model/hardware combination has already passed. Dated validation records
 and release notes carry the actual results.
+The [source-candidate handoff](SOURCE_RELEASE_CANDIDATE.md) lists what is
+included, what remains disabled and the maintainer publication steps.
 
 ## Build a downloadable source candidate
 

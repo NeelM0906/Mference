@@ -67,6 +67,9 @@ head and its full hidden bundle for subsequent drafting.
   pending tail, token expectation and draft cursor. Cancellation requires
   restoring both target and primer. Synthetic cold/warm/decode partition,
   ownership, invalid-input and paired-recovery checks pass byte-for-byte.
+  The installed 16-slot target-to-draft test also passes: 43 actual target HC
+  rows across cold/warm/decode boundaries match an explicitly shifted manual
+  native feed exactly, without target replay.
   This internal alignment component has no CLI/server caller; it does not
   verify proposals, sample tokens or claim a generation speedup.
 

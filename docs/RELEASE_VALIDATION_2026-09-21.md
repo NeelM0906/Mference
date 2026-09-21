@@ -20,6 +20,9 @@ enabled. These are correctness checks, not performance measurements.
 
 ## Native draft alignment
 
+Implementation commit: `5af3c97` (tests developed on `8d65245` plus the changes
+recorded in that commit).
+
 The internal primer preserves a pending target HC row until its successor
 token is known. It uses shared BF16/INT4 embeddings and fills all preceding
 native draft KV rows at the original target positions. Finalization requires
@@ -64,6 +67,37 @@ The existing unrounded-FP32 row-zero precision expectation remains the one
 known issue, with the unchanged 5% gate and hard failure above 6%. No tolerance
 was relaxed. Native MTP remains disabled and unqualified for proposal
 verification, end-to-end generation, quality or speed.
+
+### Installed target-to-native-draft check
+
+At runtime/test commit `5af3c97`, the same environment and fresh 98%-free /
+619-GiB single-owner preflight, all 57 receipt-file sizes checked before loading:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  MFERENCE_FLASHNEXT_GTURBO=/Users/studio2/Documents/ChatGPT/Mference/scratch/qwen38flashnext-r8.gturbo \
+  Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs \
+  --filter installedTargetRowsPrimeNativeDraft \
+  > /tmp/mference-mtp-priming-installed-20260921.log 2>&1
+```
+
+Exit 0; complete timing footer:
+
+```text
+Build complete! (1.51s)
+Test installedTargetRowsPrimeNativeDraft() passed after 32.071 seconds.
+Suite FlashNextMTPPrimingTests passed after 32.071 seconds.
+Test run with 1 test in 1 suite passed after 32.071 seconds.
+```
+
+The existing completed INT8-router install loads with full SHA verification;
+target and native auxiliary pool both use 16 slots in the same process. All
+43 captured actual target HC rows are finite/nonzero. Cold chunks 32/3, warm
+append 7 and one decode row produce the same final native hidden bundle and
+full-vocabulary logits as manually feeding those rows with explicitly shifted
+tokens, byte-for-byte. Target prefill reports zero replay. This closes the
+installed alignment component gate, **not** upstream full-native numerical
+parity, proposal verification, accepted-token output equivalence or speed.
 
 ## Source-release delivery tooling
 
