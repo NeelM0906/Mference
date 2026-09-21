@@ -1,3 +1,4 @@
+import Foundation
 import Mference
 
 /// Prefill chunk selection. `.fixed` must name an allowed size;
@@ -7,6 +8,22 @@ import Mference
 public enum PrefillChunkChoice: Equatable, Sendable {
     case fixed(Int)
     case auto
+
+    /// Interactive chat has no prompt at load time, so `auto` takes the
+    /// family's server chunk: both prefill a growing conversation turn after
+    /// turn. A fixed size applies to every turn's prefill; the server's
+    /// environment override does not reach the CLI, whose control is the flag.
+    func chatChunkTokens(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Int {
+        switch self {
+        case .fixed(let n): return n
+        case .auto:
+            return RuntimeConfiguration.defaultServerPrefillChunkTokens(
+                for: family, physicalMemoryBytes: physicalMemoryBytes, environment: [:])
+        }
+    }
 }
 
 /// Routed-expert cache selection. Auto keeps the 16-slot memory-first default
@@ -203,7 +220,8 @@ extension Args {
       --prefill-chunk <n|auto>  Prefill chunk tokens (default auto). Larger
                                 chunks cut routed-expert re-reads during
                                 prompt processing; auto sizes the chunk to
-                                the prompt (--chat resolves auto to 128). Allowed:
+                                the prompt (--chat uses the server's chunk
+                                for the model family). Allowed:
                                 32, 64, 128, 256, 512, 1024, 2048, 4096.
       --flash-head              Enable Maple's approximate sparse decode head.
                                 Prefill remains exact; unsupported models use

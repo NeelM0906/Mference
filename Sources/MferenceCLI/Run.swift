@@ -383,13 +383,8 @@ private func runChat(args: Args,
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
         let baseConfig = try args.generationConfig(defaults: tokenizer.generationDefaults,
                                                    maxNewTokens: args.maxNew)
-        // Interactive chat has no prompt at load time, so `auto` keeps the
-        // production default; a fixed size applies to every turn's prefill.
-        let prefillChunkTokens: Int
-        switch args.prefillChunk {
-        case .fixed(let n): prefillChunkTokens = n
-        case .auto: prefillChunkTokens = 128
-        }
+        let prefillChunkTokens = args.prefillChunk.chatChunkTokens(
+            for: try ManifestReader.peekFamily(directoryURL: modelURL))
         let runtime = RuntimeConfiguration(
             expertCacheSlots: expertStreaming.configSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),

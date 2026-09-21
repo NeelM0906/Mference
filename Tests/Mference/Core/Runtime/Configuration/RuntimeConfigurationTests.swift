@@ -34,7 +34,7 @@ import Testing
             for: .inklingSmall, physicalMemoryBytes: twentyFourGiB) == 16)
     }
 
-    @Test func serverPrefillChunkGrowsOnlyForGemmaOnSixteenGiBHosts() {
+    @Test func serverPrefillChunkGrowsForGemmaOnSixteenGiBHosts() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .gemma4, physicalMemoryBytes: 16 * gib, environment: [:]) == 1024)
@@ -42,10 +42,24 @@ import Testing
             for: .gemma4, physicalMemoryBytes: 24 * gib, environment: [:]) == 1024)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .gemma4, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
+    }
+
+    @Test func serverPrefillChunkGrowsForQwen36OnSixteenGiBHosts() {
+        let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen36, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+            for: .qwen36, physicalMemoryBytes: 16 * gib, environment: [:]) == 2048)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 24 * gib, environment: [:]) == 2048)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
+    }
+
+    @Test func serverPrefillChunkStaysEstablishedForUnmeasuredFamilies() {
+        let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .inklingSmall, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen38flashnext, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
     }
 
     @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {

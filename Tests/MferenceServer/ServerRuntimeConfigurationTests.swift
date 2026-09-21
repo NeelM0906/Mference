@@ -14,12 +14,20 @@ import Mference
         #expect(runtime.headPath == .logits)
     }
 
-    @Test func otherFamiliesKeepTheEstablishedChunk() {
+    @Test func qwen36SessionsPrefillLongPromptsInLargerChunks() {
         let runtime = ServerModelSession.runtimeConfiguration(
             family: .qwen36, expertCacheSlots: 32,
             physicalMemoryBytes: Self.sixteenGiB, environment: [:])
-        #expect(runtime.prefillChunkTokens == 128)
+        #expect(runtime.prefillChunkTokens == 2048)
         #expect(runtime.expertCacheSlots == 32)
+    }
+
+    @Test func otherFamiliesKeepTheEstablishedChunk() {
+        let runtime = ServerModelSession.runtimeConfiguration(
+            family: .inklingSmall, expertCacheSlots: 16,
+            physicalMemoryBytes: Self.sixteenGiB, environment: [:])
+        #expect(runtime.prefillChunkTokens == 128)
+        #expect(runtime.expertCacheSlots == 16)
     }
 
     @Test func operatorsCanOverrideTheChunk() {

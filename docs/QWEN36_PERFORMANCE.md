@@ -269,3 +269,24 @@ on every case (short −2%, long −56% from page-cache thrash), so auto
 always uses the slot cache and resident stays opt-in. Details:
 [experiments/summaries/15](experiments/summaries/15-gpu-slot-map.md) and
 [10](experiments/summaries/10-qwen-resident-rung.md).
+
+## Server prefill chunk (2026-09-21)
+
+The server prefills in chunks, and with 256 experts a 128-token chunk already
+touches about 98% of them, so every chunk re-reads nearly the whole expert
+pool. On hosts with at least 16 GiB the server now gives Qwen 3.6 2,048-token
+chunks (`MFERENCE_SERVER_PREFILL_CHUNK` overrides; smaller hosts keep 128).
+
+| 2,940-token prompt, M2 MacBook Air 16 GiB, server | 128 | 1,024 | 2,048 |
+| --- | ---: | ---: | ---: |
+| Prefill, 16K context | 148.9 / 148.4 s | 49.4 / 49.2 s | 42.7 / 42.8 s |
+| Prefill, 128K context | 149.6 s | 49.3 / 48.7 s | 42.5 / 42.5 s |
+| Decode after it, 16K context | 5.59 / 5.63 tok/s | 5.53 / 5.50 tok/s | 5.61 / 5.63 tok/s |
+| Decode after it, 128K context | 5.30 tok/s | 5.18 / 5.25 tok/s | 5.30 / 5.32 tok/s |
+| Metal allocation vs 128 | — | +126 MB | +270 MB |
+
+These are diagnostic runs, not community-protocol benchmarks: a fresh server
+per run (so each prefill includes the first-touch SHA-256 of the expert
+files), 150 s cool-downs on a fanless Mac, mirrored run order, 64 greedy
+completion tokens. All runs produced byte-identical text. The growth is
+prefill scratch only; Qwen 3.6 has no sliding-window KV ring to enlarge.

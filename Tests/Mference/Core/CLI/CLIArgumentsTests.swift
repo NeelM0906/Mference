@@ -225,6 +225,24 @@ import Mference
         #expect(!arguments.flashHead)
     }
 
+    @Test func chatAutoChunkFollowsTheFamilyServerChunk() {
+        let gib = UInt64(1) << 30
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 16 * gib) == 2048)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib) == 1024)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .inklingSmall, physicalMemoryBytes: 16 * gib) == 128)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 8 * gib) == 128)
+    }
+
+    @Test func chatFixedChunkWinsOverTheFamilyDefault() {
+        let gib = UInt64(1) << 30
+        #expect(PrefillChunkChoice.fixed(256).chatChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 16 * gib) == 256)
+    }
+
     @Test func flashHeadRequiresExplicitOptIn() throws {
         let arguments = try Args.parse([
             "--model", "m.gturbo", "--prompt", "hi", "--flash-head",
