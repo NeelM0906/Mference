@@ -43,6 +43,7 @@ class SourceReleaseTests(unittest.TestCase):
 
     def test_reproducible_checksums_provenance_and_modes(self):
         first = package(self.root, self.output(), "0.1.0-rc.1")
+        self.git("config", "tar.umask", "0077")
         second = package(self.root, self.output("again"), "0.1.0-rc.1")
         for a, b in zip(first["files"], second["files"]):
             self.assertEqual(Path(a).read_bytes(), Path(b).read_bytes())
@@ -54,6 +55,8 @@ class SourceReleaseTests(unittest.TestCase):
             digest, name = line.split("  ")
             self.assertEqual(digest, hashlib.sha256((self.output() / name).read_bytes()).hexdigest())
         with tarfile.open(archive) as tar:
+            self.assertEqual(metadata["archive_entries"], len(tar.getmembers()))
+            self.assertEqual(metadata["source_entries"] + 1, metadata["archive_entries"])
             self.assertTrue(tar.getmember("mference-0.1.0-rc.1/mference-ui.sh").mode & 0o111)
             self.assertTrue(all(m.name.startswith("mference-0.1.0-rc.1") for m in tar.getmembers()))
 

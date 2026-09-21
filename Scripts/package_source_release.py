@@ -8,10 +8,12 @@ CI/test success is deliberately not inferred by this packaging-only utility.
 import argparse
 import gzip
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
+import tarfile
 
 from check_source_archive import validate_archive
 
@@ -39,16 +41,18 @@ def package(root, output, version):
     checksums_name = base + "-SHA256SUMS"
     # Git fixes tar metadata to the commit, gzip fixes its timestamp/filename.
     # GzipFile (not gzip.compress) also fixes the OS header across Python hosts.
-    import io
+    prefixed = git(root, "-c", "tar.umask=0022", "archive", "--format=tar", f"--prefix={base}/", commit)
+    with tarfile.open(fileobj=io.BytesIO(prefixed), mode="r:") as tar:
+        archive_entries = len(tar.getmembers())
     stream = io.BytesIO()
     with gzip.GzipFile(filename="", mode="wb", fileobj=stream, mtime=0, compresslevel=9) as compressed:
-        compressed.write(git(root, "-c", "tar.umask=0022", "archive", "--format=tar", f"--prefix={base}/", commit))
+        compressed.write(prefixed)
     archive = stream.getvalue()
     digest = hashlib.sha256(archive).hexdigest()
     manifest = (json.dumps({
         "schema_version": 1, "version": version.removeprefix("v"),
         "commit": commit, "tree": tree, "commit_timestamp": timestamp,
-        "distribution": "source-only", "archive_entries": count,
+        "distribution": "source-only", "source_entries": count, "archive_entries": archive_entries,
         "archive": {"file": archive_name, "sha256": digest, "bytes": len(archive)},
         "qualification": "Packaging checks only. Consult the commit's release validation and support records; this manifest does not certify model quality, hardware coverage or CI success.",
     }, indent=2, sort_keys=True) + "\n").encode()
