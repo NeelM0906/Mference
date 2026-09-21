@@ -28,6 +28,27 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: python3 Scripts/package_source_release.py --version "$RELEASE_VERSION" --output "$RUNNER_TEMP/mference-source-candidate"
+      - name: Verify the extracted distribution
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          cd "$RUNNER_TEMP/mference-source-candidate"
+          shasum -a 256 -c "mference-$version-SHA256SUMS"
+          # Only the validated archive made in the preceding step is extracted.
+          verify_root=$(mktemp -d "$RUNNER_TEMP/mference-source-verify.XXXXXX")
+          tar -xzf "mference-$version.tar.gz" -C "$verify_root"
+          cd "$verify_root/mference-$version"
+          swift build -c release --force-resolved-versions
+          Scripts/test.sh
+          .build/release/MferenceCLI --help
+          .build/release/MferenceServer --help
+          .build/release/MferenceRepack --help
+          python3 Scripts/tests/test_mference_ui.py
+          python3 Scripts/tests/test_openwebui_mference.py
+          python3 Scripts/tests/test_source_release.py
+          LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
       - name: Upload source, provenance and checksums
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

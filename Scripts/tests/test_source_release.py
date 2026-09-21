@@ -74,7 +74,7 @@ class SourceReleaseTests(unittest.TestCase):
             package(self.root, self.output("dirty"), "0.1.0")
 
     def test_invalid_version_rejected(self):
-        for version in ["../escape", "v1", "1.02.3", "$(command)", "1.2.3/else"]:
+        for version in ["../escape", "v1", "1.02.3", "1.2.3-rc.01", "$(command)", "1.2.3/else"]:
             with self.subTest(version=version), self.assertRaises(ValueError):
                 package(self.root, self.output(), version)
 

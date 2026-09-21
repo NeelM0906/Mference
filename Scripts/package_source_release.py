@@ -23,6 +23,9 @@ def git(root, *args):
 def package(root, output, version):
     if not re.fullmatch(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?", version):
         raise ValueError("version must be a plain semantic version, e.g. 0.1.0-rc.1")
+    prerelease = version.partition("-")[2]
+    if any(part.isdigit() and len(part) > 1 and part.startswith("0") for part in prerelease.split(".")):
+        raise ValueError("numeric prerelease identifiers cannot have leading zeroes")
     if git(root, "status", "--porcelain", "--untracked-files=no").strip():
         raise ValueError("commit tracked changes before packaging; the candidate must identify exactly one committed tree")
     commit = git(root, "rev-parse", "HEAD").decode().strip()

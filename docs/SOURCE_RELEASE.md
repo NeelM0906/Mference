@@ -83,8 +83,12 @@ included, what remains disabled and the maintainer publication steps.
 The **Source release candidate** GitHub Actions workflow is manually triggered
 with a version such as `0.1.0-rc.1`. It first runs the same macOS 15 / Swift 6.1,
 macOS 26, script and documentation checks as PR CI. Only after those jobs pass
-does it upload a source archive, JSON provenance manifest and SHA-256 checksum
-file as one downloadable Actions artifact (retained for 30 days). It does not
+does it package and extract the archive, rebuild all release products using
+the pinned dependency lock, rerun serial tests and check executable help,
+launcher/adapter/packaging scripts and documentation from the extracted tree.
+Only then does it upload the source archive, JSON provenance manifest and
+SHA-256 checksum file as one downloadable Actions artifact (retained for
+30 days). It does not
 create a tag, merge a PR, publish a GitHub Release, sign/notarize executables,
 or download model weights. Real-checkpoint and UI evidence must still be
 reviewed separately; hosted CI has no installed models.
