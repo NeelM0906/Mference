@@ -9,6 +9,22 @@ The launcher restricts Open WebUI browser origins to its selected loopback
 port; it does not retain the upstream wildcard CORS default. This is additional
 browser hardening, not authentication or a substitute for loopback binding.
 
+Versioned bundles are distributed through
+[GitHub Releases](https://github.com/NeelM0906/Mference/releases).
+The [0.1.0 final gate](RELEASE_GATE_0.1.0.md) identifies the exact source,
+validation and exclusions; historical candidate records are not publication
+announcements. Download the archive, JSON manifest and checksum file together.
+
+```sh
+shasum -a 256 -c mference-0.1.0-SHA256SUMS
+tar -xzf mference-0.1.0.tar.gz
+cd mference-0.1.0
+```
+
+Then follow the prerequisites and first-use steps below. Checksum verification
+detects changed bytes; obtain all three files from the same trusted release.
+It is not a code-signing or notarization identity.
+
 ## First-use path
 
 Use [checkpoint choices and limits](RELEASE_SUPPORT.md) to distinguish the

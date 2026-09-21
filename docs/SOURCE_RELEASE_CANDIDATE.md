@@ -1,5 +1,10 @@
 # Source candidate: review and publication boundary
 
+Historical candidate handoff. PR #38 has since merged as `4ff63ff`; see the
+[0.1.0 final release gate](RELEASE_GATE_0.1.0.md) and
+[release listing](https://github.com/NeelM0906/Mference/releases) for subsequent
+validation and publication. The candidate boundary below remains unchanged.
+
 This is the source candidate delivered by
 [PR #38](https://github.com/NeelM0906/Mference/pull/38), not a published tag or
 signed application. The reproducible archive workflow and local packaging

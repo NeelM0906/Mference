@@ -28,8 +28,9 @@ execution. Resident and larger-budget configurations keep their existing width.
 | Inkling | Nonzero CI fixture at `3462477`: resident/eight-slot exact boundary, continuation and recovery results plus bounded sequential-reference error; installed resident/16-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps and cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); installed weights remain env-gated; wider hardware/context qualification is separate |
 
 PRs #33–36 merged into `main` on September 18 (`c67e857`); PR #37 merged on
-September 20 (`049bdcd`). Further qualification is in
-[PR #38](https://github.com/NeelM0906/Mference/pull/38).
+September 20 (`049bdcd`). Further qualification in
+[PR #38](https://github.com/NeelM0906/Mference/pull/38) merged September 21
+(`4ff63ff`), the [0.1.0 source-release baseline](RELEASE_GATE_0.1.0.md).
 The all-family invariant remains **not fully qualified**
 until the outstanding cells have evidence, including OS/GPU fallback paths,
 partial-chunk cancellation across the remaining runners, and real checkpoints.

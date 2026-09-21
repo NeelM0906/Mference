@@ -119,6 +119,12 @@ compile-time baseline, and manifest contract. New families merge through the
 
 ## Try it
 
+Download a versioned source bundle, provenance manifest and checksums from
+[GitHub Releases](https://github.com/NeelM0906/Mference/releases). The
+[0.1.0 release gate](docs/RELEASE_GATE_0.1.0.md) records the exact source commit,
+extracted-source checks and limitations. A tagged release is a reproducible
+baseline; cloning the default branch below gets the latest development source.
+
 This is a **source release for Apple Silicon Macs**, not a signed Mac app or
 a bundle of model weights. You need macOS 15+, Swift 6.1+ (Xcode 16.3+ or
 matching Command Line Tools), and `uv` for the browser UI. Install `uv` first
@@ -178,6 +184,14 @@ swift run -c release MferenceCLI \
   --model scratch/qwen36.gturbo \
   --prompt "The capital of France is" \
   --max-new 64
+```
+
+`--prompt` is raw completion input, not a chat message. For normal conversation
+with an instruction checkpoint, use `--chat` (or `--messages-file` for a JSON
+message history) so the checkpoint's chat template is applied:
+
+```bash
+swift run -c release MferenceCLI --model scratch/gemma4.gturbo --chat
 ```
 
 The server alone, for other OpenAI-compatible clients, is documented in
