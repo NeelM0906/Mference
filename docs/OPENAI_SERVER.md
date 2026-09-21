@@ -81,6 +81,13 @@ curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
 By default, the server runs one generation and queues up to four requests. Use
 `--queue-limit` to change the queue size. Press Control-C to stop the server.
 
+Model integrity follows `--verify`, on the first load and on every library
+swap. The default `auto` checks the routed-expert files against the install
+receipt's sizes when that receipt validates and hashes them on first touch
+otherwise; `--verify full-sha256` always hashes, which adds that time to the
+first prefill after each load. See
+[Runtime settings](RUNTIME_CONTROLS.md#runtime-settings) for the trade-off.
+
 ## Connect a client
 
 The base URL is `http://127.0.0.1:8080/v1`. Some client libraries require an

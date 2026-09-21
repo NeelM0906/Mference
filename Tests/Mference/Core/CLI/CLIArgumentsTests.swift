@@ -324,9 +324,14 @@ import Mference
 
     /// Verification defaults to the strict policy: skipping the per-expert
     /// hashes is a deliberate opt-in, not something a caller inherits.
-    @Test func verificationDefaultsToFullSha256() throws {
+    @Test func verificationDefaultsToTheInstallReceiptWhenItIsValid() throws {
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
-        #expect(arguments.verification == .fullSha256)
+        #expect(arguments.verification == .trustedReceiptWhenValid)
+    }
+
+    @Test func verifyAcceptsAuto() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--verify", "auto"])
+        #expect(arguments.verification == .trustedReceiptWhenValid)
     }
 
     @Test func verifyAcceptsFullSha256() throws {

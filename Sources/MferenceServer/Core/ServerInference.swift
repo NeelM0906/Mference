@@ -224,7 +224,8 @@ public actor ServerModelSession: ServerLoadedModel {
 
     public static func load(modelDirectory: URL,
                             maxContext: Int,
-                            promptCacheMode: ServerPromptCacheMode = .singlePrefix) async throws -> ServerModelSession {
+                            promptCacheMode: ServerPromptCacheMode = .singlePrefix,
+                            integrityPolicy: ModelIntegrityPolicy = .trustedReceiptWhenValid) async throws -> ServerModelSession {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
@@ -270,7 +271,7 @@ public actor ServerModelSession: ServerLoadedModel {
             device: context.device,
             streamingMode: streamingMode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
+            integrityPolicy: integrityPolicy)
         let forwardRuntime = try ForwardRunnerFactory.make(model: model,
                                                             context: context,
                                                             maxContext: maxContext,

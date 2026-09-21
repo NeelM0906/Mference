@@ -193,9 +193,10 @@ Choosing a different model in the picker sends a normal
 3. The requested model loads, and the request is then rendered and served by it.
 
 The swapping request **blocks** until the model is ready rather than returning
-`503` with `Retry-After`. Loading runs first-touch SHA-256 verification over the
-expert pool and takes tens of seconds to minutes, so **the first token after a
-switch is slow — sometimes very slow**. Open WebUI tolerates the wait; a retry
+`503` with `Retry-After`. Loading a model takes seconds to tens of seconds, and
+with `--verify full-sha256`, or for an install without a valid receipt, the
+first prefill also hashes the expert pool, which takes tens of seconds to
+minutes, so **the first token after a switch is slow — sometimes very slow**. Open WebUI tolerates the wait; a retry
 protocol would be one the API does not describe. The swap is logged:
 
 ```text

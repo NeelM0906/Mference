@@ -669,7 +669,7 @@ public struct Model {
                 throw ModelError.missingFile(name: manifestRel)
             }
             switch integrityPolicy {
-            case .fullSha256:
+            case .fullSha256, .trustedReceiptWhenValid:
                 try Sha256Verifier.verifyFile(at: url, named: manifestRel,
                                               expectedHex: entry.sha256)
             case .sizeCheckTrustedReceipt:
@@ -770,7 +770,22 @@ extension Model {
         defer {
             loadStats?.pointee = stats
         }
-        let resolvedIntegrityPolicy = integrityPolicy ?? .fullSha256
+        let requestedIntegrityPolicy = integrityPolicy ?? .fullSha256
+        // `.trustedReceiptWhenValid` starts on the receipt path and settles on
+        // full SHA-256 as soon as a receipt check fails, so an install without
+        // a usable receipt loads exactly as it does under `.fullSha256`.
+        var resolvedIntegrityPolicy: ModelIntegrityPolicy =
+            requestedIntegrityPolicy == .trustedReceiptWhenValid ? .sizeCheckTrustedReceipt : requestedIntegrityPolicy
+        func receiptCheck(_ check: () throws -> Void) throws {
+            guard resolvedIntegrityPolicy == .sizeCheckTrustedReceipt else { return }
+            let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            defer { stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start }
+            do {
+                try check()
+            } catch ModelError.trustedReceiptInvalid where requestedIntegrityPolicy == .trustedReceiptWhenValid {
+                resolvedIntegrityPolicy = .fullSha256
+            }
+        }
 
         let manifestURL = directoryURL.appendingPathComponent("manifest.json")
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
@@ -781,30 +796,26 @@ extension Model {
         stats.manifestSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - manifestShaStart
         let manifestSize = try Self.fileSize(at: manifestURL,
                                              relativePath: "manifest.json")
-        let receipt: VerifiedInstallReceipt?
-        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
-            let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        var receipt: VerifiedInstallReceipt?
+        try receiptCheck {
             let loadedReceipt = try VerifiedInstallReceiptReader.load(directoryURL: directoryURL)
             try VerifiedInstallReceiptReader.validateManifestBinding(
                 loadedReceipt,
                 directoryURL: directoryURL,
                 manifestSha256: manifestSha)
-            stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
             receipt = loadedReceipt
-        } else {
-            receipt = nil
         }
 
         let manifest = try ManifestReader.load(directoryURL: directoryURL,
                                                expecting: expecting)
         if let receipt {
-            let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            try VerifiedInstallReceiptReader.validate(receipt,
-                                                      directoryURL: directoryURL,
-                                                      manifest: manifest,
-                                                      manifestSha256: manifestSha,
-                                                      manifestSize: manifestSize)
-            stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
+            try receiptCheck {
+                try VerifiedInstallReceiptReader.validate(receipt,
+                                                          directoryURL: directoryURL,
+                                                          manifest: manifest,
+                                                          manifestSha256: manifestSha,
+                                                          manifestSize: manifestSize)
+            }
         }
 
         // Verify the small, always-touched files before mapping model data.
@@ -871,12 +882,10 @@ extension Model {
             device: device,
             tensorSpans: tensorSpans)
 
-        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
-            let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        try receiptCheck {
             try validateTrustedReceiptLayerLayout(directoryURL: directoryURL,
                                                   manifest: manifest,
                                                   layout: layout)
-            stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
         }
 
         let model = Model(

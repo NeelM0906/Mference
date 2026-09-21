@@ -54,9 +54,10 @@ scans the library roots — the `Mference.libraryRoot` default if set,
 and serves every runnable model it finds there to the UI. The CLI and a non-library
 server take an explicit `--model` path; that selection also persists via
 `defaults write Mference model qwen36` (or `MFERENCE_MODEL` in the
-environment). `MferenceCLI --verify trusted-receipt` skips the first-touch
-SHA-256 of the expert pool in favor of the install receipt's size checks; the
-strict `full-sha256` mode is the default.
+environment). By default the CLI and the server check the expert pool against
+the install receipt's sizes when that receipt validates, and hash it on first
+touch otherwise; `--verify full-sha256` always hashes, and
+`--verify trusted-receipt` requires the receipt.
 
 ## Local server
 

@@ -140,10 +140,12 @@ may load. It records the architecture, file sizes, and SHA-256 hashes. Without
 it, the runtime treats the installation as partial. `verified-install.json`
 records which manifest, directory, and files were verified.
 
-By default, Mference hashes `manifest.json`, `model_weights.bin`, and
-`packed_experts/layout.json` at load, then hashes each routed-expert layer file
-on first use. The trusted-receipt policy is an explicit alternative. It still
-hashes the same three common files. For large layer files, it checks the
+Mference always hashes `manifest.json`, `model_weights.bin`, and
+`packed_experts/layout.json` at load. Under `--verify full-sha256` it then hashes
+each routed-expert layer file on first use. The trusted-receipt policy still
+hashes the same three common files, and it is what the CLI and server use by
+default whenever the receipt validates; an install without a usable receipt is
+hashed as under `full-sha256`. For large layer files, it checks the
 receipt binding, manifest metadata, layout, and current file size instead of
 hashing the complete file again.
 

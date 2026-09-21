@@ -75,7 +75,8 @@ public struct Args: Equatable, Sendable {
     /// Model-integrity policy. `.fullSha256` re-hashes every routed-expert
     /// file on first touch — 145 GB for Inkling-Small, ~59 s inside the first
     /// prefill. `.sizeCheckTrustedReceipt` checks sizes against the receipt
-    /// written at install time instead.
+    /// written at install time instead. The default uses the receipt when it
+    /// validates and hashes otherwise.
     public var verification: ModelIntegrityPolicy
     /// Paged KV cache with SSD spill + sparse decode (Qwen 3.8):
     /// "on" / "off" / "auto" (auto enables it above 32k context).
@@ -109,7 +110,7 @@ public struct Args: Equatable, Sendable {
                 rdadvise: String = "off",
                 prefillChunk: PrefillChunkChoice = .auto,
                 flashHead: Bool = false,
-                verification: ModelIntegrityPolicy = .fullSha256,
+                verification: ModelIntegrityPolicy = .trustedReceiptWhenValid,
                 kvPaged: String = "auto",
                 kvTopKPages: Int = 60,
                 kvPoolPages: Int? = nil,
@@ -237,12 +238,14 @@ extension Args {
       --flash-head              Enable Maple's approximate sparse decode head.
                                 Prefill remains exact; unsupported models use
                                 the exact head.
-      --verify <mode>           Model integrity: full-sha256 (default)
-                                re-hashes every routed-expert file on first
-                                touch, which for a 145 GB expert pool costs
-                                ~59 s inside the first prefill;
-                                trusted-receipt checks file sizes against the
-                                receipt written at install time instead.
+      --verify <mode>           Model integrity: auto (default) checks file
+                                sizes against the receipt written at install
+                                time when that receipt validates, and hashes
+                                otherwise; full-sha256 re-hashes every
+                                routed-expert file on first touch, which for a
+                                145 GB expert pool costs ~59 s inside the
+                                first prefill; trusted-receipt requires the
+                                receipt and fails without it.
       --reasoning-effort <mode>  Gemma 4 / Qwen chat: xhigh, medium, low,
                                 or none. Gemma 4 and Qwen 3.6 use binary
                                 on/off aliases. Not applied to raw prompts.
@@ -278,7 +281,7 @@ extension Args {
         var rdadvise = "off"
         var prefillChunk = PrefillChunkChoice.auto
         var flashHead = false
-        var verification = ModelIntegrityPolicy.fullSha256
+        var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
         var kvPaged = "auto"
         var kvTopKPages = 60
         var kvPoolPages: Int? = nil
@@ -439,11 +442,10 @@ extension Args {
                 }
             case "--verify":
                 let value = try takeValue(argv, &index, flag: flag)
-                switch value {
-                case "full-sha256": verification = .fullSha256
-                case "trusted-receipt": verification = .sizeCheckTrustedReceipt
-                default: throw ArgsError.invalidValue(flag: flag, value: value)
+                guard let policy = ModelIntegrityPolicy(verifyFlag: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                verification = policy
             case "--rdadvise":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard ["off", "default", "bounded", "adaptive"].contains(value) else {

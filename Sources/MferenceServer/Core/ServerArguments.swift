@@ -1,4 +1,5 @@
 import Foundation
+import Mference
 
 public struct ServerArguments: Equatable, Sendable {
     /// Model directory. Required in single-model mode; optional in library
@@ -13,6 +14,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    /// `--verify`; see `ModelIntegrityPolicy`.
+    public let verification: ModelIntegrityPolicy
     /// nil when `--library` was absent, which keeps single-model mode exactly
     /// as it was.
     public let library: ServerLibraryOption?
@@ -62,6 +65,11 @@ public struct ServerArguments: Equatable, Sendable {
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
+      --verify <mode>        Model integrity on load and model swap: auto
+                             (default) checks file sizes against the install
+                             receipt when it validates and hashes otherwise;
+                             full-sha256 re-hashes every routed-expert file on
+                             first touch; trusted-receipt requires the receipt.
       --help                 Show this help.
     """
 
@@ -73,6 +81,7 @@ public struct ServerArguments: Equatable, Sendable {
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
         var libraryRoots: [String] = []
         var wantsDefaultLibraryRoots = false
         var listModels = false
@@ -142,6 +151,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--prompt-cache-mode must be off or single-prefix")
                 }
                 promptCacheMode = parsed
+            case "--verify":
+                guard let parsed = ModelIntegrityPolicy(verifyFlag: value) else {
+                    throw ServerArgumentError.invalid(
+                        "--verify must be \(ModelIntegrityPolicy.verifyFlagValues)")
+                }
+                verification = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -175,6 +190,7 @@ public struct ServerArguments: Equatable, Sendable {
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
+                               verification: verification,
                                library: library,
                                listModels: listModels)
     }
