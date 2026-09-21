@@ -253,7 +253,62 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   > /tmp/mference-cancellation-log-20260921.log 2>&1
 ```
 
-Exit 0: 27 tests / 3 suites in 3.008s, including HTTP disconnect cancellation,
+Exit 0: build 4.50s, 27 tests / 3 suites in 3.008s, including HTTP disconnect cancellation,
 stream/non-stream formatting, real-error preservation and library HTTP behavior.
 The preceding browser run used the old logger; it is not relabelled as a live
 test of the new message.
+
+## Final runtime regression and artifact handoff
+
+Candidate `0.1.0-rc.3`, commit
+`2fe197660aa0eac297b4aa37389e463ade413638`, includes the cancellation-log fix.
+It was independently extracted to
+`/tmp/mference-source-final.LUVMeM/mference-0.1.0-rc.3`. From that directory,
+the exact commands were:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./mference-ui.sh doctor
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift build -c release --force-resolved-versions \
+  > /tmp/mference-source-final-build-20260921.log 2>&1
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  Scripts/test.sh > /tmp/mference-source-final-tests-20260921.log 2>&1
+.build/release/MferenceCLI --help
+.build/release/MferenceServer --help
+.build/release/MferenceRepack --help
+```
+
+All exit 0, same hardware/toolchain. Fresh pre-test checks: 98% memory free,
+617 GiB disk, no other model/test/installer owner, no installed-model gates.
+Complete build/test timing footers:
+
+```text
+Build complete! (98.51s)
+Build complete! (45.89s)
+Test run with 1297 tests in 233 suites passed after 279.534 seconds with 2 known issues.
+```
+
+The known issues remain exactly the two disclosed above. The actual HTTP
+disconnect tests now emit `cancelled streaming=false`, without a fabricated
+500-class failure. No production model, benchmark, download or profiler ran
+alongside this regression. Light packaging/docs work continued; these durations
+are correctness-run timings, not throughput comparisons.
+
+Final packaging inspection found a metadata-only off-by-one: `rc.1`–`rc.3`
+counted unprefixed source entries in the manifest's `archive_entries`, omitting
+the extra root directory created by `git archive --prefix`. Archive bytes,
+checksums, file contents and extraction were valid. `4b4f83b` corrects this by
+counting members of the actual prefixed tar and separately recording
+`source_entries`. The packaging suite asserts both counts and byte-identical
+output even with a different local Git `tar.umask`; six tests pass normally
+(1.176s) and with `-O` (1.225s). No runtime or Swift test source changes after
+`2fe1976` are involved. Earlier local candidates are retained as superseded
+validation artifacts, not distributed as the handoff.
+
+The corrected handoff is `0.1.0-rc.4`, produced by the same documented
+packager. Its manifest identifies its exact documentation/packaging head;
+runtime and Swift test contents can be compared directly with the extracted
+`rc.3` tree above. No tag or GitHub Release is created. Final-head CI remains
+a separate PR gate, not inferred from these local checks or earlier green CI.
+The [candidate boundary](SOURCE_RELEASE_CANDIDATE.md) retains the explicit
+Swift, native-MTP, GLM-performance and hardware limitations.

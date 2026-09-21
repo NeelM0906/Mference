@@ -1,7 +1,8 @@
 # Source-release support and checkpoint choices
 
-Status reviewed September 20, 2026; PR #37 is merged and follow-up qualification
-is in PR #38, not yet a tagged release. This table distinguishes established choices from qualification
+Status reviewed September 21, 2026; PR #37 is merged and follow-up qualification
+is in PR #38, with a [tested source candidate](RELEASE_VALIDATION_2026-09-21.md),
+not yet a tagged release. This table distinguishes established choices from qualification
 candidates. It is not a claim that every family has been re-tested on every Mac.
 For a first installation, use **Gemma 4**. For the established general-purpose
 MoE path on a 24 GB-class Mac, use **Qwen 3.6**. Keep base Qwen available while
