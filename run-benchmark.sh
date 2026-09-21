@@ -14,6 +14,7 @@
 #      WARMUP_CASES=a,b    restrict which cases get a discarded warmup
 #      MIN_FREE_GB=5       minimum free disk required
 #      MIN_FREE_PCT=20     minimum system-wide free memory percentage required
+#      BENCH_CLI=path      previously built release executable (recorded/hashed)
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -24,6 +25,7 @@ model_dir="${2:?gturbo dir}"
 reps="${3:-3}"
 shift 3 2>/dev/null || shift 2
 extra=("$@")
+cli="${BENCH_CLI:-.build/release/MferenceCLI}"
 
 case "${reps}" in
   ''|*[!0-9]*) fail "reps must be a positive integer; got \"${reps}\"" ;;
@@ -61,7 +63,7 @@ free_pct=$(memory_pressure -Q 2>/dev/null |
 [ "${free_pct}" -ge "${MIN_FREE_PCT:-20}" ] \
   || fail "memory pressure too high: ${free_pct}% free, need ${MIN_FREE_PCT:-20}%"
 
-[ -x .build/release/MferenceCLI ] \
+[ -x "${cli}" ] \
   || fail "release CLI missing; run: swift build -c release --product MferenceCLI"
 
 [ -d "${model_dir}" ] || fail "model directory not found: ${model_dir}"
@@ -92,6 +94,7 @@ ${live}"
 # ---------------------------------------------------------------------------
 
 root="benchmark-results/${label}"
+[ ! -e "${root}" ] || fail "refusing to overwrite existing evidence: ${root}"
 mkdir -p "${root}/system" "${root}/warmup" "${root}/measured"
 
 {
@@ -105,6 +108,10 @@ mkdir -p "${root}/system" "${root}/warmup" "${root}/measured"
   shasum -a 256 docs/benchmark-prompts/real-generation-v1/*.json
   echo "measured repetitions: ${reps}"
   echo "extra CLI args: ${extra[*]+${extra[*]}}"
+  echo "CLI: ${cli}"
+  shasum -a 256 "${cli}"
+  echo "GLM effort override: ${MFERENCE_GLM5_REASONING_EFFORT:-unset (source default)}"
+  pmset -g custom
 } 2>&1 | tee "${root}/system/system.txt"
 
 cases=(short-explanation:20260721 medium-review:20260722 long-synthesis:20260723)
@@ -125,7 +132,21 @@ warmup_filter="${WARMUP_CASES:-all}"
 
 # run_case <case_id> <seed> <output-prefix> -- returns the CLI's exit status.
 run_case() {
-  /usr/bin/time -l .build/release/MferenceCLI \
+  # Headroom and ownership can change after an earlier run. Never treat the
+  # initial batch preflight as permission to keep launching model processes.
+  local available owners
+  available=$(memory_pressure -Q 2>/dev/null |
+    sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p' | head -1)
+  [ -n "${available}" ] && [ "${available}" -ge "${MIN_FREE_PCT:-20}" ] \
+    || fail "memory preflight failed before ${1}: ${available:-unknown}% free"
+  free_gb=$(df -g . | awk 'NR==2 { print $4 }')
+  [ -n "${free_gb}" ] && [ "${free_gb}" -ge "${MIN_FREE_GB:-5}" ] \
+    || fail "disk preflight failed before ${1}: ${free_gb:-unknown} GiB free"
+  owners=$(pgrep -fl 'MferenceServer|MferenceCLI|MferenceRepack|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' || true)
+  [ -z "${owners}" ] || fail "another model owner before ${1}: ${owners}"
+  printf 'memory_free_percent=%s\ndisk_free_gib=%s\n' "${available}" "${free_gb}" > "${3}.preflight"
+  printf '%q ' "${cli}" --model "${model_dir}" --messages-file "docs/benchmark-prompts/real-generation-v1/${1}.json" --max-new 1024 --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95 --seed "${2}" ${extra[@]+"${extra[@]}"} > "${3}.command"
+  /usr/bin/time -l "${cli}" \
     --model "${model_dir}" \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${1}.json" \
     --max-new 1024 \
@@ -136,6 +157,9 @@ run_case() {
     --seed "${2}" \
     ${extra[@]+"${extra[@]}"} \
     > "${3}.stdout" 2> "${3}.stderr"
+  local status=$?
+  printf '%s\n' "${status}" > "${3}.exit"
+  return "${status}"
 }
 
 # check_run <output-prefix> <description> -- abort unless the run is valid.
@@ -154,6 +178,8 @@ ${footer:-(no timing footer)}"
     *) fail "${what} did not reach a natural end of turn, so the protocol rejects it:
 ${footer}" ;;
   esac
+  LC_ALL=C grep -q '[^[:space:]]' "${prefix}.stdout" \
+    || fail "${what} produced no visible answer"
   echo "${footer}" >&2
 }
 
