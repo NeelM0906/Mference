@@ -1101,7 +1101,7 @@ public struct MFTokenizer: @unchecked Sendable {
         // prefix is not guaranteed to be a token prefix of the full render.
         // DeepSeek merges tool results into user turns rather than keying on
         // special tokens, so the boundary search below has nothing to anchor
-        // on. Callers (ServerPromptCache) fall back to prefix matching.
+        // on. Callers (PromptPrefixCache) fall back to prefix matching.
         guard dialect == .gemma else {
             throw MFTokenizerError.unsupportedForDialect("tool-result KV continuation")
         }
