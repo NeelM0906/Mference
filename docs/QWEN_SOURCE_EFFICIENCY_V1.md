@@ -49,6 +49,16 @@ protocol and acknowledges a math-token training-penalty bug. This establishes
 that savings are not guaranteed for every workload; it does not identify the
 cause of Mference's local failures or make this small corpus an AIME replica.
 
+A further September 20 reread found [discussion #8](https://huggingface.co/ukisai/Swift-Qwen3.8-27b/discussions/8):
+a positive coding-use report using llama.cpp, Q4_K_M, an RTX 5090 and a
+65,536-token output allowance. It is anecdotal evidence with different
+hardware, quantization, sampling and budget, not a reproduction of our parser
+or short-budget failures. The current [model card](https://huggingface.co/ukisai/Swift-Qwen3.8-27b)
+also reports mixed-W4/AWQ comparisons with larger output allowances; those
+results do not qualify Mference's affine INT4 group-64 conversion or its local
+task/context budgets. No upstream configuration was copied into product
+defaults and the pinned checkpoint was not changed.
+
 For the observed XML `False` issue, the pinned
 [SGLang Qwen parser](https://github.com/sgl-project/sglang/blob/745de73ba3c136b6f99b7a3e2177ed1a8eef4a56/python/sglang/srt/function_call/qwen3_coder_detector.py)
 already converts case-insensitive boolean spellings using the parameter schema.

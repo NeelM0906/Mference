@@ -67,7 +67,9 @@ byte-exact. Installed aligned-checkpoint evidence is separate. See the
   now pass completed-answer gates and show lower prefill-plus-decode time,
   but resident short/medium prefill regresses. The separate 16-slot revision
   has modest 0.5%/1.2%/2.3% median generation-time reductions; short-case and
-  all decode ranges overlap. GLM comparisons and native MTP
+  all decode ranges overlap. GLM's new default-profile warmups truncate on
+  short/medium cases and memory preflight stops before the long case; no
+  completed-answer comparison follows from them. GLM comparisons and native MTP
   integration remain open. No unmeasured speedup or default change is claimed.
 - Phase 7: real UI streaming, tool loops, history, cancellation and model-switch
   recovery have been tested; a [support table](RELEASE_SUPPORT.md) distinguishes

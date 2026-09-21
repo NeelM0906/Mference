@@ -1,5 +1,101 @@
 # Release performance experiments — September 20, 2026
 
+## GLM default-profile warmups: rejected completion gate, safety stop
+
+**Not a completed-answer performance result.** Four resident warmups ran:
+short explanation and medium review, baseline then candidate for each. Every
+process exited 0 but stopped at `maxTokens`, with 1,024 generated tokens and
+zero bytes of visible stdout. Empty stdout equality does not establish equal
+reasoning, answers, quality or token sequences. The candidate prints the
+existing actionable token-budget warning. No measured repetitions ran.
+
+Before launching the long-synthesis baseline, the harness's resident-memory
+preflight reported **53% memory free**, below its 75% headroom requirement for
+this roughly 181-GB installed model. The harness exited 2 without starting
+that process. Long synthesis and the bounded profile were not run. A later
+read-only process check found no model/test/installer owner; no application
+was terminated, no cache purged and no model deleted/reinstalled. No further
+model run was attempted after the failed safety check.
+
+Host: Mac Studio Mac15,14, M3 Ultra (32 CPU cores), 256 GiB; macOS 26.3
+(25D125), Apple Swift 6.3.3 (`swiftlang-6.3.3.1.3`). Local date September 20;
+the four launch times are September 21 00:00:17/00:02:22/00:04:29/00:06:39 UTC.
+AC power, Low Power Mode off, sleep off. Initial disk 619 GiB; all 49 receipt
+file sizes matched. Each completed run's preflight reported 98% memory free
+and no other model owner. Default full-SHA verification; no effort override,
+MTP, profiling or experimental controls. No local build/test/download ran
+concurrently. Light documentation, read-only source/web review and remote-CI
+checks continued; this interrupted warmup set supports no speed inference.
+
+Candidate: `28ce980cf8f4c5d7d650dafb1460aaa5c4ed0fdf`, release build 56.83s.
+Its preserved CLI is `/tmp/mference-release-glm-qualified.2S9zMK/MferenceCLI`,
+SHA-256 `07c01f8859bf7a030ad008d02081ac9aae6de09d2e5109f903f784a2a0a6608f`.
+All 26 preserved Metal resources were byte-checked against that commit.
+Baseline: `c67e857` production source, source-equivalent `d769a7e` build,
+`/tmp/mference-release-baseline.olcDV9/MferenceCLI`, SHA-256
+`621d9b41f09836e8d23fc231597f316b052b86b1420daa5deafea1341602dfb2`.
+Neither binary nor its resources was rebuilt during the attempt.
+
+Raw commands, footers, stdout, per-run exit codes, preflights and system/hash
+records: `/tmp/mference-glm-default-warmups.8viocX`.
+Manifest SHA-256: `bee37795db54e06f2af66225c864b6cfc10d14156c893f476e24df6017e56287`.
+Frozen prompt hashes, short/medium/long respectively:
+
+```text
+c57da2677143657be55e03797c1aabe8e012d61c1a71bf9345acdd575117d1e1
+23add7976db2069c9927affd13c2f5120508702a1c4915ea88b7de565bdd4b33
+b12e4a71493ad151d7a85b91e878ba784b116ef65de9fcb1b1b1c05198b537b8
+```
+
+Exact orchestration (the final argument selects warmups only):
+
+```sh
+bash /tmp/mference-release-compare.sh glm53flash resident \
+  /tmp/mference-glm-default-warmups.8viocX \
+  /tmp/mference-release-baseline.olcDV9/MferenceCLI \
+  c67e857-source-equivalent-d769a7e-build \
+  /tmp/mference-release-glm-qualified.2S9zMK/MferenceCLI \
+  28ce980cf8f4c5d7d650dafb1460aaa5c4ed0fdf warmup
+```
+
+Each CLI command uses `--model scratch/glm53flash.gturbo`,
+`--messages-file docs/benchmark-prompts/real-generation-v1/<case>.json`,
+`--max-new 1024 --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95`,
+`--expert-cache-slots resident`, and seed 20260721/20260722 for short/medium.
+These settings retain the frozen community protocol. **Protocol incompleteness:**
+the planned long warmups and all three measured repetitions were not executed;
+the warmups already fail the completion criterion and the safety stop prevented
+the next launch. They must not be presented as a completed benchmark.
+
+Complete timing footers (each underlying CLI exits 0):
+
+```text
+short-explanation baseline [stop=maxTokens prefill=60tok/1.25s new=1024tok decode=40.84s tok/s=25.076]
+short-explanation candidate [stop=maxTokens prefill=60tok/1.23s new=1024tok decode=40.87s tok/s=25.058]
+medium-review baseline [stop=maxTokens prefill=420tok/4.05s new=1024tok decode=42.70s tok/s=23.980]
+medium-review candidate [stop=maxTokens prefill=420tok/3.96s new=1024tok decode=42.82s tok/s=23.915]
+```
+
+Candidate stderr also contains, before each footer:
+
+```text
+note: token limit reached before a visible answer. Increase --max-new (and --max-context if needed).
+```
+
+Complete orchestration error (exit 2):
+
+```text
+Refusing benchmark: memory check: The system has 274877906944 (16777216 pages with a page size of 16384).
+System-wide memory free percentage: 53%
+```
+
+The [historical GLM report](families/GLM53_FLASH.md#measured-results) already
+distinguishes the template-default Max reasoning from its separately disclosed
+Low-effort measurements. No new Low-effort comparison ran, and no defaults or
+checkpoint bytes were changed. Any such comparison needs its own explicitly
+labeled protocol. Current matched GLM completed-answer performance
+and INT8 throughput optimization remain open.
+
 ## Flash-Next resident: matched completed-answer measurement
 
 All 24 fresh-process runs exited 0, reached `stop=endOfTurn`, and produced
