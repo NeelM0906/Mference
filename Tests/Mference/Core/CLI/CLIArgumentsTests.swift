@@ -134,7 +134,7 @@ import Mference
 
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
-            "--model", "--prompt", "--messages-file", "--chat", "--system", "--reuse-prefix",
+            "--model", "--prompt", "--messages-file", "--chat", "--system", "--reuse-prefix", "--show-reasoning",
             "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--repeat-penalty", "--min-p", "--presence-penalty", "--frequency-penalty", "--repeat-last-n",
@@ -229,6 +229,19 @@ import Mference
     @Test func reusePrefixRequiresChatMode() {
         #expect(throws: ArgsError.invalidValue(flag: "--reuse-prefix", value: "requires --chat")) {
             _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--reuse-prefix"])
+        }
+    }
+
+    @Test func chatHidesReasoningUnlessAskedToShowIt() throws {
+        let plain = try Args.parse(["--model", "m.gturbo", "--chat"])
+        #expect(!plain.showReasoning)
+        let shown = try Args.parse(["--model", "m.gturbo", "--chat", "--show-reasoning"])
+        #expect(shown.showReasoning)
+    }
+
+    @Test func showReasoningRequiresChatMode() {
+        #expect(throws: ArgsError.invalidValue(flag: "--show-reasoning", value: "requires --chat")) {
+            _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--show-reasoning"])
         }
     }
 

@@ -522,6 +522,7 @@ private func runChat(args: Args,
                                                  context: context,
                                                  scratch: scratch,
                                                  prefillConfig: forwardRuntime.prefillConfig,
+                                                 showReasoning: args.showReasoning,
                                                  quiet: args.quiet,
                                                  stdout: stdout,
                                                  stderr: stderr)
@@ -604,6 +605,7 @@ private func streamChatTurn(promptIds: [Int32],
                             context: MetalContext,
                             scratch: RawCompletionScratch,
                             prefillConfig: PrefillRuntimeConfig,
+                            showReasoning: Bool,
                             quiet: Bool,
                             stdout: FileHandle,
                             stderr: FileHandle) async throws -> (MFTokenizer.Message, RawDecodeResult, Bool) {
@@ -616,8 +618,21 @@ private func streamChatTurn(promptIds: [Int32],
                                      allowedTools: [],
                                      startsInThought: startsInThinking)
         : nil
+    // `--show-reasoning` forwards thoughts where they are already collected;
+    // installing the callback elsewhere would change the decoder's framing of
+    // the visible text.
+    var echo = ReasoningEcho()
+    func writeVisible(_ text: String) {
+        guard !text.isEmpty else { return }
+        if showReasoning { stderr.write(Data(echo.close().utf8)) }
+        stdout.write(Data(text.utf8))
+        reply += text
+    }
     if tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort) {
-        decoder?.onReasoning = { reasoning += $0 }
+        decoder?.onReasoning = { text in
+            reasoning += text
+            if showReasoning { stderr.write(Data(echo.reasoning(text).utf8)) }
+        }
     }
     var completionConfig = config
     var stopMatcher = StreamingStopMatcher(stops: decoder == nil ? [] : config.stopStrings)
@@ -644,12 +659,12 @@ private func streamChatTurn(promptIds: [Int32],
                 let visible = try visibleAssistantText(
                     structuredEvents(decoder, tokenID: tokenID, text: delta))
                 let emitted = decoder == nil ? visible : stopMatcher.push(visible)
-                if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+                writeVisible(emitted)
                 if decoder != nil, stopMatcher.isStopped { shouldStop = true }
             case .tail(let tail):
                 let visible = try visibleAssistantText(structuredTailEvents(decoder, text: tail))
                 let emitted = decoder == nil ? visible : stopMatcher.push(visible)
-                if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+                writeVisible(emitted)
             }
             } catch {
                 decodingError = error
@@ -660,8 +675,9 @@ private func streamChatTurn(promptIds: [Int32],
     if let decoder {
         let visible = try visibleAssistantText(decoder.finish())
         let emitted = stopMatcher.push(visible) + stopMatcher.finish()
-        if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+        writeVisible(emitted)
     }
+    if showReasoning { stderr.write(Data(echo.close().utf8)) }
     stdout.write(Data("\n".utf8))
     if let notice = emptyResponseLimitNotice(reason: stats.reason,
         hasVisibleText: reply.contains(where: { !$0.isWhitespace }),
