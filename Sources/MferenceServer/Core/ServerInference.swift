@@ -209,6 +209,19 @@ public actor ServerModelSession: ServerLoadedModel {
     private let promptCacheDomain: ServerPromptCacheDomain
     private var promptCache = ServerPromptCache()
 
+    static func runtimeConfiguration(
+        family: ModelFamily,
+        expertCacheSlots: Int,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> RuntimeConfiguration {
+        RuntimeConfiguration(
+            expertCacheSlots: expertCacheSlots,
+            prefillChunkTokens: RuntimeConfiguration.defaultServerPrefillChunkTokens(
+                for: family, physicalMemoryBytes: physicalMemoryBytes, environment: environment),
+            forceLogitsHead: true)
+    }
+
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix) async throws -> ServerModelSession {
@@ -251,9 +264,7 @@ public actor ServerModelSession: ServerLoadedModel {
         case .resident:
             configSlots = RuntimeConfiguration.allowedExpertCacheSlots.max()!
         }
-        let runtime = RuntimeConfiguration(
-            expertCacheSlots: configSlots,
-            forceLogitsHead: true)
+        let runtime = runtimeConfiguration(family: family, expertCacheSlots: configSlots)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,

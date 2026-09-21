@@ -415,6 +415,19 @@ static inline float mpp_grouped_silu(float x) {
     return x / (1.0f + exp(-x));
 }
 
+// Unset/false = SiLU (Flash-Next), true = gelu_pytorch_tanh with the same
+// clamp as prefill.metal's Gemma activation.
+constant bool FC_MPP_GROUPED_GELU [[function_constant(112)]];
+static inline float mpp_grouped_activation(float x) {
+    if (is_function_constant_defined(FC_MPP_GROUPED_GELU) && FC_MPP_GROUPED_GELU) {
+        const float x3 = x * x * x;
+        float inner = 0.7978845608028654f * (x + 0.044715f * x3);
+        inner = clamp(inner, -20.0f, 20.0f);
+        return 0.5f * x * (1.0f + tanh(inner));
+    }
+    return mpp_grouped_silu(x);
+}
+
 kernel void mpp_grouped_routed_moe_phase1(
     device const half* hidden                 [[buffer(0)]],
     device const MPPGroupedPair* pairs        [[buffer(1)]],
@@ -491,7 +504,10 @@ kernel void mpp_grouped_routed_moe_phase1(
     }
 
     const uint row_bytes = p.D / 2u;
+    // Column tiles stay 64 wide; scales and biases follow the checkpoint's
+    // storage group (the same index when that is 64).
     const uint groups_per_row = p.D / uint(kMPPGroupedK);
+    const uint scale_groups = p.D / kAffineGroupSize;
     for (uint kg = 0; kg < groups_per_row; ++kg) {
         for (uint linear = lid; linear < uint(kMPPGroupedM * kMPPGroupedK);
              linear += threads) {
@@ -513,6 +529,7 @@ kernel void mpp_grouped_routed_moe_phase1(
             const uint global_n = n_base + n;
             if (global_n < p.F) {
                 const uint global_k = kg * uint(kMPPGroupedK) + k;
+                const uint scale_index = global_n * scale_groups + global_k / kAffineGroupSize;
                 const uint8_t gpacked = gate_w[global_n * row_bytes
                     + (global_k >> 1)];
                 const uint8_t upacked = up_w[global_n * row_bytes
@@ -522,11 +539,9 @@ kernel void mpp_grouped_routed_moe_phase1(
                 const uint uq = (global_k & 1u) == 0u
                     ? uint(upacked & 0x0fu) : uint(upacked >> 4);
                 gate_tile[linear] = half(fma(float(gq),
-                    float(gate_s[global_n * groups_per_row + kg]),
-                    float(gate_b[global_n * groups_per_row + kg])));
+                    float(gate_s[scale_index]), float(gate_b[scale_index])));
                 up_tile[linear] = half(fma(float(uq),
-                    float(up_s[global_n * groups_per_row + kg]),
-                    float(up_b[global_n * groups_per_row + kg])));
+                    float(up_s[scale_index]), float(up_b[scale_index])));
             } else {
                 gate_tile[linear] = half(0.0f);
                 up_tile[linear] = half(0.0f);
@@ -551,7 +566,7 @@ kernel void mpp_grouped_routed_moe_phase1(
         if (n < p.F && m < group.pair_count) {
             const uint local_pair = group.pair_start + m - tile_pair_start;
             activation[local_pair * p.F + n] =
-                half(mpp_grouped_silu(gate_acc[i]) * up_acc[i]);
+                half(mpp_grouped_activation(gate_acc[i]) * up_acc[i]);
         }
     }
 }
@@ -619,6 +634,7 @@ kernel void mpp_grouped_routed_moe_down(
 
     const uint row_bytes = p.F / 2u;
     const uint groups_per_row = p.F / uint(kMPPGroupedK);
+    const uint scale_groups = p.F / kAffineGroupSize;
     for (uint kg = 0; kg < groups_per_row; ++kg) {
         for (uint linear = lid; linear < uint(kMPPGroupedM * kMPPGroupedK);
              linear += threads) {
@@ -644,9 +660,9 @@ kernel void mpp_grouped_routed_moe_down(
                     + (global_k >> 1)];
                 const uint q = (global_k & 1u) == 0u
                     ? uint(packed & 0x0fu) : uint(packed >> 4);
+                const uint scale_index = global_n * scale_groups + global_k / kAffineGroupSize;
                 weight_tile[linear] = half(fma(float(q),
-                    float(down_s[global_n * groups_per_row + kg]),
-                    float(down_b[global_n * groups_per_row + kg])));
+                    float(down_s[scale_index]), float(down_b[scale_index])));
             } else {
                 weight_tile[linear] = half(0.0f);
             }

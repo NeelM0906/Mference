@@ -60,7 +60,10 @@ which is not part of the repository.
 - Native scalar/chunked inference matched the pinned FP16 MLX reference's
   top prediction at all 158 qualified full-vocabulary positions, with routing
   and logit errors within the frozen tolerances. This is scoped numerical
-  evidence, not bit-identical execution for every prompt.
+  evidence, not bit-identical execution for every prompt. That record used
+  the source-order prefill: the default build keeps it for decode and
+  reproduces the chunked positions only with `MFERENCE_QAT_EXACT_PREFILL=1`;
+  see [Prefill arithmetic](#prefill-arithmetic).
 - The pinned template passed 72 independent cases with exact rendered bytes
   and token IDs. CLI chat/messages, thinking on/off and both real HTTP modes
   passed, including two tool-result rounds, repeated calls and a later user.
@@ -87,7 +90,57 @@ hardware are not qualified by this evidence. The architecture's source context
 limit is not a tested runtime limit. KV/activation precision policy remains
 unchanged, and this integration provides text inference only.
 
+## Prefill arithmetic
+
+Since 2026-09-21 the default prefill runs QAT's Q/K/V/O projections, shared
+expert and routed experts on the kernels original Gemma uses, batches the INT4
+shared expert, and runs well-filled routed tiles as grouped matrix products.
+Decode, routing, normalization and attention keep the MLX FP16 reduction
+order. The source-order prefill kernels spend 32 GPU threads on every
+(token, row) dot product and were 3-5x slower on long prompts; these kernels
+change only floating-point summation order.
+
+| 3,015-token prompt, M2 MacBook Air 16 GiB | Before | After |
+| --- | ---: | ---: |
+| QAT, CLI, one chunk | 160.6 s | 38.6 s |
+| QAT, server at 16K context | 245.4 s (128-token chunks) | 50.4 s (1,024-token chunks) |
+| Original Gemma, CLI, one chunk | 75.6 s | 52.4 s |
+
+These are diagnostic runs with cool-down pauses on a fanless Mac, not
+community-protocol benchmarks; decode rates were unchanged. The server's larger
+Gemma chunk costs 307 MB of Metal allocation (KV +183.5 MB) and applies to
+hosts with at least 16 GiB; see [Runtime controls](../RUNTIME_CONTROLS.md).
+
+What the numbers above do and do not keep:
+
+- Decode is unchanged: all 149 scalar reference positions stay byte-identical
+  to the MLX-exact capture.
+- Chunked prefill no longer reproduces the scalar MLX oracle. On the raw-text
+  reference corpus 4 of 9 chunked positions remain inside the frozen limits and
+  5 do not (relative L2 up to 0.44 on the repetitive sequence). Reordered sums
+  flip near-tied experts in MoE routing, and the flips cascade; stock MLX also
+  changes kernels for batched prompts.
+- `MFERENCE_QAT_EXACT_PREFILL=1` reproduces all 158 positions byte for byte
+  (verified 2026-09-21). Use it for the MLX reference comparison.
+- The default is gated instead on teacher-forced perplexity against that exact
+  control, on identical tokens after the frozen community prompts. QAT: 1,000
+  predictions, NLL +0.0004 nats/token (95 % -0.0014..+0.0022), same top
+  prediction at 99.6 %. Original Gemma, whose shared and routed experts changed
+  the same way: +0.0029 (-0.0028..+0.0086), 98.3 %. On the real weights the new
+  expert kernels match the old within 5e-4 relative error for every one of
+  3,015 layer-0 tokens.
+
+```bash
+MFERENCE_GEMMA_PREFILL_GATE="$HOME/llm-models/gemma4qat.gturbo" \
+  Scripts/test.sh --filter GemmaPrefillEquivalenceGateTests
+```
+
+The gate reads the install, loads the model once and takes about 15 minutes on
+the M2; apply the model-process checks first.
+
 ## M2 generation measurements
+
+The prefill times in this section predate the prefill change above.
 
 The three frozen community cases ran once as discarded warmups and once in
 fresh measured processes, using temperature 0.2, Top-K 64, Top-P 0.95, source

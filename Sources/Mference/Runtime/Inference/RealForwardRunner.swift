@@ -343,6 +343,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var dsv4Prefill: DSV4ChunkedPrefill?
     /// Internal fault-injection boundary; production leaves this unset.
     var dsv4PrefillDidCompleteLayer: ((Int) throws -> Void)?
+    private let gemmaPrefillPolicy: GemmaPrefillPolicy
+    /// Grouped-GEMM routed experts for well-filled Gemma prefill tiles.
+    private let prefillGroupedGEMM: MPPGroupedRoutedMoE?
+    /// Routed prefill tiles that ran as grouped GEMM rather than per-row GEMV.
+    private(set) var prefillGroupedExpertTiles = 0
+    /// How the last prefill layer ran its shared expert. A batched layout that
+    /// silently falls back to per-row dispatch costs a third of a long prefill.
+    private(set) var lastPrefillSharedExpertPath: PrefillSharedExpert.BlockPath?
     /// Test-only failure seam. Prior layer work is drained at this boundary;
     /// production leaves it nil and adds no GPU synchronization.
     var prefillWillEncodeLayer: ((Int) throws -> Void)?
@@ -553,8 +561,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `issueSpeculativePrefetch`.
     private var pilotPrediction: (layer: Int, experts: [Int])?
 
-    public init(model: Model, context: MetalContext, maxContext: Int,
-                runtimeConfiguration: RuntimeConfiguration = .production) throws {
+    public convenience init(model: Model, context: MetalContext, maxContext: Int,
+                            runtimeConfiguration: RuntimeConfiguration = .production) throws {
+        try self.init(model: model, context: context, maxContext: maxContext,
+                      runtimeConfiguration: runtimeConfiguration, gemmaPrefillPolicy: nil)
+    }
+
+    /// `gemmaPrefillPolicy` is nil in production, which derives it from the
+    /// checkpoint identity and the documented environment switches.
+    init(model: Model, context: MetalContext, maxContext: Int,
+         runtimeConfiguration: RuntimeConfiguration = .production,
+         gemmaPrefillPolicy: GemmaPrefillPolicy?) throws {
         self.model = model
         self.ctx = context
         self.cfg = model.config
@@ -593,7 +610,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         let silu = cfg.hiddenActivation == "silu"
         let int4GroupSize = model.affineInt4GroupSize
-        let sourceFP16 = model.modelID == CheckpointIdentity.gemma4QAT
+        let policy = gemmaPrefillPolicy ?? GemmaPrefillPolicy(modelID: model.modelID)
+        self.gemmaPrefillPolicy = policy
+        let sourceFP16 = policy.sourceFP16
+        // Prefill projections, shared expert and routed experts reorder only
+        // floating-point sums; the rest of the QAT profile stays source-exact.
+        let prefillMatmulSourceFP16 = policy.prefillMatmulSourceFP16
         self.embedInt4 = try EmbedLookupInt4(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
         self.rms       = try RMSNorm(context: context, sourceFP16: sourceFP16)
         self.int4      = try DequantInt4GEMV(
@@ -625,8 +647,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.fusedTail = try FusedLayerTail(context: context, sourceFP16: sourceFP16)
         self.prefillEmbed = try PrefillEmbedLookupInt4(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
         self.prefillRMS = try PrefillRMSNorm(context: context, sourceFP16: sourceFP16)
-        self.prefillQMM = try PrefillInt4QMM(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
-        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize, sourceFP16: sourceFP16)
+        self.prefillQMM = try PrefillInt4QMM(context: context, groupSize: int4GroupSize,
+                                             sourceFP16: prefillMatmulSourceFP16)
+        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize,
+                                                      sourceFP16: prefillMatmulSourceFP16)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context, sourceFP16: sourceFP16)
         self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil)
         self.prefillPostAttention = try PrefillPostAttentionSetup(context: context, sourceFP16: sourceFP16)
@@ -635,10 +659,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             context: context,
             weightBits: model.sharedExpertWeightBits,
             siluActivation: silu,
-            groupSize: int4GroupSize, sourceFP16: sourceFP16)
+            groupSize: int4GroupSize, sourceFP16: prefillMatmulSourceFP16)
         self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(context: context,
                                                              siluActivation: silu,
-                                                             groupSize: int4GroupSize, sourceFP16: sourceFP16)
+                                                             groupSize: int4GroupSize,
+                                                             sourceFP16: prefillMatmulSourceFP16)
+        self.prefillGroupedGEMM = cfg.family == .gemma4 && policy.batchedExperts
+            ? MPPGroupedRoutedMoE(context: context, groupSize: int4GroupSize, gelu: !silu)
+            : nil
         self.prefillMoE = try PrefillMoE(context: context, sourceFP16: sourceFP16)
         self.prefillLayerTail = try PrefillLayerTail(context: context, sourceFP16: sourceFP16)
         self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(context: context,
@@ -1728,7 +1756,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     @discardableResult
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillChunkScratchBuffers {
-        let layout = PrefillChunkScratchLayout(config: cfg, runtime: config)
+        let layout = PrefillChunkScratchLayout(
+            config: cfg, runtime: config,
+            batchedSharedExpert: cfg.family == .gemma4 && gemmaPrefillPolicy.batchedExperts
+                && model.sharedExpertWeightBits == 4,
+            groupedExperts: prefillGroupedGEMM?.isAvailable == true)
         if let scratch = prefillScratch, scratch.layout == layout {
             return scratch
         }
@@ -2387,7 +2419,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         throw ModelError.residentBufferWrapFailed
                     }
                     let sharedProj = sharedExpertProjections[L]
-                    try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                    lastPrefillSharedExpertPath = try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
                                                         x: cfg.ffnSandwichNorms
                                                             ? scratch.denseX
                                                             : scratch.routedX,
@@ -2577,9 +2609,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             try tileLifetime.begin(tileIndex: tileIndex,
                                                    plannedSlots: fetch.plannedMissSlots)
                         }
-                        let argumentBuffer = try prefillGroupedMoE.makeStreamedArgumentBuffer(
-                            device: ctx.device,
-                            binding: fetch.binding)
                         let streamedParams = PrefillGroupedRoutedMoEStreamedParams(
                             pairStart: tile.pairStart,
                             pairCount: tile.pairCount,
@@ -2592,17 +2621,50 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         guard let tileCB = ctx.queue.makeCommandBuffer() else {
                             throw ModelError.residentBufferWrapFailed
                         }
-                        _ = prefillGroupedMoE.encodeStreamedBatched(
-                            commandBuffer: tileCB,
-                            hidden: scratch.routedX,
-                            sortedPairs: metadata.sortedPairs,
-                            routePartials: scratch.routePartials,
-                            gateUpActScratch: scratch.routedGateUpActScratch,
-                            downScratch: scratch.routedDownScratch,
-                            argumentBuffer: argumentBuffer,
-                            binding: fetch.binding,
-                            params: streamedParams,
-                            pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows)
+                        let tilePairCounts = routes.groups[
+                            Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
+                            .map { Int($0.pairCount) }
+                        let argumentBuffer: PrefillStreamedTileArgumentBuffer
+                        if let grouped = prefillGroupedGEMM, grouped.isAvailable,
+                           let activation = scratch.groupedExpertActivation,
+                           PrefillGroupedExpertGate.usesGroupedGEMM(pairCounts: tilePairCounts) {
+                            // Whole 64-row matrix tiles per expert; its group
+                            // range replaces the row kernel's pair range.
+                            let groupedArguments = try grouped.makeArgumentBuffer(
+                                device: ctx.device, binding: fetch.binding)
+                            var groupedParams = streamedParams
+                            groupedParams.pairStart = tile.groupStart
+                            groupedParams.pairCount = tile.groupCount
+                            let encoded = grouped.encode(
+                                commandBuffer: tileCB,
+                                hidden: scratch.routedX,
+                                sortedPairs: metadata.sortedPairs,
+                                groups: metadata.groups,
+                                activation: activation,
+                                routePartials: scratch.routePartials,
+                                argumentBuffer: groupedArguments,
+                                binding: fetch.binding,
+                                params: groupedParams,
+                                maxPairsPerGroup: tilePairCounts.max() ?? 0)
+                            guard encoded else { throw ModelError.residentBufferWrapFailed }
+                            argumentBuffer = PrefillStreamedTileArgumentBuffer(buffer: groupedArguments.buffer)
+                            prefillGroupedExpertTiles += 1
+                        } else {
+                            argumentBuffer = try prefillGroupedMoE.makeStreamedArgumentBuffer(
+                                device: ctx.device,
+                                binding: fetch.binding)
+                            _ = prefillGroupedMoE.encodeStreamedBatched(
+                                commandBuffer: tileCB,
+                                hidden: scratch.routedX,
+                                sortedPairs: metadata.sortedPairs,
+                                routePartials: scratch.routePartials,
+                                gateUpActScratch: scratch.routedGateUpActScratch,
+                                downScratch: scratch.routedDownScratch,
+                                argumentBuffer: argumentBuffer,
+                                binding: fetch.binding,
+                                params: streamedParams,
+                                pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows)
+                        }
                         tileCB.commit()
                         pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                                commandBuffer: tileCB,

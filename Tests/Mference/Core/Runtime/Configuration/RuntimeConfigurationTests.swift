@@ -34,6 +34,33 @@ import Testing
             for: .inklingSmall, physicalMemoryBytes: twentyFourGiB) == 16)
     }
 
+    @Test func serverPrefillChunkGrowsOnlyForGemmaOnSixteenGiBHosts() {
+        let gib = UInt64(1) << 30
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib, environment: [:]) == 1024)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 24 * gib, environment: [:]) == 1024)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .inklingSmall, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+    }
+
+    @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {
+        let gib = UInt64(1) << 30
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 16 * gib,
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "512"]) == 512)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "1000"]) == 1024)
+    }
+
     @Test func retainedControlsReachTypedRuntime() {
         let runtime = RuntimeConfiguration(
             expertCacheSlots: 32,

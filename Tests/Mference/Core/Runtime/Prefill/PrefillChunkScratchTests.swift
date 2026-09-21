@@ -50,6 +50,58 @@ import Metal
         #expect(layout.totalPersistentBytes <= Int(Double(chunk) * perTokenBytes * 1.3))
     }
 
+    @Test func batchedSharedExpertKeepsOneScratchRowPerToken() {
+        let batched = PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 1024,
+                                                batchedSharedExpert: true)
+        #expect(batched.sharedExpertScratchElements == 1024 * 2112)
+        // Families that dispatch the shared expert row by row keep one row.
+        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 1024)
+            .sharedExpertScratchElements == 2112)
+    }
+
+    @Test func groupedExpertActivationGetsItsOwnBufferWhenAttentionOutputIsTooSmall() throws {
+        // Toy shape: 64 x 8 x 128 activation rows against 64 x 4 x 32 attention output.
+        let layout = PrefillChunkScratchLayout(config: .gemma4Toy(topKExperts: 8), chunkTokens: 64,
+                                               groupedExperts: true)
+        #expect(layout.groupedExpertActivationElements > layout.attentionOutputElements)
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let buffers = try PrefillChunkScratchBuffers.allocate(device: device, layout: layout)
+        let activation = try #require(buffers.groupedExpertActivation)
+        #expect(activation !== buffers.attentionOutput)
+        #expect(activation.length >= layout.groupedExpertActivationElements * MemoryLayout<Float16>.stride)
+        // Row-kernel-only layouts allocate nothing for it.
+        let rowOnly = try PrefillChunkScratchBuffers.allocate(device: device,
+            layout: PrefillChunkScratchLayout(config: .gemma4Toy(topKExperts: 8), chunkTokens: 64))
+        #expect(rowOnly.groupedExpertActivation == nil)
+    }
+
+    @Test func groupedExpertActivationReusesTheIdleAttentionOutput() throws {
+        let layout = PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 64,
+                                               batchedSharedExpert: true, groupedExperts: true)
+        #expect(layout.groupedExpertActivationElements == 64 * 8 * 704)
+        #expect(layout.groupedExpertActivationElements <= layout.attentionOutputElements)
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let buffers = try PrefillChunkScratchBuffers.allocate(device: device, layout: layout)
+        // Attention output is consumed by the O projection before any routed
+        // tile runs, so grouped experts borrow it instead of growing the arena.
+        #expect(buffers.groupedExpertActivation === buffers.attentionOutput)
+    }
+
+    /// Owner budget (2026-09-21): raising the server's Gemma prefill chunk from
+    /// 128 to 1024 tokens may cost about 310 MB and no more.
+    @Test func serverChunkGrowthStaysWithinTheOwnerMemoryBudget() {
+        let config = ArchConfig.gemma4_26B_A4B
+        let today = PrefillChunkScratchLayout(config: config, chunkTokens: 128).totalPersistentBytes
+        let planned = PrefillChunkScratchLayout(config: config, chunkTokens: 1024,
+                                                batchedSharedExpert: true,
+                                                groupedExperts: true).totalPersistentBytes
+        let slidingLayers = config.fullAttentionLayerMask.filter { $0 == 0 }.count
+        let ringBytesPerToken = slidingLayers * 2 * config.numKVHeads * config.headDim
+            * MemoryLayout<Float16>.stride
+        let growth = (planned - today) + (1024 - 128) * ringBytesPerToken
+        #expect(growth <= 310_000_000, "growth=\(growth)")
+    }
+
     @Test func allocationUsesPrivateScratchAndSharedRouteMetadata() throws {
         let ctx = try MetalContext()
         let toy = ArchConfig(hiddenSize: 64,

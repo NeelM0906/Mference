@@ -92,6 +92,24 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         RuntimeConfiguration()
     }
 
+    /// The server prefills long prompts in chunks; every chunk re-reads most
+    /// routed experts, so 128-token chunks made a 3,015-token Gemma prompt
+    /// spend 134 s of 205 s on expert I/O. Gemma takes 1,024 tokens on hosts
+    /// with at least 16 GiB: about +309 MB (scratch +125 MB, sliding KV ring
+    /// +184 MB), the accepted budget. `MFERENCE_SERVER_PREFILL_CHUNK` overrides.
+    public static func defaultServerPrefillChunkTokens(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        if let requested = environment["MFERENCE_SERVER_PREFILL_CHUNK"].flatMap(Int.init),
+           allowedPrefillChunkTokens.contains(requested) {
+            return requested
+        }
+        let gib = UInt64(1) << 30
+        return family == .gemma4 && physicalMemoryBytes >= 16 * gib ? 1024 : 128
+    }
+
     /// Qwen 3.6's large expert table needs more cache coverage to avoid repeated
     /// SSD reads. Keep the larger footprint family- and RAM-specific.
     /// 64 slots beat 32 by 4.6–5.9% (2026-08-08 A/B); with the GPU slot map

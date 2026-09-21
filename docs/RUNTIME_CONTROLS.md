@@ -122,12 +122,12 @@ automatically, or treat a truncated reply as an end-of-turn success.
 | Expert-cache slots | 8, 16, 24, 32, 64, 96, 128; CLI also accepts resident and auto | `--expert-cache-slots` | CLI/server auto | Qwen 3.6 auto uses 96 slots on hosts with at least 24 GiB, 32 with at least 16 GiB, and 16 otherwise. Flash-Next auto maps the routed-expert pool on hosts with at least 192 GiB when that pool plus the core leaves 32 GiB of headroom; otherwise it uses 16 slots. GLM selects resident when its pool plus core plus 48 GiB of reserve fits physical memory; otherwise it uses 16 slots. Other families use 16. `resident` maps every layer file once and skips the slot cache. This won for Flash-Next on the 256 GiB M3 Ultra but lost the Qwen 3.6 community A/B on 24 GiB because of page-cache pressure, so it is not a universal default. More slots retain more routed experts and reduce later reads at the cost of RAM. Ordinary RSS substantially undercounts clean file-backed pages in resident mode. |
 | Prompt prefill | On, off | — | On | On requests chunked prefill. The merged GLM bounded-expert path and DeepSeek sparse-cutover path now batch rather than replaying the full model per prompt token. Real-checkpoint and hardware coverage remains separate: see the [qualification matrix](PREFILL_QUALIFICATION.md). Recurrent scans inside a layer-major GPU batch still advance in token order where required. Off selects scalar replay, not skipped prompt processing. [Runtime diagnostics](RUNTIME_DIAGNOSTICS.md) reports actual per-request counts and separate memory metrics. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
-| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Maple stages each chunk layer-major but preserves its fixed 512-slot sliding-cache semantics by committing and attending rows in time order. |
+| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); 128 (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` resolves auto to 128 for its growing conversation. Maple stages each chunk layer-major but preserves its fixed 512-slot sliding-cache semantics by committing and attending rows in time order. The server has no flag: it uses 128 tokens, except 1,024 for Gemma 4 and Gemma 4 QAT on hosts with at least 16 GiB (about 309 MB more scratch and sliding-window KV), and `MFERENCE_SERVER_PREFILL_CHUNK` accepts any listed size. |
 | Maple FlashHead | Off, on | `--flash-head` | Off | Enables Maple's approximate singleton-decode candidate head when the install carries validated FlashHead tensors. It leaves all non-candidates at negative infinity, so sampling is restricted to selected rows. Prefill and the default decode head remain exact; an install without the data falls back to the exact head. |
 | Model verification | Full SHA-256, trusted receipt | `--verify` | Full SHA-256 | `full-sha256` re-hashes each routed-expert file on first touch, which for a 145 GB expert pool costs about 59 s inside the first prefill. `trusted-receipt` instead checks each file's size against the receipt written at install time; the receipt itself is still validated against the manifest hash, and `model_weights.bin` and `layout.json` are still hashed. It trades detection of size-preserving corruption for that time. |
 
-The prefill chunk size and FlashHead switch are CLI-only controls; every other
-surface uses the default exact head.
+The `--prefill-chunk` flag and FlashHead switch are CLI-only controls; every
+other surface uses the default exact head and the server chunk described above.
 The CLI applies these settings when it loads the model, so each run uses the
 values passed on its command line. Setting `MFERENCE_PHASES=1` makes the
 CLI print the decode phase report after the timing footer: `cb1` and `cb2`
@@ -157,6 +157,17 @@ checkpoint and swaps the round's draft source to it (draft depth defaults
 to 6; see docs/QWEN38_DFLASH2.md); `MFERENCE_DFLASH2_BF16=1` skips its
 load-time INT4 quantization for reference runs. All are byte-identical
 toggles, not quality controls.
+
+Gemma prefill has two switches that are not byte-identical, because the
+defaults reorder floating-point sums. `MFERENCE_GEMMA_PREFILL_LEGACY=1` returns
+Gemma 4 and Gemma 4 QAT to the per-token shared expert and per-row routed
+experts; the default batches the INT4 shared expert and runs well-filled
+routed tiles as grouped matrix products. `MFERENCE_QAT_EXACT_PREFILL=1`
+additionally returns QAT's prefill projections, shared expert and routed
+experts to the MLX FP16 reduction order, which is several times slower on long
+prompts. QAT decode, routing, normalization and attention keep that order in
+every mode. Both exist for A/B runs and for the
+[prefill equivalence gate](families/GEMMA4_QAT.md#prefill-arithmetic).
 
 Flash-Next's installer carries an MTP sidecar, but native Flash-Next speculative
 execution is not implemented. The dense Qwen MTP switches do not activate it.
