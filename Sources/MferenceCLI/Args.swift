@@ -51,6 +51,7 @@ public struct Args: Equatable, Sendable {
     public var messagesFile: String?
     public var chat: Bool
     public var systemPrompt: String?
+    public var reusePrefix: Bool
     public var maxNew: Int
     public var maxContext: Int
     public var temperature: Float { didSet { omittedSamplingOptions.remove(.temperature) } }
@@ -88,6 +89,7 @@ public struct Args: Equatable, Sendable {
                 messagesFile: String? = nil,
                 chat: Bool = false,
                 systemPrompt: String? = nil,
+                reusePrefix: Bool = false,
                 maxNew: Int = 1_024,
                 maxContext: Int = 4096,
                 temperature: Float = GenerationConfig.defaults.temperature,
@@ -116,6 +118,7 @@ public struct Args: Equatable, Sendable {
         self.messagesFile = messagesFile
         self.chat = chat
         self.systemPrompt = systemPrompt
+        self.reusePrefix = reusePrefix
         self.maxNew = maxNew
         self.maxContext = maxContext
         self.temperature = temperature
@@ -185,6 +188,9 @@ extension Args {
 
     options:
       --system <string>         System message for --chat (repeatable).
+      --reuse-prefix            Keep the KV cache between --chat turns and
+                                prefill only what a turn adds. Off by default:
+                                every turn re-prefills from a reset cache.
       --max-new <int>           Generated-token limit (default 1024).
       --max-context <int>       Context limit in tokens (default 4096).
       --kv-paged <on|off|auto>  Paged KV cache with SSD spill + Quest sparse
@@ -245,6 +251,7 @@ extension Args {
         var messagesFile: String?
         var chat = false
         var systemPrompt: String?
+        var reusePrefix = false
         var maxNew = 1_024
         var maxContext = 4096
         // Starting values only: each flag below overwrites its own, so an
@@ -291,6 +298,9 @@ extension Args {
                 messagesFile = try takeValue(argv, &index, flag: flag)
             case "--chat":
                 chat = true
+                index += 1
+            case "--reuse-prefix":
+                reusePrefix = true
                 index += 1
             case "--system":
                 let value = try takeValue(argv, &index, flag: flag)
@@ -455,6 +465,9 @@ extension Args {
         if systemPrompt != nil && !chat {
             throw ArgsError.invalidValue(flag: "--system", value: "requires --chat")
         }
+        if reusePrefix && !chat {
+            throw ArgsError.invalidValue(flag: "--reuse-prefix", value: "requires --chat")
+        }
         if temperature > 0, topK == nil, let topP, topP < 1 {
             throw ArgsError.invalidValue(
                 flag: "--top-p",
@@ -465,6 +478,7 @@ extension Args {
                     messagesFile: messagesFile,
                     chat: chat,
                     systemPrompt: systemPrompt,
+                    reusePrefix: reusePrefix,
                     maxNew: maxNew,
                     maxContext: maxContext,
                     temperature: temperature,

@@ -134,7 +134,7 @@ import Mference
 
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
-            "--model", "--prompt", "--messages-file", "--chat", "--system",
+            "--model", "--prompt", "--messages-file", "--chat", "--system", "--reuse-prefix",
             "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--repeat-penalty", "--min-p", "--presence-penalty", "--frequency-penalty", "--repeat-last-n",
@@ -216,6 +216,19 @@ import Mference
             _ = try Args.parse([
                 "--model", "m.gturbo", "--prompt", "hi", "--system", "be terse",
             ])
+        }
+    }
+
+    @Test func chatResetsEveryTurnUnlessPrefixReuseIsRequested() throws {
+        let plain = try Args.parse(["--model", "m.gturbo", "--chat"])
+        #expect(!plain.reusePrefix)
+        let reuse = try Args.parse(["--model", "m.gturbo", "--chat", "--reuse-prefix"])
+        #expect(reuse.reusePrefix)
+    }
+
+    @Test func reusePrefixRequiresChatMode() {
+        #expect(throws: ArgsError.invalidValue(flag: "--reuse-prefix", value: "requires --chat")) {
+            _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--reuse-prefix"])
         }
     }
 

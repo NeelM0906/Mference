@@ -30,6 +30,26 @@ Each turn re-prefills the entire conversation from a reset KV cache, so no
 state carries between turns and later turns in a long conversation take longer
 to start.
 
+`--reuse-prefix` is an opt-in alternative for `--chat`: the KV cache is kept
+between turns and a turn prefills only what it adds. It applies the same
+single-prefix rules as the loopback server's
+[prompt reuse](OPENAI_SERVER.md#prompt-reuse): ChatML checkpoints continue from
+the turn as it was generated and append the new user message, and Gemma rewinds
+to the point where the freshly rendered conversation diverges from the cached
+one. A turn that cannot continue resets as above, for example after `/clear`,
+when history was dropped to fit the context, when a reply was ended by `--stop`,
+or when the continued prompt would no longer fit `--max-context`. A resumed turn
+reports `cached=<n>tok` in its timing footer.
+
+Output with `--reuse-prefix` is not guaranteed to be byte-identical to the
+default. A resumed turn's new tokens pass through prefill as one short chunk,
+and a continued ChatML turn keeps earlier replies as generated rather than
+re-rendered. For Gemma this already applies to the first turn: prefill captures
+a recovery point just before the generation suffix, which splits the last chunk
+and sends its few remaining tokens through the short-chunk kernels. Thinking
+is unaffected: every turn is rendered with the session's `--reasoning-effort`,
+and Gemma's template still removes earlier thoughts at a new user message.
+
 `--system <string>` sets the system message for `--chat` and is repeatable;
 repeated values join with newlines. It requires `--chat`, because the other two
 modes carry their own prompt text.
