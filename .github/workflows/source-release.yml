@@ -1,0 +1,37 @@
+name: Source release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Candidate version, for example 0.1.0-rc.1 (no tag is created)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: validate
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Package the exact tested commit
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 Scripts/package_source_release.py --version "$RELEASE_VERSION" --output "$RUNNER_TEMP/mference-source-candidate"
+      - name: Upload source, provenance and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mference-source-${{ github.sha }}
+          path: ${{ runner.temp }}/mference-source-candidate/*
+          if-no-files-found: error
+          retention-days: 30

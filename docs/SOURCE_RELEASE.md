@@ -75,3 +75,48 @@ establish support or performance on a physically smaller-memory Mac.
 This checklist is a release requirement, not a statement that every gate or
 every model/hardware combination has already passed. Dated validation records
 and release notes carry the actual results.
+
+## Build a downloadable source candidate
+
+The **Source release candidate** GitHub Actions workflow is manually triggered
+with a version such as `0.1.0-rc.1`. It first runs the same macOS 15 / Swift 6.1,
+macOS 26, script and documentation checks as PR CI. Only after those jobs pass
+does it upload a source archive, JSON provenance manifest and SHA-256 checksum
+file as one downloadable Actions artifact (retained for 30 days). It does not
+create a tag, merge a PR, publish a GitHub Release, sign/notarize executables,
+or download model weights. Real-checkpoint and UI evidence must still be
+reviewed separately; hosted CI has no installed models.
+
+For a local candidate from a clean **tracked** checkout:
+
+```sh
+python3 Scripts/package_source_release.py \
+  --version 0.1.0-rc.1 --output scratch/release-candidates/0.1.0-rc.1
+cd scratch/release-candidates/0.1.0-rc.1
+shasum -a 256 -c mference-0.1.0-rc.1-SHA256SUMS
+tar -xzf mference-0.1.0-rc.1.tar.gz
+cd mference-0.1.0-rc.1
+./mference-ui.sh doctor
+swift build -c release --force-resolved-versions
+```
+
+The version is a candidate label, not an assertion that the version has been
+published. The packager uses only the committed Git tree and refuses tracked
+edits or an existing output artifact. It validates required source, licenses,
+Metal resources and script executable bits. It rejects model-install/cache/
+secret paths and archive links or special files. The archive includes the
+small tracked test reference fixtures, not downloaded full checkpoints.
+Untracked files, local installs and UI history are not included.
+
+Git tar metadata, file modes and gzip timestamps are normalized, so repeated
+packaging of the same commit/version is byte-identical with the same tools.
+The manifest records the exact commit/tree and archive hash; it deliberately
+does **not** claim that packaging itself proves CI, model quality or hardware
+support. Checksums detect changed bytes; they are not a signing identity.
+
+Before publishing, the maintainer should select the reviewed commit/version,
+confirm its CI and dated qualification record, and test the extracted archive
+rather than a working tree with extra local files. Attach the archive,
+manifest and checksum file together to the release. Keep experimental features
+disabled and carry [checkpoint limits](RELEASE_SUPPORT.md) into the release
+notes. Source publication is separate from merging the review PR.

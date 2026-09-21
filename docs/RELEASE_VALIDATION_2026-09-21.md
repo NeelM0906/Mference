@@ -42,11 +42,12 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   --filter 'FlashNextMTPPrimingTests|FlashNextMTPDraftRunnerTests'
 ```
 
-After the fixture fix, the first pass exited 0: 11 tests / 2 suites, 6.675s,
+After the fixture fix, the first pass exited 0: build 6.32s, 11 tests / 2 suites, 6.675s,
 one known issue (`/tmp/mference-mtp-priming-v2-20260921.log`). Adding the paired
 target/primer recovery test and opt-in installed probe then exited 0:
 
 ```text
+Build complete! (6.01s)
 Test run with 13 tests in 2 suites passed after 6.839 seconds with 1 known issue.
 ```
 
@@ -63,3 +64,23 @@ The existing unrounded-FP32 row-zero precision expectation remains the one
 known issue, with the unchanged 5% gate and hard failure above 6%. No tolerance
 was relaxed. Native MTP remains disabled and unqualified for proposal
 verification, end-to-end generation, quality or speed.
+
+## Source-release delivery tooling
+
+`Scripts/package_source_release.py` produces a versioned source tarball,
+commit/tree manifest and SHA-256 checksum file from committed source only.
+`.github/workflows/source-release.yml` runs the reusable two-platform CI before
+uploading these as a downloadable candidate artifact. It has read-only
+repository permissions and no publish/tag/merge step. Documentation in
+[Source release](SOURCE_RELEASE.md#build-a-downloadable-source-candidate)
+separates packaging validation from model/hardware qualification.
+
+`python3 Scripts/tests/test_source_release.py` and the same command with `-O`
+both exit 0, six tests each (1.109s and 1.148s in the first final check).
+Coverage includes repeated byte-identical artifacts, manifest/checksum
+verification, executable modes, exclusion of untracked models/secrets,
+refusal of tracked edits/overwrites/bad versions, missing licenses, unsafe
+paths, symlinks, special entries and duplicate tar members. Archive safety
+checks use explicit exceptions and therefore still execute with Python `-O`.
+These packaging-only checks ran while the installed correctness gate ran;
+there is no performance claim from either duration.
