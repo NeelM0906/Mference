@@ -398,6 +398,43 @@ static inline void router_topk_select_softmax_par(
     }
 }
 
+// Non-production Flash-Next geometries include top-2 BF16 and top-6 INT4
+// fixtures. Their softmax width must match their output buffers; Gemma's
+// sqrt-softplus top-6 rule is not a substitute. Production keeps k10_par.
+kernel void flashnext_router_topk_select(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid != 0u || k == 0u || k > 10u || num_experts < k || num_experts > 512u) return;
+    uint indices[10];
+    float scores[10];
+    for (uint i = 0; i < k; ++i) { indices[i] = 0u; scores[i] = -INFINITY; }
+    for (uint e = 0; e < num_experts; ++e) {
+        const float score = logits[e];
+        uint at = k;
+        for (uint i = 0; i < k; ++i) {
+            if (score > scores[i]) { at = i; break; }
+        }
+        if (at == k) continue;
+        for (uint i = k - 1u; i > at; --i) {
+            indices[i] = indices[i - 1u]; scores[i] = scores[i - 1u];
+        }
+        indices[at] = e; scores[at] = score;
+    }
+    float total = 0.0f;
+    const float maximum = scores[0];
+    for (uint i = 0; i < k; ++i) { scores[i] = fast::exp(scores[i] - maximum); total += scores[i]; }
+    for (uint i = 0; i < k; ++i) {
+        out_indices[i] = indices[i];
+        out_weights[i] = half(scores[i] / total * float(per_expert_scale[indices[i]]));
+    }
+}
+
 kernel void router_topk_select_k8_par(
     device const float* logits [[buffer(0)]],
     device const bfloat* per_expert_scale [[buffer(1)]],

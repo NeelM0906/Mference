@@ -237,6 +237,71 @@ import Testing
         #expect(worst < 2e-3, "pooled key worst abs delta \(worst)")
     }
 
+    @Test(arguments: [1, 31, 32, 33, 37, 63, 64, 65])
+    func raggedInt8GemmNeedsNoPaddedInputRows(tokens: Int) throws {
+        let ctx = try MetalContext()
+        let kernels = try Glm53PrefillKernels(context: ctx, swigluLimit: 10)
+        let rows = 40, columns = 192, groups = columns / 64
+        let xStride = columns + 8, yStride = rows + 8, prefix = 8
+        let weightBytes = rows * columns, companionBytes = rows * groups * 2
+        let buffer = try #require(ctx.device.makeBuffer(length: weightBytes + 2 * companionBytes,
+                                                        options: .storageModeShared))
+        let packed = buffer.contents().assumingMemoryBound(to: UInt8.self)
+        for i in 0..<weightBytes { packed[i] = UInt8((i * 17 + i / columns * 3) % 256) }
+        let scales = buffer.contents().advanced(by: weightBytes).assumingMemoryBound(to: UInt16.self)
+        let biases = buffer.contents().advanced(by: weightBytes + companionBytes).assumingMemoryBound(to: UInt16.self)
+        scales.update(repeating: Quantization.bf16Bits(1.0 / 256), count: rows * groups)
+        biases.update(repeating: Quantization.bf16Bits(-0.5), count: rows * groups)
+        let view = TensorView(buffer: buffer, offset: 0, length: UInt64(weightBytes),
+            scaleOffset: UInt64(weightBytes), scaleLength: UInt64(companionBytes),
+            biasOffset: UInt64(weightBytes + companionBytes), biasLength: UInt64(companionBytes),
+            shape: (UInt32(rows), UInt32(columns), 0, 0), dtype: 0)
+        // No padding through ceil(T/32): the last allocated element is the
+        // final valid input column. Test both nonzero offset and row stride.
+        let xCount = prefix + (tokens - 1) * xStride + columns
+        let input = try #require(ctx.device.makeBuffer(length: xCount * 2, options: .storageModeShared))
+        let x = input.contents().assumingMemoryBound(to: Float16.self)
+        x.update(repeating: .nan, count: xCount)
+        for t in 0..<tokens {
+            for n in 0..<columns { x[prefix + t * xStride + n] = Float16(Float((t * 7 + n) % 19 - 9) / 16) }
+        }
+        let before = Array(UnsafeBufferPointer(start: input.contents().assumingMemoryBound(to: UInt16.self), count: xCount))
+        for matrixUnits in [false, true] {
+            let count = prefix + tokens * yStride + 8
+            let output = try #require(ctx.device.makeBuffer(length: count * 2, options: .storageModeShared))
+            let y = output.contents().assumingMemoryBound(to: Float16.self)
+            y.update(repeating: -123, count: count)
+            for t in 0..<tokens { y.advanced(by: prefix + t * yStride).update(repeating: .nan, count: rows) }
+            try Self.run(ctx) { cb in
+                kernels.encodeInt8GEMM(commandBuffer: cb, weights: view,
+                    x: input, xOffset: prefix * 2, xStride: xStride,
+                    y: output, yOffset: prefix * 2, yStride: yStride,
+                    m: rows, n: columns, tokens: tokens, matrixUnits: matrixUnits)
+            }
+            var maximumError: Float = 0
+            for t in 0..<tokens {
+                for m in 0..<rows {
+                    var expected: Float = 0
+                    for n in 0..<columns {
+                        let weight = Float(packed[m * columns + n]) / 256 - 0.5
+                        expected += weight * Float(x[prefix + t * xStride + n])
+                    }
+                    let actual = Float(y[prefix + t * yStride + m])
+                    try #require(actual.isFinite)
+                    maximumError = max(maximumError, abs(actual - expected))
+                }
+            }
+            #expect(maximumError <= 0.005)
+            for i in 0..<count {
+                let relative = i - prefix
+                let isOutput = relative >= 0 && relative / yStride < tokens && relative % yStride < rows
+                if !isOutput { #expect(y[i] == -123) }
+            }
+        }
+        let after = Array(UnsafeBufferPointer(start: input.contents().assumingMemoryBound(to: UInt16.self), count: xCount))
+        #expect(after == before)
+    }
+
     @Test func batchedInt8GemmMatchesTheDequantizedProduct() throws {
         let ctx = try MetalContext()
         let kernels = try Glm53PrefillKernels(context: ctx, swigluLimit: 10)

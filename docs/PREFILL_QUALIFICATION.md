@@ -16,23 +16,32 @@ execution. Resident and larger-budget configurations keep their existing width.
 
 | Family / path | Production-dispatch evidence | Limits |
 | --- | --- | --- |
-| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, mid-append cancellation/dirty rejection/reset and decode handoff | Small loader fixture; execution/state reproducibility, not independent model-quality parity |
-| Qwen 3.6, bounded / resident experts | Same matrix (including actual task cancellation between layers of a warm append) plus `QwenRunnerTests` and existing hybrid-state parity suites | Small fixture is not smaller-RAM hardware qualification |
+| Gemma, bounded / resident experts | `ProductionPrefillContractTests`: ragged cold/warm appends, multiple chunks, sliding-ring boundary, cancellation/reset and decode handoff; installed resident/eight-slot gate at `ba14ff4` matches all full logits across 1,024-token window and eight continuation steps, zero replay | [Installed evidence](RELEASE_VALIDATION_2026-09-20.md); not independent upstream quality parity or fresh physical low-RAM qualification |
+| Qwen 3.6, bounded / resident experts | Same synthetic matrix plus `QwenRunnerTests`/hybrid-state parity; installed resident/eight-slot gate at `ba14ff4` matches ragged append heads and eight full continuation rows, with cancellation/dirty rejection/exact reset | [Installed evidence](RELEASE_VALIDATION_2026-09-20.md); reduced slots are not smaller-RAM hardware qualification |
 | Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts and numerical/continuation checks; `7505e82` adds actual cancellation after GPU writes in all three backends, dirty rejection and exact reset/next logits | Installed fine-tunes need their own numerical gate; fixture recovery is not physical low-RAM qualification |
 | Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` and four-row tiled `ee0bfb9` pass the installed numerical/state/MTP retest without changing tolerances | Candidate only; default-effort community attempts truncate without visible answers; broader quality/latency/hardware evidence required before promotion |
-| Flash-Next, bounded / resident | `FlashNextChunkedPrefillTests`: exact logits/state, warm appends, cancellation/reset, six continuation rows and zero replay; `31f0067` installed INT8-router short gate passes both memory modes | Real long-context/TensorOps-sized chunks and wider hardware evidence remain separate |
-| GLM, bounded / resident | PR #34 matrix plus installed gate at `ed69598`: exact resident/16-slot full logits at 33/2047/2051/2083 tokens and eight continuation steps, zero replay, cancellation/dirty rejection/exact reset | [Installed evidence](families/GLM53_FLASH.md#installed-streamed-prefill-qualification-september-18-2026); not longer-context, smaller-hardware or throughput qualification |
+| Flash-Next, bounded / resident | Synthetic state gates, installed short A/B, plus `c8f3298`: actual TensorOps encodings with 1,024-token chunks; exact resident/16-slot logits across 2,048-token cutover, eight continuation rows and cancellation/reset | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); wider contexts, old-OS real fallback and physical hardware remain separate |
+| GLM, bounded / resident | PR #34 matrix plus installed gates at `ed69598` and post-ragged-read-fix `84bfefc`: exact resident/16-slot full logits at 33/2047/2051/2083 tokens and eight continuation steps, zero replay, cancellation/dirty rejection/exact reset | [Latest installed evidence](RELEASE_VALIDATION_2026-09-20.md#installed-glm-recheck-after-ragged-tile-correction); not longer-context, smaller-hardware or throughput qualification |
 | DeepSeek, bounded / resident | Phase 4 PR #35: below/across/above sparse cutover, cache slots 8/16/resident, exact state and cancellation/reset; opt-in installed gate | Installed results and limitations live in `DEEPSEEK_V4_FLASH.md` |
 | MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts and golden/continuation checks; `7505e82` exercises actual warm-append cancellation/reset in all three backends and compares exact next logits | Representative full-selection/5-page-spill fixture; not every sparse budget/context or new hardware qualification |
-| Maple | `MapleForwardRunnerTests` asserts batched execution, continuation logits and failure between layers/dirty rejection/reset | Existing sparse/zero fixture does not replace a broad installed-model gate |
-| Inkling | Real short generation regression plus `7505e82` installed 16-slot cancellation after routed-layer GPU writes: dirty rejection, zero replay and exact reset/next full-logit rows | Env-gated, not run by ordinary CI; a small full-runner fixture and wider resident/window-boundary matrix remain needed |
+| Maple | Existing fixture plus installed 16/8-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps, cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); resident-expert mode is not implemented by this runner; not every context/hardware |
+| Inkling | Nonzero CI fixture at `3462477`: resident/eight-slot exact boundary, continuation and recovery results plus bounded sequential-reference error; installed resident/16-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps and cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); installed weights remain env-gated; wider hardware/context qualification is separate |
 
-PRs #33–36 merged into `main` on September 18 (`c67e857`). New source-release
-work is in PR #37. The all-family invariant remains **not fully qualified**
+PRs #33–36 merged into `main` on September 18 (`c67e857`); PR #37 merged on
+September 20 (`049bdcd`). Further qualification is in
+[PR #38](https://github.com/NeelM0906/Mference/pull/38).
+The all-family invariant remains **not fully qualified**
 until the outstanding cells have evidence, including OS/GPU fallback paths,
 partial-chunk cancellation across the remaining runners, and real checkpoints.
 Do not hide a missing combination behind a new unsupported-context error or
 rename host-side full-model replay as batching.
+
+September 20 evidence correction: `d4f5dd4` fixes unaligned resident GPU
+mappings and the Flash-Next synthetic fixture. Earlier synthetic NaN-bit
+equality is not numerical parity. The replacement finite/nonzero gate asserts
+bounded FP16-scale error and exact greedy continuation; rollback remains
+byte-exact. Installed aligned-checkpoint evidence is separate. See the
+[detailed correction](RELEASE_VALIDATION_2026-09-20.md#resident-gpu-alignment-and-target-state-follow-up).
 
 ## Roadmap status
 
@@ -40,7 +49,12 @@ rename host-side full-model replay as batching.
 - Phase 2: Swift-Qwen implementation and initial qualification merged in PR #33;
   numerical retest passes. The [matched-low screen](families/QWEN_MATCHED_QUALIFICATION_2026-09-18.md)
   passes 54/60 cases versus base 59/60 with 6.77% fewer completion tokens;
-  broader default-effort quality/performance/hardware qualification remains.
+  the [five-seed xhigh screen](QWEN_SOURCE_EFFICIENCY_V1.md) passes 293/300
+  attempts versus base 297/300 with 14.992% fewer completion tokens. A parser
+  compatibility issue is fixed separately. The default-policy screen passes
+  Swift 180/180 versus base 177/180 with 20.088% fewer completion tokens; its
+  policies differ and the base failures share one punctuation ambiguity.
+  Broader quality/performance/hardware qualification remains.
 - Phase 3: bounded GLM prefill implementation merged in PR #34; pinned install
   and current resident/16-slot sparse-cutover/continuation/recovery gate now
   complete on the 256 GiB M3 Ultra; broader hardware/performance remains open.
@@ -49,7 +63,14 @@ rename host-side full-model replay as batching.
 - Phase 5: execution-contract coverage extended here; the gaps above remain
   explicit. A green ordinary CI run does not execute env-gated real-model tests.
 - Phase 6: Flash-Next/GLM optimization and matched performance experiments are
-  not complete. No unmeasured speedup or default change is claimed.
+  not complete. [Flash-Next resident and 16-slot measurements](RELEASE_PERFORMANCE_2026-09-20.md)
+  now pass completed-answer gates and show lower prefill-plus-decode time,
+  but resident short/medium prefill regresses. The separate 16-slot revision
+  has modest 0.5%/1.2%/2.3% median generation-time reductions; short-case and
+  all decode ranges overlap. GLM's new default-profile warmups truncate on
+  short/medium cases and memory preflight stops before the long case; no
+  completed-answer comparison follows from them. GLM comparisons and native MTP
+  integration remain open. No unmeasured speedup or default change is claimed.
 - Phase 7: real UI streaming, tool loops, history, cancellation and model-switch
   recovery have been tested; a [support table](RELEASE_SUPPORT.md) distinguishes
   established paths from candidates. The separately frozen 60-case screen has

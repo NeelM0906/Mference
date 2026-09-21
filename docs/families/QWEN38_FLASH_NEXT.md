@@ -11,12 +11,24 @@ its production runner, INT8-router install, family gate, and frozen-protocol
 measurements landed on 2026-09-10. The checklists below retain the bring-up
 history and mark the remaining performance work explicitly.
 
+September 20: [matched resident and 16-slot measurements](../RELEASE_PERFORMANCE_2026-09-20.md)
+complete all three frozen generation cases with identical answers across
+versions. Lower resident generation time includes a short/medium-prefill
+regression. The later 16-slot revision improves median generation time by
+0.5%/1.2%/2.3%, with overlapping short-case and all decode ranges. Do not
+combine these distinct revisions into one benchmark. Native MTP remains
+unqualified and disabled, including an explicit synthetic FP32 precision gap.
+
 September 18 source-release update (PR #37): resident prefill route grouping
 now stays on the GPU; bounded prefill overlaps one expert tile's GPU work with
 the next tile's I/O in disjoint cache slots. The short installed INT8-router
 gate passes in resident and 16-slot modes, with zero replay and exact 16-token
-greedy continuation. New matched speed and real long-context/TensorOps-size
-qualification remain pending; **native MTP is still not implemented**. See
+greedy continuation. The [September 20 installed gate](../RELEASE_VALIDATION_2026-09-20.md)
+also passes 1,024-token chunks with observed TensorOps encodings and exact
+resident/16-slot logits across the sparse boundary. Wider-context/hardware
+qualification remains pending; **native MTP decoding is not enabled**.
+The [MTP implementation boundary](../FLASHNEXT_MTP_STATUS.md) separates the
+new input-fusion/rollback foundations from the remaining decoder and gates. See
 [the dated validation record](../RELEASE_VALIDATION_2026-09-18.md) and
 [current support boundaries](../RELEASE_SUPPORT.md). Older roadmap statements
 below describe their dated measurements, not the status of this update.

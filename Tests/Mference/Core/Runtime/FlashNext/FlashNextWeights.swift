@@ -12,7 +12,7 @@ import Metal
 /// here reads the source checkpoint.
 ///
 /// Dequantization dispatches on the stored dtype, so the same runner works
-/// against a BF16-passthrough install and an INT4 affine group-64 one. INT4
+/// against BF16-passthrough and mixed INT4/INT8 affine group-64 installs. INT4
 /// decode is `Quantization.dequantizeInt4Affine`, the runtime's own reference,
 /// which `Int4AffineEncoderParityTests` locks bit-for-bit to the repacker's
 /// `Int4AffineEncoder`.
@@ -57,8 +57,16 @@ final class FlashNextWeights {
                 .assumingMemoryBound(to: Float.self)
             return (0..<count).map { base[$0] }
         case 0:
+            // The on-disk dtype is shared by INT4 and INT8. Derive the width
+            // from shape and payload size independently of the GPU dispatch;
+            // assuming nibbles silently doubles an INT8 router's row length.
+            let count = Int(view.shape.0) * Int(view.shape.1)
+            precondition(count > 0 && count % Quantization.groupSize == 0)
+            precondition(view.shape.2 == 0 && view.shape.3 == 0)
             let packedCount = Int(view.length)
             let companion = Int(view.scaleLength) / MemoryLayout<UInt16>.stride
+            precondition(companion == count / Quantization.groupSize)
+            precondition(view.scaleLength == view.biasLength)
             let raw = view.buffer.contents()
             let packed = (0..<packedCount).map {
                 raw.advanced(by: Int(view.offset) + $0)
@@ -72,10 +80,13 @@ final class FlashNextWeights {
                 raw.advanced(by: Int(view.biasOffset) + $0 * 2)
                     .assumingMemoryBound(to: UInt16.self).pointee
             }
+            if packedCount == count {
+                return Quantization.dequantizeInt8Affine(
+                    .init(packed: packed, scales: scales, biases: biases), n: count)
+            }
+            precondition(packedCount * 2 == count, "unsupported packed weight width")
             return Quantization.dequantizeInt4Affine(
-                Quantization.Int4AffineRow(packed: packed, scales: scales,
-                                           biases: biases),
-                n: packedCount * 2)
+                .init(packed: packed, scales: scales, biases: biases), n: count)
         default:
             preconditionFailure("unsupported tensor dtype \(view.dtype)")
         }

@@ -36,13 +36,38 @@ import Testing
     }
 
     private static func bits(_ buffer: MTLBuffer, count: Int) -> [UInt16] {
-        Array(UnsafeBufferPointer(
+        let values = Array(UnsafeBufferPointer(
             start: buffer.contents().bindMemory(to: UInt16.self, capacity: count),
             count: count))
+        #expect(values.allSatisfy { Float16(bitPattern: $0).isFinite })
+        #expect(values.contains { Float16(bitPattern: $0) != 0 })
+        return values
     }
 
     private static func prompt(_ count: Int, vocab: Int) -> [Int32] {
         (0..<count).map { Int32(4 + ($0 * 37 + 11) % (vocab - 4)) }
+    }
+
+    private static func argmax(_ bits: [UInt16]) -> Int32 {
+        Int32(bits.indices.max { Float16(bitPattern: bits[$0]) < Float16(bitPattern: bits[$1]) }!)
+    }
+
+    /// Different batched reductions need not round identically to GEMV. The
+    /// original unaligned fixture compared NaN bit patterns; that was not a
+    /// valid zero-tolerance gate. Require finite/nonzero rows, exact decisions,
+    /// and at most two FP16 relative-precision units at the row's scale. This
+    /// is tighter than the existing installed-model 5% bound, not an assertion
+    /// that chunked prefill is an exact speculative verifier.
+    private static func expectNumericalMatch(_ actual: [UInt16], _ expected: [UInt16]) {
+        #expect(actual.count == expected.count)
+        let a = actual.map { Float(Float16(bitPattern: $0)) }
+        let e = expected.map { Float(Float16(bitPattern: $0)) }
+        #expect(a.allSatisfy { $0.isFinite } && e.allSatisfy { $0.isFinite })
+        let error = zip(a, e).map { abs($0 - $1) }.max() ?? .infinity
+        let scale = e.map { abs($0) }.max() ?? 0
+        #expect(scale > 0)
+        #expect(error <= scale / 512)
+        #expect(argmax(actual) == argmax(expected))
     }
 
     @Test func factoryDoesNotClaimExecutionBeforePrefill() throws {
@@ -79,6 +104,14 @@ import Testing
         try await runner.produce(token: continuation, position: prompt.count,
                                  into: logits)
         let sequentialNext = Self.bits(logits, count: vocab)
+        var greedyTokens: [Int32] = []
+        var greedyRows: [[UInt16]] = []
+        for step in 0..<8 {
+            let token = Self.argmax(Self.bits(logits, count: vocab))
+            greedyTokens.append(token)
+            try await runner.produce(token: token, position: prompt.count + 1 + step, into: logits)
+            greedyRows.append(Self.bits(logits, count: vocab))
+        }
 
         runner.reset()
         var progress: [Int] = []
@@ -100,12 +133,18 @@ import Testing
             #expect(runner.deviceGroupedPrefillLayers == 0)
         }
         let chunkedPrompt = Self.bits(logits, count: vocab)
+        #expect(runner.tensorOpsPrefillEncodings == 0, "toy geometry uses the portable path")
         try await runner.produce(token: continuation, position: prompt.count,
                                  into: logits)
         let chunkedNext = Self.bits(logits, count: vocab)
 
-        #expect(chunkedPrompt == sequentialPrompt)
-        #expect(chunkedNext == sequentialNext)
+        Self.expectNumericalMatch(chunkedPrompt, sequentialPrompt)
+        Self.expectNumericalMatch(chunkedNext, sequentialNext)
+        for (step, token) in greedyTokens.enumerated() {
+            #expect(Self.argmax(Self.bits(logits, count: vocab)) == token)
+            try await runner.produce(token: token, position: prompt.count + 1 + step, into: logits)
+            Self.expectNumericalMatch(Self.bits(logits, count: vocab), greedyRows[step])
+        }
     }
 
     @Test("chunked prefill matches sequential state",
@@ -149,10 +188,10 @@ import Testing
             start += length
             try runner.prepareForContinuation(expectedPosition: start)
         }
-        #expect(Self.bits(out, count: vocab) == expected[0])
+        Self.expectNumericalMatch(Self.bits(out, count: vocab), expected[0])
         for (i, token) in continuation.enumerated() {
             try await runner.produce(token: token, position: start + i, into: out)
-            #expect(Self.bits(out, count: vocab) == expected[i + 1])
+            Self.expectNumericalMatch(Self.bits(out, count: vocab), expected[i + 1])
         }
     }
 

@@ -15,7 +15,9 @@ import Foundation
 /// unless the tool schema explicitly declares a string. Qwen serializes
 /// strings unquoted, so `123`, `true`, and JSON text can all be string payloads.
 /// Without an unambiguous string declaration, retain the legacy JSON inference;
-/// this parser is not a general JSON Schema validator.
+/// a declared boolean also accepts case-insensitive true/false spellings seen
+/// in Qwen XML output. No arbitrary value is coerced to false. This parser is
+/// not a general JSON Schema validator.
 public struct QwenToolCallParser: Sendable {
     public static let maximumBytes = 256 * 1024
 
@@ -49,8 +51,15 @@ public struct QwenToolCallParser: Sendable {
         let properties = toolSchemas[name]?.objectValue?["properties"]?.objectValue ?? [:]
         while !body.hasPrefix("</function>") {
             let (key, raw) = try parameter(&body)
-            arguments[key] = properties[key]?.objectValue?["type"] == .string("string")
-                ? .string(raw) : try parsedValue(raw)
+            let declaredType = properties[key]?.objectValue?["type"]
+            if declaredType == .string("string") {
+                arguments[key] = .string(raw)
+            } else if declaredType == .string("boolean"),
+                      let value = booleanLiteral(raw) {
+                arguments[key] = .bool(value)
+            } else {
+                arguments[key] = try parsedValue(raw)
+            }
         }
         body.removeFirst("</function>".count)
         trimOuterWhitespace(&body)
@@ -119,6 +128,14 @@ public struct QwenToolCallParser: Sendable {
 
     private func isValidFunctionName(_ name: String) -> Bool {
         name.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil
+    }
+
+    private func booleanLiteral(_ raw: String) -> Bool? {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true": return true
+        case "false": return false
+        default: return nil
+        }
     }
 
     private func parsedValue(_ raw: String) throws -> JSONValue {

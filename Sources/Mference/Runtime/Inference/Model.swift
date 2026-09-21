@@ -594,11 +594,11 @@ public struct Model {
         }
         return TensorView(
             buffer: chunk.buffer,
-            offset: relativeOffset - chunk.start,
+            offset: relativeOffset - chunk.start + chunk.bufferOffset,
             length: entry.sizeBytes,
-            scaleOffset: entry.scaleSize > 0 ? scaleRel - chunk.start : 0,
+            scaleOffset: entry.scaleSize > 0 ? scaleRel - chunk.start + chunk.bufferOffset : 0,
             scaleLength: entry.scaleSize,
-            biasOffset:  entry.biasSize > 0 ? biasRel - chunk.start : 0,
+            biasOffset:  entry.biasSize > 0 ? biasRel - chunk.start + chunk.bufferOffset : 0,
             biasLength:  entry.biasSize,
             shape: entry.shape,
             dtype: entry.dtype)

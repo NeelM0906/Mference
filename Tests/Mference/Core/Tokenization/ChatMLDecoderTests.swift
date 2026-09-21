@@ -107,6 +107,26 @@ struct ChatMLDecoderTests {
         _ = try d.finish()
     }
 
+    @Test(arguments: ["boolean", "string"])
+    func streamedCaseVariantUsesDeclaredType(type: String) throws {
+        let tool = MFTokenizer.FunctionDefinition(name: "set_preview", description: "Set preview",
+            parameters: .object(["type": .string("object"), "properties": .object([
+                "enabled": .object(["type": .string(type)])
+            ])]))
+        let d = StructuredAssistantDecoder(tokenizer: tok, allowedTools: [tool.name],
+            startsInThought: true, toolDefinitions: [tool], idGenerator: { "call_fixed" })
+        var events = try feed("The preview must be disabled.</think>", into: d)
+        events += try feed("<tool_call>\n<function=set_preview>\n<parameter=enabled>\nFalse\n</parameter>\n</function>\n</tool_call>", into: d)
+        events += try d.finish()
+        let calls = events.compactMap { event -> ParsedToolCall? in
+            if case .toolCall(let call) = event { return call }
+            return nil
+        }
+        #expect(calls.count == 1)
+        #expect(calls.first?.arguments == .object(["enabled": type == "boolean" ? .bool(false) : .string("False")]))
+        #expect(!visibleText(events).contains("preview must"))
+    }
+
     @Test("Unknown tool inside a call fails closed")
     func unknownToolFails() {
         let d = decoder(allowedTools: [])

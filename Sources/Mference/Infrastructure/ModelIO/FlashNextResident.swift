@@ -59,8 +59,9 @@ extension Model {
     ///     (2026-09-01 parity harness), not inferred: it is the one norm in
     ///     this stack that is not zero-centered, and baking it would add one
     ///     to an already-full-form weight.
-    ///   * the `mtp.*` sidecar's norms: MTP draft decode is out of scope for
-    ///     v1, and its norms need the same treatment when it lands.
+    /// The MTP sidecar's two pre-FC norms are exact-name additions below;
+    /// MTP attention/HC names share the trunk suffixes. Resolving any of these
+    /// weights does not itself enable draft decoding.
     ///
     /// The reference RMSNorm upcasts internally —
     /// `_norm(x.float()) * (1 + w.float())`, cast back afterwards — so a
@@ -80,7 +81,9 @@ extension Model {
 
     /// Whether `name` is one of the norms the `(1 + w)` bake applies to.
     static func isZeroCenteredNorm(_ name: String) -> Bool {
-        zeroCenteredNormSuffixes.contains { name.hasSuffix($0) }
+        name == "mtp.pre_fc_norm_embedding.weight"
+            || name == "mtp.pre_fc_norm_hidden.weight"
+            || zeroCenteredNormSuffixes.contains { name.hasSuffix($0) }
     }
 
     /// Resolve a norm weight, applying the family's `(1 + w)` bake when the
@@ -92,7 +95,7 @@ extension Model {
     /// and there are a few hundred of them, so the copies cost single-digit
     /// megabytes against a 175 GB install.
     ///
-    /// Names outside `zeroCenteredNormSuffixes`, and every family outside
+    /// Names outside `isZeroCenteredNorm`, and every family outside
     /// `zeroCenteredNormFamilies`, return the mapped tensor untouched: this
     /// accessor is safe to route all norm reads through.
     public func normWeight(name: String) throws -> TensorView {

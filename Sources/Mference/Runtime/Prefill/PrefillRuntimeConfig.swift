@@ -55,12 +55,12 @@ struct PrefillChunkCommitState: Sendable, Equatable {
         guard !isDirty else {
             let range: String
             if let start = inFlightStartPosition, let end = inFlightEndPosition {
-                range = " for in-flight chunk [\(start), \(end))"
+                range = " for in-flight tokens [\(start), \(end))"
             } else {
                 range = ""
             }
             throw PrefillError.chunkedRunnerDirty(
-                "\(operation) rejected because a previous chunked prefill wrote KV rows\(range) but did not commit; call reset() before reusing the runner")
+                "\(operation) rejected because a previous forward operation wrote sequence state\(range) but did not commit; call reset() before reusing the runner")
         }
     }
 }

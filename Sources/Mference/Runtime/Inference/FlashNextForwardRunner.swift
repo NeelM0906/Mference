@@ -408,12 +408,24 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private let gdnOut: MTLBuffer
 
     private var position = 0
+    /// The final, unmixed HC row for the last committed token. Prefill and
+    /// decode use different scratch buffers. Retaining this view costs no GPU
+    /// copy in ordinary generation; native-MTP callers request an owned copy.
+    private var committedHiddenSource: (buffer: MTLBuffer, offset: Int)?
+    private let checkpointOwner = UUID()
+    private var checkpointEpoch: UInt64 = 0
+    /// Internal cancellation seam; absent in normal generation.
+    var decodeWillEncodeLayer: ((Int) throws -> Void)?
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillScratch?
     /// Internal correctness seam: drain the layer before injecting a failure.
     /// Nil in production, where resident layers remain in one command buffer.
     var prefillDidCompleteLayer: ((Int) throws -> Void)?
     private(set) var deviceGroupedPrefillLayers = 0
+    /// Successful TensorOps encodings, not a prediction from requested size.
+    /// Read after a completed prefill; a failed command is not qualification.
+    private(set) var tensorOpsPrefillEncodings = 0
+    var tensorOpsPrefillAvailable: Bool { prefillMPPGroupedMoE.isAvailable }
     /// The MoE sub-block's command buffer, committed without a wait so the CPU
     /// can start the next layer's work while it runs. Joined before anything
     /// else touches `hyper`.
@@ -592,7 +604,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                    specializedNumExperts: UInt32(numExperts),
                                    specializedTopK: UInt32(topK))
         }
-        self.moeBF16 = try FlashNextMoE(context: context)
+        self.moeBF16 = try FlashNextMoE(context: context, routerTopK: topK)
         // The gated norm's activation is SIGMOID for this family
         // (`output_gate_type`), where Qwen 3.6 and Qwen 3.8 use silu. Everything
         // else about the GDN block is the Qwen 3.8 geometry, fused Hv=48 decode
@@ -885,9 +897,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     // MARK: - Lifecycle
 
     public func reset() {
+        checkpointEpoch &+= 1
         position = 0
+        committedHiddenSource = nil
         prefillChunkState.reset()
         deviceGroupedPrefillLayers = 0
+        tensorOpsPrefillEncodings = 0
         inSequentialPrefill = false
         try? joinPendingMoE()
         gdnState?.reset()
@@ -915,6 +930,168 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 "continuation expects position \(expectedPosition) but the runner "
                 + "is at \(position)")
         }
+    }
+
+    /// Foundation for native draft verification, not an enabled MTP decoder.
+    /// KV/indexer rows are append-only: rewinding the cursor hides speculative
+    /// rows. Recurrent state and PLE history must instead be restored exactly.
+    /// Snapshots are runner-local and all become stale on reset or restoration;
+    /// a checkpoint from a discarded branch must never resurrect overwritten KV.
+    struct DecodeCheckpoint {
+        fileprivate let owner: UUID
+        fileprivate let epoch: UInt64
+        fileprivate let position: Int
+        fileprivate let pleHistory: [Int]
+        fileprivate let sequentialPrefill: Bool
+        fileprivate let buffers: [MTLBuffer]
+        fileprivate let hidden: TargetHiddenBundle?
+    }
+
+    /// Full FP16 [hcCount * hiddenSize] target state, BEFORE the final global
+    /// mixer, paired with an unambiguous prefix length. The next input token
+    /// belongs at `processedTokenCount`; aligning it with a draft KV cursor is
+    /// the verifier's responsibility, not an implicit shift in this accessor.
+    struct TargetHiddenBundle {
+        let processedTokenCount: Int
+        let buffer: MTLBuffer
+    }
+
+    /// Owned, unmixed FP16 [tokens.count, hcCount * hiddenSize] rows from one
+    /// ordinary target batch. This is the data needed to prime a native draft
+    /// cache without replaying the target. It does not shift embeddings/tokens
+    /// or establish the draft's positional convention.
+    struct TargetHiddenRows {
+        let startPosition: Int
+        let tokens: [Int32]
+        let buffer: MTLBuffer
+    }
+
+    /// Internal opt-in consumer; nil adds no GPU allocation/copy. Called after
+    /// GPU completion but BEFORE target commit, so a consumer failure leaves
+    /// the target dirty. The owner must reset or restore BOTH target and draft;
+    /// target checkpoints cannot rewind arbitrary consumer-owned state.
+    var consumeTargetHiddenRows: ((TargetHiddenRows) throws -> Void)?
+
+    private func copyTargetRows(_ source: MTLBuffer, tokens: ArraySlice<Int32>,
+                                startPosition: Int, command: MTLCommandBuffer) throws -> TargetHiddenRows? {
+        guard consumeTargetHiddenRows != nil else { return nil }
+        let byteCount = tokens.count * bundle * MemoryLayout<Float16>.stride
+        guard let copy = ctx.device.makeBuffer(length: byteCount, options: .storageModePrivate),
+              let blit = command.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot copy target hidden rows")
+        }
+        blit.copy(from: source, sourceOffset: 0, to: copy, destinationOffset: 0, size: byteCount)
+        blit.endEncoding()
+        return TargetHiddenRows(startPosition: startPosition, tokens: Array(tokens), buffer: copy)
+    }
+
+    func captureTargetHiddenBundle() throws -> TargetHiddenBundle {
+        try prefillChunkState.requireClean(operation: "captureTargetHiddenBundle")
+        guard position > 0, committedHiddenSource != nil else {
+            throw FlashNextForwardRunnerError.invalidInput("no committed target hidden bundle")
+        }
+        try joinPendingMoE()
+        guard let result = try makeTargetHiddenCopy() else {
+            throw FlashNextForwardRunnerError.invalidInput("no committed target hidden bundle")
+        }
+        guard let cb = ctx.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot capture target hidden bundle")
+        }
+        encodeTargetHiddenCopy(result, using: blit)
+        blit.endEncoding()
+        try finish(cb)
+        return result
+    }
+
+    private func makeTargetHiddenCopy() throws -> TargetHiddenBundle? {
+        guard committedHiddenSource != nil else { return nil }
+        guard let copy = ctx.device.makeBuffer(length: bundle * MemoryLayout<Float16>.stride,
+                                               options: .storageModePrivate) else {
+            throw MetalError.noDevice
+        }
+        return TargetHiddenBundle(processedTokenCount: position, buffer: copy)
+    }
+
+    private func encodeTargetHiddenCopy(_ copy: TargetHiddenBundle, using blit: MTLBlitCommandEncoder) {
+        guard let source = committedHiddenSource else { return }
+        blit.copy(from: source.buffer, sourceOffset: source.offset, to: copy.buffer,
+                  destinationOffset: 0, size: copy.buffer.length)
+    }
+
+    private func checkpointBuffers() -> [MTLBuffer] {
+        var buffers: [MTLBuffer] = []
+        for layer in 0..<cfg.numLayers where cfg.layerIsLinear(layer) {
+            if let state = gdnState {
+                buffers.append(state.stateBuffer(layer: layer))
+                buffers.append(state.convTailBuffer(layer: layer))
+            } else if let state = genericGDNState[layer] {
+                buffers.append(state.recurrent)
+                buffers.append(state.convTail)
+            }
+        }
+        if let pleScratch { buffers.append(pleScratch.convState) }
+        return buffers
+    }
+
+    func captureDecodeCheckpoint() throws -> DecodeCheckpoint {
+        try prefillChunkState.requireClean(operation: "captureDecodeCheckpoint")
+        try joinPendingMoE()
+        let sources = checkpointBuffers()
+        let copies = try sources.map { source -> MTLBuffer in
+            guard let copy = ctx.device.makeBuffer(length: source.length,
+                                                   options: .storageModePrivate) else {
+                throw MetalError.noDevice
+            }
+            return copy
+        }
+        let hidden = try makeTargetHiddenCopy()
+        guard let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot capture decode checkpoint")
+        }
+        for (source, copy) in zip(sources, copies) {
+            blit.copy(from: source, sourceOffset: 0, to: copy, destinationOffset: 0,
+                      size: source.length)
+        }
+        if let hidden { encodeTargetHiddenCopy(hidden, using: blit) }
+        blit.endEncoding()
+        try finish(cb)
+        return DecodeCheckpoint(owner: checkpointOwner, epoch: checkpointEpoch,
+            position: position, pleHistory: pleHistory,
+            sequentialPrefill: inSequentialPrefill, buffers: copies, hidden: hidden)
+    }
+
+    func restoreDecodeCheckpoint(_ checkpoint: DecodeCheckpoint) throws {
+        guard checkpoint.owner == checkpointOwner,
+              checkpoint.epoch == checkpointEpoch,
+              checkpoint.position <= position else {
+            throw FlashNextForwardRunnerError.invalidInput("foreign, stale or future decode checkpoint")
+        }
+        try joinPendingMoE()
+        // Scratch can be resized between capture and restore. Resolve the
+        // current PLE state buffer, not a reference to retired scratch storage.
+        let destinations = checkpointBuffers()
+        guard destinations.count == checkpoint.buffers.count,
+              zip(destinations, checkpoint.buffers).allSatisfy({ $0.length == $1.length }) else {
+            throw FlashNextForwardRunnerError.invalidInput("decode checkpoint state layout changed")
+        }
+        guard let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot restore decode checkpoint")
+        }
+        prefillChunkState.markDirty(startPosition: checkpoint.position, tokenCount: 1)
+        for (destination, copy) in zip(destinations, checkpoint.buffers) {
+            blit.copy(from: copy, sourceOffset: 0, to: destination, destinationOffset: 0,
+                      size: destination.length)
+        }
+        blit.endEncoding()
+        try finish(cb)
+        position = checkpoint.position
+        committedHiddenSource = checkpoint.hidden.map { ($0.buffer, 0) }
+        pleHistory = checkpoint.pleHistory
+        inSequentialPrefill = checkpoint.sequentialPrefill
+        prefillChunkState.markCommitted()
+        checkpointEpoch &+= 1
     }
 
     // MARK: - Entry points
@@ -1199,8 +1376,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                           x: scratch.mixed, xOffset: (t - 1) * hidden * half,
                           y: logits, rows: cfg.vocabSize, cols: hidden)
         }
+        let targetRows = try copyTargetRows(scratch.hyper, tokens: tokens,
+                                           startPosition: startPosition, command: cb)
         try finish(cb)
+        if let targetRows { try consumeTargetHiddenRows?(targetRows) }
         position += t
+        committedHiddenSource = (scratch.hyper, (t - 1) * bundle * half)
         prefillChunkState.markCommitted()
     }
 
@@ -1494,6 +1675,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 indirectDispatch: grouping.dispatch) else {
                 throw FlashNextForwardRunnerError.commandFailed("resident grouped TensorOps encoding failed")
             }
+            tensorOpsPrefillEncodings += 1
         } else {
             try prefillGroupedMoE.encodeResidentBatched(commandBuffer: cb, hidden: scratch.mixed,
                 sortedPairs: grouping.pairs, activation: scratch.routedMatrixAct,
@@ -1557,6 +1739,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 residentExpertStride: UInt32(resident.slotStride),
                 maxPairsPerGroup: routes.maxPairsPerExpert)
             precondition(encoded, "resident grouped TensorOps encoding failed")
+            tensorOpsPrefillEncodings += 1
             try finish(cb)
         } else if cacheSlotCount == nil {
             guard let cb = ctx.queue.makeCommandBuffer() else {
@@ -1679,6 +1862,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 routePartials: scratch.routePartials,
                 argumentBuffer: argument, binding: binding,
                 params: mppParams, maxPairsPerGroup: maxPairs) {
+                tensorOpsPrefillEncodings += 1
                 return argument.buffer
             }
         }
@@ -1756,6 +1940,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         guard var head = ctx.queue.makeCommandBuffer() else {
             throw FlashNextForwardRunnerError.commandFailed("no command buffer")
         }
+        // A cancelled/failed token can advance recurrent state and PLE before
+        // the cursor commits. It must not be used as a new clean checkpoint.
+        prefillChunkState.markDirty(startPosition: p, tokenCount: 1)
         encodeEmbedRow(commandBuffer: head, token: UInt32(token))
         try captureFloats(&head, "embed_out", embedRow, count: hidden)
         hc.encodeTileEmbedding(commandBuffer: head, embedding: embedRow,
@@ -1765,6 +1952,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
+            try decodeWillEncodeLayer?(L)
             try await encodeLayer(L, token: Int(token), position: p)
         }
 
@@ -1783,11 +1971,21 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                           x: mixed, y: logits,
                           rows: cfg.vocabSize, cols: hidden)
         }
+        let targetRows: TargetHiddenRows?
+        if consumeTargetHiddenRows != nil {
+            targetRows = try copyTargetRows(hyper, tokens: [token][...],
+                                           startPosition: p, command: tailCB)
+        } else {
+            targetRows = nil
+        }
         try finish(tailCB)
+        if let targetRows { try consumeTargetHiddenRows?(targetRows) }
         if capture != nil, let logits {
             capture?.floats["logits"] = Self.readFP16(logits, count: cfg.vocabSize)
         }
         position += 1
+        committedHiddenSource = (hyper, 0)
+        prefillChunkState.markCommitted()
     }
 
     private func encodeLayer(_ L: Int, token: Int, position p: Int) async throws {

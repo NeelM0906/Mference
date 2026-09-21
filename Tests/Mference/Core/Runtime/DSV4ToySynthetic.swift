@@ -224,7 +224,7 @@ enum DSV4ToySynthetic {
         // A 2-byte-aligned offset is legal for the BF16/INT4 tensors but
         // silently corrupts a `device const float*` binding.
         func align16(_ value: UInt64) -> UInt64 { (value + 15) & ~15 }
-        let indexBytes = align16(UInt64(stringTableBase + stringTable.count))
+        let indexBytes = (UInt64(stringTableBase + stringTable.count) + 16_383) / 16_384 * 16_384
 
         var entries: [ResidentEntry] = []
         entries.reserveCapacity(specs.count)

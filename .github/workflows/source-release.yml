@@ -1,0 +1,58 @@
+name: Source release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Candidate version, for example 0.1.0-rc.1 (no tag is created)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: validate
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Package the exact tested commit
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 Scripts/package_source_release.py --version "$RELEASE_VERSION" --output "$RUNNER_TEMP/mference-source-candidate"
+      - name: Verify the extracted distribution
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          cd "$RUNNER_TEMP/mference-source-candidate"
+          shasum -a 256 -c "mference-$version-SHA256SUMS"
+          # Only the validated archive made in the preceding step is extracted.
+          verify_root=$(mktemp -d "$RUNNER_TEMP/mference-source-verify.XXXXXX")
+          tar -xzf "mference-$version.tar.gz" -C "$verify_root"
+          cd "$verify_root/mference-$version"
+          swift build -c release --force-resolved-versions
+          Scripts/test.sh
+          .build/release/MferenceCLI --help
+          .build/release/MferenceServer --help
+          .build/release/MferenceRepack --help
+          python3 Scripts/tests/test_mference_ui.py
+          python3 Scripts/tests/test_openwebui_mference.py
+          python3 Scripts/tests/test_source_release.py
+          LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb
+      - name: Upload source, provenance and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mference-source-${{ github.sha }}
+          path: ${{ runner.temp }}/mference-source-candidate/*
+          if-no-files-found: error
+          retention-days: 30

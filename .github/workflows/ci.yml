@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches:
       - main
@@ -66,6 +67,9 @@ jobs:
           python3 Scripts/tests/test_openwebui_mference.py
           python3 Scripts/tests/test_swift_qwen_task_screen.py
           python3 Scripts/tests/test_release_task_screen.py
+          python3 Scripts/tests/test_release_screen_summary.py
+          python3 Scripts/tests/test_qwen_efficiency_screen.py
+          python3 Scripts/tests/test_source_release.py
 
   docs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

@@ -12,7 +12,7 @@ struct QwenToolCallParserTests {
         try parser.parse(body, allowedTools: allowedTools ?? tools, id: "call_test")
     }
 
-    @Test(arguments: ["123", "true", "false", "null", "1.25", "[1,2]", "{\"a\":1}", " 123 ", "\"quoted\"", ""])
+    @Test(arguments: ["123", "true", "false", "True", "False", "null", "1.25", "[1,2]", "{\"a\":1}", " 123 ", "\"quoted\"", ""])
     func declaredStringsAreNeverInferredAsJSON(_ raw: String) throws {
         let body = "<function=run_query>\n<parameter=q>\n\(raw)\n</parameter>\n</function>"
         let schemas: [String: JSONValue] = ["run_query": .object([
@@ -32,6 +32,40 @@ struct QwenToolCallParserTests {
         #expect(throws: ToolCallParserError.unknownTool("run_query")) {
             try parser.parse(body, allowedTools: [], id: "test", toolSchemas: schemas)
         }
+    }
+
+    @Test(arguments: ["true", "True", "TRUE", " tRuE ", "false", "False", "FALSE", "\nFalse\n"])
+    func declaredBooleansAcceptRecognizableCaseVariants(_ raw: String) throws {
+        let body = "<function=run_query>\n<parameter=active>\n\(raw)\n</parameter>\n</function>"
+        let schemas: [String: JSONValue] = ["run_query": .object([
+            "properties": .object(["active": .object(["type": .string("boolean")])])
+        ])]
+        let call = try parser.parse(body, allowedTools: tools, id: "test", toolSchemas: schemas)
+        let expected = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true"
+        #expect(call.arguments == .object(["active": .bool(expected)]))
+    }
+
+    @Test(arguments: ["False", "True"])
+    func ambiguousOrAbsentBooleanSchemaDoesNotGuess(_ raw: String) throws {
+        let body = "<function=run_query>\n<parameter=active>\n\(raw)\n</parameter>\n</function>"
+        let variants: [JSONValue] = [.object([:]), .object(["type": .array([.string("boolean"), .string("string")])])]
+        for schema in variants {
+            let schemas: [String: JSONValue] = ["run_query": .object([
+                "properties": .object(["active": schema])
+            ])]
+            let call = try parser.parse(body, allowedTools: tools, id: "test", toolSchemas: schemas)
+            #expect(call.arguments == .object(["active": .string(raw)]))
+        }
+    }
+
+    @Test(arguments: ["yes", "no", "False or True", "\"False\"", "", "None"])
+    func declaredBooleanDoesNotTurnUnknownTextIntoFalse(_ raw: String) throws {
+        let body = "<function=run_query>\n<parameter=active>\n\(raw)\n</parameter>\n</function>"
+        let schemas: [String: JSONValue] = ["run_query": .object([
+            "properties": .object(["active": .object(["type": .string("boolean")])])
+        ])]
+        let call = try parser.parse(body, allowedTools: tools, id: "test", toolSchemas: schemas)
+        #expect(call.arguments == .object(["active": .string(raw)]))
     }
 
     @Test("Happy path with a single string parameter")

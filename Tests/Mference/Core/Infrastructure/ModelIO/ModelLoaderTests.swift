@@ -263,7 +263,8 @@ import Metal
             nameAbsOffsets.append(UInt32(stringTableBase + cursor))
             cursor += n.utf8.count
         }
-        let indexBytes = UInt64(stringTableBase + stringTable.count)
+        // Match the production writer's page-aligned resident payload.
+        let indexBytes = (UInt64(stringTableBase + stringTable.count) + 16_383) / 16_384 * 16_384
 
         var entries: [ResidentEntry] = []
         entries.reserveCapacity(specs.count)
