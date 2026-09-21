@@ -79,6 +79,17 @@ for which synthetic and installed checks have actually executed.
 
 ## Remaining integration and gates
 
+The post-launch work adds an internal `FlashNextMTPGreedyVerifier` reference:
+it checks proposals using ordinary sequential target decode, commits only the
+matching prefix plus a target correction/bonus, and restores target, primer and
+logits together after an interrupted round. Its output contract consumes all
+returned tokens. It is **not** wired to CLI/server generation, does not yet
+generate its own proposals, and makes no speed claim. It deliberately does not
+substitute numerically different batched prefill for exact target verification.
+Its synthetic and installed 16-slot validation passes in the
+[post-launch qualification record](POSTLAUNCH_QUALIFICATION.md);
+this component does not clear any upstream-native or default-promotion gate.
+
 1. Resolve the new one-layer runner's unrounded-FP32 numerical gate. On the
    synthetic 40-row probe, row zero's hidden bundle differs by 5.263%, above
    the unchanged 5% limit; all other hidden rows, all logits and all 40 greedy
@@ -101,11 +112,13 @@ for which synthetic and installed checks have actually executed.
    not be invented from its last token. The primer enforces this convention;
    it is not an enabled speculative generation path or an upstream numerical
    golden. See the [September 21 record](RELEASE_VALIDATION_2026-09-21.md).
-3. Implement target verification and accepted-prefix replay/rollback. Ordinary
+3. Accelerate target verification against the sequential reference above and
+   integrate accepted-prefix replay/rollback with actual native proposals. Ordinary
    chunked prefill is not automatically an exact speculative verifier: its
    numerical and greedy equivalence must be demonstrated for this use.
-4. Qualify correct, partially accepted and fully rejected drafts; EOS, stop
-   strings, context exhaustion, cancellation, prefix reuse and model switching.
+4. Extend the reference's passing accepted/rejected proposal, stop-token,
+   context and paired-recovery checks to actual native drafts and generation:
+   EOS, stop strings, cancellation, prefix reuse and model switching.
    Compare against MTP-off target results, including all recurrent state.
 5. Compare the native drafter with an independent reference of the same pinned
    weights. Measure acceptance and completed-answer time on separate resident
