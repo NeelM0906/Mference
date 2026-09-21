@@ -19,6 +19,11 @@ a completed-install receipt. Historical measured results below do not validate
 the new kernels or bounded streamed performance. See
 [the dated validation record](../RELEASE_VALIDATION_2026-09-18.md).
 
+Post-launch low-effort attempt: the short resident warmup completed, but the
+next process was stopped by the unchanged headroom check (38% free, 75%
+required). No measured repetitions ran. Current matched performance therefore
+remains open; see [the full record](../POSTLAUNCH_QUALIFICATION.md).
+
 | | |
 |---|---|
 | Family identifier | `glm53Flash` (`ModelFamily.glm53Flash`), install label `glm53flash` |

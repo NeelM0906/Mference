@@ -18,7 +18,13 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-fail() { echo "ABORT: $*" >&2; exit 1; }
+fail() {
+  echo "ABORT: $*" >&2
+  if [ "${evidence_started:-0}" = 1 ]; then
+    printf 'ABORT: %s\n' "$*" > "${root}/failure.txt"
+  fi
+  exit 1
+}
 
 label="${1:?model label}"
 model_dir="${2:?gturbo dir}"
@@ -96,6 +102,8 @@ ${live}"
 root="benchmark-results/${label}"
 [ ! -e "${root}" ] || fail "refusing to overwrite existing evidence: ${root}"
 mkdir -p "${root}/system" "${root}/warmup" "${root}/measured"
+evidence_started=1
+trap 'status=$?; printf "%s\n" "$status" > "${root}/exit-status"' EXIT
 
 {
   git status --short
@@ -137,14 +145,15 @@ run_case() {
   local available owners
   available=$(memory_pressure -Q 2>/dev/null |
     sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p' | head -1)
+  printf 'memory_free_percent=%s\n' "${available:-unknown}" > "${3}.preflight"
   [ -n "${available}" ] && [ "${available}" -ge "${MIN_FREE_PCT:-20}" ] \
     || fail "memory preflight failed before ${1}: ${available:-unknown}% free"
   free_gb=$(df -g . | awk 'NR==2 { print $4 }')
+  printf 'disk_free_gib=%s\n' "${free_gb:-unknown}" >> "${3}.preflight"
   [ -n "${free_gb}" ] && [ "${free_gb}" -ge "${MIN_FREE_GB:-5}" ] \
     || fail "disk preflight failed before ${1}: ${free_gb:-unknown} GiB free"
   owners=$(pgrep -fl 'MferenceServer|MferenceCLI|MferenceRepack|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' || true)
   [ -z "${owners}" ] || fail "another model owner before ${1}: ${owners}"
-  printf 'memory_free_percent=%s\ndisk_free_gib=%s\n' "${available}" "${free_gb}" > "${3}.preflight"
   printf '%q ' "${cli}" --model "${model_dir}" --messages-file "docs/benchmark-prompts/real-generation-v1/${1}.json" --max-new 1024 --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95 --seed "${2}" ${extra[@]+"${extra[@]}"} > "${3}.command"
   /usr/bin/time -l "${cli}" \
     --model "${model_dir}" \

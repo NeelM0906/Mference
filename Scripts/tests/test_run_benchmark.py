@@ -58,9 +58,11 @@ class BenchmarkSafetyTests(unittest.TestCase):
         self.assertEqual(len(list(evidence.rglob("*.exit"))), 6)
         self.assertEqual(len(list(evidence.rglob("*.command"))), 6)
         self.assertEqual(len(list(evidence.rglob("*.preflight"))), 6)
+        self.assertEqual((evidence / "exit-status").read_text().strip(), "0")
         result = self.run_benchmark()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("refusing to overwrite", result.stderr)
+        self.assertEqual((evidence / "exit-status").read_text().strip(), "0")
 
     def test_memory_rechecked_after_initial_preflight(self):
         self.script("memory_pressure", "if [ -e pressure-read ]; then echo 'System-wide memory free percentage: 1%'; else touch pressure-read; echo 'System-wide memory free percentage: 98%'; fi")
@@ -68,6 +70,10 @@ class BenchmarkSafetyTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("memory preflight failed", result.stderr)
         self.assertFalse(list(self.root.rglob("*.exit")))
+        evidence = self.root / "benchmark-results/test"
+        self.assertEqual((evidence / "exit-status").read_text().strip(), "1")
+        self.assertIn("memory preflight failed", (evidence / "failure.txt").read_text())
+        self.assertIn("memory_free_percent=1", next(evidence.rglob("*.preflight")).read_text())
 
     def test_owner_rechecked_after_initial_preflight(self):
         self.script("pgrep", "if [ -e owner-read ]; then echo '123 /test/MferenceServer'; else touch owner-read; exit 1; fi")

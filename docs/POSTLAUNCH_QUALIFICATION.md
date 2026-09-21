@@ -31,6 +31,9 @@ Exit 0; `Build of product 'MferenceCLI' complete! (76.36s)`.
 Executable SHA-256:
 `e826b8b17b3dd17b9e572145ea1bfc5c07f59d961b461b02a9167b8577fe8d6a`.
 The new internal verifier described below is not in this measured executable.
+After all performance runs stopped, the measured executable and resource
+bundles were preserved at `/tmp/mference-postlaunch-measured.E5hCEV/` before
+building the updated source. No model weights were copied.
 
 Frozen community prompts/seeds and sampling are retained. Differences are
 explicitly labeled below: these opt-in profiles do **not** replace the failed
@@ -125,6 +128,51 @@ cache-purge recommendation conflicts with this project's measurement rules.
 No generated instruction was executed. A completed answer is not necessarily
 a correct answer or a reason to promote this checkpoint over base Qwen.
 
+## GLM low-effort resident: completed short warmup, safety stop
+
+Exact command, same frozen executable and host as above:
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  BENCH_CLI=/tmp/mference-phase1-build.sXnNTs/release/MferenceCLI \
+  MIN_FREE_PCT=75 MFERENCE_GLM5_REASONING_EFFORT=low \
+  ./run-benchmark.sh glm-low-resident-20260921 scratch/glm53flash.gturbo 3 \
+  --expert-cache-slots resident
+```
+
+Protocol deviations: vendor-supported low effort instead of Max, explicit
+resident policy, three planned measured repetitions. Sampling, context 4,096,
+output allowance 1,024 and prompts/seeds match the frozen protocol. Initial
+memory check was 98%, completed receipt had 49 matching file sizes, and model
+loading used full SHA-256. The short warmup exited 0 with a complete, manually
+read, non-repeating answer. Full footer and process time:
+
+```text
+[stop=endOfTurn prefill=60tok/1.23s new=653tok decode=25.43s tok/s=25.683]
+109.96 real 61.63 user 45.85 sys
+171843846144 maximum resident set size
+172400765688 peak memory footprint
+```
+
+Before the medium warmup, the per-process check stopped the harness (exit 1):
+
+```text
+ABORT: memory preflight failed before medium-review: 38% free
+```
+
+**No medium/long warmups, measured repetitions, bounded GLM runs or subsequent
+local model tests were launched.** No apps were killed or caches purged; the
+75% resident headroom requirement was not lowered. A later read-only snapshot
+found no model owner, 98% free memory and 0.56 MiB swap used. This suggests a
+transient post-exit headroom report, not proof of a persistent leak; it does
+not retroactively pass the failed preflight or authorize ignoring it.
+
+Evidence: `benchmark-results/glm-low-resident-20260921/`, plus the orchestration
+error above. The runner was subsequently hardened to retain failed preflights,
+batch exit status and failure text as files as well as terminal output.
+**Matched GLM completed-answer performance remains unqualified.** A successful
+warmup is neither a median nor an improvement over the historical baseline.
+
 ## Native MTP reference verifier
 
 `FlashNextMTPGreedyVerifier` is internal and disconnected from production
@@ -156,6 +204,7 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   --filter FlashNextMTPGreedyVerifierTests
 ```
 
+Implementation commit `b62b400` (before documentation-only merge of main).
 Exit 0. Full timing footer, log `/tmp/mference-postlaunch-installed-verifier.log`:
 
 ```text
