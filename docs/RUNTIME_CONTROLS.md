@@ -174,8 +174,9 @@ which commits the routed command buffer before its expert fills land, gated on
 a shared event; a failed eager fill aborts the decode step with an error
 rather than emitting corrupt output (default on). `MFERENCE_ROUTER_EVENT=0`
 disables the early mid-buffer router readback. `MFERENCE_SPEC_PREFETCH`
-selects the speculative-prefetch mode — shadow prefetch is the accepted
-DeepSeek-V4-Flash default, off elsewhere — and `MFERENCE_SHADOW_BUDGET` caps
+selects the speculative-prefetch mode — shadow prefetch is the default for
+DeepSeek-V4-Flash and for Qwen 3.6 on hosts from 16 GiB to below 24 GiB, off
+elsewhere — and `MFERENCE_SHADOW_BUDGET` caps
 its per-layer speculative reads. For Qwen 3.8, `MFERENCE_MTP=0` disables MTP
 speculative decoding (on by default for greedy decode when the install
 carries the attached MTP tensors; **off by default for the Swift-Qwen candidate**)

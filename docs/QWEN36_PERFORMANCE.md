@@ -290,3 +290,33 @@ per run (so each prefill includes the first-touch SHA-256 of the expert
 files), 150 s cool-downs on a fanless Mac, mirrored run order, 64 greedy
 completion tokens. All runs produced byte-identical text. The growth is
 prefill scratch only; Qwen 3.6 has no sliding-window KV ring to enlarge.
+
+## Shadow prefetch on 16 GiB hosts (2026-09-21)
+
+On a 16 GiB host the file cache cannot hold the 18 GB expert pool, and with 32
+cache slots per layer only 22% of decode layer steps find all eight experts in
+memory. The phase report shows the consequence: the GPU is busy for about half
+of decode and waits for expert reads for the rest (10.4 s busy, 10.3 s gap over
+160 tokens).
+
+Shadow prefetch, the accepted DeepSeek-V4-Flash default, predicts the next
+layer's experts and reads them without ever blocking a real plan. It is now
+the Qwen 3.6 default on hosts from 16 GiB to below 24 GiB;
+`MFERENCE_SPEC_PREFETCH=off` restores the previous behavior.
+
+| M2 MacBook Air 16 GiB, 160 decoded tokens, greedy | Off | Shadow |
+| --- | ---: | ---: |
+| Decode, five pairings (tok/s) | 6.61 / 7.70 / 5.15 / 7.92 | 7.57 / 9.09 / 9.57 / 9.08 |
+| Mean | 6.85 | 8.83 |
+| All-hit layer steps | 22.3% | 44.8% |
+| GPU gap | 10.3–15.8 s | 7.4–8.2 s |
+| Peak memory footprint | 2,551.6 MB | 2,552.6 MB |
+
+Predictor recall was 83.9%, the speculative reads use the existing expert
+slots, and the generated text is byte-identical in every run. These are short
+diagnostic runs with brief pauses on a fanless Mac, not the community-protocol
+A/B; the off runs vary widely, so read the gain as roughly 15–45% rather than
+as one number. Hosts with 24 GiB or more keep it off: the file cache holds the
+whole pool there and the earlier pilot predictor lost. Gemma 4, with 16 slots
+per layer and experts twice as large, showed no clear gain in the same runs
+and stays off.

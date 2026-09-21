@@ -462,6 +462,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// recall but slower end-to-end from joins and unthrottled reads.
         case shadow
 
+        /// The mode a runner starts in: `MFERENCE_SPEC_PREFETCH` wins in either
+        /// direction, otherwise shadow prefetch where it has been measured to
+        /// pay, byte-identical to no speculation in both cases.
+        ///
+        /// DeepSeek-V4-Flash: community A/B 2026-08-07, short +18%, long +13%
+        /// (docs/experiments/summaries/14-dsv4-shadow-prefetch.md).
+        ///
+        /// Qwen 3.6 on hosts from 16 GiB to below 24 GiB, the 32-slot tier: the
+        /// GPU idles about half of decode waiting for expert reads, and shadow
+        /// prefetch raised the all-hit layer rate from 22% to 45% and decode
+        /// from 6.9 to 8.8 tok/s with no memory cost (M2 16 GiB diagnostic runs,
+        /// 2026-09-21). From 24 GiB the file cache holds the whole pool and the
+        /// earlier pilot lost there; below 16 GiB the 16-slot cache is
+        /// unmeasured, and Gemma's 16 slots showed no gain. Those stay off.
+        static func resolve(environmentValue: String?,
+                            family: ModelFamily,
+                            physicalMemoryBytes: UInt64) -> SpeculativePrefetchMode {
+            if let environmentValue { return parse(environmentValue) }
+            let gib = UInt64(1) << 30
+            switch family {
+            case .deepseekV4Flash:
+                return .shadow
+            case .qwen36:
+                return physicalMemoryBytes >= 16 * gib && physicalMemoryBytes < 24 * gib ? .shadow : .off
+            default:
+                return .off
+            }
+        }
+
         static func parse(_ raw: String?) -> SpeculativePrefetchMode {
             switch raw?.lowercased() {
             case "1", "on", "prefetch": return .prefetch
@@ -578,15 +607,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.routerEvent = context.device.makeSharedEvent()
         self.eagerFetchEvent = context.device.makeSharedEvent()
         self.maxContext = maxContext
-        // Shadow prefetch is the accepted DSV4 production default
-        // (community A/B 2026-08-07: short +18%, long +13%, byte-identical;
-        // docs/experiments/summaries/14-dsv4-shadow-prefetch.md). The env
-        // variable still overrides in either direction; other families keep
-        // `off` until they have their own accepted A/B.
-        if ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"] == nil,
-           model.config.family == .deepseekV4Flash {
-            self.speculativePrefetchMode = .shadow
-        }
+        self.speculativePrefetchMode = .resolve(
+            environmentValue: ProcessInfo.processInfo.environment["MFERENCE_SPEC_PREFETCH"],
+            family: model.config.family,
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled

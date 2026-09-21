@@ -191,6 +191,34 @@ import Metal
         #expect(Mode.parse("nonsense") == .off)
     }
 
+    @Test func speculativePrefetchDefault_isShadowForQwen36OnTheMeasuredMemoryTier() {
+        typealias Mode = RealForwardRunner.SpeculativePrefetchMode
+        let gib = UInt64(1) << 30
+        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 16 * gib) == .shadow)
+        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 18 * gib) == .shadow)
+        // Unmeasured tiers keep the previous behavior: 16 slots below 16 GiB,
+        // and a file cache that holds the whole pool from 24 GiB.
+        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 8 * gib) == .off)
+        #expect(Mode.resolve(environmentValue: nil, family: .qwen36, physicalMemoryBytes: 24 * gib) == .off)
+    }
+
+    @Test func speculativePrefetchDefault_keepsTheOtherFamiliesAsTheyWere() {
+        typealias Mode = RealForwardRunner.SpeculativePrefetchMode
+        let gib = UInt64(1) << 30
+        #expect(Mode.resolve(environmentValue: nil, family: .deepseekV4Flash, physicalMemoryBytes: 16 * gib) == .shadow)
+        #expect(Mode.resolve(environmentValue: nil, family: .deepseekV4Flash, physicalMemoryBytes: 128 * gib) == .shadow)
+        #expect(Mode.resolve(environmentValue: nil, family: .gemma4, physicalMemoryBytes: 16 * gib) == .off)
+        #expect(Mode.resolve(environmentValue: nil, family: .qwen38, physicalMemoryBytes: 16 * gib) == .off)
+    }
+
+    @Test func speculativePrefetchDefault_yieldsToTheEnvironmentInBothDirections() {
+        typealias Mode = RealForwardRunner.SpeculativePrefetchMode
+        let gib = UInt64(1) << 30
+        #expect(Mode.resolve(environmentValue: "off", family: .qwen36, physicalMemoryBytes: 16 * gib) == .off)
+        #expect(Mode.resolve(environmentValue: "shadow", family: .gemma4, physicalMemoryBytes: 16 * gib) == .shadow)
+        #expect(Mode.resolve(environmentValue: "nonsense", family: .deepseekV4Flash, physicalMemoryBytes: 16 * gib) == .off)
+    }
+
     /// The overlap probe is what makes "io exposed" trustworthy: it must report
     /// nil (still running) until every tracked buffer completes, then the
     /// completion time of the last one.
