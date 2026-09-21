@@ -52,7 +52,7 @@ struct GemmaThinkingServerTests {
             #expect((response as? HTTPURLResponse)?.statusCode == 200)
             let received = await backend.received
             #expect(received?.request.reasoningEffort == .low)
-            #expect(received?.request.preserveThinking == true)
+            #expect(received?.request.preserveThinking == false)
             #expect(received?.request.maximumCompletionTokens == 4096)
             let rendered = tok.decode(received?.promptIDs ?? [], skipSpecialTokens: false)
             #expect(rendered.contains("<|think|>"))

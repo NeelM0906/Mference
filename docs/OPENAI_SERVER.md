@@ -325,11 +325,18 @@ thought may return empty `content` and `finish_reason: "length"`.
 JSON and SSE responses return Gemma thoughts separately as `reasoning_content`.
 Replay that field on assistant messages, particularly between tool-result
 rounds. Google's template retains thoughts within the active user turn and
-strips earlier thoughts when a new user message arrives. The optional
-`chat_template_kwargs.preserve_thinking` defaults to `false`; `true` retains
-earlier tool-call thoughts only, not every earlier assistant thought. This
-option alone does not enable thinking. Gemma does not report estimated
-reasoning-token usage counts.
+strips earlier thoughts when a new user message arrives. For both Gemma
+checkpoints, the HTTP server accepts `chat_template_kwargs.preserve_thinking`
+for generic-client compatibility and normalizes it to `false` before rendering
+and cache matching. Tool-call reasoning remains available within the current
+user turn; the selected source template removes older reasoning after a new
+user prompt. This option does not enable or disable thinking. Gemma does not
+report estimated reasoning-token usage counts.
+
+This changes the former HTTP contract: ordinary Gemma no longer retains older
+tool-call thoughts when a client sends `preserve_thinking=true`, and QAT no
+longer rejects that value. Clients should continue replaying `reasoning_content`;
+the server applies the model's history policy without changing client messages.
 
 The app bundles Google's canonical template at revision
 `35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122`. Existing valid installs need no
@@ -343,9 +350,10 @@ The separate `gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned` checkpoint instead uses
 its verified installed template and generation settings, including through a
 custom alias or library swap. Its thinking switch follows the same opt-in
 rules, but its source drops ordinary assistant reasoning and retains tool-call
-reasoning only after the latest user message. Omitted/false
-`preserve_thinking` follows that source policy; `true` returns JSON 400 before
-streaming, including while queued. After tool results, the source suffix does
+reasoning only after the latest user message. Every accepted
+`preserve_thinking` value follows that source policy, including while queued.
+The two checkpoints retain their distinct source templates; their prompt bytes
+and cache reuse counts need not be identical. After tool results, the source suffix does
 not pre-open a thought channel. Reasoning, visible content and tool calls still
 use the same separate API fields. See [QAT defaults and qualification](RUNTIME_CONTROLS.md#gemma-qat).
 

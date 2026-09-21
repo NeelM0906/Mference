@@ -120,8 +120,10 @@ The checkpoint's model identity is
 QAT uses the checkpoint's installed chat template and sampling settings; see
 [QAT controls and current qualification](RUNTIME_CONTROLS.md#gemma-qat).
 Library discovery lists it separately in `/v1/models` and the picker. The
-existing Gemma remains available. QAT thinking is off by default, and
-`preserve_thinking=true` is unsupported. M2 timing observations and a separate
+existing Gemma remains available. QAT thinking is off by default. Both Gemma
+HTTP profiles accept `preserve_thinking` and apply their source history policy:
+keep current tool-call thoughts, remove earlier thoughts after a new user prompt.
+M2 timing observations and a separate
 short-chat CLI peak-memory measurement are recorded in the
 [QAT model guide](families/GEMMA4_QAT.md); general loop reduction, other hardware
 and wider-context resource limits remain unverified.

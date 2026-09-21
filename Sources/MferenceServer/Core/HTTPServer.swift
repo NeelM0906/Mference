@@ -254,7 +254,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                                               swiftQwen: backend.usesSwiftQwenTemplate,
                                                               acceptsReasoningEffort: backend.acceptsReasoningEffort,
                                                               qwenReasoning: backend.supportsQwenReasoningEffort,
-                                                              gemmaQAT: backend.isGemmaQAT,
                                                               generationDefaults: backend.generationDefaults)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
@@ -389,8 +388,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 throw ServerRequestError.unknownModel
             }
             let requestedModelID = entry.modelID
-            try OpenAIRequestValidator.validateGemmaQATControls(decoded,
-                isGemmaQAT: entry.familyModelID == CheckpointIdentity.gemma4QAT)
             let streaming = decoded.stream ?? false
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
@@ -430,7 +427,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             swiftQwen: resolved.backend.usesSwiftQwenTemplate,
                             acceptsReasoningEffort: resolved.backend.acceptsReasoningEffort,
                             qwenReasoning: resolved.backend.supportsQwenReasoningEffort,
-                            gemmaQAT: resolved.backend.isGemmaQAT,
                             generationDefaults: resolved.backend.generationDefaults)
                         let prepared = try await resolved.backend.prepare(request)
                         startStream()

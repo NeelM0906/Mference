@@ -77,12 +77,14 @@ struct GemmaQATServerTests {
                     #expect(config.minP == (fields.isEmpty ? 0 : 0.2))
                 }
             }
-            let (error, reply) = try await URLSession.shared.data(for: Self.request(port: port, model: id, stream: stream,
+            let (compatible, reply) = try await URLSession.shared.data(for: Self.request(port: port, model: id, stream: stream,
                 fields: "\"chat_template_kwargs\":{\"preserve_thinking\":true},"))
-            #expect((reply as? HTTPURLResponse)?.statusCode == 400)
-            #expect((reply as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-type")?.contains("application/json") == true)
-            #expect(String(decoding: error, as: UTF8.self).contains("unsupported_value"))
-            #expect(!String(decoding: error, as: UTF8.self).contains("data: "))
+            #expect((reply as? HTTPURLResponse)?.statusCode == 200)
+            let normalized = try #require(await backend.received)
+            #expect(normalized.request.preserveThinking == false)
+            #expect(normalized.request.reasoningEffort == nil)
+            #expect(!String(decoding: compatible, as: UTF8.self).contains("unsupported_value"))
+            if stream { #expect(String(decoding: compatible, as: UTF8.self).hasSuffix("data: [DONE]\n\n")) }
             try await server.shutdown()
         } catch {
             try await server.shutdown()
@@ -121,7 +123,56 @@ struct GemmaQATServerTests {
         }
     }
 
-    @Test func queuedQATPreserveThinkingFailsBeforeStreaming() async throws {
+    // Contract change: both Gemma HTTP profiles follow their source history
+    // policy even when a generic client sends preserve_thinking=true.
+    @Test(arguments: [false, true], [false, true])
+    func compatibleThinkingHistoryRendersThroughHTTP(qat: Bool, libraryMode: Bool) async throws {
+        let backend = QATProfileBackend(tokenizer: try await Self.tokenizer(qat: qat))
+        let id = "history-alias"
+        let server: MferenceHTTPServer
+        if libraryMode {
+            server = MferenceHTTPServer(library: ServerModelLibrary(index: .init(entries: [Self.entry(id, qat: qat)])) { _ in backend }, queueLimit: 1)
+        } else {
+            server = MferenceHTTPServer(modelID: id, queueLimit: 1, backend: backend, chatDialect: .gemma)
+        }
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        do {
+            let history = #"[{"role":"user","content":"Old lookup"},{"role":"assistant","content":null,"reasoning_content":"OLD_TOOL_THOUGHT","tool_calls":[{"id":"old","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","content":"Old result","tool_call_id":"old"},{"role":"assistant","content":"Old answer","reasoning_content":"OLD_ORDINARY_THOUGHT"},{"role":"user","content":"Current lookup"},{"role":"assistant","content":null,"reasoning_content":"CURRENT_TOOL_THOUGHT","tool_calls":[{"id":"current","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","content":"Current result","tool_call_id":"current"}]"#
+            var reference: [Int32]?
+            for preserve in [false, true] {
+                for newUser in [false, true] {
+                    var request = Self.request(port: port, model: id, stream: false)
+                    let messages = newUser ? String(history.dropLast()) + #",{"role":"assistant","content":"Current answer"},{"role":"user","content":"New question"}]"# : history
+                    request.httpBody = Data("""
+                    {"model":"\(id)","chat_template_kwargs":{"enable_thinking":true,"preserve_thinking":\(preserve)},
+                     "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{}}}}],
+                     "messages":\(messages)}
+                    """.utf8)
+                    let (_, response) = try await URLSession.shared.data(for: request)
+                    #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                    let prepared = try #require(await backend.received)
+                    #expect(prepared.request.reasoningEffort == .xhigh)
+                    #expect(prepared.request.preserveThinking == false)
+                    let rendered = backend.tokenizer.decode(prepared.promptIDs, skipSpecialTokens: false)
+                    #expect(!rendered.contains("OLD_TOOL_THOUGHT"))
+                    #expect(!rendered.contains("OLD_ORDINARY_THOUGHT"))
+                    #expect(rendered.contains("CURRENT_TOOL_THOUGHT") == !newUser)
+                    #expect(rendered.contains("Old result") && rendered.contains("Current result"))
+                    if !newUser {
+                        if let reference { #expect(prepared.promptIDs == reference) }
+                        else { reference = prepared.promptIDs }
+                    }
+                }
+            }
+            try await server.shutdown()
+        } catch {
+            try await server.shutdown()
+            throw error
+        }
+    }
+
+    @Test func queuedQATPreserveThinkingUsesSourcePolicy() async throws {
         let blocker = QATProfileBackend(tokenizer: try await Self.tokenizer(qat: false), blocks: true)
         let qat = QATProfileBackend(tokenizer: try await Self.tokenizer())
         let library = ServerModelLibrary(index: .init(entries: [Self.entry("original", qat: false), Self.entry("qat", qat: true)])) {
@@ -137,13 +188,19 @@ struct GemmaQATServerTests {
                 try await Task.sleep(for: .milliseconds(5))
             }
             #expect(await blocker.started)
-            let (_, response) = try await URLSession.shared.bytes(for: Self.request(port: port, model: "qat", stream: true,
-                fields: "\"chat_template_kwargs\":{\"preserve_thinking\":true},"))
-            #expect((response as? HTTPURLResponse)?.statusCode == 400)
-            #expect((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-type")?.contains("application/json") == true)
+            let (bytes, response) = try await URLSession.shared.bytes(for: Self.request(port: port, model: "qat", stream: true,
+                fields: "\"chat_template_kwargs\":{\"enable_thinking\":true,\"preserve_thinking\":true},"))
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+            #expect((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-type")?.contains("text/event-stream") == true)
             #expect(await qat.received == nil)
             await blocker.release()
             _ = try await first.value
+            var data = Data()
+            for try await byte in bytes { data.append(byte) }
+            #expect(String(decoding: data, as: UTF8.self).hasSuffix("data: [DONE]\n\n"))
+            let prepared = try #require(await qat.received)
+            #expect(prepared.request.preserveThinking == false)
+            #expect(prepared.request.reasoningEffort == .xhigh)
             try await server.shutdown()
         } catch {
             await blocker.release()

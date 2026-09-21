@@ -44,8 +44,9 @@ messages files and HTTP, including custom aliases and library swaps.
 Thinking is off by default. `--reasoning-effort medium` enables it in the CLI;
 the server accepts the existing reasoning-effort or `enable_thinking` controls.
 The checkpoint template drops ordinary historical reasoning and replays
-tool-call reasoning within the active user turn. `preserve_thinking=true` is
-unsupported and rejected before streaming starts. Clients send full histories
+tool-call reasoning within the active user turn. The HTTP server accepts
+`preserve_thinking=true` and normalizes it to this source policy, as it does
+for ordinary Gemma. It does not change the pinned template. Clients send full histories
 with matching tool-call IDs and results. See [QAT controls](../RUNTIME_CONTROLS.md#gemma-qat)
 and the [server API](../OPENAI_SERVER.md).
 

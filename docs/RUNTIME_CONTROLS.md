@@ -67,8 +67,9 @@ repeats in both Mference and the pinned FP16 reference; QAT is not inherently
 loop-free. Chat uses the pinned checkpoint's own template. Thinking is off
 when omitted; `medium`, `low` and `xhigh` all enable the same binary mode.
 The source drops ordinary assistant reasoning and replays tool-call reasoning
-only within the active user turn. QAT rejects `preserve_thinking=true`;
-omitted/false follows the source policy. Clients still send complete tool
+only within the active user turn. The HTTP server accepts `preserve_thinking`
+and normalizes it to this source policy for both Gemma checkpoints; it does
+not disable thinking or retain older thoughts. Clients still send complete tool
 history, including reasoning and matching tool-call IDs.
 
 No reinstall is needed for this runtime update. Kernel, CLI chat and both server modes

@@ -139,9 +139,9 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
     }
 }
 
-/// The Qwen model card's thinking switches, as vLLM and SGLang clients send
-/// them. `preserve_thinking` is accepted for compatibility: a source-template
-/// render always preserves reasoning history.
+/// Thinking switches as generic chat clients send them. `preserve_thinking`
+/// is accepted for compatibility; Gemma normalizes it to its source history
+/// policy, while Qwen's source template always preserves reasoning history.
 public struct OpenAIChatTemplateKwargs: Codable, Equatable, Sendable {
     public let enableThinking: Bool?
     public let preserveThinking: Bool?
@@ -306,10 +306,8 @@ public enum OpenAIRequestValidator {
                                 swiftQwen: Bool? = nil,
                                 acceptsReasoningEffort: Bool? = nil,
                                 qwenReasoning: Bool? = nil,
-                                gemmaQAT: Bool = false,
                                 generationDefaults: GenerationConfig = .defaults) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
-        try validateGemmaQATControls(request, isGemmaQAT: gemmaQAT)
         let isSwiftQwen = swiftQwen ?? (modelID.split(separator: "@").first == Substring(CheckpointIdentity.swiftQwen38))
         let supportsQwenEffort = qwenReasoning ?? (isSwiftQwen ||
             modelID.split(separator: "@").first == Substring(CheckpointIdentity.baseQwen38))
@@ -437,23 +435,18 @@ public enum OpenAIRequestValidator {
                                       minP: minP,
                                       seed: request.seed,
                                       stopStrings: request.stop?.values ?? [])
+        // Gemma HTTP clients share one history policy: retain current-turn
+        // tool reasoning, then let the selected source template strip it after
+        // a new user message. Normalize before rendering AND cache matching.
+        let preserveThinking = dialect == .gemma ? false : request.chatTemplateKwargs?.preserveThinking ?? false
         return ValidatedChatRequest(reasoningEffort: effort,
-                                    preserveThinking: request.chatTemplateKwargs?.preserveThinking ?? false,
+                                    preserveThinking: preserveThinking,
                                     messages: messages,
                                     tools: tools,
                                     stream: request.stream ?? false,
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum)
-    }
-
-    /// Library queues can reject this checkpoint-level unsupported control
-    /// before loading a model or committing streaming response headers.
-    static func validateGemmaQATControls(_ request: OpenAIChatRequest, isGemmaQAT: Bool) throws {
-        if isGemmaQAT, request.chatTemplateKwargs?.preserveThinking == true {
-            throw invalid("Gemma QAT does not support preserve_thinking=true",
-                          "chat_template_kwargs", "unsupported_value")
-        }
     }
 
     private static func validateTool(_ tool: OpenAITool,
