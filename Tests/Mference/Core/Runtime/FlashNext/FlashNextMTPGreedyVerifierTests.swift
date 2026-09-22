@@ -121,9 +121,50 @@ import Testing
         } catch is FlashNextForwardRunnerError { }
         #expect(bits(verifier.logits, count: model.config.vocabSize) == invalidHead)
 
+        // Actual sidecar proposals, not injected token lists. Repeating a
+        // proposal must leave the target head and both committed cursors intact.
+        try await verifier.prefill(prefix)
+        let headBeforeDraft = bits(verifier.logits, count: model.config.vocabSize)
+        let firstDraft = try verifier.propose(maxDraftTokens: 3)
+        #expect(firstDraft.count == 4 && firstDraft.first == expected.first)
+        #expect(try verifier.propose(maxDraftTokens: 3) == firstDraft)
+        #expect(try verifier.propose(maxDraftTokens: 0) == [expected[0]])
+        #expect(throws: FlashNextForwardRunnerError.self) { _ = try verifier.propose(maxDraftTokens: -1) }
+        #expect(bits(verifier.logits, count: model.config.vocabSize) == headBeforeDraft)
+        #expect(verifier.target.continuationPosition == prefix.count)
+        #expect(verifier.primer.draftPosition == prefix.count - 1)
+        verifier.primer.didPrimeRow = { if $0 == prefix.count { throw CancellationError() } }
+        #expect(throws: CancellationError.self) { _ = try verifier.propose(maxDraftTokens: 3) }
+        verifier.primer.didPrimeRow = nil
+        #expect(try verifier.propose(maxDraftTokens: 3) == firstDraft)
+        #expect(bits(verifier.logits, count: model.config.vocabSize) == headBeforeDraft)
+        var generated: [Int32] = []
+        var drafted = 0
+        var acceptedDrafts = 0
+        while generated.count < expected.count {
+            let proposals = try verifier.propose(maxDraftTokens: min(3, expected.count - generated.count - 1))
+            drafted += proposals.count - 1 // exclude the target-selected seed
+            let result = try await verifier.verify(proposals, budget: expected.count - generated.count)
+            try #require(!result.tokens.isEmpty && result.accepted >= 1)
+            acceptedDrafts += result.accepted - 1
+            generated += result.tokens
+            #expect(generated == Array(expected.prefix(generated.count)))
+            #expect(bits(verifier.logits, count: model.config.vocabSize) == heads[generated.count - 1])
+        }
+        #expect(generated == expected)
+        #expect(acceptedDrafts <= drafted)
+        print("[native proposal reconciliation] drafted=\(drafted) accepted=\(acceptedDrafts) target-seeds-excluded; 8 target tokens and full heads exact")
+
+        try await verifier.prefill(prefix)
+        let stopProposals = try verifier.propose(maxDraftTokens: 3)
+        let nativeStopped = try await verifier.verify(stopProposals, budget: 8, stopTokens: [expected[0]])
+        #expect(nativeStopped.tokens == [expected[0]] && nativeStopped.reachedStop)
+        #expect(bits(verifier.logits, count: model.config.vocabSize) == heads[0])
+
         let limited = try FlashNextMTPGreedyVerifier(model: model, context: context, maxContext: 37,
             policy: .bounded(slots: 16))
         try await limited.prefill(prefix)
+        #expect(try limited.propose(maxDraftTokens: 99).count == 2)
         let exhausted = try await limited.verify(Array(expected.prefix(3)), budget: 8)
         #expect(exhausted.tokens == Array(expected.prefix(2)))
         #expect(limited.target.continuationPosition == 37)
@@ -132,6 +173,7 @@ import Testing
             Issue.record("expected exhausted context rejection")
         } catch is FlashNextForwardRunnerError { }
         limited.reset()
+        #expect(throws: FlashNextForwardRunnerError.self) { _ = try limited.propose(maxDraftTokens: 1) }
         do {
             _ = try await limited.verify([], budget: 1)
             Issue.record("expected unprimed state rejection")

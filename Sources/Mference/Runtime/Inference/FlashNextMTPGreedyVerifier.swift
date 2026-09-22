@@ -17,6 +17,7 @@ final class FlashNextMTPGreedyVerifier {
     let logits: MTLBuffer
     private let context: MetalContext
     private let scratch: RawCompletionScratch
+    private let draftScratch: RawCompletionScratch
     private let vocab: Int
     private let maxContext: Int
     private var ready = false
@@ -32,9 +33,45 @@ final class FlashNextMTPGreedyVerifier {
         primer = try FlashNextMTPPrimer(model: model, context: context, maxContext: maxContext, policy: policy)
         scratch = try RawCompletionScratch(context: context, vocab: vocab,
             logitSoftcap: Float(model.config.finalLogitSoftcap))
+        draftScratch = try RawCompletionScratch(context: context, vocab: vocab,
+            logitSoftcap: Float(model.config.finalLogitSoftcap))
         logits = scratch.logits
         let consumer = primer
         target.consumeTargetHiddenRows = { try consumer.consume($0) }
+    }
+
+    /// Return the target-selected seed followed by native draft proposals.
+    /// Neither target nor primer advances. The first element is guaranteed by
+    /// the target and MUST NOT be counted as a successful draft prediction.
+    /// This is a correctness path, not accelerated generation.
+    func propose(maxDraftTokens: Int) throws -> [Int32] {
+        try Task.checkCancellation()
+        guard ready, maxDraftTokens >= 0, target.continuationPosition < maxContext else {
+            throw FlashNextForwardRunnerError.invalidInput("invalid native proposal state or count")
+        }
+        let count = min(maxDraftTokens, maxContext - target.continuationPosition - 1)
+        let seed = try sampleToken()
+        guard count > 0 else { return [seed] }
+        do {
+            let proposals = try primer.proposals(after: seed, count: count, into: draftScratch.logits) { _ in
+                try self.sampleToken(using: self.draftScratch)
+            }
+            return [seed] + proposals
+        } catch {
+            // The primer restores ordinary proposal failures itself. If it
+            // cannot prove paired cursors are clean after recovery, reset all.
+            do {
+                _ = try primer.checkpoint()
+                guard primer.targetPosition == target.continuationPosition,
+                      primer.draftPosition == target.continuationPosition - 1 else {
+                    throw FlashNextForwardRunnerError.invalidInput("native proposal recovery cursor mismatch")
+                }
+            } catch {
+                reset()
+                throw error
+            }
+            throw error
+        }
     }
 
     func reset() {
@@ -77,17 +114,6 @@ final class FlashNextMTPGreedyVerifier {
         do {
             while tokens.count < budget && target.continuationPosition < maxContext {
                 try Task.checkCancellation()
-                let values = logits.contents().assumingMemoryBound(to: Float16.self)
-                var best = 0
-                for i in 0..<vocab {
-                    guard !values[i].isNaN, values[i] != .infinity else {
-                        throw FlashNextForwardRunnerError.invalidInput("invalid target verification logits")
-                    }
-                    if values[i] > values[best] { best = i }
-                }
-                guard values[best].isFinite else {
-                    throw FlashNextForwardRunnerError.invalidInput("no finite target verification logit")
-                }
                 // Use the actual generation sampler, including FP16 softmax
                 // rounding and its tie rule, not an assumed raw-logit argmax.
                 let token = try sampleToken()
@@ -118,16 +144,26 @@ final class FlashNextMTPGreedyVerifier {
         }
     }
 
-    private func sampleToken() throws -> Int32 {
+    private func sampleToken(using alternate: RawCompletionScratch? = nil) throws -> Int32 {
+        let selected = alternate ?? scratch
+        let values = selected.logits.contents().assumingMemoryBound(to: Float16.self)
+        var hasFinite = false
+        for i in 0..<vocab {
+            guard !values[i].isNaN, values[i] != .infinity else {
+                throw FlashNextForwardRunnerError.invalidInput("invalid native verification/sample logits")
+            }
+            hasFinite = hasFinite || values[i].isFinite
+        }
+        guard hasFinite else { throw FlashNextForwardRunnerError.invalidInput("no finite native sample logits") }
         guard let cb = context.queue.makeCommandBuffer() else {
             throw FlashNextForwardRunnerError.commandFailed("cannot sample verification token")
         }
-        scratch.sampler.sample(commandBuffer: cb, logits: logits, probs: scratch.probs,
+        selected.sampler.sample(commandBuffer: cb, logits: selected.logits, probs: selected.probs,
             history: [], config: .init(temperature: 0), position: target.continuationPosition,
-            outToken: scratch.outToken)
+            outToken: selected.outToken)
         cb.commit()
         cb.waitUntilCompleted()
         if let error = cb.error { throw error }
-        return Int32(bitPattern: scratch.outToken.contents().assumingMemoryBound(to: UInt32.self).pointee)
+        return Int32(bitPattern: selected.outToken.contents().assumingMemoryBound(to: UInt32.self).pointee)
     }
 }
