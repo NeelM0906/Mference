@@ -4,6 +4,22 @@ Work starts at `364a5d021ad35c117e8cc9bd47a4d1b136bb91e8` on
 `codex/postlaunch-qualification`, updating [PR #41](https://github.com/NeelM0906/Mference/pull/41)
 against `main`. The published 0.1.0 tag/assets are not changed.
 
+## Current outcome
+
+- Native MTP: the independent installed 43-row comparison and complete
+  installed internal correctness suite pass after the FP32 fixes below.
+  Earlier failures in this chronological record are superseded by the
+  explicitly identified final run, not erased or counted as successes.
+- GLM: resident low-effort matched performance, resident Max/8,192 and
+  bounded 16-slot low-effort completed-answer qualification pass. Both new
+  profiles complete 9/9 measured cases; Max/1,024 truncations remain failures.
+- Release engineering: exact-code macOS 15/26 CI and the clean extracted
+  source-candidate workflow pass at `ef9484d`.
+- Physical 16/24-GiB testing is waived as a release blocker, not passed.
+- Native accelerated CLI/server generation remains disabled and unqualified.
+  Numerical verification is not completed-answer speed/default promotion;
+  this record does not declare the whole optimization roadmap complete.
+
 ## Scope and host
 
 Per the explicit user decision, physical 16/24-GiB evaluation is **not a
@@ -218,6 +234,21 @@ launcher/UI/screen/source/benchmark script suites pass (43 tests), log
 `/tmp/mference-scripts-wide-20260922.log`. Both new Python parity modules
 compile, and `git diff --check` passes. No new checkpoint was downloaded.
 
+Code and the initial record are committed at
+`ef9484d5c0977d13bcfb8f05adf3d9369c576236`. Its
+[PR CI](https://github.com/NeelM0906/Mference/actions/runs/35767341334)
+passes all three jobs: macOS 15 / Swift-floor build-and-test, macOS 26
+build-and-test, and documentation/source-archive checks.
+
+The separate [source-candidate workflow](https://github.com/NeelM0906/Mference/actions/runs/35767355921)
+also passes for that exact commit: both toolchains, archive checksums, fresh
+extraction, release build, serial tests, all three executable help commands,
+launcher/source/benchmark script tests and Markdown validation. Its artifact
+is `mference-source-ef9484d5c0977d13bcfb8f05adf3d9369c576236`
+(artifact ID `10715315045`), containing the `0.1.1-rc.1` source candidate,
+provenance and checksums. This workflow does not create a tag or publish a
+GitHub release; the existing 0.1.0 release is untouched.
+
 ## GLM Max profile
 
 The Max/1,024-output failures remain historical failures. A distinct profile
@@ -232,7 +263,14 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 ```
 
 This uses the previously preserved, hashed GLM candidate executable; native
-MTP changes are not in its binary and have no GLM caller. Frozen prompts,
+MTP changes are not in its binary and have no GLM caller.
+The executable SHA-256 is
+`29d9eefeb8686b43d7a26f9af0ec748cf9d66a4aa154cfa85b799ed690646f4e`,
+built from `fba8196b09424100071ab08a9c25419f31f2eb79`. All `Sources/`
+differences from that revision to `ef9484d` are Flash-Next/native-MTP files;
+the GLM runtime and CLI source are unchanged. Whole-process times below are
+measurements of this named frozen executable, not a rebuilt binary.
+Frozen prompts,
 seeds and sampling are unchanged. Output/context allowances are explicit
 protocol deviations. The batch launcher was paused **between** its second and
 third discarded warmups and again after the first measured medium case for
@@ -254,3 +292,92 @@ All three discarded warmups produce complete visible answers:
 The answers were read for completion, not independently factual-scored.
 The wetlands answer includes an overbroad claim about rainfall flooding;
 completion is not a broad accuracy endorsement.
+
+**Completed, exit 0:** all 12 CLI processes and the harness succeeded; 9/9
+measured answers reached `endOfTurn`. Each measured stdout matches its
+case's manually read warmup byte-for-byte. All process exit files contain 0.
+Evidence: `benchmark-results/glm-max-resident-8192-20260922/`.
+
+| Case (prompt/new tokens) | Median prefill, s | Median decode, tok/s | Median prefill + decode, s (range) | Median whole-process wall, s |
+| --- | ---: | ---: | ---: | ---: |
+| Short (60/2127) | 1.23 | 23.041 | 93.54 (93.49–93.92) | 176.72 |
+| Medium (420/3708) | 3.96 | 20.451 | 185.27 (184.27–186.78) | 268.71 |
+| Long (2792/2795) | 29.89 | 19.150 | 175.85 (175.57–175.89) | 259.09 |
+
+Maximum reported process footprint: 172,639,103,856 bytes. This is not a
+minimum-RAM certificate. Cold-process wall time includes strict verification
+and loading; prefill-plus-decode does not. These Max outputs differ from the
+low-effort workload, so comparing their token rates does not establish an
+optimization gain or equal answer quality. Max **with the larger explicit
+budget** now passes completion; Max/1,024 is still not qualified.
+
+Complete measured footers (warmup footers above):
+
+```text
+short 1 [stop=endOfTurn prefill=60tok/1.22s new=2127tok decode=92.32s tok/s=23.041]
+short 2 [stop=endOfTurn prefill=60tok/1.25s new=2127tok decode=92.67s tok/s=22.954]
+short 3 [stop=endOfTurn prefill=60tok/1.23s new=2127tok decode=92.26s tok/s=23.054]
+medium 1 [stop=endOfTurn prefill=420tok/3.95s new=3708tok decode=180.32s tok/s=20.563]
+medium 2 [stop=endOfTurn prefill=420tok/3.96s new=3708tok decode=182.82s tok/s=20.282]
+medium 3 [stop=endOfTurn prefill=420tok/3.96s new=3708tok decode=181.31s tok/s=20.451]
+long 1 [stop=endOfTurn prefill=2792tok/29.89s new=2795tok decode=145.68s tok/s=19.186]
+long 2 [stop=endOfTurn prefill=2792tok/29.90s new=2795tok decode=145.95s tok/s=19.150]
+long 3 [stop=endOfTurn prefill=2792tok/29.89s new=2795tok decode=146.00s tok/s=19.144]
+```
+
+## GLM bounded profile
+
+The separate 16-slot profile retains the same frozen executable and original
+1,024-output / 4,096-context allowances. It explicitly selects vendor-supported
+low effort. No result from it is a physical smaller-Mac qualification.
+
+```sh
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  BENCH_CLI=/tmp/mference-glm-measured.Dr7tT9/MferenceCLI \
+  BENCH_SETTLE_SECONDS=10 MIN_FREE_PCT=75 MFERENCE_GLM5_REASONING_EFFORT=low \
+  ./run-benchmark.sh glm-low-16slot-20260922 scratch/glm53flash.gturbo 3 \
+  --expert-cache-slots 16
+```
+
+Initial preflight: 98% free memory, 612 GiB disk, no model/test owner, all 49
+receipt-file sizes match. The run uses full-SHA install verification. Explicit
+protocol deviations: low effort, 16 slots, three measured repetitions and
+fixed ten-second inter-process settling. No builds, tests or downloads run
+alongside timed processes.
+
+**Completed, exit 0:** all three warmups, all nine measured CLI processes and
+the harness succeed. Every answer reaches `endOfTurn`; all 12 stdout files
+match the manually read low-effort resident answers byte-for-byte. This checks
+completion and equivalence on the frozen cases, not broad factual accuracy.
+Every preflight reports 98% free memory and 612 GiB free disk.
+Evidence: `benchmark-results/glm-low-16slot-20260922/`.
+
+| Case (prompt/new tokens) | Median prefill, s | Median decode, tok/s | Median prefill + decode, s (range) | Median whole-process wall, s |
+| --- | ---: | ---: | ---: | ---: |
+| Short (60/653) | 15.19 | 6.768 | 111.71 (111.51–111.73) | 179.34 |
+| Medium (420/841) | 46.02 | 6.428 | 176.81 (176.81–176.95) | 244.53 |
+| Long (2792/709) | 302.22 | 6.032 | 419.67 (419.44–419.83) | 487.27 |
+
+The maximum reported process footprint is 10,528,826,512 bytes. This metric
+does not fully account for GPU/mapped/page-cache residency and does **not**
+certify operation on a 16/24-GiB Mac. The 256-GiB machine can cache file data
+outside the bounded expert slots. Bounded mode completes the same answers
+but is substantially slower than the separate resident low-effort run; no
+bounded-versus-prior-revision optimization gain is claimed.
+
+Complete footers:
+
+```text
+warm short [stop=endOfTurn prefill=60tok/15.25s new=653tok decode=96.54s tok/s=6.764]
+warm medium [stop=endOfTurn prefill=420tok/46.08s new=841tok decode=130.81s tok/s=6.429]
+warm long [stop=endOfTurn prefill=2792tok/302.22s new=709tok decode=117.56s tok/s=6.031]
+short 1 [stop=endOfTurn prefill=60tok/15.19s new=653tok decode=96.54s tok/s=6.764]
+short 2 [stop=endOfTurn prefill=60tok/15.18s new=653tok decode=96.33s tok/s=6.779]
+short 3 [stop=endOfTurn prefill=60tok/15.23s new=653tok decode=96.48s tok/s=6.768]
+medium 1 [stop=endOfTurn prefill=420tok/46.04s new=841tok decode=130.91s tok/s=6.424]
+medium 2 [stop=endOfTurn prefill=420tok/46.02s new=841tok decode=130.79s tok/s=6.430]
+medium 3 [stop=endOfTurn prefill=420tok/45.98s new=841tok decode=130.83s tok/s=6.428]
+long 1 [stop=endOfTurn prefill=2792tok/302.22s new=709tok decode=117.61s tok/s=6.028]
+long 2 [stop=endOfTurn prefill=2792tok/301.89s new=709tok decode=117.55s tok/s=6.032]
+long 3 [stop=endOfTurn prefill=2792tok/302.23s new=709tok decode=117.44s tok/s=6.037]
+```

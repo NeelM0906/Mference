@@ -81,7 +81,8 @@ head and its full hidden bundle for subsequent drafting.
   This internal alignment component has no CLI/server caller; it does not
   verify proposals, sample tokens or claim a generation speedup.
 
-These are implementation boundaries, not a passed native-MTP qualification.
+The tested independent numerical and internal correctness gates pass; these
+implementation boundaries do not qualify accelerated production generation.
 The [dated validation record](RELEASE_VALIDATION_2026-09-22.md) is authoritative
 for which synthetic and installed checks have actually executed.
 
@@ -105,7 +106,8 @@ this component does not clear any upstream-native or default-promotion gate.
 
 1. **Resolved September 22:** the unrounded-FP32 synthetic numerical gate
    passes after widening fusion intermediates. Row zero's hidden error falls
-   from 5.263% to 2.212%; the 5% threshold is unchanged and its known-issue
+   from 5.263% to 2.212% initially, then to 0.036193% with the final native
+   FP32 intermediates; the 5% threshold is unchanged and its known-issue
    exemption is removed. All 40 hidden/logit rows and greedy choices pass.
    The independent upstream-component test additionally runs pinned SGLang
    fusion and actual Transformers decoder/QSA/HC/mixer code with the same

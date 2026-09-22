@@ -13,7 +13,8 @@ resumable installation completed September 18: 49 verified receipt files,
 180,843,651,789 bytes, at the pinned revision below. Qualification of the new
 kernels on this completed checkpoint now passes the installed resident/16-slot
 correctness gate recorded below. The later matched low-effort resident result
-is summarized below; default-Max and bounded performance remain separate.
+is summarized below; September 22 also qualifies explicit larger-budget Max
+and bounded low-effort profiles separately.
 The pinned text range plan reads 180,796,250,360 bytes and writes
 180,796,414,200 bytes, excluding the vision tower. These planned bytes are not
 a completed-install receipt. Historical measured results below do not validate
@@ -30,6 +31,43 @@ answers. Long generation improves 3.7%; short/medium ranges overlap and decode
 does not improve. This does not qualify default Max effort or smaller Macs. See
 [commands, deviations and full footers](../POSTLAUNCH_QUALIFICATION.md).
 
+September 22: **Max with an explicit 8,192-token output allowance and 16,384
+context completes 9/9 measured answers**, after three discarded warmups.
+Median prefill-plus-decode is 93.54 / 185.27 / 175.85 seconds for
+short / medium / long on the 256-GiB M3 Ultra. The 1,024-token Max profile
+still truncates; increasing the budget is an explicit profile choice, not a
+silent effort/default change. See the
+[complete Max record](../RELEASE_VALIDATION_2026-09-22.md#glm-max-profile).
+
+To use that budget for interactive chat on a host with enough memory for
+resident GLM (the benchmark itself uses the frozen message files):
+
+```sh
+.build/release/MferenceCLI --model scratch/glm53flash.gturbo --chat \
+  --expert-cache-slots resident --max-new 8192 --max-context 16384
+```
+
+Leave `MFERENCE_GLM5_REASONING_EFFORT` unset for Max, or set it explicitly to
+`max`. Hidden reasoning consumes the output allowance. These three cases
+exercise completed conversations, not every position of a 16,384-token
+context, and do not establish a minimum hardware specification.
+
+The **16-slot low-effort profile also completes 9/9 measured answers**, after
+three warmups. Every output matches the resident low-effort answer exactly.
+Median prefill-plus-decode is 111.71 / 176.81 / 419.67 seconds, with decode
+6.768 / 6.428 / 6.032 tok/s. It is slower than resident mode on this host and
+is not physical smaller-Mac qualification. See the
+[full bounded record](../RELEASE_VALIDATION_2026-09-22.md#glm-bounded-profile).
+The corresponding interactive settings are:
+
+```sh
+MFERENCE_GLM5_REASONING_EFFORT=low .build/release/MferenceCLI \
+  --model scratch/glm53flash.gturbo --chat --expert-cache-slots 16 \
+  --max-new 1024 --max-context 4096
+```
+
+These allowances pass the three frozen cases, not every possible conversation.
+
 | | |
 |---|---|
 | Family identifier | `glm53Flash` (`ModelFamily.glm53Flash`), install label `glm53flash` |
@@ -37,7 +75,7 @@ does not improve. This does not qualify default Max effort or smaller Macs. See
 | Pinned revision | `d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3` (index SHA-256 `5e0a3768…314383`) |
 | Parameters | 320B total, 18B active (vendor figures) |
 | Download / install size | Current text range plan: 180,796,250,360 source bytes, not cumulative network traffic including retries; completed September 18 receipt: 180,843,651,789 bytes across 49 files |
-| Status | **first light green 2026-09-11** — runner, tokenizer and resident-expert path landed; the capability gate is lifted; perf pass and the FAMILY_GATE protocol run in progress |
+| Status | Text runtime and installed resident/16-slot state gates pass; September 22 qualifies low-effort resident/bounded and larger-budget Max resident completed-answer profiles on the 256-GiB M3 Ultra. Max/1,024 and physical smaller-Mac qualification are not passed. |
 
 ## Checkpoint selection
 
@@ -145,11 +183,16 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
 
 | Slots | Resident expert bytes | Notes |
 |---|---:|---|
-| 16 | 9.5 GB | floor; `auto` default for non-Qwen families |
+| 16 | 9.5 GB | bounded fallback when the whole GLM expert pool cannot fit under the auto policy |
 | 32 | 19.0 GB | |
 | 96 | 57.1 GB | |
 | 128 | 76.1 GB | |
 | `resident` | 171.2 GB | the whole expert set; fits a 256 GB host with ~60 GB to spare |
+
+For GLM, `auto` selects resident experts only when expert-pool bytes plus core
+bytes plus 48 GiB of reserved headroom fit physical memory; otherwise it uses
+the bounded slot policy. Qualification commands use an explicit cache policy
+so this automatic choice cannot silently change the measured workload.
 
 ## Port status
 

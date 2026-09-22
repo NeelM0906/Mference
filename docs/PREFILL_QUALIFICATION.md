@@ -21,7 +21,7 @@ execution. Resident and larger-budget configurations keep their existing width.
 | Qwen 3.8 dense / paged / spilled KV | `Qwen38ForwardRunnerTests`, `Qwen38PagedKVParityTests`, `Qwen38BlockedPrefillTests`; observed counts and numerical/continuation checks; `7505e82` adds actual cancellation after GPU writes in all three backends, dirty rejection and exact reset/next logits | Installed fine-tunes need their own numerical gate; fixture recovery is not physical low-RAM qualification |
 | Swift-Qwen | PR #33 source/template, installed-reference and MTP gates; `d2b84f1` and four-row tiled `ee0bfb9` pass the installed numerical/state/MTP retest without changing tolerances | Candidate only; default-effort community attempts truncate without visible answers; broader quality/latency/hardware evidence required before promotion |
 | Flash-Next, bounded / resident | Synthetic state gates, installed short A/B, plus `c8f3298`: actual TensorOps encodings with 1,024-token chunks; exact resident/16-slot logits across 2,048-token cutover, eight continuation rows and cancellation/reset | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); wider contexts, old-OS real fallback and physical hardware remain separate |
-| GLM, bounded / resident | PR #34 matrix plus installed gates at `ed69598` and post-ragged-read-fix `84bfefc`: exact resident/16-slot full logits at 33/2047/2051/2083 tokens and eight continuation steps, zero replay, cancellation/dirty rejection/exact reset | [Latest installed evidence](RELEASE_VALIDATION_2026-09-20.md#installed-glm-recheck-after-ragged-tile-correction); not longer-context, smaller-hardware or throughput qualification |
+| GLM, bounded / resident | PR #34 matrix plus installed gates at `ed69598` and post-ragged-read-fix `84bfefc`: exact resident/16-slot full logits at 33/2047/2051/2083 tokens and eight continuation steps, zero replay, cancellation/dirty rejection/exact reset | [Installed correctness](RELEASE_VALIDATION_2026-09-20.md#installed-glm-recheck-after-ragged-tile-correction) and separate [Max resident / low-effort bounded performance](RELEASE_VALIDATION_2026-09-22.md#glm-max-profile) pass on the measured host/settings; not all-context or smaller-hardware qualification |
 | DeepSeek, bounded / resident | Phase 4 PR #35: below/across/above sparse cutover, cache slots 8/16/resident, exact state and cancellation/reset; opt-in installed gate | Installed results and limitations live in `DEEPSEEK_V4_FLASH.md` |
 | MiniCPM5 dense / paged / spilled KV | `MiniCPM5ForwardRunnerTests`, `MiniCPM5PagedKVTests`; observed counts and golden/continuation checks; `7505e82` exercises actual warm-append cancellation/reset in all three backends and compares exact next logits | Representative full-selection/5-page-spill fixture; not every sparse budget/context or new hardware qualification |
 | Maple | Existing fixture plus installed 16/8-slot factory gate at `e549ea6`: exact full logits across 512-token window, eight continuation steps, cancellation/dirty rejection/reset, zero replay | [September 20 evidence](RELEASE_VALIDATION_2026-09-20.md); resident-expert mode is not implemented by this runner; not every context/hardware |
@@ -58,7 +58,10 @@ byte-exact. Installed aligned-checkpoint evidence is separate. See the
   Broader quality/performance/hardware qualification remains.
 - Phase 3: bounded GLM prefill implementation merged in PR #34; pinned install
   and current resident/16-slot sparse-cutover/continuation/recovery gate now
-  complete on the 256 GiB M3 Ultra; broader hardware/performance remains open.
+  complete on the 256 GiB M3 Ultra. Matched low-effort resident performance and
+  [Max with a larger output budget](RELEASE_VALIDATION_2026-09-22.md#glm-max-profile)
+  now complete; [16-slot low-effort performance](RELEASE_VALIDATION_2026-09-22.md#glm-bounded-profile)
+  also completes all nine measured answers, identical to resident low effort.
 - Phase 4: DeepSeek sparse-cutover implementation merged in PR #35; its own report
   records the measured correctness status, separately from throughput.
 - Phase 5: execution-contract coverage extended here; the gaps above remain
@@ -68,10 +71,15 @@ byte-exact. Installed aligned-checkpoint evidence is separate. See the
   now pass completed-answer gates and show lower prefill-plus-decode time,
   but resident short/medium prefill regresses. The separate 16-slot revision
   has modest 0.5%/1.2%/2.3% median generation-time reductions; short-case and
-  all decode ranges overlap. GLM's new default-profile warmups truncate on
-  short/medium cases and memory preflight stops before the long case; no
-  completed-answer comparison follows from them. GLM comparisons and native MTP
-  integration remain open. No unmeasured speedup or default change is claimed.
+  all decode ranges overlap. GLM's default Max/1,024 warmup failures remain
+  failures; the separate [matched low-effort resident comparison](POSTLAUNCH_QUALIFICATION.md#matched-glm-baseline)
+  completes and improves long generation time by 3.7%, with short/medium ranges
+  overlapping and no decode gain. Max/8,192 also completes all nine measured
+  answers, as does low-effort 16-slot mode, without a matched speedup claim.
+  Native MTP's
+  [43-row independent installed comparison](RELEASE_VALIDATION_2026-09-22.md#final-native-precision-comparison-passed)
+  now passes; accelerated verification, production integration and benefit
+  remain separate, open gates. No unmeasured speedup or default change is claimed.
 - Phase 7: real UI streaming, tool loops, history, cancellation and model-switch
   recovery have been tested; a [support table](RELEASE_SUPPORT.md) distinguishes
   established paths from candidates. The separately frozen 60-case screen has

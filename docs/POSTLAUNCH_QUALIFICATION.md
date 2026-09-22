@@ -6,6 +6,12 @@ enablement are separate gates. Per the September 22 release-scope decision,
 physical 16/24-GiB qualification is **not a blocker for this release**. Those
 profiles remain unqualified; no claim of fit or measured performance is added.
 
+Follow-up evidence: the [September 22 record](RELEASE_VALIDATION_2026-09-22.md)
+closes the tested independent installed native-MTP numerical comparison and
+records the larger-budget GLM Max profile. Historical failures and limits in
+this September 21 record remain intact; the follow-up does not retroactively
+pass the original default-budget runs or enable accelerated native MTP.
+
 ## Machine and protocol
 
 Mac Studio Mac15,14, Apple M3 Ultra (32 CPU cores), 256 GiB; macOS 26.3
