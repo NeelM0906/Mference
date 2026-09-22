@@ -15,6 +15,7 @@
 #      MIN_FREE_GB=5       minimum free disk required
 #      MIN_FREE_PCT=20     minimum system-wide free memory percentage required
 #      BENCH_CLI=path      previously built release executable (recorded/hashed)
+#      BENCH_SETTLE_SECONDS=0  fixed idle interval between processes (0–60)
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -32,6 +33,11 @@ reps="${3:-3}"
 shift 3 2>/dev/null || shift 2
 extra=("$@")
 cli="${BENCH_CLI:-.build/release/MferenceCLI}"
+settle_seconds="${BENCH_SETTLE_SECONDS:-0}"
+[[ "${settle_seconds}" =~ ^[0-9]{1,2}$ ]] || fail "BENCH_SETTLE_SECONDS must be an integer from 0 to 60"
+settle_seconds=$((10#${settle_seconds}))
+[ "${settle_seconds}" -le 60 ] || fail "BENCH_SETTLE_SECONDS must be an integer from 0 to 60"
+completed_runs=0
 
 case "${reps}" in
   ''|*[!0-9]*) fail "reps must be a positive integer; got \"${reps}\"" ;;
@@ -115,6 +121,7 @@ trap 'status=$?; printf "%s\n" "$status" > "${root}/exit-status"' EXIT
   shasum -a 256 "${model_dir}/manifest.json"
   shasum -a 256 docs/benchmark-prompts/real-generation-v1/*.json
   echo "measured repetitions: ${reps}"
+  echo "fixed inter-process idle seconds: ${settle_seconds} (no failed-check retries)"
   echo "extra CLI args: ${extra[*]+${extra[*]}}"
   echo "CLI: ${cli}"
   shasum -a 256 "${cli}"
@@ -140,12 +147,18 @@ warmup_filter="${WARMUP_CASES:-all}"
 
 # run_case <case_id> <seed> <output-prefix> -- returns the CLI's exit status.
 run_case() {
+  # Fixed before the next preflight, never a retry of a failed safety check.
+  # This permits post-exit reclamation without purging or changing thresholds.
+  if [ "${completed_runs}" -gt 0 ] && [ "${settle_seconds}" -gt 0 ]; then
+    sleep "${settle_seconds}" || fail "inter-process settling interrupted"
+  fi
   # Headroom and ownership can change after an earlier run. Never treat the
   # initial batch preflight as permission to keep launching model processes.
   local available owners
   available=$(memory_pressure -Q 2>/dev/null |
     sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p' | head -1)
   printf 'memory_free_percent=%s\n' "${available:-unknown}" > "${3}.preflight"
+  printf 'configured_settle_seconds=%s\n' "${settle_seconds}" >> "${3}.preflight"
   [ -n "${available}" ] && [ "${available}" -ge "${MIN_FREE_PCT:-20}" ] \
     || fail "memory preflight failed before ${1}: ${available:-unknown}% free"
   free_gb=$(df -g . | awk 'NR==2 { print $4 }')
@@ -168,6 +181,7 @@ run_case() {
     > "${3}.stdout" 2> "${3}.stderr"
   local status=$?
   printf '%s\n' "${status}" > "${3}.exit"
+  completed_runs=$((completed_runs + 1))
   return "${status}"
 }
 

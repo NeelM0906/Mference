@@ -39,7 +39,7 @@ class BenchmarkSafetyTests(unittest.TestCase):
             (prompts / (name + ".json")).write_text("[]")
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
                         BENCH_CLI=str(self.bin / "model-cli"))
-        for key in ["BENCH_CASES", "WARMUP_CASES", "MIN_FREE_GB", "MIN_FREE_PCT"]:
+        for key in ["BENCH_CASES", "WARMUP_CASES", "MIN_FREE_GB", "MIN_FREE_PCT", "BENCH_SETTLE_SECONDS"]:
             self.env.pop(key, None)
 
     def script(self, name, body):
@@ -87,6 +87,34 @@ class BenchmarkSafetyTests(unittest.TestCase):
         result = self.run_benchmark()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no visible answer", result.stderr)
+
+    def test_fixed_settling_between_runs_is_recorded(self):
+        self.script("sleep", 'echo "$1" >> slept')
+        self.env["BENCH_SETTLE_SECONDS"] = "10"
+        result = self.run_benchmark()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "slept").read_text().splitlines(), ["10"] * 5)
+        system = (self.root / "benchmark-results/test/system/system.txt").read_text()
+        self.assertIn("fixed inter-process idle seconds: 10", system)
+
+    def test_settling_never_retries_a_failed_check(self):
+        self.script("sleep", 'echo "$1" >> slept')
+        self.env["BENCH_SETTLE_SECONDS"] = "10"
+        self.script("model-cli", "touch model-finished; echo answer; echo '[stop=endOfTurn prefill=5tok/1.00s new=1tok decode=0.10s tok/s=10.000]' >&2")
+        self.script("memory_pressure", "if [ -e model-finished ]; then echo 'System-wide memory free percentage: 1%'; else echo 'System-wide memory free percentage: 98%'; fi")
+        result = self.run_benchmark()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("memory preflight failed", result.stderr)
+        self.assertEqual((self.root / "slept").read_text().splitlines(), ["10"])
+        self.assertEqual(len(list(self.root.rglob("*.exit"))), 1)
+
+    def test_invalid_settling_rejected_before_launch(self):
+        for value in ["-1", "1.5", "61", "100", "oops"]:
+            self.env["BENCH_SETTLE_SECONDS"] = value
+            result = self.run_benchmark()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("BENCH_SETTLE_SECONDS", result.stderr)
+            self.assertFalse(list(self.root.rglob("*.exit")))
 
     def test_truncation_and_process_failure_preserve_exit(self):
         for status in [0, 7]:
