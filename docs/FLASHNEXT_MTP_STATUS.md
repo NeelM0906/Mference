@@ -83,9 +83,14 @@ The post-launch work adds an internal `FlashNextMTPGreedyVerifier` reference:
 it checks proposals using ordinary sequential target decode, commits only the
 matching prefix plus a target correction/bonus, and restores target, primer and
 logits together after an interrupted round. Its output contract consumes all
-returned tokens. It is **not** wired to CLI/server generation, does not yet
-generate its own proposals, and makes no speed claim. It deliberately does not
-substitute numerically different batched prefill for exact target verification.
+returned tokens. It can now request native proposals from the aligned primer:
+the target-selected seed is followed by drafts using each preceding draft's
+owned full HC output. The speculative draft branch is restored before target
+verification, so only verified target rows prime committed draft state. The
+target-selected seed is excluded from draft-acceptance counts. This internal
+path is **not** wired to CLI/server generation and makes no speed claim. It
+deliberately does not substitute numerically different batched prefill for
+exact target verification.
 Its synthetic and installed 16-slot validation passes in the
 [post-launch qualification record](POSTLAUNCH_QUALIFICATION.md);
 this component does not clear any upstream-native or default-promotion gate.
@@ -113,7 +118,7 @@ this component does not clear any upstream-native or default-promotion gate.
    it is not an enabled speculative generation path or an upstream numerical
    golden. See the [September 21 record](RELEASE_VALIDATION_2026-09-21.md).
 3. Accelerate target verification against the sequential reference above and
-   integrate accepted-prefix replay/rollback with actual native proposals. Ordinary
+   qualify accepted-prefix replay/rollback in production generation. Ordinary
    chunked prefill is not automatically an exact speculative verifier: its
    numerical and greedy equivalence must be demonstrated for this use.
 4. Extend the reference's passing accepted/rejected proposal, stop-token,

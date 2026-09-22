@@ -12,17 +12,23 @@ reuse latent rows. Synthetic selector and attention gates pass. The approved
 resumable installation completed September 18: 49 verified receipt files,
 180,843,651,789 bytes, at the pinned revision below. Qualification of the new
 kernels on this completed checkpoint now passes the installed resident/16-slot
-correctness gate recorded below; new matched performance remains unmeasured.
+correctness gate recorded below. The later matched low-effort resident result
+is summarized below; default-Max and bounded performance remain separate.
 The pinned text range plan reads 180,796,250,360 bytes and writes
 180,796,414,200 bytes, excluding the vision tower. These planned bytes are not
 a completed-install receipt. Historical measured results below do not validate
 the new kernels or bounded streamed performance. See
 [the dated validation record](../RELEASE_VALIDATION_2026-09-18.md).
 
-Post-launch low-effort attempt: the short resident warmup completed, but the
-next process was stopped by the unchanged headroom check (38% free, 75%
-required). No measured repetitions ran. Current matched performance therefore
-remains open; see [the full record](../POSTLAUNCH_QUALIFICATION.md).
+Post-launch low-effort resident qualification: the initial attempt stopped
+before its second process on the unchanged headroom check (38% free, 75%
+required). A separate fixed-ten-second-settling profile subsequently completed
+all 12 processes and 9/9 measured answers, with every preflight at 98% free.
+Median prefill-plus-decode was 26.68/38.71/66.26 seconds for short/medium/long;
+the matched preserved baseline was 26.63/38.73/68.78 seconds, with identical
+answers. Long generation improves 3.7%; short/medium ranges overlap and decode
+does not improve. This does not qualify default Max effort or smaller Macs. See
+[commands, deviations and full footers](../POSTLAUNCH_QUALIFICATION.md).
 
 | | |
 |---|---|
