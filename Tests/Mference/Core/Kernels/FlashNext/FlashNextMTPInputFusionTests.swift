@@ -3,8 +3,8 @@ import Testing
 @testable import Mference
 
 @Suite struct FlashNextMTPInputFusionTests {
-    @Test(arguments: [64, 2560], [false, true])
-    func fullBundleNormAndSharedProjectionMatchScalarOracle(hidden: Int, int4: Bool) throws {
+    @Test(arguments: [64, 2560], [4, 8, 16])
+    func fullBundleNormAndSharedProjectionMatchScalarOracle(hidden: Int, bits: Int) throws {
         let context = try MetalContext()
         let streams = 4
         let fusion = try FlashNextMTPInputFusion(context: context, hidden: hidden, streams: streams)
@@ -23,23 +23,30 @@ import Testing
                                                     options: .storageModeShared))
         }
         func projection(gain: Float, offset: Int) throws -> FlashNextWeightMatrix {
-            if int4 {
-                var bytes = [UInt8](repeating: 0, count: hidden * hidden / 2)
+            if bits != 16 {
+                let perByte = 8 / bits
+                var bytes = [UInt8](repeating: 0, count: hidden * hidden / perByte)
                 for row in 0..<hidden {
                     let column = (row * 17 + offset) % hidden
                     let flat = row * hidden + column
-                    bytes[flat / 2] |= UInt8(1 << ((flat % 2) * 4))
+                    bytes[flat / perByte] |= UInt8(1 << ((flat % perByte) * bits))
                 }
                 let groups = hidden * hidden / 64
-                return .int4(weights: try buffer(bytes), weightsOffset: 0,
-                    scales: try buffer([UInt16](repeating: Quantization.bf16Bits(gain), count: groups)),
-                    scalesOffset: 0, biases: try buffer([UInt16](repeating: 0, count: groups)), biasesOffset: 0)
+                let w = try buffer([UInt8](repeating: 0, count: 16) + bytes)
+                let s = try buffer([UInt16(0)] + [UInt16](repeating: Quantization.bf16Bits(gain), count: groups))
+                let b = try buffer([UInt16(0)] + [UInt16](repeating: 0, count: groups))
+                if bits == 4 {
+                    return .int4(weights: w, weightsOffset: 16, scales: s, scalesOffset: 2,
+                                 biases: b, biasesOffset: 2)
+                }
+                return .int8(weights: w, weightsOffset: 16, scales: s, scalesOffset: 2,
+                             biases: b, biasesOffset: 2)
             }
             var values = [UInt16](repeating: 0, count: hidden * hidden)
             for row in 0..<hidden {
                 values[row * hidden + (row * 17 + offset) % hidden] = Quantization.bf16Bits(gain)
             }
-            return .bf16(buffer: try buffer(values), offset: 0)
+            return .bf16(buffer: try buffer([UInt16(0)] + values), offset: 2)
         }
         let inputE = try buffer(embedding)
         let inputH = try buffer(hc)
@@ -60,12 +67,12 @@ import Testing
 
         // Independent scalar transcription: one RMS reduction over H*D,
         // then a shared projection per stream and a broadcast embedding add.
-        // Match the runtime's FP16 intermediate stores, not unrounded inputs.
-        func norm(_ values: [Float16], _ weights: [UInt16]) -> [Float16] {
+        // FP32 intermediates; only the final fused bundle is stored as FP16.
+        func norm(_ values: [Float16], _ weights: [UInt16]) -> [Float] {
             var sum: Double = 0
             for value in values { sum += Double(value) * Double(value) }
             let inverse = Float(1 / (sum / Double(values.count) + 1e-6).squareRoot())
-            return zip(values, weights).map { Float16(Float($0) * inverse * Quantization.bf16ToFloat($1)) }
+            return zip(values, weights).map { Float($0) * inverse * Quantization.bf16ToFloat($1) }
         }
         let normalizedE = norm(embedding, normE)
         let normalizedH = norm(hc, normH)
@@ -76,8 +83,8 @@ import Testing
                 let eIndex: Int = (row * 17 + 7) % hidden
                 let hColumn: Int = (row * 17 + 3) % hidden
                 let hIndex: Int = stream * hidden + hColumn
-                let e = Float16(Float(normalizedE[eIndex]) * Float(0.5))
-                let h = Float16(Float(normalizedH[hIndex]) * Float(0.25))
+                let e = normalizedE[eIndex] * Float(0.5)
+                let h = normalizedH[hIndex] * Float(0.25)
                 let expected = Float16(Float(e) + Float(h))
                 let value = actual[stream * hidden + row]
                 #expect(value.isFinite)
@@ -91,6 +98,6 @@ import Testing
                                           count: embedding.count)) == embedding)
         #expect(Array(UnsafeBufferPointer(start: inputH.contents().assumingMemoryBound(to: Float16.self),
                                           count: hc.count)) == hc)
-        print("[Flash-Next MTP fusion] hidden=\(hidden) int4=\(int4) maxAbs=\(maxError)")
+        print("[Flash-Next MTP fusion] hidden=\(hidden) bits=\(bits) maxAbs=\(maxError)")
     }
 }

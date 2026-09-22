@@ -79,8 +79,9 @@ byte-exact. Installed aligned-checkpoint evidence is separate. See the
   screen nor the earlier 12-task screen or UI checks is
   a broad quality claim or support evidence for hardware not tested here.
 
-The GLM installation blocker is resolved; smaller-memory hardware remains an
-external qualification requirement. Kernel optimizations must pass correctness and
+The GLM installation blocker is resolved. Per the September 22 release-scope
+decision, physical 16/24-GiB qualification is not a blocker for this release;
+those profiles remain unqualified. Kernel optimizations must pass correctness and
 repeatable matched measurements before promotion. Never infer 24 GB support
 from a 256 GB host with a reduced expert-slot setting.
 

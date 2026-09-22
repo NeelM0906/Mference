@@ -13,6 +13,10 @@ quality or faster completed answers.
 
 ## Checkpoints
 
+The September 22 update does not wait for physical 16/24-GiB evaluations.
+New qualification claims below are limited to the measured host and settings;
+smaller-Mac profiles are not newly qualified by reducing cache slots on it.
+
 Sizes are decimal GB of installed files, not required RAM or download budgets.
 Local receipt totals were inspected September 18; MiniCPM uses the linked
 family's planning evidence where no completed current local install exists.

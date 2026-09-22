@@ -30,35 +30,26 @@ final class FlashNextMTPDraftRunner {
     private let maxContext: Int
     private let matvec: FlashNextMatVec
     private let fusion: FlashNextMTPInputFusion
-    private let hc: FlashNextHyperConnections
-    private let hcScratch: FlashNextHyperConnections.Scratch
     private let indexer: FlashNextIndexer
     private let indexScratch: FlashNextIndexer.Scratch
     private let indexCache: FlashNextIndexer.LayerCache
-    private let attention: FlashNextAttention
-    private let attentionScratch: FlashNextAttention.Scratch
-    private let kv: FlashNextAttention.KVCache
-    private let moe: MoE
+    private let attention: FlashNextMTPAttention
+    private let mixer: FlashNextMTPMixer
+    private let moe: FlashNextMTPMoE
+    private let projection: FlashNextMTPFloat32Projection
+    private let narrow: MTLComputePipelineState
+    private let indexInput: MTLBuffer
     private let router: FlashNextMoE
-    private let elementwise: Elementwise
-    private let silu: MTLComputePipelineState
     private let resident: ResidentExpertStreamer?
     private let streamed: PreadExpertStreamer?
     private let hyper: MTLBuffer
     private let mixed: MTLBuffer
     private let block: MTLBuffer
     private let routed: MTLBuffer
-    private let acts: MTLBuffer
-    private let zero: MTLBuffer
     private let routerLogits: MTLBuffer
     private let routerScale: MTLBuffer
     private let routeIDs: MTLBuffer
     private let routeWeights: MTLBuffer
-    private let sharedGate: MTLBuffer
-    private let sharedUp: MTLBuffer
-    private let sharedAct: MTLBuffer
-    private let sharedOutput: MTLBuffer
-    private let sharedScalar: MTLBuffer
     private let head: FlashNextWeightMatrix
     private let embedInt4: EmbedLookupInt4
     private let embedBF16: MTLComputePipelineState
@@ -85,7 +76,7 @@ final class FlashNextMTPDraftRunner {
               fn.indexerBlockBudget > 0, fn.indexerBlockBudget <= FlashNextIndexer.maxBlockBudget,
               fn.indexerHeadDim <= FlashNextIndexer.maxHeadDim,
               rotary >= 0, rotary.isMultiple(of: 2), rotary <= fn.indexerHeadDim,
-              rotary <= cfg.fullHeadDim, cfg.numFullKVHeads > 0,
+              rotary <= cfg.fullHeadDim, cfg.fullHeadDim <= 256, cfg.numFullKVHeads > 0,
               cfg.numHeads.isMultiple(of: cfg.numFullKVHeads) else {
             throw FlashNextForwardRunnerError.invalidConfiguration("unsupported Flash-Next native MTP geometry")
         }
@@ -121,31 +112,25 @@ final class FlashNextMTPDraftRunner {
         }
         let int4 = try DequantInt4GEMV(context: context, additionalShapes: cfg.decodeInt4GEMVShapes)
         matvec = try FlashNextMatVec(context: context, int4: int4, int8Columns: d)
-        fusion = try FlashNextMTPInputFusion(context: context, hidden: d, streams: fn.hcCount)
-        elementwise = try Elementwise(context: context)
-        hc = try FlashNextHyperConnections(context: context, rms: RMSNorm(context: context),
-            matVec: matvec, hidden: d, hcCount: fn.hcCount, lowRank: fn.hcLowRank, eps: 1e-6)
-        hcScratch = try hc.makeScratch(device: context.device, rows: 1)
+        fusion = try FlashNextMTPInputFusion(context: context, hidden: d, streams: fn.hcCount,
+            normWeightsFloat32: true, outputFloat32: true)
+        projection = try FlashNextMTPFloat32Projection(context: context)
+        narrow = try context.pipeline("flashnext_mtp_float_to_half")
         indexer = try FlashNextIndexer(context: context, matVec: matvec,
             geometry: .init(numHeads: fn.indexerNumHeads, numKVHeads: fn.indexerNumKVHeads,
                 headDim: fn.indexerHeadDim, compressRatio: fn.indexerCompressRatio,
-                blockBudget: fn.indexerBlockBudget, rotaryDim: rotary, theta: Float(cfg.fullRopeTheta), eps: 1e-6))
+                blockBudget: fn.indexerBlockBudget, rotaryDim: rotary, theta: Float(cfg.fullRopeTheta), eps: 1e-6), normWeightsFloat32: true)
         indexScratch = try indexer.makeScratch(device: context.device, rows: 1, maxTokens: maxContext)
         indexCache = try indexer.makeLayerCache(device: context.device, maxTokens: maxContext)
-        attention = FlashNextAttention(context: context, matVec: matvec, elementwise: elementwise,
-            epilogue: try PrefillQKVEpilogue(context: context), attention: try Attention(context: context),
-            prefillAttention: try PrefillAttention(context: context),
+        attention = try FlashNextMTPAttention(context: context,
             geometry: .init(hidden: d, numHeads: cfg.numHeads, numKVHeads: cfg.numFullKVHeads,
                 headDim: cfg.fullHeadDim, rotaryDim: rotary, theta: Float(cfg.fullRopeTheta),
-                eps: 1e-6, scale: 1 / Float(cfg.fullHeadDim).squareRoot()))
-        attentionScratch = try attention.makeScratch(device: context.device, rows: 1,
-            maxSelected: indexer.maxSelected, gatherSlots: 1)
-        kv = try attention.makeKVCache(device: context.device, maxTokens: maxContext)
-        moe = try MoE(context: context, siluActivation: true, specializedD: UInt32(d),
-            specializedF: UInt32(cfg.moeIntermediateSize), specializedNumExperts: UInt32(cfg.numExperts),
-            specializedTopK: UInt32(cfg.topKExperts))
+                eps: 1e-6, scale: 1 / Float(cfg.fullHeadDim).squareRoot()), maxContext: maxContext, float32IO: true)
+        mixer = try FlashNextMTPMixer(context: context, hidden: d, streams: fn.hcCount,
+            rank: fn.hcLowRank, vocab: cfg.vocabSize)
+        moe = try FlashNextMTPMoE(context: context, hidden: d, intermediate: cfg.moeIntermediateSize,
+            sharedIntermediate: cfg.intermediateSize, topK: cfg.topKExperts)
         router = try FlashNextMoE(context: context, routerTopK: cfg.topKExperts)
-        silu = try context.pipeline("silu_mul_fp16")
         head = headMatrix
         embedInt4 = try EmbedLookupInt4(context: context)
         embedBF16 = try context.pipeline("flashnext_embed_row_bf16")
@@ -162,25 +147,18 @@ final class FlashNextMTPDraftRunner {
                 options: shared ? .storageModeShared : .storageModePrivate) else { throw MetalError.noDevice }
             return b
         }
-        hyper = try buffer(cfg.residualStreamWidth)
+        hyper = try buffer(cfg.residualStreamWidth, stride: 4)
         embeddingRow = try buffer(d)
-        mixed = try buffer(d)
-        block = try buffer(d)
-        routed = try buffer(d)
-        acts = try buffer(cfg.topKExperts * cfg.moeIntermediateSize)
-        zero = try buffer(d, shared: true)
-        memset(zero.contents(), 0, zero.length)
+        indexInput = try buffer(d)
+        mixed = try buffer(d, stride: 4)
+        block = try buffer(d, stride: 4)
+        routed = try buffer(d, stride: 4)
         routerLogits = try buffer(cfg.numExperts, stride: 4)
         routerScale = try buffer(cfg.numExperts, shared: true)
         routerScale.contents().assumingMemoryBound(to: UInt16.self)
             .update(repeating: Quantization.bf16Bits(1), count: cfg.numExperts)
         routeIDs = try buffer(cfg.topKExperts, stride: 4, shared: true)
         routeWeights = try buffer(cfg.topKExperts)
-        sharedGate = try buffer(cfg.intermediateSize)
-        sharedUp = try buffer(cfg.intermediateSize)
-        sharedAct = try buffer(cfg.intermediateSize)
-        sharedOutput = try buffer(d)
-        sharedScalar = try buffer(1, stride: 4)
     }
 
     func reset() {
@@ -268,16 +246,18 @@ final class FlashNextMTPDraftRunner {
             captures[name] = (copy, fp32)
         }
         dirty = true
+        try capture("embedding", embedding, on: cb)
+        try capture("target_hidden", targetHidden, on: cb)
         fusion.encode(commandBuffer: cb, embedding: embedding, targetHidden: targetHidden,
             embeddingNorm: weights.embeddingNorm.buffer, embeddingNormOffset: Int(weights.embeddingNorm.offset),
             hiddenNorm: weights.hiddenNorm.buffer, hiddenNormOffset: Int(weights.hiddenNorm.offset),
             embeddingProjection: weights.embeddingProjection, hiddenProjection: weights.hiddenProjection, output: hyper)
-        try capture("fusion", hyper, on: cb)
-        hc.encodeMix(commandBuffer: cb, weights: weights.attentionHC, scratch: hcScratch, hyper: hyper, mixed: mixed, rows: 1)
-        try capture("attention_mix", mixed, on: cb)
-        hc.encodeInjectGate(commandBuffer: cb, weights: weights.attentionHC, scratch: hcScratch, rows: 1)
+        try capture("fusion", hyper, on: cb, fp32: true)
+        mixer.encodeMix(commandBuffer: cb, weights: weights.attentionHC, hyper: hyper, output: mixed)
+        try capture("attention_mix", mixed, on: cb, fp32: true)
+        encodeNarrow(commandBuffer: cb, input: mixed, output: indexInput, count: d)
         indexer.encodeProjection(commandBuffer: cb, weight: weights.indexerProjection,
-            x: mixed, xOffset: 0, hidden: d, scratch: indexScratch, rows: 1)
+            x: indexInput, xOffset: 0, hidden: d, scratch: indexScratch, rows: 1)
         indexer.encodePrepare(commandBuffer: cb,
             qNorm: weights.indexerQNorm.buffer, qNormOffset: Int(weights.indexerQNorm.offset),
             kNorm: weights.indexerKNorm.buffer, kNormOffset: Int(weights.indexerKNorm.offset),
@@ -288,30 +268,18 @@ final class FlashNextMTPDraftRunner {
             indexer.encodeScores(commandBuffer: cb, scratch: indexScratch, cache: indexCache, rows: 1, startPosition: position)
             indexer.encodeSelection(commandBuffer: cb, scratch: indexScratch, rows: 1, startPosition: position)
         }
-        attention.encodeProjectAndCache(commandBuffer: cb, weights: weights.attention, scratch: attentionScratch,
-            cache: kv, x: mixed, xOffset: 0, rows: 1, startPosition: position)
-        if contiguous {
-            attention.encodeAttendContiguousRow(commandBuffer: cb, scratch: attentionScratch, cache: kv, row: 0, visibleCount: count)
-        } else {
-            indexer.encodeGatherKV(commandBuffer: cb, kCache: kv.keys, kCacheOffset: 0, vCache: kv.values, vCacheOffset: 0,
-                scratch: indexScratch, selectionRow: 0, kOut: attentionScratch.gatheredK, kOutOffset: 0,
-                vOut: attentionScratch.gatheredV, vOutOffset: 0, kvDim: attention.geometry.kvDim, count: count)
-            attention.encodeAttendRow(commandBuffer: cb, scratch: attentionScratch, row: 0, slot: 0, selectedCount: count)
-        }
-        attention.encodeGateAndProject(commandBuffer: cb, weights: weights.attention, scratch: attentionScratch,
-            out: block, outOffset: 0, rows: 1)
-        try capture("attention", block, on: cb)
-        hc.encodeInjectAccumulate(commandBuffer: cb, scratch: hcScratch, hyper: hyper, block: block, rows: 1)
-        try capture("post_attention", hyper, on: cb)
-        hc.encodeMix(commandBuffer: cb, weights: weights.mlpHC, scratch: hcScratch, hyper: hyper, mixed: mixed, rows: 1)
-        try capture("mlp_mix", mixed, on: cb)
-        hc.encodeInjectGate(commandBuffer: cb, weights: weights.mlpHC, scratch: hcScratch, rows: 1)
-        matvec.encode(commandBuffer: cb, matrix: weights.router, x: mixed, y: routerLogits,
-            rows: cfg.numExperts, cols: d, outputFloat32: true)
+        attention.encode(commandBuffer: cb, weights: weights.attention, x: mixed, output: block,
+            position: position, selected: indexScratch.selection, selectedCount: count, contiguous: contiguous)
+        try capture("attention", block, on: cb, fp32: true)
+        mixer.encodeInject(commandBuffer: cb, hyper: hyper, block: block)
+        try capture("post_attention", hyper, on: cb, fp32: true)
+        mixer.encodeMix(commandBuffer: cb, weights: weights.mlpHC, hyper: hyper, output: mixed)
+        try capture("mlp_mix", mixed, on: cb, fp32: true)
+        projection.encode(commandBuffer: cb, matrix: weights.router, x: mixed, out: routerLogits,
+            rows: cfg.numExperts, columns: d)
         router.encodeRouterSelect(commandBuffer: cb, logits: routerLogits, perExpertScale: routerScale,
             outIndices: routeIDs, outWeights: routeWeights, numExperts: UInt32(cfg.numExperts))
         try capture("router", routerLogits, on: cb, fp32: true)
-        encodeShared(commandBuffer: cb)
         try finish(cb)
         try didPrepareAttention?()
         try Task.checkCancellation()
@@ -327,21 +295,12 @@ final class FlashNextMTPDraftRunner {
             blobs = try streamed.loadExpertsCached(experts: experts).map { ($0.buffer, Int($0.offset)) }
         } else { throw failure("missing draft expert backend") }
         let tail = try command()
-        let args = moe.makeReusedRoutedArgumentBuffer(routedBlobs: blobs, topK: UInt32(k))
-        moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: tail, routedArgBuffer: args, routedBlobs: blobs,
-            routedOffsets: weights.expertOffsets, x: mixed, acts: acts,
-            d: UInt32(d), f: UInt32(cfg.moeIntermediateSize), topK: UInt32(k))
-        moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: tail, routedArgBuffer: args, routedBlobs: blobs,
-            routedOffsets: weights.expertOffsets, acts: acts, routingWeights: routeWeights,
-            residual: zero, y: routed, d: UInt32(d), f: UInt32(cfg.moeIntermediateSize), topK: UInt32(k))
-        elementwise.encodeResidualAdd(commandBuffer: tail, hidden: routed, delta: sharedOutput, count: d)
-        try capture("moe", routed, on: tail)
-        hc.encodeInjectAccumulate(commandBuffer: tail, scratch: hcScratch, hyper: hyper, block: routed, rows: 1)
-        hc.encodeMix(commandBuffer: tail, weights: weights.mixer, scratch: hcScratch, hyper: hyper, mixed: mixed, rows: 1)
-        matvec.encode(commandBuffer: tail, matrix: head, x: mixed, y: logits, rows: cfg.vocabSize, cols: d)
-        guard let blit = tail.makeBlitCommandEncoder() else { throw failure("cannot capture draft hidden row") }
-        blit.copy(from: hyper, sourceOffset: 0, to: owned, destinationOffset: 0, size: owned.length)
-        blit.endEncoding()
+        moe.encode(commandBuffer: tail, weights: weights, blobs: blobs, x: mixed,
+            routerLogits: routerLogits, routeIDs: routeIDs, output: routed)
+        try capture("moe", routed, on: tail, fp32: true)
+        mixer.encodeInject(commandBuffer: tail, hyper: hyper, block: routed)
+        mixer.encode(commandBuffer: tail, weights: weights.mixer, head: head, hyper: hyper, output: logits)
+        encodeNarrow(commandBuffer: tail, input: hyper, output: owned, count: cfg.residualStreamWidth)
         try finish(tail)
         position += 1
         dirty = false
@@ -354,24 +313,14 @@ final class FlashNextMTPDraftRunner {
         return Output(processedRows: position, hidden: owned)
     }
 
-    private func encodeShared(commandBuffer cb: MTLCommandBuffer) {
-        let d = model.config.hiddenSize, f = model.config.intermediateSize
-        matvec.encode(commandBuffer: cb, matrix: weights.sharedGateProjection, x: mixed, y: sharedGate, rows: f, cols: d)
-        matvec.encode(commandBuffer: cb, matrix: weights.sharedUp, x: mixed, y: sharedUp, rows: f, cols: d)
-        if let enc = cb.makeComputeCommandEncoder() {
-            enc.setComputePipelineState(silu)
-            enc.setBuffer(sharedGate, offset: 0, index: 0)
-            enc.setBuffer(sharedUp, offset: 0, index: 1)
-            enc.setBuffer(sharedAct, offset: 0, index: 2)
-            var count = UInt32(f)
-            enc.setBytes(&count, length: 4, index: 3)
-            enc.dispatchThreads(MTLSize(width: f, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: min(f, min(silu.maxTotalThreadsPerThreadgroup, 256)), height: 1, depth: 1))
-            enc.endEncoding()
-        }
-        matvec.encode(commandBuffer: cb, matrix: weights.sharedDown, x: sharedAct, y: sharedOutput, rows: d, cols: f)
-        matvec.encode(commandBuffer: cb, matrix: weights.sharedGate, x: mixed, y: sharedScalar, rows: 1, cols: d, outputFloat32: true)
-        router.encodeSharedGateScale(commandBuffer: cb, out: sharedOutput, scalar: sharedScalar, count: d)
+    private func encodeNarrow(commandBuffer cb: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer, count: Int) {
+        let enc = cb.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(narrow)
+        enc.setBuffer(input, offset: 0, index: 0)
+        enc.setBuffer(output, offset: 0, index: 1)
+        enc.dispatchThreads(.init(width: count, height: 1, depth: 1),
+            threadsPerThreadgroup: .init(width: min(32, count), height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     private func command() throws -> MTLCommandBuffer {

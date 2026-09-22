@@ -45,6 +45,185 @@ using namespace metal;
 
 constant constexpr float kFlashNextGemvRowsPerThreadgroup = 8;
 
+// MTP fusion keeps normalization and both projections wide. Rounding each
+// intermediate separately is amplified by the draft layer's HC gates.
+constant bool FC_MTP_NORM_F32 [[function_constant(401)]];
+kernel void flashnext_mtp_norm_f32(
+    device const half* x [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    float sum = 0;
+    for (uint i = lane; i < n; i += 32) sum += float(x[i]) * float(x[i]);
+    float scale = rsqrt(simd_sum(sum) / float(n) + eps);
+    for (uint i = lane; i < n; i += 32)
+        out[i] = float(x[i]) * scale * ((is_function_constant_defined(FC_MTP_NORM_F32) && FC_MTP_NORM_F32)
+            ? ((device const float*)weight)[i] : float(weight[i]));
+}
+
+kernel void flashnext_mtp_project_f32(
+    device const uchar* w [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const float* x [[buffer(3)]], device float* out [[buffer(4)]],
+    constant uint& n [[buffer(5)]], constant uint& bits [[buffer(6)]],
+    uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    float sum = 0;
+    for (uint i = lane; i < n; i += 32) {
+        ulong index = ulong(row) * n + i;
+        float value;
+        if (bits == 16) value = float(((device const bfloat*)w)[index]);
+        else {
+            uint q = bits == 4 ? ((w[index / 2] >> ((index % 2) * 4)) & 15) : w[index];
+            value = float(q) * float(scales[index / 64]) + float(biases[index / 64]);
+        }
+        sum = fma(value, x[i], sum);
+    }
+    sum = simd_sum(sum);
+    if (lane == 0) out[row] = sum;
+}
+
+kernel void flashnext_mtp_add_f32(
+    device const float* embedding [[buffer(0)]], device const float* hidden [[buffer(1)]],
+    device half* out [[buffer(2)]], constant uint& d [[buffer(3)]],
+    uint i [[thread_position_in_grid]]) {
+    out[i] = half(embedding[i % d] + hidden[i]);
+}
+
+kernel void flashnext_mtp_add_wide(
+    device const float* embedding [[buffer(0)]], device const float* hidden [[buffer(1)]],
+    device float* out [[buffer(2)]], constant uint& d [[buffer(3)]],
+    uint i [[thread_position_in_grid]]) { out[i] = embedding[i % d] + hidden[i]; }
+
+kernel void flashnext_mtp_half_to_float(device const half* x [[buffer(0)]],
+    device float* y [[buffer(1)]], uint i [[thread_position_in_grid]]) { y[i] = float(x[i]); }
+
+kernel void flashnext_mtp_float_to_half(device const float* x [[buffer(0)]],
+    device half* y [[buffer(1)]], uint i [[thread_position_in_grid]]) { y[i] = half(x[i]); }
+
+kernel void flashnext_mtp_group_norm_f32(device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]], device float* out [[buffer(2)]],
+    constant uint& d [[buffer(3)]], uint group [[thread_position_in_grid]]) {
+    uint base = group * d;
+    float sum = 0;
+    for (uint i = 0; i < d; ++i) sum += float(x[base + i]) * float(x[base + i]);
+    float inv = rsqrt(sum / float(d) + 1e-6f);
+    for (uint i = 0; i < d; ++i) out[base + i] = float(x[base + i]) * inv * weight[base + i];
+}
+
+kernel void flashnext_mtp_lowrank_f32(device float* x [[buffer(0)]],
+    constant uint& streams [[buffer(1)]], uint i [[thread_position_in_grid]]) {
+    float value = x[i] / float(streams);
+    x[i] = value / (1.0f + exp(-value));
+}
+
+kernel void flashnext_mtp_mix_f32(device const float* normed [[buffer(0)]],
+    device const float* gates [[buffer(1)]], device float* out [[buffer(2)]],
+    constant uint& d [[buffer(3)]], constant uint& streams [[buffer(4)]],
+    uint i [[thread_position_in_grid]]) {
+    float sum = 0;
+    for (uint h = 0; h < streams; ++h) {
+        uint j = h * d + i;
+        sum += normed[j] / (1.0f + exp(-gates[j]));
+    }
+    out[i] = sum / float(streams);
+}
+
+kernel void flashnext_mtp_inject_f32(device float* hyper [[buffer(0)]],
+    device const float* block [[buffer(1)]], device const float* raw [[buffer(2)]],
+    constant uint& d [[buffer(3)]], constant uint& streams [[buffer(4)]],
+    uint i [[thread_position_in_grid]]) {
+    float gate = 2.0f / (1.0f + exp(-raw[i / d] / float(streams)));
+    hyper[i] += block[i % d] * gate;
+}
+
+kernel void flashnext_mtp_silu_mul_f32(device const float* gate [[buffer(0)]],
+    device const float* up [[buffer(1)]], device float* out [[buffer(2)]],
+    uint i [[thread_position_in_grid]]) { out[i] = gate[i] / (1.0f + exp(-gate[i])) * up[i]; }
+
+kernel void flashnext_mtp_moe_sum_f32(device const float* outputs [[buffer(0)]],
+    device const float* logits [[buffer(1)]], device const uint* ids [[buffer(2)]],
+    device const float* shared [[buffer(3)]], device const float* sharedGate [[buffer(4)]],
+    device float* out [[buffer(5)]], constant uint& d [[buffer(6)]],
+    constant uint& k [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+    float maximum = -INFINITY;
+    for (uint j = 0; j < k; ++j) maximum = max(maximum, logits[ids[j]]);
+    float denominator = 0, sum = 0;
+    for (uint j = 0; j < k; ++j) denominator += exp(logits[ids[j]] - maximum);
+    for (uint j = 0; j < k; ++j) sum += outputs[j * d + i] * (exp(logits[ids[j]] - maximum) / denominator);
+    out[i] = sum + shared[i] / (1.0f + exp(-sharedGate[0]));
+}
+
+static inline void flashnext_mtp_rope_f32(device float* row, uint rotary, uint position, float theta) {
+    for (uint i = 0; i < rotary / 2; ++i) {
+        float angle = float(position) / pow(theta, float(2 * i) / float(rotary));
+        float a = row[i], b = row[i + rotary / 2];
+        row[i] = a * cos(angle) - b * sin(angle);
+        row[i + rotary / 2] = b * cos(angle) + a * sin(angle);
+    }
+}
+
+kernel void flashnext_mtp_prepare_q_f32(
+    device const float* packed [[buffer(0)]], device const float* norm [[buffer(1)]],
+    device float* query [[buffer(2)]], constant uint& d [[buffer(3)]],
+    constant uint& rotary [[buffer(4)]], constant uint& position [[buffer(5)]],
+    constant float& theta [[buffer(6)]], constant float& eps [[buffer(7)]], uint h [[thread_position_in_grid]]) {
+    device const float* x = packed + h * 2 * d;
+    device float* y = query + h * d;
+    float sum = 0;
+    for (uint i = 0; i < d; ++i) sum += x[i] * x[i];
+    float inv = rsqrt(sum / float(d) + eps);
+    for (uint i = 0; i < d; ++i) y[i] = x[i] * inv * norm[i];
+    flashnext_mtp_rope_f32(y, rotary, position, theta);
+}
+
+kernel void flashnext_mtp_prepare_k_f32(
+    device float* key [[buffer(0)]], device const float* norm [[buffer(1)]],
+    constant uint& d [[buffer(2)]], constant uint& rotary [[buffer(3)]],
+    constant uint& position [[buffer(4)]], constant float& theta [[buffer(5)]], constant float& eps [[buffer(6)]],
+    uint h [[thread_position_in_grid]]) {
+    device float* y = key + h * d;
+    float sum = 0;
+    for (uint i = 0; i < d; ++i) sum += y[i] * y[i];
+    float inv = rsqrt(sum / float(d) + eps);
+    for (uint i = 0; i < d; ++i) y[i] = y[i] * inv * norm[i];
+    flashnext_mtp_rope_f32(y, rotary, position, theta);
+}
+
+// Correctness-oriented native draft attention: all Q/K/V/cache/softmax/gate
+// arithmetic stays FP32. The target's optimized FP16 attention is untouched.
+kernel void flashnext_mtp_attend_f32(
+    device const float* query [[buffer(0)]], device const float* packed [[buffer(1)]],
+    device const float* keys [[buffer(2)]], device const float* values [[buffer(3)]],
+    device const uint* selected [[buffer(4)]], device float* out [[buffer(5)]],
+    constant uint& d [[buffer(6)]], constant uint& heads [[buffer(7)]],
+    constant uint& kvHeads [[buffer(8)]], constant uint& count [[buffer(9)]],
+    constant uint& contiguous [[buffer(10)]], constant float& scale [[buffer(11)]],
+    uint h [[thread_position_in_grid]]) {
+    if (d > 256 || h >= heads) return;
+    float acc[256];
+    for (uint j = 0; j < d; ++j) acc[j] = 0;
+    float maximum = -INFINITY, denominator = 0;
+    uint kv = h / (heads / kvHeads);
+    for (uint i = 0; i < count; ++i) {
+        uint position = contiguous ? i : selected[i];
+        ulong base = (ulong(position) * kvHeads + kv) * d;
+        float score = 0;
+        for (uint j = 0; j < d; ++j) score = fma(query[h * d + j], keys[base + j], score);
+        score *= scale;
+        float nextMaximum = max(maximum, score);
+        float prior = exp(maximum - nextMaximum), weight = exp(score - nextMaximum);
+        for (uint j = 0; j < d; ++j) acc[j] = acc[j] * prior + weight * values[base + j];
+        denominator = denominator * prior + weight;
+        maximum = nextMaximum;
+    }
+    for (uint j = 0; j < d; ++j) {
+        float gate = 1.0f / (1.0f + exp(-packed[h * 2 * d + d + j]));
+        out[h * d + j] = acc[j] / denominator * gate;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BF16 GEMV
 //

@@ -1,8 +1,10 @@
 # Post-launch qualification — September 21, 2026
 
 This work does not retag or replace the published v0.1.0 source archive.
-Performance qualification, checkpoint-quality promotion, native MTP enablement
-and physical smaller-Mac qualification are separate gates.
+Performance qualification, checkpoint-quality promotion and native MTP
+enablement are separate gates. Per the September 22 release-scope decision,
+physical 16/24-GiB qualification is **not a blocker for this release**. Those
+profiles remain unqualified; no claim of fit or measured performance is added.
 
 ## Machine and protocol
 
@@ -443,7 +445,9 @@ gates are local, not inferred from CI's ungated runs.
 
 This host supplies only 256-GiB M3 Ultra evidence. Neither limited expert slots,
 CPU RSS nor a software memory cap qualifies physical 16/24-GiB hardware.
-No smaller Mac is attached to this task. Qualification still requires actual
+No smaller Mac is attached to this task. This is explicitly outside the current
+release-blocking scope, per the September 22 user decision. A future claim of
+smaller-Mac qualification still requires actual
 target-hardware install/first-use, the frozen benchmark, pressure/swap checks,
 streaming and cancellation/recovery, and declared model/context/cache settings.
 Do not claim every checkpoint fits every smaller tier: dense Swift weights
