@@ -10,31 +10,47 @@ extension GemmaQATKernelTests {
         func bf16(_ values: [Float]) -> [UInt16] {
             values.map { UInt16(truncatingIfNeeded: $0.bitPattern >> 16) }
         }
-        let weights = (0..<experts * d).map { i -> Float in
-            Float(((i / d) * 7 + (i % d) * 3) % 31 - 15) / 128
+        let weights: [Float] = (0..<(experts * d)).map { i in
+            let pattern = (i / d) * 7 + (i % d) * 3
+            return Float(pattern % 31 - 15) / 128
         }
-        let effective = (0..<d).map { col in
-            sourceFP16 ? Float(Float16((1 + Float(col % 3) / 3) / Float(d).squareRoot()))
-                : 1 + Float(col % 3) / 4
+        let rootD = Float(d).squareRoot()
+        let effective: [Float] = (0..<d).map { col in
+            let columnTerm = Float(col % 3)
+            if sourceFP16 {
+                return Float(Float16((1 + columnTerm / 3) / rootD))
+            }
+            return 1 + columnTerm / 4
         }
-        let gains = (0..<experts).map { 0.5 + Float($0 % 4) / 2 }
-        let inputs = (0..<rows).map { row in
-            (0..<d).map { col in Float16(Float((col * 3 + row * 5) % 17 - 8) / 32) }
+        let gains: [Float] = (0..<experts).map { expert in
+            0.5 + Float(expert % 4) / 2
         }
-        let expected: [[Float]] = inputs.map { input in
-            (0..<experts).map { expert in
-                let sum = (0..<d).reduce(0.0) { sum, col in
-                    let x = Double(input[col]) * Double(effective[col])
-                    return sum + Double(weights[expert * d + col]) * (sourceFP16 ? Double(Float16(x)) : x)
-                }
-                return sourceFP16 ? Float(Float16(sum)) : Float(sum)
+        let inputs: [[Float16]] = (0..<rows).map { row in
+            (0..<d).map { col in
+                let pattern = (col * 3 + row * 5) % 17 - 8
+                return Float16(Float(pattern) / 32)
             }
         }
+        func expectedLogit(expert: Int, input: [Float16]) -> Float {
+            var sum = 0.0
+            for col in 0..<d {
+                let x = Double(input[col]) * Double(effective[col])
+                let projected = sourceFP16 ? Double(Float16(x)) : x
+                sum += Double(weights[expert * d + col]) * projected
+            }
+            return sourceFP16 ? Float(Float16(sum)) : Float(sum)
+        }
+        let expected: [[Float]] = inputs.map { input in
+            (0..<experts).map { expert in expectedLogit(expert: expert, input: input) }
+        }
         let expectedIDs: [[UInt32]] = expected.map { logits in
-            Array((0..<experts).sorted {
-                logits[$0] == logits[$1]
-                    ? (sourceFP16 ? $0 > $1 : $0 < $1) : logits[$0] > logits[$1]
-            }.prefix(8)).map(UInt32.init)
+            let ranked = (0..<experts).sorted { lhs, rhs in
+                if logits[lhs] == logits[rhs] {
+                    return sourceFP16 ? lhs > rhs : lhs < rhs
+                }
+                return logits[lhs] > logits[rhs]
+            }
+            return ranked.prefix(8).map { UInt32($0) }
         }
         let expectedWeights: [[Float]] = zip(expected, expectedIDs).map { logits, ids in
             let exps = ids.map { exp(Double(logits[Int($0)] - logits[Int(ids[0])])) }
@@ -44,10 +60,15 @@ extension GemmaQATKernelTests {
                 return Float(Float16(probability * Double(gains[Int($0)])))
             }
         }
-        let w = try Self.buffer(bf16(weights), context: context, offset: 2)
-        let scaleBits = sourceFP16 ? effective.map { Float16($0).bitPattern } : bf16(effective)
-        let scale = try Self.buffer(scaleBits, context: context, offset: 2)
-        let gain = try Self.buffer(bf16(gains), context: context, offset: 6)
+        let w: MTLBuffer = try Self.buffer(bf16(weights), context: context, offset: 2)
+        let scaleBits: [UInt16]
+        if sourceFP16 {
+            scaleBits = effective.map { Float16($0).bitPattern }
+        } else {
+            scaleBits = bf16(effective)
+        }
+        let scale: MTLBuffer = try Self.buffer(scaleBits, context: context, offset: 2)
+        let gain: MTLBuffer = try Self.buffer(bf16(gains), context: context, offset: 6)
         // Poisoned quantized companions are never read by a BF16 router.
         // Sized for the old INT8 path so its red run is a numerical failure,
         // not an out-of-bounds memory access.
@@ -69,7 +90,8 @@ extension GemmaQATKernelTests {
                 maxTotalThreadsPerThreadgroup: nil,
                 safeMathModule: sourceFP16 ? "moe" : nil)
             for row in 0..<rows {
-                let hidden = try Self.buffer(inputs[row], context: context)
+                let rowInput: [Float16] = inputs[row]
+                let hidden: MTLBuffer = try Self.buffer(rowInput, context: context)
                 let cb = try #require(context.queue.makeCommandBuffer())
                 router.encodeRouterGemma4(commandBuffer: cb, weights: w, weightsOffset: 2,
                     scales: unused, biases: unused, hidden: hidden,
@@ -104,8 +126,13 @@ extension GemmaQATKernelTests {
             }
         }
         let batched = try PrefillRouter(context: context, routerBF16: true, sourceFP16: sourceFP16)
-        let hidden = try Self.buffer(inputs.flatMap { $0 + [Float16](repeating: .nan, count: 8) },
-                                     context: context, offset: 8)
+        var batchedInput: [Float16] = []
+        batchedInput.reserveCapacity(rows * (d + 8))
+        for rowInput in inputs {
+            batchedInput.append(contentsOf: rowInput)
+            batchedInput.append(contentsOf: [Float16](repeating: .nan, count: 8))
+        }
+        let hidden: MTLBuffer = try Self.buffer(batchedInput, context: context, offset: 8)
         let batchIDs = try Self.buffer([UInt32](repeating: .max, count: rows * 8), context: context, offset: 4)
         let batchWeights = try Self.buffer([Float16](repeating: .nan, count: rows * 8), context: context, offset: 6)
         let cb = try #require(context.queue.makeCommandBuffer())

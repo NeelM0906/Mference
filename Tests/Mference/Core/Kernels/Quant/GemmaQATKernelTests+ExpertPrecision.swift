@@ -70,11 +70,15 @@ extension GemmaQATKernelTests {
             let x = try Self.buffer(Array(repeating: input, count: rows).flatMap { $0 }, context: context)
             let quadSum = ((quad[0] + quad[1]) + quad[2]) + quad[3]
             #expect(Double(quadSum) != quad.reduce(0.0) { $0 + Double($1) })
-            let expected = (0..<n).map { row in
-                Float16((0..<(k / 32)).reduce(0.0) { sum, group in
-                    sum + Double(biasValues[row * (k / 32) + group]) * Double(quadSum) * 8
-                })
+            let groups = k / 32
+            func expectedAffine(row: Int) -> Float16 {
+                var total = 0.0
+                for group in 0..<groups {
+                    total += Double(biasValues[row * groups + group]) * Double(quadSum) * 8
+                }
+                return Float16(total)
             }
+            let expected: [Float16] = (0..<n).map { expectedAffine(row: $0) }
             let out = try Self.buffer([Float16](repeating: .nan, count: n * rows), context: context)
             let gemv = try DequantInt4GEMV(context: context, additionalShapes: [(n, k)],
                 groupSize: 32, sourceFP16: true)

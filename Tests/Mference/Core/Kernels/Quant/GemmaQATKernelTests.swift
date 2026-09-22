@@ -20,8 +20,10 @@ import Testing
             self.rows = rows
             self.columns = columns
             self.groupSize = groupSize
-            packed = (0..<(rows * columns / 2)).map { i in
-                UInt8((i * 7 + 3) % 16 | (((i * 11 + 5) % 16) << 4))
+            packed = (0..<(rows * columns / 2)).map { i -> UInt8 in
+                let low = (i * 7 + 3) % 16
+                let high = (i * 11 + 5) % 16
+                return UInt8(low | (high << 4))
             }
             scales = (0..<(rows * columns / groupSize)).map { i in
                 UInt16(Float((i % 7) + 1).bitPattern >> 16) - 6 * 128
