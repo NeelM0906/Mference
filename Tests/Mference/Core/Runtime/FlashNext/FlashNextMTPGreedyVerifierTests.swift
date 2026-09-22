@@ -37,6 +37,54 @@ import Testing
         print("[installed MTP verifier] accepted/rejected/bonus/budget/stop/context/recovery match plain target full logits exactly; sequential reference only")
     }
 
+    @Test func installedChatProposalsMatchPlainTarget() async throws {
+        guard let path = ProcessInfo.processInfo.environment["MFERENCE_FLASHNEXT_GTURBO"] else { return }
+        let url = URL(fileURLWithPath: path)
+        let context = try MetalContext()
+        let model = try Model.load(directoryURL: url, device: context.device, streamingMode: .pread(slotCount: 16))
+        let tokenizer = try await MFTokenizer.load(forModelDirectory: url)
+        let prefix = try tokenizer.encodeChat(messages: [.init(role: .user,
+            content: "Explain in two sentences why coastal wetlands can reduce storm flood damage.")])
+        let capacity = prefix.count + 65
+        let plain = try FlashNextForwardRunner(model: model, context: context, maxContext: capacity)
+        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
+            logitSoftcap: Float(model.config.finalLogitSoftcap))
+        _ = try await plain.prefillChunked(tokens: prefix[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: scratch.logits, onProgress: { _ in })
+        var expected: [Int32] = []
+        var heads: [[UInt16]] = []
+        for _ in 0..<64 {
+            let token = try sample(scratch, context: context, position: plain.continuationPosition)
+            expected.append(token)
+            try await plain.produce(token: token, position: plain.continuationPosition, into: scratch.logits)
+            heads.append(bits(scratch.logits, count: model.config.vocabSize))
+            if tokenizer.stopTokenIDs.contains(token) { break }
+        }
+        try #require(expected.last.map { tokenizer.stopTokenIDs.contains($0) } == true,
+            "the short chat probe must exercise a natural stop within 64 tokens")
+        let verifier = try FlashNextMTPGreedyVerifier(model: model, context: context, maxContext: capacity,
+            policy: .bounded(slots: 16))
+        try await verifier.prefill(prefix)
+        var generated: [Int32] = []
+        var drafted = 0
+        var acceptedDrafts = 0
+        while generated.count < expected.count {
+            let proposals = try verifier.propose(maxDraftTokens: min(3, expected.count - generated.count - 1))
+            drafted += proposals.count - 1
+            let result = try await verifier.verify(proposals, budget: expected.count - generated.count,
+                stopTokens: tokenizer.stopTokenIDs)
+            try #require(!result.tokens.isEmpty && result.accepted >= 1)
+            acceptedDrafts += result.accepted - 1
+            generated += result.tokens
+            #expect(generated == Array(expected.prefix(generated.count)))
+            #expect(bits(verifier.logits, count: model.config.vocabSize) == heads[generated.count - 1])
+            #expect(result.reachedStop == tokenizer.stopTokenIDs.contains(generated.last!))
+        }
+        #expect(acceptedDrafts <= drafted)
+        print("[installed chat MTP probe] prefix=\(prefix.count) target=\(generated.count) drafted=\(drafted) accepted=\(acceptedDrafts) target-seeds-excluded; exact tokens/full heads; diagnostic only, not completed-answer performance")
+        print("[installed chat MTP answer] \(tokenizer.decode(generated, skipSpecialTokens: true))")
+    }
+
     private func verify(model: Model, context: MetalContext, resident: Bool) async throws {
         let verifier = try FlashNextMTPGreedyVerifier(model: model, context: context, maxContext: 48,
             policy: resident ? .resident : .bounded(slots: 16))
