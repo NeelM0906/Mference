@@ -139,9 +139,9 @@ import MferenceValidationSupport
     ])
     func tensorOps2DFullAttentionMatchesReferenceAtTileBoundaries(_ visibleKeys: Int) throws {
         let context = try MetalContext()
-        // Hosted CI has no Apple10 GPU, so it returns without dispatching this
-        // kernel. Run this suite on Apple10 before changing the TensorOps path.
-        guard context.device.supportsApple10TensorOps else { return }
+        // Below MSL 4.0 the pipeline is absent and this returns without
+        // dispatching. Run this suite on macOS 26 before changing the TensorOps path.
+        guard try PrefillAttention(context: context).tensorOpsPipelineAvailable else { return }
         let fixture = Self.makeFixture(start: visibleKeys - 1,
                                        chunk: 1,
                                        window: 0,
@@ -185,10 +185,78 @@ import MferenceValidationSupport
                 "preferred TensorOps maxAbs=\(maxAbs) rel=\(rel)")
         #expect(rel <= 2e-2,
                 "preferred TensorOps rel=\(rel) maxAbs=\(maxAbs)")
-        if !context.device.supportsApple10TensorOps {
+        if try !PrefillAttention(context: context).tensorOpsPipelineAvailable {
             let baseline = try Self.runKernel(fixture, path: .causalTiled)
             #expect(preferred == baseline)
         }
+    }
+
+    /// TensorOps reads every key from zero, so a window that hides some of
+    /// them must take the tiled kernel, which honours it.
+    @Test func tensorOpsPathRejectsAClippingWindow() throws {
+        let context = try MetalContext()
+        let prefill = try PrefillAttention(context: context)
+        let clipped = Self.makeFixture(start: 96, chunk: 4, window: 64, seed: 0xA873,
+                                       headDim: 512, qHeads: 16, kvHeads: 2)
+        let run = try Self.runKernel(clipped, context: context, prefill: prefill,
+                                     path: .fullTensorOps2DValidityV2)
+        #expect(!run.usedTensorOps)
+        let reference = Self.reference(clipped)
+        let maxAbs = RelError.maxAbsDiff(run.values, reference)
+        #expect(maxAbs <= 2e-2, "clipping window maxAbs=\(maxAbs)")
+
+        // A window that covers every key is full visibility.
+        let covering = Self.makeFixture(start: 96, chunk: 4, window: 100, seed: 0xA874,
+                                        headDim: 512, qHeads: 16, kvHeads: 2)
+        let full = try Self.runKernel(covering, context: context, prefill: prefill,
+                                      path: .fullTensorOps2DPreferred)
+        #expect(full.usedTensorOps == prefill.tensorOpsPipelineAvailable)
+    }
+
+    /// The QAT profile keeps its source-arithmetic kernels unless the runner
+    /// lets full attention use TensorOps; sliding-window layers always keep them.
+    @Test func qatFullAttentionUsesTensorOpsOnlyWhenAllowed() throws {
+        let context = try MetalContext()
+        let plain = try PrefillAttention(context: context)
+        let exact = try PrefillAttention(context: context, gemmaQATMaxContext: 256)
+        let allowed = try PrefillAttention(context: context, gemmaQATMaxContext: 256,
+                                           gemmaQATFullAttentionTensorOps: true)
+        #expect(!exact.tensorOpsPipelineAvailable)
+        #expect(allowed.tensorOpsPipelineAvailable == plain.tensorOpsPipelineAvailable)
+
+        // QAT full layers pass the causal extent as their window.
+        let full = Self.makeFixture(start: 130, chunk: 5, window: 135, seed: 0xA875,
+                                    headDim: 512, qHeads: 16, kvHeads: 2)
+        let exactFull = try Self.runKernel(full, context: context, prefill: exact,
+                                           path: .fullTensorOps2DPreferred)
+        let allowedFull = try Self.runKernel(full, context: context, prefill: allowed,
+                                             path: .fullTensorOps2DPreferred)
+        let exactTiledPath = try Self.runKernel(full, context: context, prefill: allowed,
+                                                path: .causalTiled)
+        #expect(!exactFull.usedTensorOps)
+        #expect(allowedFull.usedTensorOps == plain.tensorOpsPipelineAvailable)
+        #expect(!exactTiledPath.usedTensorOps)
+        #expect(exactTiledPath.values == exactFull.values, "the non-tensor path must stay source-exact")
+        if allowedFull.usedTensorOps {
+            let plainFull = try Self.runKernel(full, context: context, prefill: plain,
+                                               path: .fullTensorOps2DPreferred)
+            #expect(allowedFull.values == plainFull.values)
+        } else {
+            #expect(allowedFull.values == exactFull.values)
+        }
+        for (label, values) in [("exact", exactFull.values), ("allowed", allowedFull.values)] {
+            let maxAbs = RelError.maxAbsDiff(values, Self.reference(full))
+            #expect(maxAbs <= 2e-2, "QAT \(label) full maxAbs=\(maxAbs)")
+        }
+
+        let sliding = Self.makeFixture(start: 130, chunk: 5, window: 64, seed: 0xA876,
+                                       headDim: 256, qHeads: 16, kvHeads: 8)
+        let exactSliding = try Self.runKernel(sliding, context: context, prefill: exact,
+                                              path: .fullTensorOps2DPreferred)
+        let allowedSliding = try Self.runKernel(sliding, context: context, prefill: allowed,
+                                                path: .fullTensorOps2DPreferred)
+        #expect(!allowedSliding.usedTensorOps)
+        #expect(allowedSliding.values == exactSliding.values)
     }
 
     /// The other TensorOps tests return early when the path is unavailable, so
@@ -265,7 +333,17 @@ import MferenceValidationSupport
         path: RuntimePrefillAttentionPath = .causalTiled
     ) throws -> [Float] {
         let ctx = try MetalContext()
-        let prefill = try PrefillAttention(context: ctx)
+        return try runKernel(fixture, context: ctx, prefill: PrefillAttention(context: ctx),
+                             kvRingCapacity: kvRingCapacity, path: path).values
+    }
+
+    private static func runKernel(
+        _ fixture: Fixture,
+        context ctx: MetalContext,
+        prefill: PrefillAttention,
+        kvRingCapacity: UInt32 = 0,
+        path: RuntimePrefillAttentionPath
+    ) throws -> (values: [Float], usedTensorOps: Bool) {
         let qPrefix = 17
         let kPrefix = 19
         let vPrefix = 23
@@ -280,7 +358,7 @@ import MferenceValidationSupport
                                          values: [Float](repeating: 0, count: vPrefix) + fixture.v),
               let outBuf = Fp16Buffer.make(ctx.device, count: outCount) else {
             Issue.record("alloc failed")
-            return []
+            return ([], false)
         }
 
         let params = PrefillAttentionParams(
@@ -297,18 +375,18 @@ import MferenceValidationSupport
             scale: fixture.scale)
 
         let cb = ctx.queue.makeCommandBuffer()!
-        prefill.encodeCausal(commandBuffer: cb,
-                             q: qBuf,
-                             qOffset: qPrefix * MemoryLayout<Float16>.size,
-                             k: kBuf,
-                             kOffset: kPrefix * MemoryLayout<Float16>.size,
-                             v: vBuf,
-                             vOffset: vPrefix * MemoryLayout<Float16>.size,
-                             out: outBuf,
-                             outOffset: oPrefix * MemoryLayout<Float16>.size,
-                             params: params,
-                             kvRingCapacity: kvRingCapacity,
-                             path: path)
+        let usedTensorOps = prefill.encodeCausal(commandBuffer: cb,
+                                                 q: qBuf,
+                                                 qOffset: qPrefix * MemoryLayout<Float16>.size,
+                                                 k: kBuf,
+                                                 kOffset: kPrefix * MemoryLayout<Float16>.size,
+                                                 v: vBuf,
+                                                 vOffset: vPrefix * MemoryLayout<Float16>.size,
+                                                 out: outBuf,
+                                                 outOffset: oPrefix * MemoryLayout<Float16>.size,
+                                                 params: params,
+                                                 kvRingCapacity: kvRingCapacity,
+                                                 path: path)
         cb.commit()
         cb.waitUntilCompleted()
 
@@ -322,7 +400,7 @@ import MferenceValidationSupport
                 }
             }
         }
-        return compact
+        return (compact, usedTensorOps)
     }
 
 

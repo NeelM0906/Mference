@@ -96,16 +96,28 @@ unchanged, and this integration provides text inference only.
 Since 2026-09-21 the default prefill runs QAT's Q/K/V/O projections, shared
 expert and routed experts on the kernels original Gemma uses, batches the INT4
 shared expert, and runs well-filled routed tiles as grouped matrix products.
-Decode, routing, normalization and attention keep the MLX FP16 reduction
-order. The source-order prefill kernels spend 32 GPU threads on every
-(token, row) dot product and were 3-5x slower on long prompts; these kernels
-change only floating-point summation order.
+Since 2026-09-25 its five full-attention layers also prefill with the
+tensor-ops attention kernel wherever that pipeline builds on macOS 26, M2
+included; it accumulates in FP32 where the source rounds scores and
+probabilities to FP16. Decode, routing, normalization and sliding-window
+attention keep the MLX FP16 reduction order. The source-order prefill kernels
+spend 32 GPU threads on every (token, row) dot product and were 3-5x slower on
+long prompts; these kernels change only floating-point summation order.
 
 | 3,015-token prompt, M2 MacBook Air 16 GiB | Before | After |
 | --- | ---: | ---: |
 | QAT, CLI, one chunk | 160.6 s | 38.6 s |
 | QAT, server at 16K context | 245.4 s (128-token chunks) | 50.4 s (1,024-token chunks) |
 | Original Gemma, CLI, one chunk | 75.6 s | 52.4 s |
+
+| QAT full-attention prefill, CLI, prefill only | Before | After |
+| --- | ---: | ---: |
+| 3,015-token `long-synthesis` prompt | 37.94 s | 31.99 s |
+| 7,784-token document prompt (not a community prompt) | 131.66 s | 92.16 s |
+
+The second table is one pair per prompt with 60 s cool-downs, the new binary
+second. The gain grows with prompt length because full attention is the only
+part of prefill whose cost grows with the square of the prompt.
 
 These are diagnostic runs with cool-down pauses on a fanless Mac, not
 community-protocol benchmarks; decode rates were unchanged. The server's larger
@@ -115,14 +127,19 @@ hosts with at least 16 GiB; see [Runtime controls](../RUNTIME_CONTROLS.md).
 What the numbers above do and do not keep:
 
 - Decode is unchanged: all 149 scalar reference positions stay byte-identical
-  to the MLX-exact capture.
+  to the MLX-exact capture (re-verified 2026-09-26 with the grouped decode
+  attention described below).
 - Chunked prefill no longer reproduces the scalar MLX oracle. On the raw-text
   reference corpus 4 of 9 chunked positions remain inside the frozen limits and
   5 do not (relative L2 up to 0.44 on the repetitive sequence). Reordered sums
   flip near-tied experts in MoE routing, and the flips cascade; stock MLX also
-  changes kernels for batched prompts.
+  changes kernels for batched prompts. The frozen greedy-winner check therefore
+  flags one chunked position in the default: a near tie (winner gap 0.17) since
+  2026-09-21, and with tensor-ops attention one position of the repetitive
+  sequence (gap 2.51).
 - `MFERENCE_QAT_EXACT_PREFILL=1` reproduces all 158 positions byte for byte
-  (verified 2026-09-21). Use it for the MLX reference comparison.
+  (verified 2026-09-21 and again 2026-09-26). Use it for the MLX reference
+  comparison.
 - The default is gated instead on teacher-forced perplexity against that exact
   control, on identical tokens after the frozen community prompts. QAT: 1,000
   predictions, NLL +0.0004 nats/token (95 % -0.0014..+0.0022), same top
@@ -130,14 +147,36 @@ What the numbers above do and do not keep:
   the same way: +0.0029 (-0.0028..+0.0086), 98.3 %. On the real weights the new
   expert kernels match the old within 5e-4 relative error for every one of
   3,015 layer-0 tokens.
+- The tensor-ops full attention passed the same gate on 2026-09-26. Against the
+  exact control: -0.00015 nats/token (95 % -0.00195..+0.00165), same top
+  prediction at 99.5 %. Against the previous default, which isolates the
+  attention kernel: -0.00057 (-0.00160..+0.00045), 99.7 %.
 
 ```bash
 MFERENCE_GEMMA_PREFILL_GATE="$HOME/llm-models/gemma4qat.gturbo" \
   Scripts/test.sh --filter GemmaPrefillEquivalenceGateTests
 ```
 
-The gate reads the install, loads the model once and takes about 15 minutes on
+The gate reads the install, loads the model once and takes about 22 minutes on
 the M2; apply the model-process checks first.
+
+## Decode attention
+
+QAT decode keeps MLX's three-pass full attention (FP16 scores, softmax, then
+values). Since 2026-09-26 the score and value passes place the eight query
+heads that share a K/V head in one threadgroup, so each key and value row is
+read once per group instead of once per head. Every thread performs the same
+operations in the same order, so the output is byte-identical to the source
+mapping at every tested length from 1 to 65,536 keys.
+
+| M2 MacBook Air 16 GiB | Before | After |
+| --- | ---: | ---: |
+| Full-attention layer, 16K keys (GPU) | 5.52 ms | 1.46 ms |
+| Full-attention layer, 32K keys (GPU) | 11.2 ms | 2.94 ms |
+| Decode after a 19,098-token prompt, 128 greedy tokens | 3.61 tok/s | 4.07 tok/s |
+
+The decode row is one pair of runs with identical output text. Short contexts
+gain little because attention is a small part of each token there.
 
 ## M2 generation measurements
 

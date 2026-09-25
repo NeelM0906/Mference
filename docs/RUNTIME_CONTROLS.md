@@ -193,11 +193,14 @@ defaults reorder floating-point sums. `MFERENCE_GEMMA_PREFILL_LEGACY=1` returns
 Gemma 4 and Gemma 4 QAT to the per-token shared expert and per-row routed
 experts; the default batches the INT4 shared expert and runs well-filled
 routed tiles as grouped matrix products. `MFERENCE_QAT_EXACT_PREFILL=1`
-additionally returns QAT's prefill projections, shared expert and routed
-experts to the MLX FP16 reduction order, which is several times slower on long
-prompts. QAT decode, routing, normalization and attention keep that order in
-every mode. Both exist for A/B runs and for the
+additionally returns QAT's prefill projections, shared expert, routed experts
+and full-attention layers to the MLX FP16 reduction order, which is several
+times slower on long prompts. QAT decode, routing, normalization and
+sliding-window attention keep that order in every mode. Both exist for A/B runs
+and for the
 [prefill equivalence gate](families/GEMMA4_QAT.md#prefill-arithmetic).
+On macOS 26, full-attention prefill for both checkpoints uses the tensor-ops
+kernel wherever its pipeline builds, M2 included; it has no separate switch.
 
 Flash-Next's installer carries an MTP sidecar, but native Flash-Next speculative
 execution is not implemented. The dense Qwen MTP switches do not activate it.

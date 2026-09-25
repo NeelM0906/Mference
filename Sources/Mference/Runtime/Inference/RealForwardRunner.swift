@@ -348,6 +348,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefillGroupedGEMM: MPPGroupedRoutedMoE?
     /// Routed prefill tiles that ran as grouped GEMM rather than per-row GEMV.
     private(set) var prefillGroupedExpertTiles = 0
+    /// Prefill attention layer chunks that ran the tensor-ops kernel. It falls
+    /// back to the tiled or QAT kernels silently when the pipeline is missing.
+    private(set) var prefillTensorOpsAttentionLayers = 0
     /// How the last prefill layer ran its shared expert. A batched layout that
     /// silently falls back to per-row dispatch costs a third of a long prefill.
     private(set) var lastPrefillSharedExpertPath: PrefillSharedExpert.BlockPath?
@@ -692,7 +695,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize,
                                                       sourceFP16: prefillMatmulSourceFP16)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context, sourceFP16: sourceFP16)
-        self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil)
+        self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil,
+                                                     gemmaQATFullAttentionTensorOps: !policy.prefillAttentionSourceFP16)
         self.prefillPostAttention = try PrefillPostAttentionSetup(context: context, sourceFP16: sourceFP16)
         self.prefillRouter = try PrefillRouter(context: context, routerBF16: model.hasBF16Router, sourceFP16: sourceFP16)
         self.prefillSharedExpert = try PrefillSharedExpert(
@@ -2340,14 +2344,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         let activeRingCapacity = ringCapacity > 0 && startPosition + t > ringCapacity
                             ? UInt32(ringCapacity)
                             : 0
-                        prefillAttention.encodeCausal(commandBuffer: cb,
-                                                      q: attnQ,
-                                                      k: keyBuffer,
-                                                      v: valueBuffer,
-                                                      out: scratch.attentionOutput,
-                                                      params: params,
-                                                      kvRingCapacity: activeRingCapacity,
-                                                      path: prefillAttentionPath)
+                        if prefillAttention.encodeCausal(commandBuffer: cb,
+                                                         q: attnQ,
+                                                         k: keyBuffer,
+                                                         v: valueBuffer,
+                                                         out: scratch.attentionOutput,
+                                                         params: params,
+                                                         kvRingCapacity: activeRingCapacity,
+                                                         path: prefillAttentionPath) {
+                            prefillTensorOpsAttentionLayers += 1
+                        }
                 } else {
                     throw PrefillError.chunkedUnsupported(
                         "chunked prefill attention requires FP16 KV")
