@@ -269,7 +269,7 @@ import Mference
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
             for: .qwen36, physicalMemoryBytes: 16 * gib) == 2048)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib) == 1024)
+            for: .gemma4, physicalMemoryBytes: 16 * gib) == 2048)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
             for: .inklingSmall, physicalMemoryBytes: 16 * gib) == 128)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(

@@ -103,12 +103,14 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     /// The server prefills long prompts in chunks; every chunk re-reads most
     /// routed experts, so 128-token chunks made a 3,015-token Gemma prompt
-    /// spend 134 s of 205 s on expert I/O. Gemma takes 1,024 tokens on hosts
-    /// with at least 16 GiB: about +309 MB (scratch +125 MB, sliding KV ring
-    /// +184 MB), the accepted budget. Qwen 3.6 has no sliding ring to grow, so
-    /// the same hosts give it 2,048 for +270 MB of scratch: a 2,940-token
-    /// prompt went from 148.7 s to 42.7 s with decode unchanged (2026-09-21).
-    /// `MFERENCE_SERVER_PREFILL_CHUNK` overrides.
+    /// spend 134 s of 205 s on expert I/O. On hosts with at least 16 GiB Gemma
+    /// took 1,024 tokens (about +309 MB over 128) and since 2026-09-26 takes
+    /// 2,048: a 19,098-token QAT prompt fell from 386.3 s to 350.2 s (mean of
+    /// an A B B A run) for +351 MB of Metal allocation, 210 MB of it sliding
+    /// KV ring. Qwen 3.6 has no sliding ring to grow, so 2,048 costs it +270 MB
+    /// of scratch: a 2,940-token prompt went from 148.7 s to 42.7 s with decode
+    /// unchanged (2026-09-21). The server's `--prefill-chunk` and then
+    /// `MFERENCE_SERVER_PREFILL_CHUNK` override.
     public static func defaultServerPrefillChunkTokens(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
@@ -121,8 +123,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         let gib = UInt64(1) << 30
         guard physicalMemoryBytes >= 16 * gib else { return 128 }
         switch family {
-        case .gemma4: return 1024
-        case .qwen36: return 2048
+        case .gemma4, .qwen36: return 2048
         default: return 128
         }
     }

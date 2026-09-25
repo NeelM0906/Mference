@@ -47,6 +47,7 @@ Options:
 ./mference-ui.sh --library scratch               # scan one root instead of the defaults
 ./mference-ui.sh --model scratch/qwen36.gturbo   # preload instead of loading lazily
 ./mference-ui.sh --max-context 32768             # applies to every model
+./mference-ui.sh --prefill-chunk 1024            # smaller prefill chunks, less memory
 ./mference-ui.sh --server-port 8081 --webui-port 3001
 ./mference-ui.sh --build-path /tmp/mference-build  # separate toolchain build artifacts
 ./mference-ui.sh --data-dir /tmp/mference-ui-test # isolated chats/settings for testing

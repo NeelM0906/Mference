@@ -18,6 +18,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let verification: ModelIntegrityPolicy
     /// `--shadow-budget`; nil keeps the family default.
     public let shadowBudget: Int?
+    /// `--prefill-chunk`; nil (`auto`) keeps the family default.
+    public let prefillChunk: Int?
     /// nil when `--library` was absent, which keeps single-model mode exactly
     /// as it was.
     public let library: ServerLibraryOption?
@@ -72,6 +74,14 @@ public struct ServerArguments: Equatable, Sendable {
                              issued per layer ahead of the router; 0 turns it off.
                              Default: 4 for Qwen 3.6 and Gemma 4 on hosts with 16
                              to under 24 GiB, 2 for DeepSeek-V4-Flash, off elsewhere.
+      --prefill-chunk <n|auto>
+                             Prompt tokens per prefill chunk: auto (default) or
+                             32, 64, 128, 256, 512, 1024, 2048, 4096. Larger
+                             chunks re-read routed experts less often but hold
+                             more memory. auto is 2048 for Gemma 4 (QAT
+                             included) and Qwen 3.6 on hosts with at least
+                             16 GiB, 128 elsewhere; 1024 saves Gemma about
+                             350 MB. Overrides MFERENCE_SERVER_PREFILL_CHUNK.
       --verify <mode>        Model integrity on load and model swap: auto
                              (default) checks file sizes against the install
                              receipt when it validates and hashes otherwise;
@@ -90,6 +100,7 @@ public struct ServerArguments: Equatable, Sendable {
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
         var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
         var shadowBudget: Int?
+        var prefillChunk: Int?
         var libraryRoots: [String] = []
         var wantsDefaultLibraryRoots = false
         var listModels = false
@@ -165,6 +176,17 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--shadow-budget must be 0 through 8")
                 }
                 shadowBudget = parsed
+            case "--prefill-chunk":
+                if value == "auto" {
+                    prefillChunk = nil
+                } else {
+                    guard let parsed = Int(value),
+                          RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) else {
+                        throw ServerArgumentError.invalid(
+                            "--prefill-chunk must be auto, 32, 64, 128, 256, 512, 1024, 2048 or 4096")
+                    }
+                    prefillChunk = parsed
+                }
             case "--verify":
                 guard let parsed = ModelIntegrityPolicy(verifyFlag: value) else {
                     throw ServerArgumentError.invalid(
@@ -206,6 +228,7 @@ public struct ServerArguments: Equatable, Sendable {
                                promptCacheMode: promptCacheMode,
                                verification: verification,
                                shadowBudget: shadowBudget,
+                               prefillChunk: prefillChunk,
                                library: library,
                                listModels: listModels)
     }

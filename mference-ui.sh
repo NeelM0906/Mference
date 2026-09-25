@@ -18,6 +18,7 @@ server_port=8080
 webui_port=3000
 max_context=16384
 prompt_cache_mode=single-prefix
+prefill_chunk=auto
 preload_model=""
 library_roots=()
 dry_run=0
@@ -59,6 +60,11 @@ usage: ./mference-ui.sh [options]                      start the UI
                          Use a separate directory for isolated release tests.
   --prompt-cache-mode <off|single-prefix>
                          Passed through to MferenceServer.
+  --prefill-chunk <n|auto>
+                         Prompt tokens per prefill chunk, passed through to
+                         MferenceServer: auto (default; 2048 for Gemma 4, QAT
+                         and Qwen 3.6 on 16 GiB+ Macs) or 32 ... 4096. 1024
+                         saves Gemma about 350 MB at slower long prompts.
   --dry-run              Print what would run, start nothing, exit 0. Works
                          for every subcommand, before or after it.
   --help                 Show this message.
@@ -96,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     --build-path) require_value "$@"; build_path="$2"; shift 2 ;;
     --data-dir) require_value "$@"; data_directory="$2"; shift 2 ;;
     --prompt-cache-mode) require_value "$@"; prompt_cache_mode="$2"; shift 2 ;;
+    --prefill-chunk) require_value "$@"; prefill_chunk="$2"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) note "error: unknown option $1"; usage >&2; exit 2 ;;
@@ -116,6 +123,7 @@ max_context="$((10#$max_context))"
 [[ "$server_port" -le 65535 && "$webui_port" -le 65535 ]] || fail "ports must be between 1 and 65535"
 [[ "$server_port" -ne "$webui_port" ]] || fail "server and UI need different ports"
 case "$prompt_cache_mode" in off|single-prefix) ;; *) fail "--prompt-cache-mode must be off or single-prefix" ;; esac
+case "$prefill_chunk" in auto|32|64|128|256|512|1024|2048|4096) ;; *) fail "--prefill-chunk must be auto, 32, 64, 128, 256, 512, 1024, 2048 or 4096" ;; esac
 [[ "$build_path" == /* ]] || build_path="$repository_root/$build_path"
 [[ "$data_directory" == /* ]] || data_directory="$repository_root/$data_directory"
 server_binary="$build_path/release/MferenceServer"
@@ -124,6 +132,7 @@ server_arguments=(
   --port "$server_port"
   --max-context "$max_context"
   --prompt-cache-mode "$prompt_cache_mode"
+  --prefill-chunk "$prefill_chunk"
 )
 if [[ ${#library_roots[@]} -eq 0 ]]; then
   server_arguments+=(--library)

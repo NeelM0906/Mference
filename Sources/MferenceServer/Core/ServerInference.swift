@@ -213,12 +213,13 @@ public actor ServerModelSession: ServerLoadedModel {
         family: ModelFamily,
         expertCacheSlots: Int,
         shadowPrefetchBudget: Int? = nil,
+        prefillChunkTokens: Int? = nil,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> RuntimeConfiguration {
         RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
-            prefillChunkTokens: RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            prefillChunkTokens: prefillChunkTokens ?? RuntimeConfiguration.defaultServerPrefillChunkTokens(
                 for: family, physicalMemoryBytes: physicalMemoryBytes, environment: environment),
             forceLogitsHead: true,
             shadowPrefetchBudget: shadowPrefetchBudget)
@@ -228,7 +229,8 @@ public actor ServerModelSession: ServerLoadedModel {
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix,
                             integrityPolicy: ModelIntegrityPolicy = .trustedReceiptWhenValid,
-                            shadowPrefetchBudget: Int? = nil) async throws -> ServerModelSession {
+                            shadowPrefetchBudget: Int? = nil,
+                            prefillChunkTokens: Int? = nil) async throws -> ServerModelSession {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
@@ -269,7 +271,8 @@ public actor ServerModelSession: ServerLoadedModel {
             configSlots = RuntimeConfiguration.allowedExpertCacheSlots.max()!
         }
         let runtime = runtimeConfiguration(family: family, expertCacheSlots: configSlots,
-                                           shadowPrefetchBudget: shadowPrefetchBudget)
+                                           shadowPrefetchBudget: shadowPrefetchBudget,
+                                           prefillChunkTokens: prefillChunkTokens)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,

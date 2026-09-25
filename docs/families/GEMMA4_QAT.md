@@ -123,6 +123,11 @@ These are diagnostic runs with cool-down pauses on a fanless Mac, not
 community-protocol benchmarks; decode rates were unchanged. The server's larger
 Gemma chunk costs 307 MB of Metal allocation (KV +183.5 MB) and applies to
 hosts with at least 16 GiB; see [Runtime controls](../RUNTIME_CONTROLS.md).
+Since 2026-09-26 those hosts use 2,048-token server chunks. On a 19,098-token
+QAT prompt, alternated 1,024 / 2,048 / 2,048 / 1,024 to cancel thermal drift,
+prefill averaged 386.3 s at 1,024 and 350.2 s at 2,048, with identical output,
+for another 351 MB of Metal allocation (KV +210 MB). `--prefill-chunk 1024` on
+the server or `./mference-ui.sh` keeps the smaller size.
 
 What the numbers above do and do not keep:
 
