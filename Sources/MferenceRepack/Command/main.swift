@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <gemma4|qwen36|qwen36original|qwen38|swiftqwen38|deepseekv4flash|inklingsmall|maple|qwen38flashnext|minicpm5|minicpm5mlx|glm53flash>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <gemma4|gemma4qat|qwen36|qwen36original|qwen38|swiftqwen38|deepseekv4flash|inklingsmall|maple|qwen38flashnext|minicpm5|minicpm5mlx|glm53flash>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
@@ -38,6 +38,11 @@ glm53flash reads PipeNetwork's pre-quantized mixed 4/8-bit MLX conversion of
 GLM-5.3-Flash (~181 GB; check disk first). Resident and bounded streamed
 prefill are implemented; see docs/families/GLM53_FLASH.md and the prefill
 qualification matrix for the validated profiles and remaining limits.
+
+gemma4qat preserves the aligned checkpoint's native INT4/group-32 weights and
+BF16 routers. Its install is separate from gemma4 and uses the checkpoint's
+installed chat template and generation settings. The launcher installs it under
+$HOME/llm-models/gemma4qat.gturbo.
 
 The installer streams the selected checkpoint (default: the supported Gemma 4
 checkpoint) from Hugging Face and repackages it without materializing the
@@ -275,15 +280,24 @@ private func run(_ values: [String]) async -> Int32 {
         sidecarPolicy: SidecarPolicy(carryMTP: !arguments.skipMTP))
     do {
         let printer = InstallProgressPrinter()
-        let result = try await RemoteStreamingRepacker(options: options).run { progress in
+        let audit = RepackAudit()
+        let result = try await RemoteStreamingRepacker(options: options, audit: audit).run { progress in
             printer.report(progress)
         }
         if result.dryRun {
             print("Dry run for \(source.displayName)")
             print("Source revision: \(result.resolvedCommit)")
             print("Range requests: \(result.rangeRequestCount)")
-            print("Source bytes to read: \(result.remoteBytesToDownload)")
+            print("Source bytes to read: \(result.remoteBytesToDownload + result.sourceMetadataBytes)")
             print("Output bytes: \(result.outputBytes)")
+            if result.supportingFileBytes > 0 {
+                print("Source metadata/assets bytes (included, excluding retries): \(result.sourceMetadataBytes)")
+                print("Resumable payload range bytes: \(result.remoteBytesToDownload)")
+                print("Required assets and layout bytes (included): \(result.supportingFileBytes)")
+                print("Additional metadata/staging reserve bytes: \(result.metadataReserveBytes)")
+                print("Free-space reserve bytes: \(source.reserveBytes)")
+                print("Manifest and receipt final sizes are accounted from the metadata reserve.")
+            }
             print("Resident entries: \(result.residentEntryCount)")
             print("Expert layers: \(result.expertLayerCount)")
             print("Excluded multimodal tensors: "
@@ -305,6 +319,15 @@ private func run(_ values: [String]) async -> Int32 {
         print("Installed \(source.displayName)")
         print("Source revision: \(result.resolvedCommit)")
         print("Model: \(result.outputDir)")
+        if source == .gemma4QAT {
+            print("Installed bytes: \(result.outputBytes)")
+            print("Payload bytes reused: \(result.reusedBytes); downloaded this run: \(result.downloadedThisRunBytes)")
+            print("Source metadata/assets bytes (excluding retries): \(result.sourceMetadataBytes)")
+            print("Largest temporary payload range bytes: \(audit.largestRemoteTransferBytes); writer scratch bytes: \(audit.largestScratchBytes)")
+            print("Range retries: \(result.remoteRetryCount)")
+            print("Install elapsed seconds: \(String(format: "%.3f", audit.wallTimeSeconds))")
+            print("Installation verified; select the separate gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned model.")
+        }
         return 0
     } catch {
         printError("install failed: \(error)")

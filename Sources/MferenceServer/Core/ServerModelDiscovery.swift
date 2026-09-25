@@ -9,6 +9,9 @@ import Mference
 /// their own identity while using the same architecture and runner.
 public enum ServerFamilyModelID {
     public static func modelID(for family: ModelFamily, checkpointID: String? = nil) -> String {
+        if family == .gemma4, checkpointID == CheckpointIdentity.gemma4QAT {
+            return CheckpointIdentity.gemma4QAT
+        }
         if family == .qwen38, checkpointID == CheckpointIdentity.swiftQwen38 {
             return CheckpointIdentity.swiftQwen38
         }
@@ -185,10 +188,12 @@ public struct ServerLibraryEntry: Equatable, Sendable {
 public struct ServerLibrarySkip: Equatable, Sendable {
     public let directory: URL
     public let reason: String
+    public let modelID: String?
 
-    public init(directory: URL, reason: String) {
+    public init(directory: URL, reason: String, modelID: String? = nil) {
         self.directory = directory
         self.reason = reason
+        self.modelID = modelID
     }
 }
 
@@ -205,6 +210,10 @@ public struct ServerLibraryIndex: Equatable, Sendable {
 
     public func entry(for modelID: String) -> ServerLibraryEntry? {
         entries.first { $0.modelID == modelID }
+    }
+
+    public func unavailableReason(for modelID: String) -> String? {
+        skipped.first { $0.modelID == modelID }?.reason
     }
 
     public var modelList: OpenAIModelList {
@@ -234,8 +243,8 @@ public enum ServerLibraryDiscovery {
     public static let libraryRootEnvironmentKey = "MFERENCE_LIBRARY_ROOT"
 
     /// The default library roots, in order: the `Mference.libraryRoot` default
-    /// if set, the package checkout's `scratch/`, then
-    /// `~/Library/Application Support/Mference` — the three places
+    /// if set, `~/llm-models`, the package checkout's `scratch/`, then
+    /// `~/Library/Application Support/Mference` — the places
     /// `MferenceRepack` is pointed at in practice.
     public static func defaultRoots(
         userDefaults: UserDefaults = .standard,
@@ -249,6 +258,7 @@ public enum ServerLibraryDiscovery {
             in: .userDomainMask,
             appropriateFor: nil,
             create: false),
+        homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)
     ) -> [URL] {
         var roots: [URL] = []
@@ -258,6 +268,8 @@ public enum ServerLibraryDiscovery {
             roots.append(URL(fileURLWithPath: configured, isDirectory: true)
                 .standardizedFileURL)
         }
+        roots.append(homeDirectoryURL.appendingPathComponent("llm-models", isDirectory: true)
+            .standardizedFileURL)
         let packageStart = executableURL?.deletingLastPathComponent()
             ?? currentDirectoryURL
         if let root = packageRoot(startingAt: packageStart, fileExists: fileExists)
@@ -270,7 +282,8 @@ public enum ServerLibraryDiscovery {
                 .appendingPathComponent("Mference", isDirectory: true)
                 .standardizedFileURL)
         }
-        return roots
+        var seen = Set<String>()
+        return roots.filter { seen.insert($0.path).inserted }
     }
 
     /// Walks `roots` and returns the installs worth advertising.
@@ -316,11 +329,13 @@ public enum ServerLibraryDiscovery {
                 skipped.append(ServerLibrarySkip(directory: candidate,
                                                  reason: "incomplete install: \(reason)"))
             case .notRunnable(let family, let detail):
-                let identifier = ServerFamilyModelID.modelID(forRawFamily: family)
-                    ?? family
+                let checkpoint = try? ManifestReader.peekModelID(directoryURL: candidate)
+                let identifier = ModelFamily(rawValue: family).map {
+                    ServerFamilyModelID.modelID(for: $0, checkpointID: checkpoint)
+                } ?? family
                 skipped.append(ServerLibrarySkip(
                     directory: candidate,
-                    reason: "not runnable (\(identifier)): \(detail)"))
+                    reason: "not runnable (\(identifier)): \(detail)", modelID: identifier))
             case .complete(let family):
                 found.append((basename: strippedBasename(candidate),
                               directory: candidate,

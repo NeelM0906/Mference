@@ -1,6 +1,96 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef MFERENCE_GEMMA_SOURCE_NORM
+#define MFERENCE_GEMMA_SOURCE_NORM
+// Preserve MLX's four-contiguous-value partials and SIMD merge order while
+// retaining our 256-thread dispatch. Explicit stores and precise division
+// preserve its arithmetic inside the shared fast-math library.
+// The pointer template handles resident/device and fused/threadgroup inputs.
+template <typename InputPointer>
+static inline float gemma_source_norm_inv(
+    InputPointer x, uint D, float eps, uint lane, uint sg, uint sgs,
+    threadgroup float* partial
+) {
+    const uint groups = min(32u, (D + 127u) / 128u);
+    for (uint group = sg; group < groups; group += sgs) {
+        volatile float acc = 0.0f;
+        for (uint base = (group * 32u + lane) * 4u; base < D; base += 4096u) {
+            for (uint j = 0; j < 4u; ++j) {
+                const float v = base + j < D ? float(x[base + j]) : 0.0f;
+                acc = acc + v * v;
+            }
+        }
+        const float sum = simd_sum(float(acc));
+        if (lane == 0u) partial[group] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u) {
+        const float sum = simd_sum(lane < groups ? partial[lane] : 0.0f);
+        if (lane == 0u) {
+            volatile float mean = precise::divide(sum, float(D));
+            volatile float regularized = mean + eps;
+            partial[0] = precise::rsqrt(regularized);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return partial[0];
+}
+#endif
+
+
+#ifndef MFERENCE_GEMMA_SOURCE_FP16
+#define MFERENCE_GEMMA_SOURCE_FP16
+// Preserve the source activation boundary before learned scaling. The original
+// Gemma checkpoint keeps its existing fused arithmetic unless explicitly set.
+constant bool FC_GEMMA_SOURCE_FP16 [[function_constant(110)]];
+constant bool kGemmaSourceFP16 = is_function_constant_defined(FC_GEMMA_SOURCE_FP16)
+    ? FC_GEMMA_SOURCE_FP16 : false;
+static inline half gemma_weighted_norm(float x, float inv, float weight) {
+    return kGemmaSourceFP16 ? half(x * inv) * half(weight) : half(x * inv * weight);
+}
+static inline half gemma_scaled_embedding(float value, float scale) {
+    return kGemmaSourceFP16 ? half(value) * half(scale) : half(value * scale);
+}
+
+// MLX's quantized GEMV forms its affine-bias input sum in FP16 quads.
+static inline float gemma_source_quad_sum(half4 x) {
+    const half a = x.x + x.y;
+    const half b = a + x.z;
+    return float(half(b + x.w));
+}
+static inline half gemma_source_geglu(float gate_value, float up_value) {
+    // Gate/up projections are FP16 tensors in the source, even when fused.
+    volatile half gate = half(gate_value);
+    volatile half up = half(up_value);
+    // Preserve source half stores across fast-math contraction, particularly
+    // 1 + tanh(x): its rounded negative tail is exactly zero in the source.
+    volatile half cube = half(float(gate) * float(gate) * float(gate));
+    volatile half term = half(0.044715f) * cube;
+    volatile half sum = gate + term;
+    volatile half inner = half(0.7978845608028654f) * sum;
+    // FP16 tanh has already rounded to +/-1 at these bounds. Keep that
+    // exact source result while avoiding fast-tanh's positive exp overflow.
+    volatile half curve = half(tanh(clamp(float(inner), -20.0f, 20.0f)));
+    volatile half shifted = half(1.0h + curve);
+    volatile half scaled = half(0.5h * gate);
+    volatile half activation = scaled * shifted;
+    return half(activation * up);
+}
+static inline float gemma_source_bias_correction(
+    device const half* x, device const bfloat* biases, uint width, uint group_size
+) {
+    float correction = 0.0f;
+    for (uint k = 0; k < width; k += 4u) {
+        const half4 quad(x[k], x[k + 1u], x[k + 2u], x[k + 3u]);
+        const float exact = float(quad.x) + float(quad.y) + float(quad.z) + float(quad.w);
+        correction = fma(float(biases[k / group_size]),
+                        gemma_source_quad_sum(quad) - exact, correction);
+    }
+    return correction;
+}
+#endif
+
 // ============================================================================
 // rmsnorm — RMS-norm over hidden dim.
 //
@@ -15,9 +105,9 @@ using namespace metal;
 // reduce — SIMD-group simd_sum, then a single SIMD-group merges the partials.
 // ============================================================================
 
-// Threadgroup memory carries at most simdgroups_per_threadgroup = 256/32 = 8
-// partial sums. Slot 0 is reused after the merge to broadcast the final inv.
-constant constexpr uint kRmsMaxSimdGroups = 8;
+// Original profiles use eight physical SIMD partials. QAT uses up to 32
+// logical four-value partials within the same dispatch. Slot 0 broadcasts inv.
+constant constexpr uint kRmsMaxSimdGroups = 32;
 constant uint FC_RMS_D [[function_constant(30)]];
 constant bool FC_RMS_USE_FC [[function_constant(31)]];
 
@@ -40,6 +130,8 @@ static inline float rms_block_inv(
     uint  simdgroups,
     threadgroup float* partial
 ) {
+    if (kGemmaSourceFP16) return gemma_source_norm_inv(
+        x, D, eps, simd_lane_id, simd_group_id, simdgroups, partial);
     float acc = 0.0f;
     for (uint i = lid; i < D; i += lsize) {
         float v = float(x[i]);
@@ -88,7 +180,7 @@ void rmsnorm_bf16w(
     for (uint i = lid; i < DD; i += lsize) {
         float xv = float(x[i]);
         float wv = float(weight[i]);
-        out[i] = half(xv * inv * wv);
+        out[i] = gemma_weighted_norm(xv, inv, wv);
     }
 }
 
@@ -120,7 +212,7 @@ void rmsnorm_bf16w_perhead(
     for (uint i = lid; i < HD; i += lsize) {
         float xv = float(xh[i]);
         float wv = float(weight[i]);
-        oh[i] = half(xv * inv * wv);
+        oh[i] = gemma_weighted_norm(xv, inv, wv);
     }
 }
 
@@ -157,7 +249,7 @@ void rmsnorm_bf16w_grouped(
     const float inv = rms_block_inv(xg, G, eps, lid, lsize,
                                     simd_lane_id, simd_group_id, simdgroups, partial);
     for (uint i = lid; i < G; i += lsize) {
-        og[i] = half(float(xg[i]) * inv * float(wg[i]));
+        og[i] = gemma_weighted_norm(float(xg[i]), inv, float(wg[i]));
     }
 }
 

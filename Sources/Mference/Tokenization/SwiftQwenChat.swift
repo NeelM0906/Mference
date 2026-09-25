@@ -13,6 +13,21 @@ extension MFTokenizer {
         var value = self
         value.isSwiftQwen = modelID == CheckpointIdentity.swiftQwen38
         value.isBaseQwen38 = modelID == CheckpointIdentity.baseQwen38
+        value.isGemmaQAT = modelID == CheckpointIdentity.gemma4QAT
+        value.installedGemmaTemplate = nil
+        value.generationDefaults = .defaults
+        if value.isGemmaQAT {
+            guard value.dialect == .gemma, let folder = value.localTokenizerFolder else {
+                throw MFTokenizerError.missingToolTemplate
+            }
+            let template = try Data(contentsOf: folder.appendingPathComponent("chat_template.jinja"))
+            guard Sha256Verifier.hashData(template) == GemmaQATCheckpoint.chatTemplateSHA256 else {
+                throw MFTokenizerError.invalidChatTemplate("Gemma QAT installed template differs from the pinned checkpoint")
+            }
+            value.installedGemmaTemplate = template
+            value.generationDefaults = try GemmaQATCheckpoint.generationDefaults(
+                from: Data(contentsOf: folder.appendingPathComponent("generation_config.json")))
+        }
         if value.supportsQwenReasoningEffort, value.dialect != .chatml {
             throw MFTokenizerError.unsupportedForDialect("Qwen 3.8 requires ChatML")
         }
@@ -21,14 +36,69 @@ extension MFTokenizer {
 
     public var supportsQwenReasoningEffort: Bool { isSwiftQwen || isBaseQwen38 }
 
-    /// Swift always uses its source template. Base Qwen opts into that same
-    /// contract only with an explicit effort; omitted effort keeps legacy behavior.
+    /// Whether a request may carry `reasoning_effort` at all.
+    public var acceptsReasoningEffort: Bool {
+        supportsQwenReasoningEffort || supportsOptInThinking
+    }
+
+    /// Swift always uses its source template. Base Qwen 3.8 opts into that
+    /// same contract with an explicit effort; omitted effort keeps legacy behavior.
     public func usesSourceQwenTemplate(reasoningEffort: QwenReasoningEffort?) -> Bool {
         isSwiftQwen || (isBaseQwen38 && reasoningEffort != nil)
     }
 
+    /// Gemma and Swift-Qwen always render through their source templates. Qwen 3.6 does so
+    /// only when the request opts in; an omitted effort keeps its native
+    /// non-thinking render. Its template has no effort levels: `none` closes
+    /// the thinking block and every other value opens it.
+    public func usesSourceTemplate(reasoningEffort: QwenReasoningEffort?) -> Bool {
+        dialect == .gemma || usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
+            || (supportsOptInThinking && reasoningEffort != nil)
+    }
+
+    /// Tokens that follow the assistant turn at `cachedTurnIndex` in the full
+    /// render: its closing `<|im_end|>`, the new tool results or user turn, and
+    /// the generation prompt. The KV cache already holds that turn as the
+    /// model generated it, which a re-render of the parsed turn need not match
+    /// token for token, so the cache is extended rather than compared. This is
+    /// only sound because `preserve_thinking` makes the render of a turn
+    /// independent of what follows it.
+    public func encodeSourceTemplateContinuation(messages: [Message],
+                                                 cachedTurnIndex: Int,
+                                                 tools: [FunctionDefinition],
+                                                 reasoningEffort: QwenReasoningEffort?) throws -> [Int32] {
+        guard usesSourceTemplate(reasoningEffort: reasoningEffort) else {
+            throw MFTokenizerError.unsupportedForDialect("source-template KV continuation")
+        }
+        guard messages.indices.contains(cachedTurnIndex),
+              messages[cachedTurnIndex].role == .assistant,
+              cachedTurnIndex < messages.count - 1 else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "KV continuation needs a cached assistant turn followed by new messages")
+        }
+        let full = try encodeToolChat(messages: messages, tools: tools,
+                                      reasoningEffort: reasoningEffort)
+        let head = try encodeToolChat(messages: Array(messages[...cachedTurnIndex]), tools: tools,
+                                      reasoningEffort: reasoningEffort,
+                                      addGenerationPrompt: false)
+        guard let end = head.lastIndex(of: endOfTurnID), end < full.count,
+              full[...end].elementsEqual(head[...end]) else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "cached assistant turn is not a prefix of the full render")
+        }
+        return Array(full[end...])
+    }
+
     public func startsInThinking(reasoningEffort: QwenReasoningEffort?,
                                  promptIDs: [Int32]? = nil) -> Bool {
+        if dialect == .gemma {
+            // Ordinary thinking starts at the model header and generates its
+            // channel opener. A tool result instead pre-opens the thought.
+            guard let promptIDs,
+                  let marker = promptIDs.lastIndex(of: channelStartID) else { return false }
+            return decode(Array(promptIDs[marker...]), skipSpecialTokens: false)
+                == "<|channel>thought\n"
+        }
         // The actual generation suffix wins over a family's ordinary-chat
         // default. In particular base Qwen opens thinking for ordinary chat,
         // but its tool/history template explicitly closes it. Initializing the
@@ -43,14 +113,20 @@ extension MFTokenizer {
                     .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
             }
         }
-        return usesSourceQwenTemplate(reasoningEffort: reasoningEffort)
+        return usesSourceTemplate(reasoningEffort: reasoningEffort)
             ? reasoningEffort != .off : generationPromptStartsInThinking
     }
 
-    /// Uses the installed source template for both ordinary and tool chat.
-    /// No hand-written framing or forced thinking-off path for Swift-Qwen.
+    /// Selects the family's source template for both ordinary and tool chat:
+    /// bundled for Gemma and installed for source-template Qwen checkpoints.
     public func encodeChat(messages: [Message], tools: [FunctionDefinition] = [],
-                           reasoningEffort: QwenReasoningEffort? = nil) throws -> [Int32] {
+                           reasoningEffort: QwenReasoningEffort? = nil,
+                           preserveThinking: Bool = false) throws -> [Int32] {
+        if dialect == .gemma {
+            return try encodeToolChat(messages: messages, tools: tools,
+                                      reasoningEffort: reasoningEffort,
+                                      preserveThinking: preserveThinking)
+        }
         if usesSourceQwenTemplate(reasoningEffort: reasoningEffort) {
             // The source rejects developer turns. Do not silently rewrite their
             // role or discard their instructions.
@@ -61,9 +137,13 @@ extension MFTokenizer {
             return try encodeToolChat(messages: messages, tools: tools,
                                       reasoningEffort: reasoningEffort)
         }
+        if usesSourceTemplate(reasoningEffort: reasoningEffort) {
+            return try encodeToolChat(messages: messages, tools: tools,
+                                      reasoningEffort: reasoningEffort)
+        }
         guard reasoningEffort == nil else {
             throw MFTokenizerError.unsupportedForDialect(
-                "reasoning_effort requires base or Swift Qwen 3.8")
+                "reasoning_effort is not supported by this model")
         }
         if !tools.isEmpty || messages.contains(where: {
             $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
@@ -71,5 +151,21 @@ extension MFTokenizer {
             return try encodeToolChat(messages: messages, tools: tools)
         }
         return encode(try applyChatTemplate(messages), addBOS: false)
+    }
+}
+
+extension MFTokenizer {
+    /// Capture before the generated thought channel. Derive the generation
+    /// suffix from this exact template invocation; history may itself contain
+    /// thought-channel tokens. Tool continuations keep the active turn's image.
+    public func gemmaRecoveryBoundary(messages: [Message], tools: [FunctionDefinition],
+                                      reasoningEffort: QwenReasoningEffort?,
+                                      preserveThinking: Bool, promptIDs: [Int32]) throws -> Int? {
+        guard dialect == .gemma, messages.last?.role == .user else { return nil }
+        let history = try encodeToolChat(messages: messages, tools: tools,
+            reasoningEffort: reasoningEffort, preserveThinking: preserveThinking,
+            addGenerationPrompt: false)
+        guard promptIDs.starts(with: history) else { return nil }
+        return promptIDs[history.count...].firstIndex(of: channelStartID) ?? promptIDs.count
     }
 }

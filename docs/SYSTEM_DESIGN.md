@@ -112,6 +112,20 @@ routers, shared experts, norms, and scalar parameters. Each `layer_XX.bin`
 contains 128 fixed-stride routed-expert blobs for one layer. `layout.json`
 describes the packed subregions within each blob.
 
+The separate `gemma4qat` installation uses the same text architecture and
+directory layout, with INT4 affine groups of 32 and BF16 routers without
+quantization companions. Its source `chat_template.jinja` and
+`generation_config.json` are required alongside config/tokenizer files.
+Install integrity is validated independently of entry-point readiness. CLI and
+server paths use the native group-32/BF16 profile and verified local generation
+settings. QAT chat uses its installed source template, with a separate cache
+identity and exact source-prefix recovery. Its launcher destination
+is `~/llm-models/gemma4qat.gturbo`. The qualified QAT FP16 path preserves the
+source affine reduction and activation rounding in batched prefill and decode.
+QAT's batched resident projections use SIMD affine reductions; other profiles
+retain their existing tensor-operation dispatch. Prompt batching and streamed
+experts remain enabled.
+
 The expert stride is page aligned, and each sub-tensor has its own offset.
 Metal kernels bind subregions of an existing buffer instead of creating one
 buffer per tensor.
@@ -126,10 +140,12 @@ may load. It records the architecture, file sizes, and SHA-256 hashes. Without
 it, the runtime treats the installation as partial. `verified-install.json`
 records which manifest, directory, and files were verified.
 
-By default, Mference hashes `manifest.json`, `model_weights.bin`, and
-`packed_experts/layout.json` at load, then hashes each routed-expert layer file
-on first use. The trusted-receipt policy is an explicit alternative. It still
-hashes the same three common files. For large layer files, it checks the
+Mference always hashes `manifest.json`, `model_weights.bin`, and
+`packed_experts/layout.json` at load. Under `--verify full-sha256` it then hashes
+each routed-expert layer file on first use. The trusted-receipt policy still
+hashes the same three common files, and it is what the CLI and server use by
+default whenever the receipt validates; an install without a usable receipt is
+hashed as under `full-sha256`. For large layer files, it checks the
 receipt binding, manifest metadata, layout, and current file size instead of
 hashing the complete file again.
 
@@ -238,12 +254,22 @@ flowchart LR
 
 ## Instruction framing
 
-The CLI's `--messages-file` mode uses the pinned text-only Gemma 4 chat
-format. It accepts user and assistant messages plus optional leading system
-guidance. Assistant messages
-render with Gemma's `model` role. The separate loopback server uses the pinned
-upstream Jinja template for developer messages, function declarations,
-assistant tool calls, and tool results.
+Gemma 4 CLI chat/message modes and the loopback server use the same canonical
+Google Jinja template, bundled with the app at revision
+`35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122`. The installed tokenizer vocabulary
+and model receipt remain unchanged; cache identity hashes the effective app
+resource. Assistant messages render with Gemma's `model` role. The template
+also frames developer messages, function declarations, assistant tool calls,
+and tool results. Thinking is opt-in, with separate `reasoning_content` output
+and template-driven historical thought stripping. The decoder starts from
+the actual generation suffix, including an already open thought after a tool
+result. Tool syntax within thoughts remains reasoning text.
+
+The local Swift Jinja snapshot in `Vendor/swift-jinja` corrects whitespace
+handling at lexer boundaries so literal braces in the unchanged canonical
+template do not introduce extra prompt spaces. Independent Python fixtures
+check the resulting bytes and token IDs; upstream Jinja tests and existing
+Qwen template regressions also run through the package test wrapper.
 
 The runtime stops generation on `<eos>` (token 1), `<turn|>` (token 106), or
 `<|tool_response>` (token 50). The app and CLI treat the third token as a
@@ -360,14 +386,20 @@ reads); other families keep speculation off. All three are byte-identical to
 their disabled paths.
 
 After layer 30, the tied 4-bit head has two output modes. A pure-greedy
-configuration (temperature `0` and repetition penalty `1`) returns the argmax
-token directly. Other configurations write the full logits vector for the
-sampler.
+configuration (temperature `0` with penalties disabled) returns the argmax
+token directly. Other configurations write the full
+logits vector for the sampler.
 
-Sampling applies Top-P to the full distribution, then Top-K, then temperature.
-The default Top-K `64` path uses a specialized 1,024-to-64 reduction.
+Sampling follows llama.cpp's default order: penalties, Top-K, normalized
+Top-P, Min-P, then temperature. Top-K up to `64`, including the default `40`,
+uses the existing specialized 1,024-to-64 reduction and truncates its final set.
 A pure-greedy configuration bypasses the sampler through the fused head. In the
-logits path, temperature `0` selects the argmax after any repetition penalty.
+logits path, temperature `0` selects the argmax after repetition, presence and
+frequency penalties. The default penalty window contains the last 64 prompt
+or generated tokens. The host updates token counts; the GPU applies penalties
+after softcap and before softmax, without modifying raw logits or clipping
+penalized values back to the softcap range. Presence acts once per seen token;
+frequency multiplies its count. `repeat_last_n=0` disables all penalties.
 
 ## Metal execution
 
@@ -474,7 +506,17 @@ the five architectures is explicitly enumerated with its own pinned checkpoint,
 compile-time baseline, and manifest contract; a new family merges only after
 passing the [family acceptance gate](FAMILY_GATE.md). The optional HTTP server owns one
 warm model, serializes generation, and retains one verified conversational KV
-prefix by default. It binds to loopback unless the user explicitly selects the
+prefix by default. Gemma additionally retains one server-only SWA recovery
+image at the active user turn's pre-thought boundary, derived from the pinned
+template. New-user thought stripping resumes from the longest valid current
+prefix or that image, replaying only the remaining canonical suffix. Recovery
+validates physical ring rows, restores K and V separately, and commits the cursor
+after all copies complete. Full-attention rows stay in place. The image has at
+most `2 * 25 * 4096 * 1023 = 209510400` payload bytes for the pinned model:
+the next query supplies its own row of the 1,024-token window. It is provisional
+until the request succeeds and is released on reset/failure/model replacement.
+Tool rounds retain it; new user turns replace it. Other families and CLI
+reset behavior do not use this capability. The server binds to loopback unless the user explicitly selects the
 machine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).
 
 Mference is a research system. The CLI and server expose a small set of typed

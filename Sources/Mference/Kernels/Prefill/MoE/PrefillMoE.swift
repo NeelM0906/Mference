@@ -4,8 +4,9 @@ import Metal
 final class PrefillMoE {
     private let reducePSO: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.reducePSO = try context.pipeline("prefill_moe_reduce_token_major")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        self.reducePSO = try context.pipeline("prefill_moe_reduce_token_major",
+            constants: Quantization.gemmaSourceConstants(enabled: sourceFP16))
     }
 
     func encodeReduceTokenMajor(commandBuffer: MTLCommandBuffer,

@@ -50,15 +50,8 @@ public func run(args: Args,
                 2)
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
-        let config = GenerationConfig(
-            maxNewTokens: effectiveMaxNew,
-            temperature: args.temperature,
-            topK: args.topK,
-            topP: args.topP,
-            repetitionPenalty: args.repetitionPenalty,
-            seed: args.seed,
-            stopStrings: args.stops,
-            extraStopTokens: [])
+        let config = try args.generationConfig(defaults: tokenizer.generationDefaults,
+                                               maxNewTokens: effectiveMaxNew)
         let prefillChunkTokens: Int
         switch args.prefillChunk {
         case .fixed(let n):
@@ -79,7 +72,8 @@ public func run(args: Args,
             useMapleFlashHead: args.flashHead,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
-            kvPoolPagesPerLayer: args.kvPoolPages)
+            kvPoolPagesPerLayer: args.kvPoolPages,
+            shadowPrefetchBudget: args.shadowBudget)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -102,7 +96,7 @@ public func run(args: Args,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: args.reasoningEffort, promptIDs: promptIds)
-        let decoder = args.messagesFile != nil && (tokenizer.usesSourceQwenTemplate(reasoningEffort: args.reasoningEffort) || startsInThinking)
+        let decoder = args.messagesFile != nil && (tokenizer.usesSourceTemplate(reasoningEffort: args.reasoningEffort) || startsInThinking)
             ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                          allowedTools: [],
                                          startsInThought: startsInThinking)
@@ -379,7 +373,8 @@ private func visibleAssistantText(_ events: [StructuredAssistantEvent]) throws -
 /// re-renders the whole history through the tokenizer's chat template, so the
 /// REPL follows whichever dialect the loaded checkpoint uses. Each turn starts
 /// from a reset KV cache (`runRawCompletion`'s default), so no state leaks
-/// between turns.
+/// between turns. `--reuse-prefix` instead asks the prompt prefix cache the
+/// server uses whether the turn may continue from the previous one's KV state.
 private func runChat(args: Args,
                      stdout: FileHandle,
                      stderr: FileHandle) async -> RunResult {
@@ -388,22 +383,10 @@ private func runChat(args: Args,
         let expertStreaming = try resolveExpertStreaming(args.expertCacheSlots,
                                                          modelURL: modelURL)
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelURL)
-        let baseConfig = GenerationConfig(
-            maxNewTokens: args.maxNew,
-            temperature: args.temperature,
-            topK: args.topK,
-            topP: args.topP,
-            repetitionPenalty: args.repetitionPenalty,
-            seed: args.seed,
-            stopStrings: args.stops,
-            extraStopTokens: [])
-        // Interactive chat has no prompt at load time, so `auto` keeps the
-        // production default; a fixed size applies to every turn's prefill.
-        let prefillChunkTokens: Int
-        switch args.prefillChunk {
-        case .fixed(let n): prefillChunkTokens = n
-        case .auto: prefillChunkTokens = 128
-        }
+        let baseConfig = try args.generationConfig(defaults: tokenizer.generationDefaults,
+                                                   maxNewTokens: args.maxNew)
+        let prefillChunkTokens = args.prefillChunk.chatChunkTokens(
+            for: try ManifestReader.peekFamily(directoryURL: modelURL))
         let runtime = RuntimeConfiguration(
             expertCacheSlots: expertStreaming.configSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
@@ -412,7 +395,8 @@ private func runChat(args: Args,
             useMapleFlashHead: args.flashHead,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
-            kvPoolPagesPerLayer: args.kvPoolPages)
+            kvPoolPagesPerLayer: args.kvPoolPages,
+            shadowPrefetchBudget: args.shadowBudget)
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -438,6 +422,22 @@ private func runChat(args: Args,
             [MFTokenizer.Message(role: .system, content: $0)]
         } ?? []
         var history = opening
+        // `--reuse-prefix`. One model and one runtime per process, so the
+        // cache domain only has to stay the same between turns.
+        var prefixCache = PromptPrefixCache()
+        let cacheDomain = PromptPrefixCacheDomain(
+            modelID: model.modelID,
+            sourceSnapshotHash: model.sourceSnapshotHash,
+            runtimeProfileHash: "cli",
+            maximumContext: args.maxContext,
+            kvStorage: forwardRuntime.kvStorageMode.rawValue,
+            fp16RingEnabled: runtime.fp16RingEnabled,
+            templateSHA256: "")
+        let recovery = args.reusePrefix
+            ? (runner as? any GemmaPrefixRecovering).flatMap {
+                $0.supportsGemmaPrefixRecovery && tokenizer.dialect == .gemma ? $0 : nil
+            }
+            : nil
         let promptTokens = { (messages: [MFTokenizer.Message]) throws -> Int in
             try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort).count
         }
@@ -458,6 +458,8 @@ private func runChat(args: Args,
                     return RunResult(exitCode: 0)
                 case "/clear":
                     history = opening
+                    prefixCache.invalidate()
+                    recovery?.discardGemmaPrefix()
                     stderr.write(Data("history cleared\n".utf8))
                 case "/history":
                     for message in history {
@@ -482,9 +484,38 @@ private func runChat(args: Args,
             history = fitted.messages
 
             let promptIds = try tokenizer.encodeChat(messages: history, reasoningEffort: args.reasoningEffort)
+            let cacheTurn = PromptPrefixCacheTurn(messages: history, reasoningEffort: args.reasoningEffort)
+            var plan = ChatPrefixReuse.Plan(promptIDs: promptIds, start: .reset)
+            var checkpoint: (position: Int, capture: () throws -> Void)?
+            if args.reusePrefix {
+                let match = prefixCache.match(
+                    domain: cacheDomain,
+                    turn: cacheTurn,
+                    renderedPromptIDs: promptIds,
+                    tokenizer: tokenizer,
+                    gemmaRecoverablePrefix: recovery.map { capable in { capable.gemmaRecoverablePrefix(upTo: $0) } })
+                plan = ChatPrefixReuse.plan(match: match, renderedPromptIDs: promptIds, maxContext: args.maxContext)
+                if case .resume(let cached) = plan.start {
+                    // Gemma re-renders earlier turns, so its hit can lie below
+                    // the runner's position and needs the KV state rewound.
+                    if let recovery, cached != runner.continuationPosition {
+                        _ = try recovery.recoverGemmaPrefix(to: cached)
+                    }
+                } else {
+                    prefixCache.invalidate()
+                }
+                if let recovery,
+                   let boundary = try tokenizer.gemmaRecoveryBoundary(
+                    messages: history, tools: [], reasoningEffort: args.reasoningEffort,
+                    preserveThinking: false, promptIDs: plan.promptIDs) {
+                    checkpoint = (boundary, { _ = try recovery.captureGemmaPrefix() })
+                }
+            }
             var config = baseConfig
-            config.maxNewTokens = min(args.maxNew, args.maxContext - promptIds.count)
-            let reply = try await streamChatTurn(promptIds: promptIds,
+            config.maxNewTokens = min(args.maxNew, args.maxContext - plan.promptIDs.count)
+            let (reply, stats, stoppedByStopString) = try await streamChatTurn(promptIds: plan.promptIDs,
+                                                 start: plan.start,
+                                                 prefillCheckpoint: checkpoint,
                                                  model: model,
                                                  config: config,
                                                  tokenizer: tokenizer,
@@ -493,11 +524,26 @@ private func runChat(args: Args,
                                                  context: context,
                                                  scratch: scratch,
                                                  prefillConfig: forwardRuntime.prefillConfig,
+                                                 showReasoning: args.showReasoning,
                                                  quiet: args.quiet,
                                                  stdout: stdout,
                                                  stderr: stderr)
-            if reply.content?.isEmpty == false || reply.reasoningContent != nil {
-                history.append(reply)
+            let kept = reply.content?.isEmpty == false || reply.reasoningContent != nil
+            if kept { history.append(reply) }
+            if args.reusePrefix {
+                // Only a reply that entered the history can be continued from.
+                if kept {
+                    prefixCache.publish(domain: cacheDomain,
+                                        turn: cacheTurn,
+                                        content: reply.content ?? "",
+                                        calls: [],
+                                        result: stats,
+                                        reasoningContent: reply.reasoningContent,
+                                        stopStringFiltered: stoppedByStopString)
+                } else {
+                    prefixCache.invalidate()
+                }
+                if prefixCache.entry == nil { recovery?.discardGemmaPrefix() }
             }
         }
     } catch is CancellationError {
@@ -547,8 +593,12 @@ private func resolveExpertStreaming(_ choice: ExpertCacheSlotChoice,
 }
 
 /// Generate one assistant turn, streaming deltas to `stdout`, and return the
-/// text that was streamed so the caller can append it to the history.
+/// text that was streamed so the caller can append it to the history, with the
+/// decode result that says what the KV cache now holds and whether a stop
+/// string cut the visible text short of what was generated.
 private func streamChatTurn(promptIds: [Int32],
+                            start: RawCompletionStart,
+                            prefillCheckpoint: (position: Int, capture: () throws -> Void)?,
                             model: Model,
                             config: GenerationConfig,
                             tokenizer: MFTokenizer,
@@ -557,20 +607,34 @@ private func streamChatTurn(promptIds: [Int32],
                             context: MetalContext,
                             scratch: RawCompletionScratch,
                             prefillConfig: PrefillRuntimeConfig,
+                            showReasoning: Bool,
                             quiet: Bool,
                             stdout: FileHandle,
-                            stderr: FileHandle) async throws -> MFTokenizer.Message {
+                            stderr: FileHandle) async throws -> (MFTokenizer.Message, RawDecodeResult, Bool) {
     var reply = ""
     var reasoning = ""
     let startsInThinking = tokenizer.startsInThinking(
         reasoningEffort: reasoningEffort, promptIDs: promptIds)
-    let decoder = tokenizer.usesSourceQwenTemplate(reasoningEffort: reasoningEffort) || startsInThinking
+    let decoder = tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort) || startsInThinking
         ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                      allowedTools: [],
                                      startsInThought: startsInThinking)
         : nil
-    if tokenizer.usesSourceQwenTemplate(reasoningEffort: reasoningEffort) {
-        decoder?.onReasoning = { reasoning += $0 }
+    // `--show-reasoning` forwards thoughts where they are already collected;
+    // installing the callback elsewhere would change the decoder's framing of
+    // the visible text.
+    var echo = ReasoningEcho()
+    func writeVisible(_ text: String) {
+        guard !text.isEmpty else { return }
+        if showReasoning { stderr.write(Data(echo.close().utf8)) }
+        stdout.write(Data(text.utf8))
+        reply += text
+    }
+    if tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort) {
+        decoder?.onReasoning = { text in
+            reasoning += text
+            if showReasoning { stderr.write(Data(echo.reasoning(text).utf8)) }
+        }
     }
     var completionConfig = config
     var stopMatcher = StreamingStopMatcher(stops: decoder == nil ? [] : config.stopStrings)
@@ -585,6 +649,8 @@ private func streamChatTurn(promptIds: [Int32],
         context: context,
         scratch: scratch,
         prefillConfig: prefillConfig,
+        start: start,
+        prefillCheckpoint: prefillCheckpoint,
         shouldStop: { shouldStop }) { progress in
             guard decodingError == nil else { return }
             do {
@@ -595,12 +661,12 @@ private func streamChatTurn(promptIds: [Int32],
                 let visible = try visibleAssistantText(
                     structuredEvents(decoder, tokenID: tokenID, text: delta))
                 let emitted = decoder == nil ? visible : stopMatcher.push(visible)
-                if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+                writeVisible(emitted)
                 if decoder != nil, stopMatcher.isStopped { shouldStop = true }
             case .tail(let tail):
                 let visible = try visibleAssistantText(structuredTailEvents(decoder, text: tail))
                 let emitted = decoder == nil ? visible : stopMatcher.push(visible)
-                if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+                writeVisible(emitted)
             }
             } catch {
                 decodingError = error
@@ -611,8 +677,9 @@ private func streamChatTurn(promptIds: [Int32],
     if let decoder {
         let visible = try visibleAssistantText(decoder.finish())
         let emitted = stopMatcher.push(visible) + stopMatcher.finish()
-        if !emitted.isEmpty { stdout.write(Data(emitted.utf8)); reply += emitted }
+        writeVisible(emitted)
     }
+    if showReasoning { stderr.write(Data(echo.close().utf8)) }
     stdout.write(Data("\n".utf8))
     if let notice = emptyResponseLimitNotice(reason: stats.reason,
         hasVisibleText: reply.contains(where: { !$0.isWhitespace }),
@@ -625,9 +692,12 @@ private func streamChatTurn(promptIds: [Int32],
         let tokensPerSecond = stats.decodeSeconds > 0
             ? Double(stats.newTokens) / stats.decodeSeconds
             : 0
-        let footer = "[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
+        // Only a resumed turn (`--reuse-prefix`) reports cached prompt tokens.
+        let cached = stats.cachedPromptTokens > 0 ? " cached=\(stats.cachedPromptTokens)tok" : ""
+        let footer = "[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s\(cached) new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
         stderr.write(Data(footer.utf8))
     }
-    return MFTokenizer.Message(role: .assistant, content: reply,
-                               reasoningContent: reasoning.isEmpty ? nil : reasoning)
+    return (MFTokenizer.Message(role: .assistant, content: reply,
+                                reasoningContent: reasoning.isEmpty ? nil : reasoning),
+            stats, stopMatcher.isStopped)
 }

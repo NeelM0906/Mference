@@ -6,9 +6,12 @@ final class PrefillRoPE {
     private let psoProportionalNeox: MTLComputePipelineState
     private let psoNeoxSubdim: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.psoDefaultNeox = try context.pipeline("prefill_rope_default_neox_block")
-        self.psoProportionalNeox = try context.pipeline("prefill_rope_proportional_neox_block")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        self.psoDefaultNeox = try context.pipeline("prefill_rope_default_neox_block", constants: precision,
+            maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "prefill" : nil)
+        self.psoProportionalNeox = try context.pipeline("prefill_rope_proportional_neox_block", constants: precision,
+            maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "prefill" : nil)
         self.psoNeoxSubdim = try context.pipeline("prefill_rope_neox_subdim_block")
     }
 

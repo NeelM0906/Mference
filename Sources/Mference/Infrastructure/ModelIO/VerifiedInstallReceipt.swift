@@ -1,8 +1,29 @@
 import Foundation
 
 public enum ModelIntegrityPolicy: Sendable, Equatable {
+    /// Hash every routed-expert layer file against the manifest on first use.
     case fullSha256
+    /// Require a valid install receipt and check layer file sizes against it
+    /// instead of hashing; the load fails without such a receipt.
     case sizeCheckTrustedReceipt
+    /// The CLI and server default: the receipt's size checks when the receipt
+    /// validates, full SHA-256 otherwise. `Model.load` resolves it, so a loaded
+    /// model reports one of the two policies above.
+    case trustedReceiptWhenValid
+}
+
+extension ModelIntegrityPolicy {
+    /// The `--verify` values shared by the CLI and the server.
+    public static let verifyFlagValues = "auto, full-sha256, or trusted-receipt"
+
+    public init?(verifyFlag: String) {
+        switch verifyFlag {
+        case "auto": self = .trustedReceiptWhenValid
+        case "full-sha256": self = .fullSha256
+        case "trusted-receipt": self = .sizeCheckTrustedReceipt
+        default: return nil
+        }
+    }
 }
 
 public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {

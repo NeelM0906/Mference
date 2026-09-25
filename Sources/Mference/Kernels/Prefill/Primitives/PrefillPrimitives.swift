@@ -3,9 +3,14 @@ import Metal
 
 final class PrefillEmbedLookupInt4 {
     private let pso: MTLComputePipelineState
+    private let groupSize: Int
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_embed_lookup_int4_block")
+    init(context: MetalContext, groupSize: Int = Quantization.groupSize,
+         sourceFP16: Bool = false) throws {
+        self.groupSize = groupSize
+        self.pso = try context.pipeline("prefill_embed_lookup_int4_block",
+            constants: Quantization.int4Constants(groupSize: groupSize)
+                + Quantization.gemmaSourceConstants(enabled: sourceFP16))
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -17,8 +22,8 @@ final class PrefillEmbedLookupInt4 {
                        t: UInt32,
                        d: UInt32,
                        outScale: Float) {
-        precondition(d % UInt32(Quantization.groupSize) == 0,
-                     "D must be a multiple of \(Quantization.groupSize)")
+        precondition(d % UInt32(groupSize) == 0,
+                     "D must be a multiple of \(groupSize)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(table, offset: tableOffset, index: 0)
@@ -41,8 +46,9 @@ final class PrefillEmbedLookupInt4 {
 final class PrefillRMSNorm {
     private let psoBF16W: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.psoBF16W = try context.pipeline("prefill_rmsnorm_bf16w_block")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        self.psoBF16W = try context.pipeline("prefill_rmsnorm_bf16w_block",
+            constants: Quantization.gemmaSourceConstants(enabled: sourceFP16))
     }
 
     func encodeBF16W(commandBuffer: MTLCommandBuffer,
@@ -72,11 +78,20 @@ final class PrefillRMSNorm {
 
 final class PrefillInt4QMM {
     private let pso: MTLComputePipelineState
+    private let groupSize: Int
     private let decodeOrder: Bool
+    private let qmmThreads: MTLSize
     private let decodeOrderPipelines: [MTLComputePipelineState]
     private static let decodeTileTokens = 4
 
-    init(context: MetalContext, decodeOrder: Bool = false) throws {
+    init(context: MetalContext, decodeOrder: Bool = false,
+         groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) throws {
+        self.groupSize = groupSize
+        self.qmmThreads = sourceFP16
+            ? MTLSize(width: 32, height: 8, depth: 1)
+            : MTLSize(width: 8, height: 8, depth: 1)
+        let quantizationConstants = Quantization.int4Constants(groupSize: groupSize)
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16)
         self.decodeOrder = decodeOrder
         if decodeOrder {
             // Safe math preserves each token's decode reduction while a small
@@ -87,6 +102,10 @@ final class PrefillInt4QMM {
                 let values = MTLFunctionConstantValues()
                 var count = UInt32(tokens)
                 var enabled = true
+                var group = UInt32(groupSize)
+                var sourcePrecision = sourceFP16
+                values.setConstantValue(&sourcePrecision, type: .bool, index: 110)
+                values.setConstantValue(&group, type: .uint, index: 108)
                 values.setConstantValue(&count, type: .uint, index: 45)
                 values.setConstantValue(&enabled, type: .bool, index: 46)
                 let function = try library.makeFunction(
@@ -97,7 +116,9 @@ final class PrefillInt4QMM {
             self.pso = pipelines[Self.decodeTileTokens - 1]
         } else {
             self.decodeOrderPipelines = []
-            self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block")
+            self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block",
+                constants: quantizationConstants, maxTotalThreadsPerThreadgroup: nil,
+                safeMathModule: sourceFP16 ? "prefill" : nil)
         }
     }
 
@@ -110,8 +131,8 @@ final class PrefillInt4QMM {
                        t: Int,
                        n: Int,
                        k: Int) {
-        precondition(k % Quantization.groupSize == 0,
-                     "K must be a multiple of \(Quantization.groupSize)")
+        precondition(k % groupSize == 0,
+                     "K must be a multiple of \(groupSize)")
         precondition(!decodeOrder || weightsOffset.isMultiple(of: 2),
                      "decode-order INT4 projection needs two-byte aligned weights")
         guard t > 0, n > 0, k > 0 else { return }
@@ -147,7 +168,7 @@ final class PrefillInt4QMM {
             }
         } else {
             enc.dispatchThreadgroups(MTLSize(width: (n + 7) / 8, height: (t + 7) / 8, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+                threadsPerThreadgroup: qmmThreads)
         }
         enc.endEncoding()
     }

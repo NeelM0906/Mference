@@ -5,9 +5,10 @@ final class PrefillPerHeadNorm {
     private let psoBF16W: MTLComputePipelineState
     private let psoNoScale: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.psoBF16W = try context.pipeline("prefill_rmsnorm_bf16w_perhead_block")
-        self.psoNoScale = try context.pipeline("prefill_rmsnorm_no_scale_perhead_block")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        self.psoBF16W = try context.pipeline("prefill_rmsnorm_bf16w_perhead_block", constants: precision)
+        self.psoNoScale = try context.pipeline("prefill_rmsnorm_no_scale_perhead_block", constants: precision)
     }
 
     func encodeBF16W(commandBuffer: MTLCommandBuffer,

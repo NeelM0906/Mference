@@ -341,6 +341,11 @@ cmd_doctor() {
 
 cmd_install() {
   local output="scratch/$install_family.gturbo"
+  local destination="$repository_root/$output"
+  if [[ "$install_family" == "gemma4qat" ]]; then
+    output="$HOME/llm-models/gemma4qat.gturbo"
+    destination="$output"
+  fi
   # bash 3.2 is what /usr/bin/env bash is on macOS, and there `"${empty[@]}"`
   # is an unbound-variable error under `set -u`, so every pass-through
   # expansion is guarded by its own count.
@@ -349,14 +354,14 @@ cmd_install() {
   if [[ "$dry_run" -eq 1 ]]; then
     echo "would check: pgrep -fl '$model_process_pattern'"
     echo "would verify: \"$install_family\" is one of: $(repack_families)"
-    echo "would run:   swift run -c release --scratch-path $build_path MferenceRepack --model $install_family --output $output$extra"
-    echo "would write: $repository_root/$output"
+    echo "would run:   swift run -c release --scratch-path $build_path MferenceRepack --model $install_family --output \"$output\"$extra"
+    echo "would write: $destination"
     exit 0
   fi
   check_family "$install_family"
   check_platform
   check_no_model_process
-  note "installing $install_family into $repository_root/$output"
+  note "installing $install_family into $destination"
   note "source reads range from ~5 GB to ~360 GB; check disk first. Add --dry-run to MferenceRepack for the exact budget."
   cd "$repository_root"
   if [[ ${#repack_arguments[@]} -gt 0 ]]; then
@@ -365,7 +370,11 @@ cmd_install() {
   else
     swift run -c release --scratch-path "$build_path" MferenceRepack --model "$install_family" --output "$output"
   fi
-  note "installed; start the UI with ./mference-ui.sh"
+  if [[ "$install_family" == "gemma4qat" ]]; then
+    note "QAT installation complete; select gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned in the model picker."
+  else
+    note "installed; start the UI with ./mference-ui.sh"
+  fi
 }
 
 cmd_models() {

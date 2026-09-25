@@ -21,17 +21,24 @@ final class LMHeadChainInt4 {
     private let rowSummariesBuffer: MTLBuffer
     private let maxD: Int
     private let maxVocab: Int
+    private let groupSize: Int
 
     init(context: MetalContext,
          maxD: Int = 2816,
-         maxVocab: Int = 262144) throws {
-        self.rms = try RMSNorm(context: context)
-        self.rowGreedy = try context.pipeline("lm_head_greedy_int4_rows_chunk_raw")
+         maxVocab: Int = 262144,
+         groupSize: Int = Quantization.groupSize,
+         sourceFP16: Bool = false) throws {
+        self.groupSize = groupSize
+        let quantizationConstants = Quantization.int4Constants(groupSize: groupSize)
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        self.rms = try RMSNorm(context: context, sourceFP16: sourceFP16)
+        self.rowGreedy = try context.pipeline("lm_head_greedy_int4_rows_chunk_raw",
+            constants: quantizationConstants)
         self.specializedD = UInt32(maxD)
         self.specializedVocab = UInt32(maxVocab)
         self.rowGreedySpecialized = try context.pipeline(
             "lm_head_greedy_int4_rows_chunk_raw",
-            constants: [
+            constants: quantizationConstants + [
                 MetalFunctionConstant(index: 10, value: .uint32(UInt32(maxD))),
                 MetalFunctionConstant(index: 11, value: .uint32(UInt32(maxVocab))),
                 MetalFunctionConstant(index: 13, value: .bool(true)),
@@ -73,8 +80,8 @@ final class LMHeadChainInt4 {
         precondition(Int(d) <= maxD, "d=\(d) exceeds wrapper maxD=\(maxD)")
         precondition(Int(vocab) <= maxVocab,
                      "vocab=\(vocab) exceeds wrapper maxVocab=\(maxVocab)")
-        precondition(Int(d) % Quantization.groupSize == 0,
-                     "d must be a multiple of \(Quantization.groupSize)")
+        precondition(Int(d) % groupSize == 0,
+                     "d must be a multiple of \(groupSize)")
         precondition(hiddenOffset >= 0, "hiddenOffset must be non-negative")
         precondition(weightsOffset % 2 == 0,
                      "lm_head_greedy_int4_rows_chunk_raw needs a 2-aligned weightsOffset")

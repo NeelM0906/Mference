@@ -5,28 +5,34 @@ final class MPPPrefillInt4QMM {
     enum Path: String, Sendable {
         case affineThreadgroupF16 = "affine-threadgroup-f16"
         case affineThreadgroupF32 = "affine-threadgroup-f32"
+        case sourceAffineF16 = "source-affine-f16"
+        case sourceAffineF32 = "source-affine-f32"
         case unavailable
     }
 
     static let tileM = 64
     static let tileN = 32
-    static let tileK = Quantization.groupSize
+    static let tileK = 64
 
     private var pipeline: MTLComputePipelineState?
     private var pipelineF32: MTLComputePipelineState?
+    private let sourceFP16: Bool
 
-    init(context: MetalContext) {
+    init(context: MetalContext, groupSize: Int = Quantization.groupSize, sourceFP16: Bool = false) {
+        precondition(groupSize == 32 || groupSize == 64)
+        self.sourceFP16 = sourceFP16
         do {
-            let library = try Self.compileTensorOpsLibrary(device: context.device)
-            guard let function = library.makeFunction(
-                name: "mpp_prefill_affine_threadgroup_f16") else {
-                throw MetalError.missingFunction("mpp_prefill_affine_threadgroup_f16")
-            }
+            let library = try Self.compileTensorOpsLibrary(device: context.device, safeMath: sourceFP16)
+            let constants = MTLFunctionConstantValues()
+            var group = UInt32(groupSize)
+            var sourcePrecision = sourceFP16
+            constants.setConstantValue(&sourcePrecision, type: .bool, index: 110)
+            constants.setConstantValue(&group, type: .uint, index: 108)
+            let function = try library.makeFunction(
+                name: "mpp_prefill_affine_threadgroup_f16", constantValues: constants)
             self.pipeline = try context.device.makeComputePipelineState(function: function)
-            guard let functionF32 = library.makeFunction(
-                name: "mpp_prefill_affine_threadgroup_f32") else {
-                throw MetalError.missingFunction("mpp_prefill_affine_threadgroup_f32")
-            }
+            let functionF32 = try library.makeFunction(
+                name: "mpp_prefill_affine_threadgroup_f32", constantValues: constants)
             self.pipelineF32 = try context.device.makeComputePipelineState(
                 function: functionF32)
         } catch {
@@ -85,7 +91,7 @@ final class MPPPrefillInt4QMM {
                                            height: 1,
                                            depth: 1))
         encoder.endEncoding()
-        return .affineThreadgroupF16
+        return sourceFP16 ? .sourceAffineF16 : .affineThreadgroupF16
     }
 
     @discardableResult
@@ -126,10 +132,10 @@ final class MPPPrefillInt4QMM {
             threadsPerThreadgroup: MTLSize(width: pipelineF32.threadExecutionWidth * 4,
                                            height: 1, depth: 1))
         encoder.endEncoding()
-        return .affineThreadgroupF32
+        return sourceFP16 ? .sourceAffineF32 : .affineThreadgroupF32
     }
 
-    private static func compileTensorOpsLibrary(device: MTLDevice) throws -> MTLLibrary {
-        try MetalContext.moduleLibrary(device: device, module: "tensorops")
+    private static func compileTensorOpsLibrary(device: MTLDevice, safeMath: Bool) throws -> MTLLibrary {
+        try MetalContext.moduleLibrary(device: device, module: "tensorops", safeMath: safeMath)
     }
 }

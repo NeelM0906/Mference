@@ -7,6 +7,8 @@ struct RemoteSnapshot {
     let remoteFiles: [String: RemoteFileInfo]
     let resolvedCommit: String
     let metadataDirectory: String
+    /// Unique index/config/header bytes required to establish the source plan.
+    let metadataSourceBytes: UInt64
 }
 
 enum RemoteSnapshotLoader {
@@ -47,6 +49,8 @@ enum RemoteSnapshotLoader {
         }
         let metadata = try IndexLoader.load(snapshotDir: metadataDirectory,
                                             acceptsUnquantizedSource: quantizesInFlight)
+        try GemmaQATSource.validatePin(repoID: remote.repoID,
+                                      commit: indexInfo.resolvedCommit, metadata: metadata)
         if requireKnownSource && SourceFingerprint.modelID(forIndexSha256: metadata.indexSha256Hex) == nil {
             // A supported source without a pinned index hash installs
             // trust-on-first-use: report the computed hash for pinning
@@ -68,6 +72,7 @@ enum RemoteSnapshotLoader {
             configInfo.filename: configInfo,
         ]
         var headers: [Safetensors.Header] = []
+        var metadataSourceBytes = indexInfo.size + configInfo.size
         headers.reserveCapacity(metadata.shardFilenames.count)
         for shard in metadata.shardFilenames {
             let info = try await pinned.resolveFileInfo(filename: shard, audit: audit)
@@ -105,6 +110,7 @@ enum RemoteSnapshotLoader {
                                                                      audit: audit)
             defer { try? FileManager.default.removeItem(atPath: headerFile.path) }
             let headerData = try Data(contentsOf: URL(fileURLWithPath: headerFile.path))
+            metadataSourceBytes += 8 + headerSize
             headers.append(try Safetensors.parseHeaderBytes(path: shard,
                                                             fileSize: info.size,
                                                             headerBytes: headerData))
@@ -115,6 +121,7 @@ enum RemoteSnapshotLoader {
                               shardHeaders: headers,
                               remoteFiles: files,
                               resolvedCommit: indexInfo.resolvedCommit,
-                              metadataDirectory: metadataDirectory)
+                              metadataDirectory: metadataDirectory,
+                              metadataSourceBytes: metadataSourceBytes)
     }
 }

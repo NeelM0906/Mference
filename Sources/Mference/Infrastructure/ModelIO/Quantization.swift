@@ -4,6 +4,19 @@ public enum Quantization {
 
     public static let groupSize: Int = 64
 
+    /// Per-pipeline storage geometry; compute tiles retain their own sizes.
+    /// The legacy fixture helpers and default model contracts remain group 64.
+    static func int4Constants(groupSize: Int) -> [MetalFunctionConstant] {
+        precondition(groupSize == 32 || groupSize == 64)
+        return [MetalFunctionConstant(index: 108, value: .uint32(UInt32(groupSize)))]
+    }
+
+    /// The aligned QAT checkpoint retains its source FP16 operation boundaries.
+    /// Independent of storage grouping; original model pipelines leave it off.
+    static func gemmaSourceConstants(enabled: Bool) -> [MetalFunctionConstant] {
+        [MetalFunctionConstant(index: 110, value: .bool(enabled))]
+    }
+
     // MARK: - BF16 helpers
     //
     // BF16 = top 16 bits of FP32 (8-bit exponent, 7-bit mantissa). Stored on

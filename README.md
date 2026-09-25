@@ -148,11 +148,20 @@ the completed install. Interrupted model downloads can be continued with
 See the [source-release checklist](docs/SOURCE_RELEASE.md) for checks,
 troubleshooting and release limitations.
 
+The separate Gemma QAT checkpoint can be installed with
+`./mference-ui.sh install gemma4qat` into `$HOME/llm-models/gemma4qat.gturbo`.
+It preserves native group-32 weights and BF16 routers, uses its installed
+checkpoint chat template and generation settings, and keeps a distinct model
+ID alongside the original Gemma. See the
+[QAT controls and qualification status](docs/RUNTIME_CONTROLS.md#gemma-qat) and
+[QAT installation guidance](docs/OPEN_WEBUI.md#gemma-qat-installation), with
+[checkpoint details and measured limits](docs/families/GEMMA4_QAT.md).
+
 The UI is [Open WebUI](https://github.com/open-webui/open-webui), installed
 on first launch as a pinned Python tool (the launcher uses `uv`; it prints
 the install command if `uv` is missing). Behind it, `MferenceServer` runs in
-library mode: it lists every installed model it finds in the checkout's
-`scratch/`, in `~/Library/Application Support/Mference`, or under the
+library mode: it lists runnable installs it finds in the checkout's
+`scratch/`, in `~/llm-models`, in `~/Library/Application Support/Mference`, or under the
 `Mference.libraryRoot` default, and swaps the loaded model in-process when
 you pick a different one. Exactly one model is ever resident. The launcher also
 registers each model in Open WebUI with its builtin tool schemas switched off,
@@ -201,13 +210,14 @@ The server alone, for other OpenAI-compatible clients, is documented in
 
 | Metric | Value |
 | --- | --- |
-| Models | Gemma 4 26B-A4B IT · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B · MiniCPM5-2B (dense, plain llama) · GLM-5.3-Flash 320B-A18B (new) |
+| Models | Gemma 4 26B-A4B IT · Gemma 4 QAT 26B-A4B aligned · Qwen 3.6 35B-A3B · DeepSeek-V4-Flash 284B-A13B (experimental) · Inkling-Small 276B-A12B · Maple Preview 20B-A1B · Qwen 3.8 27B (dense, MTP or DFlash2 speculative decode) · Qwen3.8-Flash-Next 180B-A3.5B · MiniCPM5-2B (dense, plain llama) · GLM-5.3-Flash 320B-A18B (new) |
 | Weights | MLX affine or ternary, group 64/128; INT8 or BF16 routers; 4-bit or 2-bit routed experts; vendor BF16 quantized in flight to INT4/INT8 group 64 for Qwen 3.6, Flash-Next, and MiniCPM5 |
-| Memory | ~2 GB (Gemma 4) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB at 16 slots (Flash-Next); high-memory auto maps its ~68 GiB routed pool** · 123 MiB (MiniCPM5-2B, short-explanation case) |
-| Storage | ~14.3 GB installed (Gemma 4) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) · ~15 GB (Qwen 3.8) · ~175 GB (Flash-Next) · 1.43 GB (MiniCPM5-2B; 1,425,981,882 bytes over 8 files) |
+| Memory | ~2 GB (Gemma 4) · ~2.16 GiB peak process footprint (Gemma 4 QAT, 4K context at 16 slots, FP16 KV) · ~1.45 GB at 16 slots (Qwen 3.6; CLI/server auto uses 96 slots on 24 GiB+ hosts, 32 on 16 GiB+) · ~5.7 GB (DeepSeek-V4-Flash) · ~9 GB (Inkling-Small), including a 4K KV cache · 490.64 MiB (Maple, 128-token prompt) · ~15 GB (Qwen 3.8, resident) · **~2.36 GB at 16 slots (Flash-Next); high-memory auto maps its ~68 GiB routed pool** · 123 MiB (MiniCPM5-2B, short-explanation case) |
+| Storage | ~14.3 GB installed (Gemma 4) · ~15.8 GB (Gemma 4 QAT; 15,835,171,794 bytes) · ~19.6 GB (Qwen 3.6) · ~91 GB (DeepSeek-V4-Flash) · ~148 GB (Inkling-Small) · ~6.6 GB (Maple) · ~15 GB (Qwen 3.8) · ~175 GB (Flash-Next) · 1.43 GB (MiniCPM5-2B; 1,425,981,882 bytes over 8 files) |
 | Hardware | Apple Silicon Mac; RAM is family-specific — low-memory streamed families run on 8 GB, while fully resident Qwen 3.8 requires a 24 GB-class host |
 | Platform | macOS 15+, Metal 3 (MSL 3.2), Swift 6.1+; running on macOS 26 with an Apple10 GPU adds the Metal 4 tensor-ops prefill path |
 | Measured decode, Gemma 4 | 5.1–6.3 tok/s (8 GB M2 Air) · 31–35 tok/s (24 GB M5 Pro) · 17.1–18.7 tok/s (256 GB M3 Ultra) |
+| Measured, Gemma 4 QAT | Diagnostic runs with cool-downs on a fanless M2 MacBook Air 16 GiB, not community-protocol benchmarks: 6.44 tok/s decode with shadow prefetch off and 7.11 tok/s at the default budget of 4 (7.16 at budget 2); output is byte-identical at every budget · 3,015-token prefill 160.6 s → 38.6 s on the CLI in one chunk and 245.4 s → 50.4 s on the server at 16K context |
 | Measured decode, Qwen 3.6 | 23.5–29.3 tok/s (24 GB M5, 32-slot profile) · 36.1–42.2 tok/s (256 GB M3 Ultra, 96-slot auto rung, 6.8 GB peak) |
 | Measured decode, DeepSeek-V4-Flash | 5.6–6.7 tok/s (256 GB M3 Ultra) at a 5,695–5,736 MiB peak footprint |
 | Measured decode, Inkling-Small | 3.0–3.7 tok/s (24 GB M5, native top-6 path) · 5.3–7.1 tok/s (256 GB M3 Ultra) at a ~8.95 GB peak footprint |

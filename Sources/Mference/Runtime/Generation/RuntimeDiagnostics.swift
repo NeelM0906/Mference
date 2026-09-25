@@ -32,6 +32,7 @@ public struct RuntimeMemorySnapshot: Sendable, Equatable, Encodable {
         let reporting = producer as? any RuntimeMemoryReporting
         var metrics = model.diagnosticMemoryBytes
         metrics["targetKVStateBuffers"] = .some(reporting?.diagnosticKVStateBytes)
+        metrics["gemmaPrefixRecoveryBuffers"] = .some((producer as? any GemmaPrefixRecovering)?.gemmaRecoveryBytes)
         metrics["runnerScratchBuffers"] = .some(reporting?.diagnosticScratchBytes)
         metrics["completionScratchBuffers"] = scratch.diagnosticBufferBytes
         metrics["metalAllocated"] = UInt64(model.device.currentAllocatedSize)
@@ -54,6 +55,18 @@ public struct RuntimeMemorySnapshot: Sendable, Equatable, Encodable {
     }
 }
 
+public struct GemmaPrefixRecoveryDiagnostics: Sendable, Equatable, Encodable {
+    public let outcome: String
+    public let capture: String?
+    public let allocatedBytes: UInt64
+
+    public init(outcome: String, capture: String?, allocatedBytes: UInt64) {
+        self.outcome = outcome
+        self.capture = capture
+        self.allocatedBytes = allocatedBytes
+    }
+}
+
 /// Additive operator diagnostics; no prompt or generated text is included.
 public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
     public let schemaVersion = 1
@@ -62,7 +75,11 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
     public let prefill: PrefillExecutionReport?
     public let memory: RuntimeMemorySnapshot
 
-    public init(result: RawDecodeResult, memory: RuntimeMemorySnapshot) {
+    public let gemmaRecovery: GemmaPrefixRecoveryDiagnostics?
+
+    public init(result: RawDecodeResult, memory: RuntimeMemorySnapshot,
+                gemmaRecovery: GemmaPrefixRecoveryDiagnostics? = nil) {
+        self.gemmaRecovery = gemmaRecovery
         cachedPromptTokens = result.cachedPromptTokens
         computedPrefillTokens = result.computedPrefillTokens
         prefill = result.prefillExecution
@@ -77,10 +94,11 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
         try c.encode(computedPrefillTokens, forKey: .computedPrefillTokens)
         try c.encode(prefill, forKey: .prefill)
         try c.encode(memory, forKey: .memory)
+        try c.encodeIfPresent(gemmaRecovery, forKey: .gemmaRecovery)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, cachedPromptTokens, computedPrefillTokens, prefill, memory
+        case schemaVersion, cachedPromptTokens, computedPrefillTokens, prefill, memory, gemmaRecovery
     }
 
     public static var enabled: Bool {

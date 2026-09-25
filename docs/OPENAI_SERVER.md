@@ -81,6 +81,13 @@ curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
 By default, the server runs one generation and queues up to four requests. Use
 `--queue-limit` to change the queue size. Press Control-C to stop the server.
 
+Model integrity follows `--verify`, on the first load and on every library
+swap. The default `auto` checks the routed-expert files against the install
+receipt's sizes when that receipt validates and hashes them on first touch
+otherwise; `--verify full-sha256` always hashes, which adds that time to the
+first prefill after each load. See
+[Runtime settings](RUNTIME_CONTROLS.md#runtime-settings) for the trade-off.
+
 ## Connect a client
 
 The base URL is `http://127.0.0.1:8080/v1`. Some client libraries require an
@@ -137,6 +144,17 @@ usage.prompt_tokens_details.cached_tokens
 The server retains one prefix. A different or incompatible history replaces
 it. Use `--prompt-cache-mode off` to disable reuse.
 
+For Gemma, a new user message applies Google's thought-stripping template.
+The server reuses the longest unchanged prefix whose state is still valid,
+rewinding current KV or restoring one bounded sliding-window snapshot before
+prefilling the remaining tokens. A tool continuation keeps the same snapshot;
+a new user turn replaces it before generating thoughts. Full-attention prefix
+rows stay in their original buffers. At most 199.81 MiB is allocated for the
+pinned Gemma recovery image (less for short histories), only with caching on.
+Missing state or incompatible history falls back to full prefill. Cancellation,
+errors, model replacement and reset invalidate recovery. Clients continue to
+send complete history; Qwen keeps its existing continuation behavior.
+
 ## Tool calls
 
 The server can return OpenAI-style function calls, but it cannot authorize or
@@ -146,7 +164,9 @@ execute them. The client runs the tool loop:
 2. When `finish_reason` is `"tool_calls"`, inspect each function name and JSON
    argument object. Apply the client's normal permission checks before running
    the function.
-3. Append the assistant message, including its unchanged `tool_calls`.
+3. Append the assistant message, including its unchanged `tool_calls` and any
+   `reasoning_content`. Gemma needs that reasoning between tool calls within
+   the current user turn.
 4. Append each result as a `role: "tool"` message. Its `tool_call_id` must
    match the call it resolves.
 5. Send the complete history and tool schemas again.
@@ -154,6 +174,19 @@ execute them. The client runs the tool loop:
 The server accepts only function tools. Omit `tool_choice` or set it to `auto`
 to allow calls. Set it to `none` to disable them. The server does not support
 `required`, named tool selection, or `parallel_tool_calls: false`.
+
+Original Gemma tool-result continuation retains the generated reasoning/KV and prefills
+only the verified results and next generation suffix. Repeated function names
+and arguments, including multiple calls in one response, are valid. A new
+user turn uses Google's canonical history policy; it cannot take the tool-loop
+append path to retain thoughts that the template strips. This also corrects
+legacy non-thinking history: the empty thought block used to start generation
+is not inserted into prior assistant messages by the canonical template.
+
+QAT uses its own installed source template. That template may normalize the
+current tool-call turn, so QAT reuse requires an actual matching source prefix;
+the server recovers that prefix and recomputes the remaining source-rendered
+tokens. Resumed input matches a fresh source render.
 
 ## Errors
 
@@ -199,7 +232,9 @@ The server writes one line per request to stderr:
 The start line is written before the model runs, so a long prefill — which
 emits nothing for minutes — is distinguishable from a wedged server. The
 completion line reports how much of the prompt the KV prefix supplied in
-`cached`, matching `usage.prompt_tokens_details.cached_tokens`.
+`cached`, matching `usage.prompt_tokens_details.cached_tokens`. The `prefill`
+field reports computed prefill time, including any snapshot capture; request
+latency also includes prefix matching and snapshot restoration.
 
 A failed request logs the status it would have carried, whether or not a
 stream had already committed `200`, along with the underlying error — which is
@@ -241,9 +276,29 @@ with adjacent system guidance instead of rendering as its own block.
 Exception: Swift-Qwen, and base Qwen 3.8 requests with an explicit
 `reasoning_effort`, use the source template and reject `developer`; use leading
 `system` guidance instead.
-Supported options include `temperature`, `top_p`, `top_k`,
-`repetition_penalty`, `seed`, `stop`, `max_tokens`,
-`max_completion_tokens`, and function-tool fields.
+Supported options include `temperature`, `top_p`, `top_k`, `min_p`,
+`presence_penalty`, `frequency_penalty`, `repetition_penalty` (alias
+`repeat_penalty`), `repeat_last_n`, `seed`, `stop`, `max_tokens`,
+`max_completion_tokens`, and function-tool fields. Conflicting repetition
+aliases are rejected.
+
+All families default to temperature `0.8`, Top-K `40`, Top-P `0.95`, Min-P
+`0.05`, repetition penalty `1.0`, presence/frequency penalties `0.0`, and a
+64-token penalty window. These match llama.cpp's built-in sampling defaults,
+before any GGUF metadata or application overrides. Explicit request values
+win. Min-P accepts `0...1`; zero disables it. Presence and frequency each
+accept finite values in `-2...2`. `repeat_last_n: 0` disables all history
+penalties; `-1` uses the complete effective history. The window includes
+cached and newly prefetched prompt tokens plus generated tokens.
+
+The chain is penalties → Top-K → normalized Top-P → Min-P → temperature.
+Penalties act on post-softcap logits: positive seen-token logits are divided
+by repetition penalty, nonpositive logits multiplied; then subtract
+`count * frequency_penalty + presence_penalty`. Counts are restricted to the
+penalty window. Nonzero penalties with an enabled window require the logits
+path even at temperature zero. See [sampling compatibility](LLAMA_SAMPLING.md).
+Top-K accepts `0` (off) or `1...256`; with positive temperature, disabling
+Top-K requires `top_p: 1`. Full-vocabulary Min-P remains supported.
 
 Base and Swift Qwen 3.8 accept `reasoning_effort` values `xhigh`, `medium`, `low`,
 and `none`. An explicit value uses the source template, retains reasoning in a
@@ -251,8 +306,82 @@ separate `reasoning_content` response/history field, and allows only exact
 rendered-prefix cache reuse. Preserve that field when replaying history.
 Omitted effort retains Swift's source-default xhigh and base Qwen's legacy
 behavior; the latter does not stream hidden reasoning. Do not treat those two
-omitted-effort policies as a matched fine-tune comparison. Other models reject
-the effort parameter. No model's sampling or MTP default is changed by this.
+omitted-effort policies as a matched fine-tune comparison.
+
+Qwen 3.6 opts into its source thinking template with
+`chat_template_kwargs: {"enable_thinking": true}` or an explicit
+`reasoning_effort`. For this checkpoint, `none` disables thinking and the other
+accepted effort values enable it; omitted controls retain non-thinking
+behavior. Explicit `reasoning_effort` takes precedence over `enable_thinking`.
+Preserve `reasoning_content` in replayed assistant turns: Qwen 3.6 can continue
+the cached generated turn with a verified source-template suffix, including
+tool-result rounds. `preserve_thinking` is accepted for compatibility; source
+template history always preserves reasoning. Thinking requests without an
+explicit completion cap default to 32,768 tokens, subject to available context.
+Gemma 4 also accepts these controls, with the policy below. Other models reject
+explicit thinking controls. Sampling and MTP defaults remain unchanged.
+
+Gemma 4 thinking is opt-in in both single-model and library mode, including
+custom model aliases. Use `chat_template_kwargs: {"enable_thinking": true}`
+or `reasoning_effort: "low"|"medium"|"xhigh"`; these three aliases enable the
+same binary mode. `none` disables it, and an explicit effort takes precedence
+over `enable_thinking`. Omitted controls leave thinking off. Its default
+completion cap remains 4,096 tokens, including reasoning; a cap reached during
+thought may return empty `content` and `finish_reason: "length"`.
+
+JSON and SSE responses return Gemma thoughts separately as `reasoning_content`.
+Replay that field on assistant messages, particularly between tool-result
+rounds. Google's template retains thoughts within the active user turn and
+strips earlier thoughts when a new user message arrives. For both Gemma
+checkpoints, the HTTP server accepts `chat_template_kwargs.preserve_thinking`
+for generic-client compatibility and normalizes it to `false` before rendering
+and cache matching. Tool-call reasoning remains available within the current
+user turn; the selected source template removes older reasoning after a new
+user prompt. This option does not enable or disable thinking. Gemma does not
+report estimated reasoning-token usage counts.
+
+This changes the former HTTP contract: ordinary Gemma no longer retains older
+tool-call thoughts when a client sends `preserve_thinking=true`, and QAT no
+longer rejects that value. Clients should continue replaying `reasoning_content`;
+the server applies the model's history policy without changing client messages.
+
+The app bundles Google's canonical template at revision
+`35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122`. Existing valid installs need no
+weight download or repack. Ordinary and tool chat use the same template;
+canonical formatting trims message content and keeps tool responses inside
+the model turn. The effective template has its own cache identity. A missing
+or damaged template resource requires rebuilding/reinstalling the application,
+not the model weights.
+
+The separate `gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned` checkpoint instead uses
+its verified installed template and generation settings, including through a
+custom alias or library swap. Its thinking switch follows the same opt-in
+rules, but its source drops ordinary assistant reasoning and retains tool-call
+reasoning only after the latest user message. Every accepted
+`preserve_thinking` value follows that source policy, including while queued.
+The two checkpoints retain their distinct source templates; their prompt bytes
+and cache reuse counts need not be identical. After tool results, the source suffix does
+not pre-open a thought channel. Reasoning, visible content and tool calls still
+use the same separate API fields. See [QAT defaults and qualification](RUNTIME_CONTROLS.md#gemma-qat).
+
+For Qwen 3.6's recommended general-thinking sampling profile, send these
+explicit options along with `model` and `messages`:
+
+```json
+{
+  "chat_template_kwargs": {"enable_thinking": true},
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 20,
+  "min_p": 0.0,
+  "presence_penalty": 1.5,
+  "repetition_penalty": 1.0
+}
+```
+
+These options change sampling policy only, not thinking templates, reasoning
+history, tool parsing, or prompt-cache continuation. Presence penalty does
+not guarantee that every semantic or textual repetition loop is eliminated.
 
 The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,

@@ -6,11 +6,15 @@ final class PrefillFinalRowHeadInt4 {
     private let int4: DequantInt4GEMV
     private let normed: MTLBuffer
     private let maxD: Int
+    private let groupSize: Int
 
-    init(context: MetalContext, maxD: Int = 2816) throws {
+    init(context: MetalContext, maxD: Int = 2816,
+         groupSize: Int = Quantization.groupSize,
+         sourceFP16: Bool = false) throws {
+        self.groupSize = groupSize
         precondition(maxD > 0, "maxD must be positive")
-        self.rms = try RMSNorm(context: context)
-        self.int4 = try DequantInt4GEMV(context: context)
+        self.rms = try RMSNorm(context: context, sourceFP16: sourceFP16)
+        self.int4 = try DequantInt4GEMV(context: context, groupSize: groupSize, sourceFP16: sourceFP16)
         self.maxD = maxD
         guard let normed = context.device.makeBuffer(length: maxD * MemoryLayout<Float16>.size,
                                                      options: .storageModePrivate) else {
@@ -39,8 +43,8 @@ final class PrefillFinalRowHeadInt4 {
         precondition(row >= 0, "row must be non-negative")
         precondition(rowStrideElements >= Int(d), "row stride must cover d")
         precondition(Int(d) <= maxD, "d=\(d) exceeds maxD=\(maxD)")
-        precondition(d % UInt32(Quantization.groupSize) == 0,
-                     "d must be a multiple of \(Quantization.groupSize)")
+        precondition(d % UInt32(groupSize) == 0,
+                     "d must be a multiple of \(groupSize)")
         let hiddenOffset = (row * rowStrideElements) * MemoryLayout<Float16>.size
         rms.encodeBF16W(commandBuffer: commandBuffer,
                         x: hiddenBlock,

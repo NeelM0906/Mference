@@ -8,7 +8,7 @@ import MferenceValidationSupport
     private static let d = ArchConfig.gemma4_26B_A4B.hiddenSize
     private static let eps: Float = 1e-6
 
-    @Test func blockLayerTailMatchesRepeatedFusedRows() throws {
+    @Test(arguments: [false, true]) func blockLayerTailMatchesRepeatedFusedRows(sourceFP16: Bool) throws {
         let rows = 3
         let h2Stride = Self.d + 9
         let h1Stride = Self.d + 13
@@ -34,8 +34,8 @@ import MferenceValidationSupport
         let layerScalar = rng.uniform(0.75, 1.25)
 
         let ctx = try MetalContext()
-        let fused = try FusedLayerTail(context: ctx)
-        let block = try PrefillLayerTail(context: ctx)
+        let fused = try FusedLayerTail(context: ctx, sourceFP16: sourceFP16)
+        let block = try PrefillLayerTail(context: ctx, sourceFP16: sourceFP16)
         guard
             let wPostFFN2Buf = ctx.device.makeBuffer(bytes: wPostFFN2,
                                                      length: wPostFFN2.count * MemoryLayout<UInt16>.size,

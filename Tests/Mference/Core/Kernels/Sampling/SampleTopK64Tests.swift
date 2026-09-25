@@ -58,24 +58,30 @@ import Testing
 
         func draw(seed: UInt64,
                   temperature: Float = 1.0,
-                  topP: Float) -> (current: UInt32, candidate: UInt32) {
+                  topP: Float,
+                  minP: Float = 0,
+                  topK: UInt32 = 64) -> (current: UInt32, candidate: UInt32) {
             let cb = context.queue.makeCommandBuffer()!
             current.encode(commandBuffer: cb,
                            probs: probs,
                            outToken: currentOutput,
                            v: UInt32(vocab),
                            temperature: temperature,
-                           topK: 64,
+                           topK: topK,
                            topP: topP,
+                           minP: minP,
                            seed: seed)
             candidate.encode(commandBuffer: cb,
                              probs: probs,
                              outToken: candidateOutput,
                              temperature: temperature,
                              topP: topP,
+                             minP: minP,
+                             topK: topK,
                              seed: seed)
             cb.commit()
             cb.waitUntilCompleted()
+            #expect(cb.status == .completed)
             return (currentOutput.contents().load(as: UInt32.self),
                     candidateOutput.contents().load(as: UInt32.self))
         }
@@ -110,20 +116,40 @@ import Testing
         }
     }
 
-    @Test func topPUsesFullVocabularyMassBeforeTopK() throws {
+    @Test func topPNormalizesTheTopKSetLikeLlama() throws {
         let rig = try Rig(vocab: 1_003)
         rig.write { _ in 1.0 / 1_003.0 }
-
-        // The full-distribution 0.95 nucleus is much wider than 64 tokens, so
-        // mlx-lm's Top-P-then-Top-K chain leaves all Top-64 entries eligible.
-        // The previous Top-K-renormalize-then-Top-P order kept only 61.
-        var sawLastThree = false
+        // llama.cpp applies Top-K before Top-P: ceil(64 * .95) == 61.
+        var sawBoundary = false
         for seed in UInt64(1)...UInt64(256) {
             let result = rig.draw(seed: seed, topP: 0.95)
             #expect(result.candidate == result.current)
-            #expect(result.candidate < 64)
-            if result.candidate >= 61 { sawLastThree = true }
+            #expect(result.candidate < 61)
+            if result.candidate == 60 { sawBoundary = true }
         }
-        #expect(sawLastThree, "Top-P incorrectly truncated the renormalized Top-64 set")
+        #expect(sawBoundary, "Top-P must include the token crossing its threshold")
+    }
+
+    @Test(arguments: [UInt32(1), 4, 40, 64], [Float(0), 0.05, 0.5, 1])
+    func requestedKAndMinPMatchGeneralSampler(topK: UInt32, minP: Float) throws {
+        let rig = try Rig(vocab: 1_003)
+        // Exact FP16 values put tokens on both sides of Min-P's inclusive edge.
+        rig.write { i in i < 2 ? 1 : (i < 4 ? 0.5 : 0.125) }
+        var seen = Set<UInt32>()
+        for seed in UInt64(1)...128 {
+            let result = rig.draw(seed: seed, temperature: 0.8, topP: 1,
+                                  minP: minP, topK: topK)
+            #expect(result.candidate == result.current)
+            #expect(result.candidate < topK)
+            if minP == 1 { #expect(result.candidate < 2) }
+            if minP == 0.5 { #expect(result.candidate < 4) }
+            seen.insert(result.candidate)
+        }
+        if topK >= 4 && minP == 0.5 {
+            #expect(seen.contains(2) && seen.contains(3), "Min-P must retain equality at its threshold")
+        }
+        if topK >= 4 && minP == 1 {
+            #expect(seen == [0, 1], "all tied maxima must remain eligible")
+        }
     }
 }

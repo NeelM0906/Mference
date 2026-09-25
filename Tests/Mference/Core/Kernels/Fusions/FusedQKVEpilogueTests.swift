@@ -5,24 +5,24 @@ import Metal
 import MferenceValidationSupport
 
 @Suite struct FusedQKVEpilogueTests {
-    @Test func fusedQKVEpilogue_matchesLegacyChainBitwise_swaShape() throws {
+    @Test(arguments: [false, true]) func fusedQKVEpilogue_matchesLegacyChainBitwise_swaShape(sourceFP16: Bool) throws {
         try Self.expectMatchesLegacy(numQHeads: 16,
                                      numKVHeads: 8,
                                      headDim: 256,
                                      position: 17,
                                      theta: 10_000.0,
                                      rotatedPairs: 128,
-                                     seed: 0x714D_E911)
+                                     seed: 0x714D_E911, sourceFP16: sourceFP16)
     }
 
-    @Test func fusedQKVEpilogue_matchesLegacyChainBitwise_fullShape() throws {
+    @Test(arguments: [false, true]) func fusedQKVEpilogue_matchesLegacyChainBitwise_fullShape(sourceFP16: Bool) throws {
         try Self.expectMatchesLegacy(numQHeads: 16,
                                      numKVHeads: 2,
                                      headDim: 512,
                                      position: 23,
                                      theta: 1_000_000.0,
                                      rotatedPairs: 64,
-                                     seed: 0x714D_F211)
+                                     seed: 0x714D_F211, sourceFP16: sourceFP16)
     }
 
     private static func expectMatchesLegacy(numQHeads: Int,
@@ -31,7 +31,7 @@ import MferenceValidationSupport
                                             position: Int,
                                             theta: Float,
                                             rotatedPairs: UInt32,
-                                            seed: UInt64) throws {
+                                            seed: UInt64, sourceFP16: Bool) throws {
         var rng = SplitMix64(seed: seed)
         let qCount = numQHeads * headDim
         let kvCount = numKVHeads * headDim
@@ -42,9 +42,9 @@ import MferenceValidationSupport
         let kWeight = (0..<headDim).map { _ in Quantization.bf16Bits(rng.uniform(0.5, 1.5)) }
 
         let ctx = try MetalContext()
-        let rms = try RMSNorm(context: ctx)
-        let rope = try RoPE(context: ctx)
-        let fused = try FusedQKVEpilogue(context: ctx)
+        let rms = try RMSNorm(context: ctx, sourceFP16: sourceFP16)
+        let rope = try RoPE(context: ctx, sourceFP16: sourceFP16)
+        let fused = try FusedQKVEpilogue(context: ctx, sourceFP16: sourceFP16)
 
         guard
             let qLegacy = ctx.device.makeBuffer(bytes: q, length: Self.bytes(qCount), options: .storageModeShared),
@@ -137,6 +137,29 @@ import MferenceValidationSupport
         if let err = cb.error {
             Issue.record("Command buffer failed: \(err)")
             return
+        }
+
+        if sourceFP16, let directory = ProcessInfo.processInfo.environment["MFERENCE_GEMMA_QAT_ROTARY_DIAGNOSTIC"] {
+            let qNorm = try #require(ctx.device.makeBuffer(bytes: q, length: Self.bytes(qCount), options: .storageModeShared))
+            let qZero = try #require(ctx.device.makeBuffer(bytes: q, length: Self.bytes(qCount), options: .storageModeShared))
+            let kZero = try #require(ctx.device.makeBuffer(bytes: k, length: Self.bytes(kvCount), options: .storageModeShared))
+            let vZero = try #require(ctx.device.makeBuffer(bytes: v, length: Self.bytes(kvCount), options: .storageModeShared))
+            let diagnostic = try #require(ctx.queue.makeCommandBuffer())
+            rms.encodeBF16WPerHead(commandBuffer: diagnostic, x: qNorm, weight: qW, out: qNorm,
+                headDim: UInt32(headDim), numHeads: numQHeads, eps: 1e-6)
+            fused.encode(commandBuffer: diagnostic, q: qZero, k: kZero, v: vZero, qWeight: qW,
+                kWeight: kW, headDim: UInt32(headDim), numQHeads: UInt32(numQHeads),
+                numKVHeads: UInt32(numKVHeads), position: 0, theta: theta, rotatedPairs: rotatedPairs, eps: 1e-6)
+            diagnostic.commit()
+            diagnostic.waitUntilCompleted()
+            try #require(diagnostic.status == .completed)
+            let root = URL(fileURLWithPath: directory)
+            for (name, buffer) in [("normalized", qNorm), ("zero-position", qZero), ("legacy", qLegacy), ("fused", qFused)] {
+                try Data(bytes: buffer.contents(), count: Self.bytes(qCount)).write(to: root.appendingPathComponent("rotary-\(headDim)-\(name).f16"))
+            }
+            let a = qNorm.contents().assumingMemoryBound(to: UInt16.self)
+            let b = qZero.contents().assumingMemoryBound(to: UInt16.self)
+            print("[qat-rotary-isolation] head=\(headDim) normalizedDifferences=\((0..<qCount).filter { a[$0] != b[$0] }.count)")
         }
 
         #expect(Self.bufferBytes(qLegacy, count: qCount) == Self.bufferBytes(qFused, count: qCount),

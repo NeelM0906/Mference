@@ -109,6 +109,9 @@ public actor ServerModelLibrary {
     public func resolve(modelID: String) async throws
         -> (modelID: String, backend: any ServerLoadedModel) {
         guard let entry = index.entry(for: modelID) else {
+            if let reason = index.unavailableReason(for: modelID) {
+                throw ServerRequestError.invalid(message: reason, param: "model", code: "model_not_runnable")
+            }
             throw ServerRequestError.unknownModel
         }
         while isLoading {

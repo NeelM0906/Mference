@@ -5,7 +5,7 @@ import Metal
 /// producer-defined prompt progress; scalar replay reports per token, while a
 /// prefill-capable producer may report per internal chunk. `.token` fires per
 /// decoded non-stop token; `.tail` carries the detokenizer flush remainder at a
-/// stop boundary.
+/// stop or Gemma channel/tool boundary.
 public enum RawDecodeProgress: Sendable {
     case prefill(done: Int, total: Int)
     case token(index: Int, id: Int32, delta: String)
@@ -43,7 +43,7 @@ public struct RawCompletionScratch: @unchecked Sendable {
     let outToken: MTLBuffer
     let sampler: Sampler
     /// Caller-owned logits, probability and output-token buffer capacities.
-    var diagnosticBufferBytes: UInt64 { uniqueBufferBytes([logits, probs, outToken]) }
+    var diagnosticBufferBytes: UInt64 { uniqueBufferBytes([logits, probs, outToken]) + sampler.diagnosticBufferBytes }
 
     public init(context: MetalContext, vocab: Int, logitSoftcap: Float = 30.0) throws {
         guard let logits = context.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
@@ -68,7 +68,7 @@ extension GenerationConfig {
     /// (`RealForwardRunner.lastGreedyToken`) instead of sampling from the
     /// logits buffer. Anything else needs real logits.
     public var isPureGreedy: Bool {
-        temperature == 0 && repetitionPenalty == 1
+        temperature == 0 && (repeatLastN == 0 || (repetitionPenalty == 1 && presencePenalty == 0 && frequencyPenalty == 0))
     }
 
 }
@@ -90,6 +90,7 @@ public func runRawCompletion(producer: any LogitProducer,
                              scratch: RawCompletionScratch,
                              prefillConfig: PrefillRuntimeConfig = .defaultChunked,
                              start: RawCompletionStart = .reset,
+                             prefillCheckpoint: (position: Int, capture: () throws -> Void)? = nil,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
     try config.validate()
@@ -118,6 +119,11 @@ public func runRawCompletion(producer: any LogitProducer,
         }
         cachedPromptTokens = count
     }
+    if let checkpoint = prefillCheckpoint {
+        guard checkpoint.position >= cachedPromptTokens, checkpoint.position <= promptIds.count else {
+            throw GeneratorError.invalidContinuation("prefill checkpoint is outside the computed prompt")
+        }
+    }
     let computedPrefillTokens = promptIds.count - cachedPromptTokens
 
     var detok = MFDetokenizer(tokenizer: tokenizer)
@@ -141,53 +147,67 @@ public func runRawCompletion(producer: any LogitProducer,
     var position = cachedPromptTokens
     var prefillSeed: PrefillSeed?
     var prefillExecution: PrefillExecutionReport?
-    let prefillTokens = promptIds[cachedPromptTokens...]
-    switch prefillConfig.mode {
-    case .chunked where producer is any ChunkedPrefillRunner:
-        let chunked = producer as! any ChunkedPrefillRunner
-        let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
-        let result = try await chunked.prefillChunked(tokens: prefillTokens,
-                                                      startPosition: position,
-                                                      outputMode: mode,
-                                                      config: prefillConfig,
-                                                      into: scratch.logits) { done in
-            onProgress(.prefill(done: cachedPromptTokens + done, total: promptIds.count))
-        }
-        if mode == .logits, result.seed != .logitsWritten {
-            throw PrefillError.unsupportedPrefillSeed(
-                "RawCompletion chunked prefill requested logits but producer returned \(result.seed)")
-        }
-        if case .greedyToken = result.seed, !config.isPureGreedy {
-            throw PrefillError.unsupportedPrefillSeed(
-                "RawCompletion chunked prefill returned a greedy token for a sampling config")
-        }
-        position = result.newPosition
-        prefillSeed = result.seed
-        prefillExecution = result.execution
-        history.append(contentsOf: prefillTokens)
-    case .chunked:
-        throw PrefillError.chunkedUnsupported(
-            PrefillError.chunkedRequiresChunkedRunnerReason)
-    case .off:
-        var execution = PrefillExecutionReport()
-        let headless = producer as? any HeadlessSequentialPrefillRunner
-        let exactPrefill = producer as? any ExactPrefillLogitProducer
-        for (offset, t) in prefillTokens.enumerated() {
-            try Task.checkCancellation()
-            if offset + 1 < prefillTokens.count, let headless {
-                try await headless.produceWithoutLogits(token: t, position: position)
-            } else if let exactPrefill {
-                try await exactPrefill.produceExactPrefill(token: t, position: position,
-                                                           into: scratch.logits)
-            } else {
-                try await producer.produce(token: t, position: position, into: scratch.logits)
+    if prefillCheckpoint?.position == position {
+        try Task.checkCancellation()
+        try prefillCheckpoint?.capture()
+    }
+    var boundaries: [Int] = []
+    if let checkpoint = prefillCheckpoint, checkpoint.position > position,
+       checkpoint.position < promptIds.count { boundaries.append(checkpoint.position) }
+    boundaries.append(promptIds.count)
+    for end in boundaries {
+        let segmentStart = position
+        let prefillTokens = promptIds[segmentStart..<end]
+        switch prefillConfig.mode {
+        case .chunked where producer is any ChunkedPrefillRunner:
+            let chunked = producer as! any ChunkedPrefillRunner
+            let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
+            let result = try await chunked.prefillChunked(tokens: prefillTokens,
+                startPosition: position, outputMode: mode, config: prefillConfig,
+                into: scratch.logits) { done in
+                onProgress(.prefill(done: segmentStart + done, total: promptIds.count))
             }
-            position += 1
-            execution.recordReplay(1, reason: "prefill_disabled")
-            history.append(t)
-            onProgress(.prefill(done: position, total: promptIds.count))
+            if mode == .logits, result.seed != .logitsWritten {
+                throw PrefillError.unsupportedPrefillSeed(
+                    "RawCompletion chunked prefill requested logits but producer returned \(result.seed)")
+            }
+            if case .greedyToken = result.seed, !config.isPureGreedy {
+                throw PrefillError.unsupportedPrefillSeed(
+                    "RawCompletion chunked prefill returned a greedy token for a sampling config")
+            }
+            position = result.newPosition
+            prefillSeed = result.seed
+            if let execution = result.execution {
+                if segmentStart == cachedPromptTokens { prefillExecution = execution }
+                else { prefillExecution?.append(execution) }
+            } else { prefillExecution = nil }
+            history.append(contentsOf: prefillTokens)
+        case .chunked:
+            throw PrefillError.chunkedUnsupported(PrefillError.chunkedRequiresChunkedRunnerReason)
+        case .off:
+            var execution = prefillExecution ?? PrefillExecutionReport()
+            let headless = producer as? any HeadlessSequentialPrefillRunner
+            let exactPrefill = producer as? any ExactPrefillLogitProducer
+            for t in prefillTokens {
+                try Task.checkCancellation()
+                if position + 1 < promptIds.count, let headless {
+                    try await headless.produceWithoutLogits(token: t, position: position)
+                } else if let exactPrefill {
+                    try await exactPrefill.produceExactPrefill(token: t, position: position, into: scratch.logits)
+                } else {
+                    try await producer.produce(token: t, position: position, into: scratch.logits)
+                }
+                position += 1
+                execution.recordReplay(1, reason: "prefill_disabled")
+                history.append(t)
+                onProgress(.prefill(done: position, total: promptIds.count))
+            }
+            prefillExecution = execution
         }
-        prefillExecution = execution
+        if prefillCheckpoint?.position == position {
+            try Task.checkCancellation()
+            try prefillCheckpoint?.capture()
+        }
     }
 
     let decodeStart = Date()
@@ -231,6 +251,16 @@ public func runRawCompletion(producer: any LogitProducer,
             break
         }
 
+        if tokenizer.dialect == .gemma,
+           tokenID == tokenizer.channelStartID || tokenID == tokenizer.channelEndID
+            || tokenID == tokenizer.toolCallStartID || tokenID == tokenizer.toolCallEndID {
+            // Special tokens are removed before byte-fallback decoding. Flush
+            // pending bytes in the old channel before delivering its boundary,
+            // then start a fresh segment so they cannot reappear in the next.
+            let tail = stopMatcher.push(detok.flush())
+            if !tail.isEmpty { onProgress(.tail(tail)) }
+            detok = MFDetokenizer(tokenizer: tokenizer)
+        }
         let delta = detok.push(tokenID)
         let visible = stopMatcher.push(delta)
         onProgress(.token(index: generated - 1, id: tokenID, delta: visible))

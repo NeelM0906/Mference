@@ -10,6 +10,9 @@ The frozen prompts are in
 [`benchmark-prompts/real-generation-v1/`](benchmark-prompts/real-generation-v1/).
 Runs use the app sampling defaults with fixed seeds: temperature `0.2`, Top-K
 `64`, Top-P `0.95`, a 4,096-token context, and up to 1,024 generated tokens.
+The commands pass `--verify full-sha256`, so every run hashes the expert files
+on first touch inside its prefill, as the recorded baselines did when that was
+the CLI default.
 
 ## Prepare the Mac
 
@@ -62,6 +65,7 @@ for case_seed in \
   .build/release/MferenceCLI \
     --model scratch/gemma4.gturbo \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
+    --verify full-sha256 \
     --max-new 1024 \
     --max-context 4096 \
     --temperature 0.2 \
@@ -85,6 +89,7 @@ for case_seed in \
   .build/release/MferenceCLI \
     --model scratch/gemma4.gturbo \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
+    --verify full-sha256 \
     --max-new 1024 \
     --max-context 4096 \
     --temperature 0.2 \

@@ -34,6 +34,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// with RAM to spare but not enough to cache the whole expert pool.
     public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
     public static let allowedPrefillChunkTokens = [32, 64, 128, 256, 512, 1024, 2048, 4096]
+    /// `--shadow-budget`: 0 turns speculative expert prefetch off, 1...8 selects
+    /// shadow prefetch with that many speculative reads per layer.
+    public static let allowedShadowPrefetchBudgets = 0...8
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy
@@ -53,6 +56,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// Pool residency per full-attention layer, in pages. `nil` sizes the
     /// pool to the full context (everything resident; SSD tier idle).
     public let kvPoolPagesPerLayer: Int?
+    /// `--shadow-budget`; nil keeps the family default.
+    public let shadowPrefetchBudget: Int?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -66,11 +71,14 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 kvTopKPages: Int = 60,
                 kvSinkPages: Int = 2,
                 kvRecentPages: Int = 4,
-                kvPoolPagesPerLayer: Int? = nil) {
+                kvPoolPagesPerLayer: Int? = nil,
+                shadowPrefetchBudget: Int? = nil) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
                      "unsupported prefill chunk size")
+        precondition(shadowPrefetchBudget.map(Self.allowedShadowPrefetchBudgets.contains) ?? true,
+                     "unsupported shadow prefetch budget")
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.rdadvisePolicy = rdadvisePolicy
@@ -86,10 +94,37 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.kvSinkPages = kvSinkPages
         self.kvRecentPages = kvRecentPages
         self.kvPoolPagesPerLayer = kvPoolPagesPerLayer
+        self.shadowPrefetchBudget = shadowPrefetchBudget
     }
 
     public static var production: RuntimeConfiguration {
         RuntimeConfiguration()
+    }
+
+    /// The server prefills long prompts in chunks; every chunk re-reads most
+    /// routed experts, so 128-token chunks made a 3,015-token Gemma prompt
+    /// spend 134 s of 205 s on expert I/O. Gemma takes 1,024 tokens on hosts
+    /// with at least 16 GiB: about +309 MB (scratch +125 MB, sliding KV ring
+    /// +184 MB), the accepted budget. Qwen 3.6 has no sliding ring to grow, so
+    /// the same hosts give it 2,048 for +270 MB of scratch: a 2,940-token
+    /// prompt went from 148.7 s to 42.7 s with decode unchanged (2026-09-21).
+    /// `MFERENCE_SERVER_PREFILL_CHUNK` overrides.
+    public static func defaultServerPrefillChunkTokens(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        if let requested = environment["MFERENCE_SERVER_PREFILL_CHUNK"].flatMap(Int.init),
+           allowedPrefillChunkTokens.contains(requested) {
+            return requested
+        }
+        let gib = UInt64(1) << 30
+        guard physicalMemoryBytes >= 16 * gib else { return 128 }
+        switch family {
+        case .gemma4: return 1024
+        case .qwen36: return 2048
+        default: return 128
+        }
     }
 
     /// Qwen 3.6's large expert table needs more cache coverage to avoid repeated

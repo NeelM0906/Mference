@@ -7,20 +7,34 @@ import Metal
 /// Canonical home is here (the sampler is the primary consumer); `Generator`
 /// reuses the same type rather than redeclaring it.
 public struct GenerationConfig: Sendable {
-    public var maxNewTokens: Int = 256
-    public var temperature: Float = 1.0
-    public var topK: Int? = nil            // nil = no truncation
-    public var topP: Float? = nil          // nil = no nucleus truncation
-    public var repetitionPenalty: Float = 1.0
-    public var seed: UInt64? = nil         // nil = nondeterministic
-    public var stopStrings: [String] = []
-    public var extraStopTokens: Set<Int32> = []
+    public var maxNewTokens: Int
+    public var temperature: Float
+    public var topK: Int?                  // nil = no truncation
+    public var topP: Float?                // nil = no nucleus truncation
+    public var repetitionPenalty: Float
+    public var presencePenalty: Float
+    public var frequencyPenalty: Float
+    public var repeatLastN: Int            // 0 disables penalties; -1 uses all history
+    public var minP: Float
+    public var seed: UInt64?               // nil = nondeterministic
+    public var stopStrings: [String]
+    public var extraStopTokens: Set<Int32>
+
+    /// The sampling defaults are declared once, in `init` below (llama.cpp's
+    /// built-in preset; docs/LLAMA_SAMPLING.md). The CLI and server fall back
+    /// to these only for a parameter the caller omitted, so an explicit flag
+    /// or request field always wins.
+    public static let defaults = GenerationConfig()
 
     public init(maxNewTokens: Int = 256,
-                temperature: Float = 1.0,
-                topK: Int? = nil,
-                topP: Float? = nil,
+                temperature: Float = 0.8,
+                topK: Int? = 40,
+                topP: Float? = 0.95,
                 repetitionPenalty: Float = 1.0,
+                presencePenalty: Float = 0.0,
+                frequencyPenalty: Float = 0.0,
+                repeatLastN: Int = 64,
+                minP: Float = 0.05,
                 seed: UInt64? = nil,
                 stopStrings: [String] = [],
                 extraStopTokens: Set<Int32> = []) {
@@ -29,12 +43,33 @@ public struct GenerationConfig: Sendable {
         self.topK = topK
         self.topP = topP
         self.repetitionPenalty = repetitionPenalty
+        self.presencePenalty = presencePenalty
+        self.frequencyPenalty = frequencyPenalty
+        self.repeatLastN = repeatLastN
+        self.minP = minP
         self.seed = seed
         self.stopStrings = stopStrings
         self.extraStopTokens = extraStopTokens
     }
 
     public func validate() throws {
+        guard presencePenalty.isFinite, (-2...2).contains(presencePenalty) else {
+            throw GeneratorError.invalidGenerationConfig(
+                "presencePenalty must be finite and between -2 and 2")
+        }
+        guard frequencyPenalty.isFinite, (-2...2).contains(frequencyPenalty) else {
+            throw GeneratorError.invalidGenerationConfig("frequencyPenalty must be finite and between -2 and 2")
+        }
+        guard repetitionPenalty.isFinite, repetitionPenalty > 0,
+              (1 / repetitionPenalty).isFinite else {
+            throw GeneratorError.invalidGenerationConfig("repetitionPenalty must be finite and greater than zero")
+        }
+        guard repeatLastN >= -1 else {
+            throw GeneratorError.invalidGenerationConfig("repeatLastN must be -1 or nonnegative")
+        }
+        guard minP.isFinite, (0...1).contains(minP) else {
+            throw GeneratorError.invalidGenerationConfig("minP must be finite and between 0 and 1")
+        }
         guard maxNewTokens > 0 else {
             throw GeneratorError.invalidGenerationConfig(
                 "maxNewTokens must be greater than zero")
@@ -63,32 +98,36 @@ public struct GenerationConfig: Sendable {
 enum SamplePath: Sendable, Equatable {
     case greedyGPU
     case gpuSampled
-    case hostPenalty
+    case hostPenalty // host prepares history counts; GPU applies penalties
 }
 
 /// Turns `GenerationConfig` + a logits buffer into one token id, staying
 /// GPU-resident wherever the kernels allow.
 ///
-/// The built `sample` kernel already does temperature / top-k / top-p / seeded
+/// The built `sample` kernel already does temperature / top-k / top-p / min-p / seeded
 /// draw / greedy argmax on GPU reading softmaxed probs, so this type's job is:
 /// (1) run the softcap+softmax front-end (`logit_softcap_softmax`), (2) apply
-/// repetition penalty — the one policy that needs `history` random access — as
-/// a single in-place CPU pass over the (shared) logits before the front-end,
+/// repetition, frequency and presence penalties in post-softcap logit space,
+/// using counts from the configured history window,
 /// and (3) derive a per-position seed so a fixed `seed` is reproducible across
 /// token positions.
 ///
 /// The chosen id lands in a 1-element UInt32 buffer. The generation loop reads
 /// that value after the command buffer completes.
 ///
-/// Truncation follows mlx-lm's sampler order: Top-P is computed from the
-/// model's full probability distribution, Top-K caps that surviving set, and
-/// temperature is applied only to the final categorical draw.
+/// Truncation follows llama.cpp's default order: Top-K, Top-P normalized over
+/// that set, Min-P relative to its peak, then temperature and the random draw.
 final class Sampler {
     private let softcap: LogitSoftcapSoftmax
     private let sampleKernel: Sample
     private let topK64Kernel: SampleTopK64
     let vocab: Int
     private let logitSoftcap: Float
+    private let historyCounts: MTLBuffer
+    private var countedTokens: [Int32] = []
+    var diagnosticBufferBytes: UInt64 {
+        UInt64(historyCounts.length + topK64Kernel.scratchBytes)
+    }
 
     init(context: MetalContext, vocab: Int = 262_144,
                 logitSoftcap: Float = 30.0) throws {
@@ -97,11 +136,17 @@ final class Sampler {
         self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab)
         self.vocab = vocab
         self.logitSoftcap = logitSoftcap
+        guard let counts = context.device.makeBuffer(length: vocab * MemoryLayout<UInt32>.stride,
+                                                     options: .storageModeShared) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        memset(counts.contents(), 0, counts.length)
+        self.historyCounts = counts
     }
 
     /// Encode the sampler onto `commandBuffer`. `logits` is FP16 [vocab],
-    /// post-lm_head and pre-softcap, in a `.storageModeShared` buffer (the
-    /// repetition-penalty path edits it in place). `probs` is a preallocated
+    /// post-lm_head and pre-softcap. It is read without modification, including
+    /// when applying history penalties. `probs` is a preallocated
     /// FP16 [vocab] scratch. `outToken` holds one UInt32. `position` indexes the
     /// per-position seed advance. Returns the path taken.
     @discardableResult
@@ -114,25 +159,28 @@ final class Sampler {
                        outToken: MTLBuffer) -> SamplePath {
         let v = UInt32(vocab)
 
-        let appliedPenalty = config.repetitionPenalty != 1.0 && !history.isEmpty
-        if appliedPenalty {
-            applyRepetitionPenaltyInPlace(logits: logits,
-                                          history: history,
-                                          penalty: config.repetitionPenalty)
-        }
+        let appliedPenalty = config.repeatLastN != 0 && !history.isEmpty
+            && (config.repetitionPenalty != 1 || config.presencePenalty != 0 || config.frequencyPenalty != 0)
+        if appliedPenalty { updateHistoryCounts(history, lastN: config.repeatLastN) }
 
         softcap.encode(commandBuffer: commandBuffer,
-                       logits: logits, probs: probs, v: v, softcap: logitSoftcap)
+                       logits: logits, probs: probs, v: v, softcap: logitSoftcap,
+                       historyCounts: appliedPenalty ? historyCounts : nil,
+                       repetitionPenalty: config.repetitionPenalty,
+                       frequencyPenalty: config.frequencyPenalty,
+                       presencePenalty: config.presencePenalty)
 
         let isGreedy = config.temperature == 0
         let seed = Self.seedFor(config: config, position: position)
         if config.temperature > 0,
-           config.topK == 64 {
+           let topK = config.topK, topK <= 64 {
             topK64Kernel.encode(commandBuffer: commandBuffer,
                                 probs: probs,
                                 outToken: outToken,
                                 temperature: config.temperature,
                                 topP: config.topP ?? 1.0,
+                                minP: config.minP,
+                                topK: UInt32(topK),
                                 seed: seed)
         } else {
             sampleKernel.encode(commandBuffer: commandBuffer,
@@ -140,6 +188,7 @@ final class Sampler {
                                 temperature: isGreedy ? 0.0 : config.temperature,
                                 topK: UInt32(config.topK ?? 0),
                                 topP: config.topP ?? 1.0,
+                                minP: config.minP,
                                 seed: seed,
                                 position: UInt32(position))
         }
@@ -148,45 +197,16 @@ final class Sampler {
         return isGreedy ? .greedyGPU : .gpuSampled
     }
 
-    // MARK: - Repetition penalty (host, in place)
+    // MARK: - History counts (host); penalty math runs after softcap on GPU.
 
-    /// HF convention: for each token id seen in `history`, a positive logit is
-    /// divided by `penalty`, a negative logit multiplied. Edits the shared
-    /// `logits` buffer in place — no full-buffer copy, only the unique history
-    /// entries are touched (counted for the audit).
-    ///
-    /// The penalty must act on the POST-softcap logit (HF applies it to the
-    /// model's output logits, and Gemma's output includes the 30*tanh(z/30)
-    /// cap). Real Gemma 4 raw logits reach the hundreds, deep in tanh
-    /// saturation, where dividing the raw value by 1.1 moves the capped logit
-    /// by ~nothing — the penalty silently no-ops on exactly the
-    /// high-confidence tokens that form repetition loops. So: softcap the raw
-    /// value, penalize, and invert through atanh so the downstream
-    /// softcap+softmax kernel reproduces the penalized capped logit.
-    private func applyRepetitionPenaltyInPlace(logits: MTLBuffer,
-                                               history: [Int32],
-                                               penalty: Float) {
-        let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
-        var seen = Set<Int32>()
-        seen.reserveCapacity(history.count)
-        for id in history {
-            guard id >= 0 && Int(id) < vocab, seen.insert(id).inserted else { continue }
-            let i = Int(id)
-            let z = Float(ptr[i])
-            let penalized: Float
-            if logitSoftcap > 0 {
-                let capped = logitSoftcap * tanhf(z / logitSoftcap)
-                let cappedPenalized = capped > 0 ? capped / penalty : capped * penalty
-                // A saturated negative logit times the penalty can leave the
-                // softcap's open interval; clamp inside it so atanh stays
-                // finite.
-                let limit = logitSoftcap * 0.9999
-                let clamped = max(min(cappedPenalized, limit), -limit)
-                penalized = logitSoftcap * atanhf(clamped / logitSoftcap)
-            } else {
-                penalized = z > 0 ? z / penalty : z * penalty
-            }
-            ptr[i] = Float16(penalized)
+    private func updateHistoryCounts(_ history: [Int32], lastN: Int) {
+        let counts = historyCounts.contents().bindMemory(to: UInt32.self, capacity: vocab)
+        for id in countedTokens { counts[Int(id)] = 0 }
+        countedTokens.removeAll(keepingCapacity: true)
+        let window = lastN < 0 ? history[...] : history.suffix(lastN)
+        for id in window where id >= 0 && Int(id) < vocab {
+            if counts[Int(id)] == 0 { countedTokens.append(id) }
+            counts[Int(id)] += 1
         }
     }
 

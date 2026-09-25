@@ -5,7 +5,7 @@ import Metal
 import MferenceValidationSupport
 
 @Suite struct PrefillQKVEpilogueTests {
-    @Test func blockQKVEpilogueMatchesRepeatedScalarSWA() throws {
+    @Test(arguments: [false, true]) func blockQKVEpilogueMatchesRepeatedScalarSWA(sourceFP16: Bool) throws {
         _ = try Self.expectMatchesRepeatedScalar(rows: 3,
                                                  numQHeads: 16,
                                                  numKVHeads: 8,
@@ -14,10 +14,10 @@ import MferenceValidationSupport
                                                  theta: 10_000.0,
                                                  rotatedPairs: 128,
                                                  sharedKVRaw: false,
-                                                 seed: 0x7A50_5A01)
+                                                 seed: 0x7A50_5A01, sourceFP16: sourceFP16)
     }
 
-    @Test func blockQKVEpiloguePreservesFullLayerSharedRawKVQuirk() throws {
+    @Test(arguments: [false, true]) func blockQKVEpiloguePreservesFullLayerSharedRawKVQuirk(sourceFP16: Bool) throws {
         let result = try Self.expectMatchesRepeatedScalar(rows: 2,
                                                           numQHeads: 16,
                                                           numKVHeads: 2,
@@ -26,7 +26,7 @@ import MferenceValidationSupport
                                                           theta: 1_000_000.0,
                                                           rotatedPairs: 64,
                                                           sharedKVRaw: true,
-                                                          seed: 0x7A50_F011)
+                                                          seed: 0x7A50_F011, sourceFP16: sourceFP16)
         #expect(result.kUsed != result.vUsed,
                 "full-layer K/V must diverge after K norm+RoPE and V no-scale norm")
     }
@@ -39,7 +39,7 @@ import MferenceValidationSupport
                                                     theta: Float,
                                                     rotatedPairs: UInt32,
                                                     sharedKVRaw: Bool,
-                                                    seed: UInt64) throws -> (kUsed: [Float], vUsed: [Float]) {
+                                                    seed: UInt64, sourceFP16: Bool) throws -> (kUsed: [Float], vUsed: [Float]) {
         let qUsed = numQHeads * headDim
         let kvUsed = numKVHeads * headDim
         let qStride = qUsed + 13
@@ -66,9 +66,9 @@ import MferenceValidationSupport
         let kWeight = (0..<headDim).map { _ in Quantization.bf16Bits(rng.uniform(0.5, 1.5)) }
 
         let ctx = try MetalContext()
-        let scalarNorm = try RMSNorm(context: ctx)
-        let scalarRoPE = try RoPE(context: ctx)
-        let block = try PrefillQKVEpilogue(context: ctx)
+        let scalarNorm = try RMSNorm(context: ctx, sourceFP16: sourceFP16)
+        let scalarRoPE = try RoPE(context: ctx, sourceFP16: sourceFP16)
+        let block = try PrefillQKVEpilogue(context: ctx, sourceFP16: sourceFP16)
         guard
             let qWeightBuf = ctx.device.makeBuffer(bytes: qWeight,
                                                    length: qWeight.count * MemoryLayout<UInt16>.size,

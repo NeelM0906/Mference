@@ -172,6 +172,119 @@ public final class KVCacheManager {
         self.capacityTokens = caps
     }
 
+    // One server-owned recovery image. It contains only SWA rows; the full
+    // attention prefix remains in the original buffers. No per-tool copies.
+    private struct GemmaRecoveryImage {
+        let rows: MTLBuffer
+        let position: Int
+        let start: Int
+    }
+    private var gemmaRecoveryImage: GemmaRecoveryImage?
+    private var gemmaRecoveryStorage: MTLBuffer?
+    private var gemmaResidentFloor = 0
+
+    var gemmaRecoveryBytes: UInt64 { UInt64(gemmaRecoveryStorage?.length ?? 0) }
+
+    func discardGemmaRecovery() {
+        gemmaRecoveryImage = nil
+        gemmaRecoveryStorage = nil
+    }
+
+    private func gemmaCurrentPrefixAvailable(_ target: Int) -> Bool {
+        guard config.family == .gemma4, target > 0, target <= position else { return false }
+        for layer in 0..<config.numLayers {
+            guard kinds[layer] == .full || kinds[layer] == .swa,
+                  strides[layer] > 0 else { return false }
+            if kinds[layer] == .swa, fp16RingEnabled {
+                // The next query at target includes its own newly written row
+                // in the window. Its earliest required *old* row is target-W+1.
+                let requiredStart = max(0, target - config.slidingWindow + 1)
+                let residentStart = max(gemmaResidentFloor, position - capacityTokens[layer])
+                guard requiredStart >= residentStart else { return false }
+            }
+        }
+        return true
+    }
+
+    func gemmaRecoverablePrefix(upTo limit: Int) -> Int {
+        let target = min(limit, position)
+        if gemmaCurrentPrefixAvailable(target) { return target }
+        guard let image = gemmaRecoveryImage, image.position <= target else { return 0 }
+        return image.position
+    }
+
+    /// Caller has drained GPU work and holds the generation owner. Allocation
+    /// failure invalidates the image but leaves current KV available.
+    func captureGemmaRecovery(onLayer: ((Int) throws -> Void)? = nil) throws -> Bool {
+        try Task.checkCancellation()
+        gemmaRecoveryImage = nil
+        guard gemmaCurrentPrefixAvailable(position), fp16RingEnabled else { return false }
+        let count = min(position, max(0, config.slidingWindow - 1))
+        let start = position - count
+        let length = (0..<config.numLayers).filter { kinds[$0] == .swa }
+            .reduce(0) { $0 + 2 * count * strides[$1] }
+        guard length > 0 else { return false }
+        if gemmaRecoveryStorage?.length != length {
+            // Release before replacement: at most one bounded allocation.
+            gemmaRecoveryStorage = nil
+            gemmaRecoveryStorage = kBuffers[0].device.makeBuffer(length: length, options: .storageModeShared)
+        }
+        guard let storage = gemmaRecoveryStorage else { return false }
+        storage.label = "kv.gemma-recovery"
+        var offset = 0
+        for layer in 0..<config.numLayers where kinds[layer] == .swa {
+            try Task.checkCancellation()
+            for source in [kBuffers[layer], vBuffers[layer]] {
+                for logical in start..<position {
+                    let slot = physicalSlot(layer: layer, position: logical) * strides[layer]
+                    memcpy(storage.contents().advanced(by: offset), source.contents().advanced(by: slot), strides[layer])
+                    offset += strides[layer]
+                }
+            }
+            try onLayer?(layer)
+        }
+        try Task.checkCancellation()
+        gemmaRecoveryImage = GemmaRecoveryImage(rows: storage, position: position, start: start)
+        return true
+    }
+
+    func recoverGemmaPrefix(to target: Int, onLayer: ((Int) throws -> Void)? = nil) throws -> GemmaPrefixRecoverySource {
+        try Task.checkCancellation()
+        if gemmaCurrentPrefixAvailable(target) {
+            if fp16RingEnabled {
+                for layer in 0..<config.numLayers where kinds[layer] == .swa {
+                    gemmaResidentFloor = max(gemmaResidentFloor, position - capacityTokens[layer])
+                }
+            }
+            if let image = gemmaRecoveryImage, image.position > target { discardGemmaRecovery() }
+            position = target
+            return .current
+        }
+        guard config.family == .gemma4, let image = gemmaRecoveryImage,
+              image.position == target, target <= position else {
+            throw PrefillError.prefillCursorMismatch("Gemma prefix state is unavailable")
+        }
+        // All geometry is fixed by this manager; full-attention rows below
+        // target have not been overwritten. Publish the cursor only after all
+        // K and V rows are restored. Any throw requires the owner's reset.
+        var offset = 0
+        for layer in 0..<config.numLayers where kinds[layer] == .swa {
+            try Task.checkCancellation()
+            for destination in [kBuffers[layer], vBuffers[layer]] {
+                for logical in image.start..<target {
+                    let slot = physicalSlot(layer: layer, position: logical) * strides[layer]
+                    memcpy(destination.contents().advanced(by: slot), image.rows.contents().advanced(by: offset), strides[layer])
+                    offset += strides[layer]
+                }
+            }
+            try onLayer?(layer)
+        }
+        try Task.checkCancellation()
+        gemmaResidentFloor = image.start
+        position = target
+        return .snapshot
+    }
+
     public func layerKind(_ layer: Int) -> LayerKind { kinds[layer] }
 
     /// Bytes per token for `layer` (K and V share the same stride).
@@ -269,6 +382,12 @@ public final class KVCacheManager {
         precondition(position >= 0, "rewind position must be non-negative")
         precondition(position <= self.position,
                      "rewind \(position) is ahead of cursor \(self.position)")
+        if config.family == .gemma4, fp16RingEnabled {
+            for layer in 0..<config.numLayers where kinds[layer] == .swa {
+                gemmaResidentFloor = max(gemmaResidentFloor, self.position - capacityTokens[layer])
+            }
+            if let image = gemmaRecoveryImage, image.position > position { discardGemmaRecovery() }
+        }
         self.position = position
     }
 
@@ -278,6 +397,8 @@ public final class KVCacheManager {
     /// and `validTokenCount` is now 0. `MADV_DONTNEED` on the page-aligned span
     /// releases resident memory between turns; pages fault back in on next write.
     public func reset() {
+        discardGemmaRecovery()
+        gemmaResidentFloor = 0
         position = 0
         let pageSize = Int(getpagesize())
         var advised = Set<ObjectIdentifier>()

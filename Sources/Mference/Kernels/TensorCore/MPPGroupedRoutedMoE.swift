@@ -21,16 +21,21 @@ final class MPPGroupedRoutedMoE {
     private var down: MTLComputePipelineState?
     private var argumentEncoder: MTLArgumentEncoder?
 
-    init(context: MetalContext) {
+    /// `groupSize` is the checkpoint's affine storage group (32 for Gemma
+    /// QAT); `gelu` selects Gemma's GeGLU instead of SwiGLU.
+    init(context: MetalContext, groupSize: Int = Quantization.groupSize, gelu: Bool = false) {
+        precondition(groupSize == 32 || groupSize == 64)
         do {
             let library = try MetalContext.moduleLibrary(
                 device: context.device, module: "tensorops")
-            guard let phase1Function = library.makeFunction(
-                    name: "mpp_grouped_routed_moe_phase1"),
-                  let downFunction = library.makeFunction(
-                    name: "mpp_grouped_routed_moe_down") else {
-                throw MetalError.missingFunction("mpp grouped routed MoE")
-            }
+            let constants = MTLFunctionConstantValues()
+            var group = UInt32(groupSize), useGelu = gelu
+            constants.setConstantValue(&group, type: .uint, index: 108)
+            constants.setConstantValue(&useGelu, type: .bool, index: 112)
+            let phase1Function = try library.makeFunction(
+                name: "mpp_grouped_routed_moe_phase1", constantValues: constants)
+            let downFunction = try library.makeFunction(
+                name: "mpp_grouped_routed_moe_down", constantValues: constants)
             self.phase1 = try context.device.makeComputePipelineState(
                 function: phase1Function)
             self.down = try context.device.makeComputePipelineState(

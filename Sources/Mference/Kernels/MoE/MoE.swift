@@ -64,6 +64,11 @@ final class MoE {
     private let routerSelectK10PSO: MTLComputePipelineState
     private let routerSelectK10SpecializedPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
+    /// Qualification readback; callers must first complete the router command.
+    var routerLogitSnapshot: [Float] {
+        Array(UnsafeBufferPointer(start: routerLogits.contents().assumingMemoryBound(to: Float.self),
+                                  count: Int(realDecodeNumExperts)))
+    }
     private let phase1U16PSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
     private let slotLookupPSO: MTLComputePipelineState
@@ -95,7 +100,10 @@ final class MoE {
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
          specializedTopK: UInt32 = 8,
-         swigluLimit: Float = 0) throws {
+         swigluLimit: Float = 0,
+         groupSize: Int = Quantization.groupSize,
+         routerBF16: Bool = false,
+         sourceFP16: Bool = false) throws {
         precondition(Self.routedComputeWidths.contains(specializedTopK),
                      "routed INT4 decode supports top-k "
                      + "\(Self.routedComputeWidths.sorted())")
@@ -106,6 +114,9 @@ final class MoE {
         var activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
             : []
+        let quantizationConstants = Quantization.int4Constants(groupSize: groupSize)
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        activationConstants += quantizationConstants
         // `swigluLimit > 0` bakes DeepSeek's asymmetric pre-activation clamp
         // (gate `<= limit`, up in `[-limit, limit]`) into the INT4 phase-1
         // kernels through function constant 5 (`moe_swiglu_clamp`). Zero, the
@@ -120,7 +131,9 @@ final class MoE {
             MetalFunctionConstant(index: 2, value: .uint32(specializedTopK)),
             MetalFunctionConstant(index: 3, value: .bool(true)),
         ] + activationConstants
-        let routerConstants: [MetalFunctionConstant] = [
+        let routerFormatConstants = [MetalFunctionConstant(index: 109, value: .bool(routerBF16))]
+            + Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        let routerConstants: [MetalFunctionConstant] = routerFormatConstants + [
             MetalFunctionConstant(index: 40, value: .uint32(specializedNumExperts)),
             MetalFunctionConstant(index: 41, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 42, value: .uint32(specializedTopK)),
@@ -129,59 +142,69 @@ final class MoE {
         let routerName = "router_gemv_gemma4_r4"
         self.routerGemvPSO = try context.pipeline(
             routerName,
-            constants: [],
-            maxTotalThreadsPerThreadgroup: 512)
+            constants: routerFormatConstants,
+            maxTotalThreadsPerThreadgroup: 512,
+            safeMathModule: sourceFP16 && routerBF16 ? "moe" : nil)
         self.routerGemvSpecializedPSO = try context.pipeline(
             routerName,
             constants: routerConstants,
-            maxTotalThreadsPerThreadgroup: 512)
+            maxTotalThreadsPerThreadgroup: 512,
+            safeMathModule: sourceFP16 && routerBF16 ? "moe" : nil)
         // One-SIMD parallel selection; bit-identical to the serial
         // `router_topk_select_k8` reference kernel (see RouterTopKParityTests).
-        self.routerSelectK8PSO = try context.pipeline("router_topk_select_k8_par")
+        self.routerSelectK8PSO = try context.pipeline("router_topk_select_k8_par", constants: routerFormatConstants)
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8_par",
             constants: routerConstants)
         // Flash-Next's top-10 over 512 experts. Same selection body, wider K and
         // a 16-deep lane array; see `router_topk_select_softmax_par`.
-        self.routerSelectK10PSO = try context.pipeline("router_topk_select_k10_par")
+        self.routerSelectK10PSO = try context.pipeline("router_topk_select_k10_par", constants: routerFormatConstants)
         self.routerSelectK10SpecializedPSO = try context.pipeline(
             "router_topk_select_k10_par",
             constants: routerConstants)
-        self.phase1U16PSO = try context.pipeline(
+        func expertPipeline(_ name: String,
+                            constants: [MetalFunctionConstant] = []) throws -> MTLComputePipelineState {
+            try context.pipeline(name, constants: constants, maxTotalThreadsPerThreadgroup: nil,
+                                 safeMathModule: sourceFP16 ? "moe" : nil)
+        }
+        self.phase1U16PSO = try expertPipeline(
             "moe_phase1_gate_up_act_u16load", constants: activationConstants)
-        self.phase1U16SpecializedPSO = try context.pipeline(
+        self.phase1U16SpecializedPSO = try expertPipeline(
             "moe_phase1_gate_up_act_u16load",
             constants: moeConstants)
-        self.slotLookupPSO = try context.pipeline("router_slot_lookup_k8")
-        self.phase1SlotmapPSO = try context.pipeline(
+        self.slotLookupPSO = try expertPipeline("router_slot_lookup_k8")
+        self.phase1SlotmapPSO = try expertPipeline(
             "moe_phase1_gate_up_act_slotmap", constants: activationConstants)
-        self.phase1SlotmapSpecializedPSO = try context.pipeline(
+        self.phase1SlotmapSpecializedPSO = try expertPipeline(
             "moe_phase1_gate_up_act_slotmap", constants: moeConstants)
-        self.phase2SlotmapPSO = try context.pipeline(
-            "moe_phase2_down_reduce_k8_slotmap")
-        self.phase2SlotmapSpecializedPSO = try context.pipeline(
+        self.phase2SlotmapPSO = try expertPipeline(
+            "moe_phase2_down_reduce_k8_slotmap", constants: quantizationConstants)
+        self.phase2SlotmapSpecializedPSO = try expertPipeline(
             "moe_phase2_down_reduce_k8_slotmap", constants: moeConstants)
-        self.phase2SlotmapWidePSO = try context.pipeline(
-            "moe_phase2_down_reduce_slotmap_wide")
-        self.phase2SlotmapWideSpecializedPSO = try context.pipeline(
+        self.phase2SlotmapWidePSO = try expertPipeline(
+            "moe_phase2_down_reduce_slotmap_wide", constants: quantizationConstants)
+        self.phase2SlotmapWideSpecializedPSO = try expertPipeline(
             "moe_phase2_down_reduce_slotmap_wide", constants: moeConstants)
-        self.residualAddGuardedPSO = try context.pipeline("residual_add_fp16_guarded")
-        self.phase1SubsetU16PSO = try context.pipeline(
+        self.residualAddGuardedPSO = try expertPipeline("residual_add_fp16_guarded")
+        self.phase1SubsetU16PSO = try expertPipeline(
             "moe_phase1_gate_up_act_subset_u16load", constants: activationConstants)
-        self.phase1SubsetU16SpecializedPSO = try context.pipeline(
+        self.phase1SubsetU16SpecializedPSO = try expertPipeline(
             "moe_phase1_gate_up_act_subset_u16load",
             constants: moeConstants)
-        self.phase2ReduceK8PSO = try context.pipeline("moe_phase2_down_reduce_k8")
-        self.phase2ReduceK8SpecializedPSO = try context.pipeline(
+        self.phase2ReduceK8PSO = try expertPipeline("moe_phase2_down_reduce_k8",
+            constants: quantizationConstants)
+        self.phase2ReduceK8SpecializedPSO = try expertPipeline(
             "moe_phase2_down_reduce_k8",
             constants: moeConstants)
-        self.phase2ReduceK6PSO = try context.pipeline("moe_phase2_down_reduce_k6")
-        self.phase2ReduceK6SpecializedPSO = try context.pipeline(
+        self.phase2ReduceK6PSO = try expertPipeline("moe_phase2_down_reduce_k6",
+            constants: quantizationConstants)
+        self.phase2ReduceK6SpecializedPSO = try expertPipeline(
             "moe_phase2_down_reduce_k6",
             constants: moeConstants)
         // Flash-Next's top-10 width. The k6/k8 pipelines above are unchanged.
-        self.phase2ReduceK10PSO = try context.pipeline("moe_phase2_down_reduce_k10")
-        self.phase2ReduceK10SpecializedPSO = try context.pipeline(
+        self.phase2ReduceK10PSO = try expertPipeline("moe_phase2_down_reduce_k10",
+            constants: quantizationConstants)
+        self.phase2ReduceK10SpecializedPSO = try expertPipeline(
             "moe_phase2_down_reduce_k10",
             constants: moeConstants)
 

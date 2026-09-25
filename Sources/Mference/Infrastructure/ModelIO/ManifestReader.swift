@@ -329,7 +329,9 @@ public enum ManifestReader {
                 detail: "manifest requests removed TurboQuant KV runtime support")
         }
         try validateArch(m.arch, expected: expected)
-        if let quant = m.quant {
+        if m.modelID == CheckpointIdentity.gemma4QAT {
+            try GemmaQATCheckpoint.validate(m, expected: expected, directory: directoryURL)
+        } else if let quant = m.quant {
             try validateQuant(quant, expected: expected)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")

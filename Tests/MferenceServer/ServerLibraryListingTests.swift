@@ -144,6 +144,15 @@ struct ServerLibraryDefaultRootsTests {
         UserDefaults(suiteName: "mference-server-tests-\(UUID().uuidString)")!
     }
 
+    @Test func homeModelLibraryIsScannedWithoutACheckout() {
+        let roots = ServerLibraryDiscovery.defaultRoots(
+            userDefaults: defaults(), environment: [:], executableURL: nil,
+            currentDirectoryURL: URL(fileURLWithPath: "/not-a-checkout"),
+            applicationSupportURL: nil, fileExists: { _ in false })
+        #expect(roots.map(\.path) == [FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("llm-models").standardizedFileURL.path])
+    }
+
     /// The checkout is recognized by `Package.swift` beside the runtime and
     /// server source trees. `Sources/MferenceApp` is absent here on purpose:
     /// the Mac app is gone, and `scratch/` must still be scanned without it.
@@ -159,8 +168,9 @@ struct ServerLibraryDefaultRootsTests {
             executableURL: URL(fileURLWithPath: "/checkout/.build/release/MferenceServer"),
             currentDirectoryURL: URL(fileURLWithPath: "/elsewhere", isDirectory: true),
             applicationSupportURL: nil,
+            homeDirectoryURL: URL(fileURLWithPath: "/Users/library user"),
             fileExists: { present.contains($0) })
-        #expect(roots.map(\.path) == ["/checkout/scratch"])
+        #expect(roots.map(\.path) == ["/Users/library user/llm-models", "/checkout/scratch"])
     }
 
     /// The old marker — `Package.swift` plus the app's Mac sources — is not
@@ -177,8 +187,9 @@ struct ServerLibraryDefaultRootsTests {
             executableURL: URL(fileURLWithPath: "/checkout/.build/release/MferenceServer"),
             currentDirectoryURL: URL(fileURLWithPath: "/checkout", isDirectory: true),
             applicationSupportURL: nil,
+            homeDirectoryURL: URL(fileURLWithPath: "/Users/library user"),
             fileExists: { present.contains($0) })
-        #expect(roots.isEmpty)
+        #expect(roots.map(\.path) == ["/Users/library user/llm-models"])
     }
 
     @Test func configuredRootComesFirstAndApplicationSupportLast() {
@@ -194,12 +205,23 @@ struct ServerLibraryDefaultRootsTests {
             currentDirectoryURL: URL(fileURLWithPath: "/checkout", isDirectory: true),
             applicationSupportURL: URL(fileURLWithPath: "/Users/x/Library/Application Support",
                                        isDirectory: true),
+            homeDirectoryURL: URL(fileURLWithPath: "/Users/library user"),
             fileExists: { present.contains($0) })
         #expect(roots.map(\.path) == [
             "/models",
+            "/Users/library user/llm-models",
             "/checkout/scratch",
             "/Users/x/Library/Application Support/Mference",
         ])
+    }
+
+    @Test func configuredHomeLibraryIsNotDuplicated() {
+        let roots = ServerLibraryDiscovery.defaultRoots(userDefaults: defaults(),
+            environment: [ServerLibraryDiscovery.libraryRootEnvironmentKey: "/Users/library user/llm-models"],
+            executableURL: nil, applicationSupportURL: nil,
+            homeDirectoryURL: URL(fileURLWithPath: "/Users/library user"),
+            fileExists: { _ in false })
+        #expect(roots.map(\.path) == ["/Users/library user/llm-models"])
     }
 }
 

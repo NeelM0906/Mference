@@ -25,6 +25,7 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 ///   - `out` : `[numQHeads, headDim]`
 final class Attention {
     private let ctx: MetalContext
+    private let gemmaQAT: GemmaQATAttention?
     private let psoPartial: MTLComputePipelineState
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
@@ -72,8 +73,9 @@ final class Attention {
     private let dPartial: MTLBuffer
     private let oPartial: MTLBuffer
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, gemmaQATMaxContext: Int? = nil) throws {
         self.ctx = context
+        self.gemmaQAT = try gemmaQATMaxContext.map { try GemmaQATAttention(context: context, maxContext: $0) }
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
@@ -387,6 +389,14 @@ final class Attention {
                      "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
         precondition(ringCapacity == 0 || preferGQASWA,
                      "FP16 KV ring is only valid for SWA attention")
+        if let gemmaQAT {
+            gemmaQAT.encode(commandBuffer: commandBuffer,
+                q: q, qOffset: qOffset, k: k, kOffset: kOffset,
+                v: v, vOffset: vOffset, out: out, outOffset: outOffset,
+                headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
+                seqLen: seqLen, kvStart: kvStart, scale: scale, ringCapacity: ringCapacity)
+            return
+        }
         let geometry = Self.splitGeometry(numQHeads: numQHeads,
                                           numKVHeads: numKVHeads,
                                           seqLen: seqLen,

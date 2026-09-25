@@ -147,6 +147,12 @@ public struct PrefillExecutionReport: Sendable, Equatable, Encodable {
         return replayedTokens > 0 ? .sequential : .off
     }
 
+    mutating func append(_ other: PrefillExecutionReport) {
+        batchedChunkSizes += other.batchedChunkSizes
+        replayedTokens += other.replayedTokens
+        for (reason, count) in other.replayReasons { replayReasons[reason, default: 0] += count }
+    }
+
     mutating func recordBatch(_ tokenCount: Int) {
         precondition(tokenCount > 0)
         batchedChunkSizes.append(tokenCount)

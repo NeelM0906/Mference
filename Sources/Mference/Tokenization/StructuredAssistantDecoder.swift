@@ -36,6 +36,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private var channel: Channel = .visible
     private var label = ""
     private var toolTokens: [Int32]?
+    /// The source template frames a turn as `</think>\n\n{content}`. When
+    /// reasoning is reported separately those newlines are framing, not
+    /// content: echoed back they would double the separator on re-render.
+    private var afterThoughtFraming = false
     /// DeepSeek text-stream state. DSML markers are plain text, not special
     /// tokens, so the fork scans deltas: `heldText` is a tail withheld while
     /// it could still open a marker, `dsmlText` buffers an open block.
@@ -119,14 +123,37 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenizer.dialect == .glm5 {
             return try consumeGlm5(tokenID: tokenID, delta: delta)
         }
-        if tokenID == tokenizer.channelStartID {
-            label = ""
-            channel = .label
-            return []
-        }
-        if tokenID == tokenizer.channelEndID {
-            channel = .visible
-            return []
+        if toolTokens == nil {
+            if tokenID == tokenizer.channelStartID {
+                label = ""
+                channel = .label
+                return []
+            }
+            if tokenID == tokenizer.channelEndID {
+                channel = .visible
+                return []
+            }
+            if channel == .label {
+                label += delta
+                guard let newline = label.firstIndex(of: "\n") else { return [] }
+                let name = label[..<newline].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let content = String(label[label.index(after: newline)...])
+                channel = name == "final" || name == "answer" ? .visible : .thought
+                label = ""
+                if channel == .visible { return content.isEmpty ? [] : [.content(content)] }
+                if !content.isEmpty { onReasoning?(content) }
+                return []
+            }
+            // Native tool markers discussed in reasoning are text, not calls.
+            if channel == .thought {
+                if tokenID == tokenizer.toolCallStartID || tokenID == tokenizer.toolCallEndID {
+                    // Streaming detokenization omits special-token text. The
+                    // token itself is literal reasoning here and must survive
+                    // replay through the canonical template.
+                    onReasoning?(tokenizer.decode([tokenID], skipSpecialTokens: false))
+                } else if !delta.isEmpty { onReasoning?(delta) }
+                return []
+            }
         }
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
@@ -144,7 +171,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = nil
             let text = tokenizer.decode(tokens, skipSpecialTokens: false)
             do {
-                let call = try GemmaToolCallParser().parse(
+                let call = try GemmaToolCallParser(allowsPythonNull: tokenizer.isGemmaQAT).parse(
                     text, allowedTools: allowedTools, id: idGenerator())
                 emittedCalls += 1
                 return [.toolCall(call)]
@@ -169,24 +196,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = tokens
             return []
         }
-        switch channel {
-        case .thought:
-            return []
-        case .visible:
-            return delta.isEmpty ? [] : [.content(delta)]
-        case .label:
-            label += delta
-            guard let newline = label.firstIndex(of: "\n") else { return [] }
-            let name = label[..<newline].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let contentStart = label.index(after: newline)
-            let content = String(label[contentStart...])
-            channel = name == "final" || name == "answer" ? .visible : .thought
-            label = ""
-            if channel == .visible, !content.isEmpty {
-                return [.content(content)]
-            }
-            return []
-        }
+        return delta.isEmpty ? [] : [.content(delta)]
     }
 
     /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
@@ -203,6 +213,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             }
             if tokenID == tokenizer.thinkEndID {
                 channel = .visible
+                afterThoughtFraming = onReasoning != nil
                 return []
             }
             if channel == .thought {
@@ -243,7 +254,13 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = tokens
             return []
         }
-        return delta.isEmpty ? [] : [.content(delta)]
+        guard afterThoughtFraming else {
+            return delta.isEmpty ? [] : [.content(delta)]
+        }
+        let visible = String(delta.drop(while: { $0 == "\n" }))
+        guard !visible.isEmpty else { return [] }
+        afterThoughtFraming = false
+        return [.content(visible)]
     }
 
     /// GLM-5 transitions: `<think>`…`</think>` (added tokens flagged

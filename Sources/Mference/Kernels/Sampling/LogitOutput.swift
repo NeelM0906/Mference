@@ -23,7 +23,11 @@ final class LogitSoftcapSoftmax {
                        logits: MTLBuffer,
                        probs: MTLBuffer,
                        v: UInt32,
-                       softcap: Float = 30.0) {
+                       softcap: Float = 30.0,
+                       historyCounts: MTLBuffer? = nil,
+                       repetitionPenalty: Float = 1,
+                       frequencyPenalty: Float = 0,
+                       presencePenalty: Float = 0) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(logits, offset: 0, index: 0)
@@ -32,6 +36,14 @@ final class LogitSoftcapSoftmax {
         var softcapVar = softcap
         enc.setBytes(&vVar,       length: MemoryLayout<UInt32>.size, index: 2)
         enc.setBytes(&softcapVar, length: MemoryLayout<Float>.size,  index: 3)
+        // When disabled, the shader never reads the placeholder binding.
+        enc.setBuffer(historyCounts ?? logits, offset: 0, index: 4)
+        var repetition = repetitionPenalty, frequency = frequencyPenalty, presence = presencePenalty
+        var hasHistory: UInt32 = historyCounts == nil ? 0 : 1
+        enc.setBytes(&repetition, length: MemoryLayout<Float>.size, index: 5)
+        enc.setBytes(&frequency, length: MemoryLayout<Float>.size, index: 6)
+        enc.setBytes(&presence, length: MemoryLayout<Float>.size, index: 7)
+        enc.setBytes(&hasHistory, length: MemoryLayout<UInt32>.size, index: 8)
 
         let threadsPerGroup = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         let gridSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
@@ -45,9 +57,8 @@ final class LogitSoftcapSoftmax {
 ///
 /// Reads softmaxed probabilities (output of `LogitSoftcapSoftmax`) and writes
 /// one UInt32 token id. With `temperature == 0` performs greedy argmax and
-/// ignores top-k / top-p / seed. With `temperature > 0` applies top-p against
-/// the full distribution, caps the surviving set with top-k, then applies
-/// temperature sharpening (`p^(1/T)`) and samples via a seeded PRNG. The
+/// ignores truncation and seed. With `temperature > 0` applies Top-K,
+/// normalized Top-P, Min-P and temperature, then samples via a seeded PRNG. The
 /// plain-temperature fast path uses the same
 /// `(seed, position, row)` Gumbel stream as the fused lm_head sampler.
 final class Sample {
@@ -67,6 +78,7 @@ final class Sample {
                        temperature: Float = 1.0,
                        topK: UInt32 = 0,
                        topP: Float = 1.0,
+                       minP: Float = 0,
                        seed: UInt64,
                        position: UInt32 = 0) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -79,12 +91,14 @@ final class Sample {
         var pVar    = topP
         var sVar    = seed
         var posVar  = position
+        var minVar = minP
         enc.setBytes(&vVar, length: MemoryLayout<UInt32>.size,  index: 2)
         enc.setBytes(&tVar, length: MemoryLayout<Float>.size,   index: 3)
         enc.setBytes(&kVar, length: MemoryLayout<UInt32>.size,  index: 4)
         enc.setBytes(&pVar, length: MemoryLayout<Float>.size,   index: 5)
         enc.setBytes(&sVar, length: MemoryLayout<UInt64>.size,  index: 6)
         enc.setBytes(&posVar, length: MemoryLayout<UInt32>.size, index: 7)
+        enc.setBytes(&minVar, length: MemoryLayout<Float>.size, index: 8)
 
         let threadsPerGroup = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         let gridSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
@@ -98,8 +112,8 @@ enum SampleTopK64Error: Error {
     case scratchAllocationFailed
 }
 
-/// Three-stage Top-64 sampler for the documented Gemma 4 policy and measured
-/// temperature variants. Intermediate pairs remain in private GPU memory.
+/// Three-stage sampler for Top-K up to 64. Intermediate pairs remain in
+/// private GPU memory; the final stage selects the requested K before filters.
 final class SampleTopK64 {
     private static let tileSize = 1024
     private static let keptPerTile = 64
@@ -164,7 +178,10 @@ final class SampleTopK64 {
                        outToken: MTLBuffer,
                        temperature: Float,
                        topP: Float,
+                       minP: Float = 0,
+                       topK: UInt32 = 64,
                        seed: UInt64) {
+        precondition((1...64).contains(topK))
         let threads = MTLSize(width: 256, height: 1, depth: 1)
 
         if let enc = commandBuffer.makeComputeCommandEncoder() {
@@ -201,10 +218,13 @@ final class SampleTopK64 {
             var temp = temperature
             var p = topP
             var rngSeed = seed
+            var minP = minP, topK = topK
             enc.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
             enc.setBytes(&temp, length: MemoryLayout<Float>.size, index: 4)
             enc.setBytes(&p, length: MemoryLayout<Float>.size, index: 5)
             enc.setBytes(&rngSeed, length: MemoryLayout<UInt64>.size, index: 6)
+            enc.setBytes(&minP, length: MemoryLayout<Float>.size, index: 7)
+            enc.setBytes(&topK, length: MemoryLayout<UInt32>.size, index: 8)
             enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                      threadsPerThreadgroup: threads)
             enc.endEncoding()

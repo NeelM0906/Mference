@@ -1,7 +1,127 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef MFERENCE_GEMMA_SOURCE_ROUTER_DOT
+#define MFERENCE_GEMMA_SOURCE_ROUTER_DOT
+// MLX 0.32.2 gemv.h reduction, adapted to one physical SIMD per expert.
+// Copyright © 2023-2024 Apple Inc. MIT license; see LICENSE-MLX.
+// The pinned 128x2816 router uses eight logical SIMD groups, four contiguous
+// values per lane, then an ordered merge. Compile its entry points safely.
+static inline float gemma_source_router_dot(
+    device const bfloat* row, device const half* input,
+    device const half* scale, uint D, uint lane
+) {
+    float total = 0.0f;
+    for (uint group = 0; group < 8u; ++group) {
+        float sum = 0.0f;
+        for (uint base = group * 128u + lane * 4u; base < D; base += 1024u) {
+            for (uint j = 0; j < 4u; ++j) {
+                const half x = input[base + j] * scale[base + j];
+                sum += float(half(row[base + j])) * float(x);
+            }
+        }
+        for (ushort delta = 16; delta > 0; delta >>= 1) sum += simd_shuffle_down(sum, delta);
+        total = group == 0 ? sum : total + sum;
+    }
+    return total;
+}
+#endif
+
+#ifndef MFERENCE_GEMMA_SOURCE_FP16
+#define MFERENCE_GEMMA_SOURCE_FP16
+// Preserve the source activation boundary before learned scaling. The original
+// Gemma checkpoint keeps its existing fused arithmetic unless explicitly set.
+constant bool FC_GEMMA_SOURCE_FP16 [[function_constant(110)]];
+constant bool kGemmaSourceFP16 = is_function_constant_defined(FC_GEMMA_SOURCE_FP16)
+    ? FC_GEMMA_SOURCE_FP16 : false;
+static inline half gemma_weighted_norm(float x, float inv, float weight) {
+    return kGemmaSourceFP16 ? half(x * inv) * half(weight) : half(x * inv * weight);
+}
+static inline half gemma_scaled_embedding(float value, float scale) {
+    return kGemmaSourceFP16 ? half(value) * half(scale) : half(value * scale);
+}
+
+// MLX's quantized GEMV forms its affine-bias input sum in FP16 quads.
+static inline float gemma_source_quad_sum(half4 x) {
+    const half a = x.x + x.y;
+    const half b = a + x.z;
+    return float(half(b + x.w));
+}
+static inline half gemma_source_geglu(float gate_value, float up_value) {
+    // Gate/up projections are FP16 tensors in the source, even when fused.
+    volatile half gate = half(gate_value);
+    volatile half up = half(up_value);
+    // Preserve source half stores across fast-math contraction, particularly
+    // 1 + tanh(x): its rounded negative tail is exactly zero in the source.
+    volatile half cube = half(float(gate) * float(gate) * float(gate));
+    volatile half term = half(0.044715f) * cube;
+    volatile half sum = gate + term;
+    volatile half inner = half(0.7978845608028654f) * sum;
+    // FP16 tanh has already rounded to +/-1 at these bounds. Keep that
+    // exact source result while avoiding fast-tanh's positive exp overflow.
+    volatile half curve = half(tanh(clamp(float(inner), -20.0f, 20.0f)));
+    volatile half shifted = half(1.0h + curve);
+    volatile half scaled = half(0.5h * gate);
+    volatile half activation = scaled * shifted;
+    return half(activation * up);
+}
+static inline float gemma_source_bias_correction(
+    device const half* x, device const bfloat* biases, uint width, uint group_size
+) {
+    float correction = 0.0f;
+    for (uint k = 0; k < width; k += 4u) {
+        const half4 quad(x[k], x[k + 1u], x[k + 2u], x[k + 3u]);
+        const float exact = float(quad.x) + float(quad.y) + float(quad.z) + float(quad.w);
+        correction = fma(float(biases[k / group_size]),
+                        gemma_source_quad_sum(quad) - exact, correction);
+    }
+    return correction;
+}
+#endif
+
+#ifndef MFERENCE_GEMMA_ROUTING_PRECISION
+#define MFERENCE_GEMMA_ROUTING_PRECISION
+static inline float gemma_source_weighted_expert(float value, half weight) {
+    // A fused projection must retain both source tensor-store boundaries.
+    volatile half projected = half(value);
+    volatile half product = projected * weight;
+    return float(product);
+}
+
+static inline void gemma_source_softmax8(
+    thread const float* descending_scores, thread half* probabilities
+) {
+    // Pinned MLX's argpartition is an ascending sort. Its default FP16
+    // softmax uses two lanes with four ascending values each, half partial
+    // sums and a half reciprocal. Keep our descending route-slot order while
+    // reproducing that source normalization order and precision.
+    volatile half exps[8];
+    for (uint i = 0; i < 8u; ++i) {
+        volatile half shifted = half(descending_scores[i]) - half(descending_scores[0]);
+        exps[i] = fast::exp(shifted);
+    }
+    volatile half lower = 0.0h;
+    volatile half upper = 0.0h;
+    for (uint i = 0; i < 4u; ++i) lower = lower + exps[7u - i];
+    for (uint i = 0; i < 4u; ++i) upper = upper + exps[3u - i];
+    volatile half total = lower + upper;
+    volatile half inverse = 1.0h / total;
+    for (uint i = 0; i < 8u; ++i) probabilities[i] = exps[i] * inverse;
+}
+#endif
+
 constant constexpr uint kMoEGroupSize = 64;
+#ifndef MFERENCE_AFFINE_GROUP_SIZE
+#define MFERENCE_AFFINE_GROUP_SIZE
+constant uint FC_AFFINE_GROUP_SIZE [[function_constant(108)]];
+constant uint kAffineGroupSize = is_function_constant_defined(FC_AFFINE_GROUP_SIZE)
+    ? FC_AFFINE_GROUP_SIZE : 64u;
+#endif
+#ifndef MFERENCE_ROUTER_BF16
+#define MFERENCE_ROUTER_BF16
+constant bool FC_ROUTER_BF16 [[function_constant(109)]];
+constant bool kRouterBF16 = is_function_constant_defined(FC_ROUTER_BF16) && FC_ROUTER_BF16;
+#endif
 // The widest routed tile the DeepSeek-V4 chunked-prefill kernels bind. Unchanged
 // at 8: it bounds `DSV4PrefillRoute.local_slot`, not the argument-buffer array.
 constant constexpr uint kMaxStreamedExperts = 8;
@@ -125,25 +245,42 @@ static inline void router_gemv_gemma4_body(
     const uint e = tg_idx * rows_per_tg + sg_idx;
     if (e >= NE) return;
 
-    const uint n_groups = DD / kMoEGroupSize;
-    device const uint8_t* W_row = W + uint(e) * DD;
-    device const bfloat* s_row = scales + uint(e) * n_groups;
-    device const bfloat* b_row = biases + uint(e) * n_groups;
-
+    if (kRouterBF16 && kGemmaSourceFP16) {
+        const float score = gemma_source_router_dot(
+            reinterpret_cast<device const bfloat*>(W) + e * DD, hidden,
+            reinterpret_cast<device const half*>(effective_scale), DD, lane);
+        if (lane == 0) out_logits[e] = float(half(score));
+        return;
+    }
     float acc = 0.0f;
-    for (uint g = 0; g < n_groups; ++g) {
-        const float s = float(s_row[g]);
-        const float b = float(b_row[g]);
-        const uint idx = g * kMoEGroupSize + lane * 2u;
-        const float q0 = float(uint(W_row[idx]));
-        const float q1 = float(uint(W_row[idx + 1u]));
-        const float x0 = float(hidden[idx]) * float(effective_scale[idx]);
-        const float x1 = float(hidden[idx + 1u]) * float(effective_scale[idx + 1u]);
-        acc = fma(s, q0 * x0 + q1 * x1, acc);
-        acc = fma(b, x0 + x1, acc);
+    if (kRouterBF16) {
+        device const bfloat* row = reinterpret_cast<device const bfloat*>(W) + e * DD;
+        for (uint idx = lane; idx < DD; idx += 32u) {
+            const float x = kGemmaSourceFP16
+                ? float(half(hidden[idx] * reinterpret_cast<device const half*>(effective_scale)[idx]))
+                : float(hidden[idx]) * float(effective_scale[idx]);
+            const float w = kGemmaSourceFP16 ? float(half(row[idx])) : float(row[idx]);
+            acc = fma(w, x, acc);
+        }
+    } else {
+        const uint n_groups = DD / kMoEGroupSize;
+        device const uint8_t* W_row = W + uint(e) * DD;
+        device const bfloat* s_row = scales + uint(e) * n_groups;
+        device const bfloat* b_row = biases + uint(e) * n_groups;
+        for (uint g = 0; g < n_groups; ++g) {
+            const float s = float(s_row[g]);
+            const float b = float(b_row[g]);
+            const uint idx = g * kMoEGroupSize + lane * 2u;
+            const float q0 = float(uint(W_row[idx]));
+            const float q1 = float(uint(W_row[idx + 1u]));
+            const float x0 = float(hidden[idx]) * float(effective_scale[idx]);
+            const float x1 = float(hidden[idx + 1u]) * float(effective_scale[idx + 1u]);
+            acc = fma(s, q0 * x0 + q1 * x1, acc);
+            acc = fma(b, x0 + x1, acc);
+        }
     }
     acc = simd_sum(acc);
-    if (lane == 0) out_logits[e] = acc;
+    if (lane == 0) out_logits[e] = kGemmaSourceFP16 ? float(half(acc)) : acc;
 }
 
 kernel void router_gemv_gemma4_r4(
@@ -223,10 +360,10 @@ static inline void router_topk_select_softmax_serial(
 
     for (uint e = 0; e < NE; ++e) {
         const float s = logits[e];
-        if (s <= top_score[K - 1]) continue;
+        if (s < top_score[K - 1] || (!kGemmaSourceFP16 && s == top_score[K - 1])) continue;
         uint pos = K;
         for (uint i = 0; i < K; ++i) {
-            if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
+            if (s > top_score[i] || (s == top_score[i] && (kGemmaSourceFP16 ? e > top_idx[i] : e < top_idx[i]))) {
                 pos = i;
                 break;
             }
@@ -238,6 +375,16 @@ static inline void router_topk_select_softmax_serial(
         }
         top_idx[pos] = e;
         top_score[pos] = s;
+    }
+
+    if (kGemmaSourceFP16 && K == 8u) {
+        half probabilities[8];
+        gemma_source_softmax8(top_score, probabilities);
+        for (uint i = 0; i < 8u; ++i) {
+            out_indices[i] = top_idx[i];
+            out_weights[i] = probabilities[i] * half(per_expert_scale[top_idx[i]]);
+        }
+        return;
     }
 
     const float max_s = top_score[0];
@@ -252,7 +399,9 @@ static inline void router_topk_select_softmax_serial(
         const uint expert_idx = top_idx[i];
         const float weight = exps[i] / sum_exp;
         out_indices[i] = expert_idx;
-        out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
+        out_weights[i] = kGemmaSourceFP16
+            ? half(weight) * half(per_expert_scale[expert_idx])
+            : half(weight * float(per_expert_scale[expert_idx]));
     }
 }
 
@@ -300,7 +449,9 @@ kernel void router_topk_select_k10(
 // wins inside a lane, matching the serial ascending scan) and then a
 // shuffle-down argmax whose ties prefer the LOWER index. Together those
 // reproduce the serial "first strictly-greater score wins, equal score keeps the
-// earlier expert" order exactly. A per-lane taken bitmask retires winners.
+// earlier expert" order exactly. QAT's source profile instead prefers the
+// higher ID at ties, matching the last eight entries of MLX's stable ascending
+// sort. A per-lane taken bitmask retires winners.
 // The normalization tail stays serial on lane 0 with the same operations in the
 // same order, so the emitted weights match bit for bit.
 constant constexpr uint kRouterMaxPerLane = 8;   // num_experts <= 256
@@ -319,7 +470,8 @@ static inline uint router_select_next_one_simd(
     float bv = -INFINITY;
     uint bi = kRouterNoWinner;
     for (uint j = 0; j < per; ++j) {
-        if (!(taken & (1u << j)) && ch[j] > bv) {
+        if (!(taken & (1u << j)) && (ch[j] > bv ||
+            (kGemmaSourceFP16 && ch[j] == bv && bi != kRouterNoWinner && base + j > bi))) {
             bv = ch[j];
             bi = base + j;
         }
@@ -327,7 +479,9 @@ static inline uint router_select_next_one_simd(
     for (uint off = 16u; off > 0u; off >>= 1) {
         const float ov = simd_shuffle_down(bv, off);
         const uint oi = simd_shuffle_down(bi, off);
-        if (ov > bv || (ov == bv && oi < bi)) {
+        const bool wins_tie = kGemmaSourceFP16
+            ? (oi != kRouterNoWinner && (bi == kRouterNoWinner || oi > bi)) : oi < bi;
+        if (ov > bv || (ov == bv && wins_tie)) {
             bv = ov;
             bi = oi;
         }
@@ -382,6 +536,16 @@ static inline void router_topk_select_softmax_par(
         }
     }
 
+    if (kGemmaSourceFP16 && K == 8u) {
+        half probabilities[8];
+        gemma_source_softmax8(top_score, probabilities);
+        for (uint i = 0; i < 8u; ++i) {
+            out_indices[i] = top_idx[i];
+            out_weights[i] = probabilities[i] * half(per_expert_scale[top_idx[i]]);
+        }
+        return;
+    }
+
     const float max_s = top_score[0];
     float sum_exp = 0.0f;
     float exps[K];
@@ -394,7 +558,9 @@ static inline void router_topk_select_softmax_par(
         const uint expert_idx = top_idx[i];
         const float weight = exps[i] / sum_exp;
         out_indices[i] = expert_idx;
-        out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
+        out_weights[i] = kGemmaSourceFP16
+            ? half(weight) * half(per_expert_scale[expert_idx])
+            : half(weight * float(per_expert_scale[expert_idx]));
     }
 }
 
@@ -464,6 +630,40 @@ kernel void router_topk_select_k10_par(
         router_fc_num_experts(num_experts), sg_idx, lane);
 }
 
+#ifndef MFERENCE_GEMMA_SOURCE_PROJECTION
+#define MFERENCE_GEMMA_SOURCE_PROJECTION
+// QAT's source GEMV rounds the input sum in half quads, accumulates four
+// products at a time, and adds each complete affine sub-result. Callers of
+// this path compile this module with safe math: fast-math compilation does
+// not preserve the source's FP16 rounding boundaries.
+static inline float gemma_source_projection_row(
+    device const uint8_t* weights,
+    device const bfloat* scales,
+    device const bfloat* biases,
+    device const half* x,
+    uint width, uint group_size, bool fast_shape, uint lane
+) {
+    device const ushort* packed_weights = (device const ushort*)weights;
+    const uint values = fast_shape ? 16u : 8u;
+    float result = 0.0f;
+    for (uint base = lane * values; base < width; base += 32u * values) {
+        float sum = 0.0f, dot = 0.0f;
+        for (uint i = 0; i < values; i += 4u) {
+            const uint k = base + i;
+            const ushort packed = packed_weights[k / 4u];
+            sum += x[k] + x[k + 1u] + x[k + 2u] + x[k + 3u];
+            dot += float(x[k]) * (packed & 15u)
+                + (float(x[k + 1u]) / 16.0f) * (packed & 240u)
+                + (float(x[k + 2u]) / 256.0f) * (packed & 3840u)
+                + (float(x[k + 3u]) / 4096.0f) * (packed & 61440u);
+        }
+        const uint group = base / group_size;
+        result += float(half(scales[group])) * dot + sum * float(half(biases[group]));
+    }
+    return simd_sum(result);
+}
+#endif
+
 // Each SIMD computes one affine INT4 row. Four adjacent groups are loaded as
 // aligned 32-bit chunks; remaining groups use one byte per lane.
 static inline float moe_int4_gemv_row_simd_dev_vec(
@@ -475,18 +675,24 @@ static inline float moe_int4_gemv_row_simd_dev_vec(
     uint N,
     uint lane
 ) {
-    const uint n_groups = N / kMoEGroupSize;
+    const uint n_groups = N / kAffineGroupSize;
     const uint row_bytes = N / 2;
     device const uint8_t* W_row = W + uint(row) * row_bytes;
     device const bfloat* s_row = S + uint(row) * n_groups;
     device const bfloat* b_row = B + uint(row) * n_groups;
 
+    if (kGemmaSourceFP16) {
+        return gemma_source_projection_row(W_row, s_row, b_row, x,
+            N, kAffineGroupSize, N % 512u == 0u, lane);
+    }
+
     float acc = 0.0f;
-    const uint full_blocks = n_groups / 4;
+    const uint full_blocks = kGemmaSourceFP16 ? (N + 255u) / 256u : N / 256u;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
+        if (kGemmaSourceFP16 && byte_base * 2u >= N) continue;
         const uint w4 = *((device const uint*)(W_row + byte_base));
-        const uint g = blk * 4u + (lane >> 3);
+        const uint g = (byte_base * 2u) / kAffineGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
@@ -505,16 +711,21 @@ static inline float moe_int4_gemv_row_simd_dev_vec(
         dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
         dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
         dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
-        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
         acc = fma(s, dot, acc);
         acc = fma(b, sum, acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint tile = full_blocks * 4u; tile * 64u < N; ++tile) {
+        const uint elem = tile * 64u + lane * 2u;
+        if (elem >= N) continue;
+        const uint g = elem / kAffineGroupSize;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kMoEGroupSize / 2) + lane];
-        const float x0 = float(x[g * kMoEGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kMoEGroupSize + lane * 2u + 1u]);
+        const uint8_t byte = W_row[elem / 2u];
+        const float x0 = float(x[elem]);
+        const float x1 = float(x[elem + 1u]);
         float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
         dot = fma(float(uint(byte >> 4)), x1, dot);
         acc = fma(s, dot, acc);
@@ -537,7 +748,7 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
     uint N,
     uint lane
 ) {
-    const uint n_groups = N / kMoEGroupSize;
+    const uint n_groups = N / kAffineGroupSize;
     const uint row_bytes = N / 2;
     device const uint8_t* gW_row = gateW + uint(row) * row_bytes;
     device const uint8_t* uW_row = upW + uint(row) * row_bytes;
@@ -546,16 +757,25 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
     device const bfloat* uS_row = upS + uint(row) * n_groups;
     device const bfloat* uB_row = upB + uint(row) * n_groups;
 
+    if (kGemmaSourceFP16) {
+        const float gate = gemma_source_projection_row(gW_row, gS_row, gB_row, x,
+            N, kAffineGroupSize, N % 512u == 0u, lane);
+        const float up = gemma_source_projection_row(uW_row, uS_row, uB_row, x,
+            N, kAffineGroupSize, N % 512u == 0u, lane);
+        return float2(gate, up);
+    }
+
     float g_acc = 0.0f;
     float u_acc = 0.0f;
-    const uint full_blocks = n_groups / 4;
+    const uint full_blocks = kGemmaSourceFP16 ? (N + 255u) / 256u : N / 256u;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
+        if (kGemmaSourceFP16 && byte_base * 2u >= N) continue;
         device const ushort* gp = (device const ushort*)(gW_row + byte_base);
         device const ushort* up = (device const ushort*)(uW_row + byte_base);
         const uint gw4 = uint(gp[0]) | (uint(gp[1]) << 16);
         const uint uw4 = uint(up[0]) | (uint(up[1]) << 16);
-        const uint g = blk * 4u + (lane >> 3);
+        const uint g = (byte_base * 2u) / kAffineGroupSize;
         const float gs = float(gS_row[g]);
         const float gb = float(gB_row[g]);
         const float us = float(uS_row[g]);
@@ -567,7 +787,9 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
         const float e2 = float(xa.z), e3 = float(xa.w);
         const float e4 = float(xb.x), e5 = float(xb.y);
         const float e6 = float(xb.z), e7 = float(xb.w);
-        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
 
         const uint gb0 = gw4 & 0xFFu;
         const uint gb1 = (gw4 >> 8) & 0xFFu;
@@ -594,15 +816,18 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
         u_acc = fma(us, u_dot, u_acc);
         u_acc = fma(ub, sum, u_acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint tile = full_blocks * 4u; tile * 64u < N; ++tile) {
+        const uint elem = tile * 64u + lane * 2u;
+        if (elem >= N) continue;
+        const uint g = elem / kAffineGroupSize;
         const float gs = float(gS_row[g]);
         const float gb = float(gB_row[g]);
         const float us = float(uS_row[g]);
         const float ub = float(uB_row[g]);
-        const uint8_t gbv = gW_row[g * (kMoEGroupSize / 2) + lane];
-        const uint8_t ubv = uW_row[g * (kMoEGroupSize / 2) + lane];
-        const float x0 = float(x[g * kMoEGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kMoEGroupSize + lane * 2u + 1u]);
+        const uint8_t gbv = gW_row[elem / 2u];
+        const uint8_t ubv = uW_row[elem / 2u];
+        const float x0 = float(x[elem]);
+        const float x1 = float(x[elem + 1u]);
         const float sum = x0 + x1;
         float g_dot = fma(float(uint(gbv & 0x0Fu)), x0, 0.0f);
         g_dot = fma(float(uint(gbv >> 4)), x1, g_dot);
@@ -647,7 +872,8 @@ static inline void moe_phase1_gate_up_act_u16load_body(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
     // DeepSeek's swiglu_limit clamp: a no-op unless function constant 5 is set.
     const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
+    if (lane == 0) acts[slot * F + f] = (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+        : half(moe_hidden_activation(cgu.x) * cgu.y));
 }
 
 static inline void moe_phase1_gate_up_act_subset_u16load_body(
@@ -685,7 +911,8 @@ static inline void moe_phase1_gate_up_act_subset_u16load_body(
         gW, gS, gB, uW, uS, uB, x, f, D, lane);
     // DeepSeek's swiglu_limit clamp: a no-op unless function constant 5 is set.
     const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
-    if (lane == 0) acts[slot * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
+    if (lane == 0) acts[slot * F + f] = (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+        : half(moe_hidden_activation(cgu.x) * cgu.y));
 }
 
 kernel void moe_phase1_gate_up_act_u16load(
@@ -775,7 +1002,8 @@ kernel void moe_phase1_gate_up_act_slotmap(
     const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
         gW, gS, gB, uW, uS, uB, x, f, DD, lane);
     const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
-    if (lane == 0) acts[slot * FF + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
+    if (lane == 0) acts[slot * FF + f] = (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+        : half(moe_hidden_activation(cgu.x) * cgu.y));
 }
 
 kernel void moe_phase2_down_reduce_k8_slotmap(
@@ -808,14 +1036,24 @@ kernel void moe_phase2_down_reduce_k8_slotmap(
 
     const float value = moe_int4_gemv_row_simd_dev_vec(
         dW, dS, dB, act_slot, d, FF, lane);
-    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    if (lane == 0) partial[sg_idx] = kGemmaSourceFP16
+        ? gemma_source_weighted_expert(value, routing_w[sg_idx])
+        : float(routing_w[sg_idx]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
-        float acc = float(residual[d]);
-        acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
-        acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
-        y[d] = half(acc);
+        if (kGemmaSourceFP16) {
+            // Source argpartition orders experts ascending; our slots are
+            // descending. Its column reduction stores every sum in FP16.
+            volatile half acc = 0.0h;
+            for (uint r = 8u; r > 0u; --r) acc = acc + half(partial[r - 1u]);
+            y[d] = half(acc + residual[d]);
+        } else {
+            float acc = float(residual[d]);
+            acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
+            acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+            y[d] = half(acc);
+        }
     }
 }
 
@@ -856,13 +1094,21 @@ kernel void moe_phase2_down_reduce_slotmap_wide(
 
     const float value = moe_int4_gemv_row_simd_dev_vec(
         dW, dS, dB, act_slot, d, FF, lane);
-    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    if (lane == 0) partial[sg_idx] = kGemmaSourceFP16
+        ? gemma_source_weighted_expert(value, routing_w[sg_idx])
+        : float(routing_w[sg_idx]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
-        float acc = float(residual[d]);
-        for (uint rank = 0; rank < K; ++rank) acc += partial[rank];
-        y[d] = half(acc);
+        if (kGemmaSourceFP16) {
+            volatile half acc = 0.0h;
+            for (uint r = K; r > 0u; --r) acc = acc + half(partial[r - 1u]);
+            y[d] = half(acc + residual[d]);
+        } else {
+            float acc = float(residual[d]);
+            for (uint rank = 0; rank < K; ++rank) acc += partial[rank];
+            y[d] = half(acc);
+        }
     }
 }
 
@@ -1110,7 +1356,9 @@ static inline float moe_int2_gemv_row_simd_dev_vec(
         dot = fma(float((w2 >> 10) & 0x3u), e5, dot);
         dot = fma(float((w2 >> 12) & 0x3u), e6, dot);
         dot = fma(float((w2 >> 14) & 0x3u), e7, dot);
-        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
         acc = fma(s, dot, acc);
         acc = fma(b, sum, acc);
     }
@@ -1180,7 +1428,9 @@ static inline float2 moe_int2_gate_up_rows_simd_dev_vec(
         const float e2 = float(xa.z), e3 = float(xa.w);
         const float e4 = float(xb.x), e5 = float(xb.y);
         const float e6 = float(xb.z), e7 = float(xb.w);
-        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float sum = kGemmaSourceFP16
+            ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+            : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
 
         float g_dot = 0.0f;
         g_dot = fma(float(gw2 & 0x3u), e0, g_dot);
@@ -1264,7 +1514,8 @@ static inline void moe_phase1_int2_body(
         x, f, D, gate_group_size, lane);
     if (lane == 0) {
         const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
-        acts[slot * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
+        acts[slot * F + f] = (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+        : half(moe_hidden_activation(cgu.x) * cgu.y));
     }
 }
 
@@ -1323,7 +1574,8 @@ kernel void moe_phase1_gate_up_act_subset_int2(
         x, f, moe_fc_d(D), gate_group_size, lane);
     if (lane == 0) {
         const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
-        acts[slot * F_ + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
+        acts[slot * F_ + f] = (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+        : half(moe_hidden_activation(cgu.x) * cgu.y));
     }
 }
 
@@ -1355,14 +1607,16 @@ kernel void moe_phase2_down_reduce_int2_k6(
 
     const float value = moe_int2_gemv_row_simd_dev_vec(
         dW, dS, dB, act_slot, d, FF, lane);
-    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    if (lane == 0) partial[sg_idx] = kGemmaSourceFP16
+        ? gemma_source_weighted_expert(value, routing_w[sg_idx])
+        : float(routing_w[sg_idx]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
-        float acc = float(residual[d]);
+        float acc = kGemmaSourceFP16 ? 0.0f : float(residual[d]);
         acc += partial[0]; acc += partial[1]; acc += partial[2];
         acc += partial[3]; acc += partial[4]; acc += partial[5];
-        y[d] = half(acc);
+        y[d] = kGemmaSourceFP16 ? half(half(acc) + residual[d]) : half(acc);
     }
 }
 
@@ -1393,14 +1647,16 @@ kernel void moe_phase2_down_reduce_k6(
 
     const float value = moe_int4_gemv_row_simd_dev_vec(
         dW, dS, dB, act_slot, d, FF, lane);
-    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    if (lane == 0) partial[sg_idx] = kGemmaSourceFP16
+        ? gemma_source_weighted_expert(value, routing_w[sg_idx])
+        : float(routing_w[sg_idx]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
-        float acc = float(residual[d]);
+        float acc = kGemmaSourceFP16 ? 0.0f : float(residual[d]);
         acc += partial[0]; acc += partial[1]; acc += partial[2];
         acc += partial[3]; acc += partial[4]; acc += partial[5];
-        y[d] = half(acc);
+        y[d] = kGemmaSourceFP16 ? half(half(acc) + residual[d]) : half(acc);
     }
 }
 
@@ -1431,14 +1687,24 @@ kernel void moe_phase2_down_reduce_k8(
 
     const float value = moe_int4_gemv_row_simd_dev_vec(
         dW, dS, dB, act_slot, d, FF, lane);
-    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    if (lane == 0) partial[sg_idx] = kGemmaSourceFP16
+        ? gemma_source_weighted_expert(value, routing_w[sg_idx])
+        : float(routing_w[sg_idx]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
-        float acc = float(residual[d]);
-        acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
-        acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
-        y[d] = half(acc);
+        if (kGemmaSourceFP16) {
+            // Source argpartition orders experts ascending; our slots are
+            // descending. Its column reduction stores every sum in FP16.
+            volatile half acc = 0.0h;
+            for (uint r = 8u; r > 0u; --r) acc = acc + half(partial[r - 1u]);
+            y[d] = half(acc + residual[d]);
+        } else {
+            float acc = float(residual[d]);
+            acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
+            acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+            y[d] = half(acc);
+        }
     }
 }
 
@@ -1473,15 +1739,17 @@ kernel void moe_phase2_down_reduce_k10(
 
     const float value = moe_int4_gemv_row_simd_dev_vec(
         dW, dS, dB, act_slot, d, FF, lane);
-    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    if (lane == 0) partial[sg_idx] = kGemmaSourceFP16
+        ? gemma_source_weighted_expert(value, routing_w[sg_idx])
+        : float(routing_w[sg_idx]) * value;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
-        float acc = float(residual[d]);
+        float acc = kGemmaSourceFP16 ? 0.0f : float(residual[d]);
         acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
         acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
         acc += partial[8]; acc += partial[9];
-        y[d] = half(acc);
+        y[d] = kGemmaSourceFP16 ? half(half(acc) + residual[d]) : half(acc);
     }
 }
 
@@ -1553,7 +1821,8 @@ kernel void dsv4_prefill_moe_phase1_pairs_int2(
     if (lane == 0) {
         const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
         acts[(uint(r.token) * KK + uint(r.rank)) * FF + f] =
-            half(moe_hidden_activation(cgu.x) * cgu.y);
+            (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+        : half(moe_hidden_activation(cgu.x) * cgu.y));
     }
 }
 
@@ -1668,7 +1937,8 @@ kernel void glm53p_moe_grouped_phase1(
         device const half* xt = x + pair_token[p] * D;
         const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(gW, gS, gB, uW, uS, uB, xt, f, D, lane);
         const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
-        if (lane == 0) acts[p * F + f] = half(moe_hidden_activation(cgu.x) * cgu.y);
+        if (lane == 0) acts[p * F + f] = (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+        : half(moe_hidden_activation(cgu.x) * cgu.y));
     }
 }
 

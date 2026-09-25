@@ -4,8 +4,9 @@ import Metal
 final class PrefillLayerTail {
     private let pso: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_layer_tail_block")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        self.pso = try context.pipeline("prefill_layer_tail_block", constants: precision)
     }
 
     func encode(commandBuffer: MTLCommandBuffer,

@@ -139,8 +139,22 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
     }
 }
 
+/// Thinking switches as generic chat clients send them. `preserve_thinking`
+/// is accepted for compatibility; Gemma normalizes it to its source history
+/// policy, while Qwen's source template always preserves reasoning history.
+public struct OpenAIChatTemplateKwargs: Codable, Equatable, Sendable {
+    public let enableThinking: Bool?
+    public let preserveThinking: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case enableThinking = "enable_thinking"
+        case preserveThinking = "preserve_thinking"
+    }
+}
+
 public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public var reasoningEffort: String? = nil
+    public var chatTemplateKwargs: OpenAIChatTemplateKwargs? = nil
     public let model: String
     public let messages: [OpenAIChatMessage]
     public let stream: Bool?
@@ -156,6 +170,9 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let parallelToolCalls: Bool?
     public let topK: Int?
     public let repetitionPenalty: Float?
+    public var repeatPenalty: Float? = nil
+    public var repeatLastN: Int? = nil
+    public var minP: Float? = nil
     public let n: Int?
     public let logprobs: Bool?
     public let presencePenalty: Float?
@@ -164,6 +181,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
         case reasoningEffort = "reasoning_effort"
+        case chatTemplateKwargs = "chat_template_kwargs"
         case streamOptions = "stream_options"
         case topP = "top_p"
         case maxTokens = "max_tokens"
@@ -172,6 +190,9 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case parallelToolCalls = "parallel_tool_calls"
         case topK = "top_k"
         case repetitionPenalty = "repetition_penalty"
+        case repeatPenalty = "repeat_penalty"
+        case repeatLastN = "repeat_last_n"
+        case minP = "min_p"
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
     }
@@ -269,6 +290,7 @@ public enum ServerRequestError: Error, Equatable, Sendable {
 
 public struct ValidatedChatRequest: Sendable {
     public var reasoningEffort: QwenReasoningEffort? = nil
+    public var preserveThinking: Bool = false
     public let messages: [MFTokenizer.Message]
     public let tools: [MFTokenizer.FunctionDefinition]
     public let stream: Bool
@@ -281,33 +303,37 @@ public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
                                 dialect: ChatDialect = .gemma,
-                                swiftQwen: Bool? = nil) throws -> ValidatedChatRequest {
-        try validate(request, modelID: modelID, dialect: dialect,
-                     swiftQwen: swiftQwen, qwenReasoning: nil)
-    }
-
-    public static func validate(_ request: OpenAIChatRequest,
-                                modelID: String,
-                                dialect: ChatDialect,
-                                swiftQwen: Bool?,
-                                qwenReasoning: Bool?) throws -> ValidatedChatRequest {
+                                swiftQwen: Bool? = nil,
+                                acceptsReasoningEffort: Bool? = nil,
+                                qwenReasoning: Bool? = nil,
+                                generationDefaults: GenerationConfig = .defaults) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
         let isSwiftQwen = swiftQwen ?? (modelID.split(separator: "@").first == Substring(CheckpointIdentity.swiftQwen38))
-        let supportsEffort = qwenReasoning ?? (isSwiftQwen ||
+        let supportsQwenEffort = qwenReasoning ?? (isSwiftQwen ||
             modelID.split(separator: "@").first == Substring(CheckpointIdentity.baseQwen38))
-        if (isSwiftQwen || (supportsEffort && request.reasoningEffort != nil)),
+        let thinkingSwitch = request.chatTemplateKwargs?.enableThinking
+        if !(acceptsReasoningEffort ?? supportsQwenEffort) {
+            if request.reasoningEffort != nil {
+                throw invalid("reasoning_effort is not supported by this model",
+                              "reasoning_effort", "unsupported_value")
+            }
+            if thinkingSwitch != nil {
+                throw invalid("chat_template_kwargs.enable_thinking is not supported by this model",
+                              "chat_template_kwargs", "unsupported_value")
+            }
+        }
+        let explicitEffort = request.reasoningEffort.flatMap(QwenReasoningEffort.init(rawValue:))
+        guard request.reasoningEffort == nil || explicitEffort != nil else {
+            throw invalid("reasoning_effort must be xhigh, medium, low, or none",
+                          "reasoning_effort", "unsupported_value")
+        }
+        // `enable_thinking: true` is the source template's default effort.
+        let effort = explicitEffort
+            ?? thinkingSwitch.map { $0 ? QwenReasoningEffort.xhigh : .off }
+        if (isSwiftQwen || (supportsQwenEffort && effort != nil)),
            request.messages.contains(where: { $0.role == "developer" }) {
             throw invalid("Qwen 3.8 source-template requests require leading system guidance; developer messages are not supported",
                           "messages", "unsupported_role")
-        }
-        if !supportsEffort, request.reasoningEffort != nil {
-            throw invalid("reasoning_effort requires base or Swift Qwen 3.8",
-                          "reasoning_effort", "unsupported_value")
-        }
-        let effort = request.reasoningEffort.flatMap(QwenReasoningEffort.init(rawValue:))
-        guard request.reasoningEffort == nil || effort != nil else {
-            throw invalid("reasoning_effort must be xhigh, medium, low, or none",
-                          "reasoning_effort", "unsupported_value")
         }
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
@@ -315,37 +341,65 @@ public enum OpenAIRequestValidator {
         guard request.logprobs != true else {
             throw invalid("logprobs are not supported", "logprobs", "unsupported_value")
         }
-        guard request.presencePenalty == nil || request.presencePenalty == 0 else {
-            throw invalid("presence_penalty must be zero", "presence_penalty", "unsupported_value")
+        // A supplied field is always the value validated and used; only an
+        // omitted one falls back to the selected checkpoint's sampling defaults.
+        let defaults = generationDefaults
+        let presencePenalty = request.presencePenalty ?? defaults.presencePenalty
+        guard presencePenalty.isFinite, (-2...2).contains(presencePenalty) else {
+            throw invalid("presence_penalty must be finite and between -2 and 2",
+                          "presence_penalty", "invalid_value")
         }
-        guard request.frequencyPenalty == nil || request.frequencyPenalty == 0 else {
-            throw invalid("frequency_penalty must be zero", "frequency_penalty", "unsupported_value")
+        let minP = request.minP ?? defaults.minP
+        guard minP.isFinite, (0...1).contains(minP) else {
+            throw invalid("min_p must be finite and between 0 and 1", "min_p", "invalid_value")
+        }
+        let frequencyPenalty = request.frequencyPenalty ?? defaults.frequencyPenalty
+        guard frequencyPenalty.isFinite, (-2...2).contains(frequencyPenalty) else {
+            throw invalid("frequency_penalty must be finite and between -2 and 2",
+                          "frequency_penalty", "invalid_value")
+        }
+        let repeatLastN = request.repeatLastN ?? defaults.repeatLastN
+        guard repeatLastN >= -1 else {
+            throw invalid("repeat_last_n must be -1 or nonnegative", "repeat_last_n", "invalid_value")
         }
         guard request.parallelToolCalls != false else {
             throw invalid("parallel_tool_calls=false is not supported",
                           "parallel_tool_calls", "unsupported_value")
         }
 
-        let temperature = request.temperature ?? 0.2
-        guard temperature >= 0, temperature <= 2 else {
+        let temperature = request.temperature ?? defaults.temperature
+        guard temperature.isFinite, temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
                           "temperature", "invalid_value")
         }
-        let topP = request.topP ?? 0.95
-        guard topP > 0, topP <= 1 else {
+        // On the wire "off" is top_p 1 / top_k 0; GenerationConfig spells it nil.
+        let topP = request.topP ?? defaults.topP ?? 1
+        guard topP.isFinite, topP > 0, topP <= 1 else {
             throw invalid("top_p must be greater than 0 and at most 1",
                           "top_p", "invalid_value")
         }
-        let topK = request.topK ?? 64
-        guard (1...256).contains(topK) else {
-            throw invalid("top_k must be between 1 and 256", "top_k", "invalid_value")
+        let topK = request.topK ?? defaults.topK ?? 0
+        guard (0...256).contains(topK) else {
+            throw invalid("top_k must be between 0 and 256", "top_k", "invalid_value")
         }
-        let repetitionPenalty = request.repetitionPenalty ?? 1
-        guard repetitionPenalty > 0 else {
+        guard temperature == 0 || topK != 0 || topP == 1 else {
+            throw invalid("top_p below one requires top_k between 1 and 256", "top_p", "unsupported_value")
+        }
+        if let old = request.repetitionPenalty, let alias = request.repeatPenalty, old != alias {
+            throw invalid("repeat_penalty and repetition_penalty must agree when both are supplied",
+                          "repeat_penalty", "invalid_value")
+        }
+        let repetitionPenalty = request.repeatPenalty ?? request.repetitionPenalty
+            ?? defaults.repetitionPenalty
+        guard repetitionPenalty.isFinite, repetitionPenalty > 0, (1 / repetitionPenalty).isFinite else {
             throw invalid("repetition_penalty must be positive",
-                          "repetition_penalty", "invalid_value")
+                          request.repeatPenalty != nil ? "repeat_penalty" : "repetition_penalty", "invalid_value")
         }
-        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 4096
+        // A requested thought needs room: the Qwen model card recommends a
+        // 32,768-token output budget in thinking mode.
+        let thinkingRequested = effort != nil && effort != .off
+        let maximum = request.maxCompletionTokens ?? request.maxTokens
+            ?? (thinkingRequested && dialect != .gemma ? 32_768 : 4096)
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
@@ -372,12 +426,22 @@ public enum OpenAIRequestValidator {
         let messages = try validateMessages(request.messages, dialect: dialect)
         let config = GenerationConfig(maxNewTokens: maximum,
                                       temperature: temperature,
-                                      topK: topK,
+                                      topK: topK == 0 ? nil : topK,
                                       topP: topP,
                                       repetitionPenalty: repetitionPenalty,
+                                      presencePenalty: presencePenalty,
+                                      frequencyPenalty: frequencyPenalty,
+                                      repeatLastN: repeatLastN,
+                                      minP: minP,
                                       seed: request.seed,
                                       stopStrings: request.stop?.values ?? [])
-        return ValidatedChatRequest(reasoningEffort: effort, messages: messages,
+        // Gemma HTTP clients share one history policy: retain current-turn
+        // tool reasoning, then let the selected source template strip it after
+        // a new user message. Normalize before rendering AND cache matching.
+        let preserveThinking = dialect == .gemma ? false : request.chatTemplateKwargs?.preserveThinking ?? false
+        return ValidatedChatRequest(reasoningEffort: effort,
+                                    preserveThinking: preserveThinking,
+                                    messages: messages,
                                     tools: tools,
                                     stream: request.stream ?? false,
                                     includeUsage: request.streamOptions?.includeUsage ?? false,

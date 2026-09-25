@@ -44,16 +44,18 @@ final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
+    private let gemmaQAT: GemmaQATPrefillAttention?
 
     /// Whether the Apple10 MPP tensor-ops prefill kernel is usable here. False
-    /// on hosts without Apple10 support and on shader libraries compiled below
-    /// MSL 4.0, in which case `encodeCausal` uses the causal-tiled kernel.
+    /// on hosts without Apple10 support, shader libraries below MSL 4.0, and
+    /// the QAT profile, which has its own source-arithmetic batched kernels.
     var tensorOpsPipelineAvailable: Bool { psoFullTensorOps2DValidityV2 != nil }
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, gemmaQATMaxContext: Int? = nil) throws {
         self.context = context
+        self.gemmaQAT = try gemmaQATMaxContext.map { try GemmaQATPrefillAttention(context: context, maxContext: $0) }
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
-        self.psoFullTensorOps2DValidityV2 = context.device.supportsApple10TensorOps
+        self.psoFullTensorOps2DValidityV2 = gemmaQATMaxContext == nil && context.device.supportsApple10TensorOps
             ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
             : nil
     }
@@ -67,6 +69,14 @@ final class PrefillAttention {
                              kvRingCapacity: UInt32 = 0,
                              path: RuntimePrefillAttentionPath = .causalTiled) {
         validate(params)
+
+        if let gemmaQAT {
+            gemmaQAT.encode(commandBuffer: commandBuffer,
+                q: q, qOffset: qOffset, k: k, kOffset: kOffset,
+                v: v, vOffset: vOffset, out: out, outOffset: outOffset,
+                params: params, ringCapacity: kvRingCapacity)
+            return
+        }
 
         let requestsTensorOps = path == .fullTensorOps2DPreferred
             || path == .fullTensorOps2DValidityV2

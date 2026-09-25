@@ -10,6 +10,29 @@ import MferenceValidationSupport
 /// (the sampler runs the softcap+softmax front-end itself).
 @Suite struct SamplerTests {
 
+    @Test(arguments: [4, 64])
+    func llamaMinPExcludesTokensBelowPeakRatio(topK: Int) throws {
+        let rig = try Rig(vocab: 128, logitSoftcap: 0)
+        var logits = [Float](repeating: -8, count: 128)
+        logits[3] = 2; logits[7] = 1.5; logits[9] = 1
+        // exp(1.5 - 2) < 0.8: only token 3 survives before temperature.
+        for seed in UInt64(1)...32 {
+            let config = GenerationConfig(temperature: 2, topK: topK, topP: 1,
+                                          minP: 0.8, seed: seed)
+            #expect(rig.draw(logits, config: config).id == 3)
+        }
+    }
+
+    @Test func llamaDefaultPenaltyWindowExpiresOldTokens() throws {
+        let rig = try Rig(vocab: 128, logitSoftcap: 0)
+        var logits = [Float](repeating: -8, count: 128)
+        logits[3] = 2; logits[7] = 1.5
+        let config = GenerationConfig(temperature: 0, presencePenalty: 1)
+        #expect(rig.draw(logits, config: config, history: [3]).id == 7)
+        #expect(rig.draw(logits, config: config,
+                         history: [3] + Array(repeating: 9, count: 64)).id == 3)
+    }
+
     /// Reusable rig — one MetalContext + Sampler + buffers, shared across the
     /// many draws a single test makes (avoids recompiling the shader library
     /// per draw).
@@ -21,9 +44,9 @@ import MferenceValidationSupport
         let probs: MTLBuffer
         let outToken: MTLBuffer
 
-        init(vocab: Int) throws {
+        init(vocab: Int, logitSoftcap: Float = 30) throws {
             self.ctx = try MetalContext()
-            self.sampler = try Sampler(context: ctx, vocab: vocab)
+            self.sampler = try Sampler(context: ctx, vocab: vocab, logitSoftcap: logitSoftcap)
             self.vocab = vocab
             guard let l = ctx.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
                                                 options: .storageModeShared),
@@ -62,6 +85,95 @@ import MferenceValidationSupport
         let (id, path) = rig.draw(logits, config: GenerationConfig(temperature: 0))
         #expect(id == 1337, "got \(id)")
         #expect(path == .greedyGPU)
+    }
+
+    @Test(arguments: [Float(0), 30], [Float(-1.5), 1.5])
+    func presenceActsOnceInPostSoftcapSpace(softcap: Float, presence: Float) throws {
+        let rig = try Rig(vocab: 64, logitSoftcap: softcap)
+        var logits = [Float](repeating: 0.25, count: 64)
+        logits[2] = 4; logits[3] = -4
+        logits[4] = 400; logits[5] = -400
+        for repetition: Float in [1, 1.25] {
+            let config = GenerationConfig(temperature: 0, repetitionPenalty: repetition,
+                                          presencePenalty: presence)
+            let once = rig.draw(logits, config: config, history: [2, 3, 4, 5])
+            #expect(once.path == .hostPenalty)
+            let pointer = rig.probs.contents().bindMemory(to: Float16.self, capacity: 64)
+            let probabilities = (0..<64).map { pointer[$0] }
+            let referenceLogits = logits.enumerated().map { i, raw -> Double in
+                let z = Double(Float(Float16(raw)))
+                let capped = softcap > 0 ? Double(softcap) * tanh(z / Double(softcap)) : z
+                return (2...5).contains(i)
+                    ? (capped > 0 ? capped / Double(repetition) : capped * Double(repetition)) - Double(presence)
+                    : capped
+            }
+            let peak = referenceLogits.max()!
+            let weights = referenceLogits.map { exp($0 - peak) }
+            let sum = weights.reduce(0, +)
+            for i in 0..<64 {
+                let expected = Float16(weights[i] / sum)
+                #expect(abs(Float(pointer[i]) - Float(expected)) <= Float(expected.ulp) * 2)
+            }
+            // Presence is once per seen token, irrespective of duplicate count.
+            let repeated = rig.draw(logits, config: config,
+                                    history: [-1, 2, 2, 3, 3, 4, 5, 5, 64, Int32.max])
+            #expect(repeated.id == once.id)
+            #expect((0..<64).map { pointer[$0] } == probabilities)
+        }
+    }
+
+    @Test(arguments: [Float(0), 30])
+    func presenceChangesSeenTokenSelection(softcap: Float) throws {
+        let rig = try Rig(vocab: 64, logitSoftcap: softcap)
+        var logits = [Float](repeating: -10, count: 64)
+        logits[5] = 5; logits[7] = 4.5
+        #expect(rig.draw(logits, config: GenerationConfig(temperature: 0), history: [5]).id == 5)
+        let positive = GenerationConfig(temperature: 0, presencePenalty: 1.5)
+        #expect(rig.draw(logits, config: positive, history: [5, 5]).id == 7)
+        let negative = GenerationConfig(temperature: 0, presencePenalty: -1.5)
+        #expect(rig.draw(logits, config: negative, history: [7, 7]).id == 7)
+        let empty = rig.draw(logits, config: positive)
+        #expect(empty.id == 5)
+        #expect(empty.path == .greedyGPU)
+    }
+
+    @Test(arguments: [20, 64], [Float(1), 1.3])
+    func omittedAndZeroPresencePreserveSeededSequence(topK: Int, repetition: Float) throws {
+        let rig = try Rig(vocab: 128)
+        let logits = (0..<128).map { Float($0 % 13) / 4 - 1 }
+        let omitted = GenerationConfig(temperature: 1, topK: topK, topP: 0.95,
+                                       repetitionPenalty: repetition, minP: 0, seed: 777)
+        let zero = GenerationConfig(temperature: 1, topK: topK, topP: 0.95,
+                                    repetitionPenalty: repetition, presencePenalty: 0,
+                                    minP: 0, seed: 777)
+        for position in 0..<8 {
+            let a = rig.draw(logits, config: omitted, position: position, history: [2, 2, 5])
+            let b = rig.draw(logits, config: zero, position: position, history: [2, 2, 5])
+            #expect(a.id == b.id)
+            #expect(a.path == b.path)
+        }
+    }
+
+    @Test func samplingConfigValidatesPenaltiesAndMinP() throws {
+        for value: Float in [-2, -1.5, 0, 1.5, 2] {
+            let config = GenerationConfig(temperature: 0, presencePenalty: value)
+            try config.validate()
+            #expect(config.isPureGreedy == (value == 0))
+        }
+        for value: Float in [-2.01, 2.01, .nan, .infinity, -.infinity] {
+            #expect(throws: GeneratorError.self) {
+                try GenerationConfig(presencePenalty: value).validate()
+            }
+        }
+        for value: Float in [-0.1, 1.01, .nan, .infinity, -.infinity] {
+            #expect(throws: GeneratorError.self) {
+                try GenerationConfig(minP: value).validate()
+            }
+        }
+        for value: Float in [0, 0.05, 0.5, 1] { try GenerationConfig(minP: value).validate() }
+        #expect(GenerationConfig(temperature: 0).isPureGreedy)
+        #expect(!GenerationConfig(temperature: 1).isPureGreedy)
+        #expect(!GenerationConfig(temperature: 0, repetitionPenalty: 1.1).isPureGreedy)
     }
 
     @Test func seeded_isDeterministicAtPosition() throws {
@@ -184,7 +296,10 @@ import MferenceValidationSupport
         var counts = [Int](repeating: 0, count: v)
         let trials = 1600
         for t in 0..<trials {
-            let cfg = GenerationConfig(temperature: 2.0, topK: v, seed: UInt64(t) &+ 1)
+            // This test isolates temperature: the llama.cpp default filters
+            // run first and would intentionally remove this fixture's tail.
+            let cfg = GenerationConfig(temperature: 2.0, topK: v, topP: 1,
+                                       minP: 0, seed: UInt64(t) &+ 1)
             let raw = rig.draw(logits, config: cfg, position: t).id
             let id = Int(raw)
             guard id >= 0 && id < v else { Issue.record("id \(raw) (0x\(String(raw, radix: 16))) out of range v=\(v)"); continue }

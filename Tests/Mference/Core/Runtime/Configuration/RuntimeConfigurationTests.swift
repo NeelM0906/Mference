@@ -34,6 +34,53 @@ import Testing
             for: .inklingSmall, physicalMemoryBytes: twentyFourGiB) == 16)
     }
 
+    @Test func serverPrefillChunkGrowsForGemmaOnSixteenGiBHosts() {
+        let gib = UInt64(1) << 30
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib, environment: [:]) == 1024)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 24 * gib, environment: [:]) == 1024)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
+    }
+
+    @Test func serverPrefillChunkGrowsForQwen36OnSixteenGiBHosts() {
+        let gib = UInt64(1) << 30
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 16 * gib, environment: [:]) == 2048)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 24 * gib, environment: [:]) == 2048)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
+    }
+
+    @Test func serverPrefillChunkStaysEstablishedForUnmeasuredFamilies() {
+        let gib = UInt64(1) << 30
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .inklingSmall, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen38flashnext, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+    }
+
+    @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {
+        let gib = UInt64(1) << 30
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 16 * gib,
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "512"]) == 512)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "1000"]) == 1024)
+    }
+
+    @Test func shadowPrefetchBudgetIsUnsetUnlessRequested() {
+        #expect(RuntimeConfiguration.production.shadowPrefetchBudget == nil)
+        #expect(RuntimeConfiguration(shadowPrefetchBudget: 0).shadowPrefetchBudget == 0)
+        #expect(RuntimeConfiguration(shadowPrefetchBudget: 4).shadowPrefetchBudget == 4)
+    }
+
     @Test func retainedControlsReachTypedRuntime() {
         let runtime = RuntimeConfiguration(
             expertCacheSlots: 32,

@@ -31,6 +31,23 @@ at revision `eba96c16158f032821b0bf374ea1421cfddef0a9`. Both upstream trees
 carry the MIT license. The applicable Apple and DeepGrove copyright notices
 are preserved in [`LICENSE-MLX`](LICENSE-MLX).
 
+Gemma QAT's attention arithmetic in
+`Sources/Mference/Metal/Attention/gemma_qat_attention.metal` and
+`Sources/Mference/Metal/Attention/gemma_qat_prefill_attention.metal` is adapted from
+Apple MLX 0.32.2's `sdpa_vector.h`, `gemv.h` and `softmax.h`, with Mference's
+KV layout and runtime dispatch. These portions also use the MIT license;
+see [`LICENSE-MLX`](LICENSE-MLX).
+
+Gemma QAT's router reduction in `Sources/Mference/Metal/MoE/moe.metal` and
+`Sources/Mference/Metal/Prefill/prefill.metal` adapts MLX 0.32.2's `gemv.h`
+reduction order to Mference's dispatch. These portions also use the MIT
+license; see [`LICENSE-MLX`](LICENSE-MLX).
+
+The QAT affine projection helper in those same files and in
+`Sources/Mference/Metal/TensorCore/tensorops.metal` follows MLX 0.32.2's
+`quantized.h` FP16 input summation and SIMD accumulation order. These portions
+also use the MIT license; see [`LICENSE-MLX`](LICENSE-MLX).
+
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a
@@ -140,12 +157,14 @@ for attribution and terms. Model weights are not bundled with Mference.
 
 The following table covers the complete graph reported by
 `swift package show-dependencies` from the checked-in
-[`Package.resolved`](Package.resolved). Exact revisions are recorded there.
+[`Package.resolved`](Package.resolved). Remote revisions are recorded there;
+the local Jinja snapshot records its revision and patch in
+[`Vendor/swift-jinja/README.md`](Vendor/swift-jinja/README.md).
 
 | Package | Version | License in locked checkout |
 | --- | --- | --- |
 | [swift-transformers](https://github.com/huggingface/swift-transformers) | 1.3.3 | Apache-2.0 |
-| [swift-jinja](https://github.com/huggingface/swift-jinja) | 2.3.6 | Apache-2.0 |
+| [swift-jinja](https://github.com/huggingface/swift-jinja) | Local 2.5.1 snapshot with whitespace and null-rendering fixes | [Apache-2.0](Vendor/swift-jinja/LICENSE) |
 | [swift-huggingface](https://github.com/huggingface/swift-huggingface) | 0.9.0 | Apache-2.0 |
 | [EventSource](https://github.com/mattt/EventSource) | 1.4.1 | MIT |
 | [swift-nio](https://github.com/apple/swift-nio) | 2.99.0 | Apache-2.0; upstream NOTICE applies |

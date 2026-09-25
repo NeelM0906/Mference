@@ -16,12 +16,13 @@ enum ServerLog {
                                  duration: Duration,
                                  completion: ServerCompletion) {
         let usage = completion.usage
+        let prefill = completion.prefillSeconds.map { " prefill=" + String(format: "%.3fs", $0) } ?? ""
         write("""
         request \(id) completed in \(format(duration)) \
         prompt=\(usage.promptTokens) \
         cached=\(usage.promptTokensDetails.cachedTokens) \
         completion=\(usage.completionTokens) \
-        finish=\(completion.finishReason)
+        finish=\(completion.finishReason)\(prefill)
         """)
         if let diagnostics = completion.diagnostics, let json = try? diagnostics.jsonLine() {
             write("request \(id) runtime-diagnostics \(json)")

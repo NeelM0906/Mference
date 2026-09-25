@@ -10,20 +10,23 @@ final class RoPE {
     private let proportionalNeoxFullQ: MTLComputePipelineState
     private let proportionalNeoxFullK: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.defaultNeox = try context.pipeline("rope_default_neox")
-        self.proportionalNeox = try context.pipeline("rope_proportional_neox")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        let precision = [MetalFunctionConstant(index: 111, value: .bool(sourceFP16))]
+        self.defaultNeox = try context.pipeline("rope_default_neox", constants: precision,
+            maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "rope" : nil)
+        self.proportionalNeox = try context.pipeline("rope_proportional_neox", constants: precision,
+            maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "rope" : nil)
         self.neoxSubdim = try context.pipeline("rope_neox_subdim")
         self.defaultNeoxSWAQ = try Self.specializedPipeline(
-            context, "rope_default_neox", headDim: 256, numHeads: 16)
+            context, "rope_default_neox", headDim: 256, numHeads: 16, sourceFP16: sourceFP16)
         self.defaultNeoxSWAK = try Self.specializedPipeline(
-            context, "rope_default_neox", headDim: 256, numHeads: 8)
+            context, "rope_default_neox", headDim: 256, numHeads: 8, sourceFP16: sourceFP16)
         self.proportionalNeoxFullQ = try Self.specializedPipeline(
             context, "rope_proportional_neox",
-            headDim: 512, numHeads: 16, rotatedPairs: 64)
+            headDim: 512, numHeads: 16, rotatedPairs: 64, sourceFP16: sourceFP16)
         self.proportionalNeoxFullK = try Self.specializedPipeline(
             context, "rope_proportional_neox",
-            headDim: 512, numHeads: 2, rotatedPairs: 64)
+            headDim: 512, numHeads: 2, rotatedPairs: 64, sourceFP16: sourceFP16)
     }
 
     /// Qwen-style partial RoPE: rotation confined to the first `rotaryDim`
@@ -130,7 +133,8 @@ final class RoPE {
                                             _ name: String,
                                             headDim: UInt32,
                                             numHeads: UInt32,
-                                            rotatedPairs: UInt32 = 0) throws
+                                            rotatedPairs: UInt32 = 0,
+                                            sourceFP16: Bool = false) throws
         -> MTLComputePipelineState {
         try context.pipeline(
             name,
@@ -139,7 +143,8 @@ final class RoPE {
                 MetalFunctionConstant(index: 51, value: .uint32(numHeads)),
                 MetalFunctionConstant(index: 52, value: .uint32(rotatedPairs)),
                 MetalFunctionConstant(index: 53, value: .bool(true)),
-            ])
+                MetalFunctionConstant(index: 111, value: .bool(sourceFP16)),
+            ], maxTotalThreadsPerThreadgroup: nil, safeMathModule: sourceFP16 ? "rope" : nil)
     }
 
     private func defaultPipeline(headDim: UInt32,

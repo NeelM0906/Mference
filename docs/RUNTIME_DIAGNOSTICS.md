@@ -108,3 +108,22 @@ to manufacture residency statistics.
 The JSON envelope has `schemaVersion:1`; consumers should tolerate additive
 fields and reason codes. Memory `scope` explicitly says the categories overlap
 and the snapshot is not a peak.
+
+## Gemma prefix recovery
+
+Completed Gemma server requests also report `gemmaRecovery`: `outcome` is
+`full_prefix`, `current_prefix`, `snapshot_prefix`, `cold_or_incompatible_history`,
+`state_unavailable`, or `cache_disabled`. `capture` is `captured`, `unavailable`,
+or omitted when the active turn keeps its image. `allocatedBytes` and
+`memory.bytes.gemmaPrefixRecoveryBuffers` report the one auxiliary allocation;
+they overlap and are separate from `targetKVStateBuffers`. The allocation is
+bounded by 209,510,400 bytes (199.81 MiB) for the pinned Gemma shape. Current
+KV can still be reused if capture allocation fails. Snapshot-copy failures
+invalidate the request and require reset.
+
+Cached counts include only actually retained/restored tokens. Replaying tokens
+from an older snapshot contributes to computed prefill, even if some token IDs
+also appeared in the previous request. Normal server completion logs include
+computed `prefill` seconds with snapshot capture; measure full request TTFT to
+include matching and restore overhead. No new response fields or cache controls
+are introduced.

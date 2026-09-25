@@ -12,11 +12,12 @@ final class FusedLayerTail {
     private let pso: MTLComputePipelineState
     private let specializedPSO: MTLComputePipelineState?
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("fused_layer_tail")
+    init(context: MetalContext, sourceFP16: Bool = false) throws {
+        let precision = Quantization.gemmaSourceConstants(enabled: sourceFP16)
+        self.pso = try context.pipeline("fused_layer_tail", constants: precision)
         self.specializedPSO = try? context.pipeline(
             "fused_layer_tail",
-            constants: [
+            constants: precision + [
                 MetalFunctionConstant(index: 80, value: .uint32(2816)),
                 MetalFunctionConstant(index: 86, value: .bool(true)),
             ])

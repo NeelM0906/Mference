@@ -3,6 +3,21 @@ import Mference
 @testable import MferenceCLICore
 
 @Suite struct CLIArgumentsTests {
+    @Test func llamaSamplingOptionsReachCLIConfiguration() throws {
+        let a = try Args.parse(["--model", "m.gturbo", "--prompt", "hi",
+            "--min-p", "0.25", "--presence-penalty", "-0.5",
+            "--frequency-penalty", "0.75", "--repeat-last-n", "-1",
+            "--repeat-penalty", "1.1"])
+        #expect(a.minP == 0.25 && a.presencePenalty == -0.5 && a.frequencyPenalty == 0.75)
+        #expect(a.repeatLastN == -1 && a.repetitionPenalty == 1.1)
+        for (flag, value) in [("--min-p", "1.1"), ("--min-p", "nan"),
+                              ("--frequency-penalty", "2.1"), ("--presence-penalty", "-2.1"),
+                              ("--repeat-last-n", "-2"), ("--repeat-penalty", "inf")] {
+            #expect(throws: ArgsError.self) {
+                _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", flag, value])
+            }
+        }
+    }
     @Test func emptyTruncationHasActionableNoticeWithoutChangingSuccessOutput() throws {
         let swift = try #require(emptyResponseLimitNotice(reason: .maxTokens,
             hasVisibleText: false, isSwiftQwen: true))
@@ -28,13 +43,51 @@ import Mference
         #expect(arguments.messagesFile == nil)
         #expect(arguments.maxNew == 1_024)
         #expect(arguments.maxContext == 4096)
-        #expect(arguments.temperature == 0.2)
-        #expect(arguments.topK == 64)
+        #expect(arguments.temperature == 0.8)
+        #expect(arguments.topK == 40)
         #expect(arguments.topP == 0.95)
         #expect(arguments.repetitionPenalty == 1)
+        #expect(arguments.minP == 0.05)
+        #expect(arguments.presencePenalty == 0)
+        #expect(arguments.frequencyPenalty == 0)
+        #expect(arguments.repeatLastN == 64)
         #expect(arguments.seed == nil)
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
+    }
+
+    @Test func omittedSamplingFlagsUseSharedDefaultsAndExplicitFlagsWin() throws {
+        let d = GenerationConfig.defaults
+        let base = ["--model", "m.gturbo", "--prompt", "hi"]
+        for omitted in [try Args.parse(base), Args(model: "m.gturbo")] {
+            #expect(omitted.temperature == d.temperature && omitted.topK == d.topK && omitted.topP == d.topP)
+            #expect(omitted.minP == d.minP && omitted.repetitionPenalty == d.repetitionPenalty)
+            #expect(omitted.presencePenalty == d.presencePenalty && omitted.frequencyPenalty == d.frequencyPenalty)
+            #expect(omitted.repeatLastN == d.repeatLastN)
+        }
+
+        // Every value differs from its default: a default leaking past an
+        // explicit flag fails here.
+        let explicit = try Args.parse(base + [
+            "--temperature", "0.3", "--top-k", "7", "--top-p", "0.6", "--min-p", "0.2",
+            "--repetition-penalty", "1.2", "--presence-penalty", "0.4",
+            "--frequency-penalty", "-0.3", "--repeat-last-n", "128"])
+        #expect(explicit.temperature == 0.3 && explicit.topK == 7 && explicit.topP == 0.6 && explicit.minP == 0.2)
+        #expect(explicit.repetitionPenalty == 1.2 && explicit.presencePenalty == 0.4)
+        #expect(explicit.frequencyPenalty == -0.3 && explicit.repeatLastN == 128)
+
+        // An explicit zero is a value, not an omission.
+        let zeros = try Args.parse(base + ["--temperature", "0", "--min-p", "0", "--repeat-last-n", "0"])
+        #expect(zeros.temperature == 0 && zeros.minP == 0 && zeros.repeatLastN == 0)
+    }
+
+    @Test func usageAdvertisesTheSharedSamplingDefaults() {
+        let d = GenerationConfig.defaults
+        for text in ["(default \(d.temperature); 0 = greedy)", "(default \(d.topK ?? 0); 0 = off)",
+                     "Nucleus truncation (default \(d.topP ?? 1))", "0...1 (default \(d.minP))",
+                     "(default \(d.repeatLastN); 0 off, -1 all)"] {
+            #expect(Args.usage.contains(text), "usage is missing: \(text)")
+        }
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
@@ -81,9 +134,10 @@ import Mference
 
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
-            "--model", "--prompt", "--messages-file", "--chat", "--system",
+            "--model", "--prompt", "--messages-file", "--chat", "--system", "--reuse-prefix", "--show-reasoning", "--shadow-budget",
             "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
+            "--repeat-penalty", "--min-p", "--presence-penalty", "--frequency-penalty", "--repeat-last-n",
             "--seed", "--stop", "--prefill-chunk", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--flash-head", "--verify",
             "--kv-paged", "--kv-topk", "--kv-pool-pages", "--reasoning-effort",
@@ -165,10 +219,67 @@ import Mference
         }
     }
 
+    @Test func chatResetsEveryTurnUnlessPrefixReuseIsRequested() throws {
+        let plain = try Args.parse(["--model", "m.gturbo", "--chat"])
+        #expect(!plain.reusePrefix)
+        let reuse = try Args.parse(["--model", "m.gturbo", "--chat", "--reuse-prefix"])
+        #expect(reuse.reusePrefix)
+    }
+
+    @Test func reusePrefixRequiresChatMode() {
+        #expect(throws: ArgsError.invalidValue(flag: "--reuse-prefix", value: "requires --chat")) {
+            _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--reuse-prefix"])
+        }
+    }
+
+    @Test func chatHidesReasoningUnlessAskedToShowIt() throws {
+        let plain = try Args.parse(["--model", "m.gturbo", "--chat"])
+        #expect(!plain.showReasoning)
+        let shown = try Args.parse(["--model", "m.gturbo", "--chat", "--show-reasoning"])
+        #expect(shown.showReasoning)
+    }
+
+    @Test func showReasoningRequiresChatMode() {
+        #expect(throws: ArgsError.invalidValue(flag: "--show-reasoning", value: "requires --chat")) {
+            _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--show-reasoning"])
+        }
+    }
+
+    @Test func shadowBudgetIsUnsetUnlessGiven() throws {
+        #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi"]).shadowBudget == nil)
+        #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--shadow-budget", "4"]).shadowBudget == 4)
+        #expect(try Args.parse(["--model", "m.gturbo", "--chat", "--shadow-budget", "0"]).shadowBudget == 0)
+    }
+
+    @Test(arguments: ["9", "-1", "two", ""])
+    func shadowBudgetRejectsValuesOutsideZeroToEight(value: String) {
+        #expect(throws: ArgsError.invalidValue(flag: "--shadow-budget", value: value)) {
+            _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--shadow-budget", value])
+        }
+    }
+
     @Test func prefillChunkDefaultsToAuto() throws {
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(arguments.prefillChunk == .auto)
         #expect(!arguments.flashHead)
+    }
+
+    @Test func chatAutoChunkFollowsTheFamilyServerChunk() {
+        let gib = UInt64(1) << 30
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 16 * gib) == 2048)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .gemma4, physicalMemoryBytes: 16 * gib) == 1024)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .inklingSmall, physicalMemoryBytes: 16 * gib) == 128)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 8 * gib) == 128)
+    }
+
+    @Test func chatFixedChunkWinsOverTheFamilyDefault() {
+        let gib = UInt64(1) << 30
+        #expect(PrefillChunkChoice.fixed(256).chatChunkTokens(
+            for: .qwen36, physicalMemoryBytes: 16 * gib) == 256)
     }
 
     @Test func flashHeadRequiresExplicitOptIn() throws {
@@ -226,9 +337,14 @@ import Mference
 
     /// Verification defaults to the strict policy: skipping the per-expert
     /// hashes is a deliberate opt-in, not something a caller inherits.
-    @Test func verificationDefaultsToFullSha256() throws {
+    @Test func verificationDefaultsToTheInstallReceiptWhenItIsValid() throws {
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
-        #expect(arguments.verification == .fullSha256)
+        #expect(arguments.verification == .trustedReceiptWhenValid)
+    }
+
+    @Test func verifyAcceptsAuto() throws {
+        let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--verify", "auto"])
+        #expect(arguments.verification == .trustedReceiptWhenValid)
     }
 
     @Test func verifyAcceptsFullSha256() throws {

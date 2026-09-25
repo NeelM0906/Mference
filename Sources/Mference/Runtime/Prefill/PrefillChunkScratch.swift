@@ -22,10 +22,17 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     let gdnVHeads: Int
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     let sharedScalarGateElements: Int
+    /// The INT4 shared expert runs as one batched block, so each
+    /// intermediate retains one row per token (Gemma).
+    let batchedSharedExpert: Bool
+    /// Routed tiles may run as grouped GEMM and need an activation row per pair.
+    let groupedExperts: Bool
 
     init(config: ArchConfig,
                 chunkTokens: Int,
-                routedPairMicrobatchRows: Int = 32) {
+                routedPairMicrobatchRows: Int = 32,
+                batchedSharedExpert: Bool = false,
+                groupedExperts: Bool = false) {
         self.chunkTokens = max(1, min(chunkTokens, PrefillRuntimeConfig.maxChunkTokens))
         self.hiddenSize = config.hiddenSize
         self.maxQElementsPerToken = config.numHeads * max(config.headDim, config.fullHeadDim)
@@ -44,11 +51,16 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
         self.gdnValueDim = hasLinear ? config.linearAttention.valueDim : 0
         self.gdnVHeads = hasLinear ? config.linearAttention.numVHeads : 0
         self.sharedScalarGateElements = config.sharedExpertGated ? 1 : 0
+        self.batchedSharedExpert = batchedSharedExpert
+        self.groupedExperts = groupedExperts
     }
 
-    init(config: ArchConfig, runtime: PrefillRuntimeConfig) {
+    init(config: ArchConfig, runtime: PrefillRuntimeConfig,
+         batchedSharedExpert: Bool = false, groupedExperts: Bool = false) {
         self.init(config: config,
-                  chunkTokens: runtime.chunkTokens)
+                  chunkTokens: runtime.chunkTokens,
+                  batchedSharedExpert: batchedSharedExpert,
+                  groupedExperts: groupedExperts)
     }
 
     var hiddenElements: Int { chunkTokens * hiddenSize }
@@ -74,11 +86,22 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var routePartialElements: Int { chunkTokens * topK * hiddenSize }
     var routeIDElements: Int { chunkTokens * topK }
     var routeWeightElements: Int { routeIDElements }
-    /// Qwen batch-dispatches its INT4 shared expert over the complete chunk,
-    /// so each intermediate must retain one row per token. Other families
-    /// keep the scalar-row scratch footprint.
+    /// Qwen and Gemma batch-dispatch their INT4 shared expert over the
+    /// complete chunk, so each intermediate must retain one row per token.
+    /// Other families keep the scalar-row scratch footprint.
     var sharedExpertScratchElements: Int {
-        (sharedScalarGateElements > 0 ? chunkTokens : 1) * sharedIntermediate
+        (sharedScalarGateElements > 0 || batchedSharedExpert ? chunkTokens : 1) * sharedIntermediate
+    }
+    /// Grouped-GEMM routed experts keep one activation row per routed pair of
+    /// a tile; a tile can hold every pair of the chunk.
+    var groupedExpertActivationElements: Int { chunkTokens * topK * routedIntermediate }
+    /// Attention output is consumed by the O projection before any routed
+    /// tile of the layer runs and is rewritten only by the next layer, so
+    /// grouped experts borrow it when it is large enough (every shipped
+    /// Gemma shape) and the arena grows only otherwise.
+    var dedicatedGroupedExpertActivationElements: Int {
+        groupedExperts && groupedExpertActivationElements > attentionOutputElements
+            ? groupedExpertActivationElements : 0
     }
     var routedGateUpActElements: Int { 3 * routedPairMicrobatchRows * routedIntermediate }
     var routedDownOutputElements: Int { routedPairMicrobatchRows * hiddenSize }
@@ -97,6 +120,7 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + h2Elements
             + routePartialElements
             + 3 * sharedExpertScratchElements
+            + dedicatedGroupedExpertActivationElements
             + routedGateUpActElements
             + routedDownOutputElements
             + attnQElements
@@ -152,6 +176,10 @@ struct PrefillChunkScratchBuffers {
     let gdnY: MTLBuffer
     let sharedScalarGate: MTLBuffer
 
+    /// Nil unless the layout admits grouped experts; otherwise the borrowed
+    /// attention output or a dedicated buffer (see the layout).
+    let groupedExpertActivation: MTLBuffer?
+
     static func allocate(device: MTLDevice,
                          layout: PrefillChunkScratchLayout) throws -> PrefillChunkScratchBuffers {
         func privateBuffer(_ elements: Int, label: String) throws -> MTLBuffer {
@@ -174,6 +202,11 @@ struct PrefillChunkScratchBuffers {
             return buffer
         }
 
+        let attentionOutput = try privateBuffer(layout.attentionOutputElements, label: "prefill.attnOut")
+        let groupedExpertActivation: MTLBuffer? = !layout.groupedExperts ? nil
+            : layout.dedicatedGroupedExpertActivationElements == 0 ? attentionOutput
+            : try privateBuffer(layout.dedicatedGroupedExpertActivationElements,
+                                label: "prefill.groupedExpertActivation")
         return PrefillChunkScratchBuffers(
             layout: layout,
             hidden: try privateBuffer(layout.hiddenElements, label: "prefill.hidden"),
@@ -181,7 +214,7 @@ struct PrefillChunkScratchBuffers {
             q: try privateBuffer(layout.qElements, label: "prefill.q"),
             kStage: try privateBuffer(layout.kStageElements, label: "prefill.kStage"),
             vStage: try privateBuffer(layout.vStageElements, label: "prefill.vStage"),
-            attentionOutput: try privateBuffer(layout.attentionOutputElements, label: "prefill.attnOut"),
+            attentionOutput: attentionOutput,
             denseX: try privateBuffer(layout.denseXElements, label: "prefill.denseX"),
             routedX: try privateBuffer(layout.routedXElements, label: "prefill.routedX"),
             routerX: try privateBuffer(layout.routerXElements, label: "prefill.routerX"),
@@ -210,6 +243,7 @@ struct PrefillChunkScratchBuffers {
             gdnB: try privateBuffer(layout.gdnBElements, label: "prefill.gdnB"),
             gdnY: try privateBuffer(layout.gdnYElements, label: "prefill.gdnY"),
             sharedScalarGate: try privateBuffer(layout.sharedScalarGateBufferElements,
-                                                label: "prefill.sharedScalarGate"))
+                                                label: "prefill.sharedScalarGate"),
+            groupedExpertActivation: groupedExpertActivation)
     }
 }

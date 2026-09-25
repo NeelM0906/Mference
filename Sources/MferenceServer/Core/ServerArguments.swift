@@ -1,4 +1,5 @@
 import Foundation
+import Mference
 
 public struct ServerArguments: Equatable, Sendable {
     /// Model directory. Required in single-model mode; optional in library
@@ -13,6 +14,10 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    /// `--verify`; see `ModelIntegrityPolicy`.
+    public let verification: ModelIntegrityPolicy
+    /// `--shadow-budget`; nil keeps the family default.
+    public let shadowBudget: Int?
     /// nil when `--library` was absent, which keeps single-model mode exactly
     /// as it was.
     public let library: ServerLibraryOption?
@@ -27,11 +32,11 @@ public struct ServerArguments: Equatable, Sendable {
 
       --model <dir>          Model directory. Required unless --library is
                              given, where it preloads one install instead.
-      --library [dir]        Serve every completed install found under <dir>,
+      --library [dir]        Serve runnable completed installs under <dir>,
                              repeatable. With no value, scans the default
                              roots: the Mference.libraryRoot default (or
-                             MFERENCE_LIBRARY_ROOT), the package checkout's
-                             scratch/, and
+                             MFERENCE_LIBRARY_ROOT), ~/llm-models,
+                             the package checkout's scratch/, and
                              ~/Library/Application Support/Mference.
                              Starting with nothing installed is fine: the
                              model list is then empty.
@@ -39,6 +44,8 @@ public struct ServerArguments: Equatable, Sendable {
                              model that is not resident unloads the current one
                              and loads it in place. One model is loaded at a
                              time and no second process is ever started.
+                             Gemma QAT has its own model ID, installed chat
+                             template and sampling defaults.
       --list-models          With --library: print the installs discovery found
                              — identifier, family, installed bytes, and path —
                              then exit 0 without binding a port or loading a
@@ -60,6 +67,16 @@ public struct ServerArguments: Equatable, Sendable {
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
+      --shadow-budget <0...8>
+                             Speculative expert prefetch during decode: reads
+                             issued per layer ahead of the router; 0 turns it off.
+                             Default: 4 for Qwen 3.6 and Gemma 4 on hosts with 16
+                             to under 24 GiB, 2 for DeepSeek-V4-Flash, off elsewhere.
+      --verify <mode>        Model integrity on load and model swap: auto
+                             (default) checks file sizes against the install
+                             receipt when it validates and hashes otherwise;
+                             full-sha256 re-hashes every routed-expert file on
+                             first touch; trusted-receipt requires the receipt.
       --help                 Show this help.
     """
 
@@ -71,6 +88,8 @@ public struct ServerArguments: Equatable, Sendable {
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
+        var shadowBudget: Int?
         var libraryRoots: [String] = []
         var wantsDefaultLibraryRoots = false
         var listModels = false
@@ -140,6 +159,18 @@ public struct ServerArguments: Equatable, Sendable {
                         "--prompt-cache-mode must be off or single-prefix")
                 }
                 promptCacheMode = parsed
+            case "--shadow-budget":
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedShadowPrefetchBudgets.contains(parsed) else {
+                    throw ServerArgumentError.invalid("--shadow-budget must be 0 through 8")
+                }
+                shadowBudget = parsed
+            case "--verify":
+                guard let parsed = ModelIntegrityPolicy(verifyFlag: value) else {
+                    throw ServerArgumentError.invalid(
+                        "--verify must be \(ModelIntegrityPolicy.verifyFlagValues)")
+                }
+                verification = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -173,6 +204,8 @@ public struct ServerArguments: Equatable, Sendable {
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
+                               verification: verification,
+                               shadowBudget: shadowBudget,
                                library: library,
                                listModels: listModels)
     }

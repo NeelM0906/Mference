@@ -105,6 +105,19 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 14_291_921_884,
         reserveBytes: 1_073_741_824)
 
+    /// Native QAT-aligned MLX bytes: INT4/group-32 with BF16 routers.
+    /// Conservative byte budgets include source and installation metadata.
+    public static let gemma4QAT = SupportedModelSource(
+        name: "gemma4qat",
+        displayName: "Gemma 4 26B-A4B IT QAT Q4_0 aligned",
+        repoID: "mlx-community/gemma-4-26B-A4B-it-qat-q4_0-mlx-aligned",
+        revision: "745a97a754ed4b7713163c7d0e9c11da41809e0c",
+        sourceIndexSHA256: "7dbbeef0345505798abcf0ac54434116a48c2f1e7aad828071c17a7a871adfe7",
+        modelID: "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned",
+        approximateDownloadBytes: 15_840_000_000,
+        installedBytes: 15_850_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// Download estimate covers the `language_model.*` tensors plus tokenizer
     /// and metadata sidecars; the vision tower is never fetched. Installed
     /// bytes add the resident index and per-expert 16 KB page rounding
@@ -348,7 +361,7 @@ public struct SupportedModelSource: Sendable, Equatable {
         reserveBytes: 2_147_483_648)
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, qwen36Original, qwen38, swiftQwen38, deepseekV4Flash, inklingSmall,
+        gemma4, gemma4QAT, qwen36, qwen36Original, qwen38, swiftQwen38, deepseekV4Flash, inklingSmall,
         maple, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
     ]
 
