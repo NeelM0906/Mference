@@ -70,6 +70,7 @@ jobs:
           python3 Scripts/tests/test_release_screen_summary.py
           python3 Scripts/tests/test_qwen_efficiency_screen.py
           python3 Scripts/tests/test_source_release.py
+          python3 Scripts/tests/test_run_benchmark.py
 
   docs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+constant bool FC_INDEXER_NORM_WEIGHT_F32 [[function_constant(404)]];
 using namespace metal;
 
 // ============================================================================
@@ -78,7 +79,11 @@ static inline void flashnext_indexer_rmsnorm(thread float* v,
     float ms = 0.0f;
     for (uint d = 0; d < n; ++d) ms += v[d] * v[d];
     const float inv = 1.0f / sqrt(ms / float(n) + eps);
-    for (uint d = 0; d < n; ++d) v[d] = v[d] * inv * float(weight[d]);
+    for (uint d = 0; d < n; ++d) {
+        float w = (is_function_constant_defined(FC_INDEXER_NORM_WEIGHT_F32) && FC_INDEXER_NORM_WEIGHT_F32)
+            ? ((device const float*)weight)[d] : float(weight[d]);
+        v[d] = v[d] * inv * w;
+    }
 }
 
 // Largest indexer head dim this file's thread-local scratch supports. The
