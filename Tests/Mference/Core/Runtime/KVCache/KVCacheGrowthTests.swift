@@ -110,7 +110,11 @@ import Testing
 /// the whole context (`--kv-reserve`): growth during prefill, during decode,
 /// and again after reset.
 @Suite(.serialized) struct KVGrowthRunnerParityTests {
-    private static let tokens: [Int32] = (0..<400).map { Int32(4 + ($0 * 37 + 11) % 1000) }
+    // Parameter and result pinned: older Swift type-checkers time out
+    // inferring the literals in this closure.
+    private static let tokens: [Int32] = (0..<400).map { (index: Int) -> Int32 in
+        Int32(4 + (index * 37 + 11) % 1000)
+    }
 
     /// The logits of every step, and the KV the runner started with.
     private func rollout(directory: URL, config: ArchConfig, step: Int?, maxContext: Int,
@@ -175,7 +179,9 @@ import Testing
     @Test func inklingGrowingKVMatchesTheWholeReservation() async throws {
         let directory = try InklingToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let tokens: [Int32] = (0..<400).map { Int32(4 + ($0 * 17) % 239) }
+        let tokens: [Int32] = (0..<400).map { (index: Int) -> Int32 in
+            Int32(4 + (index * 17) % 239)
+        }
         func run(_ step: Int?) async throws -> (rows: [[UInt16]], startingKV: UInt64) {
             try await rollout(directory: directory, config: InklingToySynthetic.config, step: step,
                               maxContext: 256, chunk: 32, prompt: 70, decode: 60, tokens: tokens)
