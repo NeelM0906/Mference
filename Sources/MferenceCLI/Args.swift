@@ -219,10 +219,10 @@ extension Args {
       --kv-pool-pages <n|auto>  Resident pool per full-attention layer in
                                 pages (default auto: sized from RAM).
       --kv-reserve              Reserve full-attention KV for the whole
-                                context up front. Without it, Gemma 4 and
-                                Qwen 3.6 start at 16384 tokens; a longer
-                                prompt grows it to the prompt plus 16384, a
-                                longer answer by 8192 at a time.
+                                context up front. Without it, Gemma 4,
+                                Qwen 3.6 and Inkling start at 16384 tokens; a
+                                longer prompt grows it to the prompt plus
+                                16384, a longer answer by 8192 at a time.
       --temperature <float>     Sampling temperature (default \(samplingDefaults.temperature); 0 = greedy).
       --top-k <int>             Top-k truncation, 1...256 (default \(samplingDefaults.topK ?? 0); 0 = off).
       --top-p <float>           Nucleus truncation (default \(samplingDefaults.topP ?? 1)).

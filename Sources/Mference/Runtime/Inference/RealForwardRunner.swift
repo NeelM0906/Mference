@@ -650,9 +650,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      // when a larger prefill chunk is opted
                                      // into, never from the static cap.
                                      maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens,
-                                     // Gemma 4 and Qwen 3.6 grow full-attention KV with the
-                                     // conversation; the other families reserve it whole.
-                                     fullAttentionGrowthStep: [.gemma4, .qwen36].contains(cfg.family)
+                                     // Gemma 4, Qwen 3.6 and Inkling grow full-attention KV
+                                     // with the conversation; DeepSeek-V4 keeps its attention
+                                     // state in DSV4StateManager and reserves it whole.
+                                     fullAttentionGrowthStep: [.gemma4, .qwen36, .inklingSmall].contains(cfg.family)
                                          ? runtimeConfiguration.kvGrowthTokens : nil)
 
         let silu = cfg.hiddenActivation == "silu"

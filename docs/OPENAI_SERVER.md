@@ -399,14 +399,14 @@ answer and the request finishes with `finish_reason` `"length"`.
 Flash-Next; 131,072 for MiniCPM5; 128,000 for Maple; 1,048,576 for
 DeepSeek-V4-Flash, Inkling-Small and GLM-5.3-Flash. `--max-context max` gives
 every model its own native context, which suits a library of different
-models; families that do not grow their KV (all but Gemma 4 and Qwen 3.6)
-then reserve that whole context when they load. A model whose native
+models; families that do not grow their KV (all but Gemma 4, Qwen 3.6 and
+Inkling) then reserve that whole context when they load. A model whose native
 context is shorter refuses to load: with `--model` the server exits at
 startup, and in library mode the request that asked for it gets HTTP 400
 `context_exceeds_model`. At 262,144 Gemma 4 QAT needs about 9.15 GiB with
 server settings, 5.02 GiB of it growing with context.
 
-Gemma 4 and Qwen 3.6 do not reserve their full-attention KV for
+Gemma 4, Qwen 3.6 and Inkling-Small do not reserve their full-attention KV for
 `--max-context` up front. It starts at 16,384 tokens (a context of 16,384 or
 less is reserved whole); a prompt that does not fit grows it to the prompt
 plus 16,384 tokens, room for the answer, and an answer that outgrows that

@@ -78,11 +78,12 @@ public struct ServerArguments: Equatable, Sendable {
                              native context is shorter refuses to load. max
                              gives each model its own native context.
       --kv-reserve           Reserve full-attention KV for the whole context
-                             when a model loads. Without it, Gemma 4 and
-                             Qwen 3.6 start at 16384 tokens (a context of
-                             16384 or less is reserved whole); a longer prompt
-                             grows it to the prompt plus 16384, and an answer
-                             that outgrows that adds 8192 at a time.
+                             when a model loads. Without it, Gemma 4,
+                             Qwen 3.6 and Inkling start at 16384 tokens (a
+                             context of 16384 or less is reserved whole); a
+                             longer prompt grows it to the prompt plus 16384,
+                             and an answer that outgrows that adds 8192 at a
+                             time.
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).

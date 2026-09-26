@@ -70,8 +70,8 @@ usage: ./mference-ui.sh [options]                      start the UI
                          saves Gemma about 350 MB at slower long prompts.
   --kv-reserve           Reserve full-attention KV for the whole context
                          up front, passed through to MferenceServer. By
-                         default Gemma 4 and Qwen 3.6 grow it with the
-                         conversation from 16384 tokens.
+                         default Gemma 4, Qwen 3.6 and Inkling grow it with
+                         the conversation from 16384 tokens.
   --dry-run              Print what would run, start nothing, exit 0. Works
                          for every subcommand, before or after it.
   --help                 Show this message.

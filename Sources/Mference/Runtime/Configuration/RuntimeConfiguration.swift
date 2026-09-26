@@ -37,7 +37,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// `--shadow-budget`: 0 turns speculative expert prefetch off, 1...8 selects
     /// shadow prefetch with that many speculative reads per layer.
     public static let allowedShadowPrefetchBudgets = 0...8
-    /// Full-attention KV (Gemma 4 and Qwen 3.6) starts at this many tokens. A
+    /// Full-attention KV (Gemma 4, Qwen 3.6, Inkling) starts at this many tokens. A
     /// prompt that does not fit grows it to the prompt plus this many more,
     /// room for the answer; an answer that outgrows that room grows it by half
     /// as much at a time, up to `--max-context`. Metal charges a KV buffer in full once

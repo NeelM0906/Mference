@@ -106,14 +106,17 @@ import Testing
 @Suite(.serialized) struct KVGrowthRunnerParityTests {
     private static let tokens: [Int32] = (0..<400).map { Int32(4 + ($0 * 37 + 11) % 1000) }
 
+    /// The logits of every step, and the KV the runner started with.
     private func rollout(directory: URL, config: ArchConfig, step: Int?, maxContext: Int,
-                         chunk: Int, prompt: Int, decode: Int) async throws -> [[UInt16]] {
+                         chunk: Int, prompt: Int, decode: Int,
+                         tokens: [Int32] = Self.tokens) async throws -> (rows: [[UInt16]], startingKV: UInt64) {
         let context = try MetalContext()
         let model = try Model.load(directoryURL: directory, device: context.device,
                                    expecting: config, streamingMode: .pread(slotCount: 8))
         let runner = try RealForwardRunner(model: model, context: context, maxContext: maxContext,
             runtimeConfiguration: RuntimeConfiguration(expertCacheSlots: 8, prefillChunkTokens: chunk,
                                                        forceLogitsHead: true, kvGrowthTokens: step))
+        let startingKV = try #require(runner.diagnosticKVStateBytes)
         let logits = try #require(context.device.makeBuffer(length: config.vocabSize * 2,
                                                             options: .storageModeShared))
         func row() -> [UInt16] {
@@ -123,40 +126,57 @@ import Testing
         var rows: [[UInt16]] = []
         for _ in 0..<2 {  // the second pass runs after reset(), from the shrunk cache
             runner.reset()
-            _ = try await runner.prefillChunked(tokens: Self.tokens[..<prompt], startPosition: 0,
+            _ = try await runner.prefillChunked(tokens: tokens[..<prompt], startPosition: 0,
                                                 outputMode: .logits, config: .production(chunkTokens: chunk),
                                                 into: logits, onProgress: { _ in })
             rows.append(row())
             for position in prompt..<(prompt + decode) {
-                try await runner.produce(token: Self.tokens[position], position: position, into: logits)
+                try await runner.produce(token: tokens[position], position: position, into: logits)
                 rows.append(row())
             }
         }
-        return rows
+        return (rows, startingKV)
     }
 
     @Test func gemmaGrowingKVMatchesTheWholeReservation() async throws {
         let config = ArchConfig.gemma4Toy(topKExperts: 8)
         let directory = try ModelLoaderTests.writeToySynthetic(config: config, finiteNorms: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        func run(_ step: Int?) async throws -> [[UInt16]] {
+        func run(_ step: Int?) async throws -> (rows: [[UInt16]], startingKV: UInt64) {
             try await rollout(directory: directory, config: config, step: step, maxContext: 768,
                               chunk: 64, prompt: 200, decode: 60)
         }
         let whole = try await run(nil)
         let growing = try await run(48)
-        #expect(growing == whole)
+        #expect(growing.startingKV < whole.startingKV)
+        #expect(growing.rows == whole.rows)
     }
 
     @Test func qwenGrowingKVMatchesTheWholeReservation() async throws {
         let directory = try QwenToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: directory) }
-        func run(_ step: Int?) async throws -> [[UInt16]] {
+        func run(_ step: Int?) async throws -> (rows: [[UInt16]], startingKV: UInt64) {
             try await rollout(directory: directory, config: .qwen36Toy(), step: step, maxContext: 256,
                               chunk: 32, prompt: 40, decode: 60)
         }
         let whole = try await run(nil)
         let growing = try await run(16)
-        #expect(growing == whole)
+        #expect(growing.startingKV < whole.startingKV)
+        #expect(growing.rows == whole.rows)
+    }
+
+    /// Inkling's global layers grow; its local layers keep their rings.
+    @Test func inklingGrowingKVMatchesTheWholeReservation() async throws {
+        let directory = try InklingToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tokens: [Int32] = (0..<400).map { Int32(4 + ($0 * 17) % 239) }
+        func run(_ step: Int?) async throws -> (rows: [[UInt16]], startingKV: UInt64) {
+            try await rollout(directory: directory, config: InklingToySynthetic.config, step: step,
+                              maxContext: 256, chunk: 32, prompt: 70, decode: 60, tokens: tokens)
+        }
+        let whole = try await run(nil)
+        let growing = try await run(16)
+        #expect(growing.startingKV < whole.startingKV)
+        #expect(growing.rows == whole.rows)
     }
 }
