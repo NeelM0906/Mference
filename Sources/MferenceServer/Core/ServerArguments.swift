@@ -21,6 +21,9 @@ public struct ServerArguments: Equatable, Sendable {
     public let shadowBudget: Int?
     /// `--prefill-chunk`; nil (`auto`) keeps the family default.
     public let prefillChunk: Int?
+    /// `--kv-reserve`: reserve full-attention KV for the whole context up front
+    /// instead of growing it with the conversation.
+    public let reserveFullKV: Bool
     /// nil when `--library` was absent, which keeps single-model mode exactly
     /// as it was.
     public let library: ServerLibraryOption?
@@ -74,6 +77,12 @@ public struct ServerArguments: Equatable, Sendable {
                              DeepSeek-V4, Inkling and GLM-5.3. A model whose
                              native context is shorter refuses to load. max
                              gives each model its own native context.
+      --kv-reserve           Reserve full-attention KV for the whole context
+                             when a model loads. Without it, Gemma 4 and
+                             Qwen 3.6 start at 16384 tokens (a context of
+                             16384 or less is reserved whole); a longer prompt
+                             grows it to the prompt plus 16384, and an answer
+                             that outgrows that adds 8192 at a time.
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
@@ -112,12 +121,18 @@ public struct ServerArguments: Equatable, Sendable {
         var libraryRoots: [String] = []
         var wantsDefaultLibraryRoots = false
         var listModels = false
+        var reserveFullKV = false
         var index = 0
         while index < input.count {
             let flag = input[index]
             if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
             if flag == "--list-models" {
                 listModels = true
+                index += 1
+                continue
+            }
+            if flag == "--kv-reserve" {
+                reserveFullKV = true
                 index += 1
                 continue
             }
@@ -242,6 +257,7 @@ public struct ServerArguments: Equatable, Sendable {
                                verification: verification,
                                shadowBudget: shadowBudget,
                                prefillChunk: prefillChunk,
+                               reserveFullKV: reserveFullKV,
                                library: library,
                                listModels: listModels)
     }

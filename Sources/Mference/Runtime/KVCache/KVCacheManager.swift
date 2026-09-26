@@ -59,12 +59,18 @@ public final class KVCacheManager {
     public let maxContext: Int
     public let fp16RingEnabled: Bool
 
-    private let kBuffers: [MTLBuffer]
-    private let vBuffers: [MTLBuffer]
+    private let device: MTLDevice
+    private var kBuffers: [MTLBuffer]
+    private var vBuffers: [MTLBuffer]
     var diagnosticBufferBytes: UInt64 { uniqueBufferBytes(kBuffers + vBuffers) }
     private let strides:  [Int]         // bytes per token, per layer
     private let kinds:    [LayerKind]
-    private let capacityTokens: [Int]
+    private var capacityTokens: [Int]
+    /// Full-attention layers start at this many tokens and grow to what
+    /// `ensureCapacity` asks for plus its headroom (this many by default); nil
+    /// sizes them for `maxContext`.
+    let fullAttentionGrowthStep: Int?
+    private let initialFullCapacity: Int
 
     public private(set) var position: Int = 0
 
@@ -74,6 +80,10 @@ public final class KVCacheManager {
     /// `KVPageStore`: those layers get the shared placeholder here (no linear
     /// allocation — 16 GiB at 262k context) while this manager keeps serving
     /// the position cursor and the linear-layer placeholders.
+    ///
+    /// `fullAttentionGrowthStep` starts full-attention layers at that many
+    /// tokens instead of `maxContext`; callers then `ensureCapacity` before
+    /// writing past it. A context within one step is allocated whole.
     public init(device: MTLDevice,
                 config: ArchConfig,
                 maxContext: Int,
@@ -81,11 +91,17 @@ public final class KVCacheManager {
                 slidingWindow: Int? = nil,
                 maxPrefillChunkTokens: Int = 128,
                 fp16RingCapacityOverride: Int? = nil,
-                pagedFullAttention: Bool = false) throws {
+                pagedFullAttention: Bool = false,
+                fullAttentionGrowthStep: Int? = nil) throws {
         precondition(maxContext > 0, "maxContext must be positive")
         precondition(maxPrefillChunkTokens > 0, "maxPrefillChunkTokens must be positive")
+        precondition(fullAttentionGrowthStep.map { $0 > 0 } ?? true, "fullAttentionGrowthStep must be positive")
         self.config = config
         self.maxContext = maxContext
+        self.device = device
+        self.fullAttentionGrowthStep = fullAttentionGrowthStep
+        let fullCapacity = min(maxContext, fullAttentionGrowthStep ?? maxContext)
+        self.initialFullCapacity = fullCapacity
         let ringEnabled = fp16RingEnabled
         self.fp16RingEnabled = ringEnabled
 
@@ -145,7 +161,7 @@ public final class KVCacheManager {
             }
             let isFull = maskValue != 0
             let stride = isFull ? fullStride : swaStride
-            let capacity = ringEnabled && !isFull ? swaCapacity : maxContext
+            let capacity = isFull ? fullCapacity : (ringEnabled ? swaCapacity : maxContext)
             let length = capacity * stride
 
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
@@ -324,12 +340,14 @@ public final class KVCacheManager {
 
     public func kRange(layer: Int, start: Int, count: Int) -> (buffer: MTLBuffer, offset: Int, stride: Int) {
         validateRange(start: start, count: count)
+        requireFullCapacity(layer: layer, tokens: start + count)
         validateContiguousPhysicalRange(layer: layer, start: start, count: count)
         return (kBuffers[layer], physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
     }
 
     public func vRange(layer: Int, start: Int, count: Int) -> (buffer: MTLBuffer, offset: Int, stride: Int) {
         validateRange(start: start, count: count)
+        requireFullCapacity(layer: layer, tokens: start + count)
         validateContiguousPhysicalRange(layer: layer, start: start, count: count)
         return (vBuffers[layer], physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
     }
@@ -340,6 +358,7 @@ public final class KVCacheManager {
 
     public func keyView(layer: Int, validTokenCount: Int) -> KVView {
         validateValidTokenCount(validTokenCount)
+        requireFullCapacity(layer: layer, tokens: validTokenCount)
         return KVView(buffer: kBuffers[layer], offset: 0, stride: strides[layer],
                       validTokenCount: validTokenCount, startSlot: ringStartSlot(layer: layer,
                                                                                  validTokenCount: validTokenCount))
@@ -359,9 +378,70 @@ public final class KVCacheManager {
 
     public func valueView(layer: Int, validTokenCount: Int) -> KVView {
         validateValidTokenCount(validTokenCount)
+        requireFullCapacity(layer: layer, tokens: validTokenCount)
         return KVView(buffer: vBuffers[layer], offset: 0, stride: strides[layer],
                       validTokenCount: validTokenCount, startSlot: ringStartSlot(layer: layer,
                                                                                  validTokenCount: validTokenCount))
+    }
+
+    /// Full-attention layers with their own storage (not placeholders).
+    private var growableLayers: [Int] {
+        (0..<config.numLayers).filter { kinds[$0] == .full && strides[$0] > 0 }
+    }
+
+    /// Makes every full-attention layer hold positions `0..<tokens`. When one
+    /// does not, all of them move to `min(maxContext, tokens + headroom)` and
+    /// the rows written so far are copied across. `headroom` defaults to one
+    /// growth step, room for the answer to a new prompt; decode passes a
+    /// smaller one. `drain` runs first and must return only once no command
+    /// buffer can still touch the current buffers. Returns whether the
+    /// layers grew.
+    @discardableResult
+    public func ensureCapacity(for tokens: Int, headroom: Int? = nil,
+                               drain: () -> Void) throws -> Bool {
+        precondition(tokens <= maxContext, "capacity \(tokens) exceeds maxContext \(maxContext)")
+        guard let step = fullAttentionGrowthStep else { return false }
+        let layers = growableLayers
+        guard let first = layers.first, capacityTokens[first] < tokens else { return false }
+        let capacity = min(maxContext, tokens + max(1, headroom ?? step))
+        // Allocate everything before touching the cache, so a failure leaves
+        // it as it was.
+        var replacements: [(layer: Int, k: MTLBuffer, v: MTLBuffer)] = []
+        for layer in layers {
+            let length = capacity * strides[layer]
+            guard let k = device.makeBuffer(length: length, options: .storageModeShared),
+                  let v = device.makeBuffer(length: length, options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            k.label = "kv.K.layer\(layer)"
+            v.label = "kv.V.layer\(layer)"
+            replacements.append((layer, k, v))
+        }
+        drain()
+        for (layer, k, v) in replacements {
+            let bytes = min(position, capacityTokens[layer]) * strides[layer]
+            memcpy(k.contents(), kBuffers[layer].contents(), bytes)
+            memcpy(v.contents(), vBuffers[layer].contents(), bytes)
+            kBuffers[layer] = k
+            vBuffers[layer] = v
+            capacityTokens[layer] = capacity
+        }
+        return true
+    }
+
+    /// A new conversation starts from one step again, so one long chat does
+    /// not keep its KV. On an allocation failure the larger buffers stay.
+    private func shrinkToInitialCapacity() {
+        for layer in growableLayers where capacityTokens[layer] > initialFullCapacity {
+            let length = initialFullCapacity * strides[layer]
+            guard let k = device.makeBuffer(length: length, options: .storageModeShared),
+                  let v = device.makeBuffer(length: length, options: .storageModeShared) else { return }
+            k.label = "kv.K.layer\(layer)"
+            v.label = "kv.V.layer\(layer)"
+            kBuffers[layer] = k
+            vBuffers[layer] = v
+            capacityTokens[layer] = initialFullCapacity
+        }
     }
 
     /// Advance the position cursor once the current token's K/V are written
@@ -400,6 +480,7 @@ public final class KVCacheManager {
         discardGemmaRecovery()
         gemmaResidentFloor = 0
         position = 0
+        shrinkToInitialCapacity()
         let pageSize = Int(getpagesize())
         var advised = Set<ObjectIdentifier>()
         for layer in 0..<config.numLayers {
@@ -423,7 +504,15 @@ public final class KVCacheManager {
 
     private func physicalSlot(layer: Int, position: Int) -> Int {
         precondition(capacityTokens[layer] > 0, "layer has no KV storage")
+        requireFullCapacity(layer: layer, tokens: position + 1)
         return position % capacityTokens[layer]
+    }
+
+    /// A full-attention layer never wraps: reaching past its storage means
+    /// `ensureCapacity` was skipped.
+    private func requireFullCapacity(layer: Int, tokens: Int) {
+        precondition(kinds[layer] != .full || tokens <= capacityTokens[layer],
+                     "full-attention layer \(layer) holds \(capacityTokens[layer]) tokens, \(tokens) needed; call ensureCapacity first")
     }
 
     private func ringStartSlot(layer: Int, validTokenCount: Int) -> Int {

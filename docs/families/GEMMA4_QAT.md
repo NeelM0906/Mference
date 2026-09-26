@@ -94,9 +94,12 @@ hardware are not qualified by this evidence. The server accepts
 `--max-context 262144`, the checkpoint's `max_position_embeddings`; the model
 runs the same algorithm at every position, but no prompt longer than 128K
 tokens has been run. With server settings (2,048-token chunks, 16 expert slots, prompt cache
-on) the runtime needs 4.12 GiB plus 20,544 B per token (20,480 B of
-full-attention KV and 64 B of QAT decode scratch): 4.44 GiB at 16,384 tokens,
-6.57 GiB at 128,000 and 9.15 GiB at 262,144. KV/activation precision policy remains
+on) the runtime needs 4.12 GiB plus 20,544 B per token of KV capacity (20,480 B
+of full-attention KV and 64 B of QAT decode scratch): 4.44 GiB at 16,384
+tokens, 6.57 GiB at 128,000 and 9.15 GiB at 262,144. The full-attention KV
+grows with the conversation from 16,384 tokens, so those are the sizes a
+conversation of that length reaches; `--kv-reserve` reserves `--max-context`
+at load. KV/activation precision policy remains
 unchanged, and this integration provides text inference only.
 
 ## Prefill arithmetic

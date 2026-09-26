@@ -19,6 +19,7 @@ webui_port=3000
 max_context=16384
 prompt_cache_mode=single-prefix
 prefill_chunk=auto
+kv_reserve=0
 preload_model=""
 library_roots=()
 dry_run=0
@@ -67,6 +68,10 @@ usage: ./mference-ui.sh [options]                      start the UI
                          MferenceServer: auto (default; 2048 for Gemma 4, QAT
                          and Qwen 3.6 on 16 GiB+ Macs) or 32 ... 4096. 1024
                          saves Gemma about 350 MB at slower long prompts.
+  --kv-reserve           Reserve full-attention KV for the whole context
+                         up front, passed through to MferenceServer. By
+                         default Gemma 4 and Qwen 3.6 grow it with the
+                         conversation from 16384 tokens.
   --dry-run              Print what would run, start nothing, exit 0. Works
                          for every subcommand, before or after it.
   --help                 Show this message.
@@ -105,6 +110,7 @@ while [[ $# -gt 0 ]]; do
     --data-dir) require_value "$@"; data_directory="$2"; shift 2 ;;
     --prompt-cache-mode) require_value "$@"; prompt_cache_mode="$2"; shift 2 ;;
     --prefill-chunk) require_value "$@"; prefill_chunk="$2"; shift 2 ;;
+    --kv-reserve) kv_reserve=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) note "error: unknown option $1"; usage >&2; exit 2 ;;
@@ -138,6 +144,9 @@ server_arguments=(
   --prompt-cache-mode "$prompt_cache_mode"
   --prefill-chunk "$prefill_chunk"
 )
+if [[ "$kv_reserve" -eq 1 ]]; then
+  server_arguments+=(--kv-reserve)
+fi
 if [[ ${#library_roots[@]} -eq 0 ]]; then
   server_arguments+=(--library)
 else

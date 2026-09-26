@@ -37,6 +37,15 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// `--shadow-budget`: 0 turns speculative expert prefetch off, 1...8 selects
     /// shadow prefetch with that many speculative reads per layer.
     public static let allowedShadowPrefetchBudgets = 0...8
+    /// Full-attention KV (Gemma 4 and Qwen 3.6) starts at this many tokens. A
+    /// prompt that does not fit grows it to the prompt plus this many more,
+    /// room for the answer; an answer that outgrows that room grows it by half
+    /// as much at a time, up to `--max-context`. Metal charges a KV buffer in full once
+    /// bound, so reserving the whole `--max-context` up front costs memory a
+    /// short chat never uses: on a 16 GiB M2 a 262,144-token reservation took
+    /// 2.6 GiB of expert page cache from 128,000 and cut QAT decode from 6.3 to
+    /// 4.6 tok/s. `--kv-reserve` reserves the whole context instead.
+    public static let defaultKVGrowthTokens = 16_384
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy
@@ -58,6 +67,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let kvPoolPagesPerLayer: Int?
     /// `--shadow-budget`; nil keeps the family default.
     public let shadowPrefetchBudget: Int?
+    /// Growth step of full-attention KV; nil (`--kv-reserve`) reserves the
+    /// whole context up front.
+    public let kvGrowthTokens: Int?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -72,13 +84,15 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 kvSinkPages: Int = 2,
                 kvRecentPages: Int = 4,
                 kvPoolPagesPerLayer: Int? = nil,
-                shadowPrefetchBudget: Int? = nil) {
+                shadowPrefetchBudget: Int? = nil,
+                kvGrowthTokens: Int? = RuntimeConfiguration.defaultKVGrowthTokens) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
                      "unsupported prefill chunk size")
         precondition(shadowPrefetchBudget.map(Self.allowedShadowPrefetchBudgets.contains) ?? true,
                      "unsupported shadow prefetch budget")
+        precondition(kvGrowthTokens.map { $0 > 0 } ?? true, "KV growth step must be positive")
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.rdadvisePolicy = rdadvisePolicy
@@ -95,6 +109,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.kvRecentPages = kvRecentPages
         self.kvPoolPagesPerLayer = kvPoolPagesPerLayer
         self.shadowPrefetchBudget = shadowPrefetchBudget
+        self.kvGrowthTokens = kvGrowthTokens
     }
 
     public static var production: RuntimeConfiguration {

@@ -649,7 +649,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      // sliding-window ring memory grows only
                                      // when a larger prefill chunk is opted
                                      // into, never from the static cap.
-                                     maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens)
+                                     maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens,
+                                     // Gemma 4 and Qwen 3.6 grow full-attention KV with the
+                                     // conversation; the other families reserve it whole.
+                                     fullAttentionGrowthStep: [.gemma4, .qwen36].contains(cfg.family)
+                                         ? runtimeConfiguration.kvGrowthTokens : nil)
 
         let silu = cfg.hiddenActivation == "silu"
         let int4GroupSize = model.affineInt4GroupSize
@@ -1610,6 +1614,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
+        // A prompt gets one full growth step past its end to answer into.
+        try ensureKVCapacity(for: startPosition + tokens.count)
 
         if cfg.family == .inklingSmall {
             // Layer-major chunked prefill with expert-major streaming (each
@@ -2857,6 +2863,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
+        // An answer that outgrows that room grows by half a step at a time.
+        try ensureKVCapacity(for: position + 1, headroom: kv?.fullAttentionGrowthStep.map { $0 / 2 })
         if cfg.hasCompressedAttentionLayers {
             try await produceTokenDSV4(token: token, position: position,
                                        into: logits, emitHead: emitHead,
@@ -5822,6 +5830,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         kv?.advance()
+    }
+
+    /// Grows full-attention KV before anything is encoded at these positions.
+    /// An empty command buffer, waited on, drains the queue first: the copy
+    /// must not race a write still in flight.
+    private func ensureKVCapacity(for tokens: Int, headroom: Int? = nil) throws {
+        try kv?.ensureCapacity(for: tokens, headroom: headroom) { runSync { _ in } }
     }
 
     private func runSync(_ body: (MTLCommandBuffer) -> Void) {

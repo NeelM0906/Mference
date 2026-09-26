@@ -79,7 +79,8 @@ public func run(args: Args,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
             kvPoolPagesPerLayer: args.kvPoolPages,
-            shadowPrefetchBudget: args.shadowBudget)
+            shadowPrefetchBudget: args.shadowBudget,
+            kvGrowthTokens: args.reserveFullKV ? nil : RuntimeConfiguration.defaultKVGrowthTokens)
 
         guard MetalContext.makeSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -402,7 +403,8 @@ private func runChat(args: Args,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
             kvPoolPagesPerLayer: args.kvPoolPages,
-            shadowPrefetchBudget: args.shadowBudget)
+            shadowPrefetchBudget: args.shadowBudget,
+            kvGrowthTokens: args.reserveFullKV ? nil : RuntimeConfiguration.defaultKVGrowthTokens)
 
         guard MetalContext.makeSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)

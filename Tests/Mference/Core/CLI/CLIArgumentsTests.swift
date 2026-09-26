@@ -141,7 +141,7 @@ import Mference
             "--repeat-penalty", "--min-p", "--presence-penalty", "--frequency-penalty", "--repeat-last-n",
             "--seed", "--stop", "--prefill-chunk", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--flash-head", "--verify",
-            "--kv-paged", "--kv-topk", "--kv-pool-pages", "--reasoning-effort",
+            "--kv-paged", "--kv-topk", "--kv-pool-pages", "--kv-reserve", "--reasoning-effort",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -274,6 +274,11 @@ import Mference
         #expect(throws: ArgsError.invalidValue(flag: "--max-context", value: "MAX")) {
             _ = try Args.parse(["--model", directory.path, "--prompt", "hi", "--max-context", "MAX"])
         }
+    }
+
+    @Test func kvGrowsUnlessReserveIsGiven() throws {
+        #expect(try !Args.parse(["--model", "m.gturbo", "--prompt", "hi"]).reserveFullKV)
+        #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--kv-reserve"]).reserveFullKV)
     }
 
     @Test func prefillChunkDefaultsToAuto() throws {

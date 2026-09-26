@@ -399,10 +399,24 @@ answer and the request finishes with `finish_reason` `"length"`.
 Flash-Next; 131,072 for MiniCPM5; 128,000 for Maple; 1,048,576 for
 DeepSeek-V4-Flash, Inkling-Small and GLM-5.3-Flash. `--max-context max` gives
 every model its own native context, which suits a library of different
-models; each then reserves that whole context when it loads. A model whose native
+models; families that do not grow their KV (all but Gemma 4 and Qwen 3.6)
+then reserve that whole context when they load. A model whose native
 context is shorter refuses to load: with `--model` the server exits at
 startup, and in library mode the request that asked for it gets HTTP 400
 `context_exceeds_model`. At 262,144 Gemma 4 QAT needs about 9.15 GiB with
-server settings, 5.02 GiB of it growing with context. Maple uses native BF16
+server settings, 5.02 GiB of it growing with context.
+
+Gemma 4 and Qwen 3.6 do not reserve their full-attention KV for
+`--max-context` up front. It starts at 16,384 tokens (a context of 16,384 or
+less is reserved whole); a prompt that does not fit grows it to the prompt
+plus 16,384 tokens, room for the answer, and an answer that outgrows that
+adds 8,192 tokens at a time, up to `--max-context`. A new conversation shrinks
+it back. Metal charges a KV buffer in full once it is bound, so a whole
+reservation costs memory a short chat never uses: on a 16 GiB M2 reserving
+262,144 instead of 128,000 took 2.6 GiB from the page cache holding routed
+experts and cut QAT decode from about 6.3 to 4.6 tok/s. `--kv-reserve`
+reserves the whole context at load instead; the other families always do.
+
+Maple uses native BF16
 KV with layer-major chunked prefill; existing families use FP16 KV. On an 8 GB Mac,
 run one model process at a time and watch memory pressure.

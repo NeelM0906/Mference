@@ -89,6 +89,9 @@ public struct Args: Equatable, Sendable {
     public var kvTopKPages: Int
     /// Resident pool per full-attention layer in pages; nil = auto by RAM.
     public var kvPoolPages: Int?
+    /// `--kv-reserve`: reserve full-attention KV for the whole context up
+    /// front instead of growing it with the conversation.
+    public var reserveFullKV: Bool
 
     public init(model: String,
                 prompt: String? = nil,
@@ -119,6 +122,7 @@ public struct Args: Equatable, Sendable {
                 kvPaged: String = "auto",
                 kvTopKPages: Int = 60,
                 kvPoolPages: Int? = nil,
+                reserveFullKV: Bool = false,
                 reasoningEffort: QwenReasoningEffort? = nil) {
         self.reasoningEffort = reasoningEffort
         self.model = model
@@ -147,6 +151,7 @@ public struct Args: Equatable, Sendable {
         self.kvPaged = kvPaged
         self.kvTopKPages = kvTopKPages
         self.kvPoolPages = kvPoolPages
+        self.reserveFullKV = reserveFullKV
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
@@ -213,6 +218,11 @@ extension Args {
                                 (default 60 ≈ 3.8k attended tokens/layer).
       --kv-pool-pages <n|auto>  Resident pool per full-attention layer in
                                 pages (default auto: sized from RAM).
+      --kv-reserve              Reserve full-attention KV for the whole
+                                context up front. Without it, Gemma 4 and
+                                Qwen 3.6 start at 16384 tokens; a longer
+                                prompt grows it to the prompt plus 16384, a
+                                longer answer by 8192 at a time.
       --temperature <float>     Sampling temperature (default \(samplingDefaults.temperature); 0 = greedy).
       --top-k <int>             Top-k truncation, 1...256 (default \(samplingDefaults.topK ?? 0); 0 = off).
       --top-p <float>           Nucleus truncation (default \(samplingDefaults.topP ?? 1)).
@@ -300,6 +310,7 @@ extension Args {
         var kvPaged = "auto"
         var kvTopKPages = 60
         var kvPoolPages: Int? = nil
+        var reserveFullKV = false
         var reasoningEffort: QwenReasoningEffort?
 
         var index = 0
@@ -313,6 +324,9 @@ extension Args {
                 index += 1
             case "--flash-head":
                 flashHead = true
+                index += 1
+            case "--kv-reserve":
+                reserveFullKV = true
                 index += 1
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
@@ -543,6 +557,7 @@ extension Args {
                     kvPaged: kvPaged,
                     kvTopKPages: kvTopKPages,
                     kvPoolPages: kvPoolPages,
+                    reserveFullKV: reserveFullKV,
                     reasoningEffort: reasoningEffort)
         result.omittedSamplingOptions = Set(SamplingOption.allCases).subtracting(providedSamplingOptions)
         result.usesModelMaxContext = usesModelMaxContext
