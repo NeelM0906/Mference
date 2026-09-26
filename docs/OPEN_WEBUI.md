@@ -105,15 +105,21 @@ For source/layout and disk checks, use the repacker's own dry-run:
   --output "$HOME/llm-models/gemma4qat.gturbo" --dry-run
 ```
 
-The measured installation is about 15.84 GB (15,835,171,794 bytes on the
-validation machine after verification), plus the installer's 1 GiB free-space
-reserve and bounded transfer/metadata staging. Receipt size can vary with the
-destination path. The dry-run reports
-payload, required assets, aligned output, and reserves separately. These are
-storage quantities, not measured peak inference memory.
+The installation is about 14.45 GB (14,451,052,105 bytes on the validation
+machine after verification). While it downloads, the installer writes
+the routed experts in the source layout (about 15.8 GB); after the download it
+stores each layer file without its implied biases, one layer at a time. Free
+space must therefore cover the larger figure plus one compact layer (about
+0.43 GB), the installer's 1 GiB free-space reserve and bounded
+transfer/metadata staging. Receipt size can vary with the destination path.
+The dry-run reports payload, required assets, aligned output, and reserves
+separately. These are storage quantities, not measured peak inference memory.
 
 Native INT4 group-32 weights, BF16 companions and BF16 routers are copied
-without requantization. The source config, tokenizer, tokenizer config, chat
+without requantization. Routed-expert biases are exactly `-8 * scale`; the
+installer checks every group and then leaves them out, and the runtime
+rebuilds them after each read (see
+[routed-expert storage](families/GEMMA4_QAT.md#routed-expert-storage)). The source config, tokenizer, tokenizer config, chat
 template and generation config are required and covered by install hashes.
 The checkpoint's model identity is
 `gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned`, regardless of directory name.

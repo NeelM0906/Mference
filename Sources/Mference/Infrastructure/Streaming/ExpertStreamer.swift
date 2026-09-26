@@ -38,29 +38,39 @@ public struct StreamLayout: Sendable {
     public let streamOffset: UInt64
     public let streamSize: UInt64
     public let expertsPerLayer: Int
+    /// Bytes of one expanded expert, as the kernels address it.
     public let expertStride: UInt64
     public let expertOffsets: [UInt64]?
+    /// Set when the file stores experts without bytes the kernels read;
+    /// see `ExpertStorage`. Nil means each expert is stored as addressed.
+    public let storage: ExpertStorage?
 
     public init(path: String,
                 streamOffset: UInt64,
                 streamSize: UInt64,
                 expertsPerLayer: Int,
                 expertStride: UInt64,
-                expertOffsets: [UInt64]? = nil) {
+                expertOffsets: [UInt64]? = nil,
+                storage: ExpertStorage? = nil) {
         self.path = path
         self.streamOffset = streamOffset
         self.streamSize = streamSize
         self.expertsPerLayer = expertsPerLayer
         self.expertStride = expertStride
         self.expertOffsets = expertOffsets
+        self.storage = storage
     }
+
+    /// Bytes of one expert in the file.
+    @inline(__always)
+    public var storedExpertStride: UInt64 { storage?.storedExpertStride ?? expertStride }
 
     @inline(__always)
     public func expertOffset(layer: Int, expert: Int) -> UInt64 {
         if layer == 0, let expertOffsets, expert >= 0, expert < expertOffsets.count {
             return expertOffsets[expert]
         }
-        let perLayer = UInt64(expertsPerLayer) * expertStride
-        return UInt64(layer) * perLayer + UInt64(expert) * expertStride
+        let perLayer = UInt64(expertsPerLayer) * storedExpertStride
+        return UInt64(layer) * perLayer + UInt64(expert) * storedExpertStride
     }
 }

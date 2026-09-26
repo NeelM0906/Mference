@@ -11,17 +11,20 @@ and generation settings. The original Gemma remains independently selectable.
 | Final installation directory | `$HOME/llm-models/gemma4qat.gturbo` |
 | API model ID | `gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned` |
 | Pinned source revision | `745a97a754ed4b7713163c7d0e9c11da41809e0c` |
-| Installed bytes, including verified receipt | 15,835,171,794 |
+| Installed bytes, including verified receipt | 14,451,052,105 (15,835,171,794 before the routed biases became implied) |
 | Resident weight file | 1,512,886,332 bytes |
-| Streamed expert pool | 14,281,605,120 bytes |
-| Native format | INT4 affine, group 32; BF16 scales/biases and unquantized BF16 routers |
+| Streamed expert pool | 12,897,484,800 bytes (14,281,605,120 before the routed biases became implied) |
+| Native format | INT4 affine, group 32, BF16 scales; BF16 biases, which routed experts imply as `-8 * scale`; unquantized BF16 routers |
 
 These are storage sizes. They do not measure physical memory use. The installer
 copies the supplied native bytes without requantization, streams bounded
-ranges, and resumes verified completed work. See the
+ranges, and resumes verified completed work; it then stores the routed experts
+without their bias arrays, as described under
+[routed-expert storage](#routed-expert-storage). See the
 [installation commands and space accounting](../OPEN_WEBUI.md#gemma-qat-installation).
-The same completed installation supports the runtime update; no second
-download or repack is needed.
+An install made before 2026-09-26 keeps working unchanged;
+`MferenceRepack --implicit-qat-biases --input-gturbo <old> --output <new>`
+converts it without a download.
 
 ## Use and defaults
 
@@ -182,6 +185,35 @@ mapping at every tested length from 1 to 65,536 keys.
 
 The decode row is one pair of runs with identical output text. Short contexts
 gain little because attention is a small part of each token there.
+
+## Routed-expert storage
+
+The checkpoint is Q4_0 re-expressed as MLX affine INT4, so every group's bias
+is exactly `-8 * scale` in BF16: all 713,687,040 routed-expert groups and all
+74,488,832 resident groups, checked bit for bit. Since 2026-09-26 the install
+stores routed experts without their three bias arrays. `layout.json` declares
+the stored segments and the implied biases in `expertStorage`, the manifest's
+routed bias type reads `impliedNeg8Scale`, and after each read the runtime
+writes the biases back into the expert slot, so the GPU sees the same bytes as
+before. The installer and the converter check every bias before dropping it
+and refuse a checkpoint in which any group breaks the identity. Older builds
+refuse the new install instead of misreading it.
+
+| M2 MacBook Air 16 GiB | Explicit biases | Implied biases |
+| --- | ---: | ---: |
+| Bytes per routed expert | 3,719,168 | 3,358,720 |
+| Streamed expert pool | 14.28 GB | 12.90 GB |
+| Decode, `medium-review`, 192 greedy tokens | 5.97 tok/s | 6.56 tok/s |
+| Prefill, 430 tokens | 7.15 s | 5.89 s |
+| Wait for expert reads per token | 89.4 ms | 73.0 ms |
+
+The decode and prefill rows are the means of an alternated explicit, implied,
+implied, explicit run, each after an unmeasured warm-up on the same install.
+All eight outputs, the six teacher-forced logit captures and the routed expert
+choices were byte-identical, and the frozen MLX reference kept 158 of 158
+positions with `MFERENCE_QAT_EXACT_PREFILL=1`. The wait fell by more than the
+bytes because the smaller pool fits the 16 GiB page cache better. Resident
+weights keep their bias arrays.
 
 ## M2 generation measurements
 

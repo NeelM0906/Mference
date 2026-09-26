@@ -42,8 +42,21 @@ struct GemmaQATGreedyHeadTests {
         let capture = try JSONDecoder().decode(Capture.self,
             from: Data(contentsOf: reference.appendingPathComponent("meta.json")))
         try #require(capture.vocab == 262_144)
-        #expect(Sha256Verifier.hashData(try Data(contentsOf: directory.appendingPathComponent("manifest.json")))
-                == capture.manifest_sha256)
+        // The capture came from an install that stored routed biases, whose
+        // manifest it pins. An install storing them implied (-8 * scale) has
+        // a different manifest for the same model, so it is identified by the
+        // checkpoint, its source snapshot and its resident weights instead;
+        // `Model.load` hashes those weights against the manifest.
+        let manifestData = try Data(contentsOf: directory.appendingPathComponent("manifest.json"))
+        if Sha256Verifier.hashData(manifestData) != capture.manifest_sha256 {
+            let manifest = try JSONDecoder().decode(Manifest.self, from: manifestData)
+            #expect(manifest.modelID == CheckpointIdentity.gemma4QAT)
+            #expect(manifest.sourceSnapshotHash
+                    == "sha256:7dbbeef0345505798abcf0ac54434116a48c2f1e7aad828071c17a7a871adfe7")
+            #expect(manifest.files["model_weights.bin"]?.sha256
+                    == "ebe5cc23de6f2c223581d89c3be5069fbd67a8e4da848c1860e4b4c8dab72bda")
+            #expect(manifest.quant?.routedExpert.biasType == GemmaQATCheckpoint.impliedRoutedBiasType)
+        }
         let context = try MetalContext()
         let model = try Model.load(directoryURL: directory, device: context.device,
                                    expecting: .gemma4_26B_A4B)
