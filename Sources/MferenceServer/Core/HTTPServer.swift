@@ -9,7 +9,8 @@ import Mference
 /// process shape; `.library` serves whatever the library found and swaps the
 /// resident model in place.
 enum ServerModelMode: Sendable {
-    case single(modelID: String, chatDialect: ChatDialect, backend: any ServerInferenceBackend)
+    case single(modelID: String, chatDialect: ChatDialect, backend: any ServerInferenceBackend,
+                maxModelLen: Int)
     case library(ServerModelLibrary)
 }
 
@@ -32,10 +33,12 @@ public actor MferenceHTTPServer {
                 queueLimit: Int,
                 backend: any ServerInferenceBackend,
                 chatDialect: ChatDialect = .gemma,
+                maxModelLen: Int = ServerArguments.defaultMaxContext,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
-        self.mode = .single(modelID: modelID, chatDialect: chatDialect, backend: backend)
+        self.mode = .single(modelID: modelID, chatDialect: chatDialect, backend: backend,
+                            maxModelLen: maxModelLen)
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
     }
@@ -205,13 +208,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
         case (.GET, "/v1/models"):
             switch mode {
-            case .single(let modelID, _, _):
+            case .single(let modelID, _, _, let maxModelLen):
                 let response = OpenAIModelList(
                     object: "list",
                     data: [.init(id: modelID,
                                  object: "model",
                                  created: 0,
-                                 ownedBy: "mference")])
+                                 ownedBy: "mference",
+                                 maxModelLen: maxModelLen)])
                 writeCodable(context, status: .ok, response)
             case .library(let library):
                 writeCodable(context, status: .ok, library.snapshot.modelList)
@@ -225,7 +229,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 return
             }
             switch mode {
-            case .single(let modelID, let chatDialect, let backend):
+            case .single(let modelID, let chatDialect, let backend, _):
                 handleCompletion(modelID: modelID,
                                  chatDialect: chatDialect,
                                  backend: backend,

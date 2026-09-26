@@ -258,10 +258,13 @@ public struct OpenAIModelList: Codable, Equatable, Sendable {
         public let object: String
         public let created: Int
         public let ownedBy: String
+        /// Context window for prompt plus completion, in tokens; vLLM's name.
+        public let maxModelLen: Int
 
         enum CodingKeys: String, CodingKey {
             case id, object, created
             case ownedBy = "owned_by"
+            case maxModelLen = "max_model_len"
         }
     }
 

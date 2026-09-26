@@ -512,6 +512,22 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// Single-model mode reports the context its model was loaded with.
+    @Test func singleModelListingReportsItsContext() async throws {
+        let server = MferenceHTTPServer(modelID: "test-model", queueLimit: 1,
+                                        backend: ScriptedServerBackend(), maxModelLen: 131_072)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        let data = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0
+        try await server.shutdown()
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let models = try #require(object["data"] as? [[String: Any]])
+        #expect(models.count == 1)
+        #expect(models.first?["id"] as? String == "test-model")
+        #expect(models.first?["max_model_len"] as? Int == 131_072)
+    }
+
     @Test func routesIgnoreQueryComponentOfRequestURI() async throws {
         let server = MferenceHTTPServer(
             modelID: "test-model",

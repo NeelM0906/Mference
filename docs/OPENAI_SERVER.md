@@ -253,6 +253,12 @@ Endpoints:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
+Each model in `GET /v1/models` carries `max_model_len`, vLLM's field: the
+context window for prompt plus completion that the model runs with. That is
+the numeric `--max-context`, or with `--max-context max` the model family's
+native context. In library mode it comes from the install index, so listing
+loads nothing and answers during a model load.
+
 Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream": true` for streaming. Set
 `"stream_options": {"include_usage": true}` to receive a final usage chunk.

@@ -31,6 +31,9 @@ public struct ServerArguments: Equatable, Sendable {
     /// exit without binding a port or loading a model.
     public let listModels: Bool
 
+    /// `--max-context` when it is not given.
+    public static let defaultMaxContext = 16_384
+
     public static let usage = """
     usage: MferenceServer --model <completed .gturbo directory> [options]
            MferenceServer --library [dir] [options]
@@ -113,7 +116,7 @@ public struct ServerArguments: Equatable, Sendable {
         var port = 8080
         var bindMode = ServerBindMode.loopback
         var modelIDOverride: String?
-        var maxContext: Int? = 16_384
+        var maxContext: Int? = defaultMaxContext
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
         var verification = ModelIntegrityPolicy.trustedReceiptWhenValid

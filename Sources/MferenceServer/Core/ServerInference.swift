@@ -204,7 +204,9 @@ public actor ServerModelSession: ServerLoadedModel {
     private let runner: any ContinuableLogitProducer
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
-    private let maxContext: Int
+    /// The context this session runs with, `--max-context` resolved for its
+    /// family; `GET /v1/models` reports it as `max_model_len`.
+    public nonisolated let maxContext: Int
     private let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
     private var promptCache = ServerPromptCache()

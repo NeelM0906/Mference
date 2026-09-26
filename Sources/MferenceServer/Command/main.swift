@@ -43,7 +43,7 @@ do {
         let shadowBudget = arguments.shadowBudget
         let prefillChunk = arguments.prefillChunk
         let reserveFullKV = arguments.reserveFullKV
-        let library = ServerModelLibrary(index: index) { directory in
+        let library = ServerModelLibrary(index: index, maxContext: maxContext) { directory in
             try await ServerModelSession.load(modelDirectory: directory,
                                               maxContext: maxContext,
                                               promptCacheMode: promptCacheMode,
@@ -83,7 +83,8 @@ do {
             modelID: modelID,
             queueLimit: arguments.queueLimit,
             backend: backend,
-            chatDialect: backend.chatDialect)
+            chatDialect: backend.chatDialect,
+            maxModelLen: backend.maxContext)
         readyDetail = "model=\(modelID)"
     }
 
