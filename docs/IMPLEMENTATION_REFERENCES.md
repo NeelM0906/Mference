@@ -33,7 +33,11 @@ included for broader design context rather than a line-level claim.
   requantizing them.
 - [Hugging Face swift-transformers](https://github.com/huggingface/swift-transformers)
   is the direct tokenizer dependency. Mference adds bounded streaming
-  detokenization around it.
+  detokenization around it. For Gemma 4 it runs the decoder sequence that
+  `tokenizer.json` declares and stops there, without the library's
+  `clean_up_tokenization_spaces` pass: Gemma's tokenizer config omits that key,
+  which leaves the pass on, and it rewrites generated text ("Bonjour !" became
+  "Bonjour!"). Decode and streaming then reproduce the model's text exactly.
 - [`deepgrove/maple-preview-2bit-mlx`](https://huggingface.co/deepgrove/maple-preview-2bit-mlx),
   pinned at `361db5da5e74ff6fcdd852d478e1f266ce11013a` with source-index SHA-256
   `56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95`, is the
