@@ -225,13 +225,19 @@ public actor ServerModelSession: ServerLoadedModel {
             shadowPrefetchBudget: shadowPrefetchBudget)
     }
 
+    /// `--max-context max` (nil) is the model's native context.
+    static func resolvedMaxContext(_ requested: Int?, family: ModelFamily) -> Int {
+        requested ?? family.maximumContext
+    }
+
     public static func load(modelDirectory: URL,
-                            maxContext: Int,
+                            maxContext requestedMaxContext: Int?,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix,
                             integrityPolicy: ModelIntegrityPolicy = .trustedReceiptWhenValid,
                             shadowPrefetchBudget: Int? = nil,
                             prefillChunkTokens: Int? = nil) async throws -> ServerModelSession {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+        let maxContext = resolvedMaxContext(requestedMaxContext, family: family)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw MFTokenizerError.missingToolTemplate

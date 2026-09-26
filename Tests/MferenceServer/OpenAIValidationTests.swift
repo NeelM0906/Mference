@@ -852,6 +852,36 @@ struct ServerArgumentTests {
         #expect(ServerArguments.usage.contains("128000"))
     }
 
+    /// Any length up to the largest native context; each model then enforces
+    /// its own limit when it loads.
+    @Test(arguments: [1, 100_000, 262_144, 1_048_576])
+    func parsesAnyContextUpToTheLargestNativeLimit(tokens: Int) throws {
+        let arguments = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--max-context", String(tokens),
+        ])
+        #expect(arguments.maxContext == tokens)
+    }
+
+    /// `max` gives every model its own native context, so one library can
+    /// serve Maple at 128,000 and Gemma at 262,144.
+    @Test func maxLeavesTheContextToEachModel() throws {
+        let arguments = try ServerArguments.parse(["--library", "--max-context", "max"])
+        #expect(arguments.maxContext == nil)
+        #expect(ServerArguments.usage.contains("max"))
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .gemma4) == 262_144)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .maple) == 128_000)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .deepseekV4Flash) == 1_048_576)
+        #expect(ServerModelSession.resolvedMaxContext(32_768, family: .gemma4) == 32_768)
+    }
+
+    @Test(arguments: ["0", "-1", "1048577", "16k", "", "MAX"])
+    func rejectsContextsNoModelCanUse(value: String) {
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse(["--model", "model.gturbo", "--max-context", value])
+        }
+    }
+
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {
         let arguments = try ServerArguments.parse([
             "--model", "model.gturbo",

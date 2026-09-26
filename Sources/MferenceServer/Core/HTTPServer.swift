@@ -658,6 +658,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             return (requestError.envelope,
                     requestError == .queueFull ? .tooManyRequests : .badRequest)
         }
+        // A library load refused because --max-context is above the model's
+        // native context: retrying cannot help, the message says what to lower.
+        if let limit = error as? ContextLimitError {
+            return (OpenAIErrorEnvelope(message: limit.description, param: "model",
+                                        code: "context_exceeds_model"),
+                    .badRequest)
+        }
         return (OpenAIErrorEnvelope(message: "generation failed",
                                     type: "server_error",
                                     code: "internal_error"),

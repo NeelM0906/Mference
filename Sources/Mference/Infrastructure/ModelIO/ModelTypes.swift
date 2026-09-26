@@ -5,7 +5,7 @@ import Metal
 /// graph shape (norm sandwich vs plain pre-norm), and family-specific kernel
 /// behavior. Stored in `manifest.json -> arch.family`; absent means Gemma 4
 /// (the format's original architecture).
-public enum ModelFamily: String, Sendable, Hashable {
+public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case qwen38 = "qwen38"

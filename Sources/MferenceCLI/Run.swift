@@ -16,6 +16,12 @@ public struct RunResult: Equatable, Sendable {
 public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
+    var args = args
+    do {
+        args = try args.resolvingModelMaxContext()
+    } catch {
+        return errored(stderr, "\(error)", 1)
+    }
     if args.chat {
         return await runChat(args: args, stdout: stdout, stderr: stderr)
     }

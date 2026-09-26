@@ -455,8 +455,9 @@ Params**.
 - **A swap is not free.** Every model change is an unload and a full load. See
   [The model picker](#the-model-picker-and-what-a-swap-costs).
 - **One context length for every model.** `--max-context` applies to whichever
-  model is resident. Maple's 128000-token window needs `--max-context 128000`,
-  which then applies to the others too.
+  model is resident, and a model whose native context is shorter refuses to
+  load (Maple: 128,000; MiniCPM5: 131,072). `--max-context max` instead gives
+  each model its own native context, Gemma 4's full 262,144 included.
 - **The library is fixed at startup.** Installing a model while the server runs
   does not add it; restart the launcher.
 - **Parameters the server rejects.** `n > 1`, `logprobs`, a non-zero

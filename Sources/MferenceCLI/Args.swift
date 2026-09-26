@@ -56,6 +56,9 @@ public struct Args: Equatable, Sendable {
     public var shadowBudget: Int?
     public var maxNew: Int
     public var maxContext: Int
+    /// `--max-context max`: `maxContext` becomes the model's native context in
+    /// `resolvingModelMaxContext()`.
+    public var usesModelMaxContext: Bool = false
     public var temperature: Float { didSet { omittedSamplingOptions.remove(.temperature) } }
     public var topK: Int? { didSet { omittedSamplingOptions.remove(.topK) } }
     public var topP: Float? { didSet { omittedSamplingOptions.remove(.topP) } }
@@ -201,7 +204,8 @@ extension Args {
       --show-reasoning          Stream the thoughts of --chat turns to standard
                                 error; standard output stays the answer only.
       --max-new <int>           Generated-token limit (default 1024).
-      --max-context <int>       Context limit in tokens (default 4096).
+      --max-context <int|max>   Context limit in tokens (default 4096); max
+                                is the model's native context.
       --kv-paged <on|off|auto>  Paged KV cache with SSD spill + Quest sparse
                                 decode (Qwen 3.8; default auto: on above 32k
                                 context). Exact when everything fits RAM.
@@ -273,6 +277,7 @@ extension Args {
         var shadowBudget: Int?
         var maxNew = 1_024
         var maxContext = 4096
+        var usesModelMaxContext = false
         // Starting values only: each flag below overwrites its own, so an
         // explicit flag always wins over the shared sampling defaults.
         var providedSamplingOptions: Set<SamplingOption> = []
@@ -335,10 +340,15 @@ extension Args {
                 maxNew = parsed
             case "--max-context":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value), parsed > 0 else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
+                if value == "max" {
+                    usesModelMaxContext = true
+                } else {
+                    guard let parsed = Int(value), parsed > 0 else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    maxContext = parsed
+                    usesModelMaxContext = false
                 }
-                maxContext = parsed
             case "--kv-paged":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard ["on", "off", "auto"].contains(value) else {
@@ -535,7 +545,18 @@ extension Args {
                     kvPoolPages: kvPoolPages,
                     reasoningEffort: reasoningEffort)
         result.omittedSamplingOptions = Set(SamplingOption.allCases).subtracting(providedSamplingOptions)
+        result.usesModelMaxContext = usesModelMaxContext
         return result
+    }
+
+    /// Replaces `--max-context max` with the installed model's native context.
+    public func resolvingModelMaxContext() throws -> Args {
+        guard usesModelMaxContext else { return self }
+        var resolved = self
+        resolved.maxContext = try ManifestReader.peekFamily(
+            directoryURL: URL(fileURLWithPath: model)).maximumContext
+        resolved.usesModelMaxContext = false
+        return resolved
     }
 
     /// Resolve after tokenizer/asset validation, before runner/head selection.

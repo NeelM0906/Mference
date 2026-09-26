@@ -53,7 +53,9 @@ usage: ./mference-ui.sh [options]                      start the UI
   --model <dir>          Preload this install instead of loading lazily.
   --server-port <port>   MferenceServer port (default 8080).
   --webui-port <port>    Open WebUI port (default 3000).
-  --max-context <tokens> Context window for every model (default 16384).
+  --max-context <tokens|max>
+                         Context window for every model (default 16384); max
+                         gives each model its own native context.
   --build-path <dir>     Swift build directory (default .build). Useful when
                          keeping different Xcode toolchains separate.
   --data-dir <dir>       Open WebUI data directory (default under your Library).
@@ -116,10 +118,12 @@ check_positive_integer() {
 }
 check_positive_integer --server-port "$server_port"
 check_positive_integer --webui-port "$webui_port"
-check_positive_integer --max-context "$max_context"
+if [[ "$max_context" != max ]]; then
+  check_positive_integer --max-context "$max_context"
+  max_context="$((10#$max_context))"
+fi
 server_port="$((10#$server_port))"
 webui_port="$((10#$webui_port))"
-max_context="$((10#$max_context))"
 [[ "$server_port" -le 65535 && "$webui_port" -le 65535 ]] || fail "ports must be between 1 and 65535"
 [[ "$server_port" -ne "$webui_port" ]] || fail "server and UI need different ports"
 case "$prompt_cache_mode" in off|single-prefix) ;; *) fail "--prompt-cache-mode must be off or single-prefix" ;; esac

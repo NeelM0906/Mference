@@ -11,7 +11,8 @@ public struct ServerArguments: Equatable, Sendable {
     /// default for the loaded model family.
     public let modelIDOverride: String?
     public var modelID: String { modelIDOverride ?? "gemma-4-26b-a4b-it" }
-    public let maxContext: Int
+    /// `--max-context`; nil (`max`) gives each model its native context.
+    public let maxContext: Int?
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
     /// `--verify`; see `ModelIntegrityPolicy`.
@@ -65,7 +66,14 @@ public struct ServerArguments: Equatable, Sendable {
                              qwen3.8-flash-next-int4g64,
                              minicpm5-2b-int4g64, or the manifest's distinct
                              GLM / Swift-Qwen checkpoint ID). Single-model mode only.
-      --max-context <tokens> 4096, 8192, 16384, 32768, 65536, or 128000 (default 16384).
+      --max-context <tokens|max>
+                             Context length in tokens (default 16384), up to
+                             the model's native context: 262144 for Gemma 4,
+                             Qwen 3.6, Qwen 3.8 and Flash-Next, 131072 for
+                             MiniCPM5, 128000 for Maple, 1048576 for
+                             DeepSeek-V4, Inkling and GLM-5.3. A model whose
+                             native context is shorter refuses to load. max
+                             gives each model its own native context.
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
@@ -95,7 +103,7 @@ public struct ServerArguments: Equatable, Sendable {
         var port = 8080
         var bindMode = ServerBindMode.loopback
         var modelIDOverride: String?
-        var maxContext = 16_384
+        var maxContext: Int? = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
         var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
@@ -154,11 +162,16 @@ public struct ServerArguments: Equatable, Sendable {
                 }
                 modelIDOverride = value
             case "--max-context":
-                guard let parsed = Int(value),
-                      [4_096, 8_192, 16_384, 32_768, 65_536, 128_000].contains(parsed) else {
-                    throw ServerArgumentError.invalid("--max-context is not supported")
+                if value == "max" {
+                    maxContext = nil
+                } else {
+                    guard let parsed = Int(value),
+                          (1...ModelFamily.largestMaximumContext).contains(parsed) else {
+                        throw ServerArgumentError.invalid(
+                            "--max-context must be max or between 1 and \(ModelFamily.largestMaximumContext)")
+                    }
+                    maxContext = parsed
                 }
-                maxContext = parsed
             case "--queue-limit":
                 guard let parsed = Int(value), parsed > 0 else {
                     throw ServerArgumentError.invalid("--queue-limit must be positive")

@@ -394,7 +394,15 @@ generous allowance — around 2048 `max_completion_tokens` (when neither cap is
 set the server uses 4096) — or the reasoning budget swallows the visible
 answer and the request finishes with `finish_reason` `"length"`.
 
-Context length can be 4K, 8K, 16K, 32K, 64K, or 128000 tokens; the default is
-16K. Maple supports 128000 tokens in the server and uses native BF16 KV with
-layer-major chunked prefill; existing families use FP16 KV. On an 8 GB Mac,
+`--max-context` takes any length up to the model's native context (default
+16K): 262,144 tokens for Gemma 4 (QAT included), Qwen 3.6, Qwen 3.8 and
+Flash-Next; 131,072 for MiniCPM5; 128,000 for Maple; 1,048,576 for
+DeepSeek-V4-Flash, Inkling-Small and GLM-5.3-Flash. `--max-context max` gives
+every model its own native context, which suits a library of different
+models; each then reserves that whole context when it loads. A model whose native
+context is shorter refuses to load: with `--model` the server exits at
+startup, and in library mode the request that asked for it gets HTTP 400
+`context_exceeds_model`. At 262,144 Gemma 4 QAT needs about 9.15 GiB with
+server settings, 5.02 GiB of it growing with context. Maple uses native BF16
+KV with layer-major chunked prefill; existing families use FP16 KV. On an 8 GB Mac,
 run one model process at a time and watch memory pressure.

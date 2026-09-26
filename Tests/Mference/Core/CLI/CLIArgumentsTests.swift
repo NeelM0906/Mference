@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import Mference
 @testable import MferenceCLICore
@@ -255,6 +256,23 @@ import Mference
     func shadowBudgetRejectsValuesOutsideZeroToEight(value: String) {
         #expect(throws: ArgsError.invalidValue(flag: "--shadow-budget", value: value)) {
             _ = try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--shadow-budget", value])
+        }
+    }
+
+    /// `--max-context max` becomes the model's native context once the
+    /// install is known; a number stays as given.
+    @Test func maxContextMaxResolvesToTheModelsNativeContext() throws {
+        let directory = try QwenToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let parsed = try Args.parse(["--model", directory.path, "--prompt", "hi", "--max-context", "max"])
+        #expect(parsed.usesModelMaxContext)
+        let resolved = try parsed.resolvingModelMaxContext()
+        #expect(resolved.maxContext == 262_144)
+        #expect(!resolved.usesModelMaxContext)
+        let fixed = try Args.parse(["--model", directory.path, "--prompt", "hi", "--max-context", "8192"])
+        #expect(try fixed.resolvingModelMaxContext().maxContext == 8_192)
+        #expect(throws: ArgsError.invalidValue(flag: "--max-context", value: "MAX")) {
+            _ = try Args.parse(["--model", directory.path, "--prompt", "hi", "--max-context", "MAX"])
         }
     }
 

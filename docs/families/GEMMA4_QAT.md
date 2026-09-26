@@ -90,8 +90,13 @@ target retains the pre-existing Maple Q/K norm failure (`0.0234375` against
 gate passed; the whole repository is not all green.
 
 The tested public runs use a 4,096-token capacity; broader contexts and other
-hardware are not qualified by this evidence. The architecture's source context
-limit is not a tested runtime limit. KV/activation precision policy remains
+hardware are not qualified by this evidence. The server accepts
+`--max-context 262144`, the checkpoint's `max_position_embeddings`; the model
+runs the same algorithm at every position, but no prompt longer than 128K
+tokens has been run. With server settings (2,048-token chunks, 16 expert slots, prompt cache
+on) the runtime needs 4.12 GiB plus 20,544 B per token (20,480 B of
+full-attention KV and 64 B of QAT decode scratch): 4.44 GiB at 16,384 tokens,
+6.57 GiB at 128,000 and 9.15 GiB at 262,144. KV/activation precision policy remains
 unchanged, and this integration provides text inference only.
 
 ## Prefill arithmetic

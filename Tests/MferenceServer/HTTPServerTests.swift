@@ -326,6 +326,36 @@ struct HTTPServerTests {
                                   backend: backend, chatDialect: .chatml)
     }
 
+    /// A library load refused because --max-context is above the model's
+    /// native limit reaches the client as a 400 naming the limit, not a 500.
+    @Test(arguments: [false, true])
+    func contextAboveTheModelLimitReachesTheClient(stream: Bool) async throws {
+        let refusal = ContextLimitError(family: .maple, requested: 262_144, maximum: 128_000)
+        let entry = ServerLibraryEntry(
+            modelID: "maple", familyModelID: "maple-preview-2bit-mlx",
+            basename: "maple.gturbo",
+            directory: URL(fileURLWithPath: "/unused/maple.gturbo"), family: .maple)
+        let library = ServerModelLibrary(index: ServerLibraryIndex(entries: [entry])) { _ in
+            throw refusal
+        }
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data("""
+        {"model":"maple","messages":[{"role":"user","content":"hi"}],"stream":\(stream)}
+        """.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try await server.shutdown()
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        let envelope = try JSONDecoder().decode(OpenAIErrorEnvelope.self, from: data)
+        #expect(envelope.error.code == "context_exceeds_model")
+        #expect(envelope.error.param == "model")
+        #expect(envelope.error.message == refusal.description)
+    }
+
     @Test(arguments: [false, true], [false, true])
     func penaltiesAndMinPReachTheBackend(stream: Bool, libraryMode: Bool) async throws {
         let backend = OptInThinkingBackend()

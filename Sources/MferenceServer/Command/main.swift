@@ -85,7 +85,7 @@ do {
     }
 
     _ = try await server.start(host: host, port: arguments.port)
-    print("MferenceServer ready at http://\(host):\(arguments.port) \(readyDetail) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue)")
+    print("MferenceServer ready at http://\(host):\(arguments.port) \(readyDetail) context=\(arguments.maxContext.map(String.init) ?? "max") prompt_cache=\(arguments.promptCacheMode.rawValue)")
     // Supervisors watch for the ready line through a pipe or log file, where
     // stdout is block-buffered and would otherwise hold it back indefinitely.
     fflush(stdout)
