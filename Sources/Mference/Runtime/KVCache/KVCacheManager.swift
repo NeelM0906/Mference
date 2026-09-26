@@ -30,12 +30,46 @@ public struct KVView: @unchecked Sendable {
     public let startSlot: Int
 }
 
+/// Address space reserved once for one growable full-attention K or V buffer,
+/// sized for `maxContext`. Its pages cost memory only once written. Every Metal
+/// wrapper over it holds a reference, so it is unmapped only after the last
+/// wrapper is released.
+private final class ReservedKVRegion: @unchecked Sendable {
+    let base: UnsafeMutableRawPointer
+    let length: Int
+
+    init?(bytes: Int) {
+        let page = Int(getpagesize())
+        let length = max(page, (bytes + page - 1) / page * page)
+        let mapped = mmap(nil, length, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0)
+        if mapped == MAP_FAILED { return nil }
+        guard let mapped else { return nil }
+        self.base = mapped
+        self.length = length
+    }
+
+    deinit { munmap(base, length) }
+
+    /// A shared, no-copy buffer over the first `bytes` of the region.
+    func wrap(_ bytes: Int, device: MTLDevice, label: String) -> MTLBuffer? {
+        let page = Int(getpagesize())
+        let wrapped = min(length, max(page, (bytes + page - 1) / page * page))
+        let buffer = device.makeBuffer(bytesNoCopy: base, length: wrapped,
+                                       options: .storageModeShared,
+                                       deallocator: { _, _ in _ = self })
+        buffer?.label = label
+        return buffer
+    }
+}
+
 /// Per-layer FP16 K/V storage for the decode loop.
 ///
-/// One K buffer and one V buffer per layer, allocated once in `init` — the
-/// decode hot path never allocates. Linear storage sizes every layer for
+/// One K buffer and one V buffer per layer, allocated in `init` — the decode
+/// hot path never allocates. Linear storage sizes every layer for
 /// `maxContext`; FP16 ring storage caps SWA layers to their physical capacity
-/// while full-attention layers remain linear.
+/// while full-attention layers remain linear. With a growth step,
+/// full-attention layers reserve address space for `maxContext` and
+/// `ensureCapacity` widens their buffers over the same pages.
 ///
 /// Gemma 4 full-attention layers carry the `attention_k_eq_v` quirk: K and V
 /// share the `k_proj` weight, so a single 4-bit dequant + GEMV produces the
@@ -71,6 +105,10 @@ public final class KVCacheManager {
     /// sizes them for `maxContext`.
     let fullAttentionGrowthStep: Int?
     private let initialFullCapacity: Int
+    /// The reserved regions behind growable full-attention layers; nil for
+    /// every other layer.
+    private var kRegions: [ReservedKVRegion?]
+    private var vRegions: [ReservedKVRegion?]
 
     public private(set) var position: Int = 0
 
@@ -83,7 +121,9 @@ public final class KVCacheManager {
     ///
     /// `fullAttentionGrowthStep` starts full-attention layers at that many
     /// tokens instead of `maxContext`; callers then `ensureCapacity` before
-    /// writing past it. A context within one step is allocated whole.
+    /// writing past it. Such a layer reserves address space for `maxContext`
+    /// and wraps only its current capacity, so growing never copies and never
+    /// holds a second buffer.
     public init(device: MTLDevice,
                 config: ArchConfig,
                 maxContext: Int,
@@ -113,6 +153,8 @@ public final class KVCacheManager {
 
         var ks: [MTLBuffer] = []
         var vs: [MTLBuffer] = []
+        var kr: [ReservedKVRegion?] = []
+        var vr: [ReservedKVRegion?] = []
         var st: [Int] = []
         var kd: [LayerKind] = []
         var caps: [Int] = []
@@ -146,6 +188,8 @@ public final class KVCacheManager {
                 }
                 ks.append(placeholder)
                 vs.append(placeholder)
+                kr.append(nil)
+                vr.append(nil)
                 st.append(0)
                 if maskValue == 2 {
                     kd.append(.linear)
@@ -164,6 +208,23 @@ public final class KVCacheManager {
             let capacity = isFull ? fullCapacity : (ringEnabled ? swaCapacity : maxContext)
             let length = capacity * stride
 
+            if isFull, fullAttentionGrowthStep != nil {
+                guard let kRegion = ReservedKVRegion(bytes: maxContext * stride),
+                      let vRegion = ReservedKVRegion(bytes: maxContext * stride),
+                      let kBuf = kRegion.wrap(length, device: device, label: "kv.K.layer\(layer)"),
+                      let vBuf = vRegion.wrap(length, device: device, label: "kv.V.layer\(layer)") else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                ks.append(kBuf)
+                vs.append(vBuf)
+                kr.append(kRegion)
+                vr.append(vRegion)
+                st.append(stride)
+                kd.append(.full)
+                caps.append(capacity)
+                continue
+            }
+
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
                 throw ModelError.residentBufferWrapFailed
             }
@@ -175,6 +236,8 @@ public final class KVCacheManager {
             }
             vBuf.label = "kv.V.layer\(layer)"
             vs.append(vBuf)
+            kr.append(nil)
+            vr.append(nil)
 
             st.append(stride)
             kd.append(isFull ? .full : .swa)
@@ -183,6 +246,8 @@ public final class KVCacheManager {
 
         self.kBuffers = ks
         self.vBuffers = vs
+        self.kRegions = kr
+        self.vRegions = vr
         self.strides  = st
         self.kinds    = kd
         self.capacityTokens = caps
@@ -384,44 +449,36 @@ public final class KVCacheManager {
                                                                                  validTokenCount: validTokenCount))
     }
 
-    /// Full-attention layers with their own storage (not placeholders).
+    /// Full-attention layers backed by a reserved region.
     private var growableLayers: [Int] {
-        (0..<config.numLayers).filter { kinds[$0] == .full && strides[$0] > 0 }
+        (0..<config.numLayers).filter { kRegions[$0] != nil }
     }
 
-    /// Makes every full-attention layer hold positions `0..<tokens`. When one
-    /// does not, all of them move to `min(maxContext, tokens + headroom)` and
-    /// the rows written so far are copied across. `headroom` defaults to one
-    /// growth step, room for the answer to a new prompt; decode passes a
-    /// smaller one. `drain` runs first and must return only once no command
-    /// buffer can still touch the current buffers. Returns whether the
-    /// layers grew.
+    /// Makes every growable full-attention layer hold positions `0..<tokens`.
+    /// When one does not, each is re-wrapped over the same reserved pages at
+    /// `min(maxContext, tokens + headroom)`: the rows written so far stay where
+    /// they are, nothing is copied, and no second buffer exists. `headroom`
+    /// defaults to one growth step, room for the answer to a new prompt;
+    /// decode passes a smaller one. Returns whether the layers grew.
     @discardableResult
-    public func ensureCapacity(for tokens: Int, headroom: Int? = nil,
-                               drain: () -> Void) throws -> Bool {
+    public func ensureCapacity(for tokens: Int, headroom: Int? = nil) throws -> Bool {
         precondition(tokens <= maxContext, "capacity \(tokens) exceeds maxContext \(maxContext)")
         guard let step = fullAttentionGrowthStep else { return false }
         let layers = growableLayers
         guard let first = layers.first, capacityTokens[first] < tokens else { return false }
         let capacity = min(maxContext, tokens + max(1, headroom ?? step))
-        // Allocate everything before touching the cache, so a failure leaves
-        // it as it was.
-        var replacements: [(layer: Int, k: MTLBuffer, v: MTLBuffer)] = []
+        // Wrap everything before touching the cache, so a failure leaves it
+        // as it was.
+        var wrappers: [(layer: Int, k: MTLBuffer, v: MTLBuffer)] = []
         for layer in layers {
             let length = capacity * strides[layer]
-            guard let k = device.makeBuffer(length: length, options: .storageModeShared),
-                  let v = device.makeBuffer(length: length, options: .storageModeShared) else {
+            guard let k = kRegions[layer]?.wrap(length, device: device, label: "kv.K.layer\(layer)"),
+                  let v = vRegions[layer]?.wrap(length, device: device, label: "kv.V.layer\(layer)") else {
                 throw ModelError.residentBufferWrapFailed
             }
-            k.label = "kv.K.layer\(layer)"
-            v.label = "kv.V.layer\(layer)"
-            replacements.append((layer, k, v))
+            wrappers.append((layer, k, v))
         }
-        drain()
-        for (layer, k, v) in replacements {
-            let bytes = min(position, capacityTokens[layer]) * strides[layer]
-            memcpy(k.contents(), kBuffers[layer].contents(), bytes)
-            memcpy(v.contents(), vBuffers[layer].contents(), bytes)
+        for (layer, k, v) in wrappers {
             kBuffers[layer] = k
             vBuffers[layer] = v
             capacityTokens[layer] = capacity
@@ -429,17 +486,20 @@ public final class KVCacheManager {
         return true
     }
 
-    /// A new conversation starts from one step again, so one long chat does
-    /// not keep its KV. On an allocation failure the larger buffers stay.
-    private func shrinkToInitialCapacity() {
+    /// A new conversation starts from one step again on fresh regions, so one
+    /// long chat does not keep its pages: the grown regions are unmapped once
+    /// their last wrapper is released. On a failure the grown layers stay.
+    private func releaseGrowth() {
         for layer in growableLayers where capacityTokens[layer] > initialFullCapacity {
             let length = initialFullCapacity * strides[layer]
-            guard let k = device.makeBuffer(length: length, options: .storageModeShared),
-                  let v = device.makeBuffer(length: length, options: .storageModeShared) else { return }
-            k.label = "kv.K.layer\(layer)"
-            v.label = "kv.V.layer\(layer)"
+            guard let kRegion = ReservedKVRegion(bytes: maxContext * strides[layer]),
+                  let vRegion = ReservedKVRegion(bytes: maxContext * strides[layer]),
+                  let k = kRegion.wrap(length, device: device, label: "kv.K.layer\(layer)"),
+                  let v = vRegion.wrap(length, device: device, label: "kv.V.layer\(layer)") else { return }
             kBuffers[layer] = k
             vBuffers[layer] = v
+            kRegions[layer] = kRegion
+            vRegions[layer] = vRegion
             capacityTokens[layer] = initialFullCapacity
         }
     }
@@ -480,7 +540,7 @@ public final class KVCacheManager {
         discardGemmaRecovery()
         gemmaResidentFloor = 0
         position = 0
-        shrinkToInitialCapacity()
+        releaseGrowth()
         let pageSize = Int(getpagesize())
         var advised = Set<ObjectIdentifier>()
         for layer in 0..<config.numLayers {

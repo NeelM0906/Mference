@@ -4,8 +4,9 @@ import Testing
 @testable import Mference
 
 /// Full-attention KV that starts at one growth step and grows with the
-/// conversation: capacity becomes what is needed plus one more step, rows
-/// already written survive the move, and a new conversation shrinks it back.
+/// conversation: capacity becomes what is needed plus one more step over the
+/// same reserved pages, so rows stay in place and nothing is copied, and a new
+/// conversation starts again from one step.
 @Suite struct KVCacheGrowthTests {
     private let gemma = ArchConfig.gemma4_26B_A4B
     private let qwen = ArchConfig.qwen36_35B_A3B
@@ -33,33 +34,29 @@ import Testing
     @Test func aContextWithinOneStepIsAllocatedWhole() throws {
         let kv = try make(gemma, maxContext: 8_192, step: 16_384)
         #expect(kv.capacity(layer: try fullLayer(gemma)) == 8_192)
-        var drained = false
-        #expect(try !kv.ensureCapacity(for: 8_192) { drained = true })
-        #expect(!drained)
+        #expect(try !kv.ensureCapacity(for: 8_192))
     }
 
     @Test func growthAddsOneStepAndStopsAtMaxContext() throws {
         let kv = try make(qwen, maxContext: 40_000, step: 16_384)
         let full = try fullLayer(qwen)
-        var drains = 0
-        #expect(try !kv.ensureCapacity(for: 16_384) { drains += 1 })
-        #expect(try kv.ensureCapacity(for: 16_385) { drains += 1 })
+        #expect(try !kv.ensureCapacity(for: 16_384))
+        #expect(try kv.ensureCapacity(for: 16_385))
         #expect(kv.capacity(layer: full) == 16_385 + 16_384)
-        #expect(try kv.ensureCapacity(for: 33_000) { drains += 1 })
+        #expect(try kv.ensureCapacity(for: 33_000))
         #expect(kv.capacity(layer: full) == 40_000)
-        #expect(drains == 2)
     }
 
     /// Decode grows by the smaller headroom it passes, until the context is full.
     @Test func decodeHeadroomGrowsInSmallerStepsUpToMaxContext() throws {
         let kv = try make(qwen, maxContext: 40_000, step: 16_384)
         let full = try fullLayer(qwen)
-        #expect(try kv.ensureCapacity(for: 16_385, headroom: 8_192) {})
+        #expect(try kv.ensureCapacity(for: 16_385, headroom: 8_192))
         #expect(kv.capacity(layer: full) == 16_385 + 8_192)
-        #expect(try !kv.ensureCapacity(for: 24_577, headroom: 8_192) {})
-        #expect(try kv.ensureCapacity(for: 24_578, headroom: 8_192) {})
+        #expect(try !kv.ensureCapacity(for: 24_577, headroom: 8_192))
+        #expect(try kv.ensureCapacity(for: 24_578, headroom: 8_192))
         #expect(kv.capacity(layer: full) == 24_578 + 8_192)
-        #expect(try kv.ensureCapacity(for: 39_000, headroom: 8_192) {})
+        #expect(try kv.ensureCapacity(for: 39_000, headroom: 8_192))
         #expect(kv.capacity(layer: full) == 40_000)
     }
 
@@ -77,8 +74,14 @@ import Testing
             memset(v.buffer.contents() + v.offset, Int32((position + 97) % 251), stride)
             kv.advance()
         }
-        #expect(try kv.ensureCapacity(for: 65) {})
-        #expect(kv.keyBuffer(layer: layer, validTokenCount: 64).length == (65 + 64) * stride)
+        let before = kv.keyBuffer(layer: layer, validTokenCount: 64).contents()
+        #expect(try kv.ensureCapacity(for: 65))
+        let grown = kv.keyBuffer(layer: layer, validTokenCount: 64)
+        #expect(kv.capacity(layer: layer) == 65 + 64)
+        #expect(grown.length >= (65 + 64) * stride)
+        // Growing re-wraps the same pages: nothing is copied and no second
+        // buffer holds the rows.
+        #expect(grown.contents() == before)
         for position in 0..<64 {
             let k = kv.kSlot(layer: layer, position: position)
             let v = kv.vSlot(layer: layer, position: position)
@@ -92,11 +95,14 @@ import Testing
     @Test func resetShrinksBackToOneStep() throws {
         let kv = try make(qwen, maxContext: 4_096, step: 64)
         let full = try fullLayer(qwen)
-        _ = try kv.ensureCapacity(for: 1_000) {}
+        let original = kv.keyBuffer(layer: full, validTokenCount: 0).contents()
+        _ = try kv.ensureCapacity(for: 1_000)
         let grown = kv.diagnosticBufferBytes
         kv.reset()
         #expect(kv.capacity(layer: full) == 64)
         #expect(kv.diagnosticBufferBytes < grown)
+        // A fresh region: the grown one is unmapped once its wrapper goes.
+        #expect(kv.keyBuffer(layer: full, validTokenCount: 0).contents() != original)
     }
 }
 

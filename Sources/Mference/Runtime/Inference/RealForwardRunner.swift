@@ -5834,10 +5834,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
     /// Grows full-attention KV before anything is encoded at these positions.
-    /// An empty command buffer, waited on, drains the queue first: the copy
-    /// must not race a write still in flight.
+    /// Growing re-wraps the same pages, so nothing in flight is disturbed.
     private func ensureKVCapacity(for tokens: Int, headroom: Int? = nil) throws {
-        try kv?.ensureCapacity(for: tokens, headroom: headroom) { runSync { _ in } }
+        try kv?.ensureCapacity(for: tokens, headroom: headroom)
     }
 
     private func runSync(_ body: (MTLCommandBuffer) -> Void) {

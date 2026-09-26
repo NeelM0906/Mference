@@ -416,12 +416,17 @@ Gemma 4, Qwen 3.6 and Inkling-Small do not reserve their full-attention KV for
 `--max-context` up front. It starts at 16,384 tokens (a context of 16,384 or
 less is reserved whole); a prompt that does not fit grows it to the prompt
 plus 16,384 tokens, room for the answer, and an answer that outgrows that
-adds 8,192 tokens at a time, up to `--max-context`. A new conversation shrinks
-it back. Metal charges a KV buffer in full once it is bound, so a whole
-reservation costs memory a short chat never uses: on a 16 GiB M2 reserving
-262,144 instead of 128,000 took 2.6 GiB from the page cache holding routed
-experts and cut QAT decode from about 6.3 to 4.6 tok/s. `--kv-reserve`
-reserves the whole context at load instead; the other families always do.
+adds 8,192 tokens at a time, up to `--max-context`. Each layer reserves
+address space for the whole context and grows its Metal buffer over the same
+pages, so rows are never copied and the KV is never held twice; a new
+conversation starts again from 16,384 and returns the pages. Metal charges a
+KV buffer in full once it is bound, so a whole reservation costs memory a
+short chat never uses: on a 16 GiB M2 reserving 262,144 instead of 128,000
+took 2.6 GiB from the page cache holding routed experts and cut QAT decode
+from about 6.3 to 4.6 tok/s. `--kv-reserve` reserves the whole context at load
+instead; the other families always do. Pages the GPU writes into a growing
+KV count as wired system memory rather than in the server process's own
+footprint, so Activity Monitor shows the process smaller than its KV.
 
 Maple uses native BF16
 KV with layer-major chunked prefill; existing families use FP16 KV. On an 8 GB Mac,
