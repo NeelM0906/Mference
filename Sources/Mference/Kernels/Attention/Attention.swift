@@ -28,6 +28,7 @@ final class Attention {
     private let ctx: MetalContext
     private let gemmaQAT: GemmaQATAttention?
     private let psoGroupedVecFull: MTLComputePipelineState
+    private let psoGroupedVecFull256: MTLComputePipelineState
     private let psoPartial: MTLComputePipelineState
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
@@ -83,6 +84,11 @@ final class Attention {
                                                               headDim: 512,
                                                               numQHeads: 16,
                                                               numKVHeads: 2)
+        self.psoGroupedVecFull256 = try Self.specializedPipeline(context,
+                                                                 "attention_decode_full_grouped_vec256_partial",
+                                                                 headDim: 256,
+                                                                 numQHeads: 16,
+                                                                 numKVHeads: 2)
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
@@ -212,8 +218,9 @@ final class Attention {
     }
 
     /// `forceGroupedVector` selects the grouped full-attention kernel for the
-    /// Gemma 512/16/2 shape: one threadgroup per KV head and chunk, one SIMD
-    /// group per query head, bit-identical to the per-head kernel.
+    /// Gemma 512/16/2 and Qwen 3.6 256/16/2 shapes: one threadgroup per KV head
+    /// and chunk, one SIMD group per query head, bit-identical to the per-head
+    /// kernel.
     static func splitGeometry(headDim: UInt32 = 512,
                                      numQHeads: UInt32,
                                      numKVHeads: UInt32,
@@ -224,7 +231,7 @@ final class Attention {
         let qPerKV = Int(numQHeads / numKVHeads)
         let useSWAGQAPartial = preferGQASWA && qPerKV <= 2
         let useGroupedVector = forceGroupedVector && !preferGQASWA
-            && headDim == 512 && numQHeads == 16 && numKVHeads == 2
+            && (headDim == 512 || headDim == 256) && numQHeads == 16 && numKVHeads == 2
         let effectiveLength = Int(seqLen) - Int(kvStart)
         let baseChunks = Self.chunkCount(effLen: effectiveLength,
                                          preferGQASWA: useSWAGQAPartial)
@@ -427,7 +434,7 @@ final class Attention {
         let nChunks = geometry.numChunks
         let chunkLen = geometry.chunkLength
         let partialPSO = geometry.useFullGroupedVectorPartial
-            ? psoGroupedVecFull
+            ? (headDim == 256 ? psoGroupedVecFull256 : psoGroupedVecFull)
             : partialPipeline(headDim: headDim,
                               numQHeads: numQHeads,
                               numKVHeads: numKVHeads,
