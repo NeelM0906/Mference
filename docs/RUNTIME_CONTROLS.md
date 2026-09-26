@@ -216,6 +216,25 @@ The bounded local compression pass that replaced older turns with a rolling
 summary belonged to the removed Mac app; the CLI and server instead drop the
 oldest messages, and never silently discard the current user turn.
 
+### macOS interactivity mitigation
+
+Before the first Metal device is created, Mference defaults
+`AGX_RELAX_CDM_CTXSTORE_TIMEOUT` to `1`. This relaxes an AGX context-store
+deadline that can terminate a long prefill command buffer as
+`kIOGPUCommandBufferCallbackErrorImpactingInteractivity` on macOS 26. It is a
+mitigation, not a guarantee: upstream reports failures with the setting
+enabled too.
+
+Export `AGX_RELAX_CDM_CTXSTORE_TIMEOUT=0` before launching the CLI or server to
+restore stock driver behaviour; an explicit value is never overwritten. When a
+Gemma or Qwen 3.6 prefill command buffer still fails, the error names its
+phase label (chunk start and size, layer, phase), Metal status, error domain,
+code and description, including the IOGPU token, and no prompt or generated
+content. A failure reported only through the buffer's status, with no error
+object, is caught as well. A failed sampling command buffer also stops the
+request. The Gemma and Qwen 3.6 decode step keeps its existing handling: it
+prints a failed command buffer with the same detail and continues.
+
 ## Run an experiment
 
 1. Start from 4K context, the automatic expert-cache choice, prefill on, and RDADVISE off.

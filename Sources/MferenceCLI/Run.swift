@@ -75,7 +75,7 @@ public func run(args: Args,
             kvPoolPagesPerLayer: args.kvPoolPages,
             shadowPrefetchBudget: args.shadowBudget)
 
-        guard MTLCreateSystemDefaultDevice() != nil else {
+        guard MetalContext.makeSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
         }
         let context = try MetalContext()
@@ -398,7 +398,7 @@ private func runChat(args: Args,
             kvPoolPagesPerLayer: args.kvPoolPages,
             shadowPrefetchBudget: args.shadowBudget)
 
-        guard MTLCreateSystemDefaultDevice() != nil else {
+        guard MetalContext.makeSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
         }
         let context = try MetalContext()
