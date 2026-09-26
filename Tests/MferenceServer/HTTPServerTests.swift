@@ -407,6 +407,18 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// A burst of connects waits in the listen queue until the accept loop
+    /// drains it. With 16 slots a burst overflowed, which macOS 27 answers
+    /// with RST (drumih/turbo-fieldfare#151, #153); the queue now matches
+    /// NIO's own default of 128.
+    @Test func listenBacklogAbsorbsAConnectBurst() async throws {
+        let server = MferenceHTTPServer(modelID: "m", queueLimit: 1, backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let backlog = try await channel.getOption(ChannelOptions.backlog).get()
+        #expect(backlog >= 128)
+        try await server.shutdown()
+    }
+
     @Test(arguments: [false, true], [false, true])
     func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool, base: Bool) async throws {
         let server = MferenceHTTPServer(modelID: "custom-alias", queueLimit: 1,

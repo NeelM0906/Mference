@@ -15,6 +15,10 @@ enum ServerModelMode: Sendable {
 
 public actor MferenceHTTPServer {
     public static let maximumBodyBytes = 1_048_576
+    /// Connects the accept loop has not drained yet. Sixteen let a burst
+    /// overflow the queue, which macOS 27 answers with RST
+    /// (drumih/turbo-fieldfare#151, #153); 128 is NIO's own default.
+    static let listenBacklog: Int32 = 128
 
     private let group: MultiThreadedEventLoopGroup
     private let mode: ServerModelMode
@@ -52,7 +56,7 @@ public actor MferenceHTTPServer {
         let heartbeatInterval = self.heartbeatInterval
         let childChannels = self.childChannels
         let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.backlog, value: 16)
+            .serverChannelOption(ChannelOptions.backlog, value: Self.listenBacklog)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 childChannels.insert(channel)
