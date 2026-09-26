@@ -16,6 +16,12 @@ public struct RunResult: Equatable, Sendable {
 public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
+    var args = args
+    do {
+        args = try args.resolvingModelMaxContext()
+    } catch {
+        return errored(stderr, "\(error)", 1)
+    }
     if args.chat {
         return await runChat(args: args, stdout: stdout, stderr: stderr)
     }
@@ -73,9 +79,10 @@ public func run(args: Args,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
             kvPoolPagesPerLayer: args.kvPoolPages,
-            shadowPrefetchBudget: args.shadowBudget)
+            shadowPrefetchBudget: args.shadowBudget,
+            kvGrowthTokens: args.reserveFullKV ? nil : RuntimeConfiguration.defaultKVGrowthTokens)
 
-        guard MTLCreateSystemDefaultDevice() != nil else {
+        guard MetalContext.makeSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
         }
         let context = try MetalContext()
@@ -396,9 +403,10 @@ private func runChat(args: Args,
             kvPagedPolicy: kvPagedPolicy(for: args),
             kvTopKPages: args.kvTopKPages,
             kvPoolPagesPerLayer: args.kvPoolPages,
-            shadowPrefetchBudget: args.shadowBudget)
+            shadowPrefetchBudget: args.shadowBudget,
+            kvGrowthTokens: args.reserveFullKV ? nil : RuntimeConfiguration.defaultKVGrowthTokens)
 
-        guard MTLCreateSystemDefaultDevice() != nil else {
+        guard MetalContext.makeSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
         }
         let context = try MetalContext()

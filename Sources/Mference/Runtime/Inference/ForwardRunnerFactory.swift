@@ -22,6 +22,10 @@ public enum ForwardRunnerFactory {
                             context: MetalContext,
                             maxContext: Int,
                             runtimeConfiguration: RuntimeConfiguration = .production) throws -> ForwardRuntime {
+        let maximum = model.config.family.maximumContext
+        guard maxContext <= maximum else {
+            throw ContextLimitError(family: model.config.family, requested: maxContext, maximum: maximum)
+        }
         if model.config.family == .maple {
             return ForwardRuntime(producer: try MapleForwardRunner(
                 model: model, context: context, maxContext: maxContext,

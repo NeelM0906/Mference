@@ -172,6 +172,17 @@ nearly flat because attention occupied little of the token step. At longer
 contexts, where attention mattered more, GPU time in that phase fell by about
 28%.
 
+Full-attention decode later moved to a grouped kernel, ported from
+TurboFieldfare: one threadgroup per K/V head and chunk, one SIMD group per
+query head, so the eight heads sharing a K/V head no longer wait on a
+threadgroup barrier at every cached token. It keeps the per-head kernel's
+reduction order and fused multiply-adds, so its output is bit-identical. On an
+M2 each Gemma full-attention layer fell from 3.84 to 1.03 ms at 8K keys and
+from 15.4 to 4.02 ms at 32K. Gemma 4 QAT keeps MLX's three-pass arithmetic, but
+its score and value passes now group the heads the same way with each thread's
+work unchanged, so decode stays byte-identical to MLX; its full-attention layer
+fell from 5.52 to 1.46 ms at 16K keys and from 11.2 to 2.94 ms at 32K.
+
 Prefill needed a similar structural change. Replaying a prompt one token at a
 time left the runtime on a scalar path. Chunked prefill replaced that replay
 with bounded batches.
@@ -213,7 +224,11 @@ from 491.09 to 204.29 seconds, a 2.404x speedup without increasing memory use.
 We nearly threw this result away because the new reduction order changed the
 final logits slightly. Better checks showed the differences were harmless.
 
-TensorOps is now the Apple10 path. Earlier GPUs keep tiled attention.
+TensorOps is now selected by pipeline capability rather than GPU family. The
+pipeline also builds on Apple8 M2 under macOS 26, where it serves Gemma 4 and
+the full-attention layers of Gemma 4 QAT. There, QAT prefill fell from 37.94 to
+31.99 seconds at 3,015 tokens and from 131.66 to 92.16 seconds at 7,784 tokens.
+GPUs where the pipeline does not build keep tiled attention.
 
 ## Sampling removed repeated vocabulary scans
 

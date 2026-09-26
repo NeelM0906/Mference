@@ -21,7 +21,8 @@ class LauncherTests(unittest.TestCase):
 
     def test_missing_values_are_actionable(self):
         for flag in ("--library", "--model", "--server-port", "--webui-port",
-                     "--max-context", "--prompt-cache-mode", "--build-path", "--data-dir"):
+                     "--max-context", "--prompt-cache-mode", "--prefill-chunk", "--build-path",
+                     "--data-dir"):
             for suffix in ([], ["--dry-run"]):
                 with self.subTest(flag=flag, suffix=suffix):
                     result = self.run_launcher(flag, *suffix)
@@ -34,6 +35,7 @@ class LauncherTests(unittest.TestCase):
                      ("--webui-port", "text"), ("--max-context", "-1"),
                      ("--max-context", "999999999999999999999"),
                      ("--prompt-cache-mode", "unknown"),
+                     ("--prefill-chunk", "1000"), ("--prefill-chunk", "big"),
                      ("--server-port", "3000")]:
             with self.subTest(args=args):
                 result = self.run_launcher(*args, "--dry-run")
@@ -47,6 +49,14 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("build with spaces/release/MferenceServer", result.stdout)
         self.assertIn("(incremental)", result.stdout)
         self.assertNotIn("if missing", result.stdout)
+
+    def test_prefill_chunk_is_passed_to_the_server(self):
+        result = self.run_launcher("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--prefill-chunk auto", result.stdout)
+        result = self.run_launcher("--prefill-chunk", "1024", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--prefill-chunk 1024", result.stdout)
 
     def test_install_dry_run_does_not_download(self):
         result = self.run_launcher("--build-path", "/tmp/mference-test-build", "install", "qwen36", "--resume", "--dry-run")

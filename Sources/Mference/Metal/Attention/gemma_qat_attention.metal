@@ -177,3 +177,50 @@ kernel void gemma_qat_attention_values(
         if (row == 0) output[head * 512u + column + d] = half(sum[d]);
     }
 }
+
+// Grouped forms of the two full-attention passes above. Each SIMD group runs
+// exactly one source thread mapping, but the eight query heads that share a
+// K/V head now sit in one threadgroup, so they read each key or value row
+// together instead of eight times from separate threadgroups. Per-thread
+// arithmetic and reduction order are unchanged, so outputs are bit-identical.
+
+// Scores for length > 32, where the source uses one SIMD group per output row.
+kernel void gemma_qat_attention_scores_grouped(
+    device const half* query [[buffer(0)]], device const half* keys [[buffer(1)]],
+    device half* scores [[buffer(2)]], constant uint& length [[buffer(3)]],
+    uint2 grid [[threadgroup_position_in_grid]],
+    uint group [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint head = grid.x * 8u + group, position = grid.y;
+    float sum = 0.0f;
+    for (uint base = lane * 4u; base < 512u; base += 128u) {
+        for (uint j = 0; j < 4u; ++j) {
+            const uint d = base + j;
+            sum += float(query[head * 512u + d]) * float(keys[(position * 2u + head / 8u) * 512u + d]);
+        }
+    }
+    for (ushort delta = 16; delta > 0; delta >>= 1) sum += simd_shuffle_down(sum, delta);
+    if (lane == 0) scores[head * length + position] = half(sum);
+}
+
+// Values: SIMD group s handles query head 8 * kvHead + s for one 16-column slice.
+kernel void gemma_qat_attention_values_grouped(
+    device const half* probabilities [[buffer(0)]], device const half* values [[buffer(1)]],
+    device half* output [[buffer(2)]], constant uint& length [[buffer(3)]],
+    uint2 grid [[threadgroup_position_in_grid]],
+    uint group [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint head = grid.y * 8u + group;
+    const uint row = lane / 4u, column = (grid.x / 4u) * 64u + (grid.x % 4u) * 16u + (lane % 4u) * 4u;
+    float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint base = row * 4u; base < length; base += 32u) {
+        for (uint j = 0; j < 4u && base + j < length; ++j) {
+            const float probability = float(probabilities[head * length + base + j]);
+            for (uint d = 0; d < 4u; ++d) {
+                sum[d] += probability * float(values[((base + j) * 2u + head / 8u) * 512u + column + d]);
+            }
+        }
+    }
+    for (uint d = 0; d < 4u; ++d) {
+        for (ushort delta = 16; delta >= 4; delta >>= 1) sum[d] += simd_shuffle_down(sum[d], delta);
+        if (row == 0) output[head * 512u + column + d] = half(sum[d]);
+    }
+}

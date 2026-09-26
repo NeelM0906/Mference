@@ -204,7 +204,9 @@ public actor ServerModelSession: ServerLoadedModel {
     private let runner: any ContinuableLogitProducer
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
-    private let maxContext: Int
+    /// The context this session runs with, `--max-context` resolved for its
+    /// family; `GET /v1/models` reports it as `max_model_len`.
+    public nonisolated let maxContext: Int
     private let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
     private var promptCache = ServerPromptCache()
@@ -213,23 +215,34 @@ public actor ServerModelSession: ServerLoadedModel {
         family: ModelFamily,
         expertCacheSlots: Int,
         shadowPrefetchBudget: Int? = nil,
+        prefillChunkTokens: Int? = nil,
+        reserveFullKV: Bool = false,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> RuntimeConfiguration {
         RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
-            prefillChunkTokens: RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            prefillChunkTokens: prefillChunkTokens ?? RuntimeConfiguration.defaultServerPrefillChunkTokens(
                 for: family, physicalMemoryBytes: physicalMemoryBytes, environment: environment),
             forceLogitsHead: true,
-            shadowPrefetchBudget: shadowPrefetchBudget)
+            shadowPrefetchBudget: shadowPrefetchBudget,
+            kvGrowthTokens: reserveFullKV ? nil : RuntimeConfiguration.defaultKVGrowthTokens)
+    }
+
+    /// `--max-context max` (nil) is the model's native context.
+    static func resolvedMaxContext(_ requested: Int?, family: ModelFamily) -> Int {
+        requested ?? family.maximumContext
     }
 
     public static func load(modelDirectory: URL,
-                            maxContext: Int,
+                            maxContext requestedMaxContext: Int?,
                             promptCacheMode: ServerPromptCacheMode = .singlePrefix,
                             integrityPolicy: ModelIntegrityPolicy = .trustedReceiptWhenValid,
-                            shadowPrefetchBudget: Int? = nil) async throws -> ServerModelSession {
+                            shadowPrefetchBudget: Int? = nil,
+                            prefillChunkTokens: Int? = nil,
+                            reserveFullKV: Bool = false) async throws -> ServerModelSession {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+        let maxContext = resolvedMaxContext(requestedMaxContext, family: family)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw MFTokenizerError.missingToolTemplate
@@ -269,7 +282,9 @@ public actor ServerModelSession: ServerLoadedModel {
             configSlots = RuntimeConfiguration.allowedExpertCacheSlots.max()!
         }
         let runtime = runtimeConfiguration(family: family, expertCacheSlots: configSlots,
-                                           shadowPrefetchBudget: shadowPrefetchBudget)
+                                           shadowPrefetchBudget: shadowPrefetchBudget,
+                                           prefillChunkTokens: prefillChunkTokens,
+                                           reserveFullKV: reserveFullKV)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,

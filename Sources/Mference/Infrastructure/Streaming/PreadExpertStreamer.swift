@@ -180,13 +180,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             throw StreamerError.slotOutOfRange(slot)
         }
         let regionOffset = layout.expertOffset(layer: layer, expert: expert)
-        guard regionOffset + layout.expertStride <= layout.streamSize else {
+        guard regionOffset + layout.storedExpertStride <= layout.streamSize else {
             throw StreamerError.offsetOutOfRange(regionOffset)
         }
-        try readFull(
-            into: slotPointers[slot],
-            fileOffset: layout.streamOffset + regionOffset,
-            count: Int(layout.expertStride))
+        try readExpertRun(into: [slotPointers[slot]],
+                          fileOffset: layout.streamOffset + regionOffset)
         return (slotSlabBuffer, UInt64(slot * slotAllocationSize),
                 layout.expertStride)
     }
@@ -281,7 +279,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             try fileOffsetForExpert(plan.experts[index])
         }
         let runs = Self.coalescedReadRuns(offsets: missFileOffsets,
-                                          stride: layout.expertStride)
+                                          stride: layout.storedExpertStride)
         let errorLock = NSLock()
         nonisolated(unsafe) var firstError: Error?
         DispatchQueue.concurrentPerform(iterations: runs.count) { runIndex in
@@ -290,10 +288,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 self.slotPointers[plan.assignedSlots[plan.misses[$0]]]
             }
             do {
-                try self.readScattered(
-                    into: destinations,
-                    fileOffset: missFileOffsets[run[0]],
-                    strideBytes: Int(self.layout.expertStride))
+                try self.readExpertRun(into: destinations,
+                                       fileOffset: missFileOffsets[run[0]])
             } catch {
                 errorLock.lock()
                 if firstError == nil { firstError = error }
@@ -393,16 +389,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         let readable = reservation.indices.filter { fileOffsets[$0] != UInt64.max }
         let runs = Self.coalescedReadRuns(offsets: readable.map { fileOffsets[$0] },
-                                          stride: layout.expertStride)
+                                          stride: layout.storedExpertStride)
         let loadedLock = NSLock()
         nonisolated(unsafe) var loaded: [Int] = []
         DispatchQueue.concurrentPerform(iterations: runs.count) { runIndex in
             let entries = runs[runIndex].map { readable[$0] }
             let destinations = entries.map { self.slotPointers[reservation[$0].slot] }
-            guard (try? self.readScattered(
+            guard (try? self.readExpertRun(
                 into: destinations,
-                fileOffset: fileOffsets[entries[0]],
-                strideBytes: Int(self.layout.expertStride))) != nil else { return }
+                fileOffset: fileOffsets[entries[0]])) != nil else { return }
             loadedLock.lock()
             loaded.append(contentsOf: entries)
             loadedLock.unlock()
@@ -416,7 +411,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             speculativeInFlight[entry.slot] = false
         }
         cacheLock.unlock()
-        return UInt64(loaded.count) * layout.expertStride
+        return UInt64(loaded.count) * layout.storedExpertStride
     }
 
     /// Single point of mutation for slot ownership: keeps the CPU array and
@@ -479,7 +474,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         cacheLock.lock()
         for pair in pairs { speculativeInFlight[pair.slot] = true }
         cacheLock.unlock()
-        let expectedBytes = UInt64(pairs.count) * layout.expertStride
+        let expectedBytes = UInt64(pairs.count) * layout.storedExpertStride
         DispatchQueue.global(qos: qos).async { [self] in
             let loadedBytes = executeSpeculativeReservation(pairs)
             completion(loadedBytes == expectedBytes)
@@ -551,8 +546,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private func expertAdviceRanges(experts: [Int]) -> [(offset: UInt64, count: UInt64)] {
         experts.compactMap { expert in
             let regionOffset = layout.expertOffset(layer: 0, expert: expert)
-            guard regionOffset + layout.expertStride <= layout.streamSize else { return nil }
-            return (layout.streamOffset + regionOffset, layout.expertStride)
+            guard regionOffset + layout.storedExpertStride <= layout.streamSize else { return nil }
+            return (layout.streamOffset + regionOffset, layout.storedExpertStride)
         }
     }
 
@@ -578,10 +573,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     private func fileOffsetForExpert(_ expert: Int) throws -> UInt64 {
         let regionOffset = layout.expertOffset(layer: 0, expert: expert)
-        guard regionOffset + layout.expertStride <= layout.streamSize else {
+        guard regionOffset + layout.storedExpertStride <= layout.streamSize else {
             throw StreamerError.offsetOutOfRange(regionOffset)
         }
         return layout.streamOffset + regionOffset
+    }
+
+    /// Reads experts stored back to back from `fileOffset` into slots: whole
+    /// expanded experts, or through `ExpertStorage` when the file omits bytes.
+    private func readExpertRun(into destinations: [UnsafeMutableRawPointer],
+                               fileOffset: UInt64) throws {
+        if let storage = layout.storage {
+            try storage.readExperts(fd: fd, fileOffset: fileOffset, into: destinations)
+        } else {
+            try readScattered(into: destinations,
+                              fileOffset: fileOffset,
+                              strideBytes: Int(layout.expertStride))
+        }
     }
 
     /// Groups reads of `stride` bytes at `offsets` into runs that are exactly

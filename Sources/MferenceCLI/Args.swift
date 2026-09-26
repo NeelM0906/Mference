@@ -56,6 +56,9 @@ public struct Args: Equatable, Sendable {
     public var shadowBudget: Int?
     public var maxNew: Int
     public var maxContext: Int
+    /// `--max-context max`: `maxContext` becomes the model's native context in
+    /// `resolvingModelMaxContext()`.
+    public var usesModelMaxContext: Bool = false
     public var temperature: Float { didSet { omittedSamplingOptions.remove(.temperature) } }
     public var topK: Int? { didSet { omittedSamplingOptions.remove(.topK) } }
     public var topP: Float? { didSet { omittedSamplingOptions.remove(.topP) } }
@@ -86,6 +89,9 @@ public struct Args: Equatable, Sendable {
     public var kvTopKPages: Int
     /// Resident pool per full-attention layer in pages; nil = auto by RAM.
     public var kvPoolPages: Int?
+    /// `--kv-reserve`: reserve full-attention KV for the whole context up
+    /// front instead of growing it with the conversation.
+    public var reserveFullKV: Bool
 
     public init(model: String,
                 prompt: String? = nil,
@@ -116,6 +122,7 @@ public struct Args: Equatable, Sendable {
                 kvPaged: String = "auto",
                 kvTopKPages: Int = 60,
                 kvPoolPages: Int? = nil,
+                reserveFullKV: Bool = false,
                 reasoningEffort: QwenReasoningEffort? = nil) {
         self.reasoningEffort = reasoningEffort
         self.model = model
@@ -144,6 +151,7 @@ public struct Args: Equatable, Sendable {
         self.kvPaged = kvPaged
         self.kvTopKPages = kvTopKPages
         self.kvPoolPages = kvPoolPages
+        self.reserveFullKV = reserveFullKV
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
@@ -201,7 +209,8 @@ extension Args {
       --show-reasoning          Stream the thoughts of --chat turns to standard
                                 error; standard output stays the answer only.
       --max-new <int>           Generated-token limit (default 1024).
-      --max-context <int>       Context limit in tokens (default 4096).
+      --max-context <int|max>   Context limit in tokens (default 4096); max
+                                is the model's native context.
       --kv-paged <on|off|auto>  Paged KV cache with SSD spill + Quest sparse
                                 decode (Qwen 3.8; default auto: on above 32k
                                 context). Exact when everything fits RAM.
@@ -209,6 +218,11 @@ extension Args {
                                 (default 60 ≈ 3.8k attended tokens/layer).
       --kv-pool-pages <n|auto>  Resident pool per full-attention layer in
                                 pages (default auto: sized from RAM).
+      --kv-reserve              Reserve full-attention KV for the whole
+                                context up front. Without it, Gemma 4,
+                                Qwen 3.6 and Inkling start at 16384 tokens; a
+                                longer prompt grows it to the prompt plus
+                                16384, a longer answer by 8192 at a time.
       --temperature <float>     Sampling temperature (default \(samplingDefaults.temperature); 0 = greedy).
       --top-k <int>             Top-k truncation, 1...256 (default \(samplingDefaults.topK ?? 0); 0 = off).
       --top-p <float>           Nucleus truncation (default \(samplingDefaults.topP ?? 1)).
@@ -273,6 +287,7 @@ extension Args {
         var shadowBudget: Int?
         var maxNew = 1_024
         var maxContext = 4096
+        var usesModelMaxContext = false
         // Starting values only: each flag below overwrites its own, so an
         // explicit flag always wins over the shared sampling defaults.
         var providedSamplingOptions: Set<SamplingOption> = []
@@ -295,6 +310,7 @@ extension Args {
         var kvPaged = "auto"
         var kvTopKPages = 60
         var kvPoolPages: Int? = nil
+        var reserveFullKV = false
         var reasoningEffort: QwenReasoningEffort?
 
         var index = 0
@@ -308,6 +324,9 @@ extension Args {
                 index += 1
             case "--flash-head":
                 flashHead = true
+                index += 1
+            case "--kv-reserve":
+                reserveFullKV = true
                 index += 1
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
@@ -335,10 +354,15 @@ extension Args {
                 maxNew = parsed
             case "--max-context":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value), parsed > 0 else {
-                    throw ArgsError.invalidValue(flag: flag, value: value)
+                if value == "max" {
+                    usesModelMaxContext = true
+                } else {
+                    guard let parsed = Int(value), parsed > 0 else {
+                        throw ArgsError.invalidValue(flag: flag, value: value)
+                    }
+                    maxContext = parsed
+                    usesModelMaxContext = false
                 }
-                maxContext = parsed
             case "--kv-paged":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard ["on", "off", "auto"].contains(value) else {
@@ -533,9 +557,21 @@ extension Args {
                     kvPaged: kvPaged,
                     kvTopKPages: kvTopKPages,
                     kvPoolPages: kvPoolPages,
+                    reserveFullKV: reserveFullKV,
                     reasoningEffort: reasoningEffort)
         result.omittedSamplingOptions = Set(SamplingOption.allCases).subtracting(providedSamplingOptions)
+        result.usesModelMaxContext = usesModelMaxContext
         return result
+    }
+
+    /// Replaces `--max-context max` with the installed model's native context.
+    public func resolvingModelMaxContext() throws -> Args {
+        guard usesModelMaxContext else { return self }
+        var resolved = self
+        resolved.maxContext = try ManifestReader.peekFamily(
+            directoryURL: URL(fileURLWithPath: model)).maximumContext
+        resolved.usesModelMaxContext = false
+        return resolved
     }
 
     /// Resolve after tokenizer/asset validation, before runner/head selection.

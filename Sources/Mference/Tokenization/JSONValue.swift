@@ -116,8 +116,9 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
     /// and run the result through normalization again. An array `type` takes its
     /// first non-null member; a type-less node defaults to `object` when it
     /// carries `properties`, otherwise `string`. Every nested `properties` value
-    /// and `items` schema is normalized recursively. Non-object values are
-    /// returned unchanged.
+    /// and `items` schema is normalized recursively, and an object-typed
+    /// property without `properties` gets an empty mapping. Non-object values
+    /// are returned unchanged.
     ///
     /// The ChatML dialect renders `tool | tojson`, so it must not go through
     /// this: unions there are carried to the model intact.
@@ -144,8 +145,7 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
         }
 
         if case .object(let properties)? = object["properties"] {
-            object["properties"] = .object(
-                properties.mapValues { $0.gemmaSchemaNormalized() })
+            object["properties"] = .object(properties.mapValues(Self.gemmaNormalizedProperty))
         }
         switch object["items"] {
         case .object?:
@@ -159,6 +159,22 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
     }
 
     private static let unionKeywords = ["anyOf", "oneOf", "allOf"]
+
+    /// A property value, which the template renders through
+    /// `format_parameters`. For an object property without `properties` that
+    /// macro takes its other branch and renders the property's own keys
+    /// (`additionalProperties`, `default`, …) as if they were parameters, so
+    /// the model is shown parameters that do not exist. An explicit empty
+    /// mapping selects the ordinary branch, which renders `properties:{}`
+    /// exactly as a property holding only standard keys already did.
+    private static func gemmaNormalizedProperty(_ schema: JSONValue) -> JSONValue {
+        let normalized = schema.gemmaSchemaNormalized()
+        guard case .object(var object) = normalized,
+              object["type"] == .string("object"),
+              object["properties"] == nil else { return normalized }
+        object["properties"] = .object([:])
+        return .object(object)
+    }
 
     /// Picks the single branch of an `anyOf`/`oneOf` that the template renders.
     /// A `{"type":"null"}` branch is taken only when no other branch resolves:
