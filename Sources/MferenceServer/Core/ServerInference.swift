@@ -403,7 +403,7 @@ public actor ServerModelSession: ServerLoadedModel {
                     let available = capable.gemmaRecoverablePrefix(upTo: limit)
                     if available == 0 { recoveryOutcome = "state_unavailable" }
                     return available
-                } }) {
+                } }).fitting(maxContext: maxContext) {
             case .miss:
                 promptCache.invalidate()
                 effectivePromptIDs = promptIDs
