@@ -216,11 +216,14 @@ public struct ServerLibraryIndex: Equatable, Sendable {
         skipped.first { $0.modelID == modelID }?.reason
     }
 
-    public var modelList: OpenAIModelList {
+    /// Each entry's context comes from its discovered family through the
+    /// resolution `ServerModelSession.load` applies, so nothing is loaded.
+    public func modelList(maxContext: Int?) -> OpenAIModelList {
         OpenAIModelList(
             object: "list",
             data: entries.map {
-                .init(id: $0.modelID, object: "model", created: 0, ownedBy: "mference")
+                .init(id: $0.modelID, object: "model", created: 0, ownedBy: "mference",
+                      maxModelLen: ServerModelSession.resolvedMaxContext(maxContext, family: $0.family))
             })
     }
 

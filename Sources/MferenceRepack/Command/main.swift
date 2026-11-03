@@ -7,11 +7,18 @@ Usage:
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
+  MferenceRepack --implicit-qat-biases --input-gturbo <gemma4qat.gturbo> --output <new.gturbo>
   MferenceRepack --help
 
 --attach-mtp appends the Qwen 3.8 MTP draft-layer tensors from a local BF16
 safetensors shard to an existing install (projections quantized to INT4
 affine group-64), enabling speculative decoding.
+
+--implicit-qat-biases writes a copy of a Gemma 4 QAT install whose routed
+experts are stored without their bias arrays (each is exactly -8 x scale; the
+runtime rebuilds them after every read), about 10 % fewer bytes per expert
+read. The input is only read; the output must not exist yet. Every bias group
+and every input file hash is checked before the output is finished.
 
 --skip-mtp drops the source checkpoint's own mtp.* draft-layer group instead
 of carrying it. Vision towers are always skipped. Either way the decision is
@@ -77,6 +84,7 @@ private struct Arguments {
     var resume = false
     var discardPartial = false
     var verifyInstall = false
+    var implicitQATBiases = false
     var attachMTP: String?
     var inputGTurbo: String?
     var baseURL: URL?
@@ -108,6 +116,9 @@ private struct Arguments {
                 index += 1
             case "--verify-install":
                 parsed.verifyInstall = true
+                index += 1
+            case "--implicit-qat-biases":
+                parsed.implicitQATBiases = true
                 index += 1
             case "--attach-mtp":
                 guard index + 1 < values.count else {
@@ -162,6 +173,17 @@ private struct Arguments {
             guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.verifyInstall,
                   !parsed.skipMTP else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
+            }
+            return parsed
+        }
+        if parsed.implicitQATBiases {
+            guard parsed.inputGTurbo != nil, parsed.output != nil else {
+                throw ParseError.missingRequired("--input-gturbo and --output")
+            }
+            guard parsed.attachMTP == nil, !parsed.verifyInstall, !parsed.overwrite,
+                  !parsed.resume, !parsed.dryRun, !parsed.skipMTP, parsed.baseURL == nil else {
+                throw ParseError.invalidMode(
+                    "--implicit-qat-biases only accepts --input-gturbo and --output")
             }
             return parsed
         }
@@ -251,6 +273,22 @@ private func run(_ values: [String]) async -> Int32 {
             return 0
         } catch {
             printError("attach-mtp failed: \(error)")
+            return 1
+        }
+    }
+
+    if arguments.implicitQATBiases, let input = arguments.inputGTurbo, let output = arguments.output {
+        do {
+            let result = try QATImpliedBiasConverter.run(
+                inputGTurbo: input, outputGTurbo: output,
+                progress: { print($0) })
+            print("Converted \(result.layers) layers: expert \(result.expertStride) -> "
+                + "\(result.storedExpertStride) bytes; routed experts \(result.routedBytesBefore) -> "
+                + "\(result.routedBytesAfter) bytes; \(result.groupsChecked) bias groups checked")
+            print("Output: \(output)")
+            return 0
+        } catch {
+            printError("implicit-qat-biases failed: \(error)")
             return 1
         }
     }

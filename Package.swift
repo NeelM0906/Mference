@@ -26,6 +26,7 @@ let package = Package(
         .target(
             name: "Mference",
             dependencies: [
+                .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/Mference",

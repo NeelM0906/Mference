@@ -73,8 +73,11 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
     /// Bytes per direct read while filling a `.copied` layer.
     static let copyChunkBytes = 64 << 20
 
-    public init(layout: StreamLayout, device: MTLDevice, strategy: Strategy = .mapped) throws {
+    public init(layout: StreamLayout, device: MTLDevice, strategy requested: Strategy = .mapped) throws {
         self.layout = layout
+        // A mapping cannot hold bytes the file omits, so compact storage is
+        // always expanded into a copy.
+        let strategy = layout.storage == nil ? requested : .copied
         self.strategy = strategy
         let pageSize = Int(getpagesize())
 
@@ -95,11 +98,13 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
         }
         for expert in 0..<layout.expertsPerLayer {
             let regionOffset = layout.expertOffset(layer: 0, expert: expert)
-            guard regionOffset + layout.expertStride <= layout.streamSize else {
+            guard regionOffset + layout.storedExpertStride <= layout.streamSize else {
                 throw StreamerError.offsetOutOfRange(regionOffset)
             }
         }
-        let uniform = (0..<layout.expertsPerLayer).allSatisfy {
+        // An expanded copy places expert `e` at `e * expertStride` whatever
+        // the file order was.
+        let uniform = layout.storage != nil || (0..<layout.expertsPerLayer).allSatisfy {
             layout.expertOffset(layer: 0, expert: $0) == UInt64($0) * layout.expertStride
         }
         guard layout.expertsPerLayer <= Int(Int16.max),
@@ -114,22 +119,33 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
 
         switch strategy {
         case .copied:
-            let length = ((Int(layout.streamSize) + pageSize - 1) / pageSize) * pageSize
+            let expandedSize = layout.storage == nil
+                ? Int(layout.streamSize)
+                : layout.expertsPerLayer * Int(layout.expertStride)
+            let length = ((expandedSize + pageSize - 1) / pageSize) * pageSize
             guard length <= device.maxBufferLength,
                   let buffer = device.makeBuffer(length: max(length, pageSize),
                                                  options: .storageModeShared) else {
                 throw StreamerError.allocFailed(errno: ENOMEM)
             }
-            try Self.readRegion(fd: fd, fileOffset: layout.streamOffset,
-                                size: Int(layout.streamSize), into: buffer.contents())
+            let memoryOffset: (Int) -> UInt64
+            if let storage = layout.storage {
+                try Self.readExpanded(fd: fd, layout: layout, storage: storage,
+                                      into: buffer.contents())
+                memoryOffset = { UInt64($0) * layout.expertStride }
+            } else {
+                try Self.readRegion(fd: fd, fileOffset: layout.streamOffset,
+                                    size: Int(layout.streamSize), into: buffer.contents())
+                memoryOffset = { layout.expertOffset(layer: 0, expert: $0) }
+            }
             self.mapping = nil
             self.sliceShift = 0
             self.expertViews = (0..<layout.expertsPerLayer).map {
-                (buffer: buffer, offset: layout.expertOffset(layer: 0, expert: $0))
+                (buffer: buffer, offset: memoryOffset($0))
             }
             self.slabView = uniform && layout.expertsPerLayer > 0
                 ? SlabView(buffer: buffer,
-                           baseOffset: Int(layout.expertOffset(layer: 0, expert: 0)),
+                           baseOffset: Int(memoryOffset(0)),
                            expertStride: Int(layout.expertStride))
                 : nil
 
@@ -222,6 +238,34 @@ public final class ResidentExpertStreamer: @unchecked Sendable {
         if failure != 0 { throw StreamerError.preadFailed(errno: failure) }
     }
 
+
+    /// Direct reads of every stored expert, each expanded to
+    /// `expert * expertStride` in `destination` with its biases rebuilt.
+    private static func readExpanded(fd: Int32, layout: StreamLayout, storage: ExpertStorage,
+                                     into destination: UnsafeMutableRawPointer) throws {
+        _ = fcntl(fd, F_NOCACHE, 1)
+        let experts = layout.expertsPerLayer
+        let workers = max(1, min(4, experts))
+        nonisolated(unsafe) var failure: Error?
+        let lock = NSLock()
+        nonisolated(unsafe) let base = destination
+        DispatchQueue.concurrentPerform(iterations: workers) { worker in
+            var expert = worker
+            while expert < experts {
+                do {
+                    try storage.readExperts(
+                        fd: fd,
+                        fileOffset: layout.streamOffset + layout.expertOffset(layer: 0, expert: expert),
+                        into: [base.advanced(by: expert * Int(layout.expertStride))])
+                } catch {
+                    lock.lock(); failure = error; lock.unlock()
+                    return
+                }
+                expert += workers
+            }
+        }
+        if let failure { throw failure }
+    }
 
     /// A direct expert-indexed slab for a resident GPU path (Flash-Next's
     /// checkpoint-specialized routing): the layer buffer bound at offset 0, the

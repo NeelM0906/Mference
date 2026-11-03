@@ -91,7 +91,7 @@ extension Model {
         try ensureLayerOpened(layer)
         switch expertBackend(layer) {
         case .pread(let streamer):
-            return UInt64(missCount) * streamer.layout.expertStride
+            return UInt64(missCount) * streamer.layout.storedExpertStride
         case .resident:
             return 0
         }

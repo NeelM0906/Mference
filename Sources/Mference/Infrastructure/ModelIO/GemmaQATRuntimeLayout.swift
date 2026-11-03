@@ -96,8 +96,17 @@ extension GemmaQATCheckpoint {
               layout.expertsPerLayer == arch.numExperts,
               layout.expertStride == manifest.expertStride,
               layout.expertStride > 0, layout.expertStride <= UInt32.max,
-              layout.expertStride.isMultiple(of: UInt64(getpagesize())) else {
+              layout.expertStride.isMultiple(of: UInt64(getpagesize())),
+              layout.storedExpertStride > 0,
+              layout.storedExpertStride.isMultiple(of: UInt64(getpagesize())) else {
             throw invalid("expert dimensions or stride disagree with manifest")
+        }
+        // The manifest and the layout must both say whether biases are implied;
+        // neither may be inferred from the other or from missing keys.
+        let impliedBiases = manifest.quant?.routedExpert.biasType.lowercased()
+            == GemmaQATCheckpoint.impliedRoutedBiasType.lowercased()
+        guard impliedBiases == (layout.storage != nil) else {
+            throw invalid("manifest bias type and layout expert storage disagree")
         }
         let roles = Set(["gate", "gate_scales", "gate_biases", "up", "up_scales",
                          "up_biases", "down", "down_scales", "down_biases"])
@@ -105,14 +114,14 @@ extension GemmaQATCheckpoint {
             let file = "packed_experts/" + layer.file
             guard layer.layer == layerID, layer.experts.count == arch.numExperts,
                   URL(fileURLWithPath: layer.file).lastPathComponent == layer.file,
-                  manifest.files[file]?.size == layout.expertStride * UInt64(arch.numExperts) else {
+                  manifest.files[file]?.size == layout.storedExpertStride * UInt64(arch.numExperts) else {
                 throw invalid("invalid expert layer \(layerID)")
             }
             var physicalOffsets = Set<UInt64>()
             for (expertID, expert) in layer.experts.enumerated() {
-                guard expert.expert == expertID, expert.size == layout.expertStride,
-                      expert.offset.isMultiple(of: layout.expertStride),
-                      expert.offset / layout.expertStride < UInt64(arch.numExperts),
+                guard expert.expert == expertID, expert.size == layout.storedExpertStride,
+                      expert.offset.isMultiple(of: layout.storedExpertStride),
+                      expert.offset / layout.storedExpertStride < UInt64(arch.numExperts),
                       physicalOffsets.insert(expert.offset).inserted,
                       Set(expert.subTensors.keys) == roles,
                       expert.subTensors == layer.experts[0].subTensors else {
@@ -134,8 +143,8 @@ extension GemmaQATCheckpoint {
                               packed ? entry.bits == 4 : entry.bits == nil,
                               entry.size == (packed ? elements / 2 : elements / 32 * 2),
                               entry.offset.isMultiple(of: alignment),
-                              entry.offset <= expert.size,
-                              entry.size <= expert.size - entry.offset else {
+                              entry.offset <= layout.expertStride,
+                              entry.size <= layout.expertStride - entry.offset else {
                             throw invalid("invalid \(name) in expert \(layerID)/\(expertID)")
                         }
                         expertSpans.append((entry.offset, entry.offset + entry.size))

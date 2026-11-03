@@ -37,9 +37,9 @@ import Testing
     @Test func serverPrefillChunkGrowsForGemmaOnSixteenGiBHosts() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib, environment: [:]) == 1024)
+            for: .gemma4, physicalMemoryBytes: 16 * gib, environment: [:]) == 2048)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 24 * gib, environment: [:]) == 1024)
+            for: .gemma4, physicalMemoryBytes: 24 * gib, environment: [:]) == 2048)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .gemma4, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
     }
@@ -72,7 +72,7 @@ import Testing
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "512"]) == 512)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .gemma4, physicalMemoryBytes: 16 * gib,
-            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "1000"]) == 1024)
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "1000"]) == 2048)
     }
 
     @Test func shadowPrefetchBudgetIsUnsetUnlessRequested() {

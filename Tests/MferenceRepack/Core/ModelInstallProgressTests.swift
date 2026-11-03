@@ -15,6 +15,8 @@ import Testing
         #expect(ModelInstallProgress.planning(downloadBytes: 5_000_000_000,
             outputBytes: 1_400_000_000).statusLine == "Plan: 5.00 GB source payload; 1.40 GB installed output.")
         #expect(ModelInstallProgress.hashingOutput("model_weights.bin").statusLine == "Verifying output: model_weights.bin")
+        #expect(ModelInstallProgress.compactingExperts("packed_experts/layer_00.bin").statusLine
+                == "Storing experts without implied biases: packed_experts/layer_00.bin")
         #expect(ModelInstallProgress.finalizing.statusLine == "Finalizing verified install.")
     }
 }
