@@ -71,4 +71,55 @@ struct FlintToolCallParserTests {
             "count": .integer(123),
         ]))
     }
+
+    @Test func stringAlternativesWinOverJSONLookingText() throws {
+        let schema = JSONValue.object([
+            "type": .string("object"),
+            "properties": .object([
+                "arrayUnion": .object([
+                    "type": .array([.string("integer"), .string("string")]),
+                ]),
+                "anyUnion": .object([
+                    "anyOf": .array([
+                        .object(["type": .string("number")]),
+                        .object(["type": .string("string")]),
+                    ]),
+                ]),
+                "allOfString": .object([
+                    "allOf": .array([
+                        .object(["type": .string("string")]),
+                        .object(["minLength": .integer(1)]),
+                    ]),
+                ]),
+            ]),
+        ])
+        let call = try FlintToolCallParser().parse(
+            "lookup<arg_key>arrayUnion</arg_key><arg_value>1.50</arg_value>"
+                + "<arg_key>anyUnion</arg_key><arg_value>1.50</arg_value>"
+                + "<arg_key>allOfString</arg_key><arg_value>007</arg_value>",
+            allowedTools: ["lookup"],
+            toolSchemas: ["lookup": schema],
+            id: "call_1")
+        #expect(call.arguments == .object([
+            "arrayUnion": .string("1.50"),
+            "anyUnion": .string("1.50"),
+            "allOfString": .string("007"),
+        ]))
+    }
+
+    @Test func schemaPropertyNamesRemainPlainDictionaryKeys() throws {
+        let key = #"$ref[/properties]"#
+        let schema = JSONValue.object([
+            "type": .string("object"),
+            "properties": .object([
+                key: .object(["type": .string("string")]),
+            ]),
+        ])
+        let call = try FlintToolCallParser().parse(
+            "lookup<arg_key>\(key)</arg_key><arg_value>123</arg_value>",
+            allowedTools: ["lookup"],
+            toolSchemas: ["lookup": schema],
+            id: "call_1")
+        #expect(call.arguments == .object([key: .string("123")]))
+    }
 }

@@ -108,25 +108,56 @@ public struct FlintToolCallParser: Sendable {
               let property = properties[key] else {
             return nil
         }
-        if case .string(let type)? = property.objectValue?["type"] {
+        let object = property.objectValue ?? [:]
+        if let type = preferredType(object["type"]) {
             return type
         }
-        if case .array(let members)? = property.objectValue?["type"] {
-            for case .string(let type) in members where type != "null" {
-                return type
+
+        for keyword in ["oneOf", "anyOf"] {
+            if case .array(let branches)? = object[keyword] {
+                let types = branches.compactMap {
+                    declaredType(
+                        in: .object(["properties": .object([key: $0])]),
+                        key: key)
+                }
+                if let type = preferredType(types) { return type }
             }
         }
-        for keyword in ["oneOf", "anyOf", "allOf"] {
-            if case .array(let branches)? = property.objectValue?[keyword] {
-                for branch in branches {
-                    if let type = declaredType(
-                        in: .object(["properties": .object([key: branch])]),
-                        key: key) {
-                        return type
-                    }
-                }
+
+        // allOf is an intersection: only return a type every branch agrees on.
+        if case .array(let branches)? = object["allOf"] {
+            let types = branches.compactMap {
+                declaredType(
+                    in: .object(["properties": .object([key: $0])]),
+                    key: key)
+            }
+            let concrete = types.filter { $0 != "null" }
+            if let first = concrete.first,
+               concrete.allSatisfy({ $0 == first }) {
+                return first
             }
         }
         return nil
+    }
+
+    private func preferredType(_ value: JSONValue?) -> String? {
+        switch value {
+        case .string(let type)?:
+            return type
+        case .array(let members)?:
+            let types = members.compactMap { member -> String? in
+                guard case .string(let type) = member, type != "null" else {
+                    return nil
+                }
+                return type
+            }
+            return preferredType(types)
+        default:
+            return nil
+        }
+    }
+
+    private func preferredType(_ types: [String]) -> String? {
+        types.contains("string") ? "string" : types.first
     }
 }
