@@ -34,6 +34,8 @@ public struct FlintToolCallParser: Sendable {
 
         var arguments: [String: JSONValue] = [:]
         while !body.isEmpty {
+            trim(&body)
+            if body.isEmpty { break }
             try consume("<arg_key>", from: &body)
             guard let keyEnd = body.range(of: "</arg_key>") else {
                 throw ToolCallParserError.malformed
@@ -48,6 +50,13 @@ public struct FlintToolCallParser: Sendable {
                 throw ToolCallParserError.malformed
             }
             let rawValue = String(body[..<valueEnd.lowerBound])
+            guard !rawValue.contains("</arg_key>"),
+                  !rawValue.contains("</arg_value>"),
+                  !rawValue.contains("</tool_call>"),
+                  !rawValue.contains("<tool_response>"),
+                  !rawValue.contains("</tool_response>") else {
+                throw ToolCallParserError.malformed
+            }
             arguments[key] = try parsedValue(rawValue)
             body = body[valueEnd.upperBound...]
         }

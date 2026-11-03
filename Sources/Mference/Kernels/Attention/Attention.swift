@@ -317,6 +317,8 @@ final class Attention {
         precondition(selTokens > 0, "paged attention requires at least one selected token")
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
+        precondition(sinks != nil || sinksOffset == 0,
+                     "a sink offset requires a sink buffer")
         let sc = scale ?? Self.defaultScale(headDim: headDim)
         let geometry = Self.splitGeometry(numQHeads: numQHeads,
                                           numKVHeads: numKVHeads,

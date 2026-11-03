@@ -180,6 +180,10 @@ final class FlintPagedKVRuntime {
             let base = ordinal * g.pagesPerLayer
             var entry = selections[ordinal].pages.count
             for page in (tailPage + 1)...lastPage {
+                guard entry < g.pagesPerLayer else {
+                    throw KVPageStoreError.poolExhausted(
+                        layer: layerIndex, pageIndex: page)
+                }
                 let slot = try store.kSlot(layer: layerIndex,
                                            position: page * KVPageGeometry.tokensPerPage)
                 let slotIndex = slot.offset / g.kPageBytes
@@ -195,7 +199,8 @@ final class FlintPagedKVRuntime {
     /// a verify round at `position` — verify position `i` attends
     /// `verifyBaseTokens + (position % 64) + i + 1` logical tokens.
     func verifyBaseTokens(ordinal: Int) -> Int {
-        64 * max(0, selections[ordinal].pages.count - 1)
+        KVPageGeometry.tokensPerPage
+            * max(0, selections[ordinal].pages.count - 1)
     }
 
     /// Quest min/max summaries for pages sealed by earlier tokens, encoded

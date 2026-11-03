@@ -36,6 +36,9 @@ final class FlintPrefillRouter {
                 routingWeights: MTLBuffer, routingWeightsOffset: Int = 0,
                 tokens: Int) {
         precondition(tokens > 0)
+        precondition(tokens <= logits.length
+            / MemoryLayout<Float>.stride / Self.expertCount,
+            "Flint prefill router token count exceeds its logits buffer")
         var experts = UInt32(Self.expertCount)
         var dimension = UInt32(Self.hiddenSize)
         var stride = UInt32(hiddenStrideElements)

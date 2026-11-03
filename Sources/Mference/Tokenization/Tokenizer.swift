@@ -791,13 +791,26 @@ public struct MFTokenizer: @unchecked Sendable {
             let value = arguments[key]!
             let encoded: String
             if case .string(let string) = value {
+                try validateFlintToolArgument(string)
                 encoded = string
             } else {
                 encoded = try value.encoded()
+                try validateFlintToolArgument(encoded)
             }
             rendered += "<arg_key>\(key)</arg_key><arg_value>\(encoded)</arg_value>"
         }
         return rendered + "</tool_call>"
+    }
+
+    private static func validateFlintToolArgument(_ value: String) throws {
+        let reserved = [
+            "</arg_key>", "</arg_value>", "</tool_call>",
+            "<tool_response>", "</tool_response>",
+        ]
+        guard !reserved.contains(where: value.contains) else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "Flint tool arguments contain a structural delimiter")
+        }
     }
 
     /// Text-only, no-tool rendering byte-matched to the shipped Jinja:

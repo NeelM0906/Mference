@@ -301,7 +301,7 @@ public final class FlintForwardRunner: ContinuableLogitProducer,
             batchPrefillScratch = scratch
         }
 
-        let chunkTokens = min(capacity, config.chunkTokens)
+        let chunkTokens = max(1, min(capacity, config.chunkTokens))
         var cursor = 0
         while cursor < tokens.count {
             try Task.checkCancellation()

@@ -751,9 +751,11 @@ struct ArchInfo: Sendable, Equatable {
             }
             return value
         }
-        guard denseInts == Array(0..<denseInts.count) else {
+        guard denseInts == Array(0..<denseInts.count),
+              denseInts.allSatisfy({ $0 < numLayers }) else {
             throw RepackError.configJsonInvalid(
-                path: configPath, detail: "Flint requires a leading dense-FFN prefix")
+                path: configPath,
+                detail: "Flint requires a leading in-range dense-FFN prefix")
         }
 
         try require("tie_word_embeddings", equals: false)

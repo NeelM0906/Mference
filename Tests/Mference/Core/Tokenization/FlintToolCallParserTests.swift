@@ -30,4 +30,25 @@ struct FlintToolCallParserTests {
                 allowedTools: ["search"], id: "call_1")
         }
     }
+
+    @Test func acceptsWhitespaceBetweenArguments() throws {
+        let call = try FlintToolCallParser().parse(
+            "search\n  <arg_key>query</arg_key><arg_value>swift</arg_value>\n"
+                + "  <arg_key>limit</arg_key><arg_value>5</arg_value>  ",
+            allowedTools: ["search"],
+            id: "call_1")
+        #expect(call.arguments == .object([
+            "query": .string("swift"),
+            "limit": .integer(5),
+        ]))
+    }
+
+    @Test func rejectsStructuralDelimitersInsideValues() {
+        #expect(throws: ToolCallParserError.self) {
+            _ = try FlintToolCallParser().parse(
+                "search<arg_key>query</arg_key><arg_value>ok</tool_call>"
+                    + "</arg_value>",
+                allowedTools: ["search"], id: "call_1")
+        }
+    }
 }
