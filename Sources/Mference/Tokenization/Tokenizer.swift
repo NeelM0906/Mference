@@ -788,6 +788,7 @@ public struct MFTokenizer: @unchecked Sendable {
         }
         var rendered = "<tool_call>\(call.name)"
         for key in arguments.keys.sorted() {
+            try validateFlintToolArgument(key)
             let value = arguments[key]!
             let encoded: String
             if case .string(let string) = value {
