@@ -24,7 +24,9 @@ extension RemotePayloadCopyTests {
             #expect(quant[slot]?["weightBits"] as? Int == 4)
             #expect(quant[slot]?["groupSize"] as? Int == 32)
             #expect(quant[slot]?["scaleType"] as? String == "BF16")
-            #expect(quant[slot]?["biasType"] as? String == "BF16")
+            // Routed experts are stored without their -8 * scale biases.
+            #expect(quant[slot]?["biasType"] as? String
+                    == (slot == "routedExpert" ? QATImpliedBiasConverter.impliedBiasType : "BF16"))
         }
         #expect(quant["router"]?["weightBits"] as? Int == 16)
         #expect(quant["router"]?["scheme"] as? String == "unquantized")
@@ -236,6 +238,18 @@ private func qatExpectEveryCopiedTensor(source: URL, output: URL) throws {
         }
     }
     let layout = try qatJSON(output.appendingPathComponent("packed_experts/layout.json"))
+    // Experts are stored as segments of the expanded expert; biases are implied.
+    let storage = try #require(layout["expertStorage"] as? [String: Any])
+    #expect(storage["format"] as? String == QATImpliedBiasConverter.storageFormat)
+    let segments = try #require(storage["segments"] as? [[String: Int]])
+    let implied = Set(try #require(storage["impliedBiases"] as? [[String: String]]).compactMap { $0["biases"] })
+    #expect(implied == ["gate_biases", "up_biases", "down_biases"])
+    func storedOffset(_ memory: Int, _ size: Int) throws -> Int {
+        let segment = try #require(segments.first {
+            memory >= $0["memoryOffset"]! && memory + size <= $0["memoryOffset"]! + $0["size"]!
+        })
+        return segment["storedOffset"]! + memory - segment["memoryOffset"]!
+    }
     for layer in try #require(layout["layers"] as? [[String: Any]]) {
         let index = try #require(layer["layer"] as? Int)
         let file = try #require(layer["file"] as? String)
@@ -253,8 +267,22 @@ private func qatExpectEveryCopiedTensor(source: URL, output: URL) throws {
                     let name = "language_model.model.layers.\(index).experts.switch_glu.\(role)_proj.\(sourceSuffix)"
                     let original = try sourceBytes(name)
                     #expect(size * experts.count == original.count)
-                    #expect(data.subdata(in: (base + offset)..<(base + offset + size))
-                        == original.subdata(in: (id * size)..<((id + 1) * size)))
+                    let expected = original.subdata(in: (id * size)..<((id + 1) * size))
+                    if implied.contains(role + suffix) {
+                        // Not stored: the runtime rebuilds -8 * scale.
+                        let scales = try sourceBytes(String(name.dropLast("biases".count)) + "scales")
+                            .subdata(in: (id * size)..<((id + 1) * size))
+                        let rebuilt = Data(stride(from: 0, to: size, by: 2).flatMap { index -> [UInt8] in
+                            let scale = UInt16(scales[scales.startIndex + index])
+                                | UInt16(scales[scales.startIndex + index + 1]) << 8
+                            let bias = QATImpliedBiasConverter.neg8ScaleBits(scale)
+                            return [UInt8(bias & 0xFF), UInt8(bias >> 8)]
+                        })
+                        #expect(rebuilt == expected)
+                    } else {
+                        let at = base + (try storedOffset(offset, size))
+                        #expect(data.subdata(in: at..<(at + size)) == expected)
+                    }
                     checked.insert(name)
                 }
             }

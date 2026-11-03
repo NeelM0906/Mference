@@ -680,14 +680,15 @@ public struct Model {
             streamersBox.layerVerified[L] = true
         }
         let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.expertStride
+            * packedExpertsLayout.storedExpertStride
         let layout = StreamLayout(
             path: url.path,
             streamOffset: 0,
             streamSize: streamSize,
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
             expertStride: packedExpertsLayout.expertStride,
-            expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
+            expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset),
+            storage: packedExpertsLayout.storage)
         switch streamingMode {
         case .pread(let slotCount):
             streamersBox.streamers[L] = .pread(try PreadExpertStreamer(
@@ -940,9 +941,11 @@ extension Model {
                                                           manifest: Manifest,
                                                           layout: PackedExpertsLayout) throws {
         let pageSize = UInt64(getpagesize())
-        guard layout.expertStride % pageSize == 0 else {
+        guard layout.expertStride % pageSize == 0,
+              layout.storedExpertStride % pageSize == 0 else {
             throw ModelError.trustedReceiptInvalid(
-                detail: "expertStride \(layout.expertStride) is not page-aligned")
+                detail: "expertStride \(layout.expertStride) or stored stride "
+                    + "\(layout.storedExpertStride) is not page-aligned")
         }
         guard layout.numLayers == manifest.numLayers,
               layout.expertsPerLayer == manifest.expertsPerLayer,
@@ -959,7 +962,7 @@ extension Model {
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(detail: "manifest missing \(relativePath)")
             }
-            let expectedSize = UInt64(layout.expertsPerLayer) * layout.expertStride
+            let expectedSize = UInt64(layout.expertsPerLayer) * layout.storedExpertStride
             guard manifestEntry.size == expectedSize else {
                 throw ModelError.trustedReceiptInvalid(
                     detail: "\(relativePath) manifest size \(manifestEntry.size) != \(expectedSize)")
@@ -976,7 +979,7 @@ extension Model {
                 throw ModelError.trustedReceiptInvalid(detail: "\(relativePath) expert count mismatch")
             }
             for expert in layer.experts {
-                guard expert.size == layout.expertStride else {
+                guard expert.size == layout.storedExpertStride else {
                     throw ModelError.trustedReceiptInvalid(
                         detail: "\(relativePath) expert \(expert.expert) size mismatch")
                 }

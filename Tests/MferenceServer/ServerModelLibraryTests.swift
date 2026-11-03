@@ -79,10 +79,11 @@ private func makeIndex(_ pairs: [(id: String, path: String)]) -> ServerLibraryIn
 private func makeLibrary(
     _ index: ServerLibraryIndex,
     log: LibraryEventLog,
+    maxContext: Int? = ServerArguments.defaultMaxContext,
     beforeLoad: @escaping @Sendable (URL) async -> Void = { _ in },
     beforeGenerate: @escaping @Sendable (String) async -> Void = { _ in }
 ) -> ServerModelLibrary {
-    ServerModelLibrary(index: index) { directory in
+    ServerModelLibrary(index: index, maxContext: maxContext) { directory in
         await beforeLoad(directory)
         let modelID = directory.lastPathComponent
         log.append("load \(modelID)")
@@ -691,6 +692,59 @@ struct LibraryHTTPServerTests {
         // Listing must not load anything.
         #expect(log.events.isEmpty)
 
+        try await server.shutdown()
+    }
+
+    /// `max_model_len` (vLLM's field) is the context each model runs with:
+    /// the configured length, or with `max` its family's native context.
+    @Test func modelsReportTheContextEachModelRunsWith() {
+        let entries = [
+            ServerLibraryEntry(modelID: "gemma", familyModelID: "gemma-4-26b-a4b-it",
+                               basename: "gemma4.gturbo",
+                               directory: URL(fileURLWithPath: "/models/gemma4.gturbo"), family: .gemma4),
+            ServerLibraryEntry(modelID: "maple", familyModelID: "maple-preview-2bit-mlx",
+                               basename: "maple.gturbo",
+                               directory: URL(fileURLWithPath: "/models/maple.gturbo"), family: .maple),
+        ]
+        func lengths(_ maxContext: Int?) -> [String: Int] {
+            let library = ServerModelLibrary(index: ServerLibraryIndex(entries: entries),
+                                             maxContext: maxContext) { _ in
+                Issue.record("listing must not load")
+                throw CancellationError()
+            }
+            return Dictionary(uniqueKeysWithValues: library.snapshot.modelList.data.map {
+                ($0.id, $0.maxModelLen)
+            })
+        }
+        #expect(lengths(nil) == ["gemma": 262_144, "maple": 128_000])
+        #expect(lengths(32_768) == ["gemma": 32_768, "maple": 32_768])
+    }
+
+    /// The listing comes from the startup index, so it answers while a load
+    /// holds the library and loads nothing itself.
+    @Test func modelsAnswerWhileALoadIsInFlight() async throws {
+        let log = LibraryEventLog()
+        let gate = LoadGate()
+        let library = makeLibrary(makeIndex([(id: "alpha", path: "/models/alpha")]), log: log,
+                                  maxContext: nil, beforeLoad: { _ in await gate.wait() })
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        async let resolved: Void = {
+            _ = try await library.resolve(modelID: "alpha")
+        }()
+        await gate.waitUntilEntered()
+
+        let data = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0
+        #expect(String(decoding: data, as: UTF8.self).contains(#""max_model_len":262144"#))
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let models = try #require(object["data"] as? [[String: Any]])
+        #expect(models.first?["max_model_len"] as? Int == 262_144)
+        #expect(log.events.isEmpty, "the parked load is the only one and has not finished")
+
+        await gate.open()
+        try await resolved
         try await server.shutdown()
     }
 

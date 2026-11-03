@@ -348,6 +348,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefillGroupedGEMM: MPPGroupedRoutedMoE?
     /// Routed prefill tiles that ran as grouped GEMM rather than per-row GEMV.
     private(set) var prefillGroupedExpertTiles = 0
+    /// Prefill attention layer chunks that ran the tensor-ops kernel. It falls
+    /// back to the tiled or QAT kernels silently when the pipeline is missing.
+    private(set) var prefillTensorOpsAttentionLayers = 0
     /// How the last prefill layer ran its shared expert. A batched layout that
     /// silently falls back to per-row dispatch costs a third of a long prefill.
     private(set) var lastPrefillSharedExpertPath: PrefillSharedExpert.BlockPath?
@@ -646,7 +649,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      // sliding-window ring memory grows only
                                      // when a larger prefill chunk is opted
                                      // into, never from the static cap.
-                                     maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens)
+                                     maxPrefillChunkTokens: runtimeConfiguration.prefillConfig.chunkTokens,
+                                     // Gemma 4, Qwen 3.6 and Inkling grow full-attention KV
+                                     // with the conversation; DeepSeek-V4 keeps its attention
+                                     // state in DSV4StateManager and reserves it whole.
+                                     fullAttentionGrowthStep: [.gemma4, .qwen36, .inklingSmall].contains(cfg.family)
+                                         ? runtimeConfiguration.kvGrowthTokens : nil)
 
         let silu = cfg.hiddenActivation == "silu"
         let int4GroupSize = model.affineInt4GroupSize
@@ -692,7 +700,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize,
                                                       sourceFP16: prefillMatmulSourceFP16)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context, sourceFP16: sourceFP16)
-        self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil)
+        self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil,
+                                                     gemmaQATFullAttentionTensorOps: !policy.prefillAttentionSourceFP16)
         self.prefillPostAttention = try PrefillPostAttentionSetup(context: context, sourceFP16: sourceFP16)
         self.prefillRouter = try PrefillRouter(context: context, routerBF16: model.hasBF16Router, sourceFP16: sourceFP16)
         self.prefillSharedExpert = try PrefillSharedExpert(
@@ -1606,6 +1615,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten, execution: execution)
         }
+        // A prompt gets one full growth step past its end to answer into.
+        try ensureKVCapacity(for: startPosition + tokens.count)
 
         if cfg.family == .inklingSmall {
             // Layer-major chunked prefill with expert-major streaming (each
@@ -2104,6 +2115,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         for L in 0..<cfg.numLayers {
             try prefillWillEncodeLayer?(L)
             try Task.checkCancellation()
+            cb.label = "prefill start=\(startPosition) count=\(t) layer=\(L) phase="
+                + (L == 0 ? "embed_attention_router" : "attention_router")
             model.beginOpeningRoutedExpertStreamer(layer: L)
             let views = layerViews[L]
             let isLinear = cfg.layerIsLinear(L)
@@ -2340,14 +2353,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         let activeRingCapacity = ringCapacity > 0 && startPosition + t > ringCapacity
                             ? UInt32(ringCapacity)
                             : 0
-                        prefillAttention.encodeCausal(commandBuffer: cb,
-                                                      q: attnQ,
-                                                      k: keyBuffer,
-                                                      v: valueBuffer,
-                                                      out: scratch.attentionOutput,
-                                                      params: params,
-                                                      kvRingCapacity: activeRingCapacity,
-                                                      path: prefillAttentionPath)
+                        if prefillAttention.encodeCausal(commandBuffer: cb,
+                                                         q: attnQ,
+                                                         k: keyBuffer,
+                                                         v: valueBuffer,
+                                                         out: scratch.attentionOutput,
+                                                         params: params,
+                                                         kvRingCapacity: activeRingCapacity,
+                                                         path: prefillAttentionPath) {
+                            prefillTensorOpsAttentionLayers += 1
+                        }
                 } else {
                     throw PrefillError.chunkedUnsupported(
                         "chunked prefill attention requires FP16 KV")
@@ -2436,9 +2451,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
                     cb.commit()
                     waitForCompletion(cb)
-                    if let error = cb.error {
-                        throw error
-                    }
+                    try checkCommandBufferError(cb)
 
                     if gemmaPrefillTrace != nil {
                         try trace(L, [
@@ -2458,6 +2471,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     guard let sharedCB = ctx.queue.makeCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
                     }
+                    sharedCB.label = "prefill start=\(startPosition) count=\(t) layer=\(L) phase=shared_expert"
                     let sharedProj = sharedExpertProjections[L]
                     lastPrefillSharedExpertPath = try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
                                                         x: cfg.ffnSandwichNorms
@@ -2565,9 +2579,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
                             waitForCompletion(pending.commandBuffer)
                         }
-                        if let error = pending.commandBuffer.error {
-                            throw error
-                        }
+                        try checkCommandBufferError(pending.commandBuffer)
                         if !pending.fetch.plannedMissSlots.isEmpty {
                             try tileLifetime.complete(tileIndex: pending.tileIndex)
                         }
@@ -2661,6 +2673,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         guard let tileCB = ctx.queue.makeCommandBuffer() else {
                             throw ModelError.residentBufferWrapFailed
                         }
+                        tileCB.label = "prefill start=\(startPosition) count=\(t) layer=\(L) "
+                            + "phase=routed_tile tile=\(tileIndex)"
                         let tilePairCounts = routes.groups[
                             Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
                             .map { Int($0.pairCount) }
@@ -2720,6 +2734,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     guard let tailCB = ctx.queue.makeCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
                     }
+                    tailCB.label = "prefill start=\(startPosition) count=\(t) layer=\(L) phase=moe_tail"
                     prefillMoE.encodeReduceTokenMajor(commandBuffer: tailCB,
                                                       routePartials: scratch.routePartials,
                                                       routeWeights: scratch.routeWeights,
@@ -2763,12 +2778,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     withExtendedLifetime(metadata) {
                         waitForCompletion(tailCB)
                     }
-                    if let error = tailCB.error {
-                        throw error
-                    }
-                    if let error = sharedCB.error {
-                        throw error
-                    }
+                    try checkCommandBufferError(tailCB)
+                    // Complete already: the tail read the shared branch's
+                    // output. The wait only makes the status check exact.
+                    waitForCompletion(sharedCB)
+                    try checkCommandBufferError(sharedCB)
                     if gemmaPrefillTrace != nil {
                         try trace(L, [("shared_output", scratch.h1, D), ("routed_output", scratch.h2, D),
                                       ("layer_output", scratch.hidden, D)])
@@ -2788,6 +2802,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             guard let finalCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
+            finalCB.label = "prefill start=\(startPosition) count=\(t) phase=final_head"
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 fusionHead.encodeGreedyDecode(
                     commandBuffer: finalCB,
@@ -2825,9 +2840,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             finalCB.commit()
             waitForCompletion(finalCB)
-            if let error = finalCB.error {
-                throw error
-            }
+            try checkCommandBufferError(finalCB)
             if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             }
@@ -2851,6 +2864,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
+        // An answer that outgrows that room grows by half a step at a time.
+        try ensureKVCapacity(for: position + 1, headroom: kv?.fullAttentionGrowthStep.map { $0 / 2 })
         if cfg.hasCompressedAttentionLayers {
             try await produceTokenDSV4(token: token, position: position,
                                        into: logits, emitHead: emitHead,
@@ -5818,20 +5833,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         kv?.advance()
     }
 
+    /// Grows full-attention KV before anything is encoded at these positions.
+    /// Growing re-wraps the same pages, so nothing in flight is disturbed.
+    private func ensureKVCapacity(for tokens: Int, headroom: Int? = nil) throws {
+        try kv?.ensureCapacity(for: tokens, headroom: headroom)
+    }
+
     private func runSync(_ body: (MTLCommandBuffer) -> Void) {
         let cb = ctx.queue.makeCommandBuffer()!
         body(cb)
         cb.commit()
         cb.waitUntilCompleted()
-        if let err = cb.error {
-            print("CB error: \(err)")
-        }
+        reportCommandBufferFailure(cb)
     }
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {
         cb.waitUntilCompleted()
-        if let err = cb.error {
-            print("CB error: \(err)")
+        reportCommandBufferFailure(cb)
+    }
+
+    /// Prints a completed wait's failure; callers that stop on it also call
+    /// `checkCommandBufferError`.
+    private nonisolated func reportCommandBufferFailure(_ cb: MTLCommandBuffer) {
+        if let detail = metalCommandBufferFailureDetail(label: cb.label, status: cb.status,
+                                                        error: cb.error) {
+            print("CB error: \(detail)")
         }
     }
 

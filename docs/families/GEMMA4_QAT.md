@@ -11,17 +11,20 @@ and generation settings. The original Gemma remains independently selectable.
 | Final installation directory | `$HOME/llm-models/gemma4qat.gturbo` |
 | API model ID | `gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned` |
 | Pinned source revision | `745a97a754ed4b7713163c7d0e9c11da41809e0c` |
-| Installed bytes, including verified receipt | 15,835,171,794 |
+| Installed bytes, including verified receipt | 14,451,052,105 (15,835,171,794 before the routed biases became implied) |
 | Resident weight file | 1,512,886,332 bytes |
-| Streamed expert pool | 14,281,605,120 bytes |
-| Native format | INT4 affine, group 32; BF16 scales/biases and unquantized BF16 routers |
+| Streamed expert pool | 12,897,484,800 bytes (14,281,605,120 before the routed biases became implied) |
+| Native format | INT4 affine, group 32, BF16 scales; BF16 biases, which routed experts imply as `-8 * scale`; unquantized BF16 routers |
 
 These are storage sizes. They do not measure physical memory use. The installer
 copies the supplied native bytes without requantization, streams bounded
-ranges, and resumes verified completed work. See the
+ranges, and resumes verified completed work; it then stores the routed experts
+without their bias arrays, as described under
+[routed-expert storage](#routed-expert-storage). See the
 [installation commands and space accounting](../OPEN_WEBUI.md#gemma-qat-installation).
-The same completed installation supports the runtime update; no second
-download or repack is needed.
+An install made before 2026-09-26 keeps working unchanged;
+`MferenceRepack --implicit-qat-biases --input-gturbo <old> --output <new>`
+converts it without a download.
 
 ## Use and defaults
 
@@ -87,8 +90,16 @@ target retains the pre-existing Maple Q/K norm failure (`0.0234375` against
 gate passed; the whole repository is not all green.
 
 The tested public runs use a 4,096-token capacity; broader contexts and other
-hardware are not qualified by this evidence. The architecture's source context
-limit is not a tested runtime limit. KV/activation precision policy remains
+hardware are not qualified by this evidence. The server accepts
+`--max-context 262144`, the checkpoint's `max_position_embeddings`; the model
+runs the same algorithm at every position, but no prompt longer than 128K
+tokens has been run. With server settings (2,048-token chunks, 16 expert slots, prompt cache
+on) the runtime needs 4.12 GiB plus 20,544 B per token of KV capacity (20,480 B
+of full-attention KV and 64 B of QAT decode scratch): 4.44 GiB at 16,384
+tokens, 6.57 GiB at 128,000 and 9.15 GiB at 262,144. The full-attention KV
+grows with the conversation from 16,384 tokens, so those are the sizes a
+conversation of that length reaches; `--kv-reserve` reserves `--max-context`
+at load. KV/activation precision policy remains
 unchanged, and this integration provides text inference only.
 
 ## Prefill arithmetic
@@ -96,10 +107,13 @@ unchanged, and this integration provides text inference only.
 Since 2026-09-21 the default prefill runs QAT's Q/K/V/O projections, shared
 expert and routed experts on the kernels original Gemma uses, batches the INT4
 shared expert, and runs well-filled routed tiles as grouped matrix products.
-Decode, routing, normalization and attention keep the MLX FP16 reduction
-order. The source-order prefill kernels spend 32 GPU threads on every
-(token, row) dot product and were 3-5x slower on long prompts; these kernels
-change only floating-point summation order.
+Since 2026-09-25 its five full-attention layers also prefill with the
+tensor-ops attention kernel wherever that pipeline builds on macOS 26, M2
+included; it accumulates in FP32 where the source rounds scores and
+probabilities to FP16. Decode, routing, normalization and sliding-window
+attention keep the MLX FP16 reduction order. The source-order prefill kernels
+spend 32 GPU threads on every (token, row) dot product and were 3-5x slower on
+long prompts; these kernels change only floating-point summation order.
 
 | 3,015-token prompt, M2 MacBook Air 16 GiB | Before | After |
 | --- | ---: | ---: |
@@ -107,22 +121,41 @@ change only floating-point summation order.
 | QAT, server at 16K context | 245.4 s (128-token chunks) | 50.4 s (1,024-token chunks) |
 | Original Gemma, CLI, one chunk | 75.6 s | 52.4 s |
 
+| QAT full-attention prefill, CLI, prefill only | Before | After |
+| --- | ---: | ---: |
+| 3,015-token `long-synthesis` prompt | 37.94 s | 31.99 s |
+| 7,784-token document prompt (not a community prompt) | 131.66 s | 92.16 s |
+
+The second table is one pair per prompt with 60 s cool-downs, the new binary
+second. The gain grows with prompt length because full attention is the only
+part of prefill whose cost grows with the square of the prompt.
+
 These are diagnostic runs with cool-down pauses on a fanless Mac, not
 community-protocol benchmarks; decode rates were unchanged. The server's larger
 Gemma chunk costs 307 MB of Metal allocation (KV +183.5 MB) and applies to
 hosts with at least 16 GiB; see [Runtime controls](../RUNTIME_CONTROLS.md).
+Since 2026-09-26 those hosts use 2,048-token server chunks. On a 19,098-token
+QAT prompt, alternated 1,024 / 2,048 / 2,048 / 1,024 to cancel thermal drift,
+prefill averaged 386.3 s at 1,024 and 350.2 s at 2,048, with identical output,
+for another 351 MB of Metal allocation (KV +210 MB). `--prefill-chunk 1024` on
+the server or `./mference-ui.sh` keeps the smaller size.
 
 What the numbers above do and do not keep:
 
 - Decode is unchanged: all 149 scalar reference positions stay byte-identical
-  to the MLX-exact capture.
+  to the MLX-exact capture (re-verified 2026-09-26 with the grouped decode
+  attention described below).
 - Chunked prefill no longer reproduces the scalar MLX oracle. On the raw-text
   reference corpus 4 of 9 chunked positions remain inside the frozen limits and
   5 do not (relative L2 up to 0.44 on the repetitive sequence). Reordered sums
   flip near-tied experts in MoE routing, and the flips cascade; stock MLX also
-  changes kernels for batched prompts.
+  changes kernels for batched prompts. The frozen greedy-winner check therefore
+  flags one chunked position in the default: a near tie (winner gap 0.17) since
+  2026-09-21, and with tensor-ops attention one position of the repetitive
+  sequence (gap 2.51).
 - `MFERENCE_QAT_EXACT_PREFILL=1` reproduces all 158 positions byte for byte
-  (verified 2026-09-21). Use it for the MLX reference comparison.
+  (verified 2026-09-21 and again 2026-09-26). Use it for the MLX reference
+  comparison.
 - The default is gated instead on teacher-forced perplexity against that exact
   control, on identical tokens after the frozen community prompts. QAT: 1,000
   predictions, NLL +0.0004 nats/token (95 % -0.0014..+0.0022), same top
@@ -130,14 +163,65 @@ What the numbers above do and do not keep:
   the same way: +0.0029 (-0.0028..+0.0086), 98.3 %. On the real weights the new
   expert kernels match the old within 5e-4 relative error for every one of
   3,015 layer-0 tokens.
+- The tensor-ops full attention passed the same gate on 2026-09-26. Against the
+  exact control: -0.00015 nats/token (95 % -0.00195..+0.00165), same top
+  prediction at 99.5 %. Against the previous default, which isolates the
+  attention kernel: -0.00057 (-0.00160..+0.00045), 99.7 %.
 
 ```bash
 MFERENCE_GEMMA_PREFILL_GATE="$HOME/llm-models/gemma4qat.gturbo" \
   Scripts/test.sh --filter GemmaPrefillEquivalenceGateTests
 ```
 
-The gate reads the install, loads the model once and takes about 15 minutes on
+The gate reads the install, loads the model once and takes about 22 minutes on
 the M2; apply the model-process checks first.
+
+## Decode attention
+
+QAT decode keeps MLX's three-pass full attention (FP16 scores, softmax, then
+values). Since 2026-09-26 the score and value passes place the eight query
+heads that share a K/V head in one threadgroup, so each key and value row is
+read once per group instead of once per head. Every thread performs the same
+operations in the same order, so the output is byte-identical to the source
+mapping at every tested length from 1 to 65,536 keys.
+
+| M2 MacBook Air 16 GiB | Before | After |
+| --- | ---: | ---: |
+| Full-attention layer, 16K keys (GPU) | 5.52 ms | 1.46 ms |
+| Full-attention layer, 32K keys (GPU) | 11.2 ms | 2.94 ms |
+| Decode after a 19,098-token prompt, 128 greedy tokens | 3.61 tok/s | 4.07 tok/s |
+
+The decode row is one pair of runs with identical output text. Short contexts
+gain little because attention is a small part of each token there.
+
+## Routed-expert storage
+
+The checkpoint is Q4_0 re-expressed as MLX affine INT4, so every group's bias
+is exactly `-8 * scale` in BF16: all 713,687,040 routed-expert groups and all
+74,488,832 resident groups, checked bit for bit. Since 2026-09-26 the install
+stores routed experts without their three bias arrays. `layout.json` declares
+the stored segments and the implied biases in `expertStorage`, the manifest's
+routed bias type reads `impliedNeg8Scale`, and after each read the runtime
+writes the biases back into the expert slot, so the GPU sees the same bytes as
+before. The installer and the converter check every bias before dropping it
+and refuse a checkpoint in which any group breaks the identity. Older builds
+refuse the new install instead of misreading it.
+
+| M2 MacBook Air 16 GiB | Explicit biases | Implied biases |
+| --- | ---: | ---: |
+| Bytes per routed expert | 3,719,168 | 3,358,720 |
+| Streamed expert pool | 14.28 GB | 12.90 GB |
+| Decode, `medium-review`, 192 greedy tokens | 5.97 tok/s | 6.56 tok/s |
+| Prefill, 430 tokens | 7.15 s | 5.89 s |
+| Wait for expert reads per token | 89.4 ms | 73.0 ms |
+
+The decode and prefill rows are the means of an alternated explicit, implied,
+implied, explicit run, each after an unmeasured warm-up on the same install.
+All eight outputs, the six teacher-forced logit captures and the routed expert
+choices were byte-identical, and the frozen MLX reference kept 158 of 158
+positions with `MFERENCE_QAT_EXACT_PREFILL=1`. The wait fell by more than the
+bytes because the smaller pool fits the 16 GiB page cache better. Resident
+weights keep their bias arrays.
 
 ## M2 generation measurements
 

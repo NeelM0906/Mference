@@ -4,10 +4,11 @@ import Testing
 @Suite struct GemmaPrefillPolicyTests {
     private static let originalID = "mlx-community/gemma-4-26b-a4b-it-4bit"
 
-    @Test func qatPrefillMatmulsUseNormalKernelsWhileEverythingElseStaysExact() {
+    @Test func qatPrefillMatmulsAndFullAttentionUseNormalKernels() {
         let policy = GemmaPrefillPolicy(modelID: CheckpointIdentity.gemma4QAT, environment: [:])
         #expect(policy.sourceFP16)
         #expect(!policy.prefillMatmulSourceFP16)
+        #expect(!policy.prefillAttentionSourceFP16)
         #expect(policy.batchedExperts)
     }
 
@@ -16,6 +17,7 @@ import Testing
                                         environment: ["MFERENCE_QAT_EXACT_PREFILL": "1"])
         #expect(policy.sourceFP16)
         #expect(policy.prefillMatmulSourceFP16)
+        #expect(policy.prefillAttentionSourceFP16)
         // Source arithmetic has no grouped-GEMM form; the switch restores
         // the whole shipped prefill, including per-row experts.
         #expect(!policy.batchedExperts)
@@ -26,6 +28,7 @@ import Testing
                                         environment: ["MFERENCE_QAT_EXACT_PREFILL": "1"])
         #expect(!policy.sourceFP16)
         #expect(!policy.prefillMatmulSourceFP16)
+        #expect(!policy.prefillAttentionSourceFP16)
         #expect(policy.batchedExperts)
     }
 
@@ -35,6 +38,7 @@ import Testing
                                         environment: ["MFERENCE_GEMMA_PREFILL_LEGACY": "1"])
         #expect(!policy.batchedExperts)
         #expect(!policy.prefillMatmulSourceFP16)
+        #expect(!policy.prefillAttentionSourceFP16)
     }
 }
 

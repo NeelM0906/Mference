@@ -46,20 +46,30 @@ final class PrefillAttention {
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
     private let gemmaQAT: GemmaQATPrefillAttention?
 
-    /// Whether the Apple10 MPP tensor-ops prefill kernel is usable here. False
-    /// on hosts without Apple10 support, shader libraries below MSL 4.0, and
-    /// the QAT profile, which has its own source-arithmetic batched kernels.
+    /// Whether the MPP tensor-ops full-attention kernel is usable here. False
+    /// with shader libraries below MSL 4.0, on GPUs where the pipeline does not
+    /// build, and for the exact QAT profile, which keeps its source-arithmetic
+    /// batched kernels.
     var tensorOpsPipelineAvailable: Bool { psoFullTensorOps2DValidityV2 != nil }
 
-    init(context: MetalContext, gemmaQATMaxContext: Int? = nil) throws {
+    /// `gemmaQATFullAttentionTensorOps` lets the QAT profile's full-attention
+    /// layers use the tensor-ops kernel; its sliding-window layers and every
+    /// fallback keep the source arithmetic.
+    init(context: MetalContext, gemmaQATMaxContext: Int? = nil,
+         gemmaQATFullAttentionTensorOps: Bool = false) throws {
         self.context = context
         self.gemmaQAT = try gemmaQATMaxContext.map { try GemmaQATPrefillAttention(context: context, maxContext: $0) }
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
-        self.psoFullTensorOps2DValidityV2 = gemmaQATMaxContext == nil && context.device.supportsApple10TensorOps
+        // Selected by pipeline capability, not GPU family: the kernel also
+        // builds on Apple8 (M2), where it measured 9x faster than tiled
+        // attention. Below MSL 4.0 it is not in the library.
+        self.psoFullTensorOps2DValidityV2 = gemmaQATMaxContext == nil || gemmaQATFullAttentionTensorOps
             ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
             : nil
     }
 
+    /// Returns whether the tensor-ops kernel ran.
+    @discardableResult
     func encodeCausal(commandBuffer: MTLCommandBuffer,
                              q: MTLBuffer, qOffset: Int = 0,
                              k: MTLBuffer, kOffset: Int = 0,
@@ -67,29 +77,32 @@ final class PrefillAttention {
                              out: MTLBuffer, outOffset: Int = 0,
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
-                             path: RuntimePrefillAttentionPath = .causalTiled) {
+                             path: RuntimePrefillAttentionPath = .causalTiled) -> Bool {
         validate(params)
-
-        if let gemmaQAT {
-            gemmaQAT.encode(commandBuffer: commandBuffer,
-                q: q, qOffset: qOffset, k: k, kOffset: kOffset,
-                v: v, vOffset: vOffset, out: out, outOffset: outOffset,
-                params: params, ringCapacity: kvRingCapacity)
-            return
-        }
 
         let requestsTensorOps = path == .fullTensorOps2DPreferred
             || path == .fullTensorOps2DValidityV2
-        // The pinned model uses 512/16/2 only for full attention; its
-        // sliding-window layers use 256/16/8. A future model that reuses this
-        // shape for sliding attention must add a full-visibility check here.
+        // TensorOps starts its key loop at zero and ignores slidingWindow, so
+        // these are visibility guards rather than shape optimizations.
+        let windowNeverClips = params.slidingWindow == 0
+            || params.slidingWindow >= params.kvValidCount
         let tensorOpsShape = requestsTensorOps
             && kvRingCapacity == 0
+            && windowNeverClips
             && params.headDim == 512
             && params.numQHeads == 16
             && params.numKVHeads == 2
             && params.scale == 1.0
         let tensorOpsPipeline = tensorOpsShape ? psoFullTensorOps2DValidityV2 : nil
+
+        if let gemmaQAT, tensorOpsPipeline == nil {
+            gemmaQAT.encode(commandBuffer: commandBuffer,
+                q: q, qOffset: qOffset, k: k, kOffset: kOffset,
+                v: v, vOffset: vOffset, out: out, outOffset: outOffset,
+                params: params, ringCapacity: kvRingCapacity)
+            return false
+        }
+
         let useTensorOps = tensorOpsPipeline != nil
         let pipeline: MTLComputePipelineState
         if let tensorOpsPipeline {
@@ -103,7 +116,7 @@ final class PrefillAttention {
                 "TensorOps 2D prefill attention pipeline is missing on an Apple10 device")
         } else {
             // Explicit mode also falls back for incompatible shapes, and on
-            // hosts without Apple10 MPP tensor support or without MSL 4.0.
+            // hosts where the pipeline does not build or without MSL 4.0.
             // Benchmark fixtures must use 512/16/2 to prove that TensorOps ran.
             pipeline = causalTiledPipeline(kvRingCapacity: kvRingCapacity)
         }
@@ -115,7 +128,7 @@ final class PrefillAttention {
         precondition(threadCount <= pipeline.maxTotalThreadsPerThreadgroup,
                      "tiled prefill attention requires headDim <= maxTotalThreadsPerThreadgroup")
 
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return false }
         enc.setComputePipelineState(pipeline)
         enc.setBuffer(q, offset: qOffset, index: 0)
         enc.setBuffer(k, offset: kOffset, index: 1)
@@ -134,6 +147,7 @@ final class PrefillAttention {
             groups,
             threadsPerThreadgroup: MTLSize(width: threadCount, height: 1, depth: 1))
         enc.endEncoding()
+        return useTensorOps
     }
 
 

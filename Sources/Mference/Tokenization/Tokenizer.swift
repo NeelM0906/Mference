@@ -1,4 +1,5 @@
 import Foundation
+import Hub
 import Tokenizers
 
 public enum MFTokenizerError: Error, CustomStringConvertible {
@@ -59,6 +60,10 @@ public struct MFTokenizer: @unchecked Sendable {
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
 
     public let dialect: ChatDialect
+    /// Special-token IDs for the lossless Gemma decode (`GemmaDecoding`); nil
+    /// when the tokenizer is not Gemma or does not declare the pinned decoder
+    /// sequence, which keeps the library's own decode.
+    let losslessGemmaSpecialTokenIDs: Set<Int32>?
     public internal(set) var isSwiftQwen = false
     public internal(set) var isBaseQwen38 = false
     public internal(set) var isGemmaQAT = false
@@ -163,8 +168,16 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     static func loadUncached(pretrained modelID: String = Self.modelID) async throws -> MFTokenizer {
-        let underlying = try await AutoTokenizer.from(pretrained: modelID)
-        return try MFTokenizer(tokenizer: underlying)
+        // What `AutoTokenizer.from(pretrained:)` does, keeping `tokenizer.json`
+        // so the Gemma decoder declaration can be checked.
+        let configuration = LanguageModelConfigurationFromHub(modelName: modelID)
+        guard let tokenizerConfig = try await configuration.tokenizerConfig else {
+            throw TokenizerError.missingConfig
+        }
+        let tokenizerData = try await configuration.tokenizerData
+        let underlying = try AutoTokenizer.from(tokenizerConfig: tokenizerConfig,
+                                                tokenizerData: tokenizerData)
+        return try MFTokenizer(tokenizer: underlying, family: nil, tokenizerData: tokenizerData)
     }
 
     static func loadUncached(from folder: URL) async throws -> MFTokenizer {
@@ -173,8 +186,16 @@ public struct MFTokenizer: @unchecked Sendable {
 
     static func loadUncached(from folder: URL,
                              family: ModelFamily?) async throws -> MFTokenizer {
-        let underlying = try await AutoTokenizer.from(modelFolder: folder)
-        var value = try MFTokenizer(tokenizer: underlying, family: family)
+        // What `AutoTokenizer.from(modelFolder:)` does, keeping `tokenizer.json`
+        // so the Gemma decoder declaration can be checked.
+        let configuration = LanguageModelConfigurationFromHub(modelFolder: folder)
+        guard let tokenizerConfig = try await configuration.tokenizerConfig else {
+            throw TokenizerError.missingConfig
+        }
+        let tokenizerData = try await configuration.tokenizerData
+        let underlying = try PreTrainedTokenizer(tokenizerConfig: tokenizerConfig,
+                                                 tokenizerData: tokenizerData)
+        var value = try MFTokenizer(tokenizer: underlying, family: family, tokenizerData: tokenizerData)
         value.localTokenizerFolder = folder.standardizedFileURL
         return value
     }
@@ -188,6 +209,10 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     public init(tokenizer: any Tokenizer, family: ModelFamily?) throws {
+        try self.init(tokenizer: tokenizer, family: family, tokenizerData: nil)
+    }
+
+    init(tokenizer: any Tokenizer, family: ModelFamily?, tokenizerData: Config?) throws {
         self.tokenizer = tokenizer
         self.usesJSONChatMLToolCalls = family == .maple
         self.supportsOptInThinking = family == .qwen36 || family == .gemma4
@@ -223,6 +248,11 @@ public struct MFTokenizer: @unchecked Sendable {
         }
 
         self.dialect = dialect
+        self.losslessGemmaSpecialTokenIDs = dialect == .gemma
+            ? tokenizerData.flatMap {
+                GemmaDecoding.declaresPinnedDecoder($0) ? GemmaDecoding.specialTokenIDs($0) : nil
+            }
+            : nil
         self.bosID = resolved.bosID
         self.bosPrefixID = resolved.bosPrefixID
         self.eosID = resolved.eosID
@@ -508,8 +538,19 @@ public struct MFTokenizer: @unchecked Sendable {
     }
 
     /// Decode token IDs to text. `skipSpecialTokens` strips BOS/EOS/turn markers from the output.
+    ///
+    /// A Gemma tokenizer declaring the pinned decoder runs it directly (see
+    /// `GemmaDecoding`) as a push loop over `MFDetokenizer`, so batch and
+    /// streaming decode agree and the library's clean-up pass cannot rewrite
+    /// model output. Every other tokenizer uses the library's decode.
     public func decode(_ ids: [Int32], skipSpecialTokens: Bool = true) -> String {
-        tokenizer.decode(tokens: ids.map(Int.init), skipSpecialTokens: skipSpecialTokens)
+        guard losslessGemmaSpecialTokenIDs != nil else {
+            return tokenizer.decode(tokens: ids.map(Int.init), skipSpecialTokens: skipSpecialTokens)
+        }
+        var detokenizer = MFDetokenizer(tokenizer: self, skipSpecialTokens: skipSpecialTokens)
+        var text = ""
+        for id in ids { text += detokenizer.push(id) }
+        return text + detokenizer.flush()
     }
 
     // MARK: - Chat template

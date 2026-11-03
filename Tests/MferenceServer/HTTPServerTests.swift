@@ -326,6 +326,36 @@ struct HTTPServerTests {
                                   backend: backend, chatDialect: .chatml)
     }
 
+    /// A library load refused because --max-context is above the model's
+    /// native limit reaches the client as a 400 naming the limit, not a 500.
+    @Test(arguments: [false, true])
+    func contextAboveTheModelLimitReachesTheClient(stream: Bool) async throws {
+        let refusal = ContextLimitError(family: .maple, requested: 262_144, maximum: 128_000)
+        let entry = ServerLibraryEntry(
+            modelID: "maple", familyModelID: "maple-preview-2bit-mlx",
+            basename: "maple.gturbo",
+            directory: URL(fileURLWithPath: "/unused/maple.gturbo"), family: .maple)
+        let library = ServerModelLibrary(index: ServerLibraryIndex(entries: [entry])) { _ in
+            throw refusal
+        }
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data("""
+        {"model":"maple","messages":[{"role":"user","content":"hi"}],"stream":\(stream)}
+        """.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try await server.shutdown()
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        let envelope = try JSONDecoder().decode(OpenAIErrorEnvelope.self, from: data)
+        #expect(envelope.error.code == "context_exceeds_model")
+        #expect(envelope.error.param == "model")
+        #expect(envelope.error.message == refusal.description)
+    }
+
     @Test(arguments: [false, true], [false, true])
     func penaltiesAndMinPReachTheBackend(stream: Bool, libraryMode: Bool) async throws {
         let backend = OptInThinkingBackend()
@@ -407,6 +437,18 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// A burst of connects waits in the listen queue until the accept loop
+    /// drains it. With 16 slots a burst overflowed, which macOS 27 answers
+    /// with RST (drumih/turbo-fieldfare#151, #153); the queue now matches
+    /// NIO's own default of 128.
+    @Test func listenBacklogAbsorbsAConnectBurst() async throws {
+        let server = MferenceHTTPServer(modelID: "m", queueLimit: 1, backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let backlog = try await channel.getOption(ChannelOptions.backlog).get()
+        #expect(backlog >= 128)
+        try await server.shutdown()
+    }
+
     @Test(arguments: [false, true], [false, true])
     func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool, base: Bool) async throws {
         let server = MferenceHTTPServer(modelID: "custom-alias", queueLimit: 1,
@@ -468,6 +510,22 @@ struct HTTPServerTests {
         #expect(details["cached_tokens"] as? Int == 0)
 
         try await server.shutdown()
+    }
+
+    /// Single-model mode reports the context its model was loaded with.
+    @Test func singleModelListingReportsItsContext() async throws {
+        let server = MferenceHTTPServer(modelID: "test-model", queueLimit: 1,
+                                        backend: ScriptedServerBackend(), maxModelLen: 131_072)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        let data = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0
+        try await server.shutdown()
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let models = try #require(object["data"] as? [[String: Any]])
+        #expect(models.count == 1)
+        #expect(models.first?["id"] as? String == "test-model")
+        #expect(models.first?["max_model_len"] as? Int == 131_072)
     }
 
     @Test func routesIgnoreQueryComponentOfRequestURI() async throws {
