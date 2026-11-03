@@ -93,7 +93,7 @@ Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
   <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple
-                qwen38flashnext minicpm5 glm53flash
+                qwen38flashnext minicpm5 glm53flash flint
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
@@ -130,6 +130,7 @@ case "${family}" in
   deepseekv4flash) suite_filter='(DSV4|Deepseek)' ;;
   inklingsmall)    suite_filter='Inkling' ;;
   maple)           suite_filter='Maple' ;;
+  flint)           suite_filter='Flint' ;;
   qwen38flashnext) suite_filter='FlashNext' ;;
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).

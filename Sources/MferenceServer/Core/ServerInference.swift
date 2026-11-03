@@ -437,7 +437,8 @@ public actor ServerModelSession: ServerLoadedModel {
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let countsPayloadTokens = tokenizer.dialect == .chatml
             || tokenizer.dialect == .glm5 || tokenizer.dialect == .minicpm
-        let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking || tokenizer.dialect == .gemma
+        let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
+            || tokenizer.dialect == .gemma || tokenizer.requiresStructuredAssistantDecoding
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),

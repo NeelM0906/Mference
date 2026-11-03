@@ -20,6 +20,7 @@ The enumeration is of axes, not of behavior. What a kernel does with an
 axis lives in the family's own page —
 [Gemma 4](../README.md), [DeepSeek-V4-Flash](DEEPSEEK_V4_FLASH.md),
 [Inkling-Small](INKLING_SMALL.md), [Qwen 3.8](QWEN38_LONG_CONTEXT.md),
+    [Flint-40B-A2.5B](families/FLINT.md),
 [MiniCPM5](families/MINICPM5.md),
 [GLM-5.3-Flash](families/GLM53_FLASH.md) —
 and in [System design](SYSTEM_DESIGN.md).
@@ -41,6 +42,7 @@ documented as what has been exercised, not as what is permitted.
 | DSV4 | DeepSeek-V4-Flash 284B-A13B | `deepseekV4Flash` | `ArchConfig.deepseekV4Flash_284B_A13B` |
 | INK | Inkling-Small 276B-A12B | `inklingSmall` | `ArchConfig.inklingSmall_276B_A12B` |
 | MPL | Maple Preview | `maple` | `ArchConfig.maplePreview` |
+| FLT | Flint-40B-A2.5B | `flint` | `ArchConfig.flint40B_A2_5B_JANG_4M` |
 | FNX | Qwen3.8-Flash-Next 180B-A3.5B | `qwen38flashnext` | `ArchConfig.qwen38FlashNext_180B_A3_5B` |
 | MC5 | MiniCPM5-2B | `minicpm5` | `ArchConfig.miniCPM5_2B` |
 | G53 | GLM-5.3-Flash 320B-A18B | `glm53Flash` | `ArchConfig.glm53Flash_320B_A18B` |
@@ -115,6 +117,8 @@ DSV4 and G53 carry `hyperConnections.mult` streams the same way.
 | `attentionKEqV` | `Bool` | Full-attention K and V share the `k_proj` weight, so one dequant and GEMV produces the raw projection for both. The K and V cache slots stay separate regardless — they diverge at the norms and RoPE. | `true` | Q36, Q38, INK, MPL, FNX, MC5 `false`. DSV4 and G53 `true` in the strongest sense: K and V are the same cache entry (G53: the `kv_a` latent). |
 | `attnOutputGate` | `Bool` | Full-attention `q_proj` emits `2 * numHeads * fullHeadDim` rows as per-head [query ; gate] halves, and the attention output is multiplied by sigmoid(gate) before `o_proj`. | `false` | Q36, Q38, FNX `true` (FNX's `output_gate_type` is `sigmoid`). G53 `false`: its KDA output gate is the low-rank `g_b(g_a(x))` inside `o_norm`, part of the `kimiDeltaAttention` axis, not this one. |
 | `attentionScale` | `Double` | Softmax scale for full attention. | 1.0 | Q36/Q38/FNX 0.0625 (256^-0.5). DSV4 0.044194173824159216 (512^-0.5). MPL and MC5 1/sqrt(128). INK 1/128 — it RMS-normalizes q and k per head, so the scale is 1/d, not 1/sqrt(d). G53 0.0625 (256^-0.5, the `qkNopeHeadDim` query width — the latent dot product is taken after `embed_q` folds q into the 512-wide latent). |
+| `attentionSinks` | `Bool` | Add one learned logit per query head to the attention softmax denominator only. The sink has no value contribution. | `false` | FLT `true`, backed by `self_attn.softmax_offset`. |
+| `noRopeLayerMask` | `[UInt8]` | Per-layer NoPE switch. A nonzero entry disables rotary position encoding on that layer; empty means the family's normal RoPE policy applies everywhere. | `[]` | FLT mirrors `fullAttentionLayerMask`, so all 14 full-attention layers are NoPE while the 35 sliding layers rotate. |
 
 ### Per-head query/key norms
 

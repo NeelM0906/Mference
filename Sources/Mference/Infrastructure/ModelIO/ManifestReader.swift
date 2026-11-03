@@ -87,6 +87,8 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let routerNormAfterTopK: Bool?
     public let routerGlobalScale: Bool?
     public let unpaddedVocabSize: Int?
+    public let noRopeLayerMask: [UInt8]?
+    public let attentionSinks: Bool?
 
     // Qwen3.8-Flash-Next extensions. Optional for the same reason: absent
     // values validate against the zeroed `FlashNextConfig.none`. Field names
@@ -380,6 +382,33 @@ public enum ManifestReader {
 
     private static func validateQuant(_ quant: ManifestQuant,
                                       expected: ArchConfig) throws {
+        if expected.family == .flint {
+            let affine: [(String, ManifestQuantSlot, Int)] = [
+                ("embedding", quant.embedding, 8),
+                ("attention", quant.attention, 8),
+                ("sharedExpert", quant.sharedExpert, 8),
+                ("routedExpert", quant.routedExpert, 4),
+            ]
+            for (name, slot, bits) in affine {
+                guard slot.weightBits == bits,
+                      slot.scheme.lowercased() == "affine",
+                      slot.scaleType.lowercased() == "bf16",
+                      slot.biasType.lowercased() == "bf16",
+                      slot.groupSize == Quantization.groupSize else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported Flint quantization for \(name)")
+                }
+            }
+            guard quant.router.weightBits == 16,
+                  quant.router.scheme.lowercased() == "unquantized",
+                  quant.router.scaleType.lowercased() == "none",
+                  quant.router.biasType.lowercased() == "none",
+                  quant.router.groupSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "unsupported Flint quantization for router")
+            }
+            return
+        }
         if expected.family == .glm53Flash {
             // PipeNetwork's mixed 4/8-bit conversion: INT8 affine group-64
             // attention (KDA and sparse projections alike), shared experts,
@@ -824,6 +853,11 @@ public enum ManifestReader {
         if let published = a.pleEosTokenID {
             try check("pleEosTokenID", published, fn.pleEosTokenID)
         }
+        try check("noRopeLayerMask",
+                  (a.noRopeLayerMask ?? []).description,
+                  e.noRopeLayerMask.description)
+        try check("attentionSinks",
+                  a.attentionSinks ?? false, e.attentionSinks)
 
         let g = e.glm53
         try check("kvLoraRank",        a.kvLoraRank ?? 0,        g.kvLoraRank)

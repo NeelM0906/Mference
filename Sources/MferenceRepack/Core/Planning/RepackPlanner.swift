@@ -270,7 +270,7 @@ enum RepackPlanner {
         switch family {
         case .gemma4, .qwen36, .qwen38:
             return name.hasPrefix("language_model.")
-        case .deepseekV4Flash, .maple:
+        case .deepseekV4Flash, .maple, .flint:
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
         case .inklingSmall:
             // Inkling is multimodal but names its towers as siblings, so the
@@ -302,6 +302,7 @@ enum RepackPlanner {
         case .qwen38:          return nil
         case .deepseekV4Flash: routedContainer = ".ffn.switch_mlp."
         case .maple:           routedContainer = ".mlp.switch_mlp."
+        case .flint:           routedContainer = ".mlp.switch_mlp."
         // `.mlp.experts.` does not match the shared experts, which sit under
         // `.mlp.shared_experts.`.
         case .inklingSmall:    routedContainer = ".mlp.experts."
@@ -1055,6 +1056,10 @@ enum RepackPlanner {
                 if n == "model.word_embeddings.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"             { return (3, 0, 0, n) }
                 if n == "lm_head.weight"                { return (4, 0, 0, n) }
+            case .flint:
+                if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
+                if n == "model.norm.weight"          { return (3, 0, 0, n) }
+                if n == "lm_head.weight"             { return (4, 0, 0, n) }
             case .inklingSmall:
                 if n == "model.llm.embed.weight"      { return (0, 0, 0, n) }
                 if n == "model.llm.embed_norm.weight" { return (0, 0, 1, n) }
@@ -1080,6 +1085,7 @@ enum RepackPlanner {
                 case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
                 case .inklingSmall:    slot = inklingSlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
+                case .flint:           slot = flintSlotRank(in: n)
                 case .qwen38flashnext: slot = 100
                 case .minicpm5:        slot = miniCPM5SlotRank(in: n)
                 case .glm53Flash:      slot = glm53SlotRank(in: n)
@@ -1161,6 +1167,26 @@ enum RepackPlanner {
         if n.hasSuffix(".input_layernorm.weight") { return 7 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 8 }
         return 99
+    }
+
+    private static func flintSlotRank(in n: String) -> Int {
+        if n.contains(".self_attn.q_proj.weight")            { return 0 }
+        if n.contains(".self_attn.k_proj.weight")            { return 1 }
+        if n.contains(".self_attn.v_proj.weight")            { return 2 }
+        if n.contains(".self_attn.o_proj.weight")            { return 3 }
+        if n.contains(".self_attn.q_norm.weight")            { return 4 }
+        if n.contains(".self_attn.k_norm.weight")            { return 5 }
+        if n.hasSuffix(".self_attn.softmax_offset")          { return 6 }
+        if n.contains(".mlp.gate.weight")                    { return 7 }
+        if n.contains(".mlp.shared_expert.gate_proj.weight") { return 8 }
+        if n.contains(".mlp.shared_expert.up_proj.weight")   { return 9 }
+        if n.contains(".mlp.shared_expert.down_proj.weight") { return 10 }
+        if n.contains(".mlp.gate_proj.weight")               { return 11 }
+        if n.contains(".mlp.up_proj.weight")                 { return 12 }
+        if n.contains(".mlp.down_proj.weight")               { return 13 }
+        if n.hasSuffix(".input_layernorm.weight")            { return 14 }
+        if n.hasSuffix(".post_attention_layernorm.weight")   { return 15 }
+        return 100
     }
 
     /// Within-layer slot order for Inkling: the attention bundle (QKV/O, the

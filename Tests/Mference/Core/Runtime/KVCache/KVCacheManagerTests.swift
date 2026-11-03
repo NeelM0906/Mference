@@ -137,6 +137,26 @@ import Metal
         #expect(kv.keyView(layer: 3, validTokenCount: 513).startSlot == 0)
     }
 
+    @Test func pagedFullAttention_keepsHybridSlidingLayersAllocated() throws {
+        let context = try MetalContext()
+        let flint = ArchConfig.flint40B_A2_5B_JANG_4M
+        let kv = try KVCacheManager(device: context.device,
+                                    config: flint,
+                                    maxContext: 513,
+                                    fp16RingEnabled: true,
+                                    slidingWindow: flint.slidingWindow,
+                                    maxPrefillChunkTokens: 1,
+                                    fp16RingCapacityOverride: 512,
+                                    pagedFullAttention: true)
+
+        #expect(kv.layerKind(0) == .full)
+        #expect(kv.layerKind(2) == .swa)
+        #expect(kv.capacity(layer: 0) == 0)
+        #expect(kv.capacity(layer: 2) == 512)
+        #expect(kv.kSlot(layer: 2, position: 0).offset == 0)
+        #expect(kv.kSlot(layer: 2, position: 512).offset == 0)
+    }
+
     @Test func fp16Ring_rangesMustNotWrap() throws {
         let (_, kv) = try makeManager(maxContext: 128,
                                       fp16RingEnabled: true,

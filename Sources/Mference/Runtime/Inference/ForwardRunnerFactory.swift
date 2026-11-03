@@ -36,6 +36,13 @@ public enum ForwardRunnerFactory {
                                   prefillConfig: runtimeConfiguration.prefillConfig,
                                   kvStorageMode: .fp16)
         }
+        if model.config.family == .flint {
+            return ForwardRuntime(producer: try FlintForwardRunner(
+                model: model, context: context, maxContext: maxContext,
+                runtimeConfiguration: runtimeConfiguration),
+                                  prefillConfig: runtimeConfiguration.prefillConfig,
+                                  kvStorageMode: .fp16)
+        }
         if model.config.family == .minicpm5 {
             return ForwardRuntime(producer: try MiniCPM5ForwardRunner(
                 model: model, context: context, maxContext: maxContext,

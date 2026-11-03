@@ -11,6 +11,9 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
     case maple = "maple"
+    /// Flint-40B-A2.5B JANG_4M. Pre-quantized MLX affine weights: INT8
+    /// resident core/shared expert and INT4 streamed routed experts.
+    case flint = "flint"
     /// Qwen3.8-Flash-Next. Repacked from the vendor's original BF16 repo and
     /// executed by `FlashNextForwardRunner`; its capability gate was lifted on
     /// 2026-09-10, so `ManifestReader.peekFamily` resolves it like any other
@@ -208,6 +211,8 @@ struct ArchInfo: Sendable, Equatable {
     /// GLM-5.3-Flash's new axes. Nil for every other family, so their
     /// manifests are unchanged.
     let glm53: Glm53Axes?
+    let noRopeLayerMask: [UInt8]
+    let attentionSinks: Bool
 
     init(hiddenSize: Int,
          intermediateSize: Int,
@@ -282,10 +287,14 @@ struct ArchInfo: Sendable, Equatable {
          unpaddedVocabSize: Int = 0,
          flashNext: FlashNextAxes? = nil,
          qkNorm: Bool = true,
-         glm53: Glm53Axes? = nil) {
+         glm53: Glm53Axes? = nil,
+         noRopeLayerMask: [UInt8] = [],
+         attentionSinks: Bool = false) {
         self.flashNext = flashNext
         self.qkNorm = qkNorm
         self.glm53 = glm53
+        self.noRopeLayerMask = noRopeLayerMask
+        self.attentionSinks = attentionSinks
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
         self.moeIntermediateSize = moeIntermediateSize
@@ -371,6 +380,9 @@ struct ArchInfo: Sendable, Equatable {
         }
         if (root["model_type"] as? String) == "maple" {
             return try loadMaple(configPath: configPath, tc: root)
+        }
+        if (root["model_type"] as? String) == "flint" {
+            return try loadFlint(configPath: configPath, tc: root)
         }
         // MiniCPM5 is a flat `LlamaForCausalLM` config. The loader is keyed on
         // the llama model type because that is all a config carries; the
@@ -644,6 +656,222 @@ struct ArchInfo: Sendable, Equatable {
                 path: configPath,
                 detail: "glm5_next config does not match the pinned "
                     + "GLM-5.3-Flash-320B-A18B architecture baseline")
+        }
+    }
+
+    // MARK: - Flint
+
+    /// Flint 40B-A2.5B JANG. The config is flat. Full-attention layers are
+    /// NoPE and are listed explicitly by `no_rope_layer_indices`; that list
+    /// must not be inferred from `layer_types` at runtime. Routed experts use
+    /// the MLX `switch_mlp` container, and the first two layers carry a dense
+    /// FFN instead.
+    private static func loadFlint(configPath: String,
+                                  tc: [String: Any]) throws -> ArchInfo {
+        func integer(_ key: String) throws -> Int {
+            guard let number = tc[key] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  NSNumber(value: number.int64Value).compare(number) == .orderedSame,
+                  let value = Int(exactly: number.int64Value) else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "\(key) must be an exact integer")
+            }
+            return value
+        }
+        func decimal(_ key: String) throws -> Double {
+            guard let value = (tc[key] as? Double) ?? (tc[key] as? NSNumber)?.doubleValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(key)")
+            }
+            return value
+        }
+        func require(_ key: String, equals expected: Bool) throws {
+            guard tc[key] as? Bool == expected else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "Flint requires \(key)=\(expected)")
+            }
+        }
+        func require(_ key: String, equals expected: String) throws {
+            guard tc[key] as? String == expected else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "Flint requires \(key)=\(expected)")
+            }
+        }
+
+        let numLayers = try integer("num_hidden_layers")
+        guard let layerTypes = tc["layer_types"] as? [String],
+              layerTypes.count == numLayers else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "layer_types must contain one entry per layer")
+        }
+        let attentionMask = try layerTypes.map { type -> UInt8 in
+            switch type {
+            case "sliding_attention": return 0
+            case "full_attention": return 1
+            default:
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "unknown layer_types entry \"\(type)\"")
+            }
+        }
+        guard let noRopeIndices = tc["no_rope_layer_indices"] as? [NSNumber] else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing no_rope_layer_indices")
+        }
+        let noRopeInts = try noRopeIndices.map { number -> Int in
+            guard CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  NSNumber(value: number.int64Value).compare(number) == .orderedSame,
+                  let value = Int(exactly: number.int64Value) else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "no_rope_layer_indices must contain exact integers")
+            }
+            return value
+        }
+        guard Set(noRopeInts).count == noRopeInts.count,
+              noRopeInts.allSatisfy({ $0 >= 0 && $0 < numLayers }) else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "no_rope_layer_indices contains a duplicate or out-of-range layer")
+        }
+        let noRopeSet = Set(noRopeInts)
+        let noRopeMask = (0..<numLayers).map { noRopeSet.contains($0) ? UInt8(1) : UInt8(0) }
+
+        guard let denseLayers = tc["mlp_only_layers"] as? [NSNumber] else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing mlp_only_layers")
+        }
+        let denseInts = try denseLayers.map { number -> Int in
+            guard CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  NSNumber(value: number.int64Value).compare(number) == .orderedSame,
+                  let value = Int(exactly: number.int64Value) else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "mlp_only_layers must contain exact integers")
+            }
+            return value
+        }
+        guard denseInts == Array(0..<denseInts.count) else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "Flint requires a leading dense-FFN prefix")
+        }
+
+        try require("tie_word_embeddings", equals: false)
+        try require("norm_topk_prob", equals: true)
+        try require("use_sliding_window", equals: true)
+        try require("router_score_function", equals: "sigmoid")
+        try require("hidden_act", equals: "silu")
+        guard tc["softmax_type"] as? String == "learnable" else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "Flint requires softmax_type=learnable")
+        }
+
+        let headDim = try integer("head_dim")
+        let numLayersValue = numLayers
+        let arch = ArchInfo(
+            hiddenSize: try integer("hidden_size"),
+            intermediateSize: try integer("shared_expert_intermediate_size"),
+            moeIntermediateSize: try integer("moe_intermediate_size"),
+            numHeads: try integer("num_attention_heads"),
+            numKVHeads: try integer("num_key_value_heads"),
+            numFullKVHeads: try integer("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try integer("vocab_size"),
+            slidingWindow: try integer("sliding_window"),
+            finalLogitSoftcap: 0.0,
+            ropeTheta: try decimal("rope_theta"),
+            fullRopeTheta: try decimal("rope_theta"),
+            partialRotaryFactor: 1.0,
+            numLayers: numLayersValue,
+            numExperts: try integer("num_experts"),
+            topKExperts: try integer("num_experts_per_tok"),
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: attentionMask,
+            hiddenActivation: "silu",
+            family: .flint,
+            attnOutputGate: false,
+            attentionScale: 1.0 / Double(headDim).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            routerScoringFunc: "sigmoid",
+            routedScalingFactor: 1.0,
+            numSharedExperts: 1,
+            numDenseLayers: denseInts.count,
+            denseIntermediateSize: try integer("intermediate_size"),
+            routerNormAfterTopK: true,
+            noRopeLayerMask: noRopeMask,
+            attentionSinks: true)
+        try crossCheckProductionFlint(arch, configPath: configPath,
+                                      rmsNormEpsilon: try decimal("rms_norm_eps"))
+        return arch
+    }
+
+    private static func crossCheckProductionFlint(_ actual: ArchInfo,
+                                                  configPath: String,
+                                                  rmsNormEpsilon: Double) throws {
+        guard actual.hiddenSize == 2_048, actual.numLayers == 49 else { return }
+        let expectedMask: [UInt8] = (0..<49).map {
+            $0 == 0 || $0 == 1 || $0 == 48
+                || ($0 >= 5 && $0 <= 45 && ($0 - 5).isMultiple(of: 4)) ? 1 : 0
+        }
+        let expectedNoRope: [UInt8] = expectedMask
+        let expected = ArchInfo(
+            hiddenSize: 2_048,
+            intermediateSize: 1_024,
+            moeIntermediateSize: 512,
+            numHeads: 32,
+            numKVHeads: 4,
+            numFullKVHeads: 4,
+            headDim: 128,
+            fullHeadDim: 128,
+            vocabSize: 150_144,
+            slidingWindow: 513,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 10_000.0,
+            fullRopeTheta: 10_000.0,
+            partialRotaryFactor: 1.0,
+            numLayers: 49,
+            numExperts: 256,
+            topKExperts: 6,
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: expectedMask,
+            hiddenActivation: "silu",
+            family: .flint,
+            attnOutputGate: false,
+            attentionScale: 1.0 / Double(128).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            routerScoringFunc: "sigmoid",
+            routedScalingFactor: 1.0,
+            numSharedExperts: 1,
+            numDenseLayers: 2,
+            denseIntermediateSize: 6_144,
+            routerNormAfterTopK: true,
+            noRopeLayerMask: expectedNoRope,
+            attentionSinks: true)
+        guard actual == expected, rmsNormEpsilon == 0.000_001 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "flint config does not match the pinned Flint-40B-A2.5B-JANG_4M architecture baseline")
         }
     }
 

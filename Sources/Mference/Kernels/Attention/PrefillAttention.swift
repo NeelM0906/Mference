@@ -67,6 +67,9 @@ final class PrefillAttention {
                              out: MTLBuffer, outOffset: Int = 0,
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
+                             sinks: MTLBuffer? = nil,
+                             sinksOffset: Int = 0,
+                             numSinks: UInt32 = 0,
                              path: RuntimePrefillAttentionPath = .causalTiled) {
         validate(params)
 
@@ -85,6 +88,7 @@ final class PrefillAttention {
         // shape for sliding attention must add a full-visibility check here.
         let tensorOpsShape = requestsTensorOps
             && kvRingCapacity == 0
+            && numSinks == 0
             && params.headDim == 512
             && params.numQHeads == 16
             && params.numKVHeads == 2
@@ -123,6 +127,9 @@ final class PrefillAttention {
         enc.setBuffer(out, offset: outOffset, index: 3)
         var p = params
         enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 4)
+        enc.setBuffer(sinks ?? out, offset: sinksOffset, index: 5)
+        var sinkCount = numSinks
+        enc.setBytes(&sinkCount, length: MemoryLayout<UInt32>.size, index: 6)
         let groups = useTensorOps
             ? MTLSize(width: Int(params.queryCount),
                       height: Int(params.numQHeads) / 8,

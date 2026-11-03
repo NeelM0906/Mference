@@ -59,7 +59,7 @@ final class Attention {
     /// attention.metal is 512; the widest family (Qwen 3.8) has 24 Q heads;
     /// `maxChunks` bounds the split factor (and therefore the scratch size:
     /// 24·64·512 FP32 ≈ 3 MB).
-    static let maxQHeads = 24
+    static let maxQHeads = 32
     static let maxHeadDim = 512
     static let maxChunks = 64
     /// Full attention uses 16 base chunks by default.
@@ -306,7 +306,10 @@ final class Attention {
                          numQHeads: UInt32,
                          numKVHeads: UInt32,
                          selTokens: UInt32,
-                         scale: Float? = nil) {
+                         scale: Float? = nil,
+                         sinks: MTLBuffer? = nil,
+                         sinksOffset: Int = 0,
+                         numSinks: UInt32 = 0) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -345,6 +348,9 @@ final class Attention {
         p1.setBytes(&cl,  length: MemoryLayout<UInt32>.size, index: 11)
         p1.setBytes(&nc,  length: MemoryLayout<UInt32>.size, index: 12)
         p1.setBytes(&sc2, length: MemoryLayout<Float>.size,  index: 13)
+        p1.setBuffer(sinks ?? mPartial, offset: sinksOffset, index: 14)
+        var ns = numSinks
+        p1.setBytes(&ns, length: MemoryLayout<UInt32>.size, index: 15)
         p1.dispatchThreadgroups(MTLSize(width: geometry.partialThreadgroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
         p1.endEncoding()

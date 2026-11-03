@@ -254,6 +254,8 @@ void attention_decode_paged_partial(
     constant     uint&   chunk_len     [[buffer(11)]],
     constant     uint&   num_chunks    [[buffer(12)]],
     constant     float&  scale         [[buffer(13)]],
+    device const bfloat* sinks         [[buffer(14)]],
+    constant     uint&   num_sinks     [[buffer(15)]],
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]],
@@ -287,8 +289,10 @@ void attention_decode_paged_partial(
     float o_local[kPerThread];
     for (uint k = 0; k < kPerThread; ++k) { o_local[k] = 0.0f; }
 
-    float m_run = -INFINITY;
-    float d_run = 0.0f;
+    float m_run = (num_sinks > 0u && chunk == 0u)
+        ? float(sinks[q_head])
+        : -INFINITY;
+    float d_run = (num_sinks > 0u && chunk == 0u) ? 1.0f : 0.0f;
 
     for (uint l = l_start; l < l_end; ++l) {
         const uint slot = page_table[l / kAttnPageTokens];

@@ -31,7 +31,7 @@ enum GTurboJSON {
         case .minicpm5:
             return "W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX"
         case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-             .qwen38flashnext, .glm53Flash:
+             .qwen38flashnext, .glm53Flash, .flint:
             return "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36"
         }
     }
@@ -217,6 +217,16 @@ enum GTurboJSON {
             archDict["numDenseLayers"] = arch.numDenseLayers
             archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
         }
+        if arch.family == .flint {
+            archDict["numSharedExperts"] = arch.numSharedExperts
+            archDict["numDenseLayers"] = arch.numDenseLayers
+            archDict["denseIntermediateSize"] = arch.denseIntermediateSize
+            archDict["routerScoringFunc"] = arch.routerScoringFunc
+            archDict["routedScalingFactor"] = arch.routedScalingFactor
+            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
+            archDict["noRopeLayerMask"] = arch.noRopeLayerMask.map { Int($0) }
+            archDict["attentionSinks"] = arch.attentionSinks
+        }
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -240,7 +250,7 @@ enum GTurboJSON {
         // GLM-5.3-Flash's router gate is unquantized BF16; the manifest
         // records the slot as such rather than the 8-bit default a BF16
         // tensor would otherwise leave in place.
-        if arch.family == .glm53Flash
+        if arch.family == .glm53Flash || arch.family == .flint
             || (arch.family == .gemma4 && bitWidths.router == 16) {
             quantDict["router"] = [
                 "weightBits": 16,
