@@ -37,6 +37,15 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// `--shadow-budget`: 0 turns speculative expert prefetch off, 1...8 selects
     /// shadow prefetch with that many speculative reads per layer.
     public static let allowedShadowPrefetchBudgets = 0...8
+    /// Full-attention KV (Gemma 4, Qwen 3.6, Inkling) starts at this many tokens. A
+    /// prompt that does not fit grows it to the prompt plus this many more,
+    /// room for the answer; an answer that outgrows that room grows it by half
+    /// as much at a time, up to `--max-context`. Metal charges a KV buffer in full once
+    /// bound, so reserving the whole `--max-context` up front costs memory a
+    /// short chat never uses: on a 16 GiB M2 a 262,144-token reservation took
+    /// 2.6 GiB of expert page cache from 128,000 and cut QAT decode from 6.3 to
+    /// 4.6 tok/s. `--kv-reserve` reserves the whole context instead.
+    public static let defaultKVGrowthTokens = 16_384
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy
@@ -58,6 +67,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let kvPoolPagesPerLayer: Int?
     /// `--shadow-budget`; nil keeps the family default.
     public let shadowPrefetchBudget: Int?
+    /// Growth step of full-attention KV; nil (`--kv-reserve`) reserves the
+    /// whole context up front.
+    public let kvGrowthTokens: Int?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -72,13 +84,15 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 kvSinkPages: Int = 2,
                 kvRecentPages: Int = 4,
                 kvPoolPagesPerLayer: Int? = nil,
-                shadowPrefetchBudget: Int? = nil) {
+                shadowPrefetchBudget: Int? = nil,
+                kvGrowthTokens: Int? = RuntimeConfiguration.defaultKVGrowthTokens) {
         precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
                      "unsupported expert-cache slot count")
         precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
                      "unsupported prefill chunk size")
         precondition(shadowPrefetchBudget.map(Self.allowedShadowPrefetchBudgets.contains) ?? true,
                      "unsupported shadow prefetch budget")
+        precondition(kvGrowthTokens.map { $0 > 0 } ?? true, "KV growth step must be positive")
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.rdadvisePolicy = rdadvisePolicy
@@ -95,6 +109,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.kvRecentPages = kvRecentPages
         self.kvPoolPagesPerLayer = kvPoolPagesPerLayer
         self.shadowPrefetchBudget = shadowPrefetchBudget
+        self.kvGrowthTokens = kvGrowthTokens
     }
 
     public static var production: RuntimeConfiguration {
@@ -103,12 +118,14 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     /// The server prefills long prompts in chunks; every chunk re-reads most
     /// routed experts, so 128-token chunks made a 3,015-token Gemma prompt
-    /// spend 134 s of 205 s on expert I/O. Gemma takes 1,024 tokens on hosts
-    /// with at least 16 GiB: about +309 MB (scratch +125 MB, sliding KV ring
-    /// +184 MB), the accepted budget. Qwen 3.6 has no sliding ring to grow, so
-    /// the same hosts give it 2,048 for +270 MB of scratch: a 2,940-token
-    /// prompt went from 148.7 s to 42.7 s with decode unchanged (2026-09-21).
-    /// `MFERENCE_SERVER_PREFILL_CHUNK` overrides.
+    /// spend 134 s of 205 s on expert I/O. On hosts with at least 16 GiB Gemma
+    /// took 1,024 tokens (about +309 MB over 128) and since 2026-09-26 takes
+    /// 2,048: a 19,098-token QAT prompt fell from 386.3 s to 350.2 s (mean of
+    /// an A B B A run) for +351 MB of Metal allocation, 210 MB of it sliding
+    /// KV ring. Qwen 3.6 has no sliding ring to grow, so 2,048 costs it +270 MB
+    /// of scratch: a 2,940-token prompt went from 148.7 s to 42.7 s with decode
+    /// unchanged (2026-09-21). The server's `--prefill-chunk` and then
+    /// `MFERENCE_SERVER_PREFILL_CHUNK` override.
     public static func defaultServerPrefillChunkTokens(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
@@ -121,8 +138,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         let gib = UInt64(1) << 30
         guard physicalMemoryBytes >= 16 * gib else { return 128 }
         switch family {
-        case .gemma4: return 1024
-        case .qwen36: return 2048
+        case .gemma4, .qwen36: return 2048
         default: return 128
         }
     }

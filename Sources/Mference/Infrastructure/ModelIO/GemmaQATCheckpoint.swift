@@ -5,6 +5,9 @@ public enum GemmaQATCheckpoint {
     public static let chatTemplateSHA256 = "94899c0f917d93f6fe81c95744d1e8ddab2d21d39228d2e4aec1fb2a25bff413"
     public static let requiredAssets = ["config.json", "tokenizer.json", "tokenizer_config.json",
                                         "chat_template.jinja", "generation_config.json"]
+    /// `quant.routedExpert.biasType` of an install that stores routed experts
+    /// without their bias arrays; `layout.json` then carries `expertStorage`.
+    public static let impliedRoutedBiasType = "impliedNeg8Scale"
 
     /// Called only after the manifest has verified the installed source assets.
     /// Source-absent processors stay neutral instead of inheriting the global
@@ -48,9 +51,11 @@ public enum GemmaQATCheckpoint {
         }
         for (name, slot) in [("embedding", quant.embedding), ("attention", quant.attention),
                              ("sharedExpert", quant.sharedExpert), ("routedExpert", quant.routedExpert)] {
+            let biasType = slot.biasType.lowercased()
+            let impliedAllowed = name == "routedExpert" && biasType == impliedRoutedBiasType.lowercased()
             guard slot.weightBits == 4, slot.groupSize == 32,
                   slot.scheme.lowercased() == "affine", slot.scaleType.lowercased() == "bf16",
-                  slot.biasType.lowercased() == "bf16" else {
+                  biasType == "bf16" || impliedAllowed else {
                 throw ModelError.indexCorrupt(detail: "Gemma QAT requires native INT4/group-32 for \(name)")
             }
         }

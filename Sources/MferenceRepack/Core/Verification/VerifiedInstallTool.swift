@@ -115,6 +115,16 @@ public enum VerifiedInstallTool {
         let numLayers: Int
         let expertsPerLayer: Int
         let layers: [Layer]
+        let expertStorage: ExpertStorage?
+
+        /// Bytes of one expert in its layer file. `expertStride` stays the
+        /// expanded size the kernels address; the runtime loader validates
+        /// the rest of `expertStorage`.
+        var storedExpertStride: UInt64 { expertStorage?.storedExpertStride ?? expertStride }
+    }
+
+    private struct ExpertStorage: Decodable {
+        let storedExpertStride: UInt64
     }
 
     private struct Layer: Decodable {
@@ -212,14 +222,16 @@ public enum VerifiedInstallTool {
               layout.expertsPerLayer == manifest.expertsPerLayer else {
             throw RepackError.configurationInvalid(detail: "packed expert layout dimensions mismatch manifest")
         }
-        guard layout.expertStride % pageSize == 0 else {
+        guard layout.expertStride % pageSize == 0,
+              layout.storedExpertStride % pageSize == 0 else {
             throw RepackError.configurationInvalid(
-                detail: "expertStride \(layout.expertStride) is not page-aligned")
+                detail: "expertStride \(layout.expertStride) or stored stride "
+                    + "\(layout.storedExpertStride) is not page-aligned")
         }
         guard layout.layers.count == layout.numLayers else {
             throw RepackError.configurationInvalid(detail: "packed expert layout layer count mismatch")
         }
-        let expectedLayerSize = UInt64(layout.expertsPerLayer) * layout.expertStride
+        let expectedLayerSize = UInt64(layout.expertsPerLayer) * layout.storedExpertStride
         for layer in layout.layers {
             guard layer.layer >= 0 && layer.layer < layout.numLayers else {
                 throw RepackError.configurationInvalid(detail: "packed expert layer index out of range")
@@ -272,7 +284,7 @@ public enum VerifiedInstallTool {
                     throw RepackError.configurationInvalid(
                         detail: "\(relativePath) duplicate expert \(expertID)")
                 }
-                guard expert.size == layout.expertStride else {
+                guard expert.size == layout.storedExpertStride else {
                     throw RepackError.configurationInvalid(
                         detail: "\(relativePath) expert \(expertID) size mismatch")
                 }

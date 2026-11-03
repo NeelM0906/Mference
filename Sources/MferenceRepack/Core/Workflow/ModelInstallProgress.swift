@@ -11,6 +11,8 @@ public enum ModelInstallProgress: Equatable, Sendable {
         totalBytes: UInt64
     )
     case hashingOutput(String)
+    /// Rewriting a Gemma 4 QAT layer file without its `-8 * scale` biases.
+    case compactingExperts(String)
     case finalizing
 
     /// Plain progress text, separate from the final machine-readable byte
@@ -33,6 +35,8 @@ public enum ModelInstallProgress: Equatable, Sendable {
                 + ": \(gb(reused)) reused + \(gb(downloaded)) downloaded this run / \(gb(total)) total."
         case let .hashingOutput(path):
             return "Verifying output: \(path)"
+        case let .compactingExperts(path):
+            return "Storing experts without implied biases: \(path)"
         case .finalizing:
             return "Finalizing verified install."
         }

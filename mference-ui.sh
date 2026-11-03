@@ -18,6 +18,8 @@ server_port=8080
 webui_port=3000
 max_context=16384
 prompt_cache_mode=single-prefix
+prefill_chunk=auto
+kv_reserve=0
 preload_model=""
 library_roots=()
 dry_run=0
@@ -52,13 +54,24 @@ usage: ./mference-ui.sh [options]                      start the UI
   --model <dir>          Preload this install instead of loading lazily.
   --server-port <port>   MferenceServer port (default 8080).
   --webui-port <port>    Open WebUI port (default 3000).
-  --max-context <tokens> Context window for every model (default 16384).
+  --max-context <tokens|max>
+                         Context window for every model (default 16384); max
+                         gives each model its own native context.
   --build-path <dir>     Swift build directory (default .build). Useful when
                          keeping different Xcode toolchains separate.
   --data-dir <dir>       Open WebUI data directory (default under your Library).
                          Use a separate directory for isolated release tests.
   --prompt-cache-mode <off|single-prefix>
                          Passed through to MferenceServer.
+  --prefill-chunk <n|auto>
+                         Prompt tokens per prefill chunk, passed through to
+                         MferenceServer: auto (default; 2048 for Gemma 4, QAT
+                         and Qwen 3.6 on 16 GiB+ Macs) or 32 ... 4096. 1024
+                         saves Gemma about 350 MB at slower long prompts.
+  --kv-reserve           Reserve full-attention KV for the whole context
+                         up front, passed through to MferenceServer. By
+                         default Gemma 4, Qwen 3.6 and Inkling grow it with
+                         the conversation from 16384 tokens.
   --dry-run              Print what would run, start nothing, exit 0. Works
                          for every subcommand, before or after it.
   --help                 Show this message.
@@ -96,6 +109,8 @@ while [[ $# -gt 0 ]]; do
     --build-path) require_value "$@"; build_path="$2"; shift 2 ;;
     --data-dir) require_value "$@"; data_directory="$2"; shift 2 ;;
     --prompt-cache-mode) require_value "$@"; prompt_cache_mode="$2"; shift 2 ;;
+    --prefill-chunk) require_value "$@"; prefill_chunk="$2"; shift 2 ;;
+    --kv-reserve) kv_reserve=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) note "error: unknown option $1"; usage >&2; exit 2 ;;
@@ -109,13 +124,16 @@ check_positive_integer() {
 }
 check_positive_integer --server-port "$server_port"
 check_positive_integer --webui-port "$webui_port"
-check_positive_integer --max-context "$max_context"
+if [[ "$max_context" != max ]]; then
+  check_positive_integer --max-context "$max_context"
+  max_context="$((10#$max_context))"
+fi
 server_port="$((10#$server_port))"
 webui_port="$((10#$webui_port))"
-max_context="$((10#$max_context))"
 [[ "$server_port" -le 65535 && "$webui_port" -le 65535 ]] || fail "ports must be between 1 and 65535"
 [[ "$server_port" -ne "$webui_port" ]] || fail "server and UI need different ports"
 case "$prompt_cache_mode" in off|single-prefix) ;; *) fail "--prompt-cache-mode must be off or single-prefix" ;; esac
+case "$prefill_chunk" in auto|32|64|128|256|512|1024|2048|4096) ;; *) fail "--prefill-chunk must be auto, 32, 64, 128, 256, 512, 1024, 2048 or 4096" ;; esac
 [[ "$build_path" == /* ]] || build_path="$repository_root/$build_path"
 [[ "$data_directory" == /* ]] || data_directory="$repository_root/$data_directory"
 server_binary="$build_path/release/MferenceServer"
@@ -124,7 +142,11 @@ server_arguments=(
   --port "$server_port"
   --max-context "$max_context"
   --prompt-cache-mode "$prompt_cache_mode"
+  --prefill-chunk "$prefill_chunk"
 )
+if [[ "$kv_reserve" -eq 1 ]]; then
+  server_arguments+=(--kv-reserve)
+fi
 if [[ ${#library_roots[@]} -eq 0 ]]; then
   server_arguments+=(--library)
 else

@@ -41,12 +41,16 @@ do {
         let promptCacheMode = arguments.promptCacheMode
         let verification = arguments.verification
         let shadowBudget = arguments.shadowBudget
-        let library = ServerModelLibrary(index: index) { directory in
+        let prefillChunk = arguments.prefillChunk
+        let reserveFullKV = arguments.reserveFullKV
+        let library = ServerModelLibrary(index: index, maxContext: maxContext) { directory in
             try await ServerModelSession.load(modelDirectory: directory,
                                               maxContext: maxContext,
                                               promptCacheMode: promptCacheMode,
                                               integrityPolicy: verification,
-                                              shadowPrefetchBudget: shadowBudget)
+                                              shadowPrefetchBudget: shadowBudget,
+                                              prefillChunkTokens: prefillChunk,
+                                              reserveFullKV: reserveFullKV)
         }
         // `--model` alongside `--library` preloads one install; without it the
         // first request pays the load. Either way exactly one model is ever
@@ -71,18 +75,21 @@ do {
             maxContext: arguments.maxContext,
             promptCacheMode: arguments.promptCacheMode,
             integrityPolicy: arguments.verification,
-            shadowPrefetchBudget: arguments.shadowBudget)
+            shadowPrefetchBudget: arguments.shadowBudget,
+            prefillChunkTokens: arguments.prefillChunk,
+            reserveFullKV: arguments.reserveFullKV)
         let modelID = arguments.modelIDOverride ?? backend.defaultModelID
         server = MferenceHTTPServer(
             modelID: modelID,
             queueLimit: arguments.queueLimit,
             backend: backend,
-            chatDialect: backend.chatDialect)
+            chatDialect: backend.chatDialect,
+            maxModelLen: backend.maxContext)
         readyDetail = "model=\(modelID)"
     }
 
     _ = try await server.start(host: host, port: arguments.port)
-    print("MferenceServer ready at http://\(host):\(arguments.port) \(readyDetail) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue)")
+    print("MferenceServer ready at http://\(host):\(arguments.port) \(readyDetail) context=\(arguments.maxContext.map(String.init) ?? "max") prompt_cache=\(arguments.promptCacheMode.rawValue)")
     // Supervisors watch for the ready line through a pipe or log file, where
     // stdout is block-buffered and would otherwise hold it back indefinitely.
     fflush(stdout)

@@ -1,4 +1,5 @@
 import Foundation
+@testable import MferenceRepackCore
 
 /// Synthesises a tiny MLX-affine-quantized safetensors snapshot inside a
 /// temporary directory. The remote repack tests need only deterministic bytes
@@ -129,15 +130,18 @@ enum SyntheticSnapshot {
             appendQuantizedWeight(name: prefix + ".experts.switch_glu.gate_proj",
                                   outerShape: [arch.numExperts, arch.moeIntermediate],
                                   innerLogical: arch.hidden, bits: 4,
-                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng,
+                                  impliedBiases: gemmaQAT)
             appendQuantizedWeight(name: prefix + ".experts.switch_glu.up_proj",
                                   outerShape: [arch.numExperts, arch.moeIntermediate],
                                   innerLogical: arch.hidden, bits: 4,
-                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng,
+                                  impliedBiases: gemmaQAT)
             appendQuantizedWeight(name: prefix + ".experts.switch_glu.down_proj",
                                   outerShape: [arch.numExperts, arch.hidden],
                                   innerLogical: arch.moeIntermediate, bits: 4,
-                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng,
+                                  impliedBiases: gemmaQAT)
 
             // Per-layer norms
             for norm in ["input_layernorm","post_attention_layernorm",
@@ -1900,7 +1904,8 @@ enum SyntheticSnapshot {
                                               bits: Int,
                                               groupSize: Int,
                                               into tensors: inout [(String, String, [Int], [UInt8])],
-                                              rng: inout SplitMix64) {
+                                              rng: inout SplitMix64,
+                                              impliedBiases: Bool = false) {
         precondition(innerLogical % groupSize == 0)
         let factor = 32 / bits
         precondition(innerLogical % factor == 0)
@@ -1919,6 +1924,16 @@ enum SyntheticSnapshot {
         tensors.append((name + ".scales", "BF16", companionShape, sb))
         var bb = [UInt8](repeating: 0, count: companionElems * 2)
         for i in 0..<bb.count { bb[i] = UInt8(rng.next() & 0xFF) }
+        if impliedBiases {
+            // Q4_0-style checkpoints (Gemma 4 QAT): every bias is -8 * scale.
+            // The random draw above still runs so later tensors keep their bytes.
+            for g in 0..<companionElems {
+                let scale = UInt16(sb[2 * g]) | UInt16(sb[2 * g + 1]) << 8
+                let bias = QATImpliedBiasConverter.neg8ScaleBits(scale)
+                bb[2 * g] = UInt8(bias & 0xFF)
+                bb[2 * g + 1] = UInt8(bias >> 8)
+            }
+        }
         tensors.append((name + ".biases", "BF16", companionShape, bb))
     }
 

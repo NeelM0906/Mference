@@ -253,6 +253,12 @@ Endpoints:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
+Each model in `GET /v1/models` carries `max_model_len`, vLLM's field: the
+context window for prompt plus completion that the model runs with. That is
+the numeric `--max-context`, or with `--max-context max` the model family's
+native context. In library mode it comes from the install index, so listing
+loads nothing and answers during a model load.
+
 Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream": true` for streaming. Set
 `"stream_options": {"include_usage": true}` to receive a final usage chunk.
@@ -394,7 +400,34 @@ generous allowance — around 2048 `max_completion_tokens` (when neither cap is
 set the server uses 4096) — or the reasoning budget swallows the visible
 answer and the request finishes with `finish_reason` `"length"`.
 
-Context length can be 4K, 8K, 16K, 32K, 64K, or 128000 tokens; the default is
-16K. Maple supports 128000 tokens in the server and uses native BF16 KV with
-layer-major chunked prefill; existing families use FP16 KV. On an 8 GB Mac,
+`--max-context` takes any length up to the model's native context (default
+16K): 262,144 tokens for Gemma 4 (QAT included), Qwen 3.6, Qwen 3.8 and
+Flash-Next; 131,072 for MiniCPM5; 128,000 for Maple; 1,048,576 for
+DeepSeek-V4-Flash, Inkling-Small and GLM-5.3-Flash. `--max-context max` gives
+every model its own native context, which suits a library of different
+models; families that do not grow their KV (all but Gemma 4, Qwen 3.6 and
+Inkling) then reserve that whole context when they load. A model whose native
+context is shorter refuses to load: with `--model` the server exits at
+startup, and in library mode the request that asked for it gets HTTP 400
+`context_exceeds_model`. At 262,144 Gemma 4 QAT needs about 9.15 GiB with
+server settings, 5.02 GiB of it growing with context.
+
+Gemma 4, Qwen 3.6 and Inkling-Small do not reserve their full-attention KV for
+`--max-context` up front. It starts at 16,384 tokens (a context of 16,384 or
+less is reserved whole); a prompt that does not fit grows it to the prompt
+plus 16,384 tokens, room for the answer, and an answer that outgrows that
+adds 8,192 tokens at a time, up to `--max-context`. Each layer reserves
+address space for the whole context and grows its Metal buffer over the same
+pages, so rows are never copied and the KV is never held twice; a new
+conversation starts again from 16,384 and returns the pages. Metal charges a
+KV buffer in full once it is bound, so a whole reservation costs memory a
+short chat never uses: on a 16 GiB M2 reserving 262,144 instead of 128,000
+took 2.6 GiB from the page cache holding routed experts and cut QAT decode
+from about 6.3 to 4.6 tok/s. `--kv-reserve` reserves the whole context at load
+instead; the other families always do. Pages the GPU writes into a growing
+KV count as wired system memory rather than in the server process's own
+footprint, so Activity Monitor shows the process smaller than its KV.
+
+Maple uses native BF16
+KV with layer-major chunked prefill; existing families use FP16 KV. On an 8 GB Mac,
 run one model process at a time and watch memory pressure.

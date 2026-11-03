@@ -11,19 +11,28 @@ public struct ServerArguments: Equatable, Sendable {
     /// default for the loaded model family.
     public let modelIDOverride: String?
     public var modelID: String { modelIDOverride ?? "gemma-4-26b-a4b-it" }
-    public let maxContext: Int
+    /// `--max-context`; nil (`max`) gives each model its native context.
+    public let maxContext: Int?
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
     /// `--verify`; see `ModelIntegrityPolicy`.
     public let verification: ModelIntegrityPolicy
     /// `--shadow-budget`; nil keeps the family default.
     public let shadowBudget: Int?
+    /// `--prefill-chunk`; nil (`auto`) keeps the family default.
+    public let prefillChunk: Int?
+    /// `--kv-reserve`: reserve full-attention KV for the whole context up front
+    /// instead of growing it with the conversation.
+    public let reserveFullKV: Bool
     /// nil when `--library` was absent, which keeps single-model mode exactly
     /// as it was.
     public let library: ServerLibraryOption?
     /// `--list-models`: run discovery, print what library mode would serve, and
     /// exit without binding a port or loading a model.
     public let listModels: Bool
+
+    /// `--max-context` when it is not given.
+    public static let defaultMaxContext = 16_384
 
     public static let usage = """
     usage: MferenceServer --model <completed .gturbo directory> [options]
@@ -63,7 +72,21 @@ public struct ServerArguments: Equatable, Sendable {
                              qwen3.8-flash-next-int4g64,
                              minicpm5-2b-int4g64, or the manifest's distinct
                              GLM / Swift-Qwen checkpoint ID). Single-model mode only.
-      --max-context <tokens> 4096, 8192, 16384, 32768, 65536, or 128000 (default 16384).
+      --max-context <tokens|max>
+                             Context length in tokens (default 16384), up to
+                             the model's native context: 262144 for Gemma 4,
+                             Qwen 3.6, Qwen 3.8 and Flash-Next, 131072 for
+                             MiniCPM5, 128000 for Maple, 1048576 for
+                             DeepSeek-V4, Inkling and GLM-5.3. A model whose
+                             native context is shorter refuses to load. max
+                             gives each model its own native context.
+      --kv-reserve           Reserve full-attention KV for the whole context
+                             when a model loads. Without it, Gemma 4,
+                             Qwen 3.6 and Inkling start at 16384 tokens (a
+                             context of 16384 or less is reserved whole); a
+                             longer prompt grows it to the prompt plus 16384,
+                             and an answer that outgrows that adds 8192 at a
+                             time.
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
@@ -72,6 +95,14 @@ public struct ServerArguments: Equatable, Sendable {
                              issued per layer ahead of the router; 0 turns it off.
                              Default: 4 for Qwen 3.6 and Gemma 4 on hosts with 16
                              to under 24 GiB, 2 for DeepSeek-V4-Flash, off elsewhere.
+      --prefill-chunk <n|auto>
+                             Prompt tokens per prefill chunk: auto (default) or
+                             32, 64, 128, 256, 512, 1024, 2048, 4096. Larger
+                             chunks re-read routed experts less often but hold
+                             more memory. auto is 2048 for Gemma 4 (QAT
+                             included) and Qwen 3.6 on hosts with at least
+                             16 GiB, 128 elsewhere; 1024 saves Gemma about
+                             350 MB. Overrides MFERENCE_SERVER_PREFILL_CHUNK.
       --verify <mode>        Model integrity on load and model swap: auto
                              (default) checks file sizes against the install
                              receipt when it validates and hashes otherwise;
@@ -85,20 +116,27 @@ public struct ServerArguments: Equatable, Sendable {
         var port = 8080
         var bindMode = ServerBindMode.loopback
         var modelIDOverride: String?
-        var maxContext = 16_384
+        var maxContext: Int? = defaultMaxContext
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
         var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
         var shadowBudget: Int?
+        var prefillChunk: Int?
         var libraryRoots: [String] = []
         var wantsDefaultLibraryRoots = false
         var listModels = false
+        var reserveFullKV = false
         var index = 0
         while index < input.count {
             let flag = input[index]
             if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
             if flag == "--list-models" {
                 listModels = true
+                index += 1
+                continue
+            }
+            if flag == "--kv-reserve" {
+                reserveFullKV = true
                 index += 1
                 continue
             }
@@ -143,11 +181,16 @@ public struct ServerArguments: Equatable, Sendable {
                 }
                 modelIDOverride = value
             case "--max-context":
-                guard let parsed = Int(value),
-                      [4_096, 8_192, 16_384, 32_768, 65_536, 128_000].contains(parsed) else {
-                    throw ServerArgumentError.invalid("--max-context is not supported")
+                if value == "max" {
+                    maxContext = nil
+                } else {
+                    guard let parsed = Int(value),
+                          (1...ModelFamily.largestMaximumContext).contains(parsed) else {
+                        throw ServerArgumentError.invalid(
+                            "--max-context must be max or between 1 and \(ModelFamily.largestMaximumContext)")
+                    }
+                    maxContext = parsed
                 }
-                maxContext = parsed
             case "--queue-limit":
                 guard let parsed = Int(value), parsed > 0 else {
                     throw ServerArgumentError.invalid("--queue-limit must be positive")
@@ -165,6 +208,17 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--shadow-budget must be 0 through 8")
                 }
                 shadowBudget = parsed
+            case "--prefill-chunk":
+                if value == "auto" {
+                    prefillChunk = nil
+                } else {
+                    guard let parsed = Int(value),
+                          RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) else {
+                        throw ServerArgumentError.invalid(
+                            "--prefill-chunk must be auto, 32, 64, 128, 256, 512, 1024, 2048 or 4096")
+                    }
+                    prefillChunk = parsed
+                }
             case "--verify":
                 guard let parsed = ModelIntegrityPolicy(verifyFlag: value) else {
                     throw ServerArgumentError.invalid(
@@ -206,6 +260,8 @@ public struct ServerArguments: Equatable, Sendable {
                                promptCacheMode: promptCacheMode,
                                verification: verification,
                                shadowBudget: shadowBudget,
+                               prefillChunk: prefillChunk,
+                               reserveFullKV: reserveFullKV,
                                library: library,
                                listModels: listModels)
     }

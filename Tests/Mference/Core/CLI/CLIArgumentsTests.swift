@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import Mference
 @testable import MferenceCLICore
@@ -140,7 +141,7 @@ import Mference
             "--repeat-penalty", "--min-p", "--presence-penalty", "--frequency-penalty", "--repeat-last-n",
             "--seed", "--stop", "--prefill-chunk", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--flash-head", "--verify",
-            "--kv-paged", "--kv-topk", "--kv-pool-pages", "--reasoning-effort",
+            "--kv-paged", "--kv-topk", "--kv-pool-pages", "--kv-reserve", "--reasoning-effort",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
@@ -258,6 +259,28 @@ import Mference
         }
     }
 
+    /// `--max-context max` becomes the model's native context once the
+    /// install is known; a number stays as given.
+    @Test func maxContextMaxResolvesToTheModelsNativeContext() throws {
+        let directory = try QwenToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let parsed = try Args.parse(["--model", directory.path, "--prompt", "hi", "--max-context", "max"])
+        #expect(parsed.usesModelMaxContext)
+        let resolved = try parsed.resolvingModelMaxContext()
+        #expect(resolved.maxContext == 262_144)
+        #expect(!resolved.usesModelMaxContext)
+        let fixed = try Args.parse(["--model", directory.path, "--prompt", "hi", "--max-context", "8192"])
+        #expect(try fixed.resolvingModelMaxContext().maxContext == 8_192)
+        #expect(throws: ArgsError.invalidValue(flag: "--max-context", value: "MAX")) {
+            _ = try Args.parse(["--model", directory.path, "--prompt", "hi", "--max-context", "MAX"])
+        }
+    }
+
+    @Test func kvGrowsUnlessReserveIsGiven() throws {
+        #expect(try !Args.parse(["--model", "m.gturbo", "--prompt", "hi"]).reserveFullKV)
+        #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--kv-reserve"]).reserveFullKV)
+    }
+
     @Test func prefillChunkDefaultsToAuto() throws {
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(arguments.prefillChunk == .auto)
@@ -269,7 +292,7 @@ import Mference
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
             for: .qwen36, physicalMemoryBytes: 16 * gib) == 2048)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib) == 1024)
+            for: .gemma4, physicalMemoryBytes: 16 * gib) == 2048)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
             for: .inklingSmall, physicalMemoryBytes: 16 * gib) == 128)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(

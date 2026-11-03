@@ -3,7 +3,14 @@ import Tokenizers
 
 /// Streaming detokenizer for generation loops.
 ///
-/// Four challenges drive the design:
+/// A Gemma tokenizer that declares the pinned decoder sequence takes the
+/// lossless path: each token contributes its own fragment, byte-fallback runs
+/// commit as a whole (`GemmaDecoding`, `ByteFallbackRun`), and the cost is O(1)
+/// per token. Callers split the stream at channel and tool markers by flushing
+/// and starting a fresh detokenizer, so a run never spans a marker. Every other
+/// tokenizer re-decodes through the library as described below.
+///
+/// Four challenges drive the library-decode design:
 ///
 /// 1. BPE byte-fallback splits multi-byte codepoints (e.g. emoji) across several
 ///    tokens. Naively decoding each token in isolation yields broken UTF-8.
@@ -47,12 +54,27 @@ struct MFDetokenizer {
     @usableFromInline var stableIDs: [Int] = []
     @usableFromInline var trailingByteIDs: [Int] = []
     @usableFromInline var emitted: String = ""
+    /// Special IDs removed on the lossless Gemma path; nil selects library decode.
+    let losslessSpecialTokenIDs: Set<Int32>?
+    let skipSpecialTokens: Bool
+    /// In-flight byte-fallback run on the lossless path.
+    var run = ByteFallbackRun()
 
-    init(tokenizer: MFTokenizer) {
+    init(tokenizer: MFTokenizer, skipSpecialTokens: Bool = true) {
         self.tokenizer = tokenizer.tokenizer
+        self.losslessSpecialTokenIDs = tokenizer.losslessGemmaSpecialTokenIDs
+        self.skipSpecialTokens = skipSpecialTokens
     }
 
     mutating func push(_ id: Int32) -> String {
+        if let specials = losslessSpecialTokenIDs {
+            // An unknown ID contributes nothing and leaves the run open, as the
+            // library's decode drops unresolvable IDs.
+            guard let token = tokenizer.convertIdToToken(Int(id)) else { return "" }
+            if skipSpecialTokens, specials.contains(id) { return "" }
+            if let byte = GemmaDecoding.byteValue(token) { return run.push(byte) }
+            return run.commit() + GemmaDecoding.fragment(token)
+        }
         let tokenID = Int(id)
         let token = tokenizer.convertIdToToken(tokenID) ?? ""
         if Self.isByteFallback(token) {
@@ -71,6 +93,7 @@ struct MFDetokenizer {
     }
 
     mutating func flush() -> String {
+        if losslessSpecialTokenIDs != nil { return run.commit() }
         let stableText = stableIDs.isEmpty
             ? ""
             : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)

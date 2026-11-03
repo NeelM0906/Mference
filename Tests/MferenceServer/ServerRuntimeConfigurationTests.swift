@@ -9,7 +9,7 @@ import Mference
         let runtime = ServerModelSession.runtimeConfiguration(
             family: .gemma4, expertCacheSlots: 16,
             physicalMemoryBytes: Self.sixteenGiB, environment: [:])
-        #expect(runtime.prefillChunkTokens == 1024)
+        #expect(runtime.prefillChunkTokens == 2048)
         #expect(runtime.expertCacheSlots == 16)
         #expect(runtime.headPath == .logits)
     }

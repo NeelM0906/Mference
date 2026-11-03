@@ -23,9 +23,12 @@ public final class ServerLibrarySnapshot: Sendable {
     }
 
     private let state: Mutex<State>
+    /// `--max-context`; nil is each model's native context.
+    private let maxContext: Int?
 
-    init(index: ServerLibraryIndex) {
+    init(index: ServerLibraryIndex, maxContext: Int?) {
         state = Mutex(State(index: index, loaded: nil, loading: nil))
+        self.maxContext = maxContext
     }
 
     public var index: ServerLibraryIndex {
@@ -37,7 +40,7 @@ public final class ServerLibrarySnapshot: Sendable {
     }
 
     public var modelList: OpenAIModelList {
-        state.withLock { $0.index.modelList }
+        state.withLock { $0.index }.modelList(maxContext: maxContext)
     }
 
     /// `("loading", target)` while a model is being loaded or swapped in,
@@ -94,10 +97,14 @@ public actor ServerModelLibrary {
     private var isLoading = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    public init(index: ServerLibraryIndex, loader: @escaping Loader) {
+    /// `maxContext` is the server's `--max-context`, nil for `max`; the
+    /// loader applies the same value when it loads a model.
+    public init(index: ServerLibraryIndex,
+                maxContext: Int? = ServerArguments.defaultMaxContext,
+                loader: @escaping Loader) {
         self.index = index
         self.loader = loader
-        self.snapshot = ServerLibrarySnapshot(index: index)
+        self.snapshot = ServerLibrarySnapshot(index: index, maxContext: maxContext)
     }
 
     /// Returns the loaded backend for `modelID`, swapping it in if a different

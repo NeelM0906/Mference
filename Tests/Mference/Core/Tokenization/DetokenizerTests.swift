@@ -92,16 +92,14 @@ struct DetokenizerTests {
         #expect(detok.emitted == "abc")
     }
 
-    // MARK: - Clean-up rewrites break append-only decoding
+    // MARK: - Clean-up patterns
 
-    /// swift-transformers applies `cleanUpTokenizationSpaces` inside `decode`,
-    /// and it defaults to true when the key is absent — which it is for Gemma.
-    /// The rewrites delete a space that an earlier decode already emitted
-    /// (" 's" -> "'s"), so the decode is not append-only and the resync path is
-    /// reachable in ordinary text. The stray space cannot be retracted, but no
-    /// character may be lost: clean-up only ever deletes whitespace, so the
-    /// non-whitespace characters must match `decode` exactly.
-    @Test("Clean-up rewrites never drop characters from the stream", arguments: [
+    /// swift-transformers' `decode` applies `cleanUpTokenizationSpaces`, which
+    /// defaults to true when the key is absent — as it is for Gemma — and
+    /// rewrites " 's" to "'s" in text already streamed. The Gemma tokenizer
+    /// decodes through `GemmaDecoding` instead, so the stream is append-only and
+    /// reproduces the text exactly.
+    @Test("Clean-up patterns stream exactly on Gemma", arguments: [
         "it 's ok",
         "x = ' ' # a space",
         "do n't stop",
@@ -109,7 +107,7 @@ struct DetokenizerTests {
         "they 're here",
         "I 'm sure",
     ])
-    func cleanUpRewritesDoNotDropCharacters(_ target: String) {
+    func cleanUpPatternsStreamExactly(_ target: String) {
         let ids = tok.encode(target, addBOS: false)
         var detok = MFDetokenizer(tokenizer: tok)
         var assembled = ""
@@ -117,20 +115,19 @@ struct DetokenizerTests {
             assembled += detok.push(id)
         }
         assembled += detok.flush()
-        let reference = tok.decode(ids)
-        #expect(assembled.filter { !$0.isWhitespace } == reference.filter { !$0.isWhitespace },
-                "characters lost: stream '\(assembled)' vs decode '\(reference)'")
+        #expect(assembled == target, "stream '\(assembled)' vs text '\(target)'")
+        #expect(assembled == tok.decode(ids))
     }
 
     // MARK: - Byte-fallback flush
 
     /// Gemma's SentencePiece splits an emoji into `<0xF0><0x9F><0xA6><0x99>`
     /// byte-fallback tokens, which `push` holds back in full. A stream that ends
-    /// after a whole emoji plus part of the next one leaves `flush` assembling a
-    /// buffer that is *partly* valid UTF-8 — the complete codepoint must still
-    /// reach the caller.
-    @Test("Flush keeps the complete codepoints in a partly-invalid byte tail")
-    func flushKeepsCompleteCodepointsBeforeAPartialOne() {
+    /// after a whole emoji plus part of the next one flushes one run of seven
+    /// bytes, and the reference decoder validates a run as a whole: invalid, so
+    /// one U+FFFD per byte, the complete emoji included.
+    @Test("Flush decodes a partly-invalid byte tail as one invalid run")
+    func flushDecodesPartlyInvalidTailAsOneRun() {
         let ids = tok.encode("🦙🦙", addBOS: false)
         #expect(ids.count == 8, "expected eight byte-fallback tokens, got \(ids.count)")
         var detok = MFDetokenizer(tokenizer: tok)
@@ -140,7 +137,7 @@ struct DetokenizerTests {
             assembled += detok.push(id)
         }
         assembled += detok.flush()
-        #expect(assembled == "🦙\u{FFFD}",
+        #expect(assembled == String(repeating: "\u{FFFD}", count: 7),
                 "byte-fallback tail mismatch: got '\(assembled)'")
     }
 
