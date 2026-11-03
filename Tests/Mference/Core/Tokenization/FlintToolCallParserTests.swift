@@ -51,4 +51,24 @@ struct FlintToolCallParserTests {
                 allowedTools: ["search"], id: "call_1")
         }
     }
+
+    @Test func declaredStringTypesWinOverJSONLookingText() throws {
+        let schema = JSONValue.object([
+            "type": .string("object"),
+            "properties": .object([
+                "code": .object(["type": .string("string")]),
+                "count": .object(["type": .string("integer")]),
+            ]),
+        ])
+        let call = try FlintToolCallParser().parse(
+            "lookup<arg_key>code</arg_key><arg_value>123</arg_value>"
+                + "<arg_key>count</arg_key><arg_value>123</arg_value>",
+            allowedTools: ["lookup"],
+            toolSchemas: ["lookup": schema],
+            id: "call_1")
+        #expect(call.arguments == .object([
+            "code": .string("123"),
+            "count": .integer(123),
+        ]))
+    }
 }

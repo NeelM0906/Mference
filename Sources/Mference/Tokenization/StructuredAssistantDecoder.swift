@@ -415,7 +415,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             let text = tokenizer.decode(tokens, skipSpecialTokens: false)
             do {
                 let call = try FlintToolCallParser().parse(
-                    text, allowedTools: allowedTools, id: idGenerator())
+                    text,
+                    allowedTools: allowedTools,
+                    toolSchemas: toolSchemas,
+                    id: idGenerator())
                 emittedCalls += 1
                 return [.toolCall(call)]
             } catch {

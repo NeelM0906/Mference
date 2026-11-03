@@ -13,6 +13,7 @@ public struct FlintToolCallParser: Sendable {
 
     public func parse(_ text: String,
                       allowedTools: Set<String>,
+                      toolSchemas: [String: JSONValue] = [:],
                       id: String) throws -> ParsedToolCall {
         guard text.utf8.count <= Self.maximumBytes else {
             throw ToolCallParserError.oversized
@@ -57,7 +58,10 @@ public struct FlintToolCallParser: Sendable {
                   !rawValue.contains("</tool_response>") else {
                 throw ToolCallParserError.malformed
             }
-            arguments[key] = try parsedValue(rawValue)
+            arguments[key] = try parsedValue(
+                rawValue,
+                key: key,
+                schema: toolSchemas[name])
             body = body[valueEnd.upperBound...]
         }
 
@@ -78,7 +82,12 @@ public struct FlintToolCallParser: Sendable {
         body.removeFirst(literal.count)
     }
 
-    private func parsedValue(_ raw: String) throws -> JSONValue {
+    private func parsedValue(_ raw: String,
+                             key: String,
+                             schema: JSONValue?) throws -> JSONValue {
+        if declaredType(in: schema, key: key) == "string" {
+            return .string(raw)
+        }
         guard let first = raw.first,
               "{[-0123456789tfn".contains(first) else {
             return .string(raw)
@@ -90,5 +99,34 @@ public struct FlintToolCallParser: Sendable {
         // Unquoted strings are the template's normal string representation.
         if case .string = value { return .string(raw) }
         return value
+    }
+
+    private func declaredType(in schema: JSONValue?,
+                              key: String) -> String? {
+        guard case .object(let root)? = schema,
+              case .object(let properties)? = root["properties"],
+              let property = properties[key] else {
+            return nil
+        }
+        if case .string(let type)? = property.objectValue?["type"] {
+            return type
+        }
+        if case .array(let members)? = property.objectValue?["type"] {
+            for case .string(let type) in members where type != "null" {
+                return type
+            }
+        }
+        for keyword in ["oneOf", "anyOf", "allOf"] {
+            if case .array(let branches)? = property.objectValue?[keyword] {
+                for branch in branches {
+                    if let type = declaredType(
+                        in: .object(["properties": .object([key: branch])]),
+                        key: key) {
+                        return type
+                    }
+                }
+            }
+        }
+        return nil
     }
 }
