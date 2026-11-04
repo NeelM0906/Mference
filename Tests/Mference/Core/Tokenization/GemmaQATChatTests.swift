@@ -123,7 +123,7 @@ import Testing
         #expect(try base.encodeChat(messages: messages) == canonical.encodeChat(messages: messages))
         #expect(try qat.encodeChat(messages: messages) != original.encodeChat(messages: messages))
         #expect(qat.generationDefaults.temperature == 1 && qat.generationDefaults.topK == 64 && qat.generationDefaults.minP == 0)
-        #expect(original.generationDefaults.temperature == 0.8 && original.generationDefaults.topK == 40 && original.generationDefaults.minP == 0.05)
+        #expect(original.generationDefaults.temperature == 1 && original.generationDefaults.topK == 64 && original.generationDefaults.minP == 0)
         #expect(base.generationDefaults.temperature == 0.8 && base.generationDefaults.minP == 0.05)
         let enabled = try qat.encodeChat(messages: messages, reasoningEffort: .medium)
         #expect(try qat.encodeChat(messages: messages, reasoningEffort: .low) == enabled)

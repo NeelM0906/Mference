@@ -698,6 +698,7 @@ public final class RemoteStreamingRepacker {
             ("special_tokens_map.json", 1 * 1024 * 1024, false),
             ("chat_template.jinja", 4 * 1024 * 1024, false),
             ("chat_template.json", 4 * 1024 * 1024, false),
+            ("generation_config.json", 1 * 1024 * 1024, false),
         ]
         for file in tokenizerFiles {
             try Task.checkCancellation()

@@ -164,6 +164,8 @@ extension RemotePayloadCopyTests {
         resetFakeHF()
         var files = try miniCPM5RemoteFiles(snapshotDir: snapshotDir, snapshot: snapshot)
         files["model.safetensors"] = files.removeValue(forKey: "model-00000-of-00001.safetensors")
+        let generation = Data(#"{"do_sample": true, "temperature": 1.0, "top_p": 0.95}"#.utf8)
+        files["generation_config.json"] = generation
         FakeHFURLProtocol.files = files
         let result = try await RemoteStreamingRepacker(
             options: remoteOptions(outputDir: output,
@@ -197,6 +199,10 @@ extension RemotePayloadCopyTests {
         #expect(quant["embedding"]?["weightBits"] as? Int == 4)
         #expect(quant["attention"]?["weightBits"] as? Int == 4)
         #expect(quant["router"]?["weightBits"] as? Int == 0)
+        // The checkpoint's sampler defaults travel with the install, verbatim.
+        let installed = try Data(contentsOf: URL(fileURLWithPath:
+            (output as NSString).appendingPathComponent("tokenizer/generation_config.json")))
+        #expect(installed == generation)
 
         let verify = try VerifiedInstallTool.run(
             options: VerifyInstallOptions(inputGTurbo: output))

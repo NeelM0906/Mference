@@ -27,6 +27,8 @@ extension MFTokenizer {
             value.installedGemmaTemplate = template
             value.generationDefaults = try GemmaQATCheckpoint.generationDefaults(
                 from: Data(contentsOf: folder.appendingPathComponent("generation_config.json")))
+        } else {
+            value.generationDefaults = try CheckpointGeneration.defaults(inFolder: value.localTokenizerFolder)
         }
         if value.supportsQwenReasoningEffort, value.dialect != .chatml {
             throw MFTokenizerError.unsupportedForDialect("Qwen 3.8 requires ChatML")
