@@ -520,7 +520,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         if let reasoning = completion.reasoningContent {
             message["reasoning_content"] = reasoning
         }
-        let object: [String: Any] = [
+        var object: [String: Any] = [
             "id": id,
             "object": "chat.completion",
             "created": created,
@@ -532,6 +532,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             ]],
             "usage": usageObject(completion.usage),
         ]
+        object["timings"] = timingsObject(completion)
         writeJSON(context, status: .ok, object: object)
     }
 
@@ -579,13 +580,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                               model: String,
                               completion: ServerCompletion,
                               includeUsage: Bool) {
-        writeStreamChunk(
-            context,
-            chunk(id: id, created: created, model: model,
-                  delta: [:],
-                  finishReason: completion.finishReason))
+        var chunks = [chunk(id: id, created: created, model: model,
+                            delta: [:],
+                            finishReason: completion.finishReason)]
         if includeUsage {
-            writeStreamChunk(context, [
+            chunks.append([
                 "id": id,
                 "object": "chat.completion.chunk",
                 "created": created,
@@ -594,6 +593,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 "usage": usageObject(completion.usage),
             ])
         }
+        // Last chunk only: Open WebUI sums token counts across chunks.
+        chunks[chunks.count - 1]["timings"] = timingsObject(completion)
+        chunks.forEach { writeStreamChunk(context, $0) }
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
             let buffer = contextBox.value.channel.allocator.buffer(string: "data: [DONE]\n\n")
@@ -750,6 +752,25 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             object["completion_tokens_details"] = values
         }
         return object
+    }
+
+    /// llama.cpp's `timings` shape, which Open WebUI shows in the reply's
+    /// info tooltip as Unsloth Studio does.
+    private func timingsObject(_ completion: ServerCompletion) -> [String: Any]? {
+        guard let prefill = completion.prefillSeconds,
+              let decode = completion.decodeSeconds else { return nil }
+        let cached = completion.usage.promptTokensDetails.cachedTokens
+        let computed = completion.usage.promptTokens - cached
+        let predicted = completion.usage.completionTokens
+        return [
+            "prompt_n": computed,
+            "cache_n": cached,
+            "prompt_ms": prefill * 1000,
+            "prompt_per_second": prefill > 0 ? Double(computed) / prefill : 0,
+            "predicted_n": predicted,
+            "predicted_ms": decode * 1000,
+            "predicted_per_second": decode > 0 ? Double(predicted) / decode : 0,
+        ]
     }
 
     private func toolCallObject(_ call: ParsedToolCall) -> [String: Any] {

@@ -273,6 +273,13 @@ answer inside a token. Unsupported dialects omit the details object rather
 than reporting invented zeros. Reasoning token accounting does not imply that
 every checkpoint streams its hidden reasoning text.
 
+Every completion also carries a llama.cpp-style `timings` object, unasked: at
+the top level of a JSON response, and on the last chunk of a stream (the usage
+chunk when one was requested, otherwise the `finish_reason` chunk). It holds
+`prompt_n` (computed prompt tokens), `cache_n` (tokens the KV prefix
+supplied), `prompt_ms` and `prompt_per_second` for prefill, and `predicted_n`,
+`predicted_ms` and `predicted_per_second` for decode.
+
 Requests may contain system, developer, user, assistant, and tool messages.
 Guidance must precede the conversation, and consecutive messages of the same
 guidance role are merged into one block separated by a blank line. Only

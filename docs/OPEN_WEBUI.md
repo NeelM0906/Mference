@@ -223,6 +223,15 @@ single-model mode `/health` is unchanged: `{"status":"ok"}`.
 Switching back and forth costs a full reload each way. Keep a conversation on
 one model when you can, and use `--model` to preload the one you start with.
 
+## Generation speed
+
+Hover the (i) icon under a reply to see its speed. `predicted_per_second` is
+decode speed in tokens per second, `prompt_ms` is prefill time in
+milliseconds, and `predicted_n`, `prompt_n` and `cache_n` count generated,
+computed-prompt and cached-prompt tokens. The server sends these as a
+llama.cpp-style `timings` object (see the [server guide](OPENAI_SERVER.md)),
+so no Open WebUI setting is needed.
+
 ## Builtin tools are off for Mference models
 
 Open WebUI 0.11 defaults every model to "native function calling" and attaches

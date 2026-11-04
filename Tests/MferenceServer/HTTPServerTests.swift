@@ -46,6 +46,8 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
                                completionTokensDetails: .init(reasoningTokens: 0, visibleTokens: 1)),
             diagnostics: diagnostics)
         completion.reasoningContent = supportsQwenReasoningEffort ? "Check first." : nil
+        completion.prefillSeconds = 0.5
+        completion.decodeSeconds = 0.25
         return completion
     }
 }
@@ -579,6 +581,44 @@ struct HTTPServerTests {
         #expect(!text.contains("processRSS"))
         #expect(text.hasSuffix("data: [DONE]\n\n"))
 
+        try await server.shutdown()
+    }
+
+    /// Open WebUI folds a llama.cpp-style `timings` object into the reply's
+    /// info tooltip whether or not it asked for usage, so speed has to arrive
+    /// unasked, exactly once, on the last object of the response.
+    @Test(arguments: [(false, false), (true, false), (true, true)])
+    func completionCarriesLlamaCppTimings(stream: Bool, includeUsage: Bool) async throws {
+        let server = MferenceHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        let options = includeUsage ? #","stream_options":{"include_usage":true}"# : ""
+        request.httpBody = Data("""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":\(stream)\(options)}
+        """.utf8)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let text = String(decoding: data, as: UTF8.self)
+        let objects: [[String: Any]] = stream
+            ? text.components(separatedBy: "\n\n")
+                .compactMap { $0.hasPrefix("data: {") ? Data($0.dropFirst(6).utf8) : nil }
+                .compactMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            : [try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])]
+        #expect(objects.filter { $0["timings"] != nil }.count == 1)
+        let timings = try #require(objects.last?["timings"] as? [String: Any])
+        #expect(timings["prompt_n"] as? Int == 3)
+        #expect(timings["cache_n"] as? Int == 0)
+        #expect(timings["prompt_ms"] as? Double == 500)
+        #expect(timings["prompt_per_second"] as? Double == 6)
+        #expect(timings["predicted_n"] as? Int == 1)
+        #expect(timings["predicted_ms"] as? Double == 250)
+        #expect(timings["predicted_per_second"] as? Double == 4)
         try await server.shutdown()
     }
 

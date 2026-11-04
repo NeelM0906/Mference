@@ -10,8 +10,9 @@ public enum ServerInferenceEvent: Equatable, Sendable {
 
 public struct ServerCompletion: Equatable, Sendable {
     public var reasoningContent: String? = nil
-    /// Operator timing; excluded from the OpenAI wire response.
+    /// Wall-clock phases, sent to clients as llama.cpp-style `timings`.
     public var prefillSeconds: Double? = nil
+    public var decodeSeconds: Double? = nil
     public let content: String
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
@@ -608,6 +609,7 @@ public actor ServerModelSession: ServerLoadedModel {
                     capture: captureOutcome, allocatedBytes: $0.gemmaRecoveryBytes) }) : nil)
         completion.reasoningContent = reasoning.isEmpty ? nil : reasoning
         completion.prefillSeconds = result.prefillSeconds
+        completion.decodeSeconds = result.decodeSeconds
         return completion
     }
 }
