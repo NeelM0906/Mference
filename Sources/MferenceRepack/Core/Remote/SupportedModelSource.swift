@@ -249,6 +249,21 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 6_650_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// Flint 40B-A2.5B JANG_4M. The upload is already MLX affine quantized:
+    /// INT8/group-64 resident core and shared expert, INT4/group-64 routed
+    /// experts, and BF16 routers/norms/sinks.
+    public static let flint = SupportedModelSource(
+        name: "flint",
+        displayName: "Flint 40B-A2.5B JANG_4M",
+        repoID: "OsaurusAI/Flint-40B-A2.5B-JANG_4M",
+        revision: "2cc33f8d9d211217febf00e1cbf503c3eac7b16e",
+        sourceIndexSHA256:
+            "df25783e939be39f41a68a4ae8fd0ad95ab19245363e599d4235f9be897d4dcb",
+        modelID: "flint-40b-a2.5b-jang-4m",
+        approximateDownloadBytes: 23_370_683_168,
+        installedBytes: 23_600_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// The first `originalRepoQuantize` entry: no faithful pre-quantized MLX
     /// conversion of Qwen3.8-Flash-Next exists (checked 2026-08-31, see
     /// docs/families/QWEN38_FLASH_NEXT.md), so the installer reads the vendor's
@@ -362,7 +377,7 @@ public struct SupportedModelSource: Sendable, Equatable {
 
     public static let all: [SupportedModelSource] = [
         gemma4, gemma4QAT, qwen36, qwen36Original, qwen38, swiftQwen38, deepseekV4Flash, inklingSmall,
-        maple, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
+        maple, flint, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

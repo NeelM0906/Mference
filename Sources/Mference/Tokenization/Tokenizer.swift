@@ -33,6 +33,9 @@ public enum ChatDialect: String, Sendable {
     /// MiniCPM5: ChatML framing with `<s>` first, XML `<function …>` tool
     /// calls, `<tool_response>` results inside user turns, two EOS ids.
     case minicpm
+    /// Flint: no BOS, `<|user|>` / `<|assistant|>` / `<|developer|>` turns,
+    /// `<think>` and GLM XML tool calls.
+    case flint
     /// GLM-5.3-Flash: `[gMASK]<sop>` prefix, `<|system|>` / `<|user|>` /
     /// `<|assistant|>` / `<|observation|>` turn markers, a `Reasoning Effort`
     /// system line, `<think>` opening every assistant turn, `<tool_call>`
@@ -106,6 +109,13 @@ public struct MFTokenizer: @unchecked Sendable {
             || dialect == .glm5
     }
 
+    /// Flint decides per turn whether to emit `<think>` after the assistant
+    /// opener. Its prompt does not preselect the thought channel, but the
+    /// stream still needs the structured decoder to suppress it when it does.
+    public var requiresStructuredAssistantDecoding: Bool {
+        dialect == .flint
+    }
+
     /// BOS actually prepended by `encode(_:addBOS:)`; nil for dialects that
     /// never use a BOS prefix (ChatML).
     private let bosPrefixID: Int32?
@@ -144,7 +154,8 @@ public struct MFTokenizer: @unchecked Sendable {
             let loaded = try await load(from: folder, family: family)
             return try loaded.forCheckpoint(checkpointID)
         }
-        if family == .maple || checkpointID == CheckpointIdentity.swiftQwen38 {
+        if family == .maple || family == .flint
+            || checkpointID == CheckpointIdentity.swiftQwen38 {
             throw MFTokenizerError.missingToolTemplate
         }
         return try await load()
@@ -224,6 +235,8 @@ public struct MFTokenizer: @unchecked Sendable {
                 .deepseek
             } else if Self.specialTokenID(tokenizer, Self.glm5GMaskMark) != nil {
                 .glm5
+            } else if Self.specialTokenID(tokenizer, Self.flintUserMark) != nil {
+                .flint
             } else if family == .minicpm5
                         || (Self.specialTokenID(tokenizer, Self.miniCPMFunctionOpen) != nil
                             && Self.specialTokenID(tokenizer, Self.imEndMark) != nil) {
@@ -238,6 +251,10 @@ public struct MFTokenizer: @unchecked Sendable {
         guard family != .maple || dialect == .chatml else {
             throw MFTokenizerError.unsupportedForDialect("Maple requires ChatML framing")
         }
+        guard family != .flint || dialect == .flint else {
+            throw MFTokenizerError.unsupportedForDialect(
+                "Flint requires its native role framing")
+        }
         let resolved = switch dialect {
         case .gemma: try Self.resolveGemmaTokens(tokenizer)
         case .chatml: try Self.resolveChatMLTokens(tokenizer, family: family)
@@ -245,6 +262,7 @@ public struct MFTokenizer: @unchecked Sendable {
         case .inkling: try Self.resolveInklingTokens(tokenizer)
         case .minicpm: try Self.resolveMiniCPMTokens(tokenizer)
         case .glm5: try Self.resolveGlm5Tokens(tokenizer)
+        case .flint: try Self.resolveFlintTokens(tokenizer)
         }
 
         self.dialect = dialect
@@ -524,6 +542,45 @@ public struct MFTokenizer: @unchecked Sendable {
             vocabSize: 154_880)
     }
 
+    private static func resolveFlintTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            guard let value = specialTokenID(tokenizer, token) else {
+                throw MFTokenizerError.missingSpecialToken(token)
+            }
+            return Int32(value)
+        }
+        let bos = try id(Self.flintBOSMark)
+        let eos = try id("<|end_of_text|>")
+        let user = try id(Self.flintUserMark)
+        _ = try id(Self.flintAssistantMark)
+        let observation = try id("<|observation|>")
+        let developer = try id("<|developer|>")
+        let toolCallStart = try id("<tool_call>")
+        let toolCallEnd = try id("</tool_call>")
+        let toolResponse = try id("<tool_response>")
+        let toolResponseEnd = try id("</tool_response>")
+        let thinkStart = try id("<think>")
+        let thinkEnd = try id("</think>")
+        return ResolvedSpecialTokens(
+            bosID: bos,
+            bosPrefixID: nil,
+            eosID: eos,
+            padID: eos,
+            endOfTurnID: eos,
+            toolCallStartID: toolCallStart,
+            toolCallEndID: toolCallEnd,
+            toolResponseID: toolResponse,
+            toolResponseEndID: toolResponseEnd,
+            channelStartID: thinkStart,
+            channelEndID: thinkEnd,
+            thinkStartID: thinkStart,
+            thinkEndID: thinkEnd,
+            stopTokenIDs: [eos, user, observation, developer],
+            vocabSize: 150_144)
+    }
+
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
     ///
     /// The library's `addSpecialTokens: true` flag is a no-op for the Gemma 4 IT
@@ -659,6 +716,11 @@ public struct MFTokenizer: @unchecked Sendable {
         inklingSystemMark + inklingContentText
         + "Thinking effort level: 0" + inklingEndMessage
 
+    // Flint's GLM-style role and tool framing.
+    private static let flintBOSMark = "<|begin_of_text|>"
+    private static let flintUserMark = "<|user|>"
+    private static let flintAssistantMark = "<|assistant|>"
+
     private static func resolveInklingTokens(
         _ tokenizer: any Tokenizer
     ) throws -> ResolvedSpecialTokens {
@@ -707,6 +769,89 @@ public struct MFTokenizer: @unchecked Sendable {
                                      thinking: Self.miniCPMDefaultThinking)
         case .glm5:
             return try glm5Render(messages: messages, tools: [])
+        case .flint:
+            return try flintChatTemplate(messages)
+        }
+    }
+
+    private func flintChatTemplate(_ messages: [Message]) throws -> String {
+        var rendered = ""
+        for (index, message) in messages.enumerated() {
+            if message.role == .system && index != 0 {
+                throw MFTokenizerError.invalidChatTemplate(
+                    "system message must be first")
+            }
+            let content = Self.flintEscapedText(message.content ?? "")
+            switch message.role {
+            case .system:
+                rendered += "<|system|>" + content
+            case .developer:
+                rendered += "<|developer|>" + content
+            case .user:
+                rendered += Self.flintUserMark + content
+            case .assistant:
+                rendered += Self.flintAssistantMark + content
+                for call in message.toolCalls {
+                    rendered += try Self.flintToolCall(call)
+                }
+            case .tool:
+                rendered += "<|observation|><tool_response>"
+                    + content + "</tool_response>"
+            }
+        }
+        rendered += Self.flintAssistantMark
+        return rendered
+    }
+
+    private static func flintEscapedText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\0", with: "")
+            .replacingOccurrences(of: "<think>", with: "")
+            .replacingOccurrences(of: "</think>", with: "")
+            .replacingOccurrences(of: "<|begin_of_text|>",
+                                  with: "&lt;|begin_of_text|&gt;")
+            .replacingOccurrences(of: "<|end_of_text|>",
+                                  with: "&lt;|end_of_text|&gt;")
+            .replacingOccurrences(of: "<|system|>", with: "&lt;|system|&gt;")
+            .replacingOccurrences(of: "<|developer|>",
+                                  with: "&lt;|developer|&gt;")
+            .replacingOccurrences(of: "<|user|>", with: "&lt;|user|&gt;")
+            .replacingOccurrences(of: "<|assistant|>",
+                                  with: "&lt;|assistant|&gt;")
+            .replacingOccurrences(of: "<|observation|>",
+                                  with: "&lt;|observation|&gt;")
+    }
+
+    private static func flintToolCall(_ call: HistoricalToolCall) throws -> String {
+        guard case .object(let arguments) = call.arguments else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "historical tool arguments must be a JSON object")
+        }
+        var rendered = "<tool_call>\(call.name)"
+        for key in arguments.keys.sorted() {
+            try validateFlintToolArgument(key)
+            let value = arguments[key]!
+            let encoded: String
+            if case .string(let string) = value {
+                try validateFlintToolArgument(string)
+                encoded = string
+            } else {
+                encoded = try value.encoded()
+                try validateFlintToolArgument(encoded)
+            }
+            rendered += "<arg_key>\(key)</arg_key><arg_value>\(encoded)</arg_value>"
+        }
+        return rendered + "</tool_call>"
+    }
+
+    private static func validateFlintToolArgument(_ value: String) throws {
+        let reserved = [
+            "</arg_key>", "</arg_value>", "</tool_call>",
+            "<tool_response>", "</tool_response>",
+        ]
+        guard !reserved.contains(where: value.contains) else {
+            throw MFTokenizerError.invalidChatTemplate(
+                "Flint tool arguments contain a structural delimiter")
         }
     }
 
@@ -1126,6 +1271,12 @@ public struct MFTokenizer: @unchecked Sendable {
             // bridge supplies it, then the user content (untrimmed, as the
             // template) and the generation prompt.
             return [endOfTurnID] + encode(userContent + Self.glm5GenerationSuffix, addBOS: false)
+        case .flint:
+            // The full Flint template places no EOS between an assistant
+            // reply and the next user marker; only the opener changes.
+            return encode(
+                Self.flintUserMark + userContent + Self.flintAssistantMark,
+                addBOS: false)
         }
     }
 

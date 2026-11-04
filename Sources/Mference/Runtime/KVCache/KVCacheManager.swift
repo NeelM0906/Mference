@@ -173,7 +173,8 @@ public final class KVCacheManager {
 
         for layer in 0..<config.numLayers {
             let maskValue = config.fullAttentionLayerMask[layer]
-            if maskValue == 2 || allPlaceholder || pagedFullAttention {
+            if maskValue == 2 || allPlaceholder
+                || (pagedFullAttention && maskValue == 1) {
                 let placeholder: MTLBuffer
                 if let existing = linearPlaceholder {
                     placeholder = existing

@@ -107,6 +107,12 @@ Mference supports a curated set of pinned instruction checkpoints:
   from PipeNetwork's mixed 4/8-bit conversion (~181 GB installed) with the
   whole expert set resident on a 256 GB host. See the
   [bring-up dossier](docs/families/GLM53_FLASH.md).
+- **[Flint-40B-A2.5B](https://huggingface.co/OsaurusAI/Flint-40B-A2.5B-JANG_4M)**
+  *(in port)* — 40B total, ~2.5B active per token, 49 layers alternating
+  513-token sliding attention with 14 NoPE full-attention layers, 256 routed
+  experts top-6 plus one shared expert. The first source is JANG_4M: INT8
+  resident projections and INT4 routed experts, ~23.4 GB installed. See the
+  [bring-up dossier](docs/families/FLINT.md).
 
 The runtime, streaming installer, CLI, and loopback OpenAI-compatible server
 are written in Swift and Metal; the UI is Open WebUI, driven through that

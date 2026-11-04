@@ -135,7 +135,7 @@ public struct Model {
     var trunkPrefix: String {
         switch config.family {
         case .gemma4, .qwen36, .qwen38: return "language_model.model."
-        case .deepseekV4Flash, .maple: return "model."
+        case .deepseekV4Flash, .maple, .flint: return "model."
         case .inklingSmall: return "model.llm."
         case .qwen38flashnext: return "model.language_model."
         case .minicpm5: return "model."
@@ -148,7 +148,7 @@ public struct Model {
     private var lmHeadName: String {
         switch config.family {
         case .gemma4, .qwen36, .qwen38: return "language_model.lm_head.weight"
-        case .deepseekV4Flash, .maple, .qwen38flashnext: return "lm_head.weight"
+        case .deepseekV4Flash, .maple, .qwen38flashnext, .flint: return "lm_head.weight"
         case .inklingSmall: return "model.llm.unembed.weight"
         case .minicpm5: return "lm_head.weight"
         case .glm53Flash: return "language_model.lm_head.weight"
@@ -157,7 +157,7 @@ public struct Model {
     /// Inkling names the token embedding `embed`, not `embed_tokens`.
     private var embeddingName: String {
         switch config.family {
-        case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .qwen38flashnext:
+        case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .qwen38flashnext, .flint:
             return "\(trunkPrefix)embed_tokens.weight"
         case .maple:
             return "\(trunkPrefix)word_embeddings.weight"
@@ -232,6 +232,8 @@ public struct Model {
             return try resident(name: "model.llm.layers.\(L).mlp.gate.weight")
         case .maple:
             return try resident(name: "model.layers.\(L).mlp.gate.weight")
+        case .flint:
+            return try resident(name: "model.layers.\(L).mlp.gate.weight")
         case .minicpm5:
             // Dense: no router tensor exists; the accessor throws
             // tensorNotFound if a caller ever asks.
@@ -269,6 +271,8 @@ public struct Model {
             return "model.llm.layers.\(L).mlp.shared_experts.\(proj).weight"
         case .maple:
             return "model.layers.\(L).mlp.shared_expert.\(proj).weight"
+        case .flint:
+            return "model.layers.\(L).mlp.shared_expert.\(proj).weight"
         case .minicpm5:
             // Dense llama: the per-layer MLP under the bare `.mlp.` names.
             return "\(trunkPrefix)layers.\(L).mlp.\(proj).weight"
@@ -289,7 +293,7 @@ public struct Model {
     /// `FlashNextForwardRunner` never calls it.
     public func inputNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36, .qwen38, .maple:
+        case .gemma4, .qwen36, .qwen38, .maple, .flint:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
         case .deepseekV4Flash, .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
@@ -303,7 +307,7 @@ public struct Model {
     /// `inputNorm`: the MLP hyper-connection carries the norm.
     public func postAttnNorm(layer L: Int) throws -> TensorView {
         switch config.family {
-        case .gemma4, .qwen36, .qwen38, .maple:
+        case .gemma4, .qwen36, .qwen38, .maple, .flint:
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")
         case .deepseekV4Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).ffn_norm.weight")
@@ -340,6 +344,11 @@ public struct Model {
     }
     public func kNorm(layer L: Int) throws -> TensorView {
         try resident(name: "\(trunkPrefix)layers.\(L).self_attn.k_norm.weight")
+    }
+    /// Flint's per-head learned attention logit: added to the softmax
+    /// denominator, with no value contribution.
+    public func flintAttentionSink(layer L: Int) throws -> TensorView {
+        try resident(name: "model.layers.\(L).self_attn.softmax_offset")
     }
 
     // MARK: - Feed-forward norms

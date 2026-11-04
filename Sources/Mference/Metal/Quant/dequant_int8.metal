@@ -30,6 +30,29 @@ static inline uint int8_fc_m(constant uint& M) {
             is_function_constant_defined(FC_INT8_M)) ? FC_INT8_M : M;
 }
 
+// Dequantize one embedding-table row. The table row layout matches the GEMV
+// path: N uint8 values followed by N/64 BF16 scales and BF16 biases.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+kernel void embed_lookup_int8(
+    device const uint8_t* table  [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device half*          out    [[buffer(3)]],
+    constant uint&        token  [[buffer(4)]],
+    constant uint&        D      [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= D) return;
+    const uint groups = D / kInt8GroupSize;
+    const uint row_base = token * D;
+    const uint scale_base = token * groups;
+    const uint group = tid / kInt8GroupSize;
+    const float q = float(uint(table[row_base + tid]));
+    const float s = float(scales[scale_base + group]);
+    const float b = float(biases[scale_base + group]);
+    out[tid] = half(fma(s, q, b));
+}
+
 static inline uint int8_fc_n(constant uint& N) {
     return (is_function_constant_defined(FC_INT8_USE_FC) &&
             FC_INT8_USE_FC &&

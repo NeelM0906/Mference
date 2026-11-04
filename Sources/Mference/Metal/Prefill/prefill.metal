@@ -1407,6 +1407,8 @@ kernel void attention_prefill_causal_tiled(
     device const half* V [[buffer(2)]],
     device half* O [[buffer(3)]],
     constant PrefillAttentionParams& p [[buffer(4)]],
+    device const bfloat* sinks [[buffer(5)]],
+    constant uint& num_sinks [[buffer(6)]],
     uint3 tg [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
@@ -1431,8 +1433,8 @@ kernel void attention_prefill_causal_tiled(
     const uint last_exclusive = min(p.kvValidCount, abs_q + 1u);
 
     device const half* q_row = Q + t * p.qTokenStrideElements + qh * p.headDim;
-    float row_max = -INFINITY;
-    float row_sum = 0.0f;
+    float row_max = (num_sinks > 0u) ? float(sinks[qh]) : -INFINITY;
+    float row_sum = (num_sinks > 0u) ? 1.0f : 0.0f;
     float acc = 0.0f;
 
     for (uint key = first; key < last_exclusive; ++key) {
