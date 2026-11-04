@@ -124,6 +124,37 @@ final class FlashNextMTPPrimer {
         return result
     }
 
+    /// Branch from the real target tail, then feed each draft's own full HC
+    /// output into the next draft. Always restore priming state before returning;
+    /// only target-verified rows may later enter the committed draft cache.
+    func proposals(after nextToken: Int32, count: Int, into logits: MTLBuffer,
+                   sample: (MTLBuffer) throws -> Int32) throws -> [Int32] {
+        guard count > 0, count < maxContext - targetPosition else {
+            throw failure("draft proposal count exceeds remaining target capacity")
+        }
+        let before = try checkpoint()
+        var tokens: [Int32] = []
+        do {
+            var output = try finish(nextToken: nextToken, into: logits)
+            for index in 0..<count {
+                try Task.checkCancellation()
+                let token = try sample(logits)
+                guard token >= 0, Int(token) < vocabSize else { throw failure("invalid native draft sample") }
+                tokens.append(token)
+                if index + 1 < count {
+                    output = try draft.append(token: token, targetHidden: output.hidden,
+                        at: draft.position, into: logits)
+                    try didPrimeRow?(draft.position - 1)
+                }
+            }
+        } catch {
+            try restore(before)
+            throw error
+        }
+        try restore(before)
+        return tokens
+    }
+
     private func copyRow(_ source: MTLBuffer, offset: Int, to destination: MTLBuffer) throws {
         guard let cb = context.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
             throw failure("cannot copy MTP priming row")

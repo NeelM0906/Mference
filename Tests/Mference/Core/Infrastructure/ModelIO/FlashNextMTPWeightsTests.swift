@@ -26,11 +26,12 @@ import Testing
                                ("mtp.pre_fc_norm_hidden.weight", weights.hiddenNorm)] {
             let raw = try model.resident(name: name)
             let src = raw.buffer.contents().advanced(by: Int(raw.offset)).assumingMemoryBound(to: UInt16.self)
-            let dst = cooked.buffer.contents().advanced(by: Int(cooked.offset)).assumingMemoryBound(to: UInt16.self)
+            let dst = cooked.buffer.contents().advanced(by: Int(cooked.offset)).assumingMemoryBound(to: Float.self)
             for i in 0..<(Int(raw.length) / 2) {
-                #expect(dst[i] == Quantization.bf16Bits(Quantization.bf16ToFloat(src[i]) + 1))
+                #expect(dst[i] == Quantization.bf16ToFloat(src[i]) + 1)
             }
-            #expect(try model.normWeight(name: name).buffer === cooked.buffer)
+            #expect(cooked.dtype == 3 && cooked.length == raw.length * 2)
+            #expect(try model.normWeight(name: name).buffer !== cooked.buffer)
         }
         #expect(!Model.isZeroCenteredNorm("other.pre_fc_norm_embedding.weight"))
         #expect(!Model.isZeroCenteredNorm("mtp.fc_hidden.weight"))
@@ -50,8 +51,10 @@ import Testing
         let model = try load(dir)
         let weights = try FlashNextMTPWeights(model: model)
         let raw = try model.resident(name: "mtp.pre_fc_norm_hidden.weight")
-        #expect(weights.hiddenNorm.buffer === raw.buffer)
-        #expect(weights.hiddenNorm.offset == raw.offset)
+        let src = raw.buffer.contents().advanced(by: Int(raw.offset)).assumingMemoryBound(to: UInt16.self)
+        let dst = weights.hiddenNorm.buffer.contents().assumingMemoryBound(to: Float.self)
+        for i in 0..<(Int(raw.length) / 2) { #expect(dst[i] == Quantization.bf16ToFloat(src[i])) }
+        #expect(weights.hiddenNorm.dtype == 3)
     }
 
     @Test(arguments: ["stride", "count", "directory", "layer", "duplicate", "size", "hash"])
