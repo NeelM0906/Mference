@@ -50,15 +50,19 @@ kernel void dsv4_rope_interleaved_trailing(
     constant uint& position [[buffer(3)]],
     device const float* inv_freq [[buffer(4)]],   // [rope_dim / 2]
     constant float& direction [[buffer(5)]],
-    uint head [[threadgroup_position_in_grid]],
-    uint tid [[thread_position_in_threadgroup]]
+    uint2 tgp [[threadgroup_position_in_grid]],
+    uint2 tgs [[threadgroups_per_grid]],
+    uint2 tid2 [[thread_position_in_threadgroup]]
 ) {
     const uint head_dim = dsv4_head_dim(head_dim_in);
     const uint rope_dim = dsv4_rope_dim(rope_dim_in);
     const uint half_dim = rope_dim / 2u;
+    const uint tid = tid2.x;
     if (tid >= half_dim) return;
+    // Grid y is the token of a batch at consecutive positions (decode: one).
+    const uint head = tgp.y * tgs.x + tgp.x;
     const uint base = head * head_dim + (head_dim - rope_dim);
-    const float freq = float(position) * inv_freq[tid];
+    const float freq = float(position + tgp.y) * inv_freq[tid];
     const float c = cos(freq);
     const float s = sin(freq) * direction;
     const float x0 = float(x[base + 2u * tid]);
@@ -590,35 +594,53 @@ kernel void dsv4_indexer_select(
 // comb, applies the sigmoid / sigmoid*2 / softmax+Sinkhorn maps, and writes
 // pre[H], post[H], comb[H*H] (fp32). fn rows are (2 + H) * H, H = hc_mult.
 //
-// Grid: 1 threadgroup x 256 threads (8 simdgroups; row r handled by
-// simdgroup r % 8 in a round-robin).
-kernel void dsv4_hc_weights(
+// Two dispatches. `dsv4_hc_mix` runs one threadgroup per fn row, so the 24
+// row dots run on separate cores instead of three after another on one core.
+// On an M4 Pro the single-threadgroup form took 0.23 ms per site back to back
+// and the pair takes 0.03 ms; inside decode the attention buffer fell from
+// 1.84 to 1.14 ms per layer. Every value is computed by the same lanes in the
+// same order as before, so the outputs are bit-identical: each threadgroup
+// repeats the 256-thread sum of squares, and simdgroup 0 walks its row with
+// the per-lane fma chain. `dsv4_hc_finish` applies the maps from the stored
+// dots.
+//
+// Grid: rows threadgroups x 256 threads.
+kernel void dsv4_hc_mix(
     device const half* streams [[buffer(0)]],      // [H, hidden]
     device const float* fn [[buffer(1)]],          // [(2+H)*H, H*hidden]
-    device const float* base_b [[buffer(2)]],      // [(2+H)*H]
-    device const float* scale3 [[buffer(3)]],      // [3]
-    device float* out_pre [[buffer(4)]],           // [H]
-    device float* out_post [[buffer(5)]],          // [H]
-    device float* out_comb [[buffer(6)]],          // [H, H] row-major
-    constant uint& hc_mult [[buffer(7)]],
-    constant uint& hidden [[buffer(8)]],
-    constant uint& sinkhorn_iters [[buffer(9)]],
-    constant float& hc_eps [[buffer(10)]],
-    constant float& rms_eps [[buffer(11)]],
-    uint tid [[thread_position_in_threadgroup]],
+    device float* mix [[buffer(2)]],               // [(2+H)*H]
+    constant uint& hc_mult [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& rms_eps [[buffer(5)]],
+    uint2 tgp [[threadgroup_position_in_grid]],
+    uint2 tid2 [[thread_position_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint sg [[simdgroup_index_in_threadgroup]]
 ) {
     threadgroup float red[8];
-    threadgroup float mix[24];          // (2 + 4) * 4 for the production shape
     threadgroup float inv_norm_tg;
-    const uint H = hc_mult;
-    const uint flat = H * hidden;
-    const uint rows = (2u + H) * H;
+    const uint flat = hc_mult * hidden;
+    // Grid y is the token of a batch (decode: one token).
+    const uint r = tgp.x;
+    const uint tid = tid2.x;
+    streams += tgp.y * flat;
+    mix += tgp.y * (2u + hc_mult) * hc_mult;
+
+    // Both loops issue a batch of loads before the batch's fmas: the fmas
+    // still run one after another in the original order, but the loads no
+    // longer wait for each other (one at a time, each iteration paid the full
+    // memory latency).
+    constexpr uint kBatch = 16;
 
     // RMS of the flattened streams.
     float sumsq = 0.0f;
-    for (uint i = tid; i < flat; i += 256u) {
+    uint i = tid;
+    for (; i + 256u * (kBatch - 1u) < flat; i += 256u * kBatch) {
+        float v[kBatch];
+        for (uint k = 0; k < kBatch; ++k) v[k] = float(streams[i + 256u * k]);
+        for (uint k = 0; k < kBatch; ++k) sumsq = fma(v[k], v[k], sumsq);
+    }
+    for (; i < flat; i += 256u) {
         const float v = float(streams[i]);
         sumsq = fma(v, v, sumsq);
     }
@@ -627,71 +649,109 @@ kernel void dsv4_hc_weights(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
         float total = 0.0f;
-        for (uint i = 0; i < 8; ++i) total += red[i];
+        for (uint k = 0; k < 8; ++k) total += red[k];
         inv_norm_tg = rsqrt(total / float(flat) + rms_eps);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg != 0) return;
     const float inv_norm = inv_norm_tg;
 
-    // fn rows, round-robin across simdgroups.
-    for (uint r = sg; r < rows; r += 8u) {
-        device const float* fn_row = fn + r * flat;
-        float dot = 0.0f;
-        for (uint i = lane; i < flat; i += 32u) {
-            dot = fma(fn_row[i], float(streams[i]) * inv_norm, dot);
+    device const float* fn_row = fn + r * flat;
+    float dot = 0.0f;
+    i = lane;
+    for (; i + 32u * (kBatch - 1u) < flat; i += 32u * kBatch) {
+        float f[kBatch];
+        float s[kBatch];
+        for (uint k = 0; k < kBatch; ++k) {
+            f[k] = fn_row[i + 32u * k];
+            s[k] = float(streams[i + 32u * k]) * inv_norm;
         }
-        dot = simd_sum(dot);
-        if (lane == 0) mix[r] = dot;
+        for (uint k = 0; k < kBatch; ++k) dot = fma(f[k], s[k], dot);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (; i < flat; i += 32u) {
+        dot = fma(fn_row[i], float(streams[i]) * inv_norm, dot);
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) mix[r] = dot;
+}
 
-    if (tid == 0) {
-        const float pre_scale = scale3[0];
-        const float post_scale = scale3[1];
-        const float comb_scale = scale3[2];
-        for (uint i = 0; i < H; ++i) {
-            out_pre[i] = 1.0f / (1.0f + fast::exp(-(mix[i] * pre_scale + base_b[i])))
-                + hc_eps;
-            out_post[i] = 2.0f / (1.0f + fast::exp(-(mix[H + i] * post_scale
-                                                     + base_b[H + i])));
-        }
+// The maps, one thread per row (softmax, row normalisation) and per column
+// (column normalisation), with barriers between the passes. Each comb entry
+// goes through the same operations in the same order as on a single thread,
+// which took 0.05 ms per site against 0.02 ms here.
+//
+// Grid: 1 threadgroup x hc_mult threads (hc_mult <= 4).
+kernel void dsv4_hc_finish(
+    device const float* mix [[buffer(0)]],         // [(2+H)*H]
+    device const float* base_b [[buffer(1)]],      // [(2+H)*H]
+    device const float* scale3 [[buffer(2)]],      // [3]
+    device float* out_pre [[buffer(3)]],           // [H]
+    device float* out_post [[buffer(4)]],          // [H]
+    device float* out_comb [[buffer(5)]],          // [H, H] row-major
+    constant uint& hc_mult [[buffer(6)]],
+    constant uint& sinkhorn_iters [[buffer(7)]],
+    constant float& hc_eps [[buffer(8)]],
+    uint t [[thread_position_in_threadgroup]],
+    uint tok [[threadgroup_position_in_grid]]
+) {
+    threadgroup float comb[16];
+    const uint H = hc_mult;
+    // One threadgroup per token of a batch (decode: one token).
+    mix += tok * (2u + H) * H;
+    out_pre += tok * H;
+    out_post += tok * H;
+    out_comb += tok * H * H;
+    const bool lead = t < H;   // thread t owns pre/post[t], row t, column t
+    if (lead) {
+        out_pre[t] = 1.0f / (1.0f + fast::exp(-(mix[t] * scale3[0] + base_b[t])))
+            + hc_eps;
+        out_post[t] = 2.0f / (1.0f + fast::exp(-(mix[H + t] * scale3[1]
+                                                 + base_b[H + t])));
         // Row softmax + eps, then Sinkhorn: column, then (iters-1) x
         // (row, column) alternations — matching the reference order.
-        float comb[16];
-        for (uint r = 0; r < H; ++r) {
-            float mx = -INFINITY;
-            for (uint c2 = 0; c2 < H; ++c2) {
-                const uint i = 2u * H + r * H + c2;
-                comb[r * H + c2] = mix[i] * comb_scale + base_b[i];
-                mx = max(mx, comb[r * H + c2]);
-            }
-            float sum = 0.0f;
-            for (uint c2 = 0; c2 < H; ++c2) {
-                comb[r * H + c2] = fast::exp(comb[r * H + c2] - mx);
-                sum += comb[r * H + c2];
-            }
-            for (uint c2 = 0; c2 < H; ++c2) {
-                comb[r * H + c2] = comb[r * H + c2] / sum + hc_eps;
-            }
+        const uint r = t;
+        const float comb_scale = scale3[2];
+        float mx = -INFINITY;
+        for (uint c2 = 0; c2 < H; ++c2) {
+            const uint i = 2u * H + r * H + c2;
+            comb[r * H + c2] = mix[i] * comb_scale + base_b[i];
+            mx = max(mx, comb[r * H + c2]);
+        }
+        float sum = 0.0f;
+        for (uint c2 = 0; c2 < H; ++c2) {
+            comb[r * H + c2] = fast::exp(comb[r * H + c2] - mx);
+            sum += comb[r * H + c2];
         }
         for (uint c2 = 0; c2 < H; ++c2) {
+            comb[r * H + c2] = comb[r * H + c2] / sum + hc_eps;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lead) {
+        const uint c2 = t;
+        float col = 0.0f;
+        for (uint r = 0; r < H; ++r) col += comb[r * H + c2];
+        for (uint r = 0; r < H; ++r) comb[r * H + c2] /= (col + hc_eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint it = 1; it < sinkhorn_iters; ++it) {
+        if (lead) {
+            const uint r = t;
+            float row_sum = 0.0f;
+            for (uint c2 = 0; c2 < H; ++c2) row_sum += comb[r * H + c2];
+            for (uint c2 = 0; c2 < H; ++c2) comb[r * H + c2] /= (row_sum + hc_eps);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lead) {
+            const uint c2 = t;
             float col = 0.0f;
             for (uint r = 0; r < H; ++r) col += comb[r * H + c2];
             for (uint r = 0; r < H; ++r) comb[r * H + c2] /= (col + hc_eps);
         }
-        for (uint it = 1; it < sinkhorn_iters; ++it) {
-            for (uint r = 0; r < H; ++r) {
-                float row_sum = 0.0f;
-                for (uint c2 = 0; c2 < H; ++c2) row_sum += comb[r * H + c2];
-                for (uint c2 = 0; c2 < H; ++c2) comb[r * H + c2] /= (row_sum + hc_eps);
-            }
-            for (uint c2 = 0; c2 < H; ++c2) {
-                float col = 0.0f;
-                for (uint r = 0; r < H; ++r) col += comb[r * H + c2];
-                for (uint r = 0; r < H; ++r) comb[r * H + c2] /= (col + hc_eps);
-            }
-        }
-        for (uint i = 0; i < H * H; ++i) out_comb[i] = comb[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lead) {
+        for (uint c2 = 0; c2 < H; ++c2) out_comb[t * H + c2] = comb[t * H + c2];
     }
 }
 
@@ -703,9 +763,14 @@ kernel void dsv4_hc_collapse(
     device half* x [[buffer(2)]],
     constant uint& hc_mult [[buffer(3)]],
     constant uint& hidden [[buffer(4)]],
-    uint d [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]]
 ) {
+    const uint d = gid.x;
     if (d >= hidden) return;
+    // Grid y is the token of a batch (decode: one token).
+    streams += gid.y * hc_mult * hidden;
+    pre += gid.y * hc_mult;
+    x += gid.y * hidden;
     float acc = 0.0f;
     for (uint j = 0; j < hc_mult; ++j) {
         acc = fma(pre[j], float(streams[j * hidden + d]), acc);
@@ -726,11 +791,17 @@ kernel void dsv4_hc_place_mix(
     device half* out_streams [[buffer(4)]],
     constant uint& hc_mult [[buffer(5)]],
     constant uint& hidden [[buffer(6)]],
-    uint2 gid [[thread_position_in_grid]]
+    uint3 gid [[thread_position_in_grid]]
 ) {
     const uint k = gid.y;
     const uint d = gid.x;
     if (k >= hc_mult || d >= hidden) return;
+    // Grid z is the token of a batch (decode: one token).
+    streams += gid.z * hc_mult * hidden;
+    sub += gid.z * hidden;
+    post += gid.z * hc_mult;
+    comb += gid.z * hc_mult * hc_mult;
+    out_streams += gid.z * hc_mult * hidden;
     float acc = post[k] * float(sub[d]);
     for (uint j = 0; j < hc_mult; ++j) {
         acc = fma(comb[j * hc_mult + k], float(streams[j * hidden + d]), acc);

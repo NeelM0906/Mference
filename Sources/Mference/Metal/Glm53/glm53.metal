@@ -391,8 +391,8 @@ kernel void glm53_router_select_k8(
 }
 
 // ---------------------------------------------------------------------------
-// mHC mixing weights, split so the fn matvec runs wide. `dsv4_hc_weights`
-// does the whole site in one threadgroup: 24 rows x 16,384 fp32 walked with a
+// mHC mixing weights, split so the fn matvec runs wide. The DeepSeek kernel
+// then did the whole site in one threadgroup: 24 rows x 16,384 fp32 walked with a
 // dependent load-fma chain per lane, which measured 0.58 ms per site on the
 // M3 Ultra (2.9 GB/s) — two sites x 45 layers was 52 ms of an 86 ms token.
 //
@@ -401,7 +401,7 @@ kernel void glm53_router_select_k8(
 // `rows` computes the streams' sum of squares. `glm53_hc_finalize` (one
 // thread) applies the RMS normalization (linear, so it factors out of the
 // dots), the sigmoid / 2*sigmoid / softmax + Sinkhorn maps — the same
-// arithmetic as `dsv4_hc_weights`' tail, in the same order.
+// arithmetic as `dsv4_hc_finish`, in the same order.
 // ---------------------------------------------------------------------------
 [[kernel, max_total_threads_per_threadgroup(256)]]
 kernel void glm53_hc_dots(

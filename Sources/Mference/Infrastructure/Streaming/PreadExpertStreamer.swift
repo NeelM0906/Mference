@@ -63,6 +63,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public let cachePolicy: ExpertCachePolicy
 
     private let fd: Int32
+    /// Same file, opened F_NOCACHE, for plans that sweep the layer (prefill).
+    private let sweepFD: Int32
     private let slotPointers: [UnsafeMutableRawPointer]
     /// One contiguous wired allocation holding every slot; slot `n` lives at
     /// byte offset `n * slotAllocationSize`. A single buffer lets the GPU
@@ -108,6 +110,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             throw StreamerError.openFailed(path: layout.path, errno: errno)
         }
         self.fd = openedFD
+        // Prefill sweeps nearly every expert of the layer once: through the
+        // file cache that pass only evicts pages other reads could reuse.
+        let sweepFD = open(layout.path, O_RDONLY)
+        guard sweepFD >= 0 else {
+            close(openedFD)
+            throw StreamerError.openFailed(path: layout.path, errno: errno)
+        }
+        _ = fcntl(sweepFD, F_NOCACHE, 1)
+        self.sweepFD = sweepFD
 
         var fileStats = stat()
         if fstat(openedFD, &fileStats) == 0 {
@@ -163,6 +174,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     deinit {
         close(fd)
+        close(sweepFD)
     }
 
     public func loadExpert(layer: Int, expert: Int) throws
@@ -268,7 +280,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             hits: experts.count - misses.count)
     }
 
-    public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws
+    public func executeExpertCachePlan(_ plan: ExpertCachePlan,
+                                       sweep: Bool = false) throws
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.experts.count <= slotCount,
                      "expert cache plan exceeds slot count")
@@ -433,6 +446,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         (slotSlabBuffer, slotOfBuffer, slotAllocationSize)
     }
 
+    /// Prefill routes many tokens to one expert, but a tile plan counts it
+    /// once: credit the rest so LFU keeps the prompt's busiest experts in
+    /// their slots through the sweep and into decode.
+    public func noteRouteCounts(_ counts: [Int]) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for (expert, count) in counts.enumerated()
+            where count > 1 && expert < expertUseCount.count {
+            expertUseCount[expert] &+= count - 1
+        }
+    }
+
     /// All-hit fast path bookkeeping: bump the LFU counters and use clock
     /// exactly as `planExpertsCached` would, without planning, assigning, or
     /// reading anything. Keeps eviction quality identical when the runner
@@ -571,6 +596,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             maxCallNanos: maxCallNanos)
     }
 
+    /// Reads the layer's whole expert region front to back through the cached
+    /// descriptor into throwaway scratch, so a sweep that follows (a long
+    /// prefill routes to nearly every expert) copies from the page cache
+    /// instead of waiting on the SSD. Returns early once `stop()` is true.
+    public func warmPageCache(stop: () -> Bool) {
+        let chunk = 4 << 20
+        guard let scratch = malloc(chunk) else { return }
+        defer { free(scratch) }
+        var offset = layout.streamOffset
+        let end = layout.streamOffset + layout.streamSize
+        while offset < end, !stop() {
+            let count = Int(min(UInt64(chunk), end - offset))
+            guard pread(fd, scratch, count, off_t(offset)) > 0 else { return }
+            offset += UInt64(count)
+        }
+    }
+
     private func fileOffsetForExpert(_ expert: Int) throws -> UInt64 {
         let regionOffset = layout.expertOffset(layer: 0, expert: expert)
         guard regionOffset + layout.storedExpertStride <= layout.streamSize else {
@@ -586,7 +628,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         if let storage = layout.storage {
             try storage.readExperts(fd: fd, fileOffset: fileOffset, into: destinations)
         } else {
-            try readScattered(into: destinations,
+            try readScattered(fd: fd,
+                              into: destinations,
                               fileOffset: fileOffset,
                               strideBytes: Int(layout.expertStride))
         }
@@ -613,11 +656,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// Reads `destinations.count * strideBytes` contiguous file bytes starting
     /// at `fileOffset`, scattering `strideBytes` into each destination in
     /// order. Single-destination runs use the plain `pread` path.
-    private func readScattered(into destinations: [UnsafeMutableRawPointer],
+    private func readScattered(fd: Int32,
+                               into destinations: [UnsafeMutableRawPointer],
                                fileOffset: UInt64,
                                strideBytes: Int) throws {
         guard destinations.count > 1 else {
-            return try readFull(into: destinations[0],
+            return try readFull(fd: fd,
+                                into: destinations[0],
                                 fileOffset: fileOffset,
                                 count: strideBytes)
         }
@@ -648,7 +693,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
     }
 
-    private func readFull(into destination: UnsafeMutableRawPointer,
+    private func readFull(fd: Int32,
+                          into destination: UnsafeMutableRawPointer,
                           fileOffset: UInt64,
                           count: Int) throws {
         var filled = 0

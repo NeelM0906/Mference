@@ -369,7 +369,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private static let rdadviseAdaptiveMissCap = 12
     private static let rdadviseAdaptiveByteCap: UInt64 = 384 * 1_048_576
     private static let rdadviseAdaptiveSlowCallNanos: UInt64 = 1_000_000
-    private static let prefillRoutedTileSchedulerConfig = PrefillRoutedTileSchedulerConfig()
+    /// Two tiles of 16 experts in flight: the next tile's reads start while
+    /// the GPU still holds two, so tile drains stop idling the SSD and each
+    /// fetch has twice the experts in flight (Qwen 3.6, 506 tokens, 24 GiB
+    /// M4 Pro: prefill 3.47-3.79 -> 3.18-3.42 s against depth 1 x 8).
+    private static let prefillRoutedTileSchedulerConfig =
+        PrefillRoutedTileSchedulerConfig(maxPendingDepth: 2, tileExperts: 16)
 
     /// Per-layer `router.scale * D^-0.5` pre-folded into one BF16 buffer
     /// allocation per layer. ~168 KB total at 30 layers × 2816 BF16 — bounded
@@ -480,26 +485,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// DeepSeek-V4-Flash: shadow, budget 2 (community A/B 2026-08-07, short
         /// +18%, long +13%; docs/experiments/summaries/14-dsv4-shadow-prefetch.md).
         ///
-        /// Qwen 3.6 and Gemma 4 on hosts from 16 GiB to below 24 GiB: shadow,
+        /// Qwen 3.6 and Gemma 4 on hosts from 16 GiB to 24 GiB: shadow,
         /// budget 4. There the GPU idles about half of decode waiting for expert
         /// reads; on an M2 with 16 GiB (diagnostic runs, 2026-09-21) Qwen 3.6
         /// decoded 7.35 / 8.91 / 9.62 / 10.55 tok/s at off / 1 / 2 / 4, and Gemma
         /// 4 and Gemma 4 QAT gained about 11% from budget 2 with nothing more at
-        /// 4, at no memory cost in any case. Hosts from 24 GiB can hold the pool
-        /// in the file cache, and smaller hosts are unmeasured, so both stay off.
+        /// 4, at no memory cost in any case. On a 24 GiB M4 Pro (2026-10-27)
+        /// Qwen 3.6 went 17.8-18.3 -> 19.6-20.6 tok/s at budget 4 and
+        /// 14.8-20.3 -> 19.7-21.8 at budget 8, so 24 GiB hosts run budget 8.
+        /// Larger and smaller hosts are unmeasured, so both stay off.
         static func plan(requestedShadowBudget: Int?,
                          environment: [String: String],
                          family: ModelFamily,
                          physicalMemoryBytes: UInt64) -> SpeculativePrefetchPlan {
             let gib = UInt64(1) << 30
-            let measuredTier = physicalMemoryBytes >= 16 * gib && physicalMemoryBytes < 24 * gib
+            let measuredTier = physicalMemoryBytes >= 16 * gib && physicalMemoryBytes <= 24 * gib
             let familyMode: SpeculativePrefetchMode
             let familyBudget: Int
             switch family {
             case .deepseekV4Flash:
                 familyMode = .shadow; familyBudget = 2
             case .qwen36, .gemma4:
-                familyMode = measuredTier ? .shadow : .off; familyBudget = 4
+                familyMode = measuredTier ? .shadow : .off
+                familyBudget = physicalMemoryBytes >= 24 * gib ? 8 : 4
             default:
                 familyMode = .off; familyBudget = 2
             }
@@ -2112,6 +2120,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             d: UInt32(D),
                             outScale: embedOutScale)
 
+        var prefillLookahead: SpeculativeExpertPrefetch?
         for L in 0..<cfg.numLayers {
             try prefillWillEncodeLayer?(L)
             try Task.checkCancellation()
@@ -2585,6 +2594,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         }
                     }
 
+                    if let streamer = try? model.routedExpertStreamer(layer: L) {
+                        var routeCounts = [Int](repeating: 0, count: cfg.numExperts)
+                        for id in routeIDs { routeCounts[Int(id)] += 1 }
+                        streamer.noteRouteCounts(routeCounts)
+                    }
+                    // Join the previous layer's lookahead before planning, so
+                    // the tile plans see its slots as hits.
+                    if let lookahead = prefillLookahead, lookahead.layer == L {
+                        _ = lookahead.join()
+                        prefillLookahead = nil
+                    }
                     let routedTileScheduler = PrefillRoutedTileScheduler(config: schedulerConfig)
                     for (tileIndex, tile) in routes.tiles.enumerated() {
                         let expertIDs = try PrefillStreamedTileBinding.expertIDs(
@@ -2726,6 +2746,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                                argumentBuffer: argumentBuffer))
                         while pendingTiles.count > schedulerConfig.maxPendingDepth {
                             try drainOldestPendingTile()
+                        }
+                    }
+                    // The SSD idles from here through the next layer's
+                    // attention and router. Tiles sweep experts in file order
+                    // and a prompt routes to most of a layer's experts, so read
+                    // the next layer's first experts by offset into its free
+                    // slots now; its tile plans then find them as hits.
+                    if L + 1 < cfg.numLayers,
+                       let slotCount = model.routedExpertCacheSlotCount(layer: L + 1),
+                       let streamer = try? model.routedExpertStreamer(layer: L + 1) {
+                        let tileSlots = (schedulerConfig.maxPendingDepth + 1) * schedulerConfig.tileExperts
+                        let offsets = model.routedExpertPhysicalOffsets(layer: L + 1)
+                        let firstByOffset = offsets.indices.sorted { offsets[$0] < offsets[$1] }
+                            .prefix(max(0, slotCount - tileSlots))
+                        let ahead = streamer.nonResidentExperts(Array(firstByOffset))
+                        let reservation = streamer.reserveSpeculativeSlots(experts: ahead,
+                                                                           keepEvictable: tileSlots)
+                        if !reservation.isEmpty {
+                            let record = SpeculativeExpertPrefetch(layer: L + 1, predicted: Set(ahead))
+                            prefillLookahead = record
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                record.complete(bytes: streamer.executeSpeculativeReservation(reservation))
+                            }
                         }
                     }
                     while !pendingTiles.isEmpty {
@@ -3167,7 +3210,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if slotMapEnabled,
                Self.slotMapOnlyLayer == nil || Self.slotMapOnlyLayer == L,
                !cfg.ffnSandwichNorms,
-               !isLinear,
                model.config.family == .qwen36,
                cfg.topKExperts == MoE.maxStreamedExperts,
                let binding = try? model.routedSlotMapBinding(layer: L) {
