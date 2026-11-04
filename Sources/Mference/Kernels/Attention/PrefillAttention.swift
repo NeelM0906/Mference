@@ -77,8 +77,15 @@ final class PrefillAttention {
                              out: MTLBuffer, outOffset: Int = 0,
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
+                             sinks: MTLBuffer? = nil,
+                             sinksOffset: Int = 0,
+                             numSinks: UInt32 = 0,
                              path: RuntimePrefillAttentionPath = .causalTiled) -> Bool {
         validate(params)
+        precondition(sinks != nil || sinksOffset == 0,
+                     "a sink offset requires a sink buffer")
+        precondition(numSinks == 0 || sinks != nil,
+                     "a sink count requires a sink buffer")
 
         let requestsTensorOps = path == .fullTensorOps2DPreferred
             || path == .fullTensorOps2DValidityV2
@@ -88,6 +95,7 @@ final class PrefillAttention {
             || params.slidingWindow >= params.kvValidCount
         let tensorOpsShape = requestsTensorOps
             && kvRingCapacity == 0
+            && numSinks == 0
             && windowNeverClips
             && params.headDim == 512
             && params.numQHeads == 16

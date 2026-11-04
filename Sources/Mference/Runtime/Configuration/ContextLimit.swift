@@ -4,7 +4,7 @@ extension ModelFamily {
     /// positions the model was never trained to address.
     public var maximumContext: Int {
         switch self {
-        case .gemma4, .qwen36, .qwen38, .qwen38flashnext: 262_144
+        case .gemma4, .qwen36, .qwen38, .qwen38flashnext, .flint: 262_144
         case .minicpm5: 131_072
         case .maple: 128_000
         case .deepseekV4Flash, .glm53Flash, .inklingSmall: 1_048_576
