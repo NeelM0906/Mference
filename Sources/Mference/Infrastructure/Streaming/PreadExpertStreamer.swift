@@ -628,7 +628,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         if let storage = layout.storage {
             try storage.readExperts(fd: fd, fileOffset: fileOffset, into: destinations)
         } else {
-            try readScattered(into: destinations,
+            try readScattered(fd: fd,
+                              into: destinations,
                               fileOffset: fileOffset,
                               strideBytes: Int(layout.expertStride))
         }
