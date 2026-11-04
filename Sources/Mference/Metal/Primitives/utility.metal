@@ -91,3 +91,16 @@ void residual_add_fp16(
     if (tid >= count) return;
     hidden[tid] = half(float(hidden[tid]) + float(delta[tid]));
 }
+
+// GPU keep-warm filler (GPUKeepWarm): one simdgroup spinning on its own
+// scratch, so the GPU never sits idle between the decode loop's short command
+// buffers. Touches no runtime buffer.
+kernel void gpu_keep_warm(
+    device float*  scratch [[buffer(0)]],
+    constant uint& iters   [[buffer(1)]],
+    uint           tid     [[thread_position_in_grid]]
+) {
+    float v = scratch[tid];
+    for (uint k = 0; k < iters; ++k) v = fma(v, 0.9999f, 0.0001f);
+    scratch[tid] = v;
+}
