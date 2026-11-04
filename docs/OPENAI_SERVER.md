@@ -210,9 +210,11 @@ data: [DONE]
 
 The frame carries the same envelope the blocking path would have returned, so
 a failure that can only surface once generation is under way still names its
-cause. Reusing a KV prefix is the case that reaches it: whether the retained
-prefix plus the new turn fits the context window is known only after the
-prompt cache has been matched, which happens after the head is committed.
+cause. A reused KV prefix does not reach it: the prompt cache is matched only
+after the head is committed, and a retained prefix plus the new turn can be
+longer than the prompt that was checked. When it no longer fits the context
+window, the server drops the cached prefix and runs the checked prompt, as on
+a cache miss.
 
 Treat any frame with an `error` key as fatal for that request; no
 `finish_reason` chunk precedes it. The stream is never terminated by dropping

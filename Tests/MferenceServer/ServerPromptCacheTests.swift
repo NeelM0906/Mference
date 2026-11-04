@@ -248,6 +248,33 @@ struct ServerPromptCacheTests {
         #expect(cache.entry == nil)
     }
 
+    @Test func aHitWithARetainedThoughtThatNoLongerFitsFallsBackToTheRenderedPrompt() async throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Mference/Core/Tokenization/Fixtures/ChatMLTokenizer")
+        let tok = try await MFTokenizer.load(from: fixture, family: .qwen38)
+            .forCheckpoint(CheckpointIdentity.baseQwen38)
+        let initial = request(messages: [.init(role: .user, content: "A")])
+        let prompt = try tok.encodeChat(messages: initial.messages)
+        // The KV cache keeps the generated thought; the next render drops it.
+        let generated = tok.encode(String(repeating: "step ", count: 32) + "\n</think>\n\nB", addBOS: false)
+        var cache = ServerPromptCache()
+        cache.publish(domain: domain, request: initial, content: "B", calls: [],
+            result: rawResult(prompt: prompt, kvBacked: prompt + generated,
+                              boundary: tok.endOfTurnID, reason: .endOfTurn))
+        let next = request(messages: initial.messages + [
+            .init(role: .assistant, content: "B"), .init(role: .user, content: "C")])
+        let rendered = try tok.encodeChat(messages: next.messages)
+        let match = cache.match(domain: domain, request: next, renderedPromptIDs: rendered, tokenizer: tok)
+        guard case .hit(let effective, _) = match else {
+            Issue.record("expected the legacy continuation to reuse the prefix")
+            return
+        }
+        #expect(effective.count > rendered.count)
+        // `prepare` admits the rendered prompt against this context.
+        #expect(match.fitting(maxContext: rendered.count + 1) == .miss)
+        #expect(match.fitting(maxContext: effective.count + 1) == match)
+    }
+
     private func request(
         messages: [MFTokenizer.Message],
         tools: [MFTokenizer.FunctionDefinition] = []

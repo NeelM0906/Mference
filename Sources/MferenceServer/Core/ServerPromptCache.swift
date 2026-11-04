@@ -56,3 +56,16 @@ extension PromptPrefixCache {
               gemmaRecoverablePrefix: gemmaRecoverablePrefix)
     }
 }
+
+extension PromptPrefixCacheMatch {
+    /// `prepare` admitted the rendered prompt, but a hit can be longer: the KV
+    /// cache keeps generated tokens, such as a thought, that the re-render
+    /// drops. A hit that no longer fits is treated as a miss, as the CLI's
+    /// `--reuse-prefix` does, instead of failing after the response started.
+    func fitting(maxContext: Int) -> PromptPrefixCacheMatch {
+        if case .hit(let effective, _) = self, effective.count >= maxContext {
+            return .miss
+        }
+        return self
+    }
+}
