@@ -398,6 +398,23 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     private func consumeFlint(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        // Reasoning can discuss tool syntax; only the visible channel may open
+        // a call. Once a real call is open, its payload owns every token,
+        // including literal thinking markers inside a string argument.
+        if toolTokens == nil {
+            if tokenID == tokenizer.thinkStartID {
+                channel = .thought
+                return []
+            }
+            if tokenID == tokenizer.thinkEndID {
+                channel = .visible
+                return []
+            }
+            if channel == .thought {
+                if !delta.isEmpty { onReasoning?(delta) }
+                return []
+            }
+        }
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
                 failed = true
@@ -436,24 +453,12 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             toolTokens = tokens
             return []
         }
-        if tokenID == tokenizer.thinkStartID {
-            channel = .thought
-            return []
-        }
-        if tokenID == tokenizer.thinkEndID {
-            channel = .visible
-            return []
-        }
         if tokenID == tokenizer.toolResponseID
             || tokenID == tokenizer.toolResponseEndID {
             guard emittedCalls > 0 else {
                 failed = true
                 throw ToolCallParserError.malformed
             }
-            return []
-        }
-        guard channel != .thought else {
-            if !delta.isEmpty { onReasoning?(delta) }
             return []
         }
         return delta.isEmpty ? [] : [.content(delta)]

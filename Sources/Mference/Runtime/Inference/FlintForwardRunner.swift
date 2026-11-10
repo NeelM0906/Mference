@@ -33,6 +33,11 @@ public final class FlintForwardRunner: ContinuableLogitProducer,
     private static let denseIntermediate = 6_144
     private static let topK = 6
     private static let slidingWindow = 513
+    /// Extra sliding-ring slots a batched prefill needs beyond the window: a
+    /// batch covering positions `slidingWindow..<slidingWindow+count` writes all
+    /// its rows before attention reads them, so the ring must hold every row at
+    /// once instead of letting the tail wrap onto keys earlier rows still need.
+    private static let slidingRingSlack = maxBatchPrefillTokens
     private static let epsilon: Float = 1e-6
     private static let sharedExpertOverlapEnabled =
         ProcessInfo.processInfo.environment["MFERENCE_FLINT_SHARED_OVERLAP"] != "0"
@@ -123,7 +128,7 @@ public final class FlintForwardRunner: ContinuableLogitProducer,
             maxContext: maxContext,
             fp16RingEnabled: true,
             maxPrefillChunkTokens: 1,
-            fp16RingCapacityOverride: Self.slidingWindow,
+            fp16RingCapacityOverride: Self.slidingWindow + Self.slidingRingSlack,
             pagedFullAttention: paged)
         if paged {
             let pagesPerLayer = (maxContext + KVPageGeometry.tokensPerPage - 1)
@@ -617,6 +622,16 @@ public final class FlintForwardRunner: ContinuableLogitProducer,
         let F = Self.moeIntermediate
         let halfStride = MemoryLayout<Float16>.stride
         let actStride = Self.denseIntermediate * halfStride
+        // A tile is fetched as a single plan, so it may never hold more experts
+        // than the install's per-layer cache has slots; the floor is top-k so a
+        // single token always fits. Resident mode has no slot limit and keeps
+        // the grouping default.
+        let tileExpertCount: Int
+        if let slots = model.routedExpertCacheSlotCount(layer: layerIndex) {
+            tileExpertCount = max(Self.topK, min(16, slots))
+        } else {
+            tileExpertCount = 16
+        }
 
         let shared = try commandBuffer()
         for offset in 0..<tokenCount {
@@ -657,7 +672,7 @@ public final class FlintForwardRunner: ContinuableLogitProducer,
             queryCount: tokenCount,
             topK: Self.topK,
             numExperts: 256,
-            tileExpertCount: 16)
+            tileExpertCount: tileExpertCount)
         let metadata = try groupedRoutedMoE.makeStreamedMetadataBuffers(
             device: context.device,
             routes: routes)

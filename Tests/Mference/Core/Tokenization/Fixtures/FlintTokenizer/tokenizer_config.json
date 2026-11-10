@@ -1,0 +1,7 @@
+{
+ "tokenizer_class": "TokenizersBackend",
+ "eos_token": "<|end_of_text|>",
+ "pad_token": "<|end_of_text|>",
+ "model_max_length": 262144,
+ "clean_up_tokenization_spaces": false
+}
