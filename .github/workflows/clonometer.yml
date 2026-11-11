@@ -1,0 +1,18 @@
+# Keeps a lifetime clone count on the `badges` branch. GitHub only retains 14 days.
+# Needs a repository secret TRAFFIC_TOKEN: fine-grained token for this repository
+# with Administration (read) and Contents (write).
+# A scheduled workflow on a public repository is disabled after 60 days with no commit.
+name: clonometer
+on:
+  schedule: [{cron: "17 * * * *"}]
+  workflow_dispatch:
+permissions: {}
+concurrency: {group: clonometer}
+jobs:
+  count:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oficiallyAkshay/clonometer@b10febfcc5614026040d6ef3f15e11a5412d4d6e # main
+        with:
+          token: ${{ secrets.TRAFFIC_TOKEN }}
+          runs-per-day: ${{ vars.CLONOMETER_RUNS_PER_DAY }}
