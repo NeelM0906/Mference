@@ -43,20 +43,21 @@ h1{font-size:clamp(44px,8vw,100px);line-height:.98;letter-spacing:-.045em;font-w
 .verdict .big{text-wrap:balance;font-size:clamp(34px,5.4vw,68px);font-weight:700;letter-spacing:-.035em;line-height:1.05}
 .verdict .big b{color:var(--sig)}
 .verdict .big,.row,.seg button{font-variant-numeric:tabular-nums}
-@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-#rows .row{animation:rise .35s ease both}
-#rows .row:nth-child(2){animation-delay:.06s}#rows .row:nth-child(3){animation-delay:.12s}#rows .row:nth-child(4){animation-delay:.18s}#rows .row:nth-child(5){animation-delay:.24s}
 .btn{transition:transform .15s}.btn:hover{transform:translateY(-1px)}
 .seg button{transition:background .15s,color .15s}.seg button:not([aria-pressed=true]):hover{background:rgba(14,15,18,.06)}
 .cols{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;padding:28px 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2)}
 .cols span:last-child{text-align:right}
-.row{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;align-items:center;padding:18px 0;border-top:1px solid var(--hair)}
-.row .n{font-size:22px;font-weight:650;letter-spacing:-.02em}
+.row{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;align-items:center;padding:15px 0;border-top:1px solid var(--hair);transition:opacity .3s}
+.row.need{opacity:.36}
+.row:not(.unlocked) .a,.row:not(.unlocked) .arr{display:none}
+.row:not(.unlocked) .b{color:var(--ink)}
+.row.need .b{color:var(--ink2)}
+.row .n{font-size:20px;font-weight:650;letter-spacing:-.02em}
 .row .n small{display:block;font-size:13px;color:var(--ink2);font-weight:400;letter-spacing:0}
-.flow{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:600;letter-spacing:-.02em}
+.flow{display:flex;align-items:center;gap:12px;font-size:19px;font-weight:600;letter-spacing:-.02em}
 .flow .a{color:var(--ink2);text-decoration:line-through;text-decoration-color:rgba(14,15,18,.35)}
 .flow .b{color:var(--sig2)}
-.flow i{font-style:normal;color:var(--ink2);font-weight:300}
+.flow .arr{font-style:normal;color:var(--ink2);font-weight:300}
 .row .s{text-align:right;font-size:20px;font-weight:700;letter-spacing:-.02em}
 .row .s small{display:block;font-size:12px;font-weight:500;color:var(--ink2);letter-spacing:0}
 .row .s.no{font-size:15px;font-weight:500;color:var(--ink2)}
@@ -80,7 +81,7 @@ footer{border-top:1px solid var(--hair);margin-top:48px;padding:24px 0 40px;font
   </header>
   <section class="verdict" aria-live="polite"><div class="big" id="verdict"></div></section>
   <div class="cols"><span>Model</span><span>Memory, before → now</span><span>Speed</span></div>
-  <div id="rows"></div>
+  <div id="rows" role="list"></div>
   <footer><span>Apple Silicon · macOS 15+ · MIT license</span><span><a href="https://github.com/NeelM0906/Mference">GitHub</a></span></footer>
 </div>
 <script src="data.js"></script>
@@ -92,24 +93,37 @@ footer{border-top:1px solid var(--hair);margin-top:48px;padding:24px 0 40px;font
   var M=window.MF, cur=M.pickHost(), seg=document.getElementById("seg");
   M.HOSTS.forEach(function(h){
     var b=document.createElement("button");b.type="button";b.dataset.id=h.id;b.textContent=h.label;b.title=h.mac;
-    b.addEventListener("click",function(){cur=h;M.setHash(h.id);render();});
-    b.addEventListener("keydown",function(e){var d=e.key==="ArrowRight"?1:e.key==="ArrowLeft"?-1:0;if(!d)return;e.preventDefault();var i=(M.HOSTS.indexOf(h)+d+M.HOSTS.length)%M.HOSTS.length;cur=M.HOSTS[i];M.setHash(cur.id);render();seg.children[i].focus();});
+    b.addEventListener("click",function(){choose(h);});
+    b.addEventListener("keydown",function(e){var d=e.key==="ArrowRight"?1:e.key==="ArrowLeft"?-1:0;if(!d)return;e.preventDefault();var i=(M.HOSTS.indexOf(h)+d+M.HOSTS.length)%M.HOSTS.length;choose(M.HOSTS[i]);seg.children[i].focus();});
     seg.appendChild(b);
   });
-  function render(){
+  function choose(h){cur=h;M.setHash(h.id);update();}
+  /* every model is always listed, in a fixed order; update() only changes text and state in place */
+  var rowsEl=document.getElementById("rows"),refs=[];
+  M.FAMS.slice().sort(function(a,b){return b.disk-a.disk;}).forEach(function(f){
+    var r=document.createElement("div");r.className="row";r.setAttribute("role","listitem");
+    r.innerHTML='<span class="n">'+f.name+'<small>'+f.p+'B</small></span><span class="flow"><span class="a"></span><i class="arr">→</i><span class="b"></span></span><span class="s"></span>';
+    rowsEl.appendChild(r);
+    refs.push({f:f,r:r,a:r.querySelector(".a"),b:r.querySelector(".b"),s:r.querySelector(".s")});
+  });
+  function update(){
     [].forEach.call(seg.children,function(b){b.setAttribute("aria-pressed",b.dataset.id===cur.id?"true":"false");});
-    var big=M.FAMS.filter(function(f){return f.disk>cur.ram&&M.status(f,cur)!=="need";}).sort(function(a,b){return b.disk-a.disk;});
-    var v=document.getElementById("verdict"),rows=big,fallback=false;
-    if(big.length){v.innerHTML='<b>'+big.length+'</b> model'+(big.length>1?'s':'')+' now '+(big.length>1?'run':'runs')+' in '+cur.label+'.';}
-    else{fallback=true;rows=M.FAMS.filter(function(f){return M.status(f,cur)!=="need";}).sort(function(a,b){return b.disk-a.disk;}).slice(0,3);
-      v.innerHTML='Every model fits. The largest run in <b>a fraction</b> of the memory.';}
-    var h="";
-    rows.forEach(function(f){var s=f.sp[cur.id],m=M.memFor(f,cur);if(fallback)m=f.mem.d;
-      h+='<div class="row"><span class="n">'+f.name+'<small>'+f.p+'B</small></span><span class="flow"><span class="a">'+M.fmtGB(f.disk)+' GB</span><i>→</i><span class="b">'+M.fmtGB(m)+' GB</span></span>'+
-        (s?'<span class="s">'+M.fmtSp(s)+' tok/s</span>':'<span class="s no">not measured</span>')+'</div>';});
-    document.getElementById("rows").innerHTML=h;
+    var unlocked=0;
+    refs.forEach(function(x){
+      var f=x.f,st=M.status(f,cur),need=st==="need",un=!need&&f.disk>cur.ram,sp=f.sp[cur.id];
+      if(un)unlocked++;
+      x.r.classList.toggle("need",need);x.r.classList.toggle("unlocked",un);
+      x.r.setAttribute("aria-disabled",need?"true":"false");
+      x.a.textContent=M.fmtGB(f.disk)+" GB";
+      x.b.textContent=need?M.fmtGB(f.disk)+" GB":M.fmtGB(M.memFor(f,cur))+" GB";
+      x.s.className="s"+(need||!sp?" no":"");
+      x.s.textContent=need?"needs a bigger Mac":(sp?M.fmtSp(sp)+" tok/s":"not measured");
+    });
+    document.getElementById("verdict").innerHTML=unlocked?
+      '<b>'+unlocked+'</b> model'+(unlocked>1?'s':'')+' now '+(unlocked>1?'run':'runs')+' in '+cur.label+'.':
+      'Every model fits. The largest run in <b>a fraction</b> of the memory.';
   }
-  render();
+  update();
 })();
 </script>
 </body>

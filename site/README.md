@@ -18,3 +18,9 @@ python3 -m http.server 8080 --bind 127.0.0.1 --directory site
 
 When a number in the README changes, change the same number in `data.js`.
 A speed is shown only where the README reports it for that Mac.
+
+## Publishing
+
+`.github/workflows/pages.yml` publishes `site/` to GitHub Pages on every change to
+`site/` on `main`. A repository admin sets the Pages source to "GitHub Actions"
+once in Settings > Pages.
