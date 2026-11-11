@@ -12,6 +12,10 @@ public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     case deepseekV4Flash = "deepseekV4Flash"
     case inklingSmall = "inklingSmall"
     case maple = "maple"
+    /// Flint-40B-A2.5B. A 49-layer hybrid NoPE/full and 513-token sliding
+    /// attention model with a 256-expert sigmoid-routed MoE and one shared
+    /// expert.
+    case flint = "flint"
     /// Qwen3.8-Flash-Next. The repacker installs it and `FlashNextForwardRunner`
     /// executes it; its capability gate was lifted on 2026-09-10. It reaches the
     /// CLI, the loopback server and the UI behind it; the install is a ~175 GB
@@ -522,6 +526,12 @@ public struct ArchConfig: Sendable, Equatable {
     /// GLM-5.3-Flash's Kimi Delta Attention, NoPE latent sparse attention and
     /// pooled indexer geometry. `.none` for every other family.
     public let glm53: Glm53Config
+    /// One entry per layer. 1 means full attention runs without RoPE.
+    /// Empty means every layer uses the family's RoPE configuration.
+    public let noRopeLayerMask: [UInt8]
+    /// Full attention adds one learned logit per query head to the softmax
+    /// denominator only.
+    public let attentionSinks: Bool
 
     public init(
         hiddenSize: Int,
@@ -574,7 +584,9 @@ public struct ArchConfig: Sendable, Equatable {
         unpaddedVocabSize: Int = 0,
         flashNext: FlashNextConfig = .none,
         qkNorm: Bool = true,
-        glm53: Glm53Config = .none
+        glm53: Glm53Config = .none,
+        noRopeLayerMask: [UInt8] = [],
+        attentionSinks: Bool = false
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -627,6 +639,8 @@ public struct ArchConfig: Sendable, Equatable {
         self.flashNext = flashNext
         self.qkNorm = qkNorm
         self.glm53 = glm53
+        self.noRopeLayerMask = noRopeLayerMask
+        self.attentionSinks = attentionSinks
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -810,6 +824,57 @@ public struct ArchConfig: Sendable, Equatable {
 
     private static func mapleLayerMask() -> [UInt8] {
         (0..<24).map { $0 % 4 == 3 ? 1 : 0 }
+    }
+
+    /// Canonical Flint-40B-A2.5B-JANG_4M baseline. Resident core and shared
+    /// expert weights are INT8/group-64; streamed routed experts are
+    /// INT4/group-64. Full-attention layers are NoPE and sliding layers use
+    /// full-head RoPE.
+    public static let flint40B_A2_5B_JANG_4M = ArchConfig(
+        hiddenSize: 2_048,
+        intermediateSize: 1_024,
+        moeIntermediateSize: 512,
+        numHeads: 32,
+        numKVHeads: 4,
+        numFullKVHeads: 4,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 150_144,
+        slidingWindow: 513,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000.0,
+        fullRopeTheta: 10_000.0,
+        partialRotaryFactor: 1.0,
+        numLayers: 49,
+        numExperts: 256,
+        topKExperts: 6,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.flintLayerMask(),
+        hiddenActivation: "silu",
+        family: .flint,
+        attnOutputGate: false,
+        attentionScale: 1.0 / Double(128).squareRoot(),
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        routerScoringFunc: "sigmoid",
+        routedScalingFactor: 1.0,
+        numSharedExperts: 1,
+        numDenseLayers: 2,
+        denseIntermediateSize: 6_144,
+        routerNormAfterTopK: true,
+        noRopeLayerMask: Self.flintLayerMask(),
+        attentionSinks: true
+    )
+
+    private static func flintLayerMask() -> [UInt8] {
+        (0..<49).map {
+            $0 == 0 || $0 == 1 || $0 == 48
+                || ($0 >= 5 && $0 <= 45 && ($0 - 5).isMultiple(of: 4)) ? 1 : 0
+        }
     }
 
     /// Canonical DeepSeek-V4-Flash 284B-A13B baseline: 43 all-MoE layers
@@ -1196,6 +1261,7 @@ public struct ArchConfig: Sendable, Equatable {
         .deepseekV4Flash: .deepseekV4Flash_284B_A13B,
         .inklingSmall: .inklingSmall_276B_A12B,
         .maple: .maplePreview,
+        .flint: .flint40B_A2_5B_JANG_4M,
         .qwen38flashnext: .qwen38FlashNext_180B_A3_5B,
         .minicpm5: .miniCPM5_2B,
         .glm53Flash: .glm53Flash_320B_A18B,
@@ -1291,6 +1357,9 @@ public struct ArchConfig: Sendable, Equatable {
 
     /// Layer kind helpers over the mask encoding.
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }
+    public func layerHasNoRope(_ layer: Int) -> Bool {
+        noRopeLayerMask.indices.contains(layer) && noRopeLayerMask[layer] != 0
+    }
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
     public func layerIsCSA(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 3 }
     public func layerIsHCA(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 4 }

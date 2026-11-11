@@ -123,6 +123,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenizer.dialect == .glm5 {
             return try consumeGlm5(tokenID: tokenID, delta: delta)
         }
+        if tokenizer.dialect == .flint {
+            return try consumeFlint(tokenID: tokenID, delta: delta)
+        }
         if toolTokens == nil {
             if tokenID == tokenizer.channelStartID {
                 label = ""
@@ -391,6 +394,73 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             return []
         }
         guard channel != .thought else { return [] }
+        return delta.isEmpty ? [] : [.content(delta)]
+    }
+
+    private func consumeFlint(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        // Reasoning can discuss tool syntax; only the visible channel may open
+        // a call. Once a real call is open, its payload owns every token,
+        // including literal thinking markers inside a string argument.
+        if toolTokens == nil {
+            if tokenID == tokenizer.thinkStartID {
+                channel = .thought
+                return []
+            }
+            if tokenID == tokenizer.thinkEndID {
+                channel = .visible
+                return []
+            }
+            if channel == .thought {
+                if !delta.isEmpty { onReasoning?(delta) }
+                return []
+            }
+        }
+        if tokenID == tokenizer.toolCallStartID {
+            guard toolTokens == nil else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = []
+            return []
+        }
+        if tokenID == tokenizer.toolCallEndID {
+            guard let tokens = toolTokens else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = nil
+            let text = tokenizer.decode(tokens, skipSpecialTokens: false)
+            do {
+                let call = try FlintToolCallParser().parse(
+                    text,
+                    allowedTools: allowedTools,
+                    toolSchemas: toolSchemas,
+                    id: idGenerator())
+                emittedCalls += 1
+                return [.toolCall(call)]
+            } catch {
+                failed = true
+                throw error
+            }
+        }
+        if var tokens = toolTokens {
+            tokens.append(tokenID)
+            guard tokens.count * MemoryLayout<Int32>.size
+                    <= FlintToolCallParser.maximumBytes else {
+                failed = true
+                throw ToolCallParserError.oversized
+            }
+            toolTokens = tokens
+            return []
+        }
+        if tokenID == tokenizer.toolResponseID
+            || tokenID == tokenizer.toolResponseEndID {
+            guard emittedCalls > 0 else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            return []
+        }
         return delta.isEmpty ? [] : [.content(delta)]
     }
 

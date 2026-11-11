@@ -329,7 +329,7 @@ enum FlashNextPlanner {
     static func residentName(for sourceName: String,
                              family: RepackModelFamily) -> String {
         switch family {
-        case .qwen38flashnext:
+        case .qwen38flashnext, .flint:
             return sourceName
         case .minicpm5:
             // The vendor already spells the trunk `model.` and the head
@@ -399,7 +399,7 @@ enum FlashNextPlanner {
     static func foldsNormBias(_ sourceName: String,
                               family: RepackModelFamily) -> Bool {
         switch family {
-        case .qwen38flashnext:
+        case .qwen38flashnext, .flint:
             return false
         case .qwen36:
             return isNormWeight(sourceName)

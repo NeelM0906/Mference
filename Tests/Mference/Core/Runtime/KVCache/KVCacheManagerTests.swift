@@ -98,6 +98,34 @@ import Metal
         #expect(kv.keyBuffer(layer: 5, validTokenCount: 0).length == 256 * 2048)
     }
 
+    /// Flint's batched prefill writes every row of a chunk before its
+    /// attention reads them, so its ring override has to carry that batch's
+    /// slack on top of the sliding window. A plain window-sized ring would
+    /// wrap a chunk covering positions 512..<544 onto keys earlier rows of
+    /// the same chunk still attend.
+    @Test func ringOverrideMustCarryBatchPrefillSlack() throws {
+        let flint = ArchConfig.flint40B_A2_5B_JANG_4M
+        let batch = 32
+        let kv = try KVCacheManager(
+            device: try MetalContext().device,
+            config: flint,
+            maxContext: 4096,
+            fp16RingEnabled: true,
+            slidingWindow: flint.slidingWindow,
+            maxPrefillChunkTokens: 1,
+            fp16RingCapacityOverride: flint.slidingWindow + batch)
+        let layer = try #require((0..<flint.numLayers)
+            .first { kv.layerKind($0) == .swa })
+        #expect(kv.ringCapacity(layer: layer) == flint.slidingWindow + batch)
+        // The wrapped rows stay inside the ring: a whole batch of writes
+        // starting at the window boundary never lands on position 0.
+        let firstRow = kv.kSlot(layer: layer, position: flint.slidingWindow).offset
+        let lastRow = kv.kSlot(layer: layer,
+                               position: flint.slidingWindow + batch - 1).offset
+        #expect(lastRow > firstRow, "batch rows must not wrap onto the window head")
+        #expect(lastRow < kv.keyBuffer(layer: layer, validTokenCount: 0).length)
+    }
+
     @Test func fp16Ring_slotOffsetsWrapOnlyForSWALayers() throws {
         let (_, kv) = try makeManager(maxContext: 128,
                                       fp16RingEnabled: true,
@@ -135,6 +163,26 @@ import Metal
         #expect(kv.keyView(layer: 0, validTokenCount: 513).startSlot == 1)
         #expect(kv.valueView(layer: 0, validTokenCount: 513).startSlot == 1)
         #expect(kv.keyView(layer: 3, validTokenCount: 513).startSlot == 0)
+    }
+
+    @Test func pagedFullAttention_keepsHybridSlidingLayersAllocated() throws {
+        let context = try MetalContext()
+        let flint = ArchConfig.flint40B_A2_5B_JANG_4M
+        let kv = try KVCacheManager(device: context.device,
+                                    config: flint,
+                                    maxContext: 513,
+                                    fp16RingEnabled: true,
+                                    slidingWindow: flint.slidingWindow,
+                                    maxPrefillChunkTokens: 1,
+                                    fp16RingCapacityOverride: 512,
+                                    pagedFullAttention: true)
+
+        #expect(kv.layerKind(0) == .full)
+        #expect(kv.layerKind(2) == .swa)
+        #expect(kv.capacity(layer: 0) == 0)
+        #expect(kv.capacity(layer: 2) == 512)
+        #expect(kv.kSlot(layer: 2, position: 0).offset == 0)
+        #expect(kv.kSlot(layer: 2, position: 512).offset == 0)
     }
 
     @Test func fp16Ring_rangesMustNotWrap() throws {

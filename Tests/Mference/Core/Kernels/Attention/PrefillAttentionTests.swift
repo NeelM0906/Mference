@@ -191,6 +191,35 @@ import MferenceValidationSupport
         }
     }
 
+    @Test func prefillAttentionFoldsPerHeadSinksIntoTheDenominator() throws {
+        let context = try MetalContext()
+        let fixture = Self.makeFixture(start: 128,
+                                       chunk: 1,
+                                       window: 0,
+                                       seed: 0xA871,
+                                       headDim: 512,
+                                       qHeads: 16,
+                                       kvHeads: 2)
+        let sinkValues = (0..<fixture.qHeads).map {
+            Float(($0 * 7) % 17 - 8) / 4
+        }
+        let sinkBits = sinkValues.map(Quantization.bf16Bits)
+        let roundedSinks = sinkBits.map(Quantization.bf16ToFloat)
+        let run = try Self.runKernel(
+            fixture,
+            context: context,
+            prefill: PrefillAttention(context: context),
+            sinks: sinkValues,
+            path: .fullTensorOps2DValidityV2)
+        #expect(!run.usedTensorOps, "TensorOps has no attention-sink input")
+
+        let reference = Self.reference(fixture, sinks: roundedSinks)
+        let maxAbs = RelError.maxAbsDiff(run.values, reference)
+        let rel = RelError.compute(actual: run.values, reference: reference)
+        #expect(maxAbs <= 2e-2, "sink prefill maxAbs=\(maxAbs) rel=\(rel)")
+        #expect(rel <= 2e-2, "sink prefill rel=\(rel) maxAbs=\(maxAbs)")
+    }
+
     /// TensorOps reads every key from zero, so a window that hides some of
     /// them must take the tiled kernel, which honours it.
     @Test func tensorOpsPathRejectsAClippingWindow() throws {
@@ -342,6 +371,7 @@ import MferenceValidationSupport
         context ctx: MetalContext,
         prefill: PrefillAttention,
         kvRingCapacity: UInt32 = 0,
+        sinks: [Float] = [],
         path: RuntimePrefillAttentionPath
     ) throws -> (values: [Float], usedTensorOps: Bool) {
         let qPrefix = 17
@@ -359,6 +389,21 @@ import MferenceValidationSupport
               let outBuf = Fp16Buffer.make(ctx.device, count: outCount) else {
             Issue.record("alloc failed")
             return ([], false)
+        }
+        let sinkBuffer: MTLBuffer?
+        if sinks.isEmpty {
+            sinkBuffer = nil
+        } else {
+            let bits = sinks.map(Quantization.bf16Bits)
+            guard let buffer = bits.withUnsafeBytes({
+                ctx.device.makeBuffer(bytes: $0.baseAddress!,
+                                      length: $0.count,
+                                      options: .storageModeShared)
+            }) else {
+                Issue.record("sink buffer alloc failed")
+                return ([], false)
+            }
+            sinkBuffer = buffer
         }
 
         let params = PrefillAttentionParams(
@@ -386,6 +431,8 @@ import MferenceValidationSupport
                                                  outOffset: oPrefix * MemoryLayout<Float16>.size,
                                                  params: params,
                                                  kvRingCapacity: kvRingCapacity,
+                                                 sinks: sinkBuffer,
+                                                 numSinks: UInt32(sinks.count),
                                                  path: path)
         cb.commit()
         cb.waitUntilCompleted()
@@ -405,7 +452,8 @@ import MferenceValidationSupport
 
 
 
-    private static func reference(_ fixture: Fixture) -> [Float] {
+    private static func reference(_ fixture: Fixture,
+                                  sinks: [Float] = []) -> [Float] {
         var out = [Float](repeating: 0, count: fixture.chunk * fixture.qHeads * fixture.headDim)
         let qPerKV = fixture.qHeads / fixture.kvHeads
         for t in 0..<fixture.chunk {
@@ -430,8 +478,10 @@ import MferenceValidationSupport
                     }
                     scores.append(score * fixture.scale)
                 }
-                let maxScore = scores.max() ?? -.infinity
-                var denom: Float = 0
+                let sink = sinks.isEmpty ? nil : sinks[qh]
+                let maxScore = max(scores.max() ?? -.infinity,
+                                   sink ?? -.infinity)
+                var denom = sink.map { Foundation.exp($0 - maxScore) } ?? 0
                 for score in scores {
                     denom += Foundation.exp(score - maxScore)
                 }
