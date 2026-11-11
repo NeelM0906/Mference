@@ -498,7 +498,7 @@ extension ArchConfig {
     ///  * `fullHeadDim == 512` — `dsv4_attention_decode` is written for the
     ///    absorbed-MLA KV width and `DSV4Kernels` preconditions on it.
     ///  * `numHeads` a multiple of `DSV4Kernels.attentionHeadsPerThreadgroup`.
-    ///  * `hyperConnections.mult <= 4` — `dsv4_hc_weights` sizes its mix
+    ///  * `hyperConnections.mult <= 4` — `DSV4Kernels` sizes its mix
     ///    scratch for that.
     ///  * `numHeads * fullHeadDim / oGroups` a multiple of the quant group.
     ///  * `topKExperts == MoEDeepseekV4.topK` — the routed kernels are k6.

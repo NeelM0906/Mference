@@ -204,9 +204,10 @@ import Metal
         for family in [ModelFamily.qwen36, .gemma4] {
             #expect(prefetchPlan(family: family, gib: 16) == .init(mode: .shadow, shadowBudget: 4))
             #expect(prefetchPlan(family: family, gib: 18) == .init(mode: .shadow, shadowBudget: 4))
+            #expect(prefetchPlan(family: family, gib: 24) == .init(mode: .shadow, shadowBudget: 8))
             // Unmeasured tiers keep the previous behavior.
             #expect(prefetchPlan(family: family, gib: 8).mode == .off)
-            #expect(prefetchPlan(family: family, gib: 24).mode == .off)
+            #expect(prefetchPlan(family: family, gib: 32).mode == .off)
         }
     }
 

@@ -301,7 +301,7 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
                 throw PrefillGroupedRoutedMoEError.invalidStreamedTileBinding(
                     "preplanned fetch does not match tile \(tileIndex)")
             }
-            views = try await model.fetchRoutedExperts(plan: plan)
+            views = try await model.fetchRoutedExperts(plan: plan, sweep: true)
             usedPlannedFetch = true
             plannedHits = plan.hits
             plannedMissIndices = plan.misses

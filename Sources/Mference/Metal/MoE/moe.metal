@@ -310,14 +310,17 @@ kernel void router_gemv_bf16_r4(
     device float* out_logits [[buffer(3)]],
     constant uint& num_experts [[buffer(4)]],
     constant uint& D [[buffer(5)]],
-    uint tg_idx [[threadgroup_position_in_grid]],
+    uint2 tgp [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
     const uint NE = router_fc_num_experts(num_experts);
     const uint DD = router_fc_d(D);
-    const uint e = tg_idx * 4u + sg_idx;
+    const uint e = tgp.x * 4u + sg_idx;
     if (e >= NE) return;
+    // Grid y is the token of a batch (decode: one token).
+    hidden += tgp.y * DD;
+    out_logits += tgp.y * NE;
     device const bfloat* W_row = W + uint(e) * DD;
     float acc = 0.0f;
     for (uint i = lane; i < DD; i += 32u) {
@@ -1780,8 +1783,17 @@ struct DSV4PrefillRoute {
     uint reserved;
 };
 
-// acts[(token * top_k + rank) * F + f], one simdgroup per (route, f) row.
-kernel void dsv4_prefill_moe_phase1_pairs_int2(
+// Routes run in groups of `kDSV4PrefillGroupRoutes` consecutive entries of one
+// expert: the CPU pads each expert's route list to a multiple of the group
+// with entries whose `local_slot` is invalid. One simdgroup computes one
+// weight row for the whole group, unpacking each weight block once; every
+// route keeps its own accumulators and the exact per-route operation sequence
+// of the single-route helpers (`moe_int2_gate_up_rows_simd_dev_vec`,
+// `moe_int2_gemv_row_simd_dev_vec`), so results stay bit-identical.
+constant constexpr uint kDSV4PrefillGroupRoutes = 4;
+
+// acts[(token * top_k + rank) * F + f], one simdgroup per (group, f) row.
+kernel void dsv4_prefill_moe_phase1_groups_int2(
     device const RoutedBlobs& routed [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
     device const half* x [[buffer(2)]],            // [tokens, D]
@@ -1792,43 +1804,144 @@ kernel void dsv4_prefill_moe_phase1_pairs_int2(
     constant uint& gate_group_size [[buffer(7)]],
     device const DSV4PrefillRoute* routes [[buffer(8)]],
     constant uint& route_start [[buffer(9)]],
-    constant uint& route_count [[buffer(10)]],
+    constant uint& route_count [[buffer(10)]],     // multiple of the group
     uint tg_idx [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
     constexpr uint rows_per_tg = 8;
+    constexpr uint R = kDSV4PrefillGroupRoutes;
     const uint DD = moe_fc_d(D);
     const uint FF = moe_fc_f(F);
     const uint KK = moe_fc_top_k(top_k);
     const uint rowg = tg_idx * rows_per_tg + sg_idx;
-    if (rowg >= route_count * FF) return;
-    const uint route_index = rowg / FF;
+    if (rowg >= (route_count / R) * FF) return;
+    const uint group = rowg / FF;
     const uint f = rowg % FF;
-    const DSV4PrefillRoute r = routes[route_start + route_index];
-    if (r.local_slot >= kMaxStreamedExperts) return;
+    const uint first = route_start + group * R;
+    const uint slot = routes[first].local_slot;
+    if (slot >= kMaxStreamedExperts) return;
+    uint token[R];
+    uint rank[R];
+    bool valid[R];
+    for (uint r = 0; r < R; ++r) {
+        const DSV4PrefillRoute rt = routes[first + r];
+        token[r] = rt.token;
+        rank[r] = rt.rank;
+        valid[r] = rt.local_slot == slot;
+    }
 
-    device const uint8_t* base = routed.blob[r.local_slot];
+    device const uint8_t* base = routed.blob[slot];
     const ExpertOffsets re = routed_offsets;
-    const float2 gu = moe_int2_gate_up_rows_simd_dev_vec(
-        base + re.gate_W_off,
-        (device const bfloat*)(base + re.gate_s_off),
-        (device const bfloat*)(base + re.gate_b_off),
-        base + re.up_W_off,
-        (device const bfloat*)(base + re.up_s_off),
-        (device const bfloat*)(base + re.up_b_off),
-        x + uint(r.token) * DD, f, DD, gate_group_size, lane);
-    if (lane == 0) {
-        const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
-        acts[(uint(r.token) * KK + uint(r.rank)) * FF + f] =
-            (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
-        : half(moe_hidden_activation(cgu.x) * cgu.y));
+    const uint N = DD;
+    const uint n_groups = N / kMoEGroupSize;
+    const uint gate_n_groups = N / gate_group_size;
+    const uint row_bytes = N / 4;
+    device const uint8_t* gW_row = base + re.gate_W_off + f * row_bytes;
+    device const uint8_t* uW_row = base + re.up_W_off + f * row_bytes;
+    device const bfloat* gS_row = (device const bfloat*)(base + re.gate_s_off) + f * gate_n_groups;
+    device const bfloat* gB_row = (device const bfloat*)(base + re.gate_b_off) + f * gate_n_groups;
+    device const bfloat* uS_row = (device const bfloat*)(base + re.up_s_off) + f * n_groups;
+    device const bfloat* uB_row = (device const bfloat*)(base + re.up_b_off) + f * n_groups;
+
+    float g_acc[R];
+    float u_acc[R];
+    for (uint r = 0; r < R; ++r) { g_acc[r] = 0.0f; u_acc[r] = 0.0f; }
+    const uint full_blocks = n_groups / 4;
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 64u + lane * 2u;
+        const uint gw2 = uint(*((device const ushort*)(gW_row + byte_base)));
+        const uint uw2 = uint(*((device const ushort*)(uW_row + byte_base)));
+        const uint g = blk * 4u + (lane >> 3);
+        const uint gg = (byte_base * 4u) / gate_group_size;
+        const float gs = float(gS_row[gg]);
+        const float gb = float(gB_row[gg]);
+        const float us = float(uS_row[g]);
+        const float ub = float(uB_row[g]);
+        const uint elem = byte_base * 4u;
+        float gw[8];
+        float uw[8];
+        for (uint k = 0; k < 8; ++k) {
+            gw[k] = float((gw2 >> (2u * k)) & 0x3u);
+            uw[k] = float((uw2 >> (2u * k)) & 0x3u);
+        }
+        for (uint r = 0; r < R; ++r) {
+            if (!valid[r]) continue;
+            device const half* xr = x + token[r] * DD;
+            const half4 xa = *((device const half4*)(xr + elem));
+            const half4 xb = *((device const half4*)(xr + elem + 4u));
+            const float e0 = float(xa.x), e1 = float(xa.y);
+            const float e2 = float(xa.z), e3 = float(xa.w);
+            const float e4 = float(xb.x), e5 = float(xb.y);
+            const float e6 = float(xb.z), e7 = float(xb.w);
+            const float sum = kGemmaSourceFP16
+                ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+                : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+            float g_dot = 0.0f;
+            g_dot = fma(gw[0], e0, g_dot);
+            g_dot = fma(gw[1], e1, g_dot);
+            g_dot = fma(gw[2], e2, g_dot);
+            g_dot = fma(gw[3], e3, g_dot);
+            g_dot = fma(gw[4], e4, g_dot);
+            g_dot = fma(gw[5], e5, g_dot);
+            g_dot = fma(gw[6], e6, g_dot);
+            g_dot = fma(gw[7], e7, g_dot);
+            float u_dot = 0.0f;
+            u_dot = fma(uw[0], e0, u_dot);
+            u_dot = fma(uw[1], e1, u_dot);
+            u_dot = fma(uw[2], e2, u_dot);
+            u_dot = fma(uw[3], e3, u_dot);
+            u_dot = fma(uw[4], e4, u_dot);
+            u_dot = fma(uw[5], e5, u_dot);
+            u_dot = fma(uw[6], e6, u_dot);
+            u_dot = fma(uw[7], e7, u_dot);
+            g_acc[r] = fma(gs, g_dot, g_acc[r]);
+            g_acc[r] = fma(gb, sum, g_acc[r]);
+            u_acc[r] = fma(us, u_dot, u_acc[r]);
+            u_acc[r] = fma(ub, sum, u_acc[r]);
+        }
+    }
+    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        const uint gg = (g * kMoEGroupSize + lane * 2u) / gate_group_size;
+        const float gs = float(gS_row[gg]);
+        const float gb = float(gB_row[gg]);
+        const float us = float(uS_row[g]);
+        const float ub = float(uB_row[g]);
+        const uint8_t gbv = gW_row[g * (kMoEGroupSize / 4) + (lane >> 1)];
+        const uint8_t ubv = uW_row[g * (kMoEGroupSize / 4) + (lane >> 1)];
+        const uint shift = (lane & 1u) * 4u;
+        for (uint r = 0; r < R; ++r) {
+            if (!valid[r]) continue;
+            device const half* xr = x + token[r] * DD;
+            const float x0 = float(xr[g * kMoEGroupSize + lane * 2u]);
+            const float x1 = float(xr[g * kMoEGroupSize + lane * 2u + 1u]);
+            const float sum = x0 + x1;
+            float g_dot = fma(float(uint((gbv >> shift) & 0x3u)), x0, 0.0f);
+            g_dot = fma(float(uint((gbv >> (shift + 2u)) & 0x3u)), x1, g_dot);
+            float u_dot = fma(float(uint((ubv >> shift) & 0x3u)), x0, 0.0f);
+            u_dot = fma(float(uint((ubv >> (shift + 2u)) & 0x3u)), x1, u_dot);
+            g_acc[r] = fma(gs, g_dot, g_acc[r]);
+            g_acc[r] = fma(gb, sum, g_acc[r]);
+            u_acc[r] = fma(us, u_dot, u_acc[r]);
+            u_acc[r] = fma(ub, sum, u_acc[r]);
+        }
+    }
+    for (uint r = 0; r < R; ++r) {
+        if (!valid[r]) continue;
+        const float2 gu = float2(simd_sum(g_acc[r]), simd_sum(u_acc[r]));
+        if (lane == 0) {
+            const float2 cgu = moe_swiglu_clamp(gu.x, gu.y);
+            acts[(token[r] * KK + rank[r]) * FF + f] =
+                (kGemmaSourceFP16 ? gemma_source_geglu(half(cgu.x), half(cgu.y))
+            : half(moe_hidden_activation(cgu.x) * cgu.y));
+        }
     }
 }
 
-// partials[(token * top_k + rank) * D + d] = routing_w[...] * down_row(acts).
-// FP32 output so the reduce below matches the fused decode kernel exactly.
-kernel void dsv4_prefill_moe_down_pairs_int2(
+// partials[(token * top_k + rank) * D + d] = routing_w[...] * down_row(acts),
+// one simdgroup per (group, d) row. FP32 output so the reduce below matches
+// the fused decode kernel exactly.
+kernel void dsv4_prefill_moe_down_groups_int2(
     device const RoutedBlobs& routed [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
     device const half* acts [[buffer(2)]],         // [tokens * top_k, F]
@@ -1839,32 +1952,97 @@ kernel void dsv4_prefill_moe_down_pairs_int2(
     constant uint& top_k [[buffer(7)]],
     device const DSV4PrefillRoute* routes [[buffer(8)]],
     constant uint& route_start [[buffer(9)]],
-    constant uint& route_count [[buffer(10)]],
+    constant uint& route_count [[buffer(10)]],     // multiple of the group
     uint tg_idx [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
     constexpr uint rows_per_tg = 8;
+    constexpr uint R = kDSV4PrefillGroupRoutes;
     const uint DD = moe_fc_d(D);
     const uint FF = moe_fc_f(F);
     const uint KK = moe_fc_top_k(top_k);
     const uint rowg = tg_idx * rows_per_tg + sg_idx;
-    if (rowg >= route_count * DD) return;
-    const uint route_index = rowg / DD;
+    if (rowg >= (route_count / R) * DD) return;
+    const uint group = rowg / DD;
     const uint d = rowg % DD;
-    const DSV4PrefillRoute r = routes[route_start + route_index];
-    if (r.local_slot >= kMaxStreamedExperts) return;
-    const uint pair = uint(r.token) * KK + uint(r.rank);
+    const uint first = route_start + group * R;
+    const uint slot = routes[first].local_slot;
+    if (slot >= kMaxStreamedExperts) return;
+    uint pair[R];
+    bool valid[R];
+    for (uint r = 0; r < R; ++r) {
+        const DSV4PrefillRoute rt = routes[first + r];
+        pair[r] = uint(rt.token) * KK + uint(rt.rank);
+        valid[r] = rt.local_slot == slot;
+    }
 
-    device const uint8_t* base = routed.blob[r.local_slot];
+    device const uint8_t* base = routed.blob[slot];
     const ExpertOffsets re = routed_offsets;
-    const float value = moe_int2_gemv_row_simd_dev_vec(
-        base + re.down_W_off,
-        (device const bfloat*)(base + re.down_s_off),
-        (device const bfloat*)(base + re.down_b_off),
-        acts + pair * FF, d, FF, lane);
-    if (lane == 0) {
-        partials[pair * DD + d] = float(routing_w[pair]) * value;
+    const uint N = FF;
+    const uint n_groups = N / kMoEGroupSize;
+    const uint row_bytes = N / 4;
+    device const uint8_t* W_row = base + re.down_W_off + d * row_bytes;
+    device const bfloat* s_row = (device const bfloat*)(base + re.down_s_off) + d * n_groups;
+    device const bfloat* b_row = (device const bfloat*)(base + re.down_b_off) + d * n_groups;
+
+    float acc[R];
+    for (uint r = 0; r < R; ++r) acc[r] = 0.0f;
+    const uint full_blocks = n_groups / 4;
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 64u + lane * 2u;
+        const uint w2 = uint(*((device const ushort*)(W_row + byte_base)));
+        const uint g = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 4u;
+        float w[8];
+        for (uint k = 0; k < 8; ++k) w[k] = float((w2 >> (2u * k)) & 0x3u);
+        for (uint r = 0; r < R; ++r) {
+            if (!valid[r]) continue;
+            device const half* xr = acts + pair[r] * FF;
+            const half4 xa = *((device const half4*)(xr + elem));
+            const half4 xb = *((device const half4*)(xr + elem + 4u));
+            const float e0 = float(xa.x), e1 = float(xa.y);
+            const float e2 = float(xa.z), e3 = float(xa.w);
+            const float e4 = float(xb.x), e5 = float(xb.y);
+            const float e6 = float(xb.z), e7 = float(xb.w);
+            float dot = 0.0f;
+            dot = fma(w[0], e0, dot);
+            dot = fma(w[1], e1, dot);
+            dot = fma(w[2], e2, dot);
+            dot = fma(w[3], e3, dot);
+            dot = fma(w[4], e4, dot);
+            dot = fma(w[5], e5, dot);
+            dot = fma(w[6], e6, dot);
+            dot = fma(w[7], e7, dot);
+            const float sum = kGemmaSourceFP16
+                ? gemma_source_quad_sum(xa) + gemma_source_quad_sum(xb)
+                : e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+            acc[r] = fma(s, dot, acc[r]);
+            acc[r] = fma(b, sum, acc[r]);
+        }
+    }
+    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint8_t byte = W_row[g * (kMoEGroupSize / 4) + (lane >> 1)];
+        const uint shift = (lane & 1u) * 4u;
+        for (uint r = 0; r < R; ++r) {
+            if (!valid[r]) continue;
+            device const half* xr = acts + pair[r] * FF;
+            const float x0 = float(xr[g * kMoEGroupSize + lane * 2u]);
+            const float x1 = float(xr[g * kMoEGroupSize + lane * 2u + 1u]);
+            float dot = fma(float(uint((byte >> shift) & 0x3u)), x0, 0.0f);
+            dot = fma(float(uint((byte >> (shift + 2u)) & 0x3u)), x1, dot);
+            acc[r] = fma(s, dot, acc[r]);
+            acc[r] = fma(b, x0 + x1, acc[r]);
+        }
+    }
+    for (uint r = 0; r < R; ++r) {
+        if (!valid[r]) continue;
+        const float value = simd_sum(acc[r]);
+        if (lane == 0) partials[pair[r] * DD + d] = float(routing_w[pair[r]]) * value;
     }
 }
 
