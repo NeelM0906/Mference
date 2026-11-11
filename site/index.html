@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mference: run the models you couldn't before</title>
+<meta name="description" content="Models bigger than your Mac's memory now run on it. Pick your Mac and see which.">
+<meta property="og:title" content="Mference: run the models you couldn't before">
+<meta property="og:description" content="A 175 GB model in 2.36 GB of memory. Open source, for Apple Silicon.">
+<meta property="og:image" content="assets/icon.png">
+<link rel="icon" href="assets/icon.png">
+<style>
+:root{--bg:#fbfbf9;--ink:#0e0f12;--ink2:#5d6068;--hair:rgba(14,15,18,.13);--sig:#4f4ee0;--sig2:#4f4ee0;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter","Helvetica Neue",Arial,sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:17px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.wrap{max-width:980px;margin:0 auto;padding:0 24px}
+nav{height:72px;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:19px;letter-spacing:-.02em;text-decoration:none}
+.brand img{width:30px;height:30px;border-radius:8px}
+.btn{display:inline-block;background:var(--ink);color:#fff;text-decoration:none;font-weight:600;font-size:15px;padding:12px 20px;border-radius:12px}
+.btn:focus-visible,a:focus-visible,button:focus-visible{outline:2px solid var(--sig2);outline-offset:3px}
+.hero{padding:48px 0 40px}
+h1{font-size:clamp(44px,8vw,100px);line-height:.98;letter-spacing:-.045em;font-weight:720;max-width:10em}
+.sub{margin-top:20px;font-size:clamp(18px,2vw,24px);color:var(--ink2)}
+.cmp{margin-top:36px;display:grid;grid-template-columns:1fr 1fr;gap:28px}
+.cmp figure canvas{display:block;width:100%}
+.cmp figcaption{display:flex;justify-content:space-between;align-items:baseline;margin-top:14px;font-size:17px;font-weight:600;letter-spacing:-.01em;color:var(--ink)}
+.cmp figcaption b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.cmp .v{font-size:32px;font-weight:700;letter-spacing:-.03em}
+.cmp .old{color:var(--ink2);text-decoration:line-through;text-decoration-color:rgba(14,15,18,.35)}.cmp .new{color:var(--sig2)}
+.il{margin-top:12px;font-size:12px;color:var(--ink2)}
+@media (max-width:700px){.cmp{grid-template-columns:1fr;gap:18px}}
+.ask{margin-top:72px;padding-top:36px;border-top:1px solid var(--hair);font-size:clamp(20px,2.2vw,26px);line-height:1.2;letter-spacing:-.02em;font-weight:600;color:var(--ink2);text-wrap:balance}
+.pick{margin-top:18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.pick .lab{font-size:13px;color:var(--ink2);min-width:56px}
+.seg{display:inline-flex;border:1.5px solid var(--ink);border-radius:12px;overflow:hidden}
+.seg button{font:inherit;font-size:16px;font-weight:650;background:transparent;color:var(--ink);border:0;padding:11px 18px;cursor:pointer;border-right:1.5px solid var(--ink)}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed=true]{background:var(--ink);color:#fff}
+.verdict{padding:28px 0 4px}
+.verdict .big{text-wrap:balance;font-size:clamp(34px,5.4vw,68px);font-weight:700;letter-spacing:-.035em;line-height:1.05}
+.verdict .big b{color:var(--sig)}
+.verdict .big,.row,.seg button{font-variant-numeric:tabular-nums}
+.btn{transition:transform .15s}.btn:hover{transform:translateY(-1px)}
+.seg button{transition:background .15s,color .15s}.seg button:not([aria-pressed=true]):hover{background:rgba(14,15,18,.06)}
+.cols{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;padding:28px 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2)}
+.cols span:last-child{text-align:right}
+.row{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;align-items:center;padding:15px 0;border-top:1px solid var(--hair);transition:opacity .3s}
+.row.need{opacity:.36}
+.row:not(.unlocked) .a,.row:not(.unlocked) .arr{display:none}
+.row:not(.unlocked) .b{color:var(--ink)}
+.row.need .b{color:var(--ink2)}
+.row .n{font-size:20px;font-weight:650;letter-spacing:-.02em}
+.row .n small{display:block;font-size:13px;color:var(--ink2);font-weight:400;letter-spacing:0}
+.flow{display:flex;align-items:center;gap:12px;font-size:19px;font-weight:600;letter-spacing:-.02em}
+.flow .a{color:var(--ink2);text-decoration:line-through;text-decoration-color:rgba(14,15,18,.35)}
+.flow .b{color:var(--sig2)}
+.flow .arr{font-style:normal;color:var(--ink2);font-weight:300}
+.row .s{text-align:right;font-size:20px;font-weight:700;letter-spacing:-.02em}
+.row .s small{display:block;font-size:12px;font-weight:500;color:var(--ink2);letter-spacing:0}
+.row .s.no{font-size:15px;font-weight:500;color:var(--ink2)}
+.act{padding:36px 0 0}
+footer{border-top:1px solid var(--hair);margin-top:48px;padding:24px 0 40px;font-size:13px;color:var(--ink2);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+@media (max-width:700px){.cols{display:none}.row{grid-template-columns:1fr auto}.row .flow{grid-row:2;grid-column:1/-1}.row .s{grid-row:1;grid-column:2}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav><a class="brand" href="#"><img src="assets/icon.png" alt="" width="30" height="30">Mference</a><a class="btn" href="https://github.com/NeelM0906/Mference/releases">Get the source release</a></nav>
+  <header class="hero">
+    <h1>Run the models you couldn't before.</h1>
+    <p class="sub">Frontier models, on your Mac.</p>
+    <div class="cmp">
+      <figure><canvas id="g1" role="img" aria-label="All 512 experts loaded in memory"></canvas><figcaption><span class="k">All 512 experts loaded</span><span class="v old">175 GB</span></figcaption></figure>
+      <figure><canvas id="g2" role="img" aria-label="Only the 10 experts a token calls are in memory"></canvas><figcaption><span class="k">Only the 10 it calls</span><span class="v new">2.36 GB</span></figcaption></figure>
+    </div>
+    <h2 class="ask">See what your Mac can run now that it couldn't before.</h2>
+    <div class="pick"><span class="lab" id="lab">Memory</span><div class="seg" id="seg" role="group" aria-labelledby="lab"></div></div>
+  </header>
+  <section class="verdict" aria-live="polite"><div class="big" id="verdict"></div></section>
+  <div class="cols"><span>Model</span><span>Memory, before → now</span><span>Speed</span></div>
+  <div id="rows" role="list"></div>
+  <footer><span>Apple Silicon · macOS 15+ · MIT license</span><span><a href="https://github.com/NeelM0906/Mference">GitHub</a></span></footer>
+</div>
+<script src="data.js"></script>
+<script src="flux.js"></script>
+<script>
+(function(){
+  window.MFlux.mount(document.getElementById("g1"),{cols:32,rows:16,gap:2,mode:"full",on:"#9a9ca4",off:"rgba(14,15,18,.12)"});
+  window.MFlux.mount(document.getElementById("g2"),{cols:32,rows:16,gap:2,on:"#4f4ee0",off:"rgba(14,15,18,.12)",every:1500});
+  var M=window.MF, cur=M.pickHost(), seg=document.getElementById("seg");
+  M.HOSTS.forEach(function(h){
+    var b=document.createElement("button");b.type="button";b.dataset.id=h.id;b.textContent=h.label;b.title=h.mac;
+    b.addEventListener("click",function(){choose(h);});
+    b.addEventListener("keydown",function(e){var d=e.key==="ArrowRight"?1:e.key==="ArrowLeft"?-1:0;if(!d)return;e.preventDefault();var i=(M.HOSTS.indexOf(h)+d+M.HOSTS.length)%M.HOSTS.length;choose(M.HOSTS[i]);seg.children[i].focus();});
+    seg.appendChild(b);
+  });
+  function choose(h){cur=h;M.setHash(h.id);update();}
+  /* every model is always listed, in a fixed order; update() only changes text and state in place */
+  var rowsEl=document.getElementById("rows"),refs=[];
+  M.FAMS.slice().sort(function(a,b){return b.disk-a.disk;}).forEach(function(f){
+    var r=document.createElement("div");r.className="row";r.setAttribute("role","listitem");
+    r.innerHTML='<span class="n">'+f.name+'<small>'+f.p+'B</small></span><span class="flow"><span class="a"></span><i class="arr">→</i><span class="b"></span></span><span class="s"></span>';
+    rowsEl.appendChild(r);
+    refs.push({f:f,r:r,a:r.querySelector(".a"),b:r.querySelector(".b"),s:r.querySelector(".s")});
+  });
+  function update(){
+    [].forEach.call(seg.children,function(b){b.setAttribute("aria-pressed",b.dataset.id===cur.id?"true":"false");});
+    var unlocked=0;
+    refs.forEach(function(x){
+      var f=x.f,st=M.status(f,cur),need=st==="need",un=!need&&f.disk>cur.ram,sp=f.sp[cur.id];
+      if(un)unlocked++;
+      x.r.classList.toggle("need",need);x.r.classList.toggle("unlocked",un);
+      x.r.setAttribute("aria-disabled",need?"true":"false");
+      x.a.textContent=M.fmtGB(f.disk)+" GB";
+      x.b.textContent=need?M.fmtGB(f.disk)+" GB":M.fmtGB(M.memFor(f,cur))+" GB";
+      x.s.className="s"+(need||!sp?" no":"");
+      x.s.textContent=need?"needs a bigger Mac":(sp?M.fmtSp(sp)+" tok/s":"not measured");
+    });
+    document.getElementById("verdict").innerHTML=unlocked?
+      '<b>'+unlocked+'</b> model'+(unlocked>1?'s':'')+' now '+(unlocked>1?'run':'runs')+' in '+cur.label+'.':
+      'Every model fits. The largest run in <b>a fraction</b> of the memory.';
+  }
+  update();
+})();
+</script>
+</body>
+</html>
