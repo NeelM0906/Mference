@@ -69,6 +69,34 @@ protocol ExactPrefillLogitProducer: LogitProducer {
     func produceExactPrefill(token: Int32, position: Int, into logits: MTLBuffer) async throws
 }
 
+/// Optional capability behind the server's multi-prefix cache: copy the
+/// complete numerical state at the current position out of the runner, and
+/// put such a copy back. A restore must leave the runner bit-for-bit in the
+/// state it held when the copy was taken, so continuing from it is the same
+/// computation as continuing the live runner. Every call requires a drained,
+/// clean runner (no prefill chunk in flight). Runners that cannot guarantee
+/// that report `supportsPrefixStateSnapshots == false`.
+public protocol PrefixStateSnapshotting: ContinuableLogitProducer {
+    var supportsPrefixStateSnapshots: Bool { get }
+    /// Bytes of a KV row image covering positions [0, tokens).
+    func prefixKVRowBytes(tokens: Int) -> Int
+    /// Bytes of one recurrent-state checkpoint.
+    var prefixRecurrentStateBytes: Int { get }
+    /// Copies KV rows [0, count) (`count <= continuationPosition`).
+    func capturePrefixKVRows(count: Int, into region: PrefixSnapshotRegion) throws
+    /// Copies the recurrent state at `continuationPosition`.
+    func capturePrefixRecurrentState(into region: PrefixSnapshotRegion) throws
+    /// Restores a prefix ending at `position`. With `rows`, KV rows
+    /// [0, rows.count) are copied in first (`position <= rows.count`); without,
+    /// the live rows below `position` must still be the prefix's rows and only
+    /// the cursor moves back (`position <= continuationPosition`). Then the
+    /// recurrent state is replaced. A throw after copying began requires
+    /// `reset()`.
+    func restorePrefixState(rows: (region: PrefixSnapshotRegion, count: Int)?,
+                            position: Int,
+                            recurrentState: PrefixSnapshotRegion) throws
+}
+
 /// Optional, server-only recovery. Implementations must reject other model
 /// families and unfinished GPU state; ordinary continuation stays exact.
 public enum GemmaPrefixRecoverySource: String, Sendable { case current, snapshot }
