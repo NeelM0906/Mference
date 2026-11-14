@@ -49,7 +49,7 @@ Source updates trigger an incremental server build on launch. Ctrl-C stops
 only the two services the launcher started. A process already using a model
 or either requested port causes a clear refusal, not termination of that process.
 
-For CLI-only use, follow [the README](../README.md#try-it); no UI dependency is
+For CLI-only use, follow [the README](../README.md#command-line); no UI dependency is
 needed. For an existing OpenAI client, see [the server guide](OPENAI_SERVER.md).
 
 ## Recovery
