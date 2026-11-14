@@ -6197,3 +6197,59 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     }
 
 }
+
+// MARK: - Prefix state snapshots (server multi-prefix cache)
+
+/// Qwen 3.6 only: its numerical state at a position is full-attention KV rows
+/// [0, position) plus the gated-DeltaNet state and conv tail. Every other
+/// family on this runner keeps state these copies do not cover (sliding
+/// rings, DeepSeek compressed state, Inkling conv history), so it reports no
+/// support and the server keeps its single-prefix behaviour for it.
+extension RealForwardRunner: PrefixStateSnapshotting {
+    public var supportsPrefixStateSnapshots: Bool {
+        model.config.family == .qwen36 && dsv4State == nil && inklingConvStates.isEmpty
+            && gdnState != nil && kv?.supportsPrefixSnapshots == true
+    }
+
+    public func prefixKVRowBytes(tokens: Int) -> Int {
+        kv?.prefixSnapshotBytes(tokens: tokens) ?? 0
+    }
+
+    public var prefixRecurrentStateBytes: Int { gdnState?.recurrentCheckpointBytes ?? 0 }
+
+    private func requireSnapshotReady(_ operation: String) throws -> (KVCacheManager, GDNStateManager) {
+        try Task.checkCancellation()
+        try prefillChunkState.requireClean(operation: operation)
+        guard supportsPrefixStateSnapshots, let kv, let gdnState else {
+            throw PrefixSnapshotError.unsupported("\(model.config.family) runner")
+        }
+        return (kv, gdnState)
+    }
+
+    public func capturePrefixKVRows(count: Int, into region: PrefixSnapshotRegion) throws {
+        let (kv, _) = try requireSnapshotReady("prefix KV capture")
+        try kv.copyPrefixRows(count: count, into: region)
+    }
+
+    public func capturePrefixRecurrentState(into region: PrefixSnapshotRegion) throws {
+        let (_, gdnState) = try requireSnapshotReady("prefix recurrent capture")
+        try gdnState.copyRecurrentState(into: region)
+    }
+
+    public func restorePrefixState(rows: (region: PrefixSnapshotRegion, count: Int)?,
+                                   position: Int,
+                                   recurrentState: PrefixSnapshotRegion) throws {
+        let (kv, gdnState) = try requireSnapshotReady("prefix restore")
+        if let rows {
+            try kv.restorePrefixRows(count: rows.count, from: rows.region, position: position)
+        } else {
+            guard position > 0, position <= kv.position else {
+                throw PrefixSnapshotError.outOfRange(
+                    "rewind to \(position) with cursor at \(kv.position)")
+            }
+            kv.rewind(to: position)
+        }
+        try gdnState.restoreRecurrentState(from: recurrentState)
+        resetTransientState()
+    }
+}
