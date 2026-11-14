@@ -203,6 +203,17 @@ public func run(args: Args,
             lines += String(format: " (recall %.1f%%, %.1f MB)\n",
                             recall * 100,
                             Double(runner.totalSpecPrefetchBytes) / 1_048_576)
+            lines += ExpertIOPhaseReport.lines(
+                routing: runner.expertRoutingCounters,
+                decodeTokens: stats.newTokens,
+                // Read timing is windowed only once a chunked prefill has
+                // opened the decode window; before that it spans the run.
+                decodeReads: runner.expertRoutingCounters == nil
+                    ? nil : ExpertReadStats.shared?.snapshot(),
+                decodeDiskStart: runner.decodeWindowDiskIOStart,
+                diskNow: ProcessDiskIO.current(),
+                prefillReads: runner.lastPrefillExpertReads,
+                prefillDiskBytes: runner.lastPrefillDiskBytesRead)
             lines += "  unaccounted (GPU waits): "
             lines += String(format: "%.1f", total - accounted) + " ms\n"
             stderr.write(Data(lines.utf8))

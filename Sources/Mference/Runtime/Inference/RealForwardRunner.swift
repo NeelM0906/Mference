@@ -1207,6 +1207,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalSpecPrefetchIssued: UInt64 = 0
     public private(set) var totalSpecPrefetchConfirmed: UInt64 = 0
     public private(set) var totalSpecPrefetchBytes: UInt64 = 0
+    /// Per-(layer, expert) routed hits and misses over the decode window.
+    /// Nil unless `MFERENCE_PHASES=1`; created by `beginDecodePhaseWindow`.
+    public private(set) var expertRoutingCounters: ExpertRoutingCounters?
+    /// Process storage counters at the start of the decode window, so the
+    /// phase report can print the bytes decode physically read.
+    public private(set) var decodeWindowDiskIOStart: ProcessDiskIO.Counters?
+    /// Routed-expert reads and physical bytes read during the most recent
+    /// chunked prefill, captured when the decode window opens.
+    public private(set) var lastPrefillExpertReads: ExpertReadStats.Snapshot?
+    public private(set) var lastPrefillDiskBytesRead: UInt64?
+    private var prefillDiskIOStart: ProcessDiskIO.Counters?
+
+    /// Opens the prefill side of the phase report's I/O counters.
+    private func beginPrefillIOWindow() {
+        guard Self.phaseInstrumentationEnabled else { return }
+        ExpertReadStats.shared?.reset()
+        prefillDiskIOStart = ProcessDiskIO.current()
+        lastPrefillExpertReads = nil
+        lastPrefillDiskBytesRead = nil
+    }
 
     /// Zeroes the per-phase counters. Prompt prefill runs through the same
     /// per-token code paths (DeepSeek-V4 prefill *is* a decode loop), so
@@ -1232,6 +1252,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalSpecPrefetchIssued = 0
         totalSpecPrefetchConfirmed = 0
         totalSpecPrefetchBytes = 0
+        if Self.phaseInstrumentationEnabled {
+            let disk = ProcessDiskIO.current()
+            if let start = prefillDiskIOStart {
+                lastPrefillExpertReads = ExpertReadStats.shared?.snapshot()
+                if let disk, disk.bytesRead >= start.bytesRead {
+                    lastPrefillDiskBytesRead = disk.bytesRead - start.bytesRead
+                }
+                prefillDiskIOStart = nil
+            }
+            ExpertReadStats.shared?.reset()
+            decodeWindowDiskIOStart = disk
+            expertRoutingCounters = ExpertRoutingCounters(numLayers: cfg.numLayers,
+                                                          numExperts: cfg.numExperts)
+        }
     }
 
     /// One outstanding speculative read set. The runner keeps at most one alive
@@ -1600,6 +1634,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        beginPrefillIOWindow()
         // Prompt prefill and decode share these counters; drop the prompt's
         // contribution on the way out so the phase report describes decode.
         defer { beginDecodePhaseWindow() }
@@ -3364,6 +3399,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if Self.phaseInstrumentationEnabled {
                     totalRoutedLayerSteps &+= 1
                     totalAllHitLayerSteps &+= 1
+                    expertRoutingCounters?.recordLayerStep(layer: L, experts: experts,
+                                                           missIndices: [])
                 }
                 issueSpeculativePrefetch(layer: L + 1)
                 continue
@@ -3380,6 +3417,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 totalRoutedLayerSteps &+= 1
                 if let plannedFetch, plannedFetch.misses.isEmpty {
                     totalAllHitLayerSteps &+= 1
+                }
+                if let plannedFetch {
+                    expertRoutingCounters?.recordLayerStep(
+                        layer: L, experts: experts, missIndices: plannedFetch.misses)
+                } else {
+                    // Top-k beyond the planner: the cached load decides hits
+                    // internally, so only the step itself is counted.
+                    expertRoutingCounters?.recordUnplannedLayerStep()
                 }
             }
             var phase1HitCB: MTLCommandBuffer?

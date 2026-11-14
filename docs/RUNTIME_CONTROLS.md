@@ -163,7 +163,14 @@ values passed on its command line. Setting `MFERENCE_PHASES=1` makes the
 CLI print the decode phase report after the timing footer: `cb1` and `cb2`
 encode-and-commit time, expert I/O await split into GPU-overlapped and exposed
 time, the all-hit layer-step rate, GPU busy/span/gap, speculative-prefetch
-counters, and unaccounted GPU waits. `MFERENCE_PREFILL_BREAKDOWN=1` prints the
+counters, and unaccounted GPU waits. For the shared runner (Gemma 4, Qwen 3.6)
+it also prints routed-expert hit and miss counts with the most-missed
+layer:expert pairs and misses per layer, the same all-hit rate recomputed from
+those counters, the count, requested bytes and latency histogram of every
+routed-expert read during decode and during the last chunked prefill, and the
+bytes the process physically read from storage (`proc_pid_rusage`) in each
+window; reads the page cache served are not counted there. The per-expert
+counts are on `RealForwardRunner.expertRoutingCounters`. `MFERENCE_PREFILL_BREAKDOWN=1` prints the
 Inkling prefill routed-expert split (fetch, encode, drain). Both are
 diagnostics and do not change behavior.
 
