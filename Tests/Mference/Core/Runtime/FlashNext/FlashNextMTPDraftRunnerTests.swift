@@ -80,12 +80,14 @@ import Testing
         let reference = try FlashNextMTPReference(model: h.model, device: h.context.device)
         let fusionRounded = try FlashNextMTPReference(model: h.model, device: h.context.device, roundFusionStores: true)
         var stages: [String: [Float]] = [:]
+        var exportedRows: [[String: Any]] = []
+        let exportPath = ProcessInfo.processInfo.environment["MFERENCE_MTP_REFERENCE_EXPORT"]
         h.runner.didCaptureStages = { stages = $0 }
         func floats(_ buffer: MTLBuffer, count: Int) -> [Float] {
             let p = buffer.contents().assumingMemoryBound(to: Float16.self)
             return (0..<count).map { Float(p[$0]) }
         }
-        func compare(_ actual: [UInt16], _ expected: [Float], label: String, knownFusionSensitivity: Bool = false) {
+        func compare(_ actual: [UInt16], _ expected: [Float], label: String) {
             #expect(actual.count == expected.count)
             #expect(expected.allSatisfy { $0.isFinite })
             let scale = expected.map { abs($0) }.max() ?? 0
@@ -93,19 +95,7 @@ import Testing
             #expect(scale > 0 && error.isFinite)
             // Same FP16-vs-FP32 semantic tier as family integration gates, not
             // bit parity or an exact speculative-verifier tolerance.
-            if knownFusionSensitivity && error <= scale * 0.06 {
-                // Preserve the failing unrounded 5% gate, specifically for
-                // row zero. The independent rounded-fusion oracle below is
-                // separately required to pass. This known precision gap is
-                // NOT native-MTP qualification; see FLASHNEXT_MTP_STATUS.md.
-                // A larger (>6%) regression is an ordinary failure, not
-                // covered by this characterized 5.263% precision issue.
-                withKnownIssue("Native draft row-zero FP32 hidden gate: FP16 fusion rounding is amplified; native MTP remains unqualified", isIntermittent: true) {
-                    #expect(error <= scale * 0.05)
-                }
-            } else {
-                #expect(error <= scale * 0.05)
-            }
+            #expect(error <= scale * 0.05)
             print("[MTP FP32 composition] \(label) maxAbs=\(error) scale=\(scale)")
         }
         for row in 0..<40 {
@@ -130,12 +120,67 @@ import Testing
                 }
                 print("[MTP routes] gpu=\(FlashNextRouterReference.select(logits: stages["router"]!, k: h.model.config.topKExperts)) cpu=\(FlashNextRouterReference.select(logits: reference.stages["router"]!, k: h.model.config.topKExperts))")
             }
-            compare(try h.bits(output.hidden), expected.hidden, label: "row=\(row) hidden", knownFusionSensitivity: row == 0)
+            compare(try h.bits(output.hidden), expected.hidden, label: "row=\(row) hidden")
             let actualLogits = try h.bits(h.logits)
+            if exportPath != nil {
+                exportedRows.append([
+                    "embedding": floats(h.embedding, count: h.model.config.hiddenSize),
+                    "hidden": floats(h.hidden, count: h.model.config.residualStreamWidth),
+                    "output_hidden": try h.bits(output.hidden).map { Float(Float16(bitPattern: $0)) },
+                    "logits": actualLogits.map { Float(Float16(bitPattern: $0)) },
+                    "stages": stages
+                ])
+            }
             compare(actualLogits, expected.logits, label: "row=\(row) logits")
             let predicted = actualLogits.indices.max { Float16(bitPattern: actualLogits[$0]) < Float16(bitPattern: actualLogits[$1]) }
             let desired = expected.logits.indices.max { expected.logits[$0] < expected.logits[$1] }
             #expect(predicted == desired)
+        }
+        if let exportPath {
+            let object: [String: Any] = ["weights": try reference.exportWeights(), "rows": exportedRows]
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            // Refuse to overwrite an earlier reference capture.
+            try data.write(to: URL(fileURLWithPath: exportPath), options: .withoutOverwriting)
+        }
+    }
+
+    @Test func nativeLayerTracksPinnedUpstreamComponents() throws {
+        struct Golden: Decodable {
+            struct Row: Decodable {
+                let embedding: [Float]
+                let hidden: [Float]
+                let output_hidden: [Float]
+                let logits: [Float]
+            }
+            let transformers_commit: String
+            let indexer_tie_policy: String
+            let rows: [Row]
+        }
+        let url = FlashNextParity.repoRoot.appendingPathComponent("Tests/Mference/Fixtures/flashnext-mtp-upstream.json")
+        let golden = try JSONDecoder().decode(Golden.self, from: Data(contentsOf: url))
+        #expect(golden.transformers_commit == "4da05482135896a529d5536c3c003102d36528a2")
+        // PyTorch topk does not promise stable tied indices. The fixture
+        // explicitly uses our lowest-index QSA tie contract, not CPU topk's
+        // incidental order. All arithmetic remains in upstream modules.
+        #expect(golden.indexer_tie_policy == "lowest-index")
+        try #require(golden.rows.count == 40)
+        let h = try make()
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+        for (position, row) in golden.rows.enumerated() {
+            let output = try h.append(position)
+            for (buffer, expected) in [(h.embedding, row.embedding), (h.hidden, row.hidden)] {
+                let actual = try h.bits(buffer).map { Float(Float16(bitPattern: $0)) }
+                #expect(actual == expected)
+            }
+            for (buffer, expected) in [(output.hidden, row.output_hidden), (h.logits, row.logits)] {
+                let actual = try h.bits(buffer).map { Float(Float16(bitPattern: $0)) }
+                try #require(actual.count == expected.count)
+                let scale = try #require(expected.map(abs).max())
+                let error = try #require(zip(actual, expected).map { abs($0 - $1) }.max())
+                #expect(error.isFinite && scale > 0 && error <= scale * 0.05)
+            }
+            let actual = try h.bits(h.logits).map { Float(Float16(bitPattern: $0)) }
+            #expect(actual.indices.max { actual[$0] < actual[$1] } == row.logits.indices.max { row.logits[$0] < row.logits[$1] })
         }
     }
 
@@ -258,6 +303,15 @@ import Testing
         let resident = try run(resident: true)
         #expect(bounded == resident)
         print("[installed MTP draft] resident/16-slot finite HC + full logits, rollback and reset exact")
+        if let path = ProcessInfo.processInfo.environment["MFERENCE_MTP_INSTALLED_REFERENCE_EXPORT"] {
+            let rows: [[String: Any]] = bounded.map { values in
+                ["embedding": eValues.map(Float.init), "hidden": hValues.map(Float.init),
+                 "output_hidden": values.prefix(cfg.residualStreamWidth).map { Float(Float16(bitPattern: $0)) },
+                 "logits": values.dropFirst(cfg.residualStreamWidth).map { Float(Float16(bitPattern: $0)) }]
+            }
+            let data = try JSONSerialization.data(withJSONObject: ["rows": rows], options: [.sortedKeys])
+            try data.write(to: URL(fileURLWithPath: path), options: .withoutOverwriting)
+        }
         // Inputs are deterministic probes, not target-aligned hidden states.
         // Do not report this as acceptance, end-to-end generation or speed.
     }

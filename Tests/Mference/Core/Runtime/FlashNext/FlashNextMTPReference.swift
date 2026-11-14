@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 @testable import Mference
 
@@ -27,9 +28,9 @@ final class FlashNextMTPReference {
         let key = (norm ? "norm:" : "raw:") + name
         if let cached = resident[key] { return cached }
         let view: TensorView
-        if norm { view = try model.normWeight(name: name) }
-        else { view = try model.resident(name: name) }
-        let result = FlashNextWeights.read(view)
+        view = try model.resident(name: name)
+        let raw = FlashNextWeights.read(view)
+        let result = norm && model.zeroCenteredNormPolicy == .bakeAtLoad ? raw.map { $0 + 1 } : raw
         resident[key] = result
         return result
     }
@@ -57,24 +58,48 @@ final class FlashNextMTPReference {
                      down: matrix(2, rows: d, columns: f))
     }
 
+    /// Optional small synthetic-fixture export for a separately executed
+    /// upstream CPU reference. No installed checkpoint is copied or downloaded.
+    func exportWeights() throws -> [String: Any] {
+        var tensors: [String: Any] = [:]
+        for (name, entry) in model.residentIndex.entries where name.hasPrefix("mtp.") || name == "lm_head.weight" {
+            let shape = [entry.shape.0, entry.shape.1, entry.shape.2, entry.shape.3].filter { $0 > 0 }
+            tensors[name] = ["shape": shape, "values": try read(name)]
+        }
+        let cfg = model.config
+        for id in 0..<cfg.numExperts {
+            let weights = try expert(id)
+            for (name, values, shape) in [
+                ("gate_proj", weights.gate, [cfg.moeIntermediateSize, cfg.hiddenSize]),
+                ("up_proj", weights.up, [cfg.moeIntermediateSize, cfg.hiddenSize]),
+                ("down_proj", weights.down, [cfg.hiddenSize, cfg.moeIntermediateSize])
+            ] {
+                tensors["mtp.layers.0.mlp.experts.\(id).\(name).weight"] = ["shape": shape, "values": values]
+            }
+        }
+        return tensors
+    }
+
     func append(embedding: [Float], hidden: [Float]) throws -> (hidden: [Float], logits: [Float]) {
         let cfg = model.config, fn = cfg.flashNext
         let d = cfg.hiddenSize, bundle = cfg.residualStreamWidth
+        stages["embedding"] = embedding
+        stages["target_hidden"] = hidden
         let geometry = FlashNextHyperConnectionReference.Geometry(hidden: d, hcCount: fn.hcCount,
             lowRank: fn.hcLowRank, eps: 1e-6)
         func store(_ values: [Float]) -> [Float] {
             roundFusionStores ? values.map { Float(Float16($0)) } : values
         }
-        let e = store(FlashNextIndexerReference.rmsNorm(embedding, offset: 0, count: d,
-            weight: try read("mtp.pre_fc_norm_embedding.weight", norm: true), eps: 1e-6))
-        let h = store(FlashNextIndexerReference.rmsNorm(hidden, offset: 0, count: bundle,
-            weight: try read("mtp.pre_fc_norm_hidden.weight", norm: true), eps: 1e-6))
-        let projectedE = store(FlashNextRouterReference.matVec(try read("mtp.fc_embedding.weight"), rows: d, cols: d, x: e))
+        let e = FlashNextIndexerReference.rmsNorm(embedding, offset: 0, count: d,
+            weight: try read("mtp.pre_fc_norm_embedding.weight", norm: true), eps: 1e-6)
+        let h = FlashNextIndexerReference.rmsNorm(hidden, offset: 0, count: bundle,
+            weight: try read("mtp.pre_fc_norm_hidden.weight", norm: true), eps: 1e-6)
+        let projectedE = FlashNextRouterReference.matVec(try read("mtp.fc_embedding.weight"), rows: d, cols: d, x: e)
         let hiddenFC = try read("mtp.fc_hidden.weight")
         var hyper: [Float] = []
         for stream in 0..<fn.hcCount {
             let input = Array(h[(stream * d)..<((stream + 1) * d)])
-            let row = store(FlashNextRouterReference.matVec(hiddenFC, rows: d, cols: d, x: input))
+            let row = FlashNextRouterReference.matVec(hiddenFC, rows: d, cols: d, x: input)
             hyper += store(zip(projectedE, row).map { $0 + $1 })
         }
         let attentionMix = FlashNextHyperConnectionReference.gatedResidual(hyper,

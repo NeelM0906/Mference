@@ -1,5 +1,64 @@
 # qwen38flashnext reference-parity golden harness (bring-up kit W3.2)
 
+## Native MTP component reference (September 22)
+
+`verify_flashnext_mtp.py` consumes an optional synthetic Swift capture and
+executes the pinned SGLang fusion method plus the actual pinned Transformers
+decoder/QSA/HC/mixer modules on CPU. It loads identical dequantized weights,
+strictly checks state-dictionary keys/shapes, and requires the unchanged 5%
+FP16-versus-FP32 bound and identical greedy choices across 40 cached rows.
+No full checkpoint is downloaded. The committed
+`Tests/Mference/Fixtures/flashnext-mtp-upstream.json` lets ordinary Swift tests
+exercise this regression without Python or network access.
+
+Use the environment below with Transformers commit
+`4da05482135896a529d5536c3c003102d36528a2`; this capture used Python 3.12.12
+and CPU torch 2.14.0. Download only the pinned source file:
+
+```sh
+curl -fL https://raw.githubusercontent.com/sgl-project/sglang/745de73ba3c136b6f99b7a3e2177ed1a8eef4a56/python/sglang/srt/models/qwen4_exp_mtp.py \
+  -o /tmp/qwen4_exp_mtp.py
+MFERENCE_MTP_REFERENCE_EXPORT=/tmp/mtp-capture.json Scripts/test.sh \
+  --filter FlashNextMTPDraftRunnerTests/nativeLayerTracksIndependentFP32Composition
+scratch/qwen4exp-parity-venv/bin/python Scripts/parity/verify_flashnext_mtp.py \
+  /tmp/mtp-capture.json --sglang-source /tmp/qwen4_exp_mtp.py
+scratch/qwen4exp-parity-venv/bin/python Scripts/parity/verify_flashnext_mtp.py \
+  /tmp/mtp-capture.json --sglang-source /tmp/qwen4_exp_mtp.py \
+  --indexer-ties lowest-index --write-golden /tmp/mtp-golden.json
+```
+
+Both capture and golden writers refuse overwrites. Run each command serially,
+with the repository's model-process/memory preflight first.
+
+The unadapted CPU reference intentionally reports a row-39 failure (21.85%
+logit error): seven QSA block scores are exactly zero and CPU top-k selects a
+different tied support set. [PyTorch does not guarantee stable tied indices](https://docs.pytorch.org/docs/2.14/generated/torch.topk.html).
+The explicitly selected `lowest-index` diagnostic changes **only** exactly
+tied selection boundaries, verifies that selected score values are unchanged,
+and retains all upstream arithmetic. It passes: worst hidden 2.2122%, logits
+0.4004%, all greedy choices equal. This is not an unmodified SGLang CUDA run,
+production-size same-weight parity, accelerated verification or a speed claim.
+Do not describe the raw failure as a pass or silently enable the tie adaptation.
+
+For an existing completed install, the same harness can read the sidecar and
+shared head directly (receipt-size checks, no checkpoint download/copy):
+
+```sh
+MFERENCE_FLASHNEXT_GTURBO=/absolute/path/qwen38flashnext.gturbo \
+MFERENCE_MTP_ALIGNED_REFERENCE_EXPORT=/tmp/mtp-installed-aligned.json \
+Scripts/test.sh --filter FlashNextMTPPrimingTests/installedTargetRowsPrimeNativeDraft
+scratch/qwen4exp-parity-venv/bin/python Scripts/parity/verify_flashnext_mtp.py \
+  /tmp/mtp-installed-aligned.json --sglang-source /tmp/qwen4_exp_mtp.py \
+  --install /absolute/path/qwen38flashnext.gturbo
+```
+
+Run these serially with the same preflight rules. The September 22 final native
+FP32-intermediate path passes all 43 installed aligned rows without any QSA
+tie adaptation: worst hidden/logit error 0.041973%/0.037470%, identical greedy
+choices. The output representation remains FP16. The earlier failures and
+the limits of this fixture are retained in the
+[validation record](../../docs/RELEASE_VALIDATION_2026-09-22.md#final-native-precision-comparison-passed).
+
 Goldens for the `qwen38flashnext` (upstream `qwen4_exp`) port, captured from the **installed
 `transformers` package** running a toy `Qwen4ExpForCausalLM` on CPU in float32.
 

@@ -45,7 +45,18 @@ struct FlashNextMTPWeights {
         func norm(_ name: String, _ count: Int) throws -> TensorView {
             let view = try model.resident(name: name)
             try Self.validate(view, name: name, rows: count, columns: nil)
-            return try model.normWeight(name: name)
+            // Preserve the upstream FP32 (1 + w), rather than rounding the
+            // folded norm back to BF16 before applying it. This is local to
+            // the native draft; ordinary target weight access is unchanged.
+            let source = view.buffer.contents().advanced(by: Int(view.offset)).assumingMemoryBound(to: UInt16.self)
+            let bias: Float = model.zeroCenteredNormPolicy == .bakeAtLoad ? 1 : 0
+            let values = (0..<count).map { Quantization.bf16ToFloat(source[$0]) + bias }
+            guard let buffer = view.buffer.device.makeBuffer(bytes: values, length: count * 4, options: .storageModeShared) else {
+                throw MetalError.noDevice
+            }
+            return TensorView(buffer: buffer, offset: 0, length: UInt64(count * 4),
+                scaleOffset: 0, scaleLength: 0, biasOffset: 0, biasLength: 0,
+                shape: view.shape, dtype: 3)
         }
         func hc(_ prefix: String, inject: Bool) throws -> FlashNextHyperConnections.Weights {
             let weight = try norm(prefix + ".hc_norm.weight", bundle)
