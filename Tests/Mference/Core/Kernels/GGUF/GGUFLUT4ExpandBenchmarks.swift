@@ -112,6 +112,28 @@ import Testing
                 print(String(format: "  [lut4bench]   decode %2d misses: gpu %.3f ms (%.1f us/expert), wall %.3f ms",
                              experts, t.gpu, t.gpu * 1e3 / Double(experts), t.wall))
             }
+            // The decode GEMV pair the expanded slots feed: one layer, top-10,
+            // over experts 0..9 just written by the expand pass.
+            let moe = try GGUFLUT4MoE(context: ctx)
+            let offsets = GGUFLUT4MoE.ExpertOffsets(
+                gateIndex: UInt32(g.gate.index), gateD: UInt32(g.gate.d), gateM: UInt32(g.gate.m),
+                upIndex: UInt32(g.up.index), upD: UInt32(g.up.d), upM: UInt32(g.up.m),
+                downIndex: UInt32(g.down.index), downD: UInt32(g.down.d), downM: UInt32(g.down.m))
+            let blobs = (0..<10).map { (buffer: dst, offset: $0 * g.slotStride) }
+            let half = { (n: Int) in ctx.device.makeBuffer(length: n * 2, options: .storageModeShared)! }
+            let x = half(2560), acts = half(10 * 640), w = half(10), res = half(2560), y = half(2560)
+            for (i, v) in [x, w, res].enumerated() {
+                let p = v.contents().bindMemory(to: Float16.self, capacity: v.length / 2)
+                for j in 0..<(v.length / 2) { p[j] = Float16(Float((j * 7 + i) % 13) / 13 - 0.5) }
+            }
+            let gemv = try Self.time(ctx, iterations: 30) { cb in
+                moe.encodePhase1(commandBuffer: cb, blobs: blobs, offsets: offsets, gateUp: mix.gateUp,
+                                 x: x, acts: acts, d: 2560, f: 640)
+                moe.encodePhase2(commandBuffer: cb, blobs: blobs, offsets: offsets, down: mix.down,
+                                 acts: acts, routingWeights: w, residual: res, y: y, d: 2560, f: 640)
+            }
+            print(String(format: "  [lut4bench]   decode GEMV top-10 (phase 1 + 2): gpu %.3f ms, wall %.3f ms (%.1f GB/s slot reads)",
+                         gemv.gpu, gemv.wall, Double(10 * g.down.end) / (gemv.gpu / 1e3) / 1e9))
             let t = try Self.time(ctx, iterations: 10) {
                 Self.encode(kernel, mix, g, experts: batch, src: src, dst: dst, cb: $0)
             }
