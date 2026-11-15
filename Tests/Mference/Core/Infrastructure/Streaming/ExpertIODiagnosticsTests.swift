@@ -91,7 +91,15 @@ import Testing
     s = stats.snapshot()
     #expect(s.reads == 3)
     #expect(s.bytes == 4 * stride)
-    #expect(s.totalNanos >= s.maxNanos)
+    #expect(s.maxNanos > 0)
+    #expect(s.buckets.reduce(0, +) == s.reads)
+  }
+
+  @Test func readStats_sharedIsOffWithoutPhaseToggle() {
+    // The suite runs without MFERENCE_PHASES=1, so streamers get nil stats:
+    // no clock read and no lock on the read path.
+    guard ProcessInfo.processInfo.environment["MFERENCE_PHASES"] != "1" else { return }
+    #expect(ExpertReadStats.shared == nil)
   }
 
   @Test func streamer_withoutStatsStillReadsCorrectly() throws {
@@ -123,16 +131,16 @@ import Testing
     let text = ExpertIOPhaseReport.lines(
       routing: c, decodeTokens: 1,
       decodeReads: reads.snapshot(),
-      decodeDiskStart: .init(bytesRead: 1_048_576, bytesWritten: 0),
-      diskNow: .init(bytesRead: 3 * 1_048_576, bytesWritten: 0),
+      decodeDiskStart: .init(bytesRead: 5 * 1_048_576, bytesWritten: 0),
+      diskNow: .init(bytesRead: 7 * 1_048_576, bytesWritten: 0),
       prefillReads: nil, prefillDiskBytes: 4 * 1_048_576)
-    #expect(text.contains("routed experts: 3 hit, 1 miss (75.0% hit) over 2 layer steps, 1.00 misses/token"))
+    #expect(text.contains("routed experts: 3 hit, 1 miss (75.0% hit) over 2 layer steps, 1.00 misses per generated token"))
     #expect(text.contains("all-hit layer steps (expert counters): 1/2 (50.0%)"))
     #expect(text.contains("most missed L1:E3 1m/0h"))
     #expect(text.contains("misses by layer: 0:0 1:1"))
     #expect(text.contains("expert reads (decode): 1 runs, 1 experts, 1.0 MB requested; mean 300 us, max 0.30 ms"))
     #expect(text.contains("<500 1"))
-    #expect(text.contains("disk physically read (proc_pid_rusage): decode 2.0 MB, prefill 4.0 MB, process total 3.0 MB"))
+    #expect(text.contains("disk physically read (proc_pid_rusage): decode 2.0 MB, prefill 4.0 MB, process total 7.0 MB"))
   }
 
   @Test func phaseReport_isEmptyWithoutCounters() {

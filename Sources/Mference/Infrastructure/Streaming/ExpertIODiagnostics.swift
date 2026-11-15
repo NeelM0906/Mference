@@ -72,8 +72,10 @@ public final class ExpertReadStats: @unchecked Sendable {
 
 /// Bytes this process has physically read from or written to storage, from
 /// `proc_pid_rusage` (`ri_diskio_bytesread` / `ri_diskio_byteswritten`).
-/// Reads served by the unified buffer cache do not count, so the difference
-/// from `ExpertReadStats.Snapshot.bytes` is what the page cache absorbed.
+/// Reads served by the unified buffer cache do not count. The counter is
+/// process-wide: besides routed-expert reads it includes page faults on the
+/// mapped core weights, KV SSD-tier traffic, page-cache warming and any other
+/// file reads, so it is not a per-expert-read measurement.
 public enum ProcessDiskIO {
     public struct Counters: Equatable, Sendable {
         public var bytesRead: UInt64
@@ -123,13 +125,11 @@ public struct ExpertRoutingCounters: Equatable, Sendable {
         guard layer >= 0, layer < numLayers else { return }
         layerSteps &+= 1
         if missIndices.isEmpty { allHitLayerSteps &+= 1 }
-        var missed = [Bool](repeating: false, count: experts.count)
-        for index in missIndices where index >= 0 && index < experts.count {
-            missed[index] = true
-        }
+        // Routed top-k is small (8 here), so a linear scan of the miss list
+        // is cheaper than building a lookup and allocates nothing.
         for (index, expert) in experts.enumerated() where expert >= 0 && expert < numExperts {
             let cell = layer * numExperts + expert
-            if missed[index] { misses[cell] &+= 1 } else { hits[cell] &+= 1 }
+            if missIndices.contains(index) { misses[cell] &+= 1 } else { hits[cell] &+= 1 }
         }
     }
 
@@ -212,7 +212,7 @@ public enum ExpertIOPhaseReport {
             out += "  routed experts: \(hits) hit, \(misses) miss ("
             out += pct(hits, hits &+ misses) + "% hit) over \(r.layerSteps) layer steps"
             if decodeTokens > 0 {
-                out += String(format: ", %.2f misses/token",
+                out += String(format: ", %.2f misses per generated token",
                               Double(misses) / Double(decodeTokens))
             }
             out += "\n"

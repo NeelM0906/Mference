@@ -1218,12 +1218,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var lastPrefillExpertReads: ExpertReadStats.Snapshot?
     public private(set) var lastPrefillDiskBytesRead: UInt64?
     private var prefillDiskIOStart: ProcessDiskIO.Counters?
+    private var prefillIOWindowOpen = false
 
     /// Opens the prefill side of the phase report's I/O counters.
     private func beginPrefillIOWindow() {
         guard Self.phaseInstrumentationEnabled else { return }
         ExpertReadStats.shared?.reset()
         prefillDiskIOStart = ProcessDiskIO.current()
+        prefillIOWindowOpen = true
         lastPrefillExpertReads = nil
         lastPrefillDiskBytesRead = nil
     }
@@ -1254,12 +1256,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalSpecPrefetchBytes = 0
         if Self.phaseInstrumentationEnabled {
             let disk = ProcessDiskIO.current()
-            if let start = prefillDiskIOStart {
+            if prefillIOWindowOpen {
+                // Read timing does not depend on rusage; keep it even when
+                // the storage counters were unavailable.
                 lastPrefillExpertReads = ExpertReadStats.shared?.snapshot()
-                if let disk, disk.bytesRead >= start.bytesRead {
+                if let start = prefillDiskIOStart, let disk, disk.bytesRead >= start.bytesRead {
                     lastPrefillDiskBytesRead = disk.bytesRead - start.bytesRead
                 }
                 prefillDiskIOStart = nil
+                prefillIOWindowOpen = false
             }
             ExpertReadStats.shared?.reset()
             decodeWindowDiskIOStart = disk
