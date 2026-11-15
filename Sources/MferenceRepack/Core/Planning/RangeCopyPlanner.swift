@@ -43,6 +43,11 @@ public enum RangeCopyTransform: Sendable, Equatable {
     case bf16RowBlocks(rowSourceBytes: Int,
                        rowsPerBlock: Int,
                        blockStride: UInt64)
+    /// GGUF Q6_K / Q8_0 blocks to one component of the INT8-2L resident format
+    /// (WS4). Like `quantizeInt4G64`, the planner emits each component over the
+    /// same source range. See `GGUFInt8TwoLevelExpander`.
+    case ggufInt8TwoLevel(source: GGUFInt8TwoLevelExpander.Source,
+                          component: GGUFInt8TwoLevelExpander.Component)
 
     var inputUnitBytes: UInt64 {
         switch self {
@@ -57,6 +62,8 @@ public enum RangeCopyTransform: Sendable, Equatable {
         case .quantizeInt4G64RowBlocks(let rowSourceBytes, let rowsPerBlock, _),
              .bf16RowBlocks(let rowSourceBytes, let rowsPerBlock, _):
             UInt64(max(rowSourceBytes, 1)) * UInt64(max(rowsPerBlock, 1))
+        case .ggufInt8TwoLevel(let source, _):
+            UInt64(source.blockBytes)
         }
     }
 
@@ -114,6 +121,11 @@ public enum RangeCopyTransform: Sendable, Equatable {
             let unit = try scaled(UInt64(rowSourceBytes), by: UInt64(rowsPerBlock))
             let blocks = try unitCount(sourceByteCount, unit: unit)
             return try scaled(blocks, by: blockStride)
+        case .ggufInt8TwoLevel(let source, let component):
+            let blocks = try unitCount(sourceByteCount, unit: UInt64(source.blockBytes))
+            return try scaled(
+                blocks,
+                by: UInt64(GGUFInt8TwoLevelExpander.destinationBytesPerBlock(source, component)))
         }
     }
 
@@ -134,6 +146,8 @@ public enum RangeCopyTransform: Sendable, Equatable {
             "quantize-int4-g64-row-blocks:\(rowSourceBytes):\(rowsPerBlock):\(blockStride)"
         case .bf16RowBlocks(let rowSourceBytes, let rowsPerBlock, let blockStride):
             "bf16-row-blocks:\(rowSourceBytes):\(rowsPerBlock):\(blockStride)"
+        case .ggufInt8TwoLevel(let source, let component):
+            "gguf-int8-2l:\(source.rawValue):\(component.rawValue)"
         }
     }
 
