@@ -1207,6 +1207,90 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalSpecPrefetchIssued: UInt64 = 0
     public private(set) var totalSpecPrefetchConfirmed: UInt64 = 0
     public private(set) var totalSpecPrefetchBytes: UInt64 = 0
+    /// Phase-report expert I/O state. Held behind one optional reference, and
+    /// touched only from non-inlined methods called under
+    /// `phaseInstrumentationEnabled`, so the default decode path carries a
+    /// single nil pointer and none of the recording code.
+    private final class PhaseIOState {
+        var routing: ExpertRoutingCounters
+        var decodeWindowOpen = false
+        var decodeDiskStart: ProcessDiskIO.Counters?
+        var lastPrefillReads: ExpertReadStats.Snapshot?
+        var lastPrefillDiskBytes: UInt64?
+        var prefillDiskStart: ProcessDiskIO.Counters?
+        var prefillWindowOpen = false
+
+        init(numLayers: Int, numExperts: Int) {
+            routing = ExpertRoutingCounters(numLayers: numLayers, numExperts: numExperts)
+        }
+    }
+    private var phaseIO: PhaseIOState?
+
+    /// Per-(layer, expert) routed hits and misses over the decode window.
+    /// Nil unless `MFERENCE_PHASES=1` and a decode window has opened.
+    public var expertRoutingCounters: ExpertRoutingCounters? {
+        guard let phaseIO, phaseIO.decodeWindowOpen else { return nil }
+        return phaseIO.routing
+    }
+    /// Process storage counters at the start of the decode window, so the
+    /// phase report can print the bytes decode physically read.
+    public var decodeWindowDiskIOStart: ProcessDiskIO.Counters? { phaseIO?.decodeDiskStart }
+    /// Routed-expert reads and physical bytes read during the most recent
+    /// chunked prefill, captured when the decode window opens.
+    public var lastPrefillExpertReads: ExpertReadStats.Snapshot? { phaseIO?.lastPrefillReads }
+    public var lastPrefillDiskBytesRead: UInt64? { phaseIO?.lastPrefillDiskBytes }
+
+    private func phaseIOState() -> PhaseIOState {
+        if let phaseIO { return phaseIO }
+        let state = PhaseIOState(numLayers: cfg.numLayers, numExperts: cfg.numExperts)
+        phaseIO = state
+        return state
+    }
+
+    /// Opens the prefill side of the phase report's I/O counters.
+    @inline(never)
+    private func beginPrefillIOWindow() {
+        let state = phaseIOState()
+        ExpertReadStats.shared?.reset()
+        state.prefillDiskStart = ProcessDiskIO.current()
+        state.prefillWindowOpen = true
+        state.lastPrefillReads = nil
+        state.lastPrefillDiskBytes = nil
+    }
+
+    /// Closes the prefill I/O window (if open) and opens the decode one.
+    @inline(never)
+    private func openDecodeIOWindow() {
+        let state = phaseIOState()
+        let disk = ProcessDiskIO.current()
+        if state.prefillWindowOpen {
+            // Read timing does not depend on rusage; keep it even when the
+            // storage counters were unavailable.
+            state.lastPrefillReads = ExpertReadStats.shared?.snapshot()
+            if let start = state.prefillDiskStart, let disk, disk.bytesRead >= start.bytesRead {
+                state.lastPrefillDiskBytes = disk.bytesRead - start.bytesRead
+            }
+            state.prefillDiskStart = nil
+            state.prefillWindowOpen = false
+        }
+        ExpertReadStats.shared?.reset()
+        state.decodeDiskStart = disk
+        state.routing.reset()
+        state.decodeWindowOpen = true
+    }
+
+    /// Records one routed layer step for the phase report. `misses` nil means
+    /// the experts were loaded without a CPU plan (top-k beyond the planner):
+    /// the cached load decides hits internally, so only the step is counted.
+    @inline(never)
+    private func notePhaseLayerStep(_ layer: Int, _ experts: [Int], misses: [Int]?) {
+        guard let phaseIO, phaseIO.decodeWindowOpen else { return }
+        if let misses {
+            phaseIO.routing.recordLayerStep(layer: layer, experts: experts, missIndices: misses)
+        } else {
+            phaseIO.routing.recordUnplannedLayerStep()
+        }
+    }
 
     /// Zeroes the per-phase counters. Prompt prefill runs through the same
     /// per-token code paths (DeepSeek-V4 prefill *is* a decode loop), so
@@ -1232,6 +1316,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalSpecPrefetchIssued = 0
         totalSpecPrefetchConfirmed = 0
         totalSpecPrefetchBytes = 0
+        if Self.phaseInstrumentationEnabled { openDecodeIOWindow() }
     }
 
     /// One outstanding speculative read set. The runner keeps at most one alive
@@ -1600,6 +1685,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         var execution = PrefillExecutionReport()
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        if Self.phaseInstrumentationEnabled { beginPrefillIOWindow() }
         // Prompt prefill and decode share these counters; drop the prompt's
         // contribution on the way out so the phase report describes decode.
         defer { beginDecodePhaseWindow() }
@@ -3364,6 +3450,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if Self.phaseInstrumentationEnabled {
                     totalRoutedLayerSteps &+= 1
                     totalAllHitLayerSteps &+= 1
+                    notePhaseLayerStep(L, experts, misses: [])
                 }
                 issueSpeculativePrefetch(layer: L + 1)
                 continue
@@ -3381,6 +3468,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 if let plannedFetch, plannedFetch.misses.isEmpty {
                     totalAllHitLayerSteps &+= 1
                 }
+                notePhaseLayerStep(L, experts, misses: plannedFetch?.misses)
             }
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSplitArgBuf: MTLBuffer?

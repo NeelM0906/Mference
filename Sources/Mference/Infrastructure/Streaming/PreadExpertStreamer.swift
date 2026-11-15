@@ -94,15 +94,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var speculativeInFlight: [Bool]
     private var useClock = 0
     private let cacheLock = NSLock()
+    /// Phase-report read timing; nil (no clock reads) unless enabled.
+    private let readStats: ExpertReadStats?
 
     public init(layout: StreamLayout,
                 device: MTLDevice,
                 slotCount: Int,
-                cachePolicy: ExpertCachePolicy = .lfu) throws {
+                cachePolicy: ExpertCachePolicy = .lfu,
+                readStats: ExpertReadStats? = ExpertReadStats.shared) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
         self.cachePolicy = cachePolicy
+        self.readStats = readStats
         let pageSize = Int(getpagesize())
 
         let openedFD = open(layout.path, O_RDONLY)
@@ -623,8 +627,31 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     /// Reads experts stored back to back from `fileOffset` into slots: whole
     /// expanded experts, or through `ExpertStorage` when the file omits bytes.
+    @inline(__always)
     private func readExpertRun(into destinations: [UnsafeMutableRawPointer],
                                fileOffset: UInt64) throws {
+        if let readStats {
+            return try readExpertRunTimed(readStats, into: destinations, fileOffset: fileOffset)
+        }
+        try readExpertRunUntimed(into: destinations, fileOffset: fileOffset)
+    }
+
+    /// Phase-report path only: kept out of line so the default read path is
+    /// the untimed body plus one nil check.
+    @inline(never)
+    private func readExpertRunTimed(_ readStats: ExpertReadStats,
+                                    into destinations: [UnsafeMutableRawPointer],
+                                    fileOffset: UInt64) throws {
+        let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        try readExpertRunUntimed(into: destinations, fileOffset: fileOffset)
+        readStats.record(experts: destinations.count,
+                         bytes: UInt64(destinations.count) * layout.storedExpertStride,
+                         nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start)
+    }
+
+    @inline(__always)
+    private func readExpertRunUntimed(into destinations: [UnsafeMutableRawPointer],
+                                      fileOffset: UInt64) throws {
         if let storage = layout.storage {
             try storage.readExperts(fd: fd, fileOffset: fileOffset, into: destinations)
         } else {
