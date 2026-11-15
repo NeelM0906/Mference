@@ -177,8 +177,13 @@ read and every routed expert counts as a hit. Read latency includes any
 implied-bias rebuild done on the reading thread, failed reads are not
 recorded, and a background read still in flight when a window opens is
 counted in the new window. `MFERENCE_PREFILL_BREAKDOWN=1` prints the
-Inkling prefill routed-expert split (fetch, encode, drain). Both are
-diagnostics and do not change behavior.
+Inkling prefill routed-expert split (fetch, encode, drain) and, for Gemma 4 and
+Qwen 3.6 chunked prefill, a stage table: GPU time for the attention or
+Gated-DeltaNet projections and core, router, shared expert, routed tiles, MoE
+tail and head, plus the CPU time spent waiting on routed expert reads. To time
+each stage it waits at stage boundaries, so its wall times describe the
+diagnostic run, not a production one. Both are diagnostics and do not change
+output.
 
 The accepted decode defaults carry environment kill-switches for A/B runs.
 `MFERENCE_SLOT_MAP=0` disables the GPU-resident expert-to-slot map that lets

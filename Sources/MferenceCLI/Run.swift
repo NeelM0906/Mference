@@ -165,6 +165,9 @@ public func run(args: Args,
         if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1",
            runner is RealForwardRunner {
             RealForwardRunner.dumpPrefillBreakdown()
+            if !PrefillStageBreakdown.shared.isEmpty {
+                FileHandle.standardError.write(Data(PrefillStageBreakdown.shared.report().utf8))
+            }
         }
         if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
            let runner = runner as? RealForwardRunner {
