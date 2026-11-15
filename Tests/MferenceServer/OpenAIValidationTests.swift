@@ -840,7 +840,7 @@ struct ServerArgumentTests {
         #expect(arguments.bindMode == .loopback)
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
-        #expect(arguments.promptCacheMode == .singlePrefix)
+        #expect(arguments.promptCacheMode == .multiPrefix)
     }
 
     @Test func parsesAndAdvertises128KContext() throws {

@@ -15,6 +15,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int?
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    /// `--prompt-cache-bytes`; the multi-prefix cache's retained-byte ceiling.
+    public let promptCacheBytes: ServerPromptCacheBytes
     /// `--verify`; see `ModelIntegrityPolicy`.
     public let verification: ModelIntegrityPolicy
     /// `--shadow-budget`; nil keeps the family default.
@@ -88,8 +90,19 @@ public struct ServerArguments: Equatable, Sendable {
                              and an answer that outgrows that adds 8192 at a
                              time.
       --queue-limit <count>  Maximum queued requests (default 4).
-      --prompt-cache-mode <off|single-prefix>
-                             Prompt KV reuse mode (default single-prefix).
+      --prompt-cache-mode <off|single-prefix|multi-prefix>
+                             Prompt KV reuse mode (default multi-prefix).
+                             single-prefix keeps the last finished turn;
+                             multi-prefix also keeps earlier turns and other
+                             conversations under --prompt-cache-bytes. Only
+                             Qwen 3.6 keeps more than one prefix; every other
+                             model serves multi-prefix as single-prefix.
+      --prompt-cache-bytes <bytes|auto>
+                             RAM ceiling for prefixes multi-prefix keeps besides
+                             the live one (default auto: the smaller of 4 GiB
+                             and physical memory / 8 with at least 24 GiB,
+                             1 GiB from 16 GiB, 0 below). 0 serves exactly as
+                             single-prefix.
       --shadow-budget <0...8>
                              Speculative expert prefetch during decode: reads
                              issued per layer ahead of the router; 0 turns it off.
@@ -118,7 +131,8 @@ public struct ServerArguments: Equatable, Sendable {
         var modelIDOverride: String?
         var maxContext: Int? = defaultMaxContext
         var queueLimit = 4
-        var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var promptCacheMode: ServerPromptCacheMode = .multiPrefix
+        var promptCacheBytes = ServerPromptCacheBytes.auto
         var verification = ModelIntegrityPolicy.trustedReceiptWhenValid
         var shadowBudget: Int?
         var prefillChunk: Int?
@@ -199,9 +213,19 @@ public struct ServerArguments: Equatable, Sendable {
             case "--prompt-cache-mode":
                 guard let parsed = ServerPromptCacheMode(rawValue: value) else {
                     throw ServerArgumentError.invalid(
-                        "--prompt-cache-mode must be off or single-prefix")
+                        "--prompt-cache-mode must be off, single-prefix or multi-prefix")
                 }
                 promptCacheMode = parsed
+            case "--prompt-cache-bytes":
+                if value == "auto" {
+                    promptCacheBytes = .auto
+                } else {
+                    guard let parsed = Int(value), parsed >= 0 else {
+                        throw ServerArgumentError.invalid(
+                            "--prompt-cache-bytes must be auto or a byte count of 0 or more")
+                    }
+                    promptCacheBytes = .bytes(parsed)
+                }
             case "--shadow-budget":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedShadowPrefetchBudgets.contains(parsed) else {
@@ -258,6 +282,7 @@ public struct ServerArguments: Equatable, Sendable {
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
+                               promptCacheBytes: promptCacheBytes,
                                verification: verification,
                                shadowBudget: shadowBudget,
                                prefillChunk: prefillChunk,

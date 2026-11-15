@@ -208,9 +208,14 @@ public actor ServerModelSession: ServerLoadedModel {
     /// The context this session runs with, `--max-context` resolved for its
     /// family; `GET /v1/models` reports it as `max_model_len`.
     public nonisolated let maxContext: Int
+    /// `multi-prefix` on a runner without prefix snapshots is stored as
+    /// `singlePrefix`, so that runner is served exactly as single-prefix.
     private let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
     private var promptCache = ServerPromptCache()
+    /// Non-nil exactly when `promptCacheMode == .multiPrefix`.
+    private let prefixStates: PrefixStateCache?
+    private let snapshotRunner: (any PrefixStateSnapshotting)?
 
     static func runtimeConfiguration(
         family: ModelFamily,
@@ -230,6 +235,13 @@ public actor ServerModelSession: ServerLoadedModel {
             kvGrowthTokens: reserveFullKV ? nil : RuntimeConfiguration.defaultKVGrowthTokens)
     }
 
+    /// `multi-prefix` needs a runner that snapshots its prefix state; any
+    /// other runner is served exactly as `single-prefix`.
+    static func effectivePromptCacheMode(_ requested: ServerPromptCacheMode,
+                                         runnerSnapshotsPrefixes: Bool) -> ServerPromptCacheMode {
+        requested == .multiPrefix && !runnerSnapshotsPrefixes ? .singlePrefix : requested
+    }
+
     /// `--max-context max` (nil) is the model's native context.
     static func resolvedMaxContext(_ requested: Int?, family: ModelFamily) -> Int {
         requested ?? family.maximumContext
@@ -237,7 +249,8 @@ public actor ServerModelSession: ServerLoadedModel {
 
     public static func load(modelDirectory: URL,
                             maxContext requestedMaxContext: Int?,
-                            promptCacheMode: ServerPromptCacheMode = .singlePrefix,
+                            promptCacheMode: ServerPromptCacheMode = .multiPrefix,
+                            promptCacheBytes: ServerPromptCacheBytes = .auto,
                             integrityPolicy: ModelIntegrityPolicy = .trustedReceiptWhenValid,
                             shadowPrefetchBudget: Int? = nil,
                             prefillChunkTokens: Int? = nil,
@@ -328,6 +341,7 @@ public actor ServerModelSession: ServerLoadedModel {
                                   prefillConfig: forwardRuntime.prefillConfig,
                                   maxContext: maxContext,
                                   promptCacheMode: promptCacheMode,
+                                  promptCacheBytes: promptCacheBytes.resolved(),
                                   promptCacheDomain: promptCacheDomain)
     }
 
@@ -339,6 +353,7 @@ public actor ServerModelSession: ServerLoadedModel {
                  prefillConfig: PrefillRuntimeConfig,
                  maxContext: Int,
                  promptCacheMode: ServerPromptCacheMode,
+                 promptCacheBytes: Int,
                  promptCacheDomain: ServerPromptCacheDomain) {
         self.context = context
         self.model = model
@@ -355,7 +370,18 @@ public actor ServerModelSession: ServerLoadedModel {
         self.scratch = scratch
         self.prefillConfig = prefillConfig
         self.maxContext = maxContext
-        self.promptCacheMode = promptCacheMode
+        let snapshots = (runner as? any PrefixStateSnapshotting).flatMap {
+            $0.supportsPrefixStateSnapshots ? $0 : nil
+        }
+        self.promptCacheMode = Self.effectivePromptCacheMode(
+            promptCacheMode, runnerSnapshotsPrefixes: snapshots != nil)
+        if self.promptCacheMode == .multiPrefix, let snapshots {
+            self.snapshotRunner = snapshots
+            self.prefixStates = PrefixStateCache(ceilingBytes: promptCacheBytes)
+        } else {
+            self.snapshotRunner = nil
+            self.prefixStates = nil
+        }
         self.promptCacheDomain = promptCacheDomain
     }
 
@@ -399,6 +425,7 @@ public actor ServerModelSession: ServerLoadedModel {
             if !completed {
                 promptCache.invalidate()
                 runner.reset()
+                prefixStates?.didFail()
             }
         }
 
@@ -409,7 +436,17 @@ public actor ServerModelSession: ServerLoadedModel {
         var captureOutcome: String?
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
-        if promptCacheMode == .singlePrefix {
+        if let prefixStates, let snapshotRunner {
+            let begun = try prefixStates.begin(
+                domain: promptCacheDomain,
+                turn: request.promptCacheTurn,
+                renderedPromptIDs: promptIDs,
+                tokenizer: tokenizer,
+                maxContext: maxContext,
+                runner: snapshotRunner)
+            effectivePromptIDs = begun.effectivePromptIDs
+            completionStart = begun.start
+        } else if promptCacheMode == .singlePrefix {
             switch promptCache.match(
                 domain: promptCacheDomain,
                 request: request,
@@ -579,7 +616,18 @@ public actor ServerModelSession: ServerLoadedModel {
             reason = "stop"
         }
         try Task.checkCancellation()
-        if promptCacheMode == .singlePrefix {
+        if let prefixStates, let snapshotRunner {
+            prefixStates.didFinish(
+                entry: PromptPrefixCache.makeEntry(
+                    domain: promptCacheDomain,
+                    turn: request.promptCacheTurn,
+                    content: content,
+                    calls: calls,
+                    result: result,
+                    reasoningContent: reasoning.isEmpty ? nil : reasoning,
+                    stopStringFiltered: stopMatcher.isStopped),
+                runner: snapshotRunner)
+        } else if promptCacheMode == .singlePrefix {
             promptCache.publish(
                 domain: promptCacheDomain,
                 request: request,
@@ -607,7 +655,8 @@ public actor ServerModelSession: ServerLoadedModel {
                 result: result,
                 memory: .capture(model: model, producer: runner, scratch: scratch),
                 gemmaRecovery: recovery.map { .init(outcome: recoveryOutcome,
-                    capture: captureOutcome, allocatedBytes: $0.gemmaRecoveryBytes) }) : nil)
+                    capture: captureOutcome, allocatedBytes: $0.gemmaRecoveryBytes) },
+                prefixCache: prefixStates.map(PrefixCacheDiagnostics.init(cache:))) : nil)
         completion.reasoningContent = reasoning.isEmpty ? nil : reasoning
         completion.prefillSeconds = result.prefillSeconds
         completion.decodeSeconds = result.decodeSeconds

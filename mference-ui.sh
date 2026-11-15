@@ -17,7 +17,8 @@ OPEN_WEBUI_VERSION=0.11.3
 server_port=8080
 webui_port=3000
 max_context=16384
-prompt_cache_mode=single-prefix
+prompt_cache_mode=multi-prefix
+prompt_cache_bytes=auto
 prefill_chunk=auto
 kv_reserve=0
 preload_model=""
@@ -61,8 +62,12 @@ usage: ./mference-ui.sh [options]                      start the UI
                          keeping different Xcode toolchains separate.
   --data-dir <dir>       Open WebUI data directory (default under your Library).
                          Use a separate directory for isolated release tests.
-  --prompt-cache-mode <off|single-prefix>
-                         Passed through to MferenceServer.
+  --prompt-cache-mode <off|single-prefix|multi-prefix>
+                         Passed through to MferenceServer (default
+                         multi-prefix).
+  --prompt-cache-bytes <bytes|auto>
+                         RAM ceiling for prefixes multi-prefix keeps, passed
+                         through to MferenceServer (default auto).
   --prefill-chunk <n|auto>
                          Prompt tokens per prefill chunk, passed through to
                          MferenceServer: auto (default; 2048 for Gemma 4, QAT
@@ -109,6 +114,7 @@ while [[ $# -gt 0 ]]; do
     --build-path) require_value "$@"; build_path="$2"; shift 2 ;;
     --data-dir) require_value "$@"; data_directory="$2"; shift 2 ;;
     --prompt-cache-mode) require_value "$@"; prompt_cache_mode="$2"; shift 2 ;;
+    --prompt-cache-bytes) require_value "$@"; prompt_cache_bytes="$2"; shift 2 ;;
     --prefill-chunk) require_value "$@"; prefill_chunk="$2"; shift 2 ;;
     --kv-reserve) kv_reserve=1; shift ;;
     --dry-run) dry_run=1; shift ;;
@@ -132,7 +138,12 @@ server_port="$((10#$server_port))"
 webui_port="$((10#$webui_port))"
 [[ "$server_port" -le 65535 && "$webui_port" -le 65535 ]] || fail "ports must be between 1 and 65535"
 [[ "$server_port" -ne "$webui_port" ]] || fail "server and UI need different ports"
-case "$prompt_cache_mode" in off|single-prefix) ;; *) fail "--prompt-cache-mode must be off or single-prefix" ;; esac
+case "$prompt_cache_mode" in off|single-prefix|multi-prefix) ;; *) fail "--prompt-cache-mode must be off, single-prefix or multi-prefix" ;; esac
+if [[ "$prompt_cache_bytes" != auto ]]; then
+  case "$prompt_cache_bytes" in ''|*[!0-9]*) fail "--prompt-cache-bytes must be auto or a byte count" ;; esac
+  [[ ${#prompt_cache_bytes} -le 18 ]] || fail "--prompt-cache-bytes must be at most eighteen digits"
+  prompt_cache_bytes="$((10#$prompt_cache_bytes))"
+fi
 case "$prefill_chunk" in auto|32|64|128|256|512|1024|2048|4096) ;; *) fail "--prefill-chunk must be auto, 32, 64, 128, 256, 512, 1024, 2048 or 4096" ;; esac
 [[ "$build_path" == /* ]] || build_path="$repository_root/$build_path"
 [[ "$data_directory" == /* ]] || data_directory="$repository_root/$data_directory"
@@ -142,6 +153,7 @@ server_arguments=(
   --port "$server_port"
   --max-context "$max_context"
   --prompt-cache-mode "$prompt_cache_mode"
+  --prompt-cache-bytes "$prompt_cache_bytes"
   --prefill-chunk "$prefill_chunk"
 )
 if [[ "$kv_reserve" -eq 1 ]]; then

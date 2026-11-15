@@ -4,6 +4,33 @@ import Mference
 public enum ServerPromptCacheMode: String, Sendable, Equatable {
     case off
     case singlePrefix = "single-prefix"
+    /// Several retained turn-boundary prefixes under a byte budget, for
+    /// runners that can snapshot their prefix state (Qwen 3.6). Every other
+    /// runner serves it exactly as `singlePrefix`.
+    case multiPrefix = "multi-prefix"
+}
+
+/// `--prompt-cache-bytes`: the ceiling on what the multi-prefix cache retains
+/// besides the runner's own live buffers.
+public enum ServerPromptCacheBytes: Equatable, Sendable {
+    case auto
+    case bytes(Int)
+
+    static let gibibyte = 1 << 30
+
+    /// `auto` is min(4 GiB, physical / 8) on hosts with at least 24 GiB,
+    /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below.
+    func resolved(physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        switch self {
+        case .bytes(let value):
+            return max(0, value)
+        case .auto:
+            let physical = Int(clamping: physicalMemoryBytes)
+            if physical >= 24 * Self.gibibyte { return min(4 * Self.gibibyte, physical / 8) }
+            if physical >= 16 * Self.gibibyte { return Self.gibibyte }
+            return 0
+        }
+    }
 }
 
 // The cache itself lives in the core library (`PromptPrefixCache`) so the CLI

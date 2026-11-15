@@ -133,16 +133,44 @@ Select `mference/gemma-4-26b-a4b-it` in OpenCode.
 
 ## Prompt reuse
 
-Single-prefix KV reuse is on by default. Send the complete message history with
-every request. When a request continues the retained conversation exactly, the
+KV prefix reuse is on by default. Send the complete message history with
+every request. When a request continues a retained conversation exactly, the
 server reuses the verified KV prefix and reports the number of reused tokens in:
 
 ```text
 usage.prompt_tokens_details.cached_tokens
 ```
 
-The server retains one prefix. A different or incompatible history replaces
-it. Use `--prompt-cache-mode off` to disable reuse.
+`--prompt-cache-mode` selects how many prefixes are retained:
+
+| Mode | Retains |
+| --- | --- |
+| `multi-prefix` (default) | Qwen 3.6: the end of every finished turn, across conversations, within `--prompt-cache-bytes`. Every other model, and any runner that cannot snapshot its state: as `single-prefix`. |
+| `single-prefix` | The last finished turn. A different or incompatible history replaces it. |
+| `off` | Nothing; every request prefills its whole prompt. |
+
+With `multi-prefix`, Qwen 3.6 keeps a copy of its recurrent state (about
+61 MiB) at the end of each finished turn. While one conversation continues,
+its attention KV stays in the runner and nothing else is copied. Before a
+request writes over KV that a retained turn still needs (another
+conversation, or an edited or regenerated earlier message), the conversation's
+KV up to its latest retained turn is copied out, even when only its end will
+be overwritten: 20 KiB per token, 640 MiB for a 32K-token conversation. A later request
+that continues any retained turn restores it and prefills only what it adds.
+`--prompt-cache-bytes <bytes|auto>` caps these copies; the least recently used
+are released first, and a copy that does not fit is skipped. `auto` is the
+smaller of 4 GiB and an eighth of physical memory on Macs with at least
+24 GiB, 1 GiB from 16 GiB, and 0 below. `0` serves exactly as
+`single-prefix`. The copies are released when the model is unloaded or
+swapped; cancellation and errors release only the conversation that was in
+the runner.
+
+A restored prefix continues from exactly the state the turn ended in, so a
+request gets the same output it would get from `single-prefix` had no other
+request come between its turns. Neither mode is byte-identical to prefilling
+the whole history from scratch: a continued turn's new tokens are prefilled
+as one short chunk, and earlier replies stay as generated rather than
+re-rendered.
 
 For Gemma, a new user message applies Google's thought-stripping template.
 The server reuses the longest unchanged prefix whose state is still valid,
