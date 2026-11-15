@@ -2199,21 +2199,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard var cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        // Diagnostic (`MFERENCE_PREFILL_BREAKDOWN=1`): read once per chunk; with
+        // it off every site below is a branch on `breakdownOn`.
         let stageBreakdown = prefillStageBreakdown
-        let chunkStartNanos = stageBreakdown == nil ? 0 : clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let breakdownOn = stageBreakdown != nil
+        let chunkStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
         // Diagnostic only: ends the current command buffer at a stage boundary so
         // the stage gets its own GPU span. Same kernels, inputs and queue order.
         func endStage(_ stage: PrefillStage) throws {
-            guard let stageBreakdown else { return }
-            cb.commit()
-            waitForCompletion(cb)
-            try checkCommandBufferError(cb)
-            stageBreakdown.addGPU(stage, cb)
-            guard let next = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
+            if breakdownOn, let stageBreakdown {
+                try splitPrefillStage(&cb, stage: stage, into: stageBreakdown)
             }
-            next.label = cb.label
-            cb = next
         }
         prefillEmbed.encode(commandBuffer: cb,
                             table: emb.buffer,
@@ -2230,7 +2226,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         var prefillLookahead: SpeculativeExpertPrefetch?
         for L in 0..<cfg.numLayers {
-            let layerStartNanos = stageBreakdown == nil ? 0 : clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let layerStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
             try prefillWillEncodeLayer?(L)
             try Task.checkCancellation()
             cb.label = "prefill start=\(startPosition) count=\(t) layer=\(L) phase="
@@ -2576,7 +2572,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     waitForCompletion(cb)
                     try checkCommandBufferError(cb)
                     stageBreakdown?.addGPU(.postAttentionAndRouter, cb)
-                    let routePlanStartNanos = stageBreakdown == nil ? 0 : clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                    let routePlanStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
 
                     if gemmaPrefillTrace != nil {
                         try trace(L, [
@@ -2717,7 +2713,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         streamer.noteRouteCounts(routeCounts)
                     }
                     if let stageBreakdown {
-                        stageBreakdown.addRoutedPlan(nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - routePlanStartNanos)
+                        stageBreakdown.addRoutedPlan(nanos: PrefillStageBreakdown.now() - routePlanStartNanos)
                     }
                     // Join the previous layer's lookahead before planning, so
                     // the tile plans see its slots as hits.
@@ -2787,7 +2783,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     detail: "routed tile scheduler requested pending action without pending tile")
                             }
                         }
-                        let fetchStartNanos = stageBreakdown == nil ? 0 : clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                        let fetchStartNanos = breakdownOn ? PrefillStageBreakdown.now() : 0
                         let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
                             model: model,
                             layer: L,
@@ -2796,7 +2792,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             plannedFetch: plannedFetch,
                             avoidingSlots: Set(pendingTiles.flatMap(\.fetch.plannedAssignedSlots)))
                         if let stageBreakdown {
-                            stageBreakdown.addRoutedFetchWait(nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - fetchStartNanos)
+                            stageBreakdown.addRoutedFetchWait(nanos: PrefillStageBreakdown.now() - fetchStartNanos)
                         }
                         try fetch.binding.validateCoversPairs(routes.sortedPairs,
                                                               pairStart: Int(tile.pairStart),
@@ -2963,7 +2959,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         cb = nextCB
                     }
                     if let stageBreakdown {
-                        stageBreakdown.addLayerWall(nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - layerStartNanos)
+                        stageBreakdown.addLayerWall(nanos: PrefillStageBreakdown.now() - layerStartNanos)
                     }
                     continue
         }
@@ -3020,7 +3016,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if let stageBreakdown {
-            stageBreakdown.addChunk(wallNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - chunkStartNanos,
+            stageBreakdown.addChunk(wallNanos: PrefillStageBreakdown.now() - chunkStartNanos,
                                     tokens: tokens.count)
         }
         kv?.advance(by: tokens.count)
@@ -6024,6 +6020,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         cb.commit()
         cb.waitUntilCompleted()
         reportCommandBufferFailure(cb)
+    }
+
+    /// `MFERENCE_PREFILL_BREAKDOWN=1` only: commits and waits the command
+    /// buffer at a stage boundary, records its GPU span, and continues on a
+    /// fresh buffer with the same label. Out of line so none of it is inlined
+    /// into `executePrefillChunk` when the diagnostic is off.
+    @inline(never)
+    private func splitPrefillStage(_ cb: inout MTLCommandBuffer,
+                                   stage: PrefillStage,
+                                   into breakdown: PrefillStageBreakdown) throws {
+        cb.commit()
+        waitForCompletion(cb)
+        try checkCommandBufferError(cb)
+        breakdown.addGPU(stage, cb)
+        guard let next = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        next.label = cb.label
+        cb = next
     }
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {

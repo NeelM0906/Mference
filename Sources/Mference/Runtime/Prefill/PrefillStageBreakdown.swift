@@ -58,7 +58,14 @@ public final class PrefillStageBreakdown: @unchecked Sendable {
     private var chunks = 0
     private var tokens = 0
 
+    /// The diagnostic clock. Out of line, like every recording method, so the
+    /// disabled path in the runner is a branch on one hoisted Bool and no
+    /// recording code is inlined into the prefill loops.
+    @inline(never)
+    static func now() -> UInt64 { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) }
+
     /// Adds a completed command buffer's GPU span to `stage`.
+    @inline(never)
     func addGPU(_ stage: PrefillStage, _ commandBuffer: MTLCommandBuffer) {
         let span = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
         guard span.isFinite, span > 0 else { return }
@@ -68,6 +75,7 @@ public final class PrefillStageBreakdown: @unchecked Sendable {
         lock.unlock()
     }
 
+    @inline(never)
     func addRoutedFetchWait(nanos: UInt64) {
         lock.lock()
         routedFetchWaitNanos &+= nanos
@@ -75,14 +83,17 @@ public final class PrefillStageBreakdown: @unchecked Sendable {
         lock.unlock()
     }
 
+    @inline(never)
     func addRoutedPlan(nanos: UInt64) {
         lock.lock(); routedPlanNanos &+= nanos; lock.unlock()
     }
 
+    @inline(never)
     func addLayerWall(nanos: UInt64) {
         lock.lock(); layerWallNanos &+= nanos; lock.unlock()
     }
 
+    @inline(never)
     func addChunk(wallNanos: UInt64, tokens chunkTokens: Int) {
         lock.lock()
         chunkWallNanos &+= wallNanos
