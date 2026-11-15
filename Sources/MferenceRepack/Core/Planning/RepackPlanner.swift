@@ -857,6 +857,7 @@ enum RepackPlanner {
         case .fp32: 3
         case .i64: 4
         case .i32: 5
+        case .ggmlBlocks: preconditionFailure("GGUF block bytes never reach the safetensors planners")
         }
     }
 

@@ -426,8 +426,9 @@ enum GTurboJSON {
                     "rowDim": pool.rowDim,
                     "storage": pool.storage.rawValue,
                     "weightBits": pool.bits,
-                    "scheme": quantized ? "affine" : "none",
-                    "scaleType": quantized ? "BF16" : "none",
+                    // IQ4_NL rows carry their FP16 scale inside each 18-byte block.
+                    "scheme": quantized ? "affine" : pool.storage == .iq4nl ? "iq4_nl" : "none",
+                    "scaleType": quantized ? "BF16" : pool.storage == .iq4nl ? "FP16" : "none",
                     "biasType": quantized ? "BF16" : "none",
                     "groupSize": pool.groupSize,
                     "rowWeightBytes": pool.rowWeightBytes,

@@ -76,7 +76,15 @@ struct PleRowPoolPlan: Sendable {
     enum Storage: String, Sendable, Equatable {
         case int4AffineG64
         case bf16
+        /// GGUF IQ4_NL rows copied verbatim from a GGUF source (WS4): 32-value
+        /// blocks of an FP16 scale plus 16 packed 4-bit indices into the
+        /// non-linear `kvalues_iq4nl` table, 18 bytes per block, no companions.
+        case iq4nl
     }
+
+    /// Bytes per 32-value IQ4_NL block (`sizeof(block_iq4_nl)`).
+    static let iq4nlBlockBytes = 18
+    static let iq4nlBlockValues = 32
 
     /// Text layer the PLE module belongs to.
     let layerIndex: Int
@@ -100,8 +108,11 @@ struct PleRowPoolPlan: Sendable {
     let fileSize: UInt64
     let shards: [PleRowPoolShardPlan]
 
-    /// BF16 bytes one source row occupies.
-    var rowSourceBytes: Int { rowDim * 2 }
+    /// Source bytes one row occupies: BF16 for a safetensors source, the
+    /// row's IQ4_NL blocks for a GGUF source.
+    var rowSourceBytes: Int {
+        storage == .iq4nl ? rowDim / Self.iq4nlBlockValues * Self.iq4nlBlockBytes : rowDim * 2
+    }
 
     /// Transform for a run of whole blocks: quantize-and-pad, or copy-and-pad.
     var blockTransform: RangeCopyTransform {
@@ -110,7 +121,9 @@ struct PleRowPoolPlan: Sendable {
             return .quantizeInt4G64RowBlocks(rowSourceBytes: rowSourceBytes,
                                              rowsPerBlock: rowsPerBlock,
                                              blockStride: blockStride)
-        case .bf16:
+        case .bf16, .iq4nl:
+            // Verbatim rows, zero-padded to the block stride. The transform is
+            // byte-generic despite its name.
             return .bf16RowBlocks(rowSourceBytes: rowSourceBytes,
                                   rowsPerBlock: rowsPerBlock,
                                   blockStride: blockStride)
@@ -124,7 +137,7 @@ struct PleRowPoolPlan: Sendable {
         switch storage {
         case .int4AffineG64:
             return .quantizeInt4G64Rows(rowSourceBytes: rowSourceBytes)
-        case .bf16:
+        case .bf16, .iq4nl:
             return .identity
         }
     }
@@ -135,7 +148,8 @@ struct PleRowPoolPlan: Sendable {
                      outputDir: String,
                      sourceTensorPrefix: String,
                      rowDim: Int,
-                     shards: [(index: Int, tensor: SourceTensor, rows: Int)]) throws
+                     shards: [(index: Int, tensor: SourceTensor, rows: Int)],
+                     sourceStorage: Storage? = nil) throws
         -> PleRowPoolPlan {
         guard rowDim > 0 else {
             throw RepackError.shapeMismatch(
@@ -148,9 +162,15 @@ struct PleRowPoolPlan: Sendable {
         }
         // Quantize only when the group size divides the row width. Flash-Next's
         // 160-wide table does not, so its pool is BF16.
-        let storage: Storage = StreamingInt4Quantizer.isQuantizableRowDim(rowDim)
+        // A GGUF source fixes the storage to its own bytes (`sourceStorage`).
+        let storage: Storage = sourceStorage ?? (StreamingInt4Quantizer.isQuantizableRowDim(rowDim)
             ? .int4AffineG64
-            : .bf16
+            : .bf16)
+        if storage == .iq4nl, rowDim % Self.iq4nlBlockValues != 0 {
+            throw RepackError.shapeMismatch(
+                name: sourceTensorPrefix,
+                detail: "IQ4_NL row width \(rowDim) is not a whole number of 32-value blocks")
+        }
         let rowWeightBytes: UInt64
         let rowCompanionBytes: UInt64
         switch storage {
@@ -161,6 +181,9 @@ struct PleRowPoolPlan: Sendable {
                 * StreamingInt4Quantizer.companionBytesPerGroup)
         case .bf16:
             rowWeightBytes = UInt64(rowDim * 2)
+            rowCompanionBytes = 0
+        case .iq4nl:
+            rowWeightBytes = UInt64(rowDim / Self.iq4nlBlockValues * Self.iq4nlBlockBytes)
             rowCompanionBytes = 0
         }
         let rowStride = rowWeightBytes + 2 * rowCompanionBytes
@@ -204,8 +227,9 @@ struct PleRowPoolPlan: Sendable {
             sourceTensorPrefix: sourceTensorPrefix,
             rowDim: rowDim,
             storage: storage,
-            bits: storage == .int4AffineG64 ? 4 : 16,
-            groupSize: storage == .int4AffineG64 ? StreamingInt4Quantizer.groupSize : 0,
+            bits: storage == .bf16 ? 16 : 4,
+            groupSize: storage == .int4AffineG64 ? StreamingInt4Quantizer.groupSize
+                : storage == .iq4nl ? Self.iq4nlBlockValues : 0,
             rowWeightBytes: rowWeightBytes,
             rowCompanionBytes: rowCompanionBytes,
             rowStride: rowStride,
