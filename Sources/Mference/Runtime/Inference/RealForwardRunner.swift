@@ -714,8 +714,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context, groupSize: int4GroupSize,
                                                       sourceFP16: prefillMatmulSourceFP16)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context, sourceFP16: sourceFP16)
+        // Qwen 3.6 full attention (headDim 256, 16/2 heads) never fits the
+        // TensorOps kernel's shape gate, so off Apple10 it takes the
+        // GQA-shared simdgroup kernel instead of the per-head tiled one.
         self.prefillAttention = try PrefillAttention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil,
-                                                     gemmaQATFullAttentionTensorOps: !policy.prefillAttentionSourceFP16)
+                                                     gemmaQATFullAttentionTensorOps: !policy.prefillAttentionSourceFP16,
+                                                     gqaSimdgroup: Self.usesQwenGQASimdAttention(
+                                                        family: cfg.family,
+                                                        supportsApple10TensorOps: context.device.supportsApple10TensorOps))
         self.prefillPostAttention = try PrefillPostAttentionSetup(context: context, sourceFP16: sourceFP16)
         self.prefillRouter = try PrefillRouter(context: context, routerBF16: model.hasBF16Router, sourceFP16: sourceFP16)
         self.prefillSharedExpert = try PrefillSharedExpert(
@@ -3870,6 +3876,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Keeps BF16-magnitude outlier channels (observed > 65k at layer 41)
     /// inside half range through h1/h2 and the phase-2 reduce.
     static let inklingFFNPrescale: Float = 32.0
+
+    /// Whether chunked prefill's full-attention layers use the GQA-shared
+    /// simdgroup kernel (`attention_prefill_gqa8_d256_simd`). Only Qwen 3.6,
+    /// and only where the Apple10 TensorOps path is absent; it changes output
+    /// within tolerance, so every other family and M5-class host keeps its bytes.
+    static func usesQwenGQASimdAttention(family: ModelFamily,
+                                         supportsApple10TensorOps: Bool) -> Bool {
+        family == .qwen36 && !supportsApple10TensorOps
+    }
 
     /// Splits Inkling prefill's routed-expert loop into fetch / encode / drain,
     /// the prefill counterpart to `MFERENCE_PHASES` for decode. Off by default:

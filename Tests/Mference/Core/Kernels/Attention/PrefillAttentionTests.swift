@@ -308,6 +308,68 @@ import MferenceValidationSupport
             """)
     }
 
+    /// Qwen 3.6 full attention: headDim 256, 16 query / 2 KV heads, scale
+    /// 1/16. Chunks that are not multiples of the 4-token threadgroup or the
+    /// 8-key step, odd strides from `makeFixture`, and a cold start.
+    @Test(arguments: [(0, 9), (37, 70), (200, 33), (5, 1)])
+    func gqaSimdMatchesReferenceAtQwenShape(_ shape: (start: Int, chunk: Int)) throws {
+        let ctx = try MetalContext()
+        let gqa = try PrefillAttention(context: ctx, gqaSimdgroup: true)
+        #expect(gqa.gqaSimdPipelineAvailable)
+        var fixture = Self.makeFixture(start: shape.start, chunk: shape.chunk, window: 0,
+                                       seed: 0xA960 + UInt64(shape.start),
+                                       headDim: 256, qHeads: 16, kvHeads: 2)
+        fixture.scale = 0.0625
+        let actual = try Self.runKernel(fixture, context: ctx, prefill: gqa,
+                                        path: .causalTiled).values
+        let reference = Self.reference(fixture)
+        let maxAbs = RelError.maxAbsDiff(actual, reference)
+        let rel = RelError.compute(actual: actual, reference: reference)
+        #expect(maxAbs <= 2e-2, "start=\(shape.start) chunk=\(shape.chunk) maxAbs=\(maxAbs) rel=\(rel)")
+        #expect(rel <= 2e-2, "start=\(shape.start) chunk=\(shape.chunk) rel=\(rel)")
+
+        // Same math as the tiled kernel up to FP32 summation order, so the
+        // FP16 outputs agree to a few ULPs.
+        let tiled = try Self.runKernel(fixture, context: ctx, prefill: PrefillAttention(context: ctx),
+                                       path: .causalTiled).values
+        let vsTiled = RelError.maxAbsDiff(actual, tiled)
+        #expect(vsTiled <= 4e-3, "start=\(shape.start) chunk=\(shape.chunk) |gqa - tiled|=\(vsTiled)")
+    }
+
+    /// Shapes the GQA kernel does not cover keep the tiled kernel's bytes even
+    /// when the kernel is enabled.
+    @Test func gqaSimdLeavesOtherShapesOnTheTiledKernel() throws {
+        let ctx = try MetalContext()
+        let gqa = try PrefillAttention(context: ctx, gqaSimdgroup: true)
+        let tiled = try PrefillAttention(context: ctx)
+        let shapes: [(label: String, window: Int, headDim: Int, qHeads: Int, kvHeads: Int, ring: UInt32)] = [
+            ("gemma-full-512", 0, 512, 16, 2, 0),
+            ("gemma-swa-256-16-8", 0, 256, 16, 8, 0),
+            ("clipping-window", 16, 256, 16, 2, 0),
+            ("ring", 0, 256, 16, 2, 64),
+        ]
+        for (index, c) in shapes.enumerated() {
+            let fixture = Self.makeFixture(start: 40, chunk: 12, window: c.window,
+                                           seed: 0xA970 + UInt64(index),
+                                           headDim: c.headDim, qHeads: c.qHeads, kvHeads: c.kvHeads)
+            let a = try Self.runKernel(fixture, context: ctx, prefill: gqa,
+                                       kvRingCapacity: c.ring, path: .causalTiled).values
+            let b = try Self.runKernel(fixture, context: ctx, prefill: tiled,
+                                       kvRingCapacity: c.ring, path: .causalTiled).values
+            #expect(a == b, "\(c.label) must stay on the tiled kernel")
+        }
+    }
+
+    @Test func gqaSimdIsSelectedOnlyForQwen36WithoutTensorOps() {
+        for family in ModelFamily.allCases {
+            for tensorOps in [false, true] {
+                let selected = RealForwardRunner.usesQwenGQASimdAttention(
+                    family: family, supportsApple10TensorOps: tensorOps)
+                #expect(selected == (family == .qwen36 && !tensorOps), "\(family) tensorOps=\(tensorOps)")
+            }
+        }
+    }
+
     private static func makeFixture(start: Int,
                                     chunk: Int,
                                     window: Int,
