@@ -106,11 +106,13 @@ public enum GGUFLUT4 {
         return packed
     }
 
-    /// The exact fp32 value of one LUT4 weight. Integer parts first (`M·T`
-    /// fits in 13 bits), then the fp16 scale, then the power of two: every
-    /// step is exact, so the order is free.
+    /// The exact fp32 value of one LUT4 weight, `((D · M) · T) · 2^K`. Every
+    /// step is exact (at most 23 significant bits), and every product stays
+    /// in fp32 so a zero carries llama.cpp's sign: IQ4_XS has M = 0 when
+    /// ls = 32, and llama.cpp's `(d · 0) · kvalue` is −0 for a negative table
+    /// entry. Multiplying M · T as integers first would give +0 there.
     @inline(__always)
     public static func weight(d: UInt16, m: Int8, k: Int, t: Int8) -> Float {
-        Float(Float16(bitPattern: d)) * Float(Int(m) * Int(t)) * Float(sign: .plus, exponent: k, significand: 1)
+        Float(Float16(bitPattern: d)) * Float(m) * Float(t) * Float(sign: .plus, exponent: k, significand: 1)
     }
 }
