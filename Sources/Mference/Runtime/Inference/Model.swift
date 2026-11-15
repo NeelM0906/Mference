@@ -171,6 +171,8 @@ public struct Model {
         case .deepseekV4Flash, .maple, .flint: return "model."
         case .inklingSmall: return "model.llm."
         case .qwen38flashnext: return "model.language_model."
+        // GGUF names (WS4): `blk.N.` per layer, flat global names.
+        case .qwen38flashnextudiq3xxs: return "blk."
         case .minicpm5: return "model."
         // PipeNetwork's mlx-vlm conversion keeps the multimodal container
         // order: `language_model.model.` for the text trunk and a
@@ -182,6 +184,7 @@ public struct Model {
         switch config.family {
         case .gemma4, .qwen36, .qwen38: return "language_model.lm_head.weight"
         case .deepseekV4Flash, .maple, .qwen38flashnext, .flint: return "lm_head.weight"
+        case .qwen38flashnextudiq3xxs: return "output.weight"
         case .inklingSmall: return "model.llm.unembed.weight"
         case .minicpm5: return "lm_head.weight"
         case .glm53Flash: return "language_model.lm_head.weight"
@@ -198,6 +201,8 @@ public struct Model {
             return "\(trunkPrefix)embed.weight"
         case .minicpm5, .glm53Flash:
             return "\(trunkPrefix)embed_tokens.weight"
+        case .qwen38flashnextudiq3xxs:
+            return "token_embd.weight"
         }
     }
 
@@ -255,6 +260,8 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
+        case .qwen38flashnextudiq3xxs:
+            return try resident(name: "blk.\(L).ffn_gate_inp.weight")
         case .qwen36, .qwen38, .qwen38flashnext:
             // Qwen 3.8 is dense and has no router tensor; the accessor throws
             // tensorNotFound if a caller ever asks.
@@ -298,6 +305,9 @@ public struct Model {
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
         case .qwen36, .qwen38flashnext:
             return "\(trunkPrefix)layers.\(L).mlp.shared_expert.\(proj).weight"
+        case .qwen38flashnextudiq3xxs:
+            // `gate_proj` -> `blk.L.ffn_gate_shexp.weight`.
+            return "blk.\(L).ffn_\(proj.replacingOccurrences(of: "_proj", with: ""))_shexp.weight"
         case .deepseekV4Flash:
             return "model.layers.\(L).ffn.shared_experts.\(proj).weight"
         case .inklingSmall:
@@ -330,7 +340,7 @@ public struct Model {
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
         case .deepseekV4Flash, .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).attn_norm.weight")
-        case .qwen38flashnext:
+        case .qwen38flashnext, .qwen38flashnextudiq3xxs:
             throw accessorNotAvailable("inputNorm")
         case .minicpm5, .glm53Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).input_layernorm.weight")
@@ -346,7 +356,7 @@ public struct Model {
             return try resident(name: "\(trunkPrefix)layers.\(L).ffn_norm.weight")
         case .inklingSmall:
             return try resident(name: "\(trunkPrefix)layers.\(L).mlp_norm.weight")
-        case .qwen38flashnext:
+        case .qwen38flashnext, .qwen38flashnextudiq3xxs:
             throw accessorNotAvailable("postAttnNorm")
         case .minicpm5, .glm53Flash:
             return try resident(name: "\(trunkPrefix)layers.\(L).post_attention_layernorm.weight")

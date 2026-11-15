@@ -77,8 +77,9 @@ import Foundation
         #expect(!arch.layerHasAttentionIndexer(2))
 
         // Every other family keeps a single-stream residual and no PLE layer.
+        // The Unsloth GGUF install (WS4) is the same architecture.
         for (family, config) in ArchConfig.knownArchitectures
-        where family != .qwen38flashnext {
+        where family != .qwen38flashnext && family != .qwen38flashnextudiq3xxs {
             #expect(config.flashNext == .none, "\(family.rawValue) grew flashNext axes")
             #expect(!config.hasLowRankHyperConnections)
             #expect(config.residualStreamWidth == config.hiddenSize)

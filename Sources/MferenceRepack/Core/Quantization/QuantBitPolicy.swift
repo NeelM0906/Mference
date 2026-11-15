@@ -115,7 +115,9 @@ public struct QuantBitPolicy: Sendable, Equatable {
     // Internal rather than public: `RepackModelFamily` is internal.
     static func originalRepo(family: RepackModelFamily) -> QuantBitPolicy {
         switch family {
-        case .qwen38flashnext, .qwen36:
+        // The GGUF family never consults a bit policy (every tensor keeps its
+        // ggml format); it shares the Flash-Next answer only to stay total.
+        case .qwen38flashnext, .qwen38flashnextudiq3xxs, .qwen36:
             // Qwen 3.6 mirrors mlx-community's conversion of the same
             // checkpoint. Flash-Next has no community conversion to mirror, so
             // the same question was answered by measuring its own shipped

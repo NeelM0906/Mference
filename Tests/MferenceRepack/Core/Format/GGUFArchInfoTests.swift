@@ -57,7 +57,7 @@ struct GGUFArchInfoTests {
         let (md, tensors) = try Self.load()
         #expect(tensors.count == 1224)
         let a = try ArchInfo.fromGGUFQwen4Exp(metadata: md, tensors: tensors, path: "unsloth")
-        #expect(a.family == .qwen38flashnext)
+        #expect(a.family == .qwen38flashnextudiq3xxs)
         #expect(a.hiddenSize == 2560 && a.numLayers == 48 && a.vocabSize == 248_320)
         #expect(a.numHeads == 24 && a.numKVHeads == 2 && a.headDim == 256)
         #expect(a.intermediateSize == 640 && a.moeIntermediateSize == 640)

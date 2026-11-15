@@ -132,7 +132,7 @@ extension ArchInfo {
             attentionKEqV: false,
             fullAttentionLayerMask: mask,
             hiddenActivation: "silu",
-            family: .qwen38flashnext,
+            family: .qwen38flashnextudiq3xxs,
             attnOutputGate: true,
             attentionScale: 1.0 / Double(headDim).squareRoot(),
             embeddingScaledBySqrtHidden: false,

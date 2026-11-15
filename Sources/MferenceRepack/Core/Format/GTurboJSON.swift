@@ -31,7 +31,7 @@ enum GTurboJSON {
         case .minicpm5:
             return "W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX"
         case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-             .qwen38flashnext, .glm53Flash, .flint:
+             .qwen38flashnext, .qwen38flashnextudiq3xxs, .glm53Flash, .flint:
             return "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36"
         }
     }
@@ -192,7 +192,8 @@ enum GTurboJSON {
             archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
             archDict["requiredAxes"] = Glm53Axes.requiredAxisNames
         }
-        if arch.family == .qwen38flashnext, let axes = arch.flashNext {
+        if arch.family == .qwen38flashnext || arch.family == .qwen38flashnextudiq3xxs,
+           let axes = arch.flashNext {
             archDict["numSharedExperts"] = arch.numSharedExperts
             archDict["numDenseLayers"] = arch.numDenseLayers
             archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize

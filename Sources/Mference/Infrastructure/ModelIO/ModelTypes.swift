@@ -21,6 +21,10 @@ public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     /// CLI, the loopback server and the UI behind it; the install is a ~175 GB
     /// quantize-in-flight repack rather than a pre-converted download.
     case qwen38flashnext = "qwen38flashnext"
+    /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4). Same
+    /// architecture, GGUF tensor names and ggml formats; installable, but gated
+    /// in `ManifestReader.familiesWithoutRunner` until U4's runner lands.
+    case qwen38flashnextudiq3xxs = "qwen38flashnextudiq3xxs"
     /// MiniCPM5-2B: a plain-llama dense family (`LlamaForCausalLM`), the
     /// project's first, installed from the vendor's BF16 upload through the
     /// quantize-in-flight path. Bare `model.` trunk prefix and a top-level
@@ -1100,6 +1104,68 @@ public struct ArchConfig: Sendable, Equatable {
             pleEosTokenID: 248_044)
     )
 
+    /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4, ruling R1).
+    /// Field for field the vendor baseline above, except the family and the
+    /// two storage-shaped PLE fields, read from the pinned GGUF header
+    /// (`docs/families/qwen38flashnext-unsloth-ud-iq3_xxs.tensors.json`). Gated
+    /// in `ManifestReader.familiesWithoutRunner` until its runner lands (U4).
+    public static let qwen38FlashNextUnslothUDIQ3XXS = ArchConfig(
+        hiddenSize: 2560,
+        intermediateSize: 640,
+        moeIntermediateSize: 640,
+        numHeads: 24,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 48,
+        numExperts: 512,
+        topKExperts: 10,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.qwen38FlashNextLayerMask(),
+        hiddenActivation: "silu",
+        family: .qwen38flashnextudiq3xxs,
+        attnOutputGate: true,          // output_gate_type: sigmoid
+        attentionScale: 0.0625,        // 256^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: true,
+        ropeNeoxSubdim: true,
+        linearAttention: LinearAttentionConfig(
+            numKHeads: 16, numVHeads: 48,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4),
+        // The router path is Qwen 3.6's: softmax over the logits, top-k of the
+        // probabilities, then renormalize the selected k (`norm_topk_prob`).
+        // `routerNormAfterTopK` stays false because that flag selects
+        // Inkling's and Maple's *different* ordering, not this one.
+        numSharedExperts: 1,
+        flashNext: FlashNextConfig(
+            hcCount: 4,
+            hcLowRank: 320,
+            indexerNumHeads: 4,
+            indexerHeadDim: 128,
+            indexerNumKVHeads: 1,
+            indexerBudget: 2048,
+            indexerCompressRatio: 4,
+            pleLayerIDs: [2],
+            // The GGUF stores the n-gram table as one merged tensor and
+            // carries explicit per-head vocab sizes instead of the base.
+            pleNgramShardCount: 1,
+            pleNgramVocabSizeBase: 0,
+            pleConvKernelSize: 4,
+            // config.json text_config.eos_token_id @ de4b8e4d.
+            pleEosTokenID: 248_044)
+    )
+
     private static func qwen38FlashNextLayerMask() -> [UInt8] {
         // Same 3:1 hybrid shape as Qwen 3.6/3.8 (full_attention_interval = 4).
         var mask = [UInt8](repeating: 2, count: 48)
@@ -1263,6 +1329,7 @@ public struct ArchConfig: Sendable, Equatable {
         .maple: .maplePreview,
         .flint: .flint40B_A2_5B_JANG_4M,
         .qwen38flashnext: .qwen38FlashNext_180B_A3_5B,
+        .qwen38flashnextudiq3xxs: .qwen38FlashNextUnslothUDIQ3XXS,
         .minicpm5: .miniCPM5_2B,
         .glm53Flash: .glm53Flash_320B_A18B,
     ]

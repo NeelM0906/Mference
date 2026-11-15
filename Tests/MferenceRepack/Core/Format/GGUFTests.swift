@@ -172,6 +172,29 @@ struct GGUFTests {
         #expect(throws: RepackError.self) { try parseComplete(g.file(dataBytes: 256)) }
     }
 
+    /// R9: the GGUF label installs by name but is not advertised, and its
+    /// pinned `sourceIndexSHA256` is the pin's own fingerprint.
+    @Test func ggufSourceIsUnlistedAndPinnedByFingerprint() throws {
+        let source = try #require(SupportedModelSource.named("qwen38flashnextudiq3xxs"))
+        #expect(!SupportedModelSource.all.contains { $0.name == source.name })
+        #expect(source.kind == .gguf)
+        let pin = try #require(source.ggufPin)
+        #expect(pin.fingerprint == source.sourceIndexSHA256)
+        #expect(pin.totalBytes == 83_626_438_426 && pin.shards.count == 4)
+        #expect(SourceFingerprint.modelID(forIndexSha256: pin.fingerprint) == source.modelID)
+        #expect(source.installOptions(outputDirectory: URL(fileURLWithPath: "/tmp/x"), overwrite: false,
+                                      token: nil).ggufPin == pin)
+    }
+
+    /// R6: Foundation JSON round-trips full-width Int64 values exactly, so the
+    /// PLE hash constants (up to 63 bits) need no decimal-string encoding.
+    @Test func int64JSONRoundTripIsExact() throws {
+        let values: [Int64] = [Int64.max, Int64.max - 1, (1 << 62) + 12_345, 23_703_573_157_769, -1]
+        let data = try JSONSerialization.data(withJSONObject: ["v": values])
+        let back = try JSONDecoder().decode([String: [Int64]].self, from: data)
+        #expect(back["v"] == values)
+    }
+
     /// The per-expert byte counts in the U0 inventory follow from the type
     /// table: expert gate/up are [2560, 640] and down is [640, 2560].
     @Test func expertBytesMatchTheU0Inventory() throws {

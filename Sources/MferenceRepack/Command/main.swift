@@ -3,7 +3,7 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <gemma4|gemma4qat|qwen36|qwen36original|qwen38|swiftqwen38|deepseekv4flash|inklingsmall|maple|flint|qwen38flashnext|minicpm5|minicpm5mlx|glm53flash|qwen38flashnextudiq3xxs>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <gemma4|gemma4qat|qwen36|qwen36original|qwen38|swiftqwen38|deepseekv4flash|inklingsmall|maple|flint|qwen38flashnext|minicpm5|minicpm5mlx|glm53flash>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
@@ -23,6 +23,10 @@ and every input file hash is checked before the output is finished.
 --skip-mtp drops the source checkpoint's own mtp.* draft-layer group instead
 of carrying it. Vision towers are always skipped. Either way the decision is
 recorded in manifest.json -> sidecars rather than left implicit.
+
+qwen38flashnextudiq3xxs (unlisted) copies Unsloth's UD-IQ3_XXS GGUF quant of
+Qwen3.8-Flash-Next, a third-party quant, in its own ggml formats (~83.6 GB
+read). It installs by name but no runner executes it yet.
 
 qwen38flashnext and qwen36original read the model vendor's original BF16 repo
 and quantize to INT4 affine group-64 during the install. qwen38flashnext keeps

@@ -108,9 +108,8 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     /// it only when present. See `FlashNextConfig.pleEosTokenID`.
     public let pleEosTokenID: Int?
     /// Axis names the install claims a runner must implement. Advisory only —
-    /// `ManifestReader.familiesWithoutRunner` is the authority, and it is empty
-    /// today, so an install publishing this field does not make the family
-    /// unloadable.
+    /// `ManifestReader.familiesWithoutRunner` is the authority, so an install
+    /// publishing this field does not by itself make the family unloadable.
     public let requiredAxes: [String]?
     /// Per-head q/k RMSNorm gains on full-attention layers. Optional so every
     /// manifest predating the axis decodes unchanged; absent validates against
@@ -941,11 +940,10 @@ public enum ManifestReader {
     /// Families `MferenceRepack` can install but no forward runner can execute,
     /// mapped to the axes whose kernels are missing.
     ///
-    /// One entry today: `glm53Flash`, added 2026-09-11 with its Day-0 contract.
-    /// `qwen38flashnext` was the previous occupant, removed 2026-09-10 when
-    /// `FlashNextForwardRunner` landed and the owner lifted its gate. The three
-    /// axis names are the runtime's own (`Glm53Config` and its doc comment name
-    /// the mechanism behind each); remove the entry only when
+    /// One entry today: `qwen38flashnextudiq3xxs` (WS4), added 2026-11-15 with
+    /// its GGUF install path. Earlier occupants were `qwen38flashnext` (removed
+    /// 2026-09-10 when `FlashNextForwardRunner` landed) and `glm53Flash`
+    /// (removed when `Glm53ForwardRunner` landed). Remove an entry only when
     /// `ForwardRunnerFactory` actually dispatches to the family's runner.
     ///
     /// Add an entry the moment a new family gains an `ArchInfo` install path,
@@ -969,7 +967,20 @@ public enum ManifestReader {
     /// runner is built *against*. Presence in this table is the single fact
     /// that decides whether it can be loaded, and it is checked in
     /// `peekFamily` before any of that machinery is reached.
-    static let familiesWithoutRunner: [String: [String]] = [:]
+    static let familiesWithoutRunner: [String: [String]] = [
+        // WS4, added 2026-11-15 with its install path (ruling R1). Remove when
+        // U4's runner lands and `ForwardRunnerFactory` dispatches to it.
+        ModelFamily.qwen38flashnextudiq3xxs.rawValue: qwen38FlashNextGGUFRequiredAxes,
+    ]
+
+    /// The kernels a `qwen38flashnextudiq3xxs` (Unsloth UD-IQ3_XXS GGUF) install
+    /// needs before it can run (WS4 U1 §4): LUT4 routed-expert slots expanded
+    /// from GGUF IQ blocks, INT8-2L resident matmuls, and IQ4_NL n-gram rows.
+    public static let qwen38FlashNextGGUFRequiredAxes: [String] = [
+        "ggufLUT4RoutedExperts",
+        "ggufInt8TwoLevelResident",
+        "ggufIQ4NLPleRows",
+    ]
 
     /// The axes `glm53Flash` needed a runner for, in the order the port built
     /// them; `Glm53ForwardRunner` implements all three, so the family is no
@@ -982,9 +993,8 @@ public enum ManifestReader {
     ]
 
     /// The gate lookup, factored out of `peekFamily` so it can be exercised
-    /// against an injected table: with `familiesWithoutRunner` empty there is
-    /// no shipped family left to prove the mechanism with, and the mechanism is
-    /// what the next family port depends on.
+    /// against an injected table, so the mechanism stays testable whatever the
+    /// shipped table holds.
     ///
     /// Returns the named refusal for a gated family, or nil for one the runtime
     /// can execute.

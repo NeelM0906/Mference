@@ -44,6 +44,22 @@ struct FlashNextGGUFPlannerTests {
         }
     }
 
+    /// R2: runtime slots hold LUT4, so they are sized from the LUT4 geometry,
+    /// which matches U1 §3a and exceeds the widest disk stride.
+    @Test func lut4SlotStridesMatchU1AndExceedDiskStrides() throws {
+        let (plan, _) = try Self.realPlan()
+        var slotByDisk: [UInt64: UInt64] = [:]
+        for l in plan.layers { slotByDisk[l.expertStride] = try LUT4SlotGeometry.slotStride(l) }
+        #expect(slotByDisk[1_982_464] == 2_801_664)   // IQ2_S / IQ4_NL
+        #expect(slotByDisk[2_179_072] == 2_703_360)   // IQ3_XXS / IQ4_NL
+        #expect(slotByDisk[1_523_712] == 2_752_512)   // IQ2_S / Q2_0
+        #expect(slotByDisk[2_670_592] == 2_703_360)   // IQ4_XS / IQ4_NL
+        let maxDisk = plan.layers.map(\.expertStride).max()!
+        let maxSlot = try plan.layers.map(LUT4SlotGeometry.slotStride).max()!
+        #expect(maxSlot == 2_801_664 && maxSlot > maxDisk)
+        for l in plan.layers { #expect(try LUT4SlotGeometry.slotStride(l) > l.expertStride) }
+    }
+
     @Test func pleTableBecomesAnIQ4NLRowPool() throws {
         let (plan, _) = try Self.realPlan()
         let pool = try #require(plan.plePools.first)
@@ -59,13 +75,38 @@ struct FlashNextGGUFPlannerTests {
         let (plan, tensors) = try Self.realPlan()
         let resident = plan.resident.entries
         #expect(resident.count == 1224 - 48 * 3 - 1)
-        #expect(resident.allSatisfy { $0.fileOffset % 256 == 0 && $0.weightTransform == .identity })
-        let q6 = try #require(resident.first { $0.name == "token_embd.weight" })
-        #expect(q6.dtype == 0x40 | 14 && q6.logicalShape4 == [248_320, 2560, 0, 0])
+        #expect(resident.allSatisfy { $0.fileOffset % 256 == 0 })
+        // token_embd stays native Q6_K (row gather); every other Q6_K / Q8_0
+        // matrix is INT8-2L (R4), and everything else is an identity copy.
+        let embd = try #require(resident.first { $0.name == "token_embd.weight" })
+        #expect(embd.dtype == 0x40 | 14 && embd.logicalShape4 == [248_320, 2560, 0, 0])
+        #expect(embd.weightTransform == .identity)
+        let twoLevel = resident.filter { $0.dtype & 0x80 != 0 }
+        #expect(twoLevel.count == tensors.filter {
+            ($0.type == .q6_K || $0.type == .q8_0) && $0.ne.count == 2 && $0.name != "token_embd.weight"
+                && !$0.name.contains("_exps")
+        }.count)
+        #expect(resident.filter { $0.dtype & 0x80 == 0 }.allSatisfy { $0.weightTransform == .identity })
+        let q6 = try #require(twoLevel.first { $0.name == "output.weight" })
+        #expect(q6.dtype == 0x80 | 14 && q6.sizeBytes == 248_320 * 2560)
+        #expect(q6.scaleSize == 248_320 * 10 * 2 && q6.biasSize == 248_320 * 160)
+        #expect(q6.scaleOffset % 256 == 0 && q6.biasOffset % 256 == 0)
 
+        // Every source byte is read: the distinct source ranges tile the tensors.
         let copies = try RangeCopyPlanner.plan(repackPlan: plan, rangeChunkBytes: 64 << 20)
-        let sourceBytes = copies.scalarCopies.reduce(UInt64(0)) { $0 + $1.size }
+        struct Range: Hashable { let shard: String; let offset: UInt64; let size: UInt64 }
+        let distinct = Set(copies.scalarCopies.map { Range(shard: $0.shardID, offset: $0.sourceOffset, size: $0.size) })
+        let sourceBytes = distinct.reduce(UInt64(0)) { $0 + $1.size }
         #expect(sourceBytes == tensors.reduce(UInt64(0)) { $0 + $1.sizeBytes })
         #expect(sourceBytes == 83_615_413_760)
+
+        // R4 cost: INT8-2L growth over the native Q6_K bytes (Q8_0 is
+        // size-neutral): 855,408,640 B of data over 249 Q6_K matrices (plus
+        // region alignment padding); token_embd stays native, so this is below U1's
+        // 1.01 GB, which counted every Q6_K tensor.
+        let growth = twoLevel.reduce(Int64(0)) {
+            $0 + Int64($1.sizeBytes + $1.scaleSize + $1.biasSize) - Int64($1.sourceWeight.sizeBytes)
+        }
+        #expect(growth == 855_408_640)
     }
 }

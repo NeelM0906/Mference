@@ -11,14 +11,43 @@ extension GTurboJSON {
         case 2: return "F16"
         case 3: return "F32"
         default:
+            if dtypeCode & FlashNextGGUFPlanner.int8TwoLevelDtypeBase != 0 {
+                let id = UInt32(dtypeCode & ~FlashNextGGUFPlanner.int8TwoLevelDtypeBase)
+                return "INT8-2L(" + (GGMLType(rawValue: id)?.name ?? "unknown") + ")"
+            }
             let id = UInt32(dtypeCode & ~FlashNextGGUFPlanner.quantizedDtypeBase)
             return GGMLType(rawValue: id)?.name ?? "unknown"
         }
     }
 
+    /// Nominal bits per weight of a planned dtype code, for the advisory quant
+    /// slots (block scales excluded).
+    static func ggufNominalBits(dtypeCode: UInt8) -> Int {
+        let name = ggufFormatName(dtypeCode: dtypeCode)
+        if name.hasPrefix("INT8-2L") { return 8 }
+        switch name {
+        case "F32": return 32
+        case "F16", "BF16": return 16
+        case "Q8_0": return 8
+        case "Q6_K": return 6
+        case "IQ4_XS", "IQ4_NL": return 4
+        case "IQ3_XXS": return 3
+        case "IQ2_S", "Q2_0": return 2
+        default: return 0
+        }
+    }
+
+    /// The `expertStorage.format` of a GGUF install (ruling R2). An old reader's
+    /// `parseStorage` refuses an unknown format, so this install cannot be
+    /// mistaken for INT4 or BF16 experts.
+    static let ggufExpertStorageFormat = "ggufNativeBlocksV1"
+
     /// Per-layer expert stride and per-component ggml format. The top-level
-    /// `expertStride` is the widest layer's, for slot sizing.
+    /// `expertStride` is the max *stored* stride; it never sizes a runtime
+    /// slot, which holds the execution format (a LUT4 slot is larger than
+    /// any GGUF disk stride).
     static func encodeGGUFLayout(plan: RepackPlan) throws -> Data {
+        let slotStrides = try plan.layers.map(LUT4SlotGeometry.slotStride)
         var layersArr: [[String: Any]] = []
         for lp in plan.layers {
             var experts: [[String: Any]] = []
@@ -48,6 +77,14 @@ extension GTurboJSON {
             "numLayers": plan.arch.numLayers,
             "expertsPerLayer": plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,
             "layers": layersArr,
+            "expertStorage": [
+                "format": ggufExpertStorageFormat,
+                "storedExpertStride": plan.layers.map(\.expertStride).max() ?? 0,
+                "storedExpertStrides": plan.layers.map(\.expertStride),
+                // Runtime slots hold LUT4 (U1 §3a); size them from these.
+                "slotFormat": "lut4",
+                "slotStrides": slotStrides,
+            ] as [String: Any],
         ]
         return try JSONSerialization.data(withJSONObject: obj,
                                           options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
@@ -126,23 +163,36 @@ extension GTurboJSON {
             "shards": pin.shards.map { ["path": $0.path, "sha256": $0.sha256, "size": $0.size] as [String: Any] },
         ] as [String: Any]
         m["expertStrides"] = plan.layers.map(\.expertStride)
-        func format(_ name: String) -> String {
-            plan.resident.entries.first { $0.name == name }.map { ggufFormatName(dtypeCode: $0.dtype) } ?? "absent"
+        // R3: every norm in the GGUF is already in full form. The converter
+        // baked +1 into the zero-centred gammas (qwen4exp.py:165 and the
+        // shared Qwen norm rule), and the pinned graph multiplies by the
+        // stored weight directly (qwen4exp.cpp:362, ggml_mul(rms_norm(x), w)).
+        // A runtime must never add 1 again.
+        m["zeroCenteredNormsBakedAtInstall"] = true
+        // Disk and slot strides per layer (U1 §3a): the top-level
+        // `expertStride` is the max disk stride and never sizes a slot.
+        m["slotStrides"] = try plan.layers.map(LUT4SlotGeometry.slotStride)
+        // R7: advisory slots. Formats vary by layer in a UD quant, so each slot
+        // lists every format its tensors use; the runtime dispatches per tensor
+        // on the index dtype, never on these slots.
+        func slot(_ codes: [UInt8]) -> [String: Any] {
+            let formats = Array(Set(codes.map { ggufFormatName(dtypeCode: $0) })).sorted()
+            return ["scheme": "gguf", "advisory": true, "formats": formats,
+                    "format": formats.joined(separator: "+"),
+                    "weightBits": codes.map { ggufNominalBits(dtypeCode: $0) }.max() ?? 0,
+                    "scaleType": codes.contains { ggufNominalBits(dtypeCode: $0) < 16 } ? "FP16" : "none",
+                    "biasType": "none", "groupSize": 0]
         }
-        func routedFormats() -> [String] {
-            Array(Set(plan.layers.flatMap { $0.subTensors.map { ggufFormatName(dtypeCode: $0.dtype) } })).sorted()
+        func resident(_ match: (String) -> Bool) -> [UInt8] {
+            plan.resident.entries.filter { match($0.name) }.map(\.dtype)
         }
-        let slot: (String) -> [String: Any] = { f in
-            ["scheme": "gguf", "format": f, "weightBits": 0, "scaleType": "none", "biasType": "none", "groupSize": 0]
-        }
-        var routed = slot(routedFormats().joined(separator: "+"))
-        routed["formats"] = routedFormats()
+        let attention = ["attn_q.", "attn_k.", "attn_v.", "attn_output.", "attn_qkv.", "attn_gate.", "ssm_out."]
         m["quant"] = [
-            "embedding": slot(format("token_embd.weight")),
-            "attention": slot(format("blk.3.attn_q.weight")),
-            "router": slot(format("blk.0.ffn_gate_inp.weight")),
-            "sharedExpert": slot(format("blk.0.ffn_gate_shexp.weight")),
-            "routedExpert": routed,
+            "embedding": slot(resident { $0 == "token_embd.weight" }),
+            "attention": slot(resident { n in attention.contains { n.contains("." + $0) } }),
+            "router": slot(resident { $0.hasSuffix(".ffn_gate_inp.weight") }),
+            "sharedExpert": slot(resident { $0.contains("_shexp.weight") && !$0.contains("gate_inp") }),
+            "routedExpert": slot(plan.layers.flatMap { $0.subTensors.map(\.dtype) }),
         ] as [String: Any]
         if let pleHash, var ple = m["plePool"] as? [String: Any], var layers = ple["layers"] as? [[String: Any]],
            !layers.isEmpty {
@@ -153,13 +203,21 @@ extension GTurboJSON {
                 throw RepackError.ggufInvalid(path: pin.shards.first?.path ?? "",
                                               detail: "PLE heads address more rows than the table holds")
             }
+            // Exact Int64 JSON integers: Foundation round-trips all 64 bits
+            // (tested), so no decimal-string encoding is needed.
             layers[0]["hash"] = [
                 "layerMultipliers": pleHash.layerMultipliers, "headOffsets": pleHash.headOffsets,
                 "headVocabSizes": pleHash.headVocabSizes, "ngramSize": pleHash.ngramSize,
-                "headsPerNgram": pleHash.headsPerNgram, "eosTokenID": pleHash.eosTokenID,
+                "headsPerNgram": pleHash.headsPerNgram,
             ] as [String: Any]
             ple["layers"] = layers
             m["plePool"] = ple
+            // R6: the n-gram EOS reset token goes in the existing, validated
+            // `arch.pleEosTokenID` axis rather than a second copy in `hash`.
+            if var arch = m["arch"] as? [String: Any] {
+                arch["pleEosTokenID"] = pleHash.eosTokenID
+                m["arch"] = arch
+            }
         }
         return try JSONSerialization.data(withJSONObject: m,
                                           options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])

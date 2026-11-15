@@ -13,20 +13,43 @@ import Foundation
 ///   own stride (no padding to the widest).
 /// - `per_layer_token_embd.weight` (IQ4_NL `[160, rows]`) goes to the PLE row
 ///   pool with `iq4nl` storage.
-/// - Every other tensor is resident under its GGUF name, 256-byte aligned,
-///   with dtype code `0x40 | ggml_type` for quantized types.
+/// - Every other tensor is resident under its GGUF name, 256-byte aligned.
+///   Q6_K and Q8_0 matrices are expanded to INT8-2L at install (U1 §3b,
+///   ruling R4(a)): dtype `0x80 | ggml_type`, `values` at `fileOffset`, the
+///   per-block FP16 `d` at `scaleOffset`, and Q6_K's per-16 int8 `m` at
+///   `biasOffset`. `token_embd` stays native Q6_K (a row gather, decoded per
+///   row). Other quantized types keep their GGUF bytes with dtype
+///   `0x40 | ggml_type`; F32 / F16 / BF16 keep codes 3 / 2 / 1.
 enum FlashNextGGUFPlanner {
     static let residentAlignment: UInt64 = 256
     static let expertComponentAlignment: UInt64 = 256
     static let quantizedDtypeBase: UInt8 = 0x40
+    static let int8TwoLevelDtypeBase: UInt8 = 0x80
+    /// Resident tensors kept in their native block format even when the type
+    /// would otherwise expand to INT8-2L.
+    static let nativeResidentNames: Set<String> = ["token_embd.weight"]
     static let pleTensorName = "per_layer_token_embd.weight"
 
     static func dtypeCode(_ t: GGMLType) -> UInt8 {
         switch t {
-        case .f32: 3
-        case .f16: 2
-        case .bf16: 1
-        default: quantizedDtypeBase | UInt8(t.rawValue)
+        case .f32: return 3
+        case .f16: return 2
+        case .bf16: return 1
+        default:
+            // The low six bits carry the ggml id; a larger id would collide
+            // with the INT8-2L marker (R5).
+            precondition(t.rawValue < 64, "ggml type id \(t.rawValue) does not fit the dtype code")
+            return quantizedDtypeBase | UInt8(t.rawValue)
+        }
+    }
+
+    /// INT8-2L source for a resident tensor, or nil to keep its bytes.
+    static func int8TwoLevelSource(_ t: GGUF.TensorInfo) -> GGUFInt8TwoLevelExpander.Source? {
+        guard !nativeResidentNames.contains(t.name), t.ne.count == 2 else { return nil }
+        switch t.type {
+        case .q6_K: return .q6_K
+        case .q8_0: return .q8_0
+        default: return nil
         }
     }
 
@@ -132,8 +155,32 @@ enum FlashNextGGUFPlanner {
             guard t.ne.count <= 4 else { throw RepackError.shapeMismatch(name: t.name, detail: "rank > 4") }
             cursor = alignUp(cursor, residentAlignment)
             // Row-major logical shape: GGML ne reversed.
+            let shape = RepackPlanner.padTo4(t.ne.reversed())
+            if let s = int8TwoLevelSource(t) {
+                let blocks = t.sizeBytes / UInt64(s.blockBytes)
+                func bytes(_ c: GGUFInt8TwoLevelExpander.Component) -> UInt64 {
+                    blocks * UInt64(GGUFInt8TwoLevelExpander.destinationBytesPerBlock(s, c))
+                }
+                let valuesOffset = cursor
+                cursor = alignUp(cursor + bytes(.values), residentAlignment)
+                let dOffset = cursor
+                cursor = alignUp(cursor + bytes(.d), residentAlignment)
+                let mOffset = s == .q6_K ? cursor : 0
+                cursor += bytes(.m)
+                entries.append(ResidentEntry(
+                    name: t.name, dtype: int8TwoLevelDtypeBase | UInt8(t.type.rawValue), logicalShape4: shape,
+                    fileOffset: valuesOffset, sizeBytes: bytes(.values),
+                    scaleOffset: dOffset, scaleSize: bytes(.d),
+                    biasOffset: mOffset, biasSize: bytes(.m),
+                    quantSpec: nil, sourceWeight: src, sourceScales: src,
+                    sourceBiases: s == .q6_K ? src : nil,
+                    weightTransform: .ggufInt8TwoLevel(source: s, component: .values),
+                    scaleTransform: .ggufInt8TwoLevel(source: s, component: .d),
+                    biasTransform: .ggufInt8TwoLevel(source: s, component: .m)))
+                continue
+            }
             entries.append(ResidentEntry(name: t.name, dtype: dtypeCode(t.type),
-                                         logicalShape4: RepackPlanner.padTo4(t.ne.reversed()),
+                                         logicalShape4: shape,
                                          fileOffset: cursor, sizeBytes: t.sizeBytes,
                                          scaleOffset: 0, scaleSize: 0, biasOffset: 0, biasSize: 0,
                                          quantSpec: nil, sourceWeight: src, sourceScales: nil, sourceBiases: nil))

@@ -131,6 +131,10 @@ public enum VerifiedInstallTool {
         let layer: Int
         let file: String
         let experts: [Expert]
+        /// Per-layer stored stride; only a GGUF install (WS4) writes it, since
+        /// its ggml types vary by layer. Absent, every layer uses the
+        /// layout's single stored stride.
+        let expertStride: UInt64?
     }
 
     private struct Expert: Decodable {
@@ -231,8 +235,19 @@ public enum VerifiedInstallTool {
         guard layout.layers.count == layout.numLayers else {
             throw RepackError.configurationInvalid(detail: "packed expert layout layer count mismatch")
         }
-        let expectedLayerSize = UInt64(layout.expertsPerLayer) * layout.storedExpertStride
         for layer in layout.layers {
+            let layerStride = layer.expertStride ?? layout.storedExpertStride
+            // Only a per-layer stride (GGUF installs) needs its own check; the
+            // single stored stride was checked above, and dense layers that
+            // carry no experts are handled below.
+            if let own = layer.expertStride {
+                guard own > 0, own % pageSize == 0, own <= layout.storedExpertStride else {
+                    throw RepackError.configurationInvalid(
+                        detail: "packed_experts/\(layer.file) stride \(own) is not page-aligned "
+                            + "or exceeds the layout's \(layout.storedExpertStride)")
+                }
+            }
+            let expectedLayerSize = UInt64(layout.expertsPerLayer) * layerStride
             guard layer.layer >= 0 && layer.layer < layout.numLayers else {
                 throw RepackError.configurationInvalid(detail: "packed expert layer index out of range")
             }
@@ -284,7 +299,7 @@ public enum VerifiedInstallTool {
                     throw RepackError.configurationInvalid(
                         detail: "\(relativePath) duplicate expert \(expertID)")
                 }
-                guard expert.size == layout.storedExpertStride else {
+                guard expert.size == layerStride else {
                     throw RepackError.configurationInvalid(
                         detail: "\(relativePath) expert \(expertID) size mismatch")
                 }

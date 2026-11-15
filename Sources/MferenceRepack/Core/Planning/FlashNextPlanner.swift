@@ -329,7 +329,7 @@ enum FlashNextPlanner {
     static func residentName(for sourceName: String,
                              family: RepackModelFamily) -> String {
         switch family {
-        case .qwen38flashnext, .flint:
+        case .qwen38flashnext, .qwen38flashnextudiq3xxs, .flint:
             return sourceName
         case .minicpm5:
             // The vendor already spells the trunk `model.` and the head
@@ -399,7 +399,7 @@ enum FlashNextPlanner {
     static func foldsNormBias(_ sourceName: String,
                               family: RepackModelFamily) -> Bool {
         switch family {
-        case .qwen38flashnext, .flint:
+        case .qwen38flashnext, .qwen38flashnextudiq3xxs, .flint:
             return false
         case .qwen36:
             return isNormWeight(sourceName)
@@ -572,7 +572,7 @@ enum FlashNextPlanner {
                 cursor += tensor.sizeBytes
                 entries.append(ResidentEntry(
                     name: entryName,
-                    dtype: dtypeCode(tensor.dtype),
+                    dtype: try dtypeCode(tensor.dtype),
                     logicalShape4: RepackPlanner.padTo4(shape),
                     fileOffset: offset,
                     sizeBytes: tensor.sizeBytes,
@@ -774,7 +774,7 @@ enum FlashNextPlanner {
 
     // MARK: - Ordering
 
-    private static func dtypeCode(_ dtype: SourceTensor.Dtype) -> UInt8 {
+    private static func dtypeCode(_ dtype: SourceTensor.Dtype) throws -> UInt8 {
         switch dtype {
         case .u32: 0
         case .bf16: 1
@@ -782,7 +782,10 @@ enum FlashNextPlanner {
         case .fp32: 3
         case .i64: 4
         case .i32: 5
-        case .ggmlBlocks: preconditionFailure("GGUF block bytes never reach the safetensors planners")
+        // Only FlashNextGGUFPlanner creates GGUF block tensors; reaching here
+        // is a planner bug, reported rather than crashed on (R10).
+        case .ggmlBlocks:
+            throw RepackError.dtypeMismatch(name: "", detail: "GGUF block bytes reached a safetensors planner")
         }
     }
 

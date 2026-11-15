@@ -141,12 +141,37 @@ extension RemotePayloadCopyTests {
             return file.subdata(in: t.offset..<(t.offset + t.size))
         }
 
-        // Resident: every tensor's bytes at its planned offset, unchanged.
+        // Resident: verbatim bytes, except Q6_K / Q8_0 matrices other than
+        // token_embd, which are the INT8-2L expansion of their source blocks.
         let weights = try read("model_weights.bin")
         for entry in result.plan.resident.entries {
             let o = Int(entry.fileOffset)
-            #expect(weights.subdata(in: o..<(o + Int(entry.sizeBytes))) == (try source(entry.name)), "\(entry.name)")
+            let stored = weights.subdata(in: o..<(o + Int(entry.sizeBytes)))
+            let src = try source(entry.name)
+            guard entry.dtype & 0x80 != 0 else {
+                #expect(stored == src, "\(entry.name)")
+                continue
+            }
+            let kind: GGUFInt8TwoLevelExpander.Source = entry.dtype & 0x3F == 14 ? .q6_K : .q8_0
+            var values: [UInt8] = [], d: [UInt8] = [], m: [UInt8] = []
+            src.withUnsafeBytes { all in
+                for b in 0..<(src.count / kind.blockBytes) {
+                    let block = UnsafeRawBufferPointer(rebasing: all[(b * kind.blockBytes)..<((b + 1) * kind.blockBytes)])
+                    let parts = GGUFInt8TwoLevelExpander.expandBlock(block, source: kind)
+                    values += parts.values.map { UInt8(bitPattern: $0) }
+                    d += [UInt8(truncatingIfNeeded: parts.d), UInt8(truncatingIfNeeded: parts.d >> 8)]
+                    m += parts.m.map { UInt8(bitPattern: $0) }
+                }
+            }
+            #expect(Array(stored) == values, "\(entry.name) values")
+            let so = Int(entry.scaleOffset), bo = Int(entry.biasOffset)
+            #expect(Array(weights.subdata(in: so..<(so + Int(entry.scaleSize)))) == d, "\(entry.name) d")
+            if kind == .q6_K {
+                #expect(Array(weights.subdata(in: bo..<(bo + Int(entry.biasSize)))) == m, "\(entry.name) m")
+            }
         }
+        #expect(result.plan.resident.entries.contains { $0.dtype == 0x80 | 14 })   // output.weight
+        #expect(result.plan.resident.entries.first { $0.name == "token_embd.weight" }?.dtype == 0x48)  // 0x40 | Q8_0 (8): native
 
         // Experts: per-layer strides; expert 1's gate slice equals the source slice.
         let strides = result.plan.layers.map(\.expertStride)
@@ -173,7 +198,7 @@ extension RemotePayloadCopyTests {
         #expect((manifest["expertStrides"] as? [NSNumber])?.map(\.uint64Value) == strides)
         let quant = try #require(manifest["quant"] as? [String: Any])
         #expect((quant["routedExpert"] as? [String: Any])?["scheme"] as? String == "gguf")
-        #expect((manifest["arch"] as? [String: Any])?["family"] as? String == "qwen38flashnext")
+        #expect((manifest["arch"] as? [String: Any])?["family"] as? String == "qwen38flashnextudiq3xxs")
         let pool = try #require(((manifest["plePool"] as? [String: Any])?["layers"] as? [[String: Any]])?.first)
         #expect(pool["storage"] as? String == "iq4nl")
         #expect(((pool["hash"] as? [String: Any])?["headVocabSizes"] as? [NSNumber])?.map(\.intValue) == [3, 4])
@@ -190,5 +215,31 @@ extension RemotePayloadCopyTests {
             #expect(files[rel] != nil, "\(rel) not recorded")
         }
         #expect(FileManager.default.fileExists(atPath: (out as NSString).appendingPathComponent("verified-install.json")))
+
+        // R2: GGUF expert storage is declared so old readers refuse it, slot
+        // strides are published beside disk strides, and --verify-install
+        // accepts the per-layer strides.
+        let storage = try #require(layout["expertStorage"] as? [String: Any])
+        #expect(storage["format"] as? String == "ggufNativeBlocksV1")
+        #expect((storage["storedExpertStrides"] as? [NSNumber])?.map(\.uint64Value) == strides)
+        let slots = try #require((manifest["slotStrides"] as? [NSNumber])?.map(\.uint64Value))
+        #expect(slots.count == strides.count && zip(slots, strides).allSatisfy { $0 >= $1 })
+        // R6: the EOS reset token is in arch, and the hash constants decode
+        // back as exact Int64 through the decoder the runtime uses.
+        #expect((manifest["arch"] as? [String: Any])?["pleEosTokenID"] as? Int == 5)
+        #expect((pool["hash"] as? [String: Any])?["eosTokenID"] == nil)
+        struct HashPeek: Decodable {
+            struct Pool: Decodable { struct Layer: Decodable { struct Hash: Decodable { let layerMultipliers: [Int64] }
+                                                               let hash: Hash }
+                                     let layers: [Layer] }
+            let plePool: Pool
+        }
+        let peek = try JSONDecoder().decode(HashPeek.self, from: read("manifest.json"))
+        #expect(peek.plePool.layers[0].hash.layerMultipliers == [35_184_372_088_831, 7])
+
+        // R3: the norms are recorded as already in full form.
+        #expect(manifest["zeroCenteredNormsBakedAtInstall"] as? Bool == true)
+        let verified = try VerifiedInstallTool.run(options: VerifyInstallOptions(inputGTurbo: out))
+        #expect(verified.fileCount > 0)
     }
 }

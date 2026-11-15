@@ -424,10 +424,18 @@ public struct SupportedModelSource: Sendable, Equatable {
 
     public static let all: [SupportedModelSource] = [
         gemma4, gemma4QAT, qwen36, qwen36Original, qwen38, swiftQwen38, deepseekV4Flash, inklingSmall,
-        maple, flint, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash, qwen38FlashNextUnslothUDIQ3XXS,
+        maple, flint, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
     ]
 
+    /// Installable by name but not advertised (R9): kept out of `all`, and so
+    /// out of the usage alternation `mference-ui.sh install` reads, until a
+    /// runner can execute them. The fingerprint table and `named` include them.
+    public static let unlisted: [SupportedModelSource] = [qwen38FlashNextUnslothUDIQ3XXS]
+
+    /// `all` plus `unlisted`: every source the installer can resolve.
+    public static var allIncludingUnlisted: [SupportedModelSource] { all + unlisted }
+
     public static func named(_ name: String) -> SupportedModelSource? {
-        all.first { $0.name == name }
+        allIncludingUnlisted.first { $0.name == name }
     }
 }
