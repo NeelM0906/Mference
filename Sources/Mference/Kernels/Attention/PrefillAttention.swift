@@ -44,7 +44,7 @@ final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
-    private let psoGQASimd: MTLComputePipelineState?
+    private var psoGQASimd: MTLComputePipelineState?
     private let gemmaQAT: GemmaQATPrefillAttention?
 
     /// Whether the MPP tensor-ops full-attention kernel is usable here. False
@@ -57,6 +57,14 @@ final class PrefillAttention {
     /// caller requests it only where it is the chosen default (Qwen 3.6 on GPUs
     /// without the Apple10 TensorOps path); everyone else keeps the tiled kernel.
     var gqaSimdPipelineAvailable: Bool { psoGQASimd != nil }
+
+    /// Dispatches of the GQA kernel so far, so the real-model tolerance gate
+    /// can prove the candidate ran it.
+    private(set) var gqaSimdDispatches = 0
+
+    /// Tests only: send the shapes the GQA kernel covers back to the tiled
+    /// kernel, so the tolerance gate compares both in one process.
+    func useTiledKernelForGQAShapes() { psoGQASimd = nil }
 
     /// `gemmaQATFullAttentionTensorOps` lets the QAT profile's full-attention
     /// layers use the tensor-ops kernel; its sliding-window layers and every
@@ -133,6 +141,7 @@ final class PrefillAttention {
         let pipeline: MTLComputePipelineState
         if let gqaSimdPipeline {
             pipeline = gqaSimdPipeline
+            gqaSimdDispatches += 1
         } else if let tensorOpsPipeline {
             pipeline = tensorOpsPipeline
         } else if tensorOpsShape
