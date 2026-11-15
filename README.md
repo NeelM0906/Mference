@@ -314,7 +314,8 @@ New Mference code is [MIT-licensed](LICENSE). Mference's foundation is derived
 from [TurboFieldfare](https://github.com/drumih/turbo-fieldfare) by Andrey
 Mikhaylov, which first ran Gemma 4 26B in ~2 GB on Apple Silicon; those portions
 are under the [Apache License 2.0](LICENSE-APACHE). Maple's MLX-derived kernel
-work is covered by [LICENSE-MLX](LICENSE-MLX). See
+work is covered by [LICENSE-MLX](LICENSE-MLX), and the GGUF quantization
+tables copied from ggml by [LICENSE-GGML](LICENSE-GGML). See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Model weights keep their own terms: the

@@ -178,6 +178,7 @@ public final class MetalContext: @unchecked Sendable {
         "flashnext_moe": "Metal/FlashNext",
         "glm53": "Metal/Glm53",
         "glm53_prefill": "Metal/Glm53",
+        "gguf_lut4": "Metal/GGUF",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
         "inkling": "Metal/Inkling",

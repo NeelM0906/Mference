@@ -14,6 +14,7 @@ def validate_archive(archive):
     if len(entries) != len(members):
         raise ValueError("duplicate source archive member")
     required = ["Package.swift", "Package.resolved", "LICENSE", "LICENSE-APACHE", "LICENSE-MLX",
+                "LICENSE-GGML",
                 "README.md", "mference-ui.sh", "Scripts/test.sh", "Scripts/openwebui-mference.py",
                 "Scripts/openwebui-configure-models.py", "docs/SOURCE_RELEASE.md"]
     for name in required:

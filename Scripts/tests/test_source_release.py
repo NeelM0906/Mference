@@ -22,7 +22,7 @@ class SourceReleaseTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.email", "release-test@example.invalid")
         self.git("config", "user.name", "Source Release Test")
-        for name in ["Package.swift", "Package.resolved", "LICENSE", "LICENSE-APACHE", "LICENSE-MLX",
+        for name in ["Package.swift", "Package.resolved", "LICENSE", "LICENSE-APACHE", "LICENSE-MLX", "LICENSE-GGML",
                      "README.md", "mference-ui.sh", "Scripts/test.sh", "Scripts/openwebui-mference.py",
                      "Scripts/openwebui-configure-models.py", "docs/SOURCE_RELEASE.md",
                      "Sources/Mference/Metal/probe.metal", "Sources/MferenceCLI/probe.swift",
