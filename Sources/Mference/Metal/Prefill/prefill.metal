@@ -1587,7 +1587,8 @@ kernel void attention_prefill_gqa8_d256_simd(
         }
     }
 
-    const float inv_sum = 1.0f / row_sum;
+    // As in the tiled kernel, a row that saw no visible key writes zeros.
+    const float inv_sum = row_sum > 0.0f ? 1.0f / row_sum : 0.0f;
     device half* out_row = O + t * p.oTokenStrideElements
         + (kvh * kPrefillGQAHeadsPerKV + fm) * kPrefillGQAHeadDim + fn;
     for (uint d = 0u; d < kPrefillGQADimTiles; ++d) {
