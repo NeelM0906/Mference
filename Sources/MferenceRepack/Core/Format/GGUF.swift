@@ -217,7 +217,12 @@ enum GGUF {
         for (a, b) in zip(sorted, sorted.dropFirst()) where a.absoluteOffset + a.sizeBytes > b.absoluteOffset {
             throw invalid("tensors \(a.name) and \(b.name) overlap")
         }
-        guard dataOffset <= fileSize else { throw invalid("data section starts past end of file") }
+        // A metadata-only shard (shard 1 of a split GGUF) may end exactly at
+        // its header, so the aligned data offset can sit past EOF; it has no
+        // tensor bytes, and every tensor range above is bounds-checked.
+        guard tensors.isEmpty || dataOffset <= fileSize else {
+            throw invalid("data section starts past end of file")
+        }
         return Header(version: version, keys: keys, metadata: metadata, tensors: tensors,
                       alignment: alignment, headerBytes: headerBytes, dataOffset: dataOffset)
     }

@@ -113,6 +113,21 @@ struct GGUFTests {
         #expect(h.metadata["split.count"]?.uint64 == 4)
     }
 
+    /// Regression (real shard 1): a metadata-only shard whose header ends at
+    /// EOF on a non-aligned byte, so the aligned data offset is past the end.
+    @Test func headerOnlyShardEndingOffAlignmentIsValid() throws {
+        var g = SyntheticGGUF()
+        g.addString("general.architecture", "qwen4exp")
+        var header = g.header()
+        if header.count % 32 == 0 { g.addString("pad", "x"); header = g.header() }
+        #expect(header.count % 32 != 0)
+        let h = try parseComplete(Data(header))
+        #expect(h.tensors.isEmpty && h.dataOffset > UInt64(header.count))
+        // With a tensor, a data section past EOF is still rejected.
+        g.tensors = [("t", [32], 0, 0)]
+        #expect(throws: RepackError.self) { try parseComplete(Data(g.header())) }
+    }
+
     @Test func honoursGeneralAlignment() throws {
         var g = SyntheticGGUF()
         g.addU32("general.alignment", 64)
