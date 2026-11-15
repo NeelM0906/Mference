@@ -69,6 +69,10 @@ on main via PR #16 (merge `e030f4e`, 2026-08-13), alongside the Maple
 family from PR #15. The 103 tabled entries below are the original Gemma 4
 program.
 
+A later M1 Max program recorded one rejected decode idea the same way:
+[pre-encoded decode command sequences](summaries/16-decode-preencode-rejected.md)
+(CPU encode measured at about 0.6 µs per dispatch, about 2% of a token).
+
 ## All 103 experiments
 
 ### Model installation and expert I/O
