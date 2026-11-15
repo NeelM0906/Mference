@@ -18,9 +18,11 @@ import Testing
 /// and one prompt of about 8K tokens built from the repository's design docs,
 /// whose second chunk attends to 4,096 cached keys.
 ///
-/// The thresholds are the Gemma prefill gate's: fail on a material mean shift
-/// (> 0.005 nats per token) that is also distinguishable from zero (batch-means
-/// 95 % interval), on any shift above 0.02, or on top-1 agreement below 0.98.
+/// The thresholds are the Gemma prefill gate's, all over every scored
+/// position: fail on a material mean shift (> 0.005 nats per token) that is
+/// also distinguishable from zero (batch-means 95 % interval), on a mean shift
+/// above 0.02, or on top-1 agreement below 0.98. Per-item means and the
+/// per-position max |shift| are printed as diagnostics, not asserted.
 /// `MFERENCE_QWEN36_PREFILL_GATE_OUT` saves the rows.
 enum Qwen36PrefillGateFixture {
     static let answerNames = ["medium-review.qwen36", "long-synthesis.qwen36"]
