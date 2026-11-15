@@ -67,6 +67,35 @@ public struct GemmaPrefixRecoveryDiagnostics: Sendable, Equatable, Encodable {
     }
 }
 
+/// The server's multi-prefix cache for one request: how it started, what it
+/// copied, and what it retains afterwards.
+public struct PrefixCacheDiagnostics: Sendable, Equatable, Encodable {
+    public let outcome: String
+    public let beginSeconds: Double
+    public let displacedBytes: Int
+    public let restoredBytes: Int
+    public let capturedBytes: Int
+    public let captureSeconds: Double
+    public let retainedBytes: Int
+    public let ceilingBytes: Int
+    public let checkpoints: Int
+    public let images: Int
+
+    public init(cache: PrefixStateCache) {
+        let report = cache.lastReport
+        outcome = report.outcome.rawValue
+        beginSeconds = report.beginSeconds
+        displacedBytes = report.displacedBytes
+        restoredBytes = report.restoredBytes
+        capturedBytes = report.capturedBytes
+        captureSeconds = report.captureSeconds
+        retainedBytes = cache.retainedBytes
+        ceilingBytes = cache.ceilingBytes
+        checkpoints = cache.checkpointCount
+        images = cache.imageCount
+    }
+}
+
 /// Additive operator diagnostics; no prompt or generated text is included.
 public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
     public let schemaVersion = 1
@@ -76,10 +105,13 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
     public let memory: RuntimeMemorySnapshot
 
     public let gemmaRecovery: GemmaPrefixRecoveryDiagnostics?
+    public let prefixCache: PrefixCacheDiagnostics?
 
     public init(result: RawDecodeResult, memory: RuntimeMemorySnapshot,
-                gemmaRecovery: GemmaPrefixRecoveryDiagnostics? = nil) {
+                gemmaRecovery: GemmaPrefixRecoveryDiagnostics? = nil,
+                prefixCache: PrefixCacheDiagnostics? = nil) {
         self.gemmaRecovery = gemmaRecovery
+        self.prefixCache = prefixCache
         cachedPromptTokens = result.cachedPromptTokens
         computedPrefillTokens = result.computedPrefillTokens
         prefill = result.prefillExecution
@@ -95,10 +127,12 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
         try c.encode(prefill, forKey: .prefill)
         try c.encode(memory, forKey: .memory)
         try c.encodeIfPresent(gemmaRecovery, forKey: .gemmaRecovery)
+        try c.encodeIfPresent(prefixCache, forKey: .prefixCache)
     }
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, cachedPromptTokens, computedPrefillTokens, prefill, memory, gemmaRecovery
+        case prefixCache
     }
 
     public static var enabled: Bool {
