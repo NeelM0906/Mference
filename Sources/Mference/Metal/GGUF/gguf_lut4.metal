@@ -147,3 +147,136 @@ kernel void gguf_lut4_expand(
         }
     }
 }
+
+// ============================================================================
+// LUT4 routed-expert decode (one token): phase 1 (gate + up, SiLU · up) and
+// phase 2 (down, routing-weighted, residual-first FP32 reduce in rank order).
+// The structure mirrors moe_phase1_gate_up_act_u16load and
+// moe_phase2_down_reduce_k10: one simdgroup per output row, x / acts in half,
+// FP32 accumulation, half outputs.
+//
+// A LUT4 weight is D · M · 2^K · T[idx] (GGUFLUT4). A lane takes 8 index bytes
+// at a time: weights w0..w0+7 (low nibbles) and w0+16..w0+23 (high nibbles)
+// of one 32-weight group, which share one D, so it sums T[idx]·x per (D, M)
+// pair and scales once.
+// ============================================================================
+
+constant uint kLUT4RoutedSlots = 10;
+
+struct LUT4RoutedBlobs {
+    device const uchar* blob[kLUT4RoutedSlots];
+};
+
+/// Byte offsets of each projection's sections inside an expert slot.
+struct LUT4ExpertOffsets {
+    uint gate_idx; uint gate_d; uint gate_m;
+    uint up_idx;   uint up_d;   uint up_m;
+    uint down_idx; uint down_d; uint down_m;
+};
+
+/// One projection type's LUT4 parameters.
+struct LUT4ProjParams {
+    uint bd_shift;   // log2(BD)
+    uint bm_shift;   // log2(BM); unused when has_m == 0
+    uint has_m;
+    float scale_k;   // 2^K
+    float table[16]; // T as float
+};
+
+static inline float lut4_row_dot(
+    device const uchar* idx, device const ushort* dbits, device const char* m,
+    constant LUT4ProjParams& p, threadgroup const float* T,
+    device const half* x, uint row, uint N, uint lane)
+{
+    device const uchar* row_idx = idx + row * (N / 2);
+    const uint row_w = row * N;
+    float acc = 0.0f;
+    for (uint hb = lane; hb < N / 16; hb += 32) {
+        const uint w0 = 32 * (hb >> 1) + 8 * (hb & 1);
+        const uint2 q = *((device const uint2*)(row_idx + 8 * hb));
+        const half4 xa = *((device const half4*)(x + w0));
+        const half4 xb = *((device const half4*)(x + w0 + 4));
+        const half4 ya = *((device const half4*)(x + w0 + 16));
+        const half4 yb = *((device const half4*)(x + w0 + 20));
+        float lo = 0.0f, hi = 0.0f;
+        lo = fma(T[(q.x >>  0) & 0xF], float(xa.x), lo); hi = fma(T[(q.x >>  4) & 0xF], float(ya.x), hi);
+        lo = fma(T[(q.x >>  8) & 0xF], float(xa.y), lo); hi = fma(T[(q.x >> 12) & 0xF], float(ya.y), hi);
+        lo = fma(T[(q.x >> 16) & 0xF], float(xa.z), lo); hi = fma(T[(q.x >> 20) & 0xF], float(ya.z), hi);
+        lo = fma(T[(q.x >> 24) & 0xF], float(xa.w), lo); hi = fma(T[(q.x >> 28) & 0xF], float(ya.w), hi);
+        lo = fma(T[(q.y >>  0) & 0xF], float(xb.x), lo); hi = fma(T[(q.y >>  4) & 0xF], float(yb.x), hi);
+        lo = fma(T[(q.y >>  8) & 0xF], float(xb.y), lo); hi = fma(T[(q.y >> 12) & 0xF], float(yb.y), hi);
+        lo = fma(T[(q.y >> 16) & 0xF], float(xb.z), lo); hi = fma(T[(q.y >> 20) & 0xF], float(yb.z), hi);
+        lo = fma(T[(q.y >> 24) & 0xF], float(xb.w), lo); hi = fma(T[(q.y >> 28) & 0xF], float(yb.w), hi);
+        const float d = float(as_type<half>(dbits[(row_w + w0) >> p.bd_shift])) * p.scale_k;
+        if (p.has_m != 0) {
+            const float m0 = float(m[(row_w + w0) >> p.bm_shift]);
+            const float m1 = float(m[(row_w + w0 + 16) >> p.bm_shift]);
+            acc = fma(d, fma(m0, lo, m1 * hi), acc);
+        } else {
+            acc = fma(d, lo + hi, acc);
+        }
+    }
+    return simd_sum(acc);
+}
+
+kernel void gguf_lut4_moe_phase1_gate_up_act(
+    device const LUT4RoutedBlobs& routed [[buffer(0)]],
+    constant LUT4ExpertOffsets& off [[buffer(1)]],
+    device const half* x [[buffer(2)]],
+    device half* acts [[buffer(3)]],
+    constant uint& D [[buffer(4)]],
+    constant uint& F [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]],
+    constant LUT4ProjParams& gu [[buffer(7)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    threadgroup float T[16];
+    if (tid < 16) { T[tid] = gu.table[tid]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint rowg = tg_idx * 8 + sg_idx;
+    if (rowg >= top_k * F) { return; }
+    const uint slot = rowg / F, f = rowg % F;
+    device const uchar* base = routed.blob[slot];
+    const float g = lut4_row_dot(base + off.gate_idx, (device const ushort*)(base + off.gate_d),
+                                 (device const char*)(base + off.gate_m), gu, T, x, f, D, lane);
+    const float u = lut4_row_dot(base + off.up_idx, (device const ushort*)(base + off.up_d),
+                                 (device const char*)(base + off.up_m), gu, T, x, f, D, lane);
+    if (lane == 0) { acts[slot * F + f] = half((g / (1.0f + exp(-g))) * u); }
+}
+
+kernel void gguf_lut4_moe_phase2_down_reduce(
+    device const LUT4RoutedBlobs& routed [[buffer(0)]],
+    constant LUT4ExpertOffsets& off [[buffer(1)]],
+    device const half* acts [[buffer(2)]],
+    device const half* routing_w [[buffer(3)]],
+    device const half* residual [[buffer(4)]],
+    device half* y [[buffer(5)]],
+    constant uint& D [[buffer(6)]],
+    constant uint& F [[buffer(7)]],
+    constant uint& top_k [[buffer(8)]],
+    constant LUT4ProjParams& dp [[buffer(9)]],
+    uint d [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    threadgroup float T[16];
+    threadgroup float partial[kLUT4RoutedSlots];
+    if (tid < 16) { T[tid] = dp.table[tid]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (d >= D) { return; }
+    device const uchar* base = routed.blob[sg_idx];
+    const float value = lut4_row_dot(base + off.down_idx, (device const ushort*)(base + off.down_d),
+                                     (device const char*)(base + off.down_m), dp, T,
+                                     acts + sg_idx * F, d, F, lane);
+    if (lane == 0) { partial[sg_idx] = float(routing_w[sg_idx]) * value; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float acc = float(residual[d]);
+        for (uint r = 0; r < top_k; ++r) { acc += partial[r]; }
+        y[d] = half(acc);
+    }
+}
