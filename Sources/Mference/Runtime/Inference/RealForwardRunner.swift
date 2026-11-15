@@ -3877,14 +3877,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// inside half range through h1/h2 and the phase-2 reduce.
     static let inklingFFNPrescale: Float = 32.0
 
-    /// Whether chunked prefill's full-attention layers use the GQA-shared
-    /// simdgroup kernel (`attention_prefill_gqa8_d256_simd`). Only Qwen 3.6,
-    /// and only where the Apple10 TensorOps path is absent; it changes output
-    /// within tolerance, so every other family and M5-class host keeps its bytes.
     /// The chunked-prefill attention kernels, for the tolerance gate's control
     /// arm (`PrefillAttention.useTiledKernelForGQAShapes()`) and its counters.
     var prefillAttentionKernels: PrefillAttention { prefillAttention }
 
+    /// Whether chunked prefill's full-attention layers use the GQA-shared
+    /// simdgroup kernel (`attention_prefill_gqa8_d256_simd`). Only Qwen 3.6,
+    /// and only where the Apple10 TensorOps path is absent; it changes output
+    /// within tolerance, so every other family and M5-class host keeps its bytes.
     static func usesQwenGQASimdAttention(family: ModelFamily,
                                          supportsApple10TensorOps: Bool) -> Bool {
         family == .qwen36 && !supportsApple10TensorOps

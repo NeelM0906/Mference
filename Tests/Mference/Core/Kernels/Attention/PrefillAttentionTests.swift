@@ -310,30 +310,38 @@ import MferenceValidationSupport
 
     /// Qwen 3.6 full attention: headDim 256, 16 query / 2 KV heads, scale
     /// 1/16. Chunks that are not multiples of the 4-token threadgroup or the
-    /// 8-key step, odd strides from `makeFixture`, and a cold start.
+    /// 8-key step, odd strides from `makeFixture`, and a cold start. Each shape
+    /// runs with no window and with the window the runner passes for full
+    /// attention (`start + chunk`, which never clips), and must dispatch the
+    /// GQA kernel both times.
     @Test(arguments: [(0, 9), (37, 70), (200, 33), (5, 1)])
     func gqaSimdMatchesReferenceAtQwenShape(_ shape: (start: Int, chunk: Int)) throws {
         let ctx = try MetalContext()
         let gqa = try PrefillAttention(context: ctx, gqaSimdgroup: true)
         #expect(gqa.gqaSimdPipelineAvailable)
-        var fixture = Self.makeFixture(start: shape.start, chunk: shape.chunk, window: 0,
-                                       seed: 0xA960 + UInt64(shape.start),
-                                       headDim: 256, qHeads: 16, kvHeads: 2)
-        fixture.scale = 0.0625
-        let actual = try Self.runKernel(fixture, context: ctx, prefill: gqa,
-                                        path: .causalTiled).values
-        let reference = Self.reference(fixture)
-        let maxAbs = RelError.maxAbsDiff(actual, reference)
-        let rel = RelError.compute(actual: actual, reference: reference)
-        #expect(maxAbs <= 2e-2, "start=\(shape.start) chunk=\(shape.chunk) maxAbs=\(maxAbs) rel=\(rel)")
-        #expect(rel <= 2e-2, "start=\(shape.start) chunk=\(shape.chunk) rel=\(rel)")
+        for window in [0, shape.start + shape.chunk] {
+            var fixture = Self.makeFixture(start: shape.start, chunk: shape.chunk, window: window,
+                                           seed: 0xA960 + UInt64(shape.start),
+                                           headDim: 256, qHeads: 16, kvHeads: 2)
+            fixture.scale = 0.0625
+            let dispatchesBefore = gqa.gqaSimdDispatches
+            let actual = try Self.runKernel(fixture, context: ctx, prefill: gqa,
+                                            path: .causalTiled).values
+            #expect(gqa.gqaSimdDispatches == dispatchesBefore + 1,
+                    "start=\(shape.start) chunk=\(shape.chunk) window=\(window) did not run the GQA kernel")
+            let reference = Self.reference(fixture)
+            let maxAbs = RelError.maxAbsDiff(actual, reference)
+            let rel = RelError.compute(actual: actual, reference: reference)
+            #expect(maxAbs <= 2e-2, "start=\(shape.start) chunk=\(shape.chunk) window=\(window) maxAbs=\(maxAbs) rel=\(rel)")
+            #expect(rel <= 2e-2, "start=\(shape.start) chunk=\(shape.chunk) window=\(window) rel=\(rel)")
 
-        // Same math as the tiled kernel up to FP32 summation order, so the
-        // FP16 outputs agree to a few ULPs.
-        let tiled = try Self.runKernel(fixture, context: ctx, prefill: PrefillAttention(context: ctx),
-                                       path: .causalTiled).values
-        let vsTiled = RelError.maxAbsDiff(actual, tiled)
-        #expect(vsTiled <= 4e-3, "start=\(shape.start) chunk=\(shape.chunk) |gqa - tiled|=\(vsTiled)")
+            // Same math as the tiled kernel up to FP32 summation order, so the
+            // FP16 outputs agree to a few ULPs.
+            let tiled = try Self.runKernel(fixture, context: ctx, prefill: PrefillAttention(context: ctx),
+                                           path: .causalTiled).values
+            let vsTiled = RelError.maxAbsDiff(actual, tiled)
+            #expect(vsTiled <= 4e-3, "start=\(shape.start) chunk=\(shape.chunk) window=\(window) |gqa - tiled|=\(vsTiled)")
+        }
     }
 
     /// Shapes the GQA kernel does not cover keep the tiled kernel's bytes even
