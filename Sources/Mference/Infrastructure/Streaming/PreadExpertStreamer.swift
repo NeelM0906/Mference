@@ -627,11 +627,21 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     /// Reads experts stored back to back from `fileOffset` into slots: whole
     /// expanded experts, or through `ExpertStorage` when the file omits bytes.
+    @inline(__always)
     private func readExpertRun(into destinations: [UnsafeMutableRawPointer],
                                fileOffset: UInt64) throws {
-        guard let readStats else {
-            return try readExpertRunUntimed(into: destinations, fileOffset: fileOffset)
+        if let readStats {
+            return try readExpertRunTimed(readStats, into: destinations, fileOffset: fileOffset)
         }
+        try readExpertRunUntimed(into: destinations, fileOffset: fileOffset)
+    }
+
+    /// Phase-report path only: kept out of line so the default read path is
+    /// the untimed body plus one nil check.
+    @inline(never)
+    private func readExpertRunTimed(_ readStats: ExpertReadStats,
+                                    into destinations: [UnsafeMutableRawPointer],
+                                    fileOffset: UInt64) throws {
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try readExpertRunUntimed(into: destinations, fileOffset: fileOffset)
         readStats.record(experts: destinations.count,
@@ -639,6 +649,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                          nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start)
     }
 
+    @inline(__always)
     private func readExpertRunUntimed(into destinations: [UnsafeMutableRawPointer],
                                       fileOffset: UInt64) throws {
         if let storage = layout.storage {
