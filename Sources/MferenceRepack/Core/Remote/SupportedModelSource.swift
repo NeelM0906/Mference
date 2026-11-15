@@ -15,6 +15,10 @@ public struct SupportedModelSource: Sendable, Equatable {
         /// affine group-64 in flight (Workstream 2). Pinning and SHA discipline
         /// are identical — only the byte transform differs.
         case originalRepoQuantize
+        /// A third-party GGUF quant (WS4): every tensor is copied in its own
+        /// ggml format, pinned per shard by `ggufPin`. Nothing is quantized
+        /// or transformed at install.
+        case gguf
     }
 
     /// CLI selector value (`--model <name>`).
@@ -32,6 +36,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     public let approximateDownloadBytes: UInt64
     public let installedBytes: UInt64
     public let reserveBytes: UInt64
+    /// Per-shard pin for a `.gguf` source; nil for safetensors sources.
+    public let ggufPin: GGUFSourcePin?
 
     public init(name: String,
                 displayName: String,
@@ -42,7 +48,8 @@ public struct SupportedModelSource: Sendable, Equatable {
                 approximateDownloadBytes: UInt64,
                 installedBytes: UInt64,
                 reserveBytes: UInt64,
-                kind: Kind = .preQuantized) {
+                kind: Kind = .preQuantized,
+                ggufPin: GGUFSourcePin? = nil) {
         self.name = name
         self.displayName = displayName
         self.repoID = repoID
@@ -53,6 +60,7 @@ public struct SupportedModelSource: Sendable, Equatable {
         self.approximateDownloadBytes = approximateDownloadBytes
         self.installedBytes = installedBytes
         self.reserveBytes = reserveBytes
+        self.ggufPin = ggufPin
     }
 
     /// Both pins recorded; unpinned sources install trust-on-first-use.
@@ -66,8 +74,9 @@ public struct SupportedModelSource: Sendable, Equatable {
                                dryRunSpaceCheck: Bool = false,
                                sidecarPolicy: SidecarPolicy = .default)
         -> RemoteStreamingRepackOptions {
+        var options: RemoteStreamingRepackOptions
         if let baseURL {
-            return RemoteStreamingRepackOptions(
+            options = RemoteStreamingRepackOptions(
                 repoID: repoID,
                 revision: revision ?? "main",
                 outputDir: outputDirectory.path,
@@ -79,8 +88,8 @@ public struct SupportedModelSource: Sendable, Equatable {
                 dryRunSpaceCheck: dryRunSpaceCheck,
                 baseURL: baseURL,
                 sidecarPolicy: sidecarPolicy)
-        }
-        return RemoteStreamingRepackOptions(
+        } else {
+            options = RemoteStreamingRepackOptions(
             repoID: repoID,
             revision: revision ?? "main",
             outputDir: outputDirectory.path,
@@ -91,6 +100,9 @@ public struct SupportedModelSource: Sendable, Equatable {
             resume: resume,
             dryRunSpaceCheck: dryRunSpaceCheck,
             sidecarPolicy: sidecarPolicy)
+        }
+        options.ggufPin = ggufPin
+        return options
     }
 
     public static let gemma4 = SupportedModelSource(
@@ -309,6 +321,41 @@ public struct SupportedModelSource: Sendable, Equatable {
         reserveBytes: 8_589_934_592,
         kind: .originalRepoQuantize)
 
+    /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4): a
+    /// third-party quant whose task-benchmark figures are Unsloth's own. The
+    /// install keeps every tensor in its GGUF format (U1/U2 design notes under
+    /// scratch/program/design/ws4-*). `sourceIndexSHA256` is the pin
+    /// fingerprint (`GGUFSourcePin.fingerprint`), not an index hash.
+    /// The runtime does not run this label yet (U4).
+    public static let qwen38FlashNextUnslothUDIQ3XXS = SupportedModelSource(
+        name: "qwen38flashnextudiq3xxs",
+        displayName: "Qwen3.8-Flash-Next 180B-A3.5B, Unsloth UD-IQ3_XXS GGUF (third-party quant)",
+        repoID: "unsloth/Qwen3.8-Flash-Next-GGUF",
+        revision: "3f3ba9cb826b49c665510ce1702fd513a393ce39",
+        sourceIndexSHA256:
+            "5cb4ea60ec38794a952d2310f81f94cd39c699ae1d21bd2dbeaa26ec13e73049",
+        modelID: "unsloth-qwen3.8-flash-next-ud-iq3_xxs",
+        approximateDownloadBytes: 83_626_438_426,
+        installedBytes: 84_000_000_000,
+        reserveBytes: 8_589_934_592,
+        kind: .gguf,
+        ggufPin: GGUFSourcePin(
+            commit: "3f3ba9cb826b49c665510ce1702fd513a393ce39",
+            shards: [
+                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf",
+                      sha256: "9d5644b371ffac921427c8021cc7242dab8e3ba37d7b48d1e79fe3770fbf9915",
+                      size: 10_946_618),
+                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00002-of-00004.gguf",
+                      sha256: "aacaff3bdb9032c2c3be428167930809735f65d3cfb204eba07d85e421e7ddf4",
+                      size: 49_946_027_488),
+                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00003-of-00004.gguf",
+                      sha256: "ef8f14e790ab471b363f146d5e8664eefbaf03e5776f317a1fb96a2bc7707b07",
+                      size: 4_869_325_888),
+                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00004-of-00004.gguf",
+                      sha256: "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36",
+                      size: 28_800_138_432),
+            ]))
+
     /// MiniCPM5-2B from the vendor's own BF16 upload, quantized to INT4
     /// affine group-64 in flight — the project's first plain-llama family and
     /// the second original-repo family with a runner, so it re-runs the W2.1b
@@ -377,7 +424,7 @@ public struct SupportedModelSource: Sendable, Equatable {
 
     public static let all: [SupportedModelSource] = [
         gemma4, gemma4QAT, qwen36, qwen36Original, qwen38, swiftQwen38, deepseekV4Flash, inklingSmall,
-        maple, flint, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
+        maple, flint, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash, qwen38FlashNextUnslothUDIQ3XXS,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {
