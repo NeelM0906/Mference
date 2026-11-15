@@ -8,21 +8,46 @@ import Metal
 /// back-to-back, ~215 us with 200-1000 us gaps, ~50 us with this filler
 /// running, and the filler cost back-to-back work nothing). Runners call
 /// `touch()` once per decode token; prefill keeps the GPU busy on its own.
-/// The filler stops `idleTimeoutNanos` after the last touch and its thread
-/// blocks until the next one.
+/// The filler stops 500 ms after the last touch and its thread blocks until
+/// the next one.
+///
+/// The filler is off on Apple7-generation GPUs, the M1 series among Macs (see
+/// `policy(supportsFamily:)`), where it slows decode instead of helping.
 public final class GPUKeepWarm: @unchecked Sendable {
-    private static let idleTimeoutNanos: UInt64 = 500_000_000
-    /// ~1.2 ms per filler buffer on an M4 Pro; two stay in flight.
-    private static let spinIterations: UInt32 = 100_000
+    /// Whether this process runs the filler, and how long each buffer spins.
+    public enum Policy: Sendable, Equatable {
+        case spin(iterations: UInt32)
+        case disabled
+    }
 
-    private let queue: MTLCommandQueue
-    private let pipeline: MTLComputePipelineState
-    private let scratch: MTLBuffer
-    private let lock = NSLock()
-    private var lastTouch: UInt64 = 0
-    private var sleeping = true
-    private let wake = DispatchSemaphore(value: 0)
-    private let inFlight = DispatchSemaphore(value: 2)
+    /// ~1.2 ms per filler buffer on an M4 Pro; two stay in flight.
+    static let spinIterations: UInt32 = 100_000
+
+    /// Picks the filler policy from the device's Metal GPU families.
+    ///
+    /// Off for devices that support `.apple7` but not `.apple8`: the M1
+    /// series among Macs (Apple's Metal Feature Set Tables, "Metal GPUs":
+    /// M1-series is Apple7, M2-series Apple8, M3- and M4-series Apple9,
+    /// M5-series Apple10). The check names the GPU generation, not a chip, so
+    /// a virtual GPU that reports Apple7 without Apple8 is treated alike. On an
+    /// M1 Max (32 GB, macOS 27.2, Qwen 3.6, 14 Nov 2026) each 100k-iteration
+    /// buffer took ~2.9 ms of GPU time, decode buffers queued behind it, and
+    /// decode ran at 2.98-3.01 tok/s with the filler against 34.4-35.2 tok/s
+    /// without it, byte-identical output. A 10k-iteration filler (~0.3 ms)
+    /// still gave only 6.0 tok/s, so a shorter spin does not fix it there.
+    ///
+    /// Every other device keeps the filler, including the M4 Pro (Apple9) it
+    /// was measured on. M2 and M3 are unmeasured and keep today's behaviour.
+    static func policy(supportsFamily: (MTLGPUFamily) -> Bool) -> Policy {
+        if supportsFamily(.apple7) && !supportsFamily(.apple8) { return .disabled }
+        return .spin(iterations: spinIterations)
+    }
+
+    public let policy: Policy
+    private let spinner: Spinner?
+
+    /// Whether a filler thread and queue exist; false exactly under `.disabled`.
+    var isSpinning: Bool { spinner != nil }
 
     private static let sharedLock = NSLock()
     nonisolated(unsafe) private static var sharedInstance: GPUKeepWarm?
@@ -34,12 +59,45 @@ public final class GPUKeepWarm: @unchecked Sendable {
         sharedLock.lock()
         defer { sharedLock.unlock() }
         if let sharedInstance { return sharedInstance }
-        let instance = try GPUKeepWarm(device: device, pipeline: try pipeline())
+        let policy = Self.policy(supportsFamily: { device.supportsFamily($0) })
+        let instance = try GPUKeepWarm(device: device, policy: policy, pipeline: pipeline)
         sharedInstance = instance
         return instance
     }
 
-    private init(device: MTLDevice, pipeline: MTLComputePipelineState) throws {
+    private init(device: MTLDevice, policy: Policy,
+                 pipeline: () throws -> MTLComputePipelineState) throws {
+        self.policy = policy
+        switch policy {
+        case .disabled:
+            spinner = nil
+        case .spin(let iterations):
+            spinner = try Spinner(device: device, pipeline: try pipeline(), iterations: iterations)
+        }
+    }
+
+    /// Marks the runtime busy; cheap enough to call once per token. A no-op
+    /// when the policy is `.disabled`.
+    public func touch() {
+        spinner?.touch()
+    }
+}
+
+/// The filler thread and its command queue; exists only under `.spin`.
+private final class Spinner: @unchecked Sendable {
+    private static let idleTimeoutNanos: UInt64 = 500_000_000
+
+    private let queue: MTLCommandQueue
+    private let pipeline: MTLComputePipelineState
+    private let scratch: MTLBuffer
+    private let iterations: UInt32
+    private let lock = NSLock()
+    private var lastTouch: UInt64 = 0
+    private var sleeping = true
+    private let wake = DispatchSemaphore(value: 0)
+    private let inFlight = DispatchSemaphore(value: 2)
+
+    init(device: MTLDevice, pipeline: MTLComputePipelineState, iterations: UInt32) throws {
         guard let queue = device.makeCommandQueue() else { throw MetalError.noQueue }
         guard let scratch = device.makeBuffer(length: 32 * MemoryLayout<Float>.stride,
                                               options: .storageModePrivate)
@@ -47,13 +105,13 @@ public final class GPUKeepWarm: @unchecked Sendable {
         self.queue = queue
         self.pipeline = pipeline
         self.scratch = scratch
+        self.iterations = iterations
         let thread = Thread { [self] in self.run() }
         thread.qualityOfService = .userInitiated
         thread.start()
     }
 
-    /// Marks the runtime busy; cheap enough to call once per token.
-    public func touch() {
+    func touch() {
         lock.lock()
         lastTouch = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let wasSleeping = sleeping
@@ -63,7 +121,7 @@ public final class GPUKeepWarm: @unchecked Sendable {
     }
 
     private func run() {
-        var iterations = Self.spinIterations
+        var iterations = self.iterations
         while true {
             lock.lock()
             let idle = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- lastTouch > Self.idleTimeoutNanos
