@@ -29,11 +29,11 @@ import Testing
     static func snap(physical: UInt64 = 32 * gib,
                      free: UInt64 = 0, inactive: UInt64 = 0,
                      purgeable: UInt64 = 0, speculative: UInt64 = 0,
-                     external: UInt64? = nil,
+                     active: UInt64 = 0, external: UInt64? = nil,
                      gpuMax: UInt64? = nil, gpuNow: UInt64? = nil) -> LiveMemorySnapshot {
         LiveMemorySnapshot(physical: physical, free: free, inactive: inactive,
                            purgeable: purgeable, speculative: speculative,
-                           external: external,
+                           active: active, external: external,
                            gpuRecommendedMaxWorkingSet: gpuMax,
                            gpuCurrentAllocated: gpuNow)
     }
@@ -231,12 +231,43 @@ import Testing
     /// Inactive anonymous pages (for example committed Metal buffers that
     /// aged out) are not reclaimable without swap and never count.
     @Test func inactiveAnonymousPagesAreNotAvailable() {
+        // 3 GiB external includes the 1 GiB speculative, so only 2 GiB of the
+        // inactive pages are file-backed: 2 free + 1 speculative + 2.
         let s = Self.snap(free: 2 * Self.gib, inactive: 12 * Self.gib,
                           speculative: 1 * Self.gib, external: 3 * Self.gib)
-        #expect(s.availableIncludingFileCache == 6 * Self.gib)
+        #expect(s.availableIncludingFileCache == 5 * Self.gib)
         let purgeableWins = Self.snap(free: 2 * Self.gib, inactive: 12 * Self.gib,
                                       purgeable: 5 * Self.gib, external: 3 * Self.gib)
         #expect(purgeableWins.availableIncludingFileCache == 7 * Self.gib)
+    }
+
+    /// `external` counts speculative pages too, so they must not be counted
+    /// again as inactive file cache: 8 GiB speculative, 8 GiB inactive
+    /// anonymous and 8 GiB external leave 8 GiB reclaimable, not 16.
+    @Test func speculativeFilePagesAreCountedOnce() {
+        let s = Self.snap(inactive: 8 * Self.gib, speculative: 8 * Self.gib,
+                          external: 8 * Self.gib)
+        #expect(s.inactiveFileBackedLowerBound == 0)
+        #expect(s.availableIncludingFileCache == 8 * Self.gib)
+        let budget = Self.budget(Host(s))
+        // 8 GiB available less 4 GiB headroom on a 32 GiB host.
+        #expect(budget.grantableBytes(basis: .includingFileCache) == 4 * Self.gib)
+        #expect(budget.reserve(12 * Self.gib, for: .residentExperts,
+                               basis: .includingFileCache) == nil)
+    }
+
+    /// File-backed pages on the active queue are not inactive file cache;
+    /// only file pages that cannot all be active count.
+    @Test func activeFilePagesAreNotInactiveFileCache() {
+        let allActive = Self.snap(inactive: 8 * Self.gib, active: 8 * Self.gib,
+                                  external: 8 * Self.gib)
+        #expect(allActive.availableIncludingFileCache == 0)
+        let someInactive = Self.snap(inactive: 8 * Self.gib, speculative: 1 * Self.gib,
+                                     active: 8 * Self.gib, external: 13 * Self.gib)
+        #expect(someInactive.inactiveFileBackedLowerBound == 4 * Self.gib)
+        #expect(someInactive.availableIncludingFileCache == 5 * Self.gib)
+        let capped = Self.snap(inactive: 2 * Self.gib, external: 20 * Self.gib)
+        #expect(capped.inactiveFileBackedLowerBound == 2 * Self.gib)
     }
 
     /// While pressure is above normal nothing is grantable; normal restores it.

@@ -21,10 +21,12 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
     public let inactive: UInt64
     public let purgeable: UInt64
     public let speculative: UInt64
-    /// File-backed pages (`external_page_count`). Inactive pages also include
-    /// anonymous memory, which can only be reclaimed by compressing or
-    /// swapping it, so the including-file-cache view counts at most this many
-    /// inactive pages.
+    /// Pages on the active queue (`active_count`), file-backed or anonymous.
+    public let active: UInt64
+    /// File-backed pages (`external_page_count`) on every pageable queue:
+    /// active, inactive and speculative (XNU's `vm_page_speculate` counts a
+    /// speculative page in both). Inactive pages also include anonymous
+    /// memory, which can only be reclaimed by compressing or swapping it.
     public let external: UInt64
     /// Diagnostics only; never part of an available view.
     public let wired: UInt64
@@ -41,6 +43,7 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
                 inactive: UInt64,
                 purgeable: UInt64,
                 speculative: UInt64,
+                active: UInt64 = 0,
                 external: UInt64? = nil,
                 wired: UInt64 = 0,
                 compressed: UInt64 = 0,
@@ -53,8 +56,10 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
         self.inactive = inactive
         self.purgeable = purgeable
         self.speculative = speculative
-        // nil (synthetic snapshots): every inactive page is file-backed.
-        self.external = external ?? inactive
+        self.active = active
+        // nil (synthetic snapshots): every inactive page is file-backed, and
+        // speculative pages always are.
+        self.external = external ?? Self.sum(inactive, speculative)
         self.wired = wired
         self.compressed = compressed
         self.swapUsed = swapUsed
@@ -66,12 +71,28 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
     /// Memory an owner could take without forcing anything to swap, counting
     /// inactive file-backed pages (the file cache) as reclaimable. Inactive
     /// anonymous pages are left out: reclaiming them means compression or
-    /// swap. `min(inactive, external)` bounds the inactive file-backed pages
-    /// from above. Volatile purgeable pages also sit on the active and
-    /// inactive queues, so adding `purgeable` could count the same pages
-    /// twice; the larger of the two is a safe lower bound on their union.
+    /// swap. Volatile purgeable pages also sit on the active and inactive
+    /// queues, so adding `purgeable` could count the same pages twice; the
+    /// larger of the two is a safe lower bound on their union.
     public var availableIncludingFileCache: UInt64 {
-        Self.sum(free, speculative, max(min(inactive, external), purgeable))
+        Self.sum(free, speculative, max(inactiveFileBackedLowerBound, purgeable))
+    }
+
+    /// Inactive pages that are certainly file-backed. The counters give no
+    /// intersection, so this takes the lower bound: file-backed pages that are
+    /// neither speculative (already counted on their own) nor able to fit on
+    /// the active queue must be inactive. It undercounts rather than count a
+    /// speculative or active file page, or an inactive anonymous one.
+    ///
+    /// The bound is deliberately conservative: `active` also holds anonymous
+    /// pages, but the counters cannot split it, so all of it is subtracted.
+    /// With a large anonymous working set this reads as zero even when much of
+    /// the inactive queue is file cache. That suits an admission budget, which
+    /// should refuse a reservation it cannot prove fits.
+    public var inactiveFileBackedLowerBound: UInt64 {
+        let notSpeculative = external > speculative ? external - speculative : 0
+        let notActive = notSpeculative > active ? notSpeculative - active : 0
+        return min(inactive, notActive)
     }
 
     /// The conservative view: inactive and speculative pages are left alone.
@@ -85,7 +106,7 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
     func with(pressure level: MemoryPressureLevel) -> LiveMemorySnapshot {
         LiveMemorySnapshot(physical: physical, free: free, inactive: inactive,
                            purgeable: purgeable, speculative: speculative,
-                           external: external, wired: wired, compressed: compressed, swapUsed: swapUsed,
+                           active: active, external: external, wired: wired, compressed: compressed, swapUsed: swapUsed,
                            gpuRecommendedMaxWorkingSet: gpuRecommendedMaxWorkingSet,
                            gpuCurrentAllocated: gpuCurrentAllocated,
                            pressure: level)
@@ -140,6 +161,7 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
             inactive: UInt64(stats.inactive_count) * page,
             purgeable: UInt64(stats.purgeable_count) * page,
             speculative: speculativeCount * page,
+            active: UInt64(stats.active_count) * page,
             external: UInt64(stats.external_page_count) * page,
             wired: UInt64(stats.wire_count) * page,
             compressed: UInt64(stats.compressor_page_count) * page,
