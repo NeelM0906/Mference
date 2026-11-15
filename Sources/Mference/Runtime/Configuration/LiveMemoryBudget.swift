@@ -204,6 +204,10 @@ public final class LiveMemoryBudget: @unchecked Sendable {
 
     /// Through `MetalContext`'s factory, so the driver's one-time environment
     /// read sees the watchdog setting even when the budget is touched first.
+    ///
+    /// `nonisolated(unsafe)` is for the macOS 15 SDK (the Swift 6.1 CI floor),
+    /// whose `MTLDevice` may not be `Sendable`. Newer SDKs mark it `Sendable`
+    /// and warn that the annotation is unnecessary; keep it for the floor.
     nonisolated(unsafe) private static let systemDevice: MTLDevice? = MetalContext.makeSystemDefaultDevice()
 
     public final class Reservation: @unchecked Sendable {
