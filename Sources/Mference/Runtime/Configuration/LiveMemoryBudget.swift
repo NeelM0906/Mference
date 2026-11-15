@@ -21,6 +21,11 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
     public let inactive: UInt64
     public let purgeable: UInt64
     public let speculative: UInt64
+    /// File-backed pages (`external_page_count`). Inactive pages also include
+    /// anonymous memory, which can only be reclaimed by compressing or
+    /// swapping it, so the including-file-cache view counts at most this many
+    /// inactive pages.
+    public let external: UInt64
     /// Diagnostics only; never part of an available view.
     public let wired: UInt64
     public let compressed: UInt64
@@ -36,6 +41,7 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
                 inactive: UInt64,
                 purgeable: UInt64,
                 speculative: UInt64,
+                external: UInt64? = nil,
                 wired: UInt64 = 0,
                 compressed: UInt64 = 0,
                 swapUsed: UInt64 = 0,
@@ -47,6 +53,8 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
         self.inactive = inactive
         self.purgeable = purgeable
         self.speculative = speculative
+        // nil (synthetic snapshots): every inactive page is file-backed.
+        self.external = external ?? inactive
         self.wired = wired
         self.compressed = compressed
         self.swapUsed = swapUsed
@@ -56,12 +64,14 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
     }
 
     /// Memory an owner could take without forcing anything to swap, counting
-    /// inactive pages (mostly the file cache) as reclaimable. Volatile
-    /// purgeable pages also sit on the active and inactive queues, so adding
-    /// `purgeable` to `inactive` could count the same pages twice; the larger
-    /// of the two is a safe lower bound on their union.
+    /// inactive file-backed pages (the file cache) as reclaimable. Inactive
+    /// anonymous pages are left out: reclaiming them means compression or
+    /// swap. `min(inactive, external)` bounds the inactive file-backed pages
+    /// from above. Volatile purgeable pages also sit on the active and
+    /// inactive queues, so adding `purgeable` could count the same pages
+    /// twice; the larger of the two is a safe lower bound on their union.
     public var availableIncludingFileCache: UInt64 {
-        Self.sum(free, speculative, max(inactive, purgeable))
+        Self.sum(free, speculative, max(min(inactive, external), purgeable))
     }
 
     /// The conservative view: inactive and speculative pages are left alone.
@@ -75,7 +85,7 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
     func with(pressure level: MemoryPressureLevel) -> LiveMemorySnapshot {
         LiveMemorySnapshot(physical: physical, free: free, inactive: inactive,
                            purgeable: purgeable, speculative: speculative,
-                           wired: wired, compressed: compressed, swapUsed: swapUsed,
+                           external: external, wired: wired, compressed: compressed, swapUsed: swapUsed,
                            gpuRecommendedMaxWorkingSet: gpuRecommendedMaxWorkingSet,
                            gpuCurrentAllocated: gpuCurrentAllocated,
                            pressure: level)
@@ -130,6 +140,7 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
             inactive: UInt64(stats.inactive_count) * page,
             purgeable: UInt64(stats.purgeable_count) * page,
             speculative: speculativeCount * page,
+            external: UInt64(stats.external_page_count) * page,
             wired: UInt64(stats.wire_count) * page,
             compressed: UInt64(stats.compressor_page_count) * page,
             swapUsed: swapUsed,
@@ -156,7 +167,8 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
 /// Pressure: one system source, created lazily on the first `onPressure`.
 /// Handlers run on the helper's queue in a fixed owner order — the prefix
 /// cache before resident experts — and must only set flags; owners act at
-/// their own safe points.
+/// their own safe points. While the last delivered level is `.warning` or
+/// `.critical`, nothing is grantable: owners do not grow under pressure.
 ///
 /// No caller exists yet; adding this type changes no runtime behaviour.
 public final class LiveMemoryBudget: @unchecked Sendable {
@@ -181,9 +193,14 @@ public final class LiveMemoryBudget: @unchecked Sendable {
     /// Kept free inside the GPU working set for scratch and transient buffers.
     public static let gpuWorkingSetMargin = UInt64(512) << 20
 
-    public static let shared = LiveMemoryBudget(
-        snapshot: { LiveMemorySnapshot.current(device: LiveMemoryBudget.systemDevice) },
-        installsSystemPressureSource: true)
+    public static let shared: LiveMemoryBudget = {
+        // Create the device here, not on the first snapshot: that read runs
+        // under the budget's lock.
+        _ = LiveMemoryBudget.systemDevice
+        return LiveMemoryBudget(
+            snapshot: { LiveMemorySnapshot.current(device: LiveMemoryBudget.systemDevice) },
+            installsSystemPressureSource: true)
+    }()
 
     /// Through `MetalContext`'s factory, so the driver's one-time environment
     /// read sees the watchdog setting even when the budget is touched first.
@@ -209,16 +226,37 @@ public final class LiveMemoryBudget: @unchecked Sendable {
         /// touched, wired or filled): lazily faulted memory does not reduce the
         /// live figures until it is touched, so committing earlier would let
         /// another owner be granted the same bytes. Committed anonymous pages
-        /// that later age onto the inactive queue can reappear in the
-        /// including-file-cache view; owners whose memory is not kept resident
-        /// by the GPU should draw with `.excludingFileCache`. Idempotent; no
-        /// effect after release.
+        /// stay out of every available view even when they age onto the
+        /// inactive queue (see `availableIncludingFileCache`). Committed
+        /// file-backed memory (an mmap) would reappear there once its pages go
+        /// inactive, so such an owner must draw with `.excludingFileCache`.
+        /// Idempotent; no effect after release.
         public func commit() { budget?.transition(self, to: .committed) }
 
         /// Returns the reservation. Idempotent; also runs on deinit.
         public func release() { budget?.transition(self, to: .released) }
 
         deinit { release() }
+    }
+
+    /// Keeps a pressure handler registered; `cancel()` or dropping the token
+    /// removes it, so an owner that goes away (a swapped-out model) leaves no
+    /// handler behind.
+    public final class PressureRegistration: @unchecked Sendable {
+        public let owner: Owner
+        fileprivate let id: UInt64
+        private weak var budget: LiveMemoryBudget?
+
+        fileprivate init(owner: Owner, id: UInt64, budget: LiveMemoryBudget) {
+            self.owner = owner
+            self.id = id
+            self.budget = budget
+        }
+
+        /// Idempotent.
+        public func cancel() { budget?.unregister(self) }
+
+        deinit { cancel() }
     }
 
     private let lock = NSLock()
@@ -231,7 +269,8 @@ public final class LiveMemoryBudget: @unchecked Sendable {
     private var pendingGPUBytes: UInt64 = 0
     private var ownerBytes: [Owner: UInt64] = [:]
     private var level: MemoryPressureLevel = .normal
-    private var handlers: [Owner: [@Sendable (MemoryPressureLevel) -> Void]] = [:]
+    private var handlers: [Owner: [(id: UInt64, handler: @Sendable (MemoryPressureLevel) -> Void)]] = [:]
+    private var nextHandlerID: UInt64 = 0
     private var pressureSource: DispatchSourceMemoryPressure?
     private let pressureQueue = DispatchQueue(label: "mference.live-memory-budget.pressure")
 
@@ -260,7 +299,8 @@ public final class LiveMemoryBudget: @unchecked Sendable {
     }
 
     /// Atomic draw-down. nil when `bytes` exceeds what is grantable under
-    /// `basis`, or, for a GPU-resident reservation, the working-set room.
+    /// `basis`, or, for a GPU-resident reservation, the working-set room, and
+    /// always nil while pressure is above `.normal`.
     public func reserve(_ bytes: UInt64, for owner: Owner, basis: Basis,
                         gpuResident: Bool = false) -> Reservation? {
         guard bytes > 0 else { return nil }
@@ -293,16 +333,27 @@ public final class LiveMemoryBudget: @unchecked Sendable {
         return ownerBytes[owner] ?? 0
     }
 
-    /// Registers a pressure handler. The first registration on the shared
-    /// budget installs the system memory-pressure source.
+    /// Registers a pressure handler for as long as the returned token lives.
+    /// The first registration on the shared budget installs the system
+    /// memory-pressure source.
     public func onPressure(_ owner: Owner,
-                           _ handler: @escaping @Sendable (MemoryPressureLevel) -> Void) {
+                           _ handler: @escaping @Sendable (MemoryPressureLevel) -> Void)
+        -> PressureRegistration {
         lock.lock()
         defer { lock.unlock() }
-        handlers[owner, default: []].append(handler)
+        nextHandlerID &+= 1
+        let id = nextHandlerID
+        handlers[owner, default: []].append((id: id, handler: handler))
         if installsSystemPressureSource && pressureSource == nil {
             installPressureSourceLocked()
         }
+        return PressureRegistration(owner: owner, id: id, budget: self)
+    }
+
+    fileprivate func unregister(_ registration: PressureRegistration) {
+        lock.lock()
+        defer { lock.unlock() }
+        handlers[registration.owner]?.removeAll { $0.id == registration.id }
     }
 
     /// Records `level` and calls handlers in `pressureOrder`, synchronously on
@@ -311,7 +362,7 @@ public final class LiveMemoryBudget: @unchecked Sendable {
     func deliverPressure(_ newLevel: MemoryPressureLevel) {
         lock.lock()
         level = newLevel
-        let ordered = Self.pressureOrder.flatMap { handlers[$0] ?? [] }
+        let ordered = Self.pressureOrder.flatMap { (handlers[$0] ?? []).map(\.handler) }
         lock.unlock()
         for handler in ordered { handler(newLevel) }
     }
@@ -334,9 +385,12 @@ public final class LiveMemoryBudget: @unchecked Sendable {
 
     private func grantableLocked(_ snap: LiveMemorySnapshot, basis: Basis,
                                  gpuResident: Bool) -> UInt64 {
+        guard level == .normal else { return 0 }
         let available = basis == .includingFileCache
             ? snap.availableIncludingFileCache
             : snap.availableExcludingFileCache
+        // Pending bytes are subtracted under either basis whichever basis they
+        // were drawn with: conservative, never a double grant.
         var grantable = Self.subtract(available, headroom(snap.physical), pendingBytes)
         if gpuResident {
             // Without a device there is no working-set figure: fail closed.

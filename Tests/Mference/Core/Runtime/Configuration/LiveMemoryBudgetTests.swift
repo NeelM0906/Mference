@@ -29,9 +29,11 @@ import Testing
     static func snap(physical: UInt64 = 32 * gib,
                      free: UInt64 = 0, inactive: UInt64 = 0,
                      purgeable: UInt64 = 0, speculative: UInt64 = 0,
+                     external: UInt64? = nil,
                      gpuMax: UInt64? = nil, gpuNow: UInt64? = nil) -> LiveMemorySnapshot {
         LiveMemorySnapshot(physical: physical, free: free, inactive: inactive,
                            purgeable: purgeable, speculative: speculative,
+                           external: external,
                            gpuRecommendedMaxWorkingSet: gpuMax,
                            gpuCurrentAllocated: gpuNow)
     }
@@ -212,8 +214,9 @@ import Testing
         }
         let log = Log()
         // Registration order is deliberately the reverse of the delivery order.
-        budget.onPressure(.residentExperts) { log.add("experts:\($0)") }
-        budget.onPressure(.prefixCache) { log.add("prefix:\($0)") }
+        let experts = budget.onPressure(.residentExperts) { log.add("experts:\($0)") }
+        let prefix = budget.onPressure(.prefixCache) { log.add("prefix:\($0)") }
+        defer { withExtendedLifetime((experts, prefix)) {} }
         #expect(budget.pressure == .normal)
         budget.deliverPressure(.warning)
         budget.deliverPressure(.critical)
@@ -225,11 +228,133 @@ import Testing
         #expect(budget.snapshot().pressure == .normal)
     }
 
+    /// Inactive anonymous pages (for example committed Metal buffers that
+    /// aged out) are not reclaimable without swap and never count.
+    @Test func inactiveAnonymousPagesAreNotAvailable() {
+        let s = Self.snap(free: 2 * Self.gib, inactive: 12 * Self.gib,
+                          speculative: 1 * Self.gib, external: 3 * Self.gib)
+        #expect(s.availableIncludingFileCache == 6 * Self.gib)
+        let purgeableWins = Self.snap(free: 2 * Self.gib, inactive: 12 * Self.gib,
+                                      purgeable: 5 * Self.gib, external: 3 * Self.gib)
+        #expect(purgeableWins.availableIncludingFileCache == 7 * Self.gib)
+    }
+
+    /// While pressure is above normal nothing is grantable; normal restores it.
+    @Test func pressureAboveNormalRefusesEveryReservation() {
+        let host = Host(Self.snap(free: 20 * Self.gib, gpuMax: 22 * Self.gib, gpuNow: 0))
+        let budget = Self.budget(host)
+        for level in [MemoryPressureLevel.warning, .critical] {
+            budget.deliverPressure(level)
+            #expect(budget.grantableBytes(basis: .excludingFileCache) == 0)
+            #expect(budget.reserve(1, for: .prefixCache, basis: .excludingFileCache) == nil)
+            #expect(budget.reserve(1, for: .residentExperts, basis: .includingFileCache,
+                                   gpuResident: true) == nil)
+        }
+        budget.deliverPressure(.normal)
+        #expect(budget.grantableBytes(basis: .excludingFileCache) == 16 * Self.gib)
+    }
+
+    @Test func cancelledOrDroppedHandlersAreNotCalled() {
+        let host = Host(Self.snap(free: 10 * Self.gib))
+        let budget = Self.budget(host)
+        final class Count: @unchecked Sendable {
+            let lock = NSLock(); var n = 0
+            func bump() { lock.lock(); n += 1; lock.unlock() }
+            var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+        }
+        let kept = Count(), cancelled = Count(), dropped = Count()
+        let keep = budget.onPressure(.residentExperts) { _ in kept.bump() }
+        let cancel = budget.onPressure(.residentExperts) { _ in cancelled.bump() }
+        do { _ = budget.onPressure(.prefixCache) { _ in dropped.bump() } }
+        budget.deliverPressure(.warning)
+        cancel.cancel(); cancel.cancel()
+        budget.deliverPressure(.critical)
+        #expect(kept.value == 2)
+        #expect(cancelled.value == 1)
+        #expect(dropped.value == 0)
+        withExtendedLifetime(keep) {}
+    }
+
+    /// Handlers run outside the budget's lock, so one may call back in.
+    @Test func handlerMayCallBackIntoTheBudget() {
+        let host = Host(Self.snap(free: 10 * Self.gib))
+        let budget = Self.budget(host)
+        final class Box: @unchecked Sendable {
+            var grantable: UInt64 = .max
+            var nested: LiveMemoryBudget.PressureRegistration?
+        }
+        let box = Box()
+        let registration = budget.onPressure(.prefixCache) { _ in
+            box.grantable = budget.grantableBytes(basis: .excludingFileCache)
+            _ = budget.reserve(1, for: .prefixCache, basis: .excludingFileCache)
+            box.nested = budget.onPressure(.residentExperts) { _ in }
+        }
+        budget.deliverPressure(.warning)
+        #expect(box.grantable == 0)
+        #expect(box.nested != nil)
+        withExtendedLifetime(registration) {}
+    }
+
+    /// When RAM, not the GPU working set, is the tighter limit, it binds.
+    @Test func ramBindsAGPUResidentReservationWhenTighter() {
+        let host = Host(Self.snap(free: 4 * Self.gib, inactive: 6 * Self.gib,
+                                  gpuMax: 22 * Self.gib, gpuNow: 1 * Self.gib))
+        let budget = Self.budget(host)
+        #expect(budget.grantableBytes(basis: .includingFileCache, gpuResident: true)
+                == 6 * Self.gib)
+        #expect(budget.reserve(6 * Self.gib + 1, for: .residentExperts,
+                               basis: .includingFileCache, gpuResident: true) == nil)
+    }
+
+    /// Live memory shrinking below the pending total saturates at zero.
+    @Test func grantableSaturatesWhenLiveMemoryShrinks() {
+        let host = Host(Self.snap(free: 10 * Self.gib))
+        let budget = Self.budget(host)
+        let r = budget.reserve(5 * Self.gib, for: .prefixCache, basis: .excludingFileCache)!
+        host.set(Self.snap(free: 3 * Self.gib))
+        #expect(budget.grantableBytes(basis: .excludingFileCache) == 0)
+        #expect(budget.reserve(1, for: .prefixCache, basis: .excludingFileCache) == nil)
+        withExtendedLifetime(r) {}
+    }
+
+    @Test func reservationThatOutlivesItsBudgetIsHarmless() {
+        var r: LiveMemoryBudget.Reservation?
+        do {
+            let host = Host(Self.snap(free: 10 * Self.gib))
+            let budget = Self.budget(host)
+            r = budget.reserve(1 * Self.gib, for: .prefixCache, basis: .excludingFileCache)
+        }
+        r?.commit()
+        r?.release()
+        r = nil
+        #expect(r == nil)
+    }
+
+    /// Concurrent draws never grant more than the budget holds.
+    @Test func concurrentReservationsNeverOvergrant() {
+        let host = Host(Self.snap(free: 14 * Self.gib))   // 10 GiB grantable
+        let budget = Self.budget(host)
+        final class Held: @unchecked Sendable {
+            let lock = NSLock(); var items: [LiveMemoryBudget.Reservation] = []
+            func add(_ r: LiveMemoryBudget.Reservation) { lock.lock(); items.append(r); lock.unlock() }
+        }
+        let held = Held()
+        DispatchQueue.concurrentPerform(iterations: 64) { _ in
+            if let r = budget.reserve(1 * Self.gib, for: .prefixCache, basis: .excludingFileCache) {
+                held.add(r)
+            }
+        }
+        #expect(held.items.count == 10)
+        #expect(budget.reservedBytes(for: .prefixCache) == 10 * Self.gib)
+        #expect(budget.grantableBytes(basis: .excludingFileCache) == 0)
+    }
+
     @Test func currentSnapshotIsSelfConsistent() {
         let s = LiveMemorySnapshot.current(device: nil)
         #expect(s.physical == ProcessInfo.processInfo.physicalMemory)
         #expect(s.availableIncludingFileCache >= s.availableExcludingFileCache)
         #expect(s.availableIncludingFileCache <= s.physical)
+        #expect(s.external <= s.physical)
         #expect(s.gpuRecommendedMaxWorkingSet == nil)
     }
 }
