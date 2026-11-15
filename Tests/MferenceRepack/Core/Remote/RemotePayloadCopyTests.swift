@@ -60,7 +60,11 @@ final class FakeHFURLProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didLoad: body)
             client?.urlProtocolDidFinishLoading(self)
             return
-        case .truncatedBody, nil:
+        case .stall:
+            // Accept the request and never answer: no response, no bytes,
+            // no completion (what a task waiting for connectivity looks like).
+            return
+        case .truncatedBody, .pass, nil:
             break
         }
 
@@ -174,6 +178,10 @@ enum FakeFailure: Equatable {
     case http(Int)
     case response(status: Int, headers: [String: String], body: Data)
     case truncatedBody
+    /// Never answers the request.
+    case stall
+    /// Serves the request normally (lets a queue target a later request).
+    case pass
 }
 
 let remoteTokenizerJSON = Data(#"{"model":{"type":"BPE"}}"#.utf8)

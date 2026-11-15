@@ -35,6 +35,9 @@ public struct RemoteRetryPolicy: Sendable {
         if case RepackError.remoteBodyTruncated = error {
             return true
         }
+        if case RepackError.remoteRangeStalled = error {
+            return true
+        }
         return false
     }
 

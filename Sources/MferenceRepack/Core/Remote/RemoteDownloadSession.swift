@@ -6,17 +6,26 @@ public struct RemoteDownloadSessionPolicy: Sendable, Equatable {
     public var waitsForConnectivity: Bool
     public var maximumConnectionsPerHost: Int
     public var maximumRedirects: Int
+    /// A range transfer with no redirect, response or body bytes for this long
+    /// is cancelled and fails with the retryable `remoteRangeStalled`.
+    /// `timeoutIntervalForRequest` does not cover a task that is waiting for
+    /// connectivity (`waitsForConnectivity`), which otherwise waits up to
+    /// `resourceTimeoutSeconds` with no socket and no error. A value <= 0
+    /// disables the watchdog.
+    public var stallTimeoutSeconds: TimeInterval
 
     public init(requestTimeoutSeconds: TimeInterval = 300,
                 resourceTimeoutSeconds: TimeInterval = 7 * 24 * 60 * 60,
                 waitsForConnectivity: Bool = true,
                 maximumConnectionsPerHost: Int = 1,
-                maximumRedirects: Int = 5) {
+                maximumRedirects: Int = 5,
+                stallTimeoutSeconds: TimeInterval = 300) {
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.resourceTimeoutSeconds = resourceTimeoutSeconds
         self.waitsForConnectivity = waitsForConnectivity
         self.maximumConnectionsPerHost = maximumConnectionsPerHost
         self.maximumRedirects = maximumRedirects
+        self.stallTimeoutSeconds = stallTimeoutSeconds
     }
 }
 
@@ -71,6 +80,7 @@ public final class RemoteDownloadSession: @unchecked Sendable {
             targetPath: targetPath,
             expectation: expectation,
             maximumRedirects: policy.maximumRedirects,
+            stallTimeoutSeconds: policy.stallTimeoutSeconds,
             progress: progress)
     }
 
