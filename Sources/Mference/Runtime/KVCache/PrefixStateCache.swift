@@ -4,13 +4,21 @@ import Foundation
 // MARK: Memory admission seam
 //
 // The multi-prefix cache takes no live-memory reading of its own. Every
-// retained region is admitted through a gate: WS2's `LiveMemoryBudget` once
-// it lands, and until then `UnlimitedPrefixCacheMemoryGate`, which leaves
-// only the cache's own byte ceiling in force.
+// retained region is admitted through a gate. The server passes
+// `PrefixCacheMemoryGovernor`, which refuses growth under memory pressure or
+// swap growth; `UnlimitedPrefixCacheMemoryGate` leaves only the cache's own
+// byte ceiling in force.
 
 /// Admits one retained region of `bytes`, or refuses it.
 public protocol PrefixCacheMemoryGate: AnyObject {
+    /// False while the gate refuses any growth whatever its size: the cache
+    /// then keeps nothing new and evicts nothing to make room.
+    var admitsGrowth: Bool { get }
     func reserve(bytes: Int) -> (any PrefixCacheMemoryGrant)?
+}
+
+extension PrefixCacheMemoryGate {
+    public var admitsGrowth: Bool { true }
 }
 
 /// One admitted region. `commit()` once its pages are resident (after the
@@ -303,13 +311,21 @@ public final class PrefixStateCache {
     }
 
     /// Releases everything retained except the live checkpoint's entry, which
-    /// stays usable without a copy. For a memory-pressure handler; none is
-    /// wired until the shared live-memory budget lands.
+    /// stays usable without a copy. `PrefixCacheMemoryGovernor` calls it
+    /// between requests after a memory-pressure event.
     public func shed() {
         let live = liveCheckpoint
         live?.recurrent = nil
         checkpoints.removeAll { $0 !== live }
         images.removeAll()
+    }
+
+    /// Evicts least recently used retained state until at most `target`
+    /// bytes remain. The live checkpoint's entry stays usable without a copy.
+    public func shrink(toRetainedBytes target: Int) {
+        while retainedBytes > max(0, target) {
+            guard evictLeastRecentlyUsed(protecting: []) else { return }
+        }
     }
 
     // MARK: Internals
@@ -367,7 +383,7 @@ public final class PrefixStateCache {
     /// Maps a region of `bytes` within the ceiling and the gate, evicting
     /// least recently used retained state (never `protecting`) to make room.
     private func allocate(bytes: Int, protecting: [Checkpoint]) -> Retained? {
-        guard bytes > 0 else { return nil }
+        guard bytes > 0, gate.admitsGrowth else { return nil }
         let page = Int(getpagesize())
         let mapped = (bytes + page - 1) / page * page
         // Evict nothing when even evicting everything unprotected would not

@@ -163,7 +163,14 @@ smaller of 4 GiB and an eighth of physical memory on Macs with at least
 24 GiB, 1 GiB from 16 GiB, and 0 below. `0` serves exactly as
 `single-prefix`. The copies are released when the model is unloaded or
 swapped; cancellation and errors release only the conversation that was in
-the runner.
+the runner. When macOS reports memory pressure (warning or critical), the
+server keeps no new copies, and at the first moment no request is running it
+releases every copy except the conversation in the runner. Copies are kept
+again once pressure returns to normal. Some Macs swap before they report
+pressure, so swap is watched too. If swap grows by more than 256 MiB after
+the copies last grew, the server releases copies back to their size before
+that growth, and keeps no new ones until swap has grown by less than 16 MiB
+over a minute.
 
 A restored prefix continues from exactly the state the turn ended in, so a
 request gets the same output it would get from `single-prefix` had no other

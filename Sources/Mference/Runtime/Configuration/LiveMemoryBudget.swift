@@ -192,7 +192,10 @@ public struct LiveMemorySnapshot: Sendable, Equatable {
 /// their own safe points. While the last delivered level is `.warning` or
 /// `.critical`, nothing is grantable: owners do not grow under pressure.
 ///
-/// No caller exists yet; adding this type changes no runtime behaviour.
+/// Callers: the server's multi-prefix cache, through
+/// `PrefixCacheMemoryGovernor`, registers for pressure as `.prefixCache` and
+/// reads `pressure` and `grantableBytes`. It does not reserve: its byte ceiling
+/// stays its admission limit, and the grantable figure is only reported.
 public final class LiveMemoryBudget: @unchecked Sendable {
     public enum Owner: Sendable, Hashable, CaseIterable {
         case residentExperts

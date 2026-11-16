@@ -29,6 +29,12 @@ enum ServerLog {
         }
     }
 
+    /// The multi-prefix cache gave memory back after memory pressure or swap
+    /// growth.
+    static func promptCacheShed(reason: String, releasedBytes: Int) {
+        write("prompt cache shed reason=\(reason) released=\(releasedBytes)B")
+    }
+
     static func requestFailed(id: String, status: UInt, streaming: Bool, error: any Error) {
         write(requestFailureMessage(id: id, status: status, streaming: streaming, error: error))
     }

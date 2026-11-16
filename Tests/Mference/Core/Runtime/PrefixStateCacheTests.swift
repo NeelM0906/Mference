@@ -358,6 +358,212 @@ import Testing
         try driver.run(a1 + [7] + seq(30, 9), generated: seq(200, 3), expect: .miss)
     }
 
+    // MARK: The live-memory governor
+
+    /// A budget with no free memory: full admission would refuse everything,
+    /// so any grant shows that the governor only shadows it.
+    private static func emptyBudget() -> LiveMemoryBudget {
+        LiveMemoryBudget(snapshot: {
+            LiveMemorySnapshot(physical: 32 << 30, free: 0, inactive: 0, purgeable: 0, speculative: 0)
+        })
+    }
+
+    final class Swap: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: UInt64 = 1 << 30
+        var used: UInt64 { lock.withLock { value } }
+        func grow(_ bytes: UInt64) { lock.withLock { value += bytes } }
+    }
+
+    final class Clock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Double = 1000
+        var seconds: Double { lock.withLock { value } }
+        func advance(_ by: Double) { lock.withLock { value += by } }
+    }
+
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func increment() { lock.withLock { value += 1 } }
+        var count: Int { lock.withLock { value } }
+    }
+
+    private struct Governed {
+        let budget = PrefixStateCacheTests.emptyBudget()
+        let swap = Swap()
+        let clock = Clock()
+        let governor: PrefixCacheMemoryGovernor
+        let driver: Driver
+
+        init(tokenizer: MFTokenizer) {
+            let swap = swap
+            let clock = clock
+            governor = PrefixCacheMemoryGovernor(budget: budget, swapUsed: { swap.used }, now: { clock.seconds })
+            driver = Driver(cache: PrefixStateCache(ceilingBytes: 1 << 20, gate: governor), tokenizer: tokenizer)
+        }
+
+        var cache: PrefixStateCache { driver.cache }
+
+        /// One request between the server's two safe points.
+        @discardableResult
+        func run(_ prompt: [Int32], generated: [Int32], expect outcome: PrefixStateCache.Outcome,
+                 sourceLocation: SourceLocation = #_sourceLocation) throws -> [Int32] {
+            governor.requestStarted(cache)
+            defer { governor.requestEnded(cache) }
+            return try driver.run(prompt, generated: generated, expect: outcome, sourceLocation: sourceLocation)
+        }
+    }
+
+    @Test func aPressureEventShedsAtTheNextSafePointOnly() async throws {
+        let g = Governed(tokenizer: try await Self.tokenizer())
+        let raised = Counter()
+        g.governor.setRaiseAction { raised.increment() }
+        let a1 = try g.run(seq(1, 20), generated: seq(100, 4), expect: .miss)
+        let b1 = try g.run(seq(500, 15), generated: seq(600, 3), expect: .miss)
+        let retained = g.cache.retainedBytes
+        #expect(retained > 0)
+        g.budget.deliverPressure(.normal)
+        #expect(raised.count == 0)
+        #expect(g.governor.idleSafePoint(g.cache) == nil)
+
+        g.budget.deliverPressure(.warning)
+        #expect(raised.count == 1)
+        // Raising the flag sheds nothing by itself.
+        #expect(g.cache.retainedBytes == retained)
+        #expect(g.governor.idleSafePoint(g.cache) == .pressure)
+        #expect(g.cache.retainedBytes == 0)
+        #expect(g.cache.checkpointCount == 1)
+        #expect(g.governor.idleSafePoint(g.cache) == nil)
+        let report = g.governor.report
+        #expect(report.pressureSheds == 1)
+        #expect(report.shedBytes == retained)
+        #expect(PrefixCacheDiagnostics(cache: g.cache, memory: report).memory?.pressureSheds == 1)
+        // The live prefix survives the shed; the displaced one does not.
+        g.budget.deliverPressure(.normal)
+        try g.run(b1 + [7] + seq(700, 4), generated: seq(800, 2), expect: .live)
+        try g.run(a1 + [7] + seq(30, 9), generated: seq(200, 3), expect: .miss)
+    }
+
+    @Test func noGrowthWhilePressureIsRaised() async throws {
+        let g = Governed(tokenizer: try await Self.tokenizer())
+        let a1 = try g.run(seq(1, 20), generated: seq(100, 4), expect: .miss)
+        g.budget.deliverPressure(.critical)
+        #expect(!g.governor.admitsGrowth)
+        // The start sheds A's copy. B's image and recurrent copies are both
+        // refused, and nothing is evicted to make room.
+        #expect(g.governor.requestStarted(g.cache) == .pressure)
+        try g.driver.run(seq(500, 15), generated: seq(600, 3), expect: .miss)
+        #expect(g.driver.fake.rowCaptures.isEmpty)
+        #expect(g.cache.retainedBytes == 0)
+        g.governor.requestEnded(g.cache)
+        try g.run(a1 + [7] + seq(30, 9), generated: seq(200, 3), expect: .miss)
+        // Back to normal, the cache grows again.
+        g.budget.deliverPressure(.normal)
+        let c1 = try g.run(seq(900, 12), generated: seq(950, 2), expect: .miss)
+        try g.run(seq(500, 15), generated: seq(600, 3), expect: .miss)
+        try g.run(c1 + [7] + seq(960, 3), generated: seq(970, 2), expect: .restored)
+    }
+
+    @Test func swapGrowthAfterTheCacheGrewShrinksItBackAndRefusesGrowthUntilSwapSettles() async throws {
+        let g = Governed(tokenizer: try await Self.tokenizer())
+        let a1 = try g.run(seq(1, 20), generated: seq(100, 4), expect: .miss)
+        let sizeBeforeB = g.cache.retainedBytes
+        #expect(sizeBeforeB > 0)
+        // B grows the cache (A's image and B's copy); swap grows beyond the
+        // limit during B.
+        g.governor.requestStarted(g.cache)
+        try g.driver.run(seq(500, 15), generated: seq(600, 3), expect: .miss)
+        #expect(g.cache.retainedBytes > sizeBeforeB)
+        g.swap.grow(PrefixCacheMemoryGovernor.defaultSwapGrowthLimit + 1)
+        #expect(g.governor.requestEnded(g.cache) == .swapGrowth)
+        #expect(g.cache.retainedBytes <= sizeBeforeB)
+        #expect(!g.governor.admitsGrowth)
+        #expect(g.governor.report.swapSheds == 1)
+        #expect(g.governor.report.refusingForSwap)
+
+        // Swap is still growing 50 s later: growth stays refused, and the
+        // settle window restarts.
+        g.clock.advance(50)
+        g.swap.grow(64 << 20)
+        #expect(g.governor.idleSafePoint(g.cache) == nil)
+        #expect(!g.governor.admitsGrowth)
+        // Flat, but only for 40 s: still refused through a whole request.
+        g.clock.advance(40)
+        g.governor.requestStarted(g.cache)
+        try g.driver.run(a1 + [7] + seq(30, 9), generated: seq(200, 3), expect: .miss)
+        #expect(g.cache.imageCount == 0)
+        g.governor.requestEnded(g.cache)
+        #expect(!g.governor.admitsGrowth)
+        // Less than 16 MiB over 60 s: settled, and growth resumes.
+        g.clock.advance(20)
+        g.swap.grow(1 << 20)
+        #expect(g.governor.idleSafePoint(g.cache) == nil)
+        #expect(g.governor.admitsGrowth)
+        #expect(!g.governor.report.refusingForSwap)
+        let c1 = try g.run(seq(900, 12), generated: seq(950, 2), expect: .miss)
+        try g.run(seq(500, 15), generated: seq(600, 3), expect: .miss)
+        try g.run(c1 + [7] + seq(960, 3), generated: seq(970, 2), expect: .restored)
+    }
+
+    @Test func swapGrowthWithoutCacheGrowthShedsNothing() async throws {
+        let g = Governed(tokenizer: try await Self.tokenizer())
+        g.governor.idleSafePoint(g.cache)
+        g.swap.grow(1 << 30)
+        #expect(g.governor.idleSafePoint(g.cache) == nil)
+        #expect(g.governor.admitsGrowth)
+    }
+
+    @Test func theIdleHopDefersWhileARequestRuns() async throws {
+        let g = Governed(tokenizer: try await Self.tokenizer())
+        try g.run(seq(1, 20), generated: seq(100, 4), expect: .miss)
+        try g.run(seq(500, 15), generated: seq(600, 3), expect: .miss)
+        let retained = g.cache.retainedBytes
+        g.governor.requestStarted(g.cache)
+        g.budget.deliverPressure(.warning)
+        // The hop arrives mid-request: it must not touch the cache.
+        #expect(g.governor.idleSafePoint(g.cache) == nil)
+        #expect(g.cache.retainedBytes == retained)
+        #expect(g.governor.isPressureRaised)
+        // The request's end is the safe point that acts.
+        #expect(g.governor.requestEnded(g.cache) == .pressure)
+        #expect(g.cache.retainedBytes == 0)
+    }
+
+    @Test func shadowAdmissionCountsWhatFullBudgetAdmissionWouldRefuse() async throws {
+        let g = Governed(tokenizer: try await Self.tokenizer())
+        try g.run(seq(1, 20), generated: seq(100, 4), expect: .miss)
+        try g.run(seq(500, 15), generated: seq(600, 3), expect: .miss)
+        let report = g.governor.report
+        // A's copy, A's image and B's copy were all kept, and an empty budget
+        // would have refused each.
+        #expect(report.admitted == 3)
+        #expect(report.wouldRefuse == 3)
+        #expect(report.grantableBytes == 0)
+        #expect(g.cache.imageCount == 1)
+
+        let roomy = LiveMemoryBudget(snapshot: {
+            LiveMemorySnapshot(physical: 32 << 30, free: 16 << 30, inactive: 0, purgeable: 0, speculative: 0)
+        })
+        let governor = PrefixCacheMemoryGovernor(budget: roomy, swapUsed: { 0 }, now: { 0 })
+        #expect(governor.reserve(bytes: Self.page) != nil)
+        #expect(governor.report.wouldRefuse == 0)
+        #expect(governor.report.grantableBytes == (16 << 30) - LiveMemoryBudget.defaultHeadroom(physical: 32 << 30))
+    }
+
+    @Test func droppingTheGovernorUnregistersItsPressureHandler() {
+        let budget = Self.emptyBudget()
+        let raised = Counter()
+        do {
+            let governor = PrefixCacheMemoryGovernor(budget: budget, swapUsed: { 0 }, now: { 0 })
+            governor.setRaiseAction { raised.increment() }
+            budget.deliverPressure(.warning)
+            #expect(governor.isPressureRaised)
+        }
+        budget.deliverPressure(.warning)
+        #expect(raised.count == 1)
+    }
+
     // MARK: Toy Qwen 3.6, full-logit bit identity through the cache
 
     private struct Toy {
