@@ -20,13 +20,17 @@ head and its full hidden bundle for subsequent drafting.
 - `FlashNextMTPWeights` strictly resolves all 29 resident tensors and the
   separate layer-0 auxiliary expert pool. It checks shapes, BF16/INT4/INT8
   payload and companion sizes before matrix dispatch, preserves each matrix's
-  stored dtype, and applies the two pre-FC `1 + w` norm folds exactly once.
+  stored matrix dtype, and applies native `1 + w` norm folds exactly once in
+  FP32 (or widens already-folded norms without another addition).
   Pool geometry, canonical paths, file size and the selected install-integrity
   policy are checked without borrowing the trunk's layout. It returns a
   verified stream layout; it does not allocate a draft cache or run a draft.
-- `FlashNextMTPInputFusion` composes the existing RMSNorm, projection and add
-  encoders. It expects already-folded norm weights. It has no caller in ordinary
-  generation and allocates no scratch unless explicitly constructed.
+- `FlashNextMTPInputFusion` keeps normalization, projections and the broadcast
+  sum in FP32; its standalone default writes FP16, while the native runner
+  retains an FP32 bundle. It expects already-folded
+  norm weights. It has no caller in ordinary generation and allocates no
+  scratch unless explicitly constructed. BF16/INT4/INT8 and nonzero offsets
+  are gated at hidden dimensions 64 and 2,560.
 - `FlashNextForwardRunner` can checkpoint recurrent GDN state, convolution
   tails, PLE state/history and the sequence cursor. KV and indexer rows are
   append-only; rollback hides discarded rows by rewinding the cursor.
@@ -59,6 +63,10 @@ head and its full hidden bundle for subsequent drafting.
   Installed INT4 projections / INT8 gates and finite native-layer output probes
   also pass, including exact resident/16-slot replay. These probe inputs are
   synthetic, not aligned target states. It is not called by CLI/server generation.
+- The native-only attention, HC mixer and expert encoders now retain FP32
+  intermediates and attention cache entries. Installed weight storage stays
+  unchanged; returned bundles and sampler logits remain FP16. The target
+  decoder does not use these correctness-first encoders.
 - `FlashNextMTPPrimer` now consumes captured target rows and pairs row `i`
   with the embedding of token `i + 1` at draft position `i`. One owned tail
   row waits for the next chunk's first token or an explicit target-selected
@@ -73,26 +81,50 @@ head and its full hidden bundle for subsequent drafting.
   This internal alignment component has no CLI/server caller; it does not
   verify proposals, sample tokens or claim a generation speedup.
 
-These are implementation boundaries, not a passed native-MTP qualification.
-The [dated validation record](RELEASE_VALIDATION_2026-09-20.md) is authoritative
+The tested independent numerical and internal correctness gates pass; these
+implementation boundaries do not qualify accelerated production generation.
+The [dated validation record](RELEASE_VALIDATION_2026-09-22.md) is authoritative
 for which synthetic and installed checks have actually executed.
 
 ## Remaining integration and gates
 
-1. Resolve the new one-layer runner's unrounded-FP32 numerical gate. On the
-   synthetic 40-row probe, row zero's hidden bundle differs by 5.263%, above
-   the unchanged 5% limit; all other hidden rows, all logits and all 40 greedy
-   choices pass. An independent scalar oracle reproduces the first fused row
-   exactly when it includes the actual FP16 normalization/projection/add stores;
-   with just those stores modeled, all 40 full-layer comparisons pass 5% and
-   row zero's hidden error falls to 0.433%. The original row-zero expectation
-   remains an explicit known issue, not a passed qualification or a raised
-   tolerance; drift above 6% is a hard regression even on that row. Stage
-   readback is opt-in and allocates/copies nothing when absent.
-   The test-only FP32 composition uses separately transcribed
-   HC, QSA, attention and expert arithmetic; it is not an upstream full-MTP
-   golden or a target-alignment/acceptance gate.
-2. Qualify the aligned drafter against independent same-weight native output.
+The post-launch work adds an internal `FlashNextMTPGreedyVerifier` reference:
+it checks proposals using ordinary sequential target decode, commits only the
+matching prefix plus a target correction/bonus, and restores target, primer and
+logits together after an interrupted round. Its output contract consumes all
+returned tokens. It can now request native proposals from the aligned primer:
+the target-selected seed is followed by drafts using each preceding draft's
+owned full HC output. The speculative draft branch is restored before target
+verification, so only verified target rows prime committed draft state. The
+target-selected seed is excluded from draft-acceptance counts. This internal
+path is **not** wired to CLI/server generation and makes no speed claim. It
+deliberately does not substitute numerically different batched prefill for
+exact target verification.
+Its synthetic and installed 16-slot validation passes in the
+[post-launch qualification record](POSTLAUNCH_QUALIFICATION.md);
+this component does not clear any upstream-native or default-promotion gate.
+
+1. **Resolved September 22:** the unrounded-FP32 synthetic numerical gate
+   passes after widening fusion intermediates. Row zero's hidden error falls
+   from 5.263% to 2.212% initially, then to 0.036193% with the final native
+   FP32 intermediates; the 5% threshold is unchanged and its known-issue
+   exemption is removed. All 40 hidden/logit rows and greedy choices pass.
+   The independent upstream-component test additionally runs pinned SGLang
+   fusion and actual Transformers decoder/QSA/HC/mixer code with the same
+   dequantized weights. Its explicit lowest-index QSA tie contract passes all
+   40 rows (worst hidden 2.2122%, logits 0.4004%). Unmodified CPU top-k differs
+   on a zero-score tied boundary at row 39, giving 21.85% logit error; that
+   negative result is retained, not counted as a pass. See the reproducible
+   [reference harness and exact boundary](../Scripts/parity/README.md#native-mtp-component-reference-september-22).
+   Stage readback remains opt-in. This is component-composition parity, not
+   a CUDA/SGLang serving run or an accelerated generation path.
+2. **Resolved for the tested aligned fixture September 22:** the
+   [independent installed comparison](RELEASE_VALIDATION_2026-09-22.md#final-native-precision-comparison-passed)
+   executes actual pinned upstream components on the installed sidecar and
+   all 43 aligned target rows. After widening the native intermediates,
+   worst hidden/logit error is 0.041973%/0.037470%, all greedy choices agree,
+   and there are no QSA boundary ties or adaptations. The 5% bounds remain
+   unchanged. Earlier failing comparisons are preserved in the record.
    The target-row-to-draft connection, complete prefix priming and shifted
    token/position checks are implemented internally. In the pinned
    [upstream prefill worker](https://github.com/sgl-project/sglang/blob/745de73ba3c136b6f99b7a3e2177ed1a8eef4a56/python/sglang/srt/speculative/eagle_worker_v2.py#L928-L1045),
@@ -101,14 +133,17 @@ for which synthetic and installed checks have actually executed.
    not be invented from its last token. The primer enforces this convention;
    it is not an enabled speculative generation path or an upstream numerical
    golden. See the [September 21 record](RELEASE_VALIDATION_2026-09-21.md).
-3. Implement target verification and accepted-prefix replay/rollback. Ordinary
+3. Accelerate target verification against the sequential reference above and
+   qualify accepted-prefix replay/rollback in production generation. Ordinary
    chunked prefill is not automatically an exact speculative verifier: its
    numerical and greedy equivalence must be demonstrated for this use.
-4. Qualify correct, partially accepted and fully rejected drafts; EOS, stop
-   strings, context exhaustion, cancellation, prefix reuse and model switching.
+4. Extend the reference's passing accepted/rejected proposal, stop-token,
+   context and paired-recovery checks to actual native drafts and generation:
+   EOS, stop strings, cancellation, prefix reuse and model switching.
    Compare against MTP-off target results, including all recurrent state.
-5. Compare the native drafter with an independent reference of the same pinned
-   weights. Measure acceptance and completed-answer time on separate resident
+5. Extend the independent comparison beyond the tested aligned fixture,
+   including the installed sidecar's sparse-selection boundary. Measure
+   acceptance and completed-answer time on separate resident
    and bounded-memory profiles. Keep MTP off unless its benefit exceeds run
    variability without changing the target result or memory guarantees.
 

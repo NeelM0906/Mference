@@ -3,6 +3,11 @@
 Status: candidate, not promoted. This records successes **and failed gates**;
 passing package tests does not imply full model qualification.
 
+Post-launch update: the separately labeled low-effort / 4,096-output / 8,192-context
+profile now completes all nine measured frozen-prompt runs on the 256-GiB M3
+Ultra. The low/1,024 medium warmup failed. This is not base-model superiority or
+default promotion; see [complete evidence and quality caveats](../POSTLAUNCH_QUALIFICATION.md).
+
 ## September 18 numerical correction and retest
 
 The previously failed installed prefill gate below now passes on `d2b84f1`.

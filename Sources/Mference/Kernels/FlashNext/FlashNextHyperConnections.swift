@@ -48,7 +48,7 @@ final class FlashNextHyperConnections {
     }
 
     struct Weights {
-        let norm: MTLBuffer            // [bundle] BF16, (1 + w) already baked
+        let norm: MTLBuffer            // [bundle] effective (1 + w); BF16 here, FP32 for the native MTP mixer
         let normOffset: Int
         let mixDown: FlashNextWeightMatrix   // [lowRank, bundle]
         let mixUp: FlashNextWeightMatrix     // [bundle, lowRank]

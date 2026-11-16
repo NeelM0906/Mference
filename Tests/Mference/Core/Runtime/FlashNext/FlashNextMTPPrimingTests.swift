@@ -162,11 +162,11 @@ import Testing
         let model = try Model.load(directoryURL: directory, device: context.device, streamingMode: .pread(slotCount: 16))
         let primer = try FlashNextMTPPrimer(model: model, context: context, maxContext: 48, policy: .bounded(slots: 16))
         let output = try #require(context.device.makeBuffer(length: model.config.vocabSize * 2, options: .storageModeShared))
-        try await verifyTargetPriming(.init(directory: directory, context: context, model: model, primer: primer, output: output))
+        try await verifyTargetPriming(.init(directory: directory, context: context, model: model, primer: primer, output: output), exportReference: true)
         print("[installed MTP priming] 43 actual target HC rows; cold/warm/decode shifted pairs match manual native feed exactly; zero target replay")
     }
 
-    private func verifyTargetPriming(_ h: Harness) async throws {
+    private func verifyTargetPriming(_ h: Harness, exportReference: Bool = false) async throws {
         let target = try FlashNextForwardRunner(model: h.model, context: h.context, maxContext: 48)
         var captured: [FlashNextForwardRunner.TargetHiddenRows] = []
         target.consumeTargetHiddenRows = { rows in
@@ -188,6 +188,10 @@ import Testing
         // Independent single-row feeding of exactly the captured target rows,
         // not a second target prefill (which has a different rounding path).
         let manual = try FlashNextMTPDraftRunner(model: h.model, context: h.context, maxContext: 48, policy: .bounded(slots: 16))
+        let exportPath = exportReference ? ProcessInfo.processInfo.environment["MFERENCE_MTP_ALIGNED_REFERENCE_EXPORT"] : nil
+        var stages: [String: [Float]] = [:]
+        var exportedRows: [[String: Any]] = []
+        if exportPath != nil { manual.didCaptureStages = { stages = $0 } }
         for batch in captured {
             let words = try h.bits(batch.buffer)
             let width = h.model.config.residualStreamWidth
@@ -197,10 +201,23 @@ import Testing
                 let buffer = try #require(h.context.device.makeBuffer(bytes: values, length: values.count * 2, options: .storageModeShared))
                 let output = try manual.append(token: position + 1 < tokens.count ? tokens[position + 1] : 61,
                     targetHidden: buffer, at: position, into: h.output)
+                if exportPath != nil {
+                    exportedRows.append([
+                        "embedding": try #require(stages["embedding"]),
+                        "hidden": try #require(stages["target_hidden"]),
+                        "output_hidden": try h.bits(output.hidden).map { Float(Float16(bitPattern: $0)) },
+                        "logits": try h.bits(h.output).map { Float(Float16(bitPattern: $0)) },
+                        "stages": stages
+                    ])
+                }
                 if position == tokens.count - 1 { #expect(try h.bits(output.hidden) + h.bits(h.output) == expected) }
             }
         }
         #expect(target.continuationPosition == 43 && h.primer.draftPosition == 43)
+        if let exportPath {
+            let data = try JSONSerialization.data(withJSONObject: ["rows": exportedRows], options: [.sortedKeys])
+            try data.write(to: URL(fileURLWithPath: exportPath), options: .withoutOverwriting)
+        }
     }
 
     @Test func interruptedTargetAndPrimerRecoverTogether() async throws {
