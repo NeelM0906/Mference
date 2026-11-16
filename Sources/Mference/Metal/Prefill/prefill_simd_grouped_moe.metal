@@ -11,9 +11,10 @@ using namespace metal;
 // Phase 1 computes gate and up together for 64 routed rows x 64 outputs, so
 // each hidden-row load feeds 128 output columns; down computes 64 rows x 128
 // outputs. Both step K by 32, dequantizing weights into padded threadgroup
-// half tiles through `psgm_dequant_tile`, the format seam (family 0: INT4
-// affine). Accumulation is float; the SwiGLU product and the route partials
-// are stored as half, as the MPP kernel does.
+// half tiles through `psgm_dequant_tile`, the format seam: family 0 is INT4
+// affine, family 1 the GGUF LUT4 execution format (`GGUFLUT4`), selected by
+// function constant 113. Accumulation is float; the SwiGLU product and the
+// route partials are stored as half, as the MPP kernel does.
 
 #ifndef MFERENCE_AFFINE_GROUP_SIZE
 #define MFERENCE_AFFINE_GROUP_SIZE
@@ -23,6 +24,11 @@ constant uint kAffineGroupSize = is_function_constant_defined(FC_AFFINE_GROUP_SI
 #endif
 
 #define PSGM_UNROLL _Pragma("clang loop unroll(full)")
+
+// Dequant family: 0 = INT4 affine (default), 1 = LUT4.
+constant uint FC_PSGM_DEQUANT [[function_constant(113)]];
+constant uint kPSGMDequant = is_function_constant_defined(FC_PSGM_DEQUANT) ? FC_PSGM_DEQUANT : 0u;
+constant bool kPSGMLUT4 = kPSGMDequant == 1u;
 
 constant constexpr uint kPSGMMaxExperts = 16;
 constant constexpr uint kPSGMRows = 64;            // routed rows per threadgroup
@@ -54,8 +60,31 @@ struct PSGMParams {
 };
 
 // One projection inside an expert blob. Bound per dispatch, never baked into
-// a pipeline: other families vary formats and strides by layer.
-struct PSGMProjFormat { uint w_off; uint s_off; uint b_off; uint k_extent; };
+// a pipeline: GGUF families vary formats and strides by layer. INT4 affine
+// reads (W, scale, bias) at (w_off, s_off, b_off); LUT4 reads (indices, D, M)
+// there, with its block geometry and 2^K below.
+struct PSGMProjFormat {
+    uint w_off; uint s_off; uint b_off; uint k_extent;
+    uint bd_shift; uint bm_shift; uint has_m; float scale_k;
+};
+
+// Layout-identical to `GGUFLUT4MoE.ProjParams` / `LUT4ProjParams`: one per
+// projection (gate, up, down), bound at buffer 7 for the LUT4 family.
+struct PSGMLUT4Proj {
+    uint bd_shift; uint bm_shift; uint has_m; float scale_k; float table[16];
+};
+
+static inline PSGMProjFormat psgm_format(uint w, uint s, uint b, uint k_extent,
+                                         constant PSGMLUT4Proj* lut4, uint proj) {
+    PSGMProjFormat f = {w, s, b, k_extent, 0u, 0u, 0u, 1.0f};
+    if (kPSGMLUT4) {
+        f.bd_shift = lut4[proj].bd_shift;
+        f.bm_shift = lut4[proj].bm_shift;
+        f.has_m = lut4[proj].has_m;
+        f.scale_k = lut4[proj].scale_k;
+    }
+    return f;
+}
 
 // (row, col) of the two elements a lane holds in an 8x8 simdgroup matrix:
 // (row, col) and (row, col + 1).
@@ -81,6 +110,36 @@ static inline void psgm_dequant_tile(device const uint8_t* blob, PSGMProjFormat 
                                      uint row0, uint rows, uint k0,
                                      threadgroup half* dst, uint ldk,
                                      uint tid, uint threads) {
+    if (kPSGMLUT4) {
+        // LUT4: weight = ((D * M) * T[idx]) * 2^K, exact in fp32, rounded to
+        // half once. Within each 32 weights, index byte r holds weight r (low
+        // nibble) and weight r + 16 (high nibble); k0 % 32 == 0, so one step
+        // is one such group: one D (BD >= 32) and one M per 16 or 32 weights.
+        for (uint r = tid; r < rows; r += threads) {
+            const uint n = row0 + r;
+            const ulong first = ulong(n) * fmt.k_extent + k0;
+            device const uint* q = reinterpret_cast<device const uint*>(
+                blob + fmt.w_off + n * (fmt.k_extent / 2u) + k0 / 2u);
+            const float d = float(reinterpret_cast<device const half*>(blob + fmt.s_off)[first >> fmt.bd_shift]);
+            float m_lo = 1.0f, m_hi = 1.0f;
+            if (fmt.has_m != 0u) {
+                device const char* m = reinterpret_cast<device const char*>(blob + fmt.b_off);
+                m_lo = float(m[first >> fmt.bm_shift]);
+                m_hi = float(m[(first + 16u) >> fmt.bm_shift]);
+            }
+            const float dm_lo = d * m_lo, dm_hi = d * m_hi;
+            threadgroup half* out = dst + r * ldk;
+            PSGM_UNROLL for (uint c = 0; c < 4u; ++c) {
+                const uint packed = q[c];
+                PSGM_UNROLL for (uint j = 0; j < 4u; ++j) {
+                    const uint byte = (packed >> (8u * j)) & 0xFFu;
+                    out[4u * c + j] = half((dm_lo * table[byte & 0xFu]) * fmt.scale_k);
+                    out[4u * c + j + 16u] = half((dm_hi * table[byte >> 4]) * fmt.scale_k);
+                }
+            }
+        }
+        return;
+    }
     const uint groups_per_row = fmt.k_extent / kAffineGroupSize;
     device const bfloat* scales = reinterpret_cast<device const bfloat*>(blob + fmt.s_off);
     device const bfloat* biases = reinterpret_cast<device const bfloat*>(blob + fmt.b_off);
@@ -122,6 +181,7 @@ kernel void prefill_simd_grouped_moe_phase1(
     device half* route_partials              [[buffer(4)]],
     device const PSGMExperts& experts        [[buffer(5)]],
     constant PSGMParams& p                   [[buffer(6)]],
+    constant PSGMLUT4Proj* lut4              [[buffer(7)]],   // LUT4 only; INT4 binds zeros
     uint3 tgid  [[threadgroup_position_in_grid]],
     ushort tid  [[thread_index_in_threadgroup]],
     ushort sg   [[simdgroup_index_in_threadgroup]],
@@ -147,8 +207,14 @@ kernel void prefill_simd_grouped_moe_phase1(
     if (a_valid) {
         a_src = hidden + pairs[group.pair_start + row_base + a_row].token * p.hidden_stride + a_k;
     }
-    const PSGMProjFormat gate_fmt = {p.gate_W_off, p.gate_s_off, p.gate_b_off, p.D};
-    const PSGMProjFormat up_fmt = {p.up_W_off, p.up_s_off, p.up_b_off, p.D};
+    const PSGMProjFormat gate_fmt = psgm_format(p.gate_W_off, p.gate_s_off, p.gate_b_off, p.D, lut4, 0u);
+    const PSGMProjFormat up_fmt = psgm_format(p.up_W_off, p.up_s_off, p.up_b_off, p.D, lut4, 1u);
+    // LUT4 tables, gate's then up's, staged once.
+    threadgroup float tables[32];
+    if (kPSGMLUT4) {
+        if (tid < 32u) tables[tid] = lut4[tid / 16u].table[tid % 16u];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
 
     simdgroup_float8x8 acc_gate[4][4], acc_up[4][4];
     PSGM_UNROLL for (uint i = 0; i < 4; ++i) PSGM_UNROLL for (uint j = 0; j < 4; ++j) {
@@ -163,10 +229,10 @@ kernel void prefill_simd_grouped_moe_phase1(
         // Simdgroups 0-1 dequantize gate and 2-3 up, so each half can carry
         // its own format (and table) without divergence inside a simdgroup.
         if (tid < kPSGMPhase1Cols) {
-            psgm_dequant_tile(expert, gate_fmt, nullptr, n_base, kPSGMPhase1Cols, k0,
+            psgm_dequant_tile(expert, gate_fmt, tables, n_base, kPSGMPhase1Cols, k0,
                               gate_tile, kPSGMLdk, tid, kPSGMPhase1Cols);
         } else {
-            psgm_dequant_tile(expert, up_fmt, nullptr, n_base, kPSGMPhase1Cols, k0,
+            psgm_dequant_tile(expert, up_fmt, tables + 16, n_base, kPSGMPhase1Cols, k0,
                               up_tile, kPSGMLdk, tid - kPSGMPhase1Cols, kPSGMPhase1Cols);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -223,6 +289,7 @@ kernel void prefill_simd_grouped_moe_down(
     device half* route_partials              [[buffer(4)]],
     device const PSGMExperts& experts        [[buffer(5)]],
     constant PSGMParams& p                   [[buffer(6)]],
+    constant PSGMLUT4Proj* lut4              [[buffer(7)]],   // LUT4 only; INT4 binds zeros
     uint3 tgid  [[threadgroup_position_in_grid]],
     ushort tid  [[thread_index_in_threadgroup]],
     ushort sg   [[simdgroup_index_in_threadgroup]],
@@ -250,7 +317,12 @@ kernel void prefill_simd_grouped_moe_down(
     if (a_valid) {
         a_src = activation + (group.pair_start + row_base + a_row - tile_pair_start) * p.F + a_k;
     }
-    const PSGMProjFormat down_fmt = {p.down_W_off, p.down_s_off, p.down_b_off, p.F};
+    const PSGMProjFormat down_fmt = psgm_format(p.down_W_off, p.down_s_off, p.down_b_off, p.F, lut4, 2u);
+    threadgroup float table[16];
+    if (kPSGMLUT4) {
+        if (tid < 16u) table[tid] = lut4[2].table[tid];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
 
     simdgroup_float8x8 acc[4][8];
     PSGM_UNROLL for (uint i = 0; i < 4; ++i) PSGM_UNROLL for (uint j = 0; j < 8; ++j) {
@@ -261,7 +333,7 @@ kernel void prefill_simd_grouped_moe_down(
 
     for (uint k0 = 0; k0 < p.F; k0 += kPSGMK) {
         psgm_load_rows(a_src, a_valid, k0, rows_tile + a_row * kPSGMLdk + a_k);
-        psgm_dequant_tile(expert, down_fmt, nullptr, n_base, kPSGMDownCols, k0,
+        psgm_dequant_tile(expert, down_fmt, table, n_base, kPSGMDownCols, k0,
                           weight_tile, kPSGMLdk, tid, kPSGMThreads);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         PSGM_UNROLL for (uint kk = 0; kk < kPSGMK; kk += 8) {
