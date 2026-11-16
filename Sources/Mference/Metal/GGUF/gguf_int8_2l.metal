@@ -135,3 +135,30 @@ kernel void gguf_int8_2l_gemm_t8_f16out(
         if (lane == 0) { y[ulong(t0 + t) * bp.y_stride + row] = half(v); }
     }
 }
+
+// Q6_K row gather for `token_embd` (WS4 U1 R2): the table stays native Q6_K
+// (block_q6_K: ql[128], qh[64], int8 scales[16], fp16 d; 210 B per 256), and
+// each selected row is decoded as ggml's dequantize_row_q6_K does,
+// (d · scale) · q with q = 6-bit code − 32, exact in fp32, then rounded once
+// to half (the contract of flashnext_embed_row_bf16). out[t][e] for
+// ids[t], t < tokens; one thread per (element, token).
+kernel void gguf_q6k_embed_rows(
+    device const uchar* table [[buffer(0)]],   // [vocab][hidden/256 blocks]
+    device const uint* ids [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    constant uint& hidden [[buffer(3)]],
+    constant uint& tokens [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    const uint e = gid.x, t = gid.y;
+    if (e >= hidden || t >= tokens) { return; }
+    device const uchar* b = table + (ulong(ids[t]) * (hidden / 256) + e / 256) * 210;
+    const uint i = e % 256, h = i / 128, r = i % 128, k = r / 32, l = r % 32;
+    const uint ql = b[h * 64 + l + (k & 1) * 32];
+    const uint low4 = (k < 2) ? (ql & 0xF) : (ql >> 4);
+    const uint high2 = (b[128 + h * 32 + l] >> (2 * k)) & 0x3;
+    const int q = int(low4 | high2 << 4) - 32;
+    const float d = float(as_type<half>(ushort(b[208] | (ushort(b[209]) << 8))));
+    const float sc = float(as_type<char>(b[192 + i / 16]));
+    out[ulong(t) * hidden + e] = half(d * sc * float(q));
+}

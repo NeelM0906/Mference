@@ -30,17 +30,23 @@ final class GGUFInt8TwoLevelGEMV {
     private let f16Out: MTLComputePipelineState
     private let f32Out: MTLComputePipelineState
     private let batchedF16Out: MTLComputePipelineState
+    private let q6KEmbedRows: MTLComputePipelineState
 
     init(context: MetalContext) throws {
-        let library = try MetalContext.moduleLibrary(device: context.device, module: "gguf_int8_2l")
+        // Safe math: the batched form is claimed bit-identical to the GEMV and the
+        // Q6_K gather bit-exact, so the compiler must not reassociate either.
+        let library = try MetalContext.moduleLibrary(device: context.device, module: "gguf_int8_2l",
+                                                     safeMath: true)
         guard let a = library.makeFunction(name: "gguf_int8_2l_gemv_f16out"),
               let b = library.makeFunction(name: "gguf_int8_2l_gemv_f32out"),
-              let c = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f16out") else {
+              let c = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f16out"),
+              let e = library.makeFunction(name: "gguf_q6k_embed_rows") else {
             throw MetalError.missingFunction("gguf_int8_2l_*")
         }
         f16Out = try context.device.makeComputePipelineState(function: a)
         f32Out = try context.device.makeComputePipelineState(function: b)
         batchedF16Out = try context.device.makeComputePipelineState(function: c)
+        q6KEmbedRows = try context.device.makeComputePipelineState(function: e)
     }
 
     func encode(commandBuffer: MTLCommandBuffer, weights w: Weights,
@@ -89,6 +95,28 @@ final class GGUFInt8TwoLevelGEMV {
         encoder.setBytes(&batch, length: MemoryLayout<BatchParams>.stride, index: 6)
         encoder.dispatchThreadgroups(MTLSize(width: (w.rows + 7) / 8, height: (tokens + 7) / 8, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// `token_embd` gather from a native Q6_K table (`[vocab][hidden/256]`
+    /// blocks of 210 B): `out[t] = half(row ids[t])`, decoded as ggml does.
+    /// One call covers a decode token or a prefill chunk.
+    func encodeQ6KEmbedRows(commandBuffer: MTLCommandBuffer,
+                            table: MTLBuffer, tableOffset: Int = 0,
+                            ids: MTLBuffer, idsOffset: Int = 0,
+                            out: MTLBuffer, outOffset: Int = 0,
+                            hidden: Int, tokens: Int) {
+        precondition(hidden % 256 == 0 && tokens > 0)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        var h = UInt32(hidden), t = UInt32(tokens)
+        encoder.setComputePipelineState(q6KEmbedRows)
+        encoder.setBuffer(table, offset: tableOffset, index: 0)
+        encoder.setBuffer(ids, offset: idsOffset, index: 1)
+        encoder.setBuffer(out, offset: outOffset, index: 2)
+        encoder.setBytes(&h, length: 4, index: 3)
+        encoder.setBytes(&t, length: 4, index: 4)
+        encoder.dispatchThreads(MTLSize(width: hidden, height: tokens, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
     }
 }

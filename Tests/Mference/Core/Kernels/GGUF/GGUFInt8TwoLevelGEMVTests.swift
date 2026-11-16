@@ -128,3 +128,44 @@ import MferenceValidationSupport
         }
     }
 }
+
+/// `token_embd` gather from a native Q6_K table against
+/// `GGUFBlockDecode.dequantizeQ6K` rounded to half, bit for bit (both sides
+/// round the same exact fp32 value to nearest-even), with repeated, first and
+/// last row ids and an untouched tail.
+@Suite struct GGUFQ6KEmbedRowsTests {
+    @Test func gatherMatchesCPUDecodeBits() throws {
+        let ctx = try MetalContext()
+        let kernel = try GGUFInt8TwoLevelGEMV(context: ctx)
+        var rng = SeedTree(0x5136_4B45).key("q6k-embed")
+        let vocab = 37, hidden = 2560, blocksPerRow = hidden / 256
+        var table = [UInt8](repeating: 0, count: vocab * blocksPerRow * 210)
+        for i in 0..<table.count { table[i] = UInt8(truncatingIfNeeded: rng.next()) }
+        for b in 0..<(vocab * blocksPerRow) {
+            let bits = Float16(rng.uniform(1e-4, 2e-3)).bitPattern
+            table[b * 210 + 208] = UInt8(bits & 0xFF)
+            table[b * 210 + 209] = UInt8(bits >> 8)
+        }
+        let ids: [UInt32] = [0, 36, 5, 5, 17, 0, 23]
+        func buffer<T>(_ v: [T]) throws -> MTLBuffer {
+            try #require(v.withUnsafeBytes { ctx.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared) })
+        }
+        let tableBuf = try buffer(table), idsBuf = try buffer(ids)
+        let outBuf = try buffer([Float16](repeating: .nan, count: (ids.count + 1) * hidden))
+        let cb = try #require(ctx.queue.makeCommandBuffer())
+        kernel.encodeQ6KEmbedRows(commandBuffer: cb, table: tableBuf, ids: idsBuf, out: outBuf,
+                                  hidden: hidden, tokens: ids.count)
+        cb.commit(); cb.waitUntilCompleted()
+        #expect(cb.status == .completed)
+        let out = outBuf.contents().bindMemory(to: UInt16.self, capacity: (ids.count + 1) * hidden)
+        var mismatches = 0
+        for (t, id) in ids.enumerated() {
+            let rowBytes = blocksPerRow * 210, at = Int(id) * rowBytes
+            let want = table[at..<(at + rowBytes)].withUnsafeBytes { GGUFBlockDecode.dequantizeQ6K($0) }
+            for e in 0..<hidden where out[t * hidden + e] != Float16(want[e]).bitPattern { mismatches += 1 }
+        }
+        #expect(mismatches == 0)
+        let tail = (0..<hidden).filter { !Float16(bitPattern: out[ids.count * hidden + $0]).isNaN }.count
+        #expect(tail == 0, "wrote past the last token")
+    }
+}
