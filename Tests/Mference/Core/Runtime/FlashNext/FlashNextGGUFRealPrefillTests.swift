@@ -102,9 +102,13 @@ import Testing
                 if p == prompt.count - 1 { runner.capture = .init() }
                 try await runner.produce(token: token, position: p, into: logits)
             }
+            // Per-layer keys are `layerNN.<name>`; the capture also holds
+            // non-layer keys (`logits`, ...), which are skipped.
             for (key, value) in runner.capture?.floats ?? [:] {
-                let layer = Int(key.dropFirst(5).prefix(2))!
-                let name = String(key.split(separator: ".").last!)
+                let parts = key.split(separator: ".")
+                guard parts.count == 2, parts[0].hasPrefix("layer"),
+                      let layer = Int(parts[0].dropFirst(5)) else { continue }
+                let name = String(parts[1])
                 if name == "stream_out" { side.layers[layer] = value }
                 if FlashNextGGUFRealPrefillTests.detailLayers.contains(layer),
                    ["block_out", "mlp_hc_mixed", "moe_out"].contains(name) {
