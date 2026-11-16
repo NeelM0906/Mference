@@ -32,7 +32,7 @@ import Testing
     static var enabled: Bool { env["MFERENCE_FLASHNEXT_GATE"] != nil && env["MFERENCE_FLASHNEXT_GATE_CHUNK"] != nil }
 
     struct Item { let name: String; let tokens: [Int32]; let prefillCount: Int }
-    struct Row { let nll: Double; let top1: Int }
+    struct Row { let nll: Double; let top1: Int; let margin: Float }  // margin: top-1 minus top-2 logit
 
     @Test(.enabled(if: FlashNextGroupedLUT4EquivalenceGateTests.enabled,
                    "set MFERENCE_FLASHNEXT_GATE and MFERENCE_FLASHNEXT_GATE_CHUNK"))
@@ -87,13 +87,20 @@ import Testing
             var source = vImage_Buffer(data: logits.contents(), height: 1,
                                        width: vImagePixelCount(vocab), rowBytes: vocab * 2)
             let count = vDSP_Length(vocab)
-            var maximum: Float = 0, index: vDSP_Length = 0, sum: Float = 0
+            var maximum: Float = 0, index: vDSP_Length = 0, sum: Float = 0, margin: Float = 0
             values.withUnsafeMutableBufferPointer { v in
                 var destination = vImage_Buffer(data: v.baseAddress, height: 1,
                                                 width: vImagePixelCount(vocab), rowBytes: vocab * 4)
                 vImageConvert_Planar16FtoPlanarF(&source, &destination, 0)
                 var size = Int32(vocab)
                 vDSP_maxvi(v.baseAddress!, 1, &maximum, &index, count)
+                // Top-2 logit, for the flip margin: mask the top-1 entry once.
+                let top = v[Int(index)]
+                v[Int(index)] = -.infinity
+                var second: Float = 0, secondIndex: vDSP_Length = 0
+                vDSP_maxvi(v.baseAddress!, 1, &second, &secondIndex, count)
+                v[Int(index)] = top
+                margin = maximum - second
                 exponent.withUnsafeMutableBufferPointer { e in
                     var shift = -maximum
                     vDSP_vsadd(v.baseAddress!, 1, &shift, e.baseAddress!, 1, count)
@@ -101,7 +108,7 @@ import Testing
                     vDSP_sve(e.baseAddress!, 1, &sum, count)
                 }
             }
-            return Row(nll: Double(maximum + log(sum) - values[Int(target)]), top1: Int(index))
+            return Row(nll: Double(maximum + log(sum) - values[Int(target)]), top1: Int(index), margin: margin)
         }
 
         func run(control: Bool) async throws -> (rows: [String: [Row]], seconds: [String: Double], tiles: Int) {
@@ -145,7 +152,13 @@ import Testing
                          item.name, item.prefillCount, chunk, control.seconds[item.name] ?? 0,
                          candidate.seconds[item.name] ?? 0, itemMean, itemTop, pairs.count))
             saved.append(["name": item.name, "base_nll": pairs.map(\.0.nll), "test_nll": pairs.map(\.1.nll),
-                          "base_top1": pairs.map(\.0.top1), "test_top1": pairs.map(\.1.top1)])
+                          "base_top1": pairs.map(\.0.top1), "test_top1": pairs.map(\.1.top1),
+                          "base_margin": pairs.map { Double($0.0.margin) },
+                          "test_margin": pairs.map { Double($0.1.margin) }])
+            for (position, pair) in pairs.enumerated() where pair.0.top1 != pair.1.top1 {
+                print(String(format: "[flashnext-lut4-gate] flip %@ position %d: top1 %d -> %d, margin control %.4f candidate %.4f",
+                             item.name, position, pair.0.top1, pair.1.top1, pair.0.margin, pair.1.margin))
+            }
         }
         let predictions = differences.count
         let meanDifference = differences.reduce(0, +) / Double(predictions)
