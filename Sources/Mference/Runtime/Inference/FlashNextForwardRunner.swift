@@ -2735,21 +2735,40 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         capture?.floats[key] = Self.readFP16(buffer, count: count)
     }
 
-    /// Diagnostic: row `row` of the chunked-prefill residual bundle as it
-    /// stands, copied out through a shared buffer (the scratch may be
-    /// private). Meant for `prefillDidCompleteLayer`, which runs after the
-    /// layer's command buffer has completed; nil before any chunked prefill.
-    func prefillStreamRow(_ row: Int) throws -> [Float]? {
+    /// A chunked-prefill scratch tensor the diagnostics can read
+    /// (`prefillScratchRow`), named like the decode capture keys.
+    enum PrefillScratchTensor {
+        /// The residual bundle, `[rows, hcCount * hidden]` (`stream_out`).
+        case stream
+        /// The attention / GDN block output, `[rows, hidden]` (`block_out`).
+        case blockOut
+        /// The MoE sub-block input after its hyper-connection mix (`mlp_hc_mixed`).
+        case mlpMixed
+        /// Routed plus gated shared expert output (`moe_out`).
+        case moeOut
+    }
+
+    /// Diagnostic: row `row` of a chunked-prefill scratch tensor as it stands,
+    /// copied out through a shared buffer (the scratch may be private). Meant
+    /// for `prefillDidCompleteLayer`, which runs after the layer's command
+    /// buffer has completed; nil before any chunked prefill. Read-only.
+    func prefillScratchRow(_ tensor: PrefillScratchTensor, row: Int) throws -> [Float]? {
         guard let scratch = prefillScratch, row >= 0, row < scratch.chunkTokens else { return nil }
-        let bytes = bundle * MemoryLayout<Float16>.stride
+        let (source, width): (MTLBuffer, Int) = switch tensor {
+        case .stream: (scratch.hyper, bundle)
+        case .blockOut: (scratch.blockOut, hidden)
+        case .mlpMixed: (scratch.mixed, hidden)
+        case .moeOut: (scratch.moeOut, hidden)
+        }
+        let bytes = width * MemoryLayout<Float16>.stride
         guard let shared = ctx.device.makeBuffer(length: bytes, options: .storageModeShared),
               let cb = ctx.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
             throw FlashNextForwardRunnerError.commandFailed("no buffer for the prefill row copy")
         }
-        blit.copy(from: scratch.hyper, sourceOffset: row * bytes, to: shared, destinationOffset: 0, size: bytes)
+        blit.copy(from: source, sourceOffset: row * bytes, to: shared, destinationOffset: 0, size: bytes)
         blit.endEncoding()
         try finish(cb)
-        return Self.readFP16(shared, count: bundle)
+        return Self.readFP16(shared, count: width)
     }
 
     static func readFP16(_ buffer: MTLBuffer, count: Int) -> [Float] {

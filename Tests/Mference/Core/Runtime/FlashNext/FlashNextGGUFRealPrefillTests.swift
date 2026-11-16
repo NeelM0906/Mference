@@ -31,6 +31,11 @@ import Testing
                                   count: count)).map(Float.init)
     }
 
+    /// Layers whose sub-layer tensors are compared: around the single-layer
+    /// jumps slot 3 found (layer 21 on the benchmark prompt, 25 on the
+    /// synthetic one).
+    static let detailLayers = Set(20...26)
+
     static func argmax(_ v: [Float]) -> Int { v.indices.max { v[$0] < v[$1] } ?? 0 }
 
     /// max |a - b| / max |b|, the vendor A/B's relative metric.
@@ -57,6 +62,9 @@ import Testing
         var rollout: [Int32] = []
         /// Residual bundle of the prompt's last row after each layer.
         var layers: [Int: [Float]] = [:]
+        /// Sub-layer tensors of the prompt's last row, `detailLayers` only,
+        /// keyed `"block_out"`, `"mlp_hc_mixed"`, `"moe_out"`.
+        var detail: [Int: [String: [Float]]] = [:]
         var replayed = 0
     }
 
@@ -94,8 +102,14 @@ import Testing
                 if p == prompt.count - 1 { runner.capture = .init() }
                 try await runner.produce(token: token, position: p, into: logits)
             }
-            for (key, value) in runner.capture?.floats ?? [:] where key.hasSuffix(".stream_out") {
-                side.layers[Int(key.dropFirst(5).prefix(2))!] = value
+            for (key, value) in runner.capture?.floats ?? [:] {
+                let layer = Int(key.dropFirst(5).prefix(2))!
+                let name = String(key.split(separator: ".").last!)
+                if name == "stream_out" { side.layers[layer] = value }
+                if FlashNextGGUFRealPrefillTests.detailLayers.contains(layer),
+                   ["block_out", "mlp_hc_mixed", "moe_out"].contains(name) {
+                    side.detail[layer, default: [:]][name] = value
+                }
             }
             runner.capture = nil
             side.promptLogits = FlashNextGGUFRealPrefillTests.floats(logits, count: vocab)
@@ -108,9 +122,16 @@ import Testing
             var side = Side()
             let lastChunkRows = prompt.count - (prompt.count - 1) / chunk * chunk
             var layers: [Int: [Float]] = [:]
+            var detail: [Int: [String: [Float]]] = [:]
             runner.prefillDidCompleteLayer = { [runner] layer in
                 // The hook fires for every chunk; the last chunk's values win.
-                if let row = try runner.prefillStreamRow(lastChunkRows - 1) { layers[layer] = row }
+                let row = lastChunkRows - 1
+                if let v = try runner.prefillScratchRow(.stream, row: row) { layers[layer] = v }
+                guard FlashNextGGUFRealPrefillTests.detailLayers.contains(layer) else { return }
+                for (name, tensor) in [("block_out", FlashNextForwardRunner.PrefillScratchTensor.blockOut),
+                                       ("mlp_hc_mixed", .mlpMixed), ("moe_out", .moeOut)] {
+                    if let v = try runner.prefillScratchRow(tensor, row: row) { detail[layer, default: [:]][name] = v }
+                }
             }
             defer { runner.prefillDidCompleteLayer = nil }
             let result = try await runner.prefillChunked(
@@ -119,6 +140,7 @@ import Testing
             #expect(result.newPosition == prompt.count && result.seed == .logitsWritten)
             side.replayed = result.execution?.replayedTokens ?? -1
             side.layers = layers
+            side.detail = detail
             side.promptLogits = FlashNextGGUFRealPrefillTests.floats(logits, count: vocab)
             try await rollout(from: prompt.count, steps: rolloutSteps, side: &side)
             return side
@@ -151,6 +173,16 @@ import Testing
             let r = relative(c, s)
             print("[gguf-prefill-layer] case=\(label) layer=\(L) kind=\(kind) "
                   + "max_abs=\(r.maxAbs) relative=\(r.relative)")
+        }
+        for L in detailLayers {
+            for name in ["block_out", "mlp_hc_mixed", "moe_out"] {
+                guard let c = chunked.detail[L]?[name], let s = sequential.detail[L]?[name] else {
+                    print("[gguf-prefill-sublayer] case=\(label) layer=\(L) \(name) missing"); continue
+                }
+                let r = relative(c, s)
+                print("[gguf-prefill-sublayer] case=\(label) layer=\(L) tensor=\(name) "
+                      + "max_abs=\(r.maxAbs) relative=\(r.relative)")
+            }
         }
         return (p.relative, n.relative, argmaxOK, rolloutOK)
     }
