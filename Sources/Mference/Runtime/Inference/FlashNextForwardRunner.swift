@@ -165,9 +165,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private struct GGUFRouted {
         let expand: GGUFLUT4Expand
         let moe: GGUFLUT4MoE
-        /// Stored bytes of up to `topK` missed experts, reused layer to layer:
-        /// layer L+1 reads into it only after `joinPendingMoE` has waited for
-        /// layer L's command buffer, whose expansion is the last reader.
+        let prefill: GGUFLUT4Prefill
+        /// Stored bytes of up to `max(topK, 16)` missed experts (a decode
+        /// step's routes or one prefill tile), reused: decode layer L+1 reads
+        /// into it only after `joinPendingMoE` has waited for layer L's
+        /// command buffer, and each prefill tile's command buffer completes
+        /// before the next tile is read.
         let staging: MTLBuffer
         let layers: [GGUFExpertLayout.Layer]
         /// One-element token id buffer for the Q6_K embedding gather.
@@ -638,14 +641,16 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                     "GGUF expert shapes or top-\(cfg.topKExperts) do not fit the LUT4 kernels")
             }
             let maxStored = Int(layout.layers.map(\.storedStride).max() ?? 0)
+            let stagedExperts = max(cfg.topKExperts, GGUFLUT4Prefill.maxTileExperts)
             guard let staging = context.device.makeBuffer(
-                    length: cfg.topKExperts * maxStored, options: .storageModeShared),
+                    length: stagedExperts * maxStored, options: .storageModeShared),
                   let tokenID = context.device.makeBuffer(
                     length: MemoryLayout<UInt32>.stride, options: .storageModeShared) else {
                 throw MetalError.noDevice
             }
             self.ggufRouted = GGUFRouted(expand: try GGUFLUT4Expand(context: context),
                                          moe: try GGUFLUT4MoE(context: context),
+                                         prefill: try GGUFLUT4Prefill(context: context),
                                          staging: staging, layers: layout.layers,
                                          tokenID: tokenID)
             self.moeInt4 = nil
@@ -1230,22 +1235,6 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 "Flash-Next logits buffer is too small")
         }
 
-        if isGGUF {
-            // WS4 U4, first pass: the LUT4 routed prefill and the Q6_K chunk
-            // gather are not wired yet, so the prompt runs as decode steps
-            // through the wired decode path. Correct, and as slow as decode.
-            for (i, token) in tokens.enumerated() {
-                try Task.checkCancellation()
-                let last = i == tokens.count - 1
-                try await produceToken(token: token, position: startPosition + i,
-                                       into: last ? logits : nil)
-                execution.recordReplay(1, reason: "gguf_prefill_not_wired")
-                onProgress(i + 1)
-            }
-            beginDecodePhaseWindow()
-            return PrefillResult(newPosition: startPosition + tokens.count,
-                                 seed: .logitsWritten, execution: execution)
-        }
         let scratch = try ensurePrefillScratch(config: config)
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
                                               startPosition: startPosition,
@@ -1354,10 +1343,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 t: UInt32(t), d: UInt32(hidden), outScale: 1)
         case .int8:
             preconditionFailure("Flash-Next embedding policy never emits INT8")
-        case .ggufQ6KRows, .ggufInt8TwoLevel:
-            // `prefillChunked` runs the GGUF install as decode steps and never
-            // reaches the chunked encoder.
-            preconditionFailure("chunked prefill is not wired for the GGUF install")
+        case let .ggufQ6KRows(buffer, offset):
+            matVec.ggufQ6KEmbedRows(commandBuffer: cb, table: buffer, tableOffset: offset,
+                                    ids: scratch.tokens, out: scratch.embed,
+                                    hidden: hidden, tokens: t)
+        case .ggufInt8TwoLevel:
+            preconditionFailure("the GGUF install's token_embd is native Q6_K, never INT8-2L")
         case let .bf16(buffer, offset):
             for row in 0..<t {
                 guard let enc = cb.makeComputeCommandEncoder() else { continue }
@@ -1433,7 +1424,11 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                     min(idPointer[$0], UInt32(numExperts - 1))
                 }
                 let routeWeights = (0..<routeCount).map { weightPointer[$0] }
-                if layer.moe.expertsAreBF16 {
+                if let routed = ggufRouted {
+                    try await encodeGGUFRoutedPrefill(
+                        routed: routed, layerIndex: layerIndex, scratch: scratch,
+                        routeIDs: routeIDs, routeWeights: routeWeights, rows: t)
+                } else if layer.moe.expertsAreBF16 {
                     try await encodeBF16RoutedPrefill(
                         layerIndex: layerIndex, layer: layer, scratch: scratch,
                         routeIDs: routeIDs, rows: t)
@@ -2575,6 +2570,24 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                                          misses: [(slotOffset: Int, stagingOffset: Int)],
                                          slab: MTLBuffer) {
         let geometry = routed.layers[L]
+        encodeGGUFExpansion(commandBuffer: cb, routed: routed, geometry: geometry,
+                            misses: misses, slab: slab)
+        let offsets = Self.lut4Offsets(geometry)
+        routed.moe.encodePhase1(commandBuffer: cb, blobs: blobs, offsets: offsets,
+                                gateUp: geometry.gate.type, x: mixed, acts: moeActs,
+                                d: UInt32(hidden), f: UInt32(moeIntermediate))
+        routed.moe.encodePhase2(commandBuffer: cb, blobs: blobs, offsets: offsets,
+                                down: geometry.down.type, acts: moeActs,
+                                routingWeights: routerWeights, residual: zeroResidual,
+                                y: moeOut, d: UInt32(hidden), f: UInt32(moeIntermediate))
+    }
+
+    /// Expand `misses` (raw GGUF blocks in `routed.staging`) into their LUT4
+    /// slots: one dispatch per source type over every miss's projections.
+    private func encodeGGUFExpansion(commandBuffer cb: MTLCommandBuffer, routed: GGUFRouted,
+                                     geometry: GGUFExpertLayout.Layer,
+                                     misses: [(slotOffset: Int, stagingOffset: Int)],
+                                     slab: MTLBuffer) {
         var jobs: [GGUFLUT4.SourceType: [GGUFLUT4Expand.Job]] = [:]
         for miss in misses {
             for projection in geometry.projections {
@@ -2591,20 +2604,80 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             routed.expand.encode(commandBuffer: cb, type: type,
                                  src: routed.staging, dst: slab, jobs: typed)
         }
-        let offsets = GGUFLUT4MoE.ExpertOffsets(
-            gateIndex: UInt32(geometry.gate.indexOffset), gateD: UInt32(geometry.gate.dOffset),
-            gateM: UInt32(geometry.gate.mOffset),
-            upIndex: UInt32(geometry.up.indexOffset), upD: UInt32(geometry.up.dOffset),
-            upM: UInt32(geometry.up.mOffset),
-            downIndex: UInt32(geometry.down.indexOffset), downD: UInt32(geometry.down.dOffset),
-            downM: UInt32(geometry.down.mOffset))
-        routed.moe.encodePhase1(commandBuffer: cb, blobs: blobs, offsets: offsets,
-                                gateUp: geometry.gate.type, x: mixed, acts: moeActs,
-                                d: UInt32(hidden), f: UInt32(moeIntermediate))
-        routed.moe.encodePhase2(commandBuffer: cb, blobs: blobs, offsets: offsets,
-                                down: geometry.down.type, acts: moeActs,
-                                routingWeights: routerWeights, residual: zeroResidual,
-                                y: moeOut, d: UInt32(hidden), f: UInt32(moeIntermediate))
+    }
+
+    private static func lut4Offsets(_ g: GGUFExpertLayout.Layer) -> GGUFLUT4MoE.ExpertOffsets {
+        GGUFLUT4MoE.ExpertOffsets(
+            gateIndex: UInt32(g.gate.indexOffset), gateD: UInt32(g.gate.dOffset), gateM: UInt32(g.gate.mOffset),
+            upIndex: UInt32(g.up.indexOffset), upD: UInt32(g.up.dOffset), upM: UInt32(g.up.mOffset),
+            downIndex: UInt32(g.down.indexOffset), downD: UInt32(g.down.dOffset), downM: UInt32(g.down.mOffset))
+    }
+
+    /// LUT4 routed prefill for the GGUF install (WS4 U4). The routes are
+    /// grouped expert-major into tiles of at most 16 experts, as for INT4.
+    /// Each tile's misses are read raw into `staging`, expanded into their
+    /// slots, and run through `GGUFLUT4Prefill` in microbatches of at most the
+    /// scratch's 256 pair rows; the tile's command buffer completes before the
+    /// next tile reuses `staging` and the tile blob table. The unweighted
+    /// route partials then go through the shared token-major reduce.
+    private func encodeGGUFRoutedPrefill(
+        routed: GGUFRouted, layerIndex: Int, scratch: PrefillScratch,
+        routeIDs: [UInt32], routeWeights: [Float16], rows: Int
+    ) async throws {
+        let pairs = PrefillRouter.makeTokenExpertPairs(
+            indices: routeIDs, weights: routeWeights, queryCount: rows, topK: topK)
+        let slotCount = model.routedExpertCacheSlotCount(layer: layerIndex) ?? 0
+        guard slotCount >= topK else {
+            throw PrefillError.chunkedUnsupported(
+                "Flash-Next top-\(topK) routing needs at least \(topK) expert slots")
+        }
+        let tileExperts = min(GGUFLUT4Prefill.maxTileExperts, slotCount)
+        let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs, queryCount: rows, topK: topK, numExperts: numExperts,
+            tileExpertCount: tileExperts,
+            expertSortKeys: model.routedExpertPhysicalOffsets(layer: layerIndex))
+        let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
+            device: ctx.device, routes: routes)
+        let geometry = routed.layers[layerIndex]
+        let offsets = Self.lut4Offsets(geometry)
+        let microbatch = min(256, scratch.chunkTokens * topK)
+        for tileIndex in routes.tiles.indices {
+            try Task.checkCancellation()
+            let tile = routes.tiles[tileIndex]
+            let experts = try PrefillStreamedTileBinding.expertIDs(forTile: tileIndex, routes: routes)
+            let fetched = try await model.fetchRoutedExpertsRaw(
+                layer: layerIndex, experts: experts, staging: routed.staging)
+            guard let cb = ctx.queue.makeCommandBuffer() else {
+                throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+            }
+            encodeGGUFExpansion(commandBuffer: cb, routed: routed, geometry: geometry,
+                                misses: fetched.misses, slab: fetched.slab)
+            let blobs = fetched.views.map { (buffer: $0.buffer, offset: Int($0.offset)) }
+            var start = 0
+            while start < Int(tile.pairCount) {
+                let count = min(microbatch, Int(tile.pairCount) - start)
+                routed.prefill.encode(
+                    commandBuffer: cb, hidden: scratch.mixed, sortedPairs: metadata.sortedPairs,
+                    gateUpActScratch: scratch.routedGateUpAct, downScratch: scratch.routedDown,
+                    routePartials: scratch.routePartials, blobs: blobs,
+                    params: .init(pairStart: tile.pairStart + UInt32(start), pairCount: UInt32(count),
+                                  d: UInt32(hidden), f: UInt32(moeIntermediate), topK: UInt32(topK),
+                                  hiddenStrideElements: UInt32(hidden),
+                                  expertIDs: experts.map(UInt32.init), offsets: offsets),
+                    gateUp: geometry.gate.type, downType: geometry.down.type)
+                start += count
+            }
+            trackGpuInterval(cb)
+            try withExtendedLifetime(metadata) { try finish(cb) }
+        }
+        guard let reduce = ctx.queue.makeCommandBuffer() else {
+            throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+        }
+        prefillMoE.encodeReduceTokenMajor(
+            commandBuffer: reduce, routePartials: scratch.routePartials,
+            routeWeights: scratch.routeWeights, h2: scratch.moeOut,
+            queryCount: UInt32(rows), topK: UInt32(topK), d: UInt32(hidden))
+        try finish(reduce)
     }
 
     // MARK: - Expert streaming
