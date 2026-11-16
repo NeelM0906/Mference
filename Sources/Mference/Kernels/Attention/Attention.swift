@@ -69,6 +69,12 @@ final class Attention {
     private static let defaultFullChunks = 16
     private static let defaultGQASWAChunks = 8
 
+    /// Qwen 3.6 decode sets this: its grouped 256/16/2 full attention splits
+    /// by length (`groupedFull256ChunkCount`) instead of a fixed 16 chunks.
+    /// It changes the rounding of the partial sums, so it is gated by the
+    /// teacher-forced tolerance gate, not byte identity. Off by default.
+    var groupedFull256LengthChunks = false
+
     // Partial state written by pass 1, read by pass 2. One shared allocation:
     // attention runs once per layer, serially, and pass 2 hazard-tracks pass 1
     // within the same command buffer — no race (mirrors MoE.routerLogits).
@@ -217,17 +223,33 @@ final class Attention {
         return max(1, min(defaultChunks, min(maxChunks, eff)))
     }
 
+    /// Split count for the grouped 256/16/2 kernel under
+    /// `groupedFull256LengthChunks`: today's 16 below 512 positions, 32 from
+    /// 512, and `maxChunks` (64) from 8,192. At 16 chunks the kernel runs
+    /// 2 × 16 threadgroups, each walking its chunk one position at a time, so
+    /// long contexts leave a 24-core M1 Max latency-bound. The thresholds are
+    /// the fastest split measured at each length on the M1 Max with
+    /// `DecodeAttentionKernelBenchmarks`: 16 at 256 positions, 32 at 1K and
+    /// 4K, 64 from 8K to 32K.
+    static func groupedFull256ChunkCount(effLen: Int) -> Int {
+        let eff = max(1, effLen)
+        let chunks = eff >= 8192 ? maxChunks : eff >= 512 ? 2 * defaultFullChunks : defaultFullChunks
+        return max(1, min(chunks, eff))
+    }
+
     /// `forceGroupedVector` selects the grouped full-attention kernel for the
     /// Gemma 512/16/2 and Qwen 3.6 256/16/2 shapes: one threadgroup per KV head
     /// and chunk, one SIMD group per query head, bit-identical to the per-head
-    /// kernel.
+    /// kernel. `groupedFull256LengthChunks` sizes the 256/16/2 grouped split
+    /// by length (`groupedFull256ChunkCount`) instead of the fixed 16.
     static func splitGeometry(headDim: UInt32 = 512,
                                      numQHeads: UInt32,
                                      numKVHeads: UInt32,
                                      seqLen: UInt32,
                                      kvStart: UInt32,
                                      preferGQASWA: Bool,
-                                     forceGroupedVector: Bool = false) -> AttentionSplitGeometry {
+                                     forceGroupedVector: Bool = false,
+                                     groupedFull256LengthChunks: Bool = false) -> AttentionSplitGeometry {
         let qPerKV = Int(numQHeads / numKVHeads)
         let useSWAGQAPartial = preferGQASWA && qPerKV <= 2
         let useGroupedVector = forceGroupedVector && !preferGQASWA
@@ -237,7 +259,9 @@ final class Attention {
                                          preferGQASWA: useSWAGQAPartial)
         let numChunks = useSWAGQAPartial
             ? max(baseChunks, min(Self.maxChunks, baseChunks * qPerKV))
-            : baseChunks
+            : (useGroupedVector && headDim == 256 && groupedFull256LengthChunks)
+                ? Self.groupedFull256ChunkCount(effLen: effectiveLength)
+                : baseChunks
         let chunkLength = (max(1, effectiveLength) + numChunks - 1) / numChunks
         let partialHeadGroups = (useSWAGQAPartial || useGroupedVector) ? Int(numKVHeads) : Int(numQHeads)
         return AttentionSplitGeometry(effectiveLength: effectiveLength,
@@ -437,7 +461,8 @@ final class Attention {
                                           seqLen: seqLen,
                                           kvStart: kvStart,
                                           preferGQASWA: preferGQASWA,
-                                          forceGroupedVector: forceGroupedVector)
+                                          forceGroupedVector: forceGroupedVector,
+                                          groupedFull256LengthChunks: groupedFull256LengthChunks)
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
         let nChunks = geometry.numChunks
         let chunkLen = geometry.chunkLength

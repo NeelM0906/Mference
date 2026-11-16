@@ -115,6 +115,7 @@ import MferenceValidationSupport
         seqLen: Int,
         mode: Mode,
         shareKV: Bool = false,
+        lengthChunks: Bool = false,
         seed: UInt64,
         tolerance: Float = Tolerance.fp16ChainedReduction
     ) throws {
@@ -137,6 +138,7 @@ import MferenceValidationSupport
 
         let ctx = try MetalContext()
         let kernel = try Attention(context: ctx)
+        kernel.groupedFull256LengthChunks = lengthChunks
 
         guard let qBuf = Fp16Buffer.make(ctx.device, halves: qFp16),
               let kBuf = Fp16Buffer.make(ctx.device, halves: kFp16),
@@ -373,6 +375,44 @@ import MferenceValidationSupport
     @Test func attentionFull_qwenRealShape() throws {
         try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
                                seqLen: 128, mode: .full, seed: 0x36_0175)
+    }
+
+    /// Qwen 3.6 decode's length split: 32 chunks at 2,048 positions and 64
+    /// at 9,000 (an uneven last chunk), against the CPU reference.
+    @Test(arguments: [2048, 9000])
+    func attentionFull_qwenLengthSplitMatchesReference(seqLen: Int) throws {
+        let geometry = Attention.splitGeometry(headDim: 256, numQHeads: 16, numKVHeads: 2,
+                                               seqLen: UInt32(seqLen), kvStart: 0,
+                                               preferGQASWA: false, forceGroupedVector: true,
+                                               groupedFull256LengthChunks: true)
+        #expect(geometry.numChunks > 16, "chunks \(geometry.numChunks) at \(seqLen)")
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
+                               seqLen: seqLen, mode: .full, lengthChunks: true,
+                               seed: 0x36_0176 &+ UInt64(seqLen))
+    }
+
+    @Test func groupedFull256ChunkCount_growsWithLengthOnlyWhenEnabled() {
+        func chunks(_ seqLen: Int, headDim: UInt32 = 256, q: UInt32 = 16, kv: UInt32 = 2,
+                    on: Bool = true) -> Int {
+            Attention.splitGeometry(headDim: headDim, numQHeads: q, numKVHeads: kv,
+                                    seqLen: UInt32(seqLen), kvStart: 0, preferGQASWA: false,
+                                    forceGroupedVector: true, groupedFull256LengthChunks: on).numChunks
+        }
+        // Short contexts keep today's split, including fewer chunks than 16.
+        #expect(chunks(5) == 5)
+        #expect(chunks(511) == 16)
+        #expect(chunks(512) == 32)
+        #expect(chunks(8191) == 32)
+        #expect(chunks(8192) == 64)
+        for seqLen in [1, 100, 4096, 32768] {
+            #expect(chunks(seqLen) >= chunks(seqLen, on: false))
+            #expect(chunks(seqLen) <= Attention.maxChunks)
+        }
+        #expect(chunks(32768) == Attention.maxChunks)
+        // Off by default, and only the Qwen 3.6 256/16/2 grouped shape changes.
+        #expect(chunks(32768, on: false) == 16)
+        #expect(chunks(32768, headDim: 512) == 16)
+        #expect(chunks(32768, q: 24, kv: 4) == 16)
     }
 
 

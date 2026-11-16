@@ -41,7 +41,7 @@ import Testing
         return try ctx.pipeline(name, constants: constants)
     }
 
-    @Test(.enabled(if: enabled), arguments: [4096, 16384, 32768])
+    @Test(.enabled(if: enabled), arguments: [256, 1024, 4096, 8192, 16384, 32768])
     func qwenGroupedFullDecode(seqLen: Int) throws {
         let ctx = try MetalContext()
         let device = ctx.device
