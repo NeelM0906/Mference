@@ -24,6 +24,9 @@ import Testing
 /// Env: `MFERENCE_FLASHNEXT_GATE` (the `qwen38flashnextudiq3xxs.gturbo`
 /// directory, read-only), `MFERENCE_FLASHNEXT_GATE_CHUNK`, optional
 /// `MFERENCE_FLASHNEXT_GATE_OUT` (per-position rows as JSON). 16 expert slots.
+/// `MFERENCE_FLASHNEXT_GATE_ITEM` (`long` or `docs`) runs one item, both arms,
+/// so a long gate can be split into separate lock holds; the thresholds are
+/// then applied offline to the pooled rows of all items, not per item.
 @Suite(.serialized) struct FlashNextGroupedLUT4EquivalenceGateTests {
     static let env = ProcessInfo.processInfo.environment
     static var enabled: Bool { env["MFERENCE_FLASHNEXT_GATE"] != nil && env["MFERENCE_FLASHNEXT_GATE_CHUNK"] != nil }
@@ -63,8 +66,11 @@ import Testing
         let docsHead = try tokenizer.encodeChat(messages: [MFTokenizer.Message(
             role: .user, content: tokenizer.decode(docTokens)
                 + "\n\nSummarize how the documents above keep memory bounded while serving a long prompt.")])
-        let items = [Item(name: "long+qwen-answer", tokens: longHead + answer, prefillCount: longHead.count),
-                     Item(name: "docs-8k+qwen-answer", tokens: docsHead + answer, prefillCount: docsHead.count)]
+        let allItems = [Item(name: "long+qwen-answer", tokens: longHead + answer, prefillCount: longHead.count),
+                        Item(name: "docs-8k+qwen-answer", tokens: docsHead + answer, prefillCount: docsHead.count)]
+        let only = Self.env["MFERENCE_FLASHNEXT_GATE_ITEM"]
+        let items = only == nil ? allItems : allItems.filter { $0.name.hasPrefix(only!) }
+        try #require(!items.isEmpty, "MFERENCE_FLASHNEXT_GATE_ITEM must be long or docs")
         let longest = items.map(\.tokens.count).max() ?? 0
 
         let context = try MetalContext()
@@ -156,10 +162,12 @@ import Testing
         print(String(format: "[flashnext-lut4-gate] row->grouped LUT4 chunk %d tiles %d predictions=%d base NLL=%.5f dNLL=%+.5f (95%% %+.5f..%+.5f) max|d|=%.4f top1 agreement=%.4f",
                      chunk, candidate.tiles, predictions, baseSum / Double(predictions), meanDifference,
                      meanDifference - halfWidth, meanDifference + halfWidth, maxAbs, agreement))
-        let material = meanDifference > 0.005 && meanDifference - halfWidth > 0
-        #expect(!material, "dNLL=\(meanDifference) +/- \(halfWidth)")
-        #expect(meanDifference <= 0.02, "dNLL=\(meanDifference)")
-        #expect(agreement >= 0.98, "agreement=\(agreement)")
+        if only == nil {
+            let material = meanDifference > 0.005 && meanDifference - halfWidth > 0
+            #expect(!material, "dNLL=\(meanDifference) +/- \(halfWidth)")
+            #expect(meanDifference <= 0.02, "dNLL=\(meanDifference)")
+            #expect(agreement >= 0.98, "agreement=\(agreement)")
+        }
         if let path = Self.env["MFERENCE_FLASHNEXT_GATE_OUT"] {
             try JSONSerialization.data(withJSONObject: ["modelID": model.modelID, "chunk": chunk, "rows": saved])
                 .write(to: URL(fileURLWithPath: path))
