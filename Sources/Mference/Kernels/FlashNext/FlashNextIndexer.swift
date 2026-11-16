@@ -100,8 +100,10 @@ final class FlashNextIndexer {
     private let selectPSO: MTLComputePipelineState
     private let gatherPSO: MTLComputePipelineState
 
+    /// `normWeightsF32`: the q/k norm weights are F32 (WS4 GGUF install,
+    /// `FC_FN_INDEXER_NORM_W_F32`); false for the vendor install.
     init(context: MetalContext, matVec: FlashNextMatVec,
-         geometry: Geometry) throws {
+         geometry: Geometry, normWeightsF32: Bool = false) throws {
         precondition(geometry.headDim <= Self.maxHeadDim,
                      "indexer head dim \(geometry.headDim) exceeds the kernels' "
                      + "\(Self.maxHeadDim)-wide thread scratch")
@@ -113,9 +115,11 @@ final class FlashNextIndexer {
         precondition(geometry.blockBudget <= Self.maxBlockBudget)
         self.geometry = geometry
         self.matVec = matVec
-        self.preparePSO = try context.pipeline("flashnext_indexer_prepare_queries")
+        let normConstants = normWeightsF32
+            ? [MetalFunctionConstant(index: 122, value: .bool(true))] : []
+        self.preparePSO = try context.pipeline("flashnext_indexer_prepare_queries", constants: normConstants)
         self.appendPSO = try context.pipeline("flashnext_indexer_append_raw_keys")
-        self.poolPSO = try context.pipeline("flashnext_indexer_pool_block_keys")
+        self.poolPSO = try context.pipeline("flashnext_indexer_pool_block_keys", constants: normConstants)
         self.scoresPSO = try context.pipeline("flashnext_indexer_scores")
         self.selectPSO = try context.pipeline("flashnext_indexer_select_blocks")
         self.gatherPSO = try context.pipeline("flashnext_indexer_gather_kv")

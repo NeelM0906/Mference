@@ -14,9 +14,8 @@ import Metal
 /// - F32 2-D matrices and conv taps, and the 1-D vectors U2's R8 scan found
 ///   BF16-exact, are narrowed to BF16 at load. The narrowing re-proves
 ///   exactness and throws on the first value that is not (`.exact`).
-/// - The `+1` norms are not BF16-exact; they are rounded to BF16
-///   (`.nearestEven`), the same rounding the vendor path's own `1 + w` bake
-///   applies. U5 measures it; F32-weight norm kernels are the fallback.
+/// - The `+1` norms are not BF16-exact; they stay F32 and the norm kernels
+///   read them through their F32-weight function constants (U5 step 1).
 /// - `ssm_a` (`-exp(A_log)` in F32) is returned as stored; the GDN kernels
 ///   read it directly (`GDN.CheckpointLayout.gguf`).
 extension Model {
@@ -92,6 +91,19 @@ extension Model {
                 dst[i] = Quantization.bf16Bits(Float(bitPattern: bits))
             }
         }
+    }
+
+    /// A `+1` norm vector as stored: F32 `[n]`, not BF16-exact, read directly
+    /// by the F32-weight norm kernels (`RMSNorm(groupedWeightF32:)`,
+    /// `PrefillQKVEpilogue(normWeightsF32:)`, `FlashNextIndexer(normWeightsF32:)`).
+    func ggufF32Norm(name: String) throws -> TensorView {
+        let view = try resident(name: name)
+        guard view.dtype == 3, view.length > 0, view.length % 4 == 0, view.offset % 4 == 0 else {
+            throw ModelError.indexCorrupt(
+                detail: "\(name) must be an F32 vector at a 4-byte offset, got dtype \(view.dtype), "
+                    + "\(view.length) B at \(view.offset)")
+        }
+        return view
     }
 
     /// `ssm_a` as stored: F32 `[numVHeads]`, `-exp(A_log)`.

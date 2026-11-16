@@ -170,7 +170,7 @@ extension Model {
     /// shared bundle-wide vector.
     public func hcNorm(site: HyperConnectionSite, layer L: Int) throws -> TensorView {
         if isFlashNextGGUF {
-            return try ggufBF16(name: Self.ggufLayerName(L, Self.ggufHCStem(site) + "_norm.weight"), mode: .nearestEven)
+            return try ggufF32Norm(name: Self.ggufLayerName(L, Self.ggufHCStem(site) + "_norm.weight"))
         }
         return try normWeight(name: hcSite(site, layer: L) + "hc_norm.weight")
     }
@@ -192,7 +192,7 @@ extension Model {
     }
     public var hcGlobalNorm: TensorView {
         get throws {
-            if isFlashNextGGUF { return try ggufBF16(name: "output_hc_norm.weight", mode: .nearestEven) }
+            if isFlashNextGGUF { return try ggufF32Norm(name: "output_hc_norm.weight") }
             return try normWeight(name: "\(trunkPrefix)hyper_connection_mixer.hc_norm.weight")
         }
     }
@@ -224,7 +224,7 @@ extension Model {
     }
     /// `[indexerHeadDim]`, zero-centered.
     public func indexerQNorm(layer L: Int) throws -> TensorView {
-        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "indexer.q_norm.weight"), mode: .nearestEven) }
+        if isFlashNextGGUF { return try ggufF32Norm(name: Self.ggufLayerName(L, "indexer.q_norm.weight")) }
         return try normWeight(name: indexerPrefix(layer: L) + "q_layernorm.weight")
     }
     /// `[indexerHeadDim]`, zero-centered. Applied to the pooled block key
@@ -236,17 +236,17 @@ extension Model {
     /// plus the always-selected incomplete tail — so no layer of this plumbing
     /// may add one.
     public func indexerKNorm(layer L: Int) throws -> TensorView {
-        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "indexer.k_norm.weight"), mode: .nearestEven) }
+        if isFlashNextGGUF { return try ggufF32Norm(name: Self.ggufLayerName(L, "indexer.k_norm.weight")) }
         return try normWeight(name: indexerPrefix(layer: L) + "k_layernorm.weight")
     }
 
     /// Per-head attention q / k RMSNorm weights, `[headDim]`, zero-centered.
     public func attnQNorm(layer L: Int) throws -> TensorView {
-        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "attn_q_norm.weight"), mode: .nearestEven) }
+        if isFlashNextGGUF { return try ggufF32Norm(name: Self.ggufLayerName(L, "attn_q_norm.weight")) }
         return try normWeight(name: "\(trunkPrefix)layers.\(L).self_attn.q_norm.weight")
     }
     public func attnKNorm(layer L: Int) throws -> TensorView {
-        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "attn_k_norm.weight"), mode: .nearestEven) }
+        if isFlashNextGGUF { return try ggufF32Norm(name: Self.ggufLayerName(L, "attn_k_norm.weight")) }
         return try normWeight(name: "\(trunkPrefix)layers.\(L).self_attn.k_norm.weight")
     }
 
@@ -280,15 +280,15 @@ extension Model {
         return try resident(name: plePrefix(layer: L) + "conv1d.weight")
     }
     public func pleNormConv(layer L: Int) throws -> TensorView {
-        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ple_norm_conv.weight"), mode: .nearestEven) }
+        if isFlashNextGGUF { return try ggufF32Norm(name: Self.ggufLayerName(L, "ple_norm_conv.weight")) }
         return try normWeight(name: plePrefix(layer: L) + "norm_conv.weight")
     }
     public func pleNormKey(layer L: Int) throws -> TensorView {
-        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ple_norm_key.weight"), mode: .nearestEven) }
+        if isFlashNextGGUF { return try ggufF32Norm(name: Self.ggufLayerName(L, "ple_norm_key.weight")) }
         return try normWeight(name: plePrefix(layer: L) + "norm_key.weight")
     }
     public func pleNormQuery(layer L: Int) throws -> TensorView {
-        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ple_norm_query.weight"), mode: .nearestEven) }
+        if isFlashNextGGUF { return try ggufF32Norm(name: Self.ggufLayerName(L, "ple_norm_query.weight")) }
         return try normWeight(name: plePrefix(layer: L) + "norm_query.weight")
     }
 

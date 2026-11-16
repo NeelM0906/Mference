@@ -330,6 +330,18 @@ void prefill_rmsnorm_bf16w_block(
     }
 }
 
+// WS4 GGUF install: the per-head q/k norm weights are F32 (`1 + w`, not
+// BF16-exact), read through the `weight` binding. UNSET keeps every shipped
+// pipeline's BF16 read unchanged.
+constant bool FC_PREFILL_PERHEAD_W_F32 [[function_constant(121)]];
+
+static inline float prefill_perhead_weight(device const bfloat* weight, uint i) {
+    if (is_function_constant_defined(FC_PREFILL_PERHEAD_W_F32) && FC_PREFILL_PERHEAD_W_F32) {
+        return reinterpret_cast<device const float*>(weight)[i];
+    }
+    return float(weight[i]);
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void prefill_rmsnorm_bf16w_perhead_block(
     device const half*   x                   [[buffer(0)]],
@@ -359,7 +371,7 @@ void prefill_rmsnorm_bf16w_perhead_block(
     const float inv = prefill_rms_block_inv(xh, head_dim, eps, lid, lsize, lane, sg, sgs, partial);
 
     for (uint i = lid; i < head_dim; i += lsize) {
-        yh[i] = gemma_weighted_norm(float(xh[i]), inv, float(weight[i]));
+        yh[i] = gemma_weighted_norm(float(xh[i]), inv, prefill_perhead_weight(weight, i));
     }
 }
 

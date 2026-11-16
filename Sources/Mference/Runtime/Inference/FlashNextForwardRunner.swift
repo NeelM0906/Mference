@@ -599,7 +599,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         self.matVec = try FlashNextMatVec(context: context, int4: int4,
                                           int8Columns: cfg.hiddenSize,
                                           ggufInt8TwoLevel: isGGUF)
-        self.rms = try RMSNorm(context: context)
+        // GGUF install: the +1 norm weights stay F32 (U5 step 1); vendor: BF16.
+        self.rms = try RMSNorm(context: context, groupedWeightF32: isGGUF)
         self.elementwise = try Elementwise(context: context)
         self.hc = try FlashNextHyperConnections(
             context: context, rms: rms, matVec: matVec,
@@ -612,10 +613,11 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                             headDim: cfg.flashNext.indexerHeadDim,
                             compressRatio: cfg.flashNext.indexerCompressRatio,
                             blockBudget: cfg.flashNext.indexerBlockBudget,
-                            rotaryDim: rotaryDim, theta: theta, eps: eps))
+                            rotaryDim: rotaryDim, theta: theta, eps: eps),
+            normWeightsF32: isGGUF)
         self.attention = FlashNextAttention(
             context: context, matVec: matVec, elementwise: elementwise,
-            epilogue: try PrefillQKVEpilogue(context: context),
+            epilogue: try PrefillQKVEpilogue(context: context, normWeightsF32: isGGUF),
             attention: try Attention(context: context),
             prefillAttention: try PrefillAttention(context: context),
             geometry: .init(hidden: hidden,
