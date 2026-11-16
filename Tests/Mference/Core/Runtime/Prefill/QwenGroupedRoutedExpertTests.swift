@@ -32,6 +32,31 @@ private let qwenGroupedGEMMAvailable: Bool = {
         }
     }
 
+    @Test func simdgroupSelectionIsQwenOffApple10Only() {
+        for family in ModelFamily.allCases {
+            for apple10 in [false, true] {
+                let selected = RealForwardRunner.usesSimdgroupGroupedRoutedExperts(
+                    family: family, supportsApple10TensorOps: apple10)
+                #expect(selected == (family == .qwen36 && !apple10), "\(family) apple10=\(apple10)")
+            }
+        }
+    }
+
+    /// The simdgroup kernel pays per 64-row block whatever its fill, so it
+    /// takes a tile while padded rows stay within 8x the real rows.
+    @Test func simdgroupFillRuleAdmitsEightRowsPerBlock() {
+        #expect(!PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: []))
+        #expect(!PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: [0]))
+        #expect(!PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: [7]))
+        #expect(PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: [8]))
+        #expect(PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: [64, 128]))
+        #expect(!PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: [1, 1, 1, 1]))
+        // 2,940-token chunks average 92 rows per expert: always admitted.
+        #expect(PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: Array(repeating: 92, count: 16)))
+        // Below 1.5x, MPP's rule also admits it; the simdgroup kernel is checked first.
+        #expect(PrefillGroupedExpertGate.usesGroupedGEMM(pairCounts: [64, 128]))
+    }
+
     /// Qwen's grouped activation (chunk x topK x routedIntermediate) equals its
     /// attention-output scratch (chunk x 16 heads x 256), so grouped experts
     /// borrow that buffer and the prefill arena does not grow.

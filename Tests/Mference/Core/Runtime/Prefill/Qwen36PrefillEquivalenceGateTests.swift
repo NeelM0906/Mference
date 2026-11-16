@@ -6,15 +6,19 @@ import Testing
 
 /// Quality gates for Qwen 3.6 kernels that reorder floating-point sums: the
 /// GQA-shared prefill attention kernel (`attention_prefill_gqa8_d256_simd`),
-/// the grouped-GEMM routed experts (`MPPGroupedRoutedMoE`), and the batched
-/// decode full-attention kernel (scored on the teacher-forced decode steps
-/// that follow each prefill).
+/// the grouped-GEMM routed experts (`MPPGroupedRoutedMoE` and
+/// `SimdgroupGroupedRoutedMoE`), and the batched decode full-attention kernel
+/// (scored on the teacher-forced decode steps that follow each prefill).
 ///
 /// Set `MFERENCE_QWEN36_PREFILL_GATE` to an installed `qwen36.gturbo`; the
 /// install is read-only. In each test, control is the default runner with that
-/// one kernel replaced by its predecessor (the tiled attention kernel, or the
-/// row kernel for every routed tile); candidate is the default runner, which
-/// selects both kernels on GPUs without the Apple10 TensorOps path. Both
+/// one kernel replaced by its predecessor (the tiled attention kernel; the row
+/// kernel for every routed tile; MPP and the row kernel in place of the
+/// simdgroup grouped kernel; or the per-component decode attention kernel);
+/// candidate is the default runner, which selects
+/// these kernels on GPUs without the Apple10 TensorOps path, with only the
+/// kernel under test differing (the MPP gate's candidate turns the simdgroup
+/// kernel off). Both
 /// prefill the same prompts in 4,096-token chunks and are teacher-forced
 /// through the same saved answers, so every difference comes from that kernel.
 ///
@@ -105,6 +109,8 @@ struct Qwen36PrefillEquivalenceGateTests {
                              "the tensorops grouped kernel does not build on this host")
             },
             configureControl: { $0.useRowKernelForRoutedExperts() },
+            // MPP alone: the simdgroup kernel, ahead of it by default, is off.
+            configureCandidate: { $0.useMPPOrRowKernelForRoutedExperts() },
             dispatches: { $0.prefillGroupedExpertTiles },
             checkDispatches: { control, candidate, _ in
                 #expect(control == 0)
@@ -133,9 +139,29 @@ struct Qwen36PrefillEquivalenceGateTests {
             })
     }
 
+    /// The simdgroup grouped kernel against the selection before it (MPP on
+    /// tiles within 1.5x padding, the row kernel otherwise).
+    @Test func simdgroupGroupedRoutedExpertsKeepTeacherForcedPerplexity() async throws {
+        try await runGate(
+            label: "mpp/row->simdgroup-grouped", outKey: "mppRowToSimdgroupGrouped",
+            precondition: { model, context in
+                let selected = RealForwardRunner.usesSimdgroupGroupedRoutedExperts(
+                    family: model.config.family,
+                    supportsApple10TensorOps: context.device.supportsApple10TensorOps)
+                try #require(selected, "the simdgroup grouped kernel is the Qwen default only off Apple10")
+            },
+            configureControl: { $0.useMPPOrRowKernelForRoutedExperts() },
+            dispatches: { $0.prefillSimdGroupedExpertTiles },
+            checkDispatches: { control, candidate, _ in
+                #expect(control == 0)
+                #expect(candidate > 0, "candidate simdgroup grouped tiles \(candidate)")
+            })
+    }
+
     private func runGate(label: String, outKey: String, documentTokenCount: Int = 7_800,
                          precondition: (Model, MetalContext) throws -> Void,
                          configureControl: (RealForwardRunner) -> Void,
+                         configureCandidate: (RealForwardRunner) -> Void = { _ in },
                          dispatches: (RealForwardRunner) -> Int,
                          checkDispatches: (_ control: Int, _ candidate: Int, _ itemCount: Int) -> Void)
         async throws {
@@ -232,7 +258,7 @@ struct Qwen36PrefillEquivalenceGateTests {
             let runner = try RealForwardRunner(
                 model: model, context: context, maxContext: longest + 64,
                 runtimeConfiguration: RuntimeConfiguration(prefillChunkTokens: 4096, forceLogitsHead: true))
-            if control { configureControl(runner) }
+            if control { configureControl(runner) } else { configureCandidate(runner) }
             var outcome = Outcome()
             for item in items {
                 runner.reset()
