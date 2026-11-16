@@ -2735,6 +2735,23 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         capture?.floats[key] = Self.readFP16(buffer, count: count)
     }
 
+    /// Diagnostic: row `row` of the chunked-prefill residual bundle as it
+    /// stands, copied out through a shared buffer (the scratch may be
+    /// private). Meant for `prefillDidCompleteLayer`, which runs after the
+    /// layer's command buffer has completed; nil before any chunked prefill.
+    func prefillStreamRow(_ row: Int) throws -> [Float]? {
+        guard let scratch = prefillScratch, row >= 0, row < scratch.chunkTokens else { return nil }
+        let bytes = bundle * MemoryLayout<Float16>.stride
+        guard let shared = ctx.device.makeBuffer(length: bytes, options: .storageModeShared),
+              let cb = ctx.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("no buffer for the prefill row copy")
+        }
+        blit.copy(from: scratch.hyper, sourceOffset: row * bytes, to: shared, destinationOffset: 0, size: bytes)
+        blit.endEncoding()
+        try finish(cb)
+        return Self.readFP16(shared, count: bundle)
+    }
+
     static func readFP16(_ buffer: MTLBuffer, count: Int) -> [Float] {
         let base = buffer.contents().bindMemory(to: Float16.self, capacity: count)
         return (0..<count).map { Float(base[$0]) }
