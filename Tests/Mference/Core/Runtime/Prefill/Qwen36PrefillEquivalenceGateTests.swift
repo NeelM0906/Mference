@@ -68,6 +68,8 @@ struct Qwen36PrefillEquivalenceGateTests {
 
     struct Outcome {
         var rows: [String: [Row]] = [:]
+        /// Per scored position, a hash of the raw logits (identity gates only).
+        var logitHashes: [String: [UInt64]] = [:]
         var prefillSeconds: [String: Double] = [:]
         var dispatches = 0
     }
@@ -158,7 +160,34 @@ struct Qwen36PrefillEquivalenceGateTests {
             })
     }
 
+    /// The staged GQA attention kernel against the unstaged P3a form it
+    /// replaced. Same arithmetic per 8-key step, so the model's logits must be
+    /// identical at every scored position (class E), not merely within the
+    /// thresholds.
+    @Test func stagedGQAAttentionKeepsLogitsBitIdentical() async throws {
+        let unstaged = try GQAPrefillAttentionUnstagedReference.pipeline(device: try MetalContext().device)
+        try await runGate(
+            label: "unstaged->staged gqa", outKey: "unstagedToStagedGQA",
+            requireIdentical: true,
+            precondition: { model, context in
+                let usesGQA = RealForwardRunner.usesQwenGQASimdAttention(
+                    family: model.config.family, supportsApple10TensorOps: context.device.supportsApple10TensorOps)
+                try #require(usesGQA, "the GQA kernel is the default only on GPUs without the Apple10 TensorOps path")
+            },
+            configureControl: {
+                $0.prefillAttentionKernels.useGQAPipelineForTesting(
+                    unstaged, tokensPerGroup: GQAPrefillAttentionUnstagedReference.tokensPerGroup)
+            },
+            dispatches: { $0.prefillAttentionKernels.gqaSimdDispatches },
+            checkDispatches: { control, candidate, itemCount in
+                // 10 full-attention layers per chunk: 1 chunk for each short item, 2 for the 8K item.
+                #expect(control == 10 * (itemCount + 1), "control GQA dispatches \(control)")
+                #expect(candidate == 10 * (itemCount + 1), "candidate GQA dispatches \(candidate)")
+            })
+    }
+
     private func runGate(label: String, outKey: String, documentTokenCount: Int = 7_800,
+                         requireIdentical: Bool = false,
                          precondition: (Model, MetalContext) throws -> Void,
                          configureControl: (RealForwardRunner) -> Void,
                          configureCandidate: (RealForwardRunner) -> Void = { _ in },
@@ -254,6 +283,14 @@ struct Qwen36PrefillEquivalenceGateTests {
             return Row(nll: Double(maximum + log(sum) - values[Int(target)]), top1: Int(index))
         }
 
+        /// FNV-1a over the raw FP16 logits, for the byte-identity gate.
+        func logitsHash() -> UInt64 {
+            let words = logits.contents().bindMemory(to: UInt64.self, capacity: vocab * 2 / 8)
+            var hash: UInt64 = 0xcbf29ce484222325
+            for i in 0..<(vocab * 2 / 8) { hash = (hash ^ words[i]) &* 0x100000001b3 }
+            return hash
+        }
+
         func run(control: Bool) async throws -> Outcome {
             let runner = try RealForwardRunner(
                 model: model, context: context, maxContext: longest + 64,
@@ -268,11 +305,14 @@ struct Qwen36PrefillEquivalenceGateTests {
                     into: logits, onProgress: { _ in })
                 outcome.prefillSeconds[item.name] = Date().timeIntervalSince(start)
                 var rows = [analyze(target: item.tokens[item.prefillCount])]
+                var hashes = requireIdentical ? [logitsHash()] : []
                 for position in item.prefillCount..<(item.tokens.count - 1) {
                     try await runner.produce(token: item.tokens[position], position: position, into: logits)
                     rows.append(analyze(target: item.tokens[position + 1]))
+                    if requireIdentical { hashes.append(logitsHash()) }
                 }
                 outcome.rows[item.name] = rows
+                outcome.logitHashes[item.name] = hashes
             }
             outcome.dispatches = dispatches(runner)
             return outcome
@@ -320,6 +360,20 @@ struct Qwen36PrefillEquivalenceGateTests {
         #expect(!material, "dNLL=\(meanDifference) +/- \(halfWidth)")
         #expect(meanDifference <= 0.02, "dNLL=\(meanDifference)")
         #expect(agreement >= 0.98, "agreement=\(agreement)")
+        if requireIdentical {
+            // Byte equality of every scored position's logits, then the
+            // derived NLL and top-1.
+            for item in items {
+                let a = try #require(control.logitHashes[item.name])
+                let b = try #require(candidate.logitHashes[item.name])
+                #expect(a.count == b.count && !a.isEmpty, "\(item.name) logit hash counts \(a.count) vs \(b.count)")
+                let differing = zip(a, b).filter { $0 != $1 }.count
+                #expect(differing == 0, "\(item.name): logits differ at \(differing) of \(a.count) positions")
+            }
+            let changed = differences.filter { $0 != 0 }.count
+            #expect(changed == 0, "\(changed) of \(differences.count) positions changed NLL")
+            #expect(sameTop == differences.count, "top-1 differs at \(differences.count - sameTop) positions")
+        }
         if let path = ProcessInfo.processInfo.environment["MFERENCE_QWEN36_PREFILL_GATE_OUT"] {
             // Both gates share this file: keep the other gate's rows for the
             // same model and replace only this gate's key.
