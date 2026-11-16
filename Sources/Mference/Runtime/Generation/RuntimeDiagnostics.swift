@@ -80,8 +80,11 @@ public struct PrefixCacheDiagnostics: Sendable, Equatable, Encodable {
     public let ceilingBytes: Int
     public let checkpoints: Int
     public let images: Int
+    /// The live-memory governor's sheds, swap reading and shadow admission;
+    /// nil when the cache runs without one.
+    public let memory: PrefixCacheMemoryReport?
 
-    public init(cache: PrefixStateCache) {
+    public init(cache: PrefixStateCache, memory: PrefixCacheMemoryReport? = nil) {
         let report = cache.lastReport
         outcome = report.outcome.rawValue
         beginSeconds = report.beginSeconds
@@ -93,6 +96,7 @@ public struct PrefixCacheDiagnostics: Sendable, Equatable, Encodable {
         ceilingBytes = cache.ceilingBytes
         checkpoints = cache.checkpointCount
         images = cache.imageCount
+        self.memory = memory
     }
 }
 

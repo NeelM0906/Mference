@@ -216,6 +216,10 @@ public actor ServerModelSession: ServerLoadedModel {
     /// Non-nil exactly when `promptCacheMode == .multiPrefix`.
     private let prefixStates: PrefixStateCache?
     private let snapshotRunner: (any PrefixStateSnapshotting)?
+    /// The multi-prefix cache's live-memory policy and pressure registration;
+    /// nil without the cache. Released with the session, so a swapped-out
+    /// model leaves no handler behind.
+    private let memoryGovernor: PrefixCacheMemoryGovernor?
 
     static func runtimeConfiguration(
         family: ModelFamily,
@@ -333,16 +337,18 @@ public actor ServerModelSession: ServerLoadedModel {
             kvStorage: forwardRuntime.kvStorageMode.rawValue,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
-        return ServerModelSession(context: context,
-                                  model: model,
-                                  tokenizer: tokenizer,
-                                  runner: forwardRuntime.producer,
-                                  scratch: scratch,
-                                  prefillConfig: forwardRuntime.prefillConfig,
-                                  maxContext: maxContext,
-                                  promptCacheMode: promptCacheMode,
-                                  promptCacheBytes: promptCacheBytes.resolved(),
-                                  promptCacheDomain: promptCacheDomain)
+        let session = ServerModelSession(context: context,
+                                         model: model,
+                                         tokenizer: tokenizer,
+                                         runner: forwardRuntime.producer,
+                                         scratch: scratch,
+                                         prefillConfig: forwardRuntime.prefillConfig,
+                                         maxContext: maxContext,
+                                         promptCacheMode: promptCacheMode,
+                                         promptCacheBytes: promptCacheBytes.resolved(),
+                                         promptCacheDomain: promptCacheDomain)
+        await session.startMemoryPressureRelief()
+        return session
     }
 
     private init(context: MetalContext,
@@ -377,12 +383,35 @@ public actor ServerModelSession: ServerLoadedModel {
             promptCacheMode, runnerSnapshotsPrefixes: snapshots != nil)
         if self.promptCacheMode == .multiPrefix, let snapshots {
             self.snapshotRunner = snapshots
-            self.prefixStates = PrefixStateCache(ceilingBytes: promptCacheBytes)
+            let governor = PrefixCacheMemoryGovernor()
+            self.memoryGovernor = governor
+            self.prefixStates = PrefixStateCache(ceilingBytes: promptCacheBytes, gate: governor)
         } else {
             self.snapshotRunner = nil
+            self.memoryGovernor = nil
             self.prefixStates = nil
         }
         self.promptCacheDomain = promptCacheDomain
+    }
+
+    /// Points the governor's pressure events at an idle safe point on this
+    /// actor. The handler only schedules the hop; the hop defers to the end of
+    /// a running request.
+    func startMemoryPressureRelief() {
+        memoryGovernor?.setRaiseAction { [weak self] in
+            Task { await self?.idleMemorySafePoint() }
+        }
+    }
+
+    private func idleMemorySafePoint() {
+        guard let prefixStates, let memoryGovernor else { return }
+        let before = prefixStates.retainedBytes
+        logShed(memoryGovernor.idleSafePoint(prefixStates), from: before)
+    }
+
+    private func logShed(_ reason: PrefixCacheShedReason?, from before: Int) {
+        guard let reason, let prefixStates else { return }
+        ServerLog.promptCacheShed(reason: reason.rawValue, releasedBytes: before - prefixStates.retainedBytes)
     }
 
     /// Renders the prompt and checks it against the context window. Runs
@@ -421,11 +450,19 @@ public actor ServerModelSession: ServerLoadedModel {
         let needsToolTemplate = prepared.needsToolTemplate
         let promptIDs = prepared.promptIDs
         var completed = false
+        if let prefixStates, let memoryGovernor {
+            let before = prefixStates.retainedBytes
+            logShed(memoryGovernor.requestStarted(prefixStates), from: before)
+        }
         defer {
             if !completed {
                 promptCache.invalidate()
                 runner.reset()
                 prefixStates?.didFail()
+            }
+            if let prefixStates, let memoryGovernor {
+                let before = prefixStates.retainedBytes
+                logShed(memoryGovernor.requestEnded(prefixStates), from: before)
             }
         }
 
@@ -656,7 +693,9 @@ public actor ServerModelSession: ServerLoadedModel {
                 memory: .capture(model: model, producer: runner, scratch: scratch),
                 gemmaRecovery: recovery.map { .init(outcome: recoveryOutcome,
                     capture: captureOutcome, allocatedBytes: $0.gemmaRecoveryBytes) },
-                prefixCache: prefixStates.map(PrefixCacheDiagnostics.init(cache:))) : nil)
+                prefixCache: prefixStates.map {
+                    PrefixCacheDiagnostics(cache: $0, memory: memoryGovernor?.report)
+                }) : nil)
         completion.reasoningContent = reasoning.isEmpty ? nil : reasoning
         completion.prefillSeconds = result.prefillSeconds
         completion.decodeSeconds = result.decodeSeconds
