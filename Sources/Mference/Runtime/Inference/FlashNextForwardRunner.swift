@@ -2695,6 +2695,18 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         !supportsApple10TensorOps
     }
 
+    /// The largest prefill chunk whose GGUF tiles may take the grouped LUT4
+    /// GEMM. Larger chunks keep the LUT4 row kernel unchanged: at 2,048-token
+    /// chunks the class T gate showed a wide-margin top-1 flip (small state
+    /// drift amplified by routing swaps), so the grouped path is capped here.
+    static let groupedLUT4MaxPrefillChunkTokens = 1024
+
+    /// Whether a chunked prefill configured for `chunkTokens` tokens per chunk
+    /// may route its GGUF tiles to the grouped LUT4 GEMM.
+    static func usesSimdgroupLUT4RoutedPrefill(chunkTokens: Int) -> Bool {
+        chunkTokens <= groupedLUT4MaxPrefillChunkTokens
+    }
+
     /// Test-only: false sends every GGUF prefill tile to the LUT4 row kernel,
     /// the control arm of the class T check.
     private var prefillSimdLUT4Enabled = true
@@ -2750,7 +2762,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             }
             encodeGGUFExpansion(commandBuffer: cb, routed: routed, geometry: geometry,
                                 misses: fetched.misses, slab: fetched.slab)
-            if prefillSimdLUT4Enabled, let grouped = routed.grouped,
+            if prefillSimdLUT4Enabled,
+               Self.usesSimdgroupLUT4RoutedPrefill(chunkTokens: scratch.chunkTokens),
+               let grouped = routed.grouped,
                try encodeGroupedLUT4Tile(grouped: grouped, commandBuffer: cb, tile: tile, routes: routes,
                                          metadata: metadata, experts: experts, views: fetched.views,
                                          geometry: geometry, offsets: offsets, scratch: scratch) {

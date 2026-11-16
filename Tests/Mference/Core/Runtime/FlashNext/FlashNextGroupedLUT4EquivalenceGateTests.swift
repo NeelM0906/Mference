@@ -8,9 +8,9 @@ import Testing
 /// (`FlashNextForwardRunner.usesSimdgroupLUT4RoutedExperts`). One process:
 /// control is the runner with every prefill tile on the LUT4 row kernel
 /// (`useRowKernelForGGUFPrefill`), candidate the default runner. Both prefill
-/// the same prompts at `MFERENCE_FLASHNEXT_GATE_CHUNK` tokens per chunk (1024
-/// or 2048; the grouped kernel engages only on tiles of about 8+ rows per
-/// expert, so prompts of about 410+ tokens in one chunk) and are then
+/// the same prompts at `MFERENCE_FLASHNEXT_GATE_CHUNK` tokens per chunk (1024,
+/// the grouped path's cap; the grouped kernel engages only on tiles of about
+/// 8+ rows per expert, so prompts of about 410+ tokens in one chunk) and are then
 /// teacher-forced through the same saved answer on the decode path.
 ///
 /// Items: the frozen long-synthesis prompt (2,940 tokens with Qwen's chat
@@ -39,7 +39,8 @@ import Testing
     func groupedLUT4PrefillKeepsTeacherForcedPerplexity() async throws {
         let install = URL(fileURLWithPath: try #require(Self.env["MFERENCE_FLASHNEXT_GATE"]))
         let chunk = try #require(Int(Self.env["MFERENCE_FLASHNEXT_GATE_CHUNK"] ?? ""))
-        try #require(chunk == 1024 || chunk == 2048, "chunk must be 1024 or 2048 (host cap)")
+        try #require(chunk == FlashNextForwardRunner.groupedLUT4MaxPrefillChunkTokens,
+                     "chunk must be 1024: larger chunks never take the grouped LUT4 path")
         let root = GemmaPrefillGateFixture.repositoryRoot
         let folder = try #require(MFTokenizer.tokenizerFolder(forModelDirectory: install))
         let tokenizer = try await MFTokenizer.load(from: folder, family: .qwen38flashnextudiq3xxs)
