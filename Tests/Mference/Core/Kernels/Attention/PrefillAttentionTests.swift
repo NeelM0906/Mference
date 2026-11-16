@@ -309,7 +309,7 @@ import MferenceValidationSupport
     }
 
     /// Qwen 3.6 full attention: headDim 256, 16 query / 2 KV heads, scale
-    /// 1/16. Chunks that are not multiples of the 4-token threadgroup or the
+    /// 1/16. Chunks that are not multiples of the 8-token threadgroup or the
     /// 8-key step, odd strides from `makeFixture`, and a cold start. Each shape
     /// runs with no window and with the window the runner passes for full
     /// attention (`start + chunk`, which never clips), and must dispatch the
@@ -320,16 +320,20 @@ import MferenceValidationSupport
         let gqa = try PrefillAttention(context: ctx, gqaSimdgroup: true)
         #expect(gqa.gqaSimdPipelineAvailable)
         for window in [0, shape.start + shape.chunk] {
+            // The GQA kernel loads K/V rows as half4: an odd but 4-element
+            // aligned KV stride and 8-byte K/V offsets; Q and O stay odd.
             var fixture = Self.makeFixture(start: shape.start, chunk: shape.chunk, window: window,
                                            seed: 0xA960 + UInt64(shape.start),
-                                           headDim: 256, qHeads: 16, kvHeads: 2)
+                                           headDim: 256, qHeads: 16, kvHeads: 2, kvStridePad: 8)
             fixture.scale = 0.0625
             let dispatchesBefore = gqa.gqaSimdDispatches
             let actual = try Self.runKernel(fixture, context: ctx, prefill: gqa,
-                                            path: .causalTiled).values
+                                            path: .causalTiled, kPrefix: 20, vPrefix: 24).values
             #expect(gqa.gqaSimdDispatches == dispatchesBefore + 1,
                     "start=\(shape.start) chunk=\(shape.chunk) window=\(window) did not run the GQA kernel")
             let reference = Self.reference(fixture)
+            let scale = reference.reduce(Float(0)) { max($0, abs($1)) }
+            #expect(scale > 0.01, "start=\(shape.start) chunk=\(shape.chunk) outputs too small to compare: \(scale)")
             let maxAbs = RelError.maxAbsDiff(actual, reference)
             let rel = RelError.compute(actual: actual, reference: reference)
             #expect(maxAbs <= 2e-2, "start=\(shape.start) chunk=\(shape.chunk) window=\(window) maxAbs=\(maxAbs) rel=\(rel)")
@@ -338,7 +342,7 @@ import MferenceValidationSupport
             // Same math as the tiled kernel up to FP32 summation order, so the
             // FP16 outputs agree to a few ULPs.
             let tiled = try Self.runKernel(fixture, context: ctx, prefill: PrefillAttention(context: ctx),
-                                           path: .causalTiled).values
+                                           path: .causalTiled, kPrefix: 20, vPrefix: 24).values
             let vsTiled = RelError.maxAbsDiff(actual, tiled)
             #expect(vsTiled <= 4e-3, "start=\(shape.start) chunk=\(shape.chunk) window=\(window) |gqa - tiled|=\(vsTiled)")
         }
@@ -355,6 +359,9 @@ import MferenceValidationSupport
             ("gemma-swa-256-16-8", 0, 256, 16, 8, 0),
             ("clipping-window", 16, 256, 16, 2, 0),
             ("ring", 0, 256, 16, 2, 64),
+            // Qwen's shape, but K/V rows not 8-byte aligned (stride 517,
+            // odd offsets): the half4-loading GQA kernel must not take it.
+            ("misaligned-kv", 0, 256, 16, 2, 0),
         ]
         for (index, c) in shapes.enumerated() {
             let fixture = Self.makeFixture(start: 40, chunk: 12, window: c.window,
@@ -384,9 +391,10 @@ import MferenceValidationSupport
                                     seed: UInt64,
                                     headDim: Int = 8,
                                     qHeads: Int = 4,
-                                    kvHeads: Int = 2) -> Fixture {
+                                    kvHeads: Int = 2,
+                                    kvStridePad: Int = 5) -> Fixture {
         let qStride = qHeads * headDim + 3
-        let kvStride = kvHeads * headDim + 5
+        let kvStride = kvHeads * headDim + kvStridePad
         let oStride = qHeads * headDim + 7
         let kvValid = start + chunk
         var rng = SeedTree(seed).key("prefill-attn-start\(start)-chunk\(chunk)-window\(window)")
@@ -442,11 +450,11 @@ import MferenceValidationSupport
         prefill: PrefillAttention,
         kvRingCapacity: UInt32 = 0,
         sinks: [Float] = [],
-        path: RuntimePrefillAttentionPath
+        path: RuntimePrefillAttentionPath,
+        kPrefix: Int = 19,
+        vPrefix: Int = 23
     ) throws -> (values: [Float], usedTensorOps: Bool) {
         let qPrefix = 17
-        let kPrefix = 19
-        let vPrefix = 23
         let oPrefix = 29
         let outCount = oPrefix + fixture.chunk * fixture.oStride
 

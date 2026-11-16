@@ -66,6 +66,20 @@ final class PrefillAttention {
     /// kernel, so the tolerance gate compares both in one process.
     func useTiledKernelForGQAShapes() { psoGQASimd = nil }
 
+    /// Query tokens per threadgroup of the GQA kernel in use.
+    private var gqaTokensPerGroup = PrefillAttention.gqaSimdTokensPerGroup
+
+    /// Tests only: run another build of the GQA kernel (same buffers and
+    /// params, one simdgroup per query token, `tokensPerGroup` tokens per
+    /// threadgroup) for the shapes it covers, so the byte-identity gate can
+    /// compare it with the default kernel in one process.
+    func useGQAPipelineForTesting(_ pipeline: MTLComputePipelineState, tokensPerGroup: Int) {
+        precondition(tokensPerGroup > 0
+                     && tokensPerGroup * 32 <= pipeline.maxTotalThreadsPerThreadgroup)
+        psoGQASimd = pipeline
+        gqaTokensPerGroup = tokensPerGroup
+    }
+
     /// `gemmaQATFullAttentionTensorOps` lets the QAT profile's full-attention
     /// layers use the tensor-ops kernel; its sliding-window layers and every
     /// fallback keep the source arithmetic.
@@ -85,9 +99,12 @@ final class PrefillAttention {
         self.psoFullTensorOps2DValidityV2 = gemmaQATMaxContext == nil || gemmaQATFullAttentionTensorOps
             ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
             : nil
-        self.psoGQASimd = gqaSimdgroup
-            ? try context.pipeline("attention_prefill_gqa8_d256_simd")
-            : nil
+        // The kernel is written for 8 simdgroups per threadgroup; a GPU that
+        // allows fewer threads keeps the tiled kernel.
+        let gqa = gqaSimdgroup ? try context.pipeline("attention_prefill_gqa8_d256_simd") : nil
+        self.psoGQASimd = gqa.flatMap {
+            $0.maxTotalThreadsPerThreadgroup >= Self.gqaSimdTokensPerGroup * 32 ? $0 : nil
+        }
     }
 
     /// Returns whether the tensor-ops kernel ran.
@@ -137,7 +154,8 @@ final class PrefillAttention {
         let gqaSimdPipeline = useTensorOps ? nil : gqaSimdPipeline(for: params,
                                                                   kvRingCapacity: kvRingCapacity,
                                                                   numSinks: numSinks,
-                                                                  windowNeverClips: windowNeverClips)
+                                                                  windowNeverClips: windowNeverClips,
+                                                                  kOffset: kOffset, vOffset: vOffset)
         let pipeline: MTLComputePipelineState
         if let gqaSimdPipeline {
             pipeline = gqaSimdPipeline
@@ -159,7 +177,9 @@ final class PrefillAttention {
         }
         let headDim = Int(params.headDim)
         let threadWidth = max(1, pipeline.threadExecutionWidth)
-        let threadCount = useTensorOps || gqaSimdPipeline != nil
+        let threadCount = gqaSimdPipeline != nil
+            ? gqaTokensPerGroup * 32
+            : useTensorOps
             ? 128
             : roundUp(max(threadWidth, headDim), toMultipleOf: threadWidth)
         precondition(threadCount <= pipeline.maxTotalThreadsPerThreadgroup,
@@ -177,8 +197,8 @@ final class PrefillAttention {
         var sinkCount = numSinks
         enc.setBytes(&sinkCount, length: MemoryLayout<UInt32>.size, index: 6)
         let groups = gqaSimdPipeline != nil
-            ? MTLSize(width: (Int(params.queryCount) + Self.gqaSimdTokensPerGroup - 1)
-                          / Self.gqaSimdTokensPerGroup,
+            ? MTLSize(width: (Int(params.queryCount) + gqaTokensPerGroup - 1)
+                          / gqaTokensPerGroup,
                       height: Int(params.numKVHeads),
                       depth: 1)
             : useTensorOps
@@ -214,20 +234,28 @@ final class PrefillAttention {
     }
 
 
-    /// Query tokens per threadgroup of the GQA kernel (one per simdgroup).
-    static let gqaSimdTokensPerGroup = 4
+    /// Query tokens per threadgroup of the GQA kernel (one per simdgroup):
+    /// they share each staged 8-key K/V block (8,448 bytes of threadgroup
+    /// memory).
+    static let gqaSimdTokensPerGroup = 8
 
     /// The GQA kernel covers exactly Qwen 3.6's full-attention shape.
     private func gqaSimdPipeline(for params: PrefillAttentionParams,
                                  kvRingCapacity: UInt32,
                                  numSinks: UInt32,
-                                 windowNeverClips: Bool) -> MTLComputePipelineState? {
+                                 windowNeverClips: Bool,
+                                 kOffset: Int,
+                                 vOffset: Int) -> MTLComputePipelineState? {
+        // K/V rows are loaded as half4, so they must start 8-byte aligned.
         guard let psoGQASimd,
               kvRingCapacity == 0,
               numSinks == 0,
               windowNeverClips,
               params.headDim == 256,
-              params.numQHeads == params.numKVHeads * 8 else { return nil }
+              params.numQHeads == params.numKVHeads * 8,
+              params.kvTokenStrideElements % 4 == 0,
+              kOffset % 8 == 0,
+              vOffset % 8 == 0 else { return nil }
         return psoGQASimd
     }
 
