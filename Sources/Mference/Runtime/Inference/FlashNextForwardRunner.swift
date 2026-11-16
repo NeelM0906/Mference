@@ -423,6 +423,14 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     /// and expert compute consumes those offsets without a CPU readback.
     private let residentSlotOffsets: MTLBuffer
     private let residentAllHit: MTLBuffer
+    /// Diagnostic only (`MFERENCE_U5_FORCE_ROUTES`, off by default): replayed
+    /// expert sets, and a shared copy of the router logits to weight them.
+    private let forcedRoutes: FlashNextForcedRoutes?
+    private let forcedRouteLogits: MTLBuffer?
+    /// Decode layers whose routing was forced, and how many of those had a
+    /// different expert set from the runner's own selection.
+    public private(set) var forcedRouteLayerCount = 0
+    public private(set) var forcedRouteChangedCount = 0
     private let sharedGateScratch: MTLBuffer
     private let sharedUpScratch: MTLBuffer
     private let sharedActScratch: MTLBuffer
@@ -927,6 +935,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         self.routerIndices = indices
         self.routerWeights = try half(topK)
         self.residentSlotOffsets = residentOffsets
+        let forced = try FlashNextForcedRoutes.fromEnvironment(layers: cfg.numLayers, topK: topK,
+                                                               numExperts: numExperts)
+        self.forcedRoutes = forced
+        self.forcedRouteLogits = forced == nil ? nil : try float(numExperts)
         self.residentAllHit = residentAllHit
         self.sharedGateScratch = try half(sharedIntermediate)
         self.sharedUpScratch = try half(sharedIntermediate)
@@ -2249,7 +2261,16 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             pendingMoECommand = cb
             return
         }
+        if let forcedRouteLogits, forcedRoutes?.covers(position: p) == true,
+           let blit = cb.makeBlitCommandEncoder() {
+            blit.copy(from: routerLogits, sourceOffset: 0, to: forcedRouteLogits,
+                      destinationOffset: 0, size: numExperts * MemoryLayout<Float>.stride)
+            blit.endEncoding()
+        }
         try finish(cb)
+        if let forcedRouteLogits, let ids = forcedRoutes?.ids(position: p, layer: L) {
+            applyForcedRoute(ids: ids, logits: forcedRouteLogits)
+        }
 
         let indexPointer = routerIndices.contents()
             .bindMemory(to: UInt32.self, capacity: topK)
@@ -2292,6 +2313,22 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         moeCB.commit()
         pendingMoECommand = moeCB
         try captureAfterDrain(key + "stream_out", hyper, count: bundle)
+    }
+
+    /// Diagnostic only: overwrite the select kernel's ids and FP16 weights
+    /// with the forced set, weighted from this runner's own logits.
+    private func applyForcedRoute(ids: [Int32], logits: MTLBuffer) {
+        let indices = routerIndices.contents().bindMemory(to: UInt32.self, capacity: topK)
+        let own = Set((0..<topK).map { Int32(indices[$0]) })
+        let weights = FlashNextForcedRoutes.weights(
+            logits: UnsafePointer(logits.contents().bindMemory(to: Float.self, capacity: numExperts)), ids: ids)
+        let out = routerWeights.contents().bindMemory(to: Float16.self, capacity: topK)
+        for k in 0..<topK {
+            indices[k] = UInt32(ids[k])
+            out[k] = Float16(weights[k])
+        }
+        forcedRouteLayerCount += 1
+        if own != Set(ids) { forcedRouteChangedCount += 1 }
     }
 
     /// Wait for the previous layer's MoE command buffer, if one is still in

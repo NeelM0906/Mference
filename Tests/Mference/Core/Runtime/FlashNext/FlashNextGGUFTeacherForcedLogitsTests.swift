@@ -61,6 +61,10 @@ import Testing
             try Self.appendRow(logits, vocab: vocab, to: handle)
         }
         try handle.close()
+        if runner.forcedRouteLayerCount > 0 {
+            print("[u5] forced routes: \(runner.forcedRouteLayerCount) decode layers forced, "
+                  + "\(runner.forcedRouteChangedCount) differed from the runner's own selection")
+        }
         let written = try FileManager.default.attributesOfItem(atPath: path.path)[.size] as? Int
         #expect(written == tokens.count * vocab * 4)
 
