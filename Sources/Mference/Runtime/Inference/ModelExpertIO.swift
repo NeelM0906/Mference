@@ -253,8 +253,10 @@ extension Model {
         }
     }
 
-    /// `sweep`: the plan is part of a pass over most of the layer (prefill),
-    /// so its reads bypass the file cache.
+    /// `sweep`: the plan is part of a pass over most of the layer (prefill).
+    /// Its reads bypass the page cache only where
+    /// `prefillSweepBypassesPageCache` held at load; otherwise they are
+    /// ordinary buffered reads.
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan,
                                    sweep: Bool = false) async throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
