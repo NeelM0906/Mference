@@ -450,6 +450,18 @@ public actor ServerModelSession: ServerLoadedModel {
         let needsToolTemplate = prepared.needsToolTemplate
         let promptIDs = prepared.promptIDs
         var completed = false
+        var ended = false
+        // The end-of-request safe point. A finished request runs it before
+        // its diagnostics are captured, so they show any shed; a failed one
+        // runs it from the defer, after `didFail`.
+        func endRequest() {
+            guard !ended else { return }
+            ended = true
+            if let prefixStates, let memoryGovernor {
+                let before = prefixStates.retainedBytes
+                logShed(memoryGovernor.requestEnded(prefixStates), from: before)
+            }
+        }
         if let prefixStates, let memoryGovernor {
             let before = prefixStates.retainedBytes
             logShed(memoryGovernor.requestStarted(prefixStates), from: before)
@@ -460,10 +472,7 @@ public actor ServerModelSession: ServerLoadedModel {
                 runner.reset()
                 prefixStates?.didFail()
             }
-            if let prefixStates, let memoryGovernor {
-                let before = prefixStates.retainedBytes
-                logShed(memoryGovernor.requestEnded(prefixStates), from: before)
-            }
+            endRequest()
         }
 
         let recovery = (runner as? any GemmaPrefixRecovering).flatMap {
@@ -676,6 +685,7 @@ public actor ServerModelSession: ServerLoadedModel {
             if promptCache.entry == nil { recovery?.discardGemmaPrefix() }
         }
         completed = true
+        endRequest()
         var completion = ServerCompletion(
             content: content,
             toolCalls: calls,
