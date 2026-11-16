@@ -39,6 +39,7 @@ do {
         // empty picker rather than refusing to launch.
         let maxContext = arguments.maxContext
         let promptCacheMode = arguments.promptCacheMode
+        let promptCacheBytes = arguments.promptCacheBytes
         let verification = arguments.verification
         let shadowBudget = arguments.shadowBudget
         let prefillChunk = arguments.prefillChunk
@@ -47,6 +48,7 @@ do {
             try await ServerModelSession.load(modelDirectory: directory,
                                               maxContext: maxContext,
                                               promptCacheMode: promptCacheMode,
+                                              promptCacheBytes: promptCacheBytes,
                                               integrityPolicy: verification,
                                               shadowPrefetchBudget: shadowBudget,
                                               prefillChunkTokens: prefillChunk,
@@ -74,6 +76,7 @@ do {
             modelDirectory: explicitModelURL,
             maxContext: arguments.maxContext,
             promptCacheMode: arguments.promptCacheMode,
+            promptCacheBytes: arguments.promptCacheBytes,
             integrityPolicy: arguments.verification,
             shadowPrefetchBudget: arguments.shadowBudget,
             prefillChunkTokens: arguments.prefillChunk,

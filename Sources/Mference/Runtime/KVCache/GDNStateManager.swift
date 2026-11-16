@@ -87,6 +87,55 @@ public final class GDNStateManager {
 
     public func isLinear(layer: Int) -> Bool { stateBuffers[layer] != nil }
 
+    // MARK: Recurrent checkpoints (server multi-prefix cache)
+    //
+    // The recurrence cannot be rewound, so a prefix checkpoint is a full copy
+    // of every linear layer's state S and conv tail, layer by layer in index
+    // order: S, then the tail.
+
+    /// Bytes one checkpoint occupies.
+    public var recurrentCheckpointBytes: Int {
+        stateBuffers.indices.reduce(0) { total, layer in
+            total + (stateBuffers[layer]?.length ?? 0) + (convTailBuffers[layer]?.length ?? 0)
+        }
+    }
+
+    /// Copies the current recurrent state into `region`. The caller has
+    /// drained GPU work. Leaves the state unchanged.
+    public func copyRecurrentState(into region: PrefixSnapshotRegion) throws {
+        let needed = recurrentCheckpointBytes
+        guard needed > 0 else { throw PrefixSnapshotError.unsupported("no linear-attention layers") }
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        var offset = 0
+        for layer in stateBuffers.indices {
+            for buffer in [stateBuffers[layer], convTailBuffers[layer]] {
+                guard let buffer else { continue }
+                memcpy(region.base.advanced(by: offset), buffer.contents(), buffer.length)
+                offset += buffer.length
+            }
+        }
+    }
+
+    /// Replaces the recurrent state with the checkpoint in `region`. The
+    /// caller has drained GPU work.
+    public func restoreRecurrentState(from region: PrefixSnapshotRegion) throws {
+        let needed = recurrentCheckpointBytes
+        guard needed > 0 else { throw PrefixSnapshotError.unsupported("no linear-attention layers") }
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        var offset = 0
+        for layer in stateBuffers.indices {
+            for buffer in [stateBuffers[layer], convTailBuffers[layer]] {
+                guard let buffer else { continue }
+                memcpy(buffer.contents(), region.base.advanced(by: offset), buffer.length)
+                offset += buffer.length
+            }
+        }
+    }
+
     /// Reset all recurrent state to the empty-context value (zeros).
     public func reset() {
         zeroAll()

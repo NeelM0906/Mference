@@ -90,6 +90,22 @@ public struct PromptPrefixCache: Sendable {
         reasoningContent: String? = nil,
         stopStringFiltered: Bool = false
     ) {
+        entry = Self.makeEntry(domain: domain, turn: turn, content: content, calls: calls,
+                               result: result, reasoningContent: reasoningContent,
+                               stopStringFiltered: stopStringFiltered)
+    }
+
+    /// The entry `publish` would hold for a finished turn, or nil when the
+    /// turn cannot be continued. Shared with the server's multi-prefix cache.
+    public static func makeEntry(
+        domain: PromptPrefixCacheDomain,
+        turn: PromptPrefixCacheTurn,
+        content: String,
+        calls: [ParsedToolCall],
+        result: RawDecodeResult,
+        reasoningContent: String? = nil,
+        stopStringFiltered: Bool = false
+    ) -> PromptPrefixCacheEntry? {
         guard result.kvPosition == result.kvBackedTokenIDs.count,
               !result.kvBackedTokenIDs.isEmpty,
               result.uncommittedBoundaryTokenIDs.count == 1,
@@ -97,8 +113,7 @@ public struct PromptPrefixCache: Sendable {
               result.reason == .endOfTurn
                 || result.reason == .toolCalls
                 || result.reason == .maxTokens else {
-            entry = nil
-            return
+            return nil
         }
         let historicalCalls = calls.map {
             MFTokenizer.HistoricalToolCall(
@@ -111,7 +126,7 @@ public struct PromptPrefixCache: Sendable {
             content: calls.isEmpty ? content : nil,
             toolCalls: historicalCalls,
             reasoningContent: reasoningContent)
-        entry = PromptPrefixCacheEntry(
+        return PromptPrefixCacheEntry(
             domain: domain,
             inputMessages: turn.messages,
             tools: turn.tools,
@@ -132,8 +147,24 @@ public struct PromptPrefixCache: Sendable {
         tokenizer: MFTokenizer,
         gemmaRecoverablePrefix: ((Int) -> Int)? = nil
     ) -> PromptPrefixCacheMatch {
-        guard let entry,
-              entry.domain == domain,
+        guard let entry else { return .miss }
+        return Self.match(entry: entry, domain: domain, turn: turn,
+                          renderedPromptIDs: renderedPromptIDs, tokenizer: tokenizer,
+                          gemmaRecoverablePrefix: gemmaRecoverablePrefix)
+    }
+
+    /// Whether `turn` may continue from `entry`, by the same per-dialect rules
+    /// as `match`. Shared with the server's multi-prefix cache, which applies
+    /// it to each retained entry.
+    public static func match(
+        entry: PromptPrefixCacheEntry,
+        domain: PromptPrefixCacheDomain,
+        turn: PromptPrefixCacheTurn,
+        renderedPromptIDs: [Int32],
+        tokenizer: MFTokenizer,
+        gemmaRecoverablePrefix: ((Int) -> Int)? = nil
+    ) -> PromptPrefixCacheMatch {
+        guard entry.domain == domain,
               entry.tools == turn.tools,
               entry.kvPosition == entry.kvBackedTokenIDs.count,
               entry.kvPosition > 0,
@@ -230,7 +261,7 @@ public struct PromptPrefixCache: Sendable {
             tokenizer: tokenizer)
     }
 
-    private func assistantMatches(
+    private static func assistantMatches(
         _ incoming: MFTokenizer.Message,
         _ cached: MFTokenizer.Message
     ) -> Bool {
@@ -254,7 +285,7 @@ public struct PromptPrefixCache: Sendable {
     /// state cannot be rewound to re-render the turn, so the cached turn stays
     /// as generated and only what follows it is prefilled. ChatML ends a
     /// tool-call turn with `<|im_end|>` too, so both shapes stop `.endOfTurn`.
-    private func matchSourceTemplateContinuation(
+    private static func matchSourceTemplateContinuation(
         entry: PromptPrefixCacheEntry,
         turn: PromptPrefixCacheTurn,
         cachedTurnIndex: Int,
@@ -274,7 +305,7 @@ public struct PromptPrefixCache: Sendable {
             cachedPromptTokens: entry.kvPosition)
     }
 
-    private func matchTextContinuation(
+    private static func matchTextContinuation(
         entry: PromptPrefixCacheEntry,
         continuation: [MFTokenizer.Message],
         tokenizer: MFTokenizer
@@ -299,7 +330,7 @@ public struct PromptPrefixCache: Sendable {
             cachedPromptTokens: entry.kvPosition)
     }
 
-    private func matchToolContinuation(
+    private static func matchToolContinuation(
         entry: PromptPrefixCacheEntry,
         turn: PromptPrefixCacheTurn,
         continuation: [MFTokenizer.Message],

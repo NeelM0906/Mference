@@ -21,7 +21,8 @@ class LauncherTests(unittest.TestCase):
 
     def test_missing_values_are_actionable(self):
         for flag in ("--library", "--model", "--server-port", "--webui-port",
-                     "--max-context", "--prompt-cache-mode", "--prefill-chunk", "--build-path",
+                     "--max-context", "--prompt-cache-mode", "--prompt-cache-bytes",
+                     "--prefill-chunk", "--build-path",
                      "--data-dir"):
             for suffix in ([], ["--dry-run"]):
                 with self.subTest(flag=flag, suffix=suffix):
@@ -35,6 +36,7 @@ class LauncherTests(unittest.TestCase):
                      ("--webui-port", "text"), ("--max-context", "-1"),
                      ("--max-context", "999999999999999999999"),
                      ("--prompt-cache-mode", "unknown"),
+                     ("--prompt-cache-bytes", "-1"), ("--prompt-cache-bytes", "lots"),
                      ("--prefill-chunk", "1000"), ("--prefill-chunk", "big"),
                      ("--server-port", "3000")]:
             with self.subTest(args=args):
@@ -49,6 +51,17 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("build with spaces/release/MferenceServer", result.stdout)
         self.assertIn("(incremental)", result.stdout)
         self.assertNotIn("if missing", result.stdout)
+
+    def test_prompt_cache_controls_are_passed_to_the_server(self):
+        result = self.run_launcher("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--prompt-cache-mode multi-prefix", result.stdout)
+        self.assertIn("--prompt-cache-bytes auto", result.stdout)
+        result = self.run_launcher("--prompt-cache-mode", "single-prefix",
+                                   "--prompt-cache-bytes", "0", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--prompt-cache-mode single-prefix", result.stdout)
+        self.assertIn("--prompt-cache-bytes 0", result.stdout)
 
     def test_prefill_chunk_is_passed_to_the_server(self):
         result = self.run_launcher("--dry-run")

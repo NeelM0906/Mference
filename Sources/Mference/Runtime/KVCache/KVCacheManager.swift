@@ -367,6 +367,98 @@ public final class KVCacheManager {
         return .snapshot
     }
 
+    // MARK: Prefix snapshots (server multi-prefix cache)
+    //
+    // A prefix snapshot of this manager is rows [0, count) of every
+    // full-attention layer, laid out layer-major: layer L's K rows, then its V
+    // rows, for each full-attention layer in index order. Only all-linear
+    // full-attention storage qualifies: sliding rings overwrite old rows,
+    // paged layers keep their rows in a `KVPageStore`, and compressed layers
+    // keep their state elsewhere, so none of those has a complete row image
+    // here. Linear-attention layers carry no rows (their state is the
+    // recurrent state, snapshotted separately).
+
+    /// Whether every attention layer stores linear, unpaged FP16 rows here.
+    public var supportsPrefixSnapshots: Bool {
+        var hasRows = false
+        for layer in 0..<config.numLayers {
+            switch kinds[layer] {
+            case .linear:
+                continue
+            case .full:
+                guard strides[layer] > 0 else { return false }
+                hasRows = true
+            case .swa, .compressed:
+                return false
+            }
+        }
+        return hasRows
+    }
+
+    private var snapshotLayers: [Int] {
+        (0..<config.numLayers).filter { kinds[$0] == .full && strides[$0] > 0 }
+    }
+
+    /// Bytes a snapshot of rows [0, tokens) occupies.
+    public func prefixSnapshotBytes(tokens: Int) -> Int {
+        snapshotLayers.reduce(0) { $0 + 2 * tokens * strides[$1] }
+    }
+
+    /// Copies rows [0, count) of every full-attention layer into `region`.
+    /// The caller has drained GPU work. Leaves the cache unchanged.
+    public func copyPrefixRows(count: Int, into region: PrefixSnapshotRegion) throws {
+        guard supportsPrefixSnapshots else {
+            throw PrefixSnapshotError.unsupported("KV layout has no complete linear row image")
+        }
+        guard count > 0, count <= position else {
+            throw PrefixSnapshotError.outOfRange("rows 0..<\(count) with cursor at \(position)")
+        }
+        let needed = prefixSnapshotBytes(tokens: count)
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        var offset = 0
+        for layer in snapshotLayers {
+            let bytes = count * strides[layer]
+            for source in [kBuffers[layer], vBuffers[layer]] {
+                memcpy(region.base.advanced(by: offset), source.contents(), bytes)
+                offset += bytes
+            }
+        }
+    }
+
+    /// Replaces rows [0, count) of every full-attention layer with the
+    /// snapshot in `region` and moves the cursor to `position` (`<= count`).
+    /// Grows the full-attention layers first when `count` exceeds their
+    /// capacity; capacity never changes which rows attention reads. The
+    /// caller has drained GPU work. The cursor moves only after every row is
+    /// copied; a throw after copying began requires the owner's `reset()`.
+    public func restorePrefixRows(count: Int, from region: PrefixSnapshotRegion,
+                                  position target: Int) throws {
+        guard supportsPrefixSnapshots else {
+            throw PrefixSnapshotError.unsupported("KV layout has no complete linear row image")
+        }
+        guard count > 0, count <= maxContext, target > 0, target <= count else {
+            throw PrefixSnapshotError.outOfRange(
+                "restore of rows 0..<\(count) to position \(target) with maxContext \(maxContext)")
+        }
+        let needed = prefixSnapshotBytes(tokens: count)
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        try ensureCapacity(for: count)
+        var offset = 0
+        for layer in snapshotLayers {
+            requireFullCapacity(layer: layer, tokens: count)
+            let bytes = count * strides[layer]
+            for destination in [kBuffers[layer], vBuffers[layer]] {
+                memcpy(destination.contents(), region.base.advanced(by: offset), bytes)
+                offset += bytes
+            }
+        }
+        position = target
+    }
+
     public func layerKind(_ layer: Int) -> LayerKind { kinds[layer] }
 
     /// Bytes per token for `layer` (K and V share the same stride).
