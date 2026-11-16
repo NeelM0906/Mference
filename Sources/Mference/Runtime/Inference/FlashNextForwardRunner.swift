@@ -2208,6 +2208,11 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         // routing, so it rides in this command buffer rather than waiting for
         // the expert blobs.
         encodeSharedExpert(commandBuffer: cb, layer: layer)
+        // Capture only (no-ops otherwise): the gated shared-expert output and
+        // the FP32 router logits, so a diagnostic can split `moe_out` into its
+        // shared and routed parts and read the routing margin.
+        try captureFloats(&cb, key + "shared_out", sharedOut, count: hidden)
+        try captureFloat32(&cb, key + "router_logits", routerLogits, count: numExperts)
 
         // In resident mode the complete layer is already a stable Metal slab.
         // Keep router ids on the GPU and address the selected expert records
@@ -2725,6 +2730,27 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
     /// Drain the queue — command buffers on one queue execute in commit order,
     /// so an empty one completing means every earlier one has — then read.
+    /// `captureFloats` for an FP32 buffer that may be private: copied out
+    /// through a shared buffer. A no-op when capture is off.
+    private func captureFloat32(_ cb: inout MTLCommandBuffer, _ key: String,
+                                _ buffer: MTLBuffer, count: Int) throws {
+        guard capture != nil else { return }
+        let bytes = count * MemoryLayout<Float>.stride
+        guard let shared = ctx.device.makeBuffer(length: bytes, options: .storageModeShared),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("no buffer for an FP32 capture")
+        }
+        blit.copy(from: buffer, sourceOffset: 0, to: shared, destinationOffset: 0, size: bytes)
+        blit.endEncoding()
+        try finish(cb)
+        capture?.floats[key] = Array(UnsafeBufferPointer(
+            start: shared.contents().bindMemory(to: Float.self, capacity: count), count: count))
+        guard let next = ctx.queue.makeCommandBuffer() else {
+            throw FlashNextForwardRunnerError.commandFailed("no command buffer")
+        }
+        cb = next
+    }
+
     private func captureAfterDrain(_ key: String, _ buffer: MTLBuffer,
                                    count: Int) throws {
         guard capture != nil else { return }
@@ -2746,6 +2772,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         case mlpMixed
         /// Routed plus gated shared expert output (`moe_out`).
         case moeOut
+        /// The gated shared-expert output alone (`shared_out`).
+        case sharedOut
     }
 
     /// Diagnostic: row `row` of a chunked-prefill scratch tensor as it stands,
@@ -2759,6 +2787,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         case .blockOut: (scratch.blockOut, hidden)
         case .mlpMixed: (scratch.mixed, hidden)
         case .moeOut: (scratch.moeOut, hidden)
+        case .sharedOut: (scratch.sharedOut, hidden)
         }
         let bytes = width * MemoryLayout<Float16>.stride
         guard let shared = ctx.device.makeBuffer(length: bytes, options: .storageModeShared),
@@ -2769,6 +2798,23 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         blit.endEncoding()
         try finish(cb)
         return Self.readFP16(shared, count: width)
+    }
+
+    /// Diagnostic: the FP32 router logits chunked prefill computed for row
+    /// `row` of the current chunk. Read-only; nil before any chunked prefill.
+    func prefillRouterLogits(row: Int) throws -> [Float]? {
+        guard let scratch = prefillScratch, row >= 0, row < scratch.chunkTokens else { return nil }
+        let bytes = numExperts * MemoryLayout<Float>.stride
+        guard let shared = ctx.device.makeBuffer(length: bytes, options: .storageModeShared),
+              let cb = ctx.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("no buffer for the router logits copy")
+        }
+        blit.copy(from: scratch.routerLogits, sourceOffset: row * bytes, to: shared,
+                  destinationOffset: 0, size: bytes)
+        blit.endEncoding()
+        try finish(cb)
+        return Array(UnsafeBufferPointer(start: shared.contents().bindMemory(to: Float.self, capacity: numExperts),
+                                         count: numExperts))
     }
 
     /// Diagnostic: the expert ids and routing weights chunked prefill chose

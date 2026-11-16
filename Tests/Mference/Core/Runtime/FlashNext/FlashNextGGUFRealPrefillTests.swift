@@ -117,7 +117,7 @@ import Testing
                 }
                 if name == "stream_out" { side.layers[layer] = value }
                 if FlashNextGGUFRealPrefillTests.detailLayers.contains(layer),
-                   ["block_out", "mlp_hc_mixed", "moe_out"].contains(name) {
+                   ["block_out", "mlp_hc_mixed", "moe_out", "shared_out", "router_logits"].contains(name) {
                     side.detail[layer, default: [:]][name] = value
                 }
             }
@@ -140,8 +140,10 @@ import Testing
                 if let v = try runner.prefillScratchRow(.stream, row: row) { layers[layer] = v }
                 guard FlashNextGGUFRealPrefillTests.detailLayers.contains(layer) else { return }
                 if let r = runner.prefillRoutes(row: row) { routes[layer] = r }
+                if let v = try runner.prefillRouterLogits(row: row) { detail[layer, default: [:]]["router_logits"] = v }
                 for (name, tensor) in [("block_out", FlashNextForwardRunner.PrefillScratchTensor.blockOut),
-                                       ("mlp_hc_mixed", .mlpMixed), ("moe_out", .moeOut)] {
+                                       ("mlp_hc_mixed", .mlpMixed), ("moe_out", .moeOut),
+                                       ("shared_out", .sharedOut)] {
                     if let v = try runner.prefillScratchRow(tensor, row: row) { detail[layer, default: [:]][name] = v }
                 }
             }
@@ -187,12 +189,19 @@ import Testing
             print("[gguf-prefill-layer] case=\(label) layer=\(L) kind=\(kind) "
                   + "max_abs=\(r.maxAbs) relative=\(r.relative)")
         }
+        func routed(_ side: Side, _ L: Int) -> [Float]? {
+            guard let moe = side.detail[L]?["moe_out"], let shared = side.detail[L]?["shared_out"] else { return nil }
+            return zip(moe, shared).map { $0 - $1 }
+        }
         for L in detailLayers {
-            for name in ["block_out", "mlp_hc_mixed", "moe_out"] {
-                guard let c = chunked.detail[L]?[name], let s = sequential.detail[L]?[name] else {
+            for name in ["block_out", "mlp_hc_mixed", "moe_out", "shared_out", "routed"] {
+                let pair = name == "routed"
+                    ? routed(chunked, L).flatMap { c in routed(sequential, L).map { (c, $0) } }
+                    : chunked.detail[L]?[name].flatMap { c in sequential.detail[L]?[name].map { (c, $0) } }
+                guard let pair else {
                     print("[gguf-prefill-sublayer] case=\(label) layer=\(L) \(name) missing"); continue
                 }
-                let r = relative(c, s)
+                let r = relative(pair.0, pair.1)
                 print("[gguf-prefill-sublayer] case=\(label) layer=\(L) tensor=\(name) "
                       + "max_abs=\(r.maxAbs) relative=\(r.relative)")
             }
@@ -204,6 +213,15 @@ import Testing
             let onlyChunked = Set(c.ids).subtracting(s.ids).sorted()
             let onlySequential = Set(s.ids).subtracting(c.ids).sorted()
             let weightGap = zip(c.weights, s.weights).map { abs($0 - $1) }.max() ?? 0
+            // Top-k margin: the 10th minus the 11th largest router logit.
+            func margin(_ side: Side) -> String {
+                guard let logits = side.detail[L]?["router_logits"] else { return "missing" }
+                let order = logits.indices.sorted { logits[$0] > logits[$1] }
+                let k = c.ids.count
+                return String(format: "%.6f(e%d>e%d)", logits[order[k - 1]] - logits[order[k]], order[k - 1], order[k])
+            }
+            print("[gguf-prefill-margin] case=\(label) layer=\(L) top\(c.ids.count)_margin "
+                  + "chunked=\(margin(chunked)) sequential=\(margin(sequential))")
             print("[gguf-prefill-routes] case=\(label) layer=\(L) same_set=\(onlyChunked.isEmpty) "
                   + "same_order=\(c.ids == s.ids) only_chunked=\(onlyChunked) only_sequential=\(onlySequential) "
                   + "chunked=\(c.ids) sequential=\(s.ids) "
