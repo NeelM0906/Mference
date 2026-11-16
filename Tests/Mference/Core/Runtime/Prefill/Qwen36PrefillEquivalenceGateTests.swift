@@ -4,9 +4,11 @@ import Metal
 import Testing
 @testable import Mference
 
-/// Quality gates for Qwen 3.6 prefill kernels that reorder floating-point
-/// sums: the GQA-shared attention kernel (`attention_prefill_gqa8_d256_simd`)
-/// and the grouped-GEMM routed experts (`MPPGroupedRoutedMoE`).
+/// Quality gates for Qwen 3.6 kernels that reorder floating-point sums: the
+/// GQA-shared prefill attention kernel (`attention_prefill_gqa8_d256_simd`),
+/// the grouped-GEMM routed experts (`MPPGroupedRoutedMoE`), and the batched
+/// decode full-attention kernel (scored on the teacher-forced decode steps
+/// that follow each prefill).
 ///
 /// Set `MFERENCE_QWEN36_PREFILL_GATE` to an installed `qwen36.gturbo`; the
 /// install is read-only. In each test, control is the default runner with that
@@ -110,7 +112,28 @@ struct Qwen36PrefillEquivalenceGateTests {
             })
     }
 
-    private func runGate(label: String, outKey: String,
+    /// Decode full attention: the batched grouped kernel and its split
+    /// (`groupedFull256Batched`) against the per-component grouped kernel at
+    /// a fixed 16 chunks. Every teacher-forced decode step runs the new kernel:
+    /// 16 chunks below 4,096 positions (the medium and long items), 32 from
+    /// 4,096. This gate lengthens the docs item to 8,400 prompt tokens so its
+    /// whole decode runs at 32 chunks past 8K.
+    @Test func batchedDecodeAttentionKeepsTeacherForcedPerplexity() async throws {
+        try await runGate(
+            label: "per-component->batched decode attention", outKey: "decodeAttentionBatched",
+            documentTokenCount: 8_400,
+            precondition: { model, _ in
+                try #require(model.config.family == .qwen36)
+            },
+            configureControl: { $0.usePerComponentDecodeAttention() },
+            dispatches: { $0.decodeAttentionIsBatched ? 1 : 0 },
+            checkDispatches: { control, candidate, _ in
+                #expect(control == 0)
+                #expect(candidate == 1)
+            })
+    }
+
+    private func runGate(label: String, outKey: String, documentTokenCount: Int = 7_800,
                          precondition: (Model, MetalContext) throws -> Void,
                          configureControl: (RealForwardRunner) -> Void,
                          dispatches: (RealForwardRunner) -> Int,
@@ -146,11 +169,11 @@ struct Qwen36PrefillEquivalenceGateTests {
                      "docs/OPENAI_SERVER.md", "docs/BENCHMARKS.md"] {
             let text = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
             documents += "<document path=\"\(path)\">\n\(text)\n</document>\n\n"
-            if tokenizer.encode(documents, addBOS: false).count >= 7_800 { break }
+            if tokenizer.encode(documents, addBOS: false).count >= documentTokenCount { break }
         }
         var documentTokens = tokenizer.encode(documents, addBOS: false)
-        try #require(documentTokens.count >= 7_800, "the design docs are shorter than the 8K item needs")
-        documentTokens = Array(documentTokens.prefix(7_800))
+        try #require(documentTokens.count >= documentTokenCount, "the design docs are shorter than the 8K item needs")
+        documentTokens = Array(documentTokens.prefix(documentTokenCount))
         let longQuestion = tokenizer.decode(documentTokens)
             + "\n\nSummarize how the documents above keep memory bounded while serving a long prompt."
 

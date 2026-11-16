@@ -689,6 +689,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             additionalShapes: cfg.decodeInt4GEMVShapes,
             groupSize: int4GroupSize, sourceFP16: sourceFP16)
         self.attention = try Attention(context: context, gemmaQATMaxContext: sourceFP16 ? maxContext : nil)
+        // Qwen 3.6 decode runs the batched grouped full-attention kernel (class
+        // T, gated by Qwen36PrefillEquivalenceGateTests' decode-attention gate).
+        self.attention.groupedFull256Batched = cfg.family == .qwen36
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
                                                   siluActivation: silu,
@@ -3921,6 +3924,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// Test-only: routes every prefill tile to the row kernel.
     func useRowKernelForRoutedExperts() { prefillGroupedGEMMEnabled = false }
+
+    /// Test-only: decode full attention goes back to the per-component
+    /// grouped kernel at a fixed 16 chunks.
+    func usePerComponentDecodeAttention() { attention.groupedFull256Batched = false }
+
+    /// Whether decode full attention runs the batched grouped kernel (Qwen 3.6 default).
+    var decodeAttentionIsBatched: Bool { attention.groupedFull256Batched }
 
     /// Splits Inkling prefill's routed-expert loop into fetch / encode / drain,
     /// the prefill counterpart to `MFERENCE_PHASES` for decode. Off by default:

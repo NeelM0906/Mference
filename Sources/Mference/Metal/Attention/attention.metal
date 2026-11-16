@@ -891,3 +891,117 @@ void attention_decode_full_grouped_vec256_partial(
     device float* o_row = o_out + base * kGVHeadDim + component;
     for (uint i = 0; i < kGVPerLane; ++i) { o_row[32 * i] = o_local[i]; }
 }
+
+// Qwen 3.6 decode's grouped 256/16/2 partial pass (opt-in per Attention
+// instance). Same grid, buffers and partial-state contract as
+// attention_decode_full_grouped_vec256_partial, so the combine pass is
+// unchanged. It reorders floating-point sums, so it is not bit-identical to
+// that kernel:
+//   - lane l owns the 8 contiguous components [8l, 8l+8) and reads each K/V
+//     row with two half4 loads, instead of eight strided half loads;
+//   - each position takes one simd_sum (the lane folds its 8 products first),
+//     instead of eight per-component sums plus a ninth over their totals;
+//   - kBatch positions per step: their scores are independent, so loads and
+//     reductions overlap, and the online-softmax state is rescaled once per
+//     batch with the batch maximum. A chunk's last chunk_len % kBatch
+//     positions take the one-at-a-time loop.
+// The query is pre-scaled by `scale`.
+template <uint kBatch>
+static inline void attn_grouped_vec256_batched_vec(
+    device const half*  Q, device const half* K, device const half* V,
+    device float* m_out, device float* d_out, device float* o_out,
+    constant uint& num_kv_heads, constant uint& seq_len, constant uint& kv_start,
+    constant uint& chunk_len, constant uint& num_chunks, constant float& scale,
+    uint tg_id, uint simd_lane_id, uint simd_group_id)
+{
+    constexpr uint kHD = 256;
+    constexpr uint kQPerKV = 8;
+    const uint NC  = attn_fc_num_chunks(num_chunks);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint kv_head = tg_id / NC;
+    const uint chunk   = tg_id % NC;
+    const uint q_head  = kv_head * kQPerKV + simd_group_id;
+    const uint p_start = kv_start + chunk * chunk_len;
+    uint p_end = p_start + chunk_len;
+    if (p_end > seq_len) { p_end = seq_len; }
+    const float sc = attn_fc_scale(scale);
+    const uint row4 = NKV * kHD / 4;   // row stride in half4
+
+    device const half4* Q4 = reinterpret_cast<device const half4*>(Q + q_head * kHD) + 2 * simd_lane_id;
+    const float4 qa = float4(Q4[0]) * sc;
+    const float4 qb = float4(Q4[1]) * sc;
+    float4 oa = 0.0f, ob = 0.0f;
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+    device const half4* K4 = reinterpret_cast<device const half4*>(K + kv_head * kHD) + 2 * simd_lane_id;
+    device const half4* V4 = reinterpret_cast<device const half4*>(V + kv_head * kHD) + 2 * simd_lane_id;
+
+    uint p = p_start;
+    for (; p + kBatch <= p_end; p += kBatch) {
+        float s[kBatch];
+        for (uint j = 0; j < kBatch; ++j) {
+            device const half4* kr = K4 + (p + j) * row4;
+            s[j] = simd_sum(dot(qa, float4(kr[0])) + dot(qb, float4(kr[1])));
+        }
+        float m_new = m_run;
+        for (uint j = 0; j < kBatch; ++j) { m_new = max(m_new, s[j]); }
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        float p_sum = 0.0f;
+        float4 na = oa * alpha, nb = ob * alpha;
+        for (uint j = 0; j < kBatch; ++j) {
+            const float pj = attn_softmax_exp(s[j] - m_new);
+            p_sum += pj;
+            device const half4* vr = V4 + (p + j) * row4;
+            na = fma(float4(vr[0]), pj, na);
+            nb = fma(float4(vr[1]), pj, nb);
+        }
+        oa = na; ob = nb;
+        d_run = d_run * alpha + p_sum;
+        m_run = m_new;
+    }
+    for (; p < p_end; ++p) {
+        device const half4* kr = K4 + p * row4;
+        const float s = simd_sum(dot(qa, float4(kr[0])) + dot(qb, float4(kr[1])));
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float pe = attn_softmax_exp(s - m_new);
+        device const half4* vr = V4 + p * row4;
+        oa = fma(float4(vr[0]), pe, oa * alpha);
+        ob = fma(float4(vr[1]), pe, ob * alpha);
+        d_run = d_run * alpha + pe;
+        m_run = m_new;
+    }
+
+    const uint base = q_head * NC + chunk;
+    if (simd_lane_id == 0) { m_out[base] = m_run; d_out[base] = d_run; }
+    device float4* o4 = reinterpret_cast<device float4*>(o_out + base * kHD) + 2 * simd_lane_id;
+    o4[0] = oa; o4[1] = ob;
+}
+
+#define ATTN_GROUPED_VEC256_BATCHED_VEC_KERNEL(NAME, BATCH)                               \
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]                               \
+void NAME(                                                                                \
+    device const half*  Q             [[buffer(0)]],                                      \
+    device const half*  K             [[buffer(1)]],                                      \
+    device const half*  V             [[buffer(2)]],                                      \
+    device       float* m_out         [[buffer(3)]],                                      \
+    device       float* d_out         [[buffer(4)]],                                      \
+    device       float* o_out         [[buffer(5)]],                                      \
+    constant     uint&  head_dim      [[buffer(6)]],                                      \
+    constant     uint&  num_q_heads   [[buffer(7)]],                                      \
+    constant     uint&  num_kv_heads  [[buffer(8)]],                                      \
+    constant     uint&  seq_len       [[buffer(9)]],                                      \
+    constant     uint&  kv_start      [[buffer(10)]],                                     \
+    constant     uint&  chunk_len     [[buffer(11)]],                                     \
+    constant     uint&  num_chunks    [[buffer(12)]],                                     \
+    constant     float& scale         [[buffer(13)]],                                     \
+    uint tg_id           [[threadgroup_position_in_grid]],                                \
+    uint simd_lane_id    [[thread_index_in_simdgroup]],                                   \
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]])                              \
+{                                                                                         \
+    attn_grouped_vec256_batched_vec<BATCH>(Q, K, V, m_out, d_out, o_out, num_kv_heads,    \
+        seq_len, kv_start, chunk_len, num_chunks, scale, tg_id, simd_lane_id,             \
+        simd_group_id);                                                                   \
+}
+
+ATTN_GROUPED_VEC256_BATCHED_VEC_KERNEL(attention_decode_full_grouped_vec256_batched_partial, 8)

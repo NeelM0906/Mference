@@ -29,6 +29,16 @@ final class Attention {
     private let gemmaQAT: GemmaQATAttention?
     private let psoGroupedVecFull: MTLComputePipelineState
     private let psoGroupedVecFull256: MTLComputePipelineState
+    // Built on first use, so only the Qwen 3.6 instances that set
+    // `groupedFull256Batched` compile it.
+    private lazy var psoGroupedVecFull256Batched: MTLComputePipelineState = {
+        do {
+            return try Self.specializedPipeline(ctx, "attention_decode_full_grouped_vec256_batched_partial",
+                                                headDim: 256, numQHeads: 16, numKVHeads: 2)
+        } catch {
+            preconditionFailure("attention_decode_full_grouped_vec256_batched_partial pipeline: \(error)")
+        }
+    }()
     private let psoPartial: MTLComputePipelineState
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
@@ -68,6 +78,14 @@ final class Attention {
     /// Full attention uses 16 base chunks by default.
     private static let defaultFullChunks = 16
     private static let defaultGQASWAChunks = 8
+
+    /// Qwen 3.6 decode sets this: its grouped 256/16/2 full attention runs
+    /// `attention_decode_full_grouped_vec256_batched_partial` with the split
+    /// from `groupedFull256BatchedChunkCount` instead of the per-component
+    /// kernel at a fixed 16 chunks. It reorders floating-point sums, so it is
+    /// gated by the teacher-forced tolerance gate, not byte identity. Off by
+    /// default.
+    var groupedFull256Batched = false
 
     // Partial state written by pass 1, read by pass 2. One shared allocation:
     // attention runs once per layer, serially, and pass 2 hazard-tracks pass 1
@@ -217,17 +235,29 @@ final class Attention {
         return max(1, min(defaultChunks, min(maxChunks, eff)))
     }
 
+    /// Split count for the batched grouped 256/16/2 kernel
+    /// (`groupedFull256Batched`): today's 16 below 4,096 positions, 32 from
+    /// 4,096. These are the fastest splits measured for that kernel on the
+    /// 24-core M1 Max with `DecodeAttentionKernelBenchmarks`: 16 from 256 to
+    /// 2K positions, 32 from 4K to 32K (64 was slower at every length).
+    static func groupedFull256BatchedChunkCount(effLen: Int) -> Int {
+        let eff = max(1, effLen)
+        return eff >= 4096 ? max(chunkCount(effLen: eff), 2 * defaultFullChunks) : chunkCount(effLen: eff)
+    }
+
     /// `forceGroupedVector` selects the grouped full-attention kernel for the
     /// Gemma 512/16/2 and Qwen 3.6 256/16/2 shapes: one threadgroup per KV head
     /// and chunk, one SIMD group per query head, bit-identical to the per-head
-    /// kernel.
+    /// kernel. `groupedFull256Batched` selects the batched 256/16/2 kernel
+    /// and its split (`groupedFull256BatchedChunkCount`).
     static func splitGeometry(headDim: UInt32 = 512,
                                      numQHeads: UInt32,
                                      numKVHeads: UInt32,
                                      seqLen: UInt32,
                                      kvStart: UInt32,
                                      preferGQASWA: Bool,
-                                     forceGroupedVector: Bool = false) -> AttentionSplitGeometry {
+                                     forceGroupedVector: Bool = false,
+                                     groupedFull256Batched: Bool = false) -> AttentionSplitGeometry {
         let qPerKV = Int(numQHeads / numKVHeads)
         let useSWAGQAPartial = preferGQASWA && qPerKV <= 2
         let useGroupedVector = forceGroupedVector && !preferGQASWA
@@ -237,7 +267,9 @@ final class Attention {
                                          preferGQASWA: useSWAGQAPartial)
         let numChunks = useSWAGQAPartial
             ? max(baseChunks, min(Self.maxChunks, baseChunks * qPerKV))
-            : baseChunks
+            : (useGroupedVector && headDim == 256 && groupedFull256Batched)
+                ? Self.groupedFull256BatchedChunkCount(effLen: effectiveLength)
+                : baseChunks
         let chunkLength = (max(1, effectiveLength) + numChunks - 1) / numChunks
         let partialHeadGroups = (useSWAGQAPartial || useGroupedVector) ? Int(numKVHeads) : Int(numQHeads)
         return AttentionSplitGeometry(effectiveLength: effectiveLength,
@@ -437,18 +469,25 @@ final class Attention {
                                           seqLen: seqLen,
                                           kvStart: kvStart,
                                           preferGQASWA: preferGQASWA,
-                                          forceGroupedVector: forceGroupedVector)
+                                          forceGroupedVector: forceGroupedVector,
+                                          groupedFull256Batched: groupedFull256Batched)
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
         let nChunks = geometry.numChunks
         let chunkLen = geometry.chunkLength
         let partialPSO = geometry.useFullGroupedVectorPartial
-            ? (headDim == 256 ? psoGroupedVecFull256 : psoGroupedVecFull)
+            ? (headDim == 256
+                ? (groupedFull256Batched ? psoGroupedVecFull256Batched : psoGroupedVecFull256)
+                : psoGroupedVecFull)
             : partialPipeline(headDim: headDim,
                               numQHeads: numQHeads,
                               numKVHeads: numKVHeads,
                               numChunks: nChunks,
                               useGQAPartial: useSWAGQAPartial,
                               ringCapacity: ringCapacity)
+        // The batched kernel reads Q, K and V as half4.
+        precondition(!(geometry.useFullGroupedVectorPartial && headDim == 256 && groupedFull256Batched)
+                     || (qOffset % 8 == 0 && kOffset % 8 == 0 && vOffset % 8 == 0),
+                     "the batched grouped attention kernel needs 8-byte-aligned Q, K and V offsets")
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
         // The grouped kernel assigns one SIMD group to each of the 8 query heads.
         precondition(!geometry.useFullGroupedVectorPartial || tgWidth == Self.threadsPerGroup,
