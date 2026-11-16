@@ -2771,6 +2771,16 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         return Self.readFP16(shared, count: width)
     }
 
+    /// Diagnostic: the expert ids and routing weights chunked prefill chose
+    /// for row `row` of the current chunk, in rank order. Shared scratch; read
+    /// from `prefillDidCompleteLayer`. Read-only; nil before any chunked prefill.
+    func prefillRoutes(row: Int) -> (ids: [Int], weights: [Float])? {
+        guard let scratch = prefillScratch, row >= 0, row < scratch.chunkTokens else { return nil }
+        let ids = scratch.routeIDs.contents().bindMemory(to: UInt32.self, capacity: scratch.chunkTokens * topK)
+        let weights = scratch.routeWeights.contents().bindMemory(to: Float16.self, capacity: scratch.chunkTokens * topK)
+        return ((0..<topK).map { Int(ids[row * topK + $0]) }, (0..<topK).map { Float(weights[row * topK + $0]) })
+    }
+
     static func readFP16(_ buffer: MTLBuffer, count: Int) -> [Float] {
         let base = buffer.contents().bindMemory(to: Float16.self, capacity: count)
         return (0..<count).map { Float(base[$0]) }

@@ -65,6 +65,8 @@ import Testing
         /// Sub-layer tensors of the prompt's last row, `detailLayers` only,
         /// keyed `"block_out"`, `"mlp_hc_mixed"`, `"moe_out"`.
         var detail: [Int: [String: [Float]]] = [:]
+        /// Routed expert ids and weights of the prompt's last row, `detailLayers`.
+        var routes: [Int: (ids: [Int], weights: [Float])] = [:]
         var replayed = 0
     }
 
@@ -109,6 +111,10 @@ import Testing
                 guard parts.count == 2, parts[0].hasPrefix("layer"),
                       let layer = Int(parts[0].dropFirst(5)) else { continue }
                 let name = String(parts[1])
+                if name == "router_weights", FlashNextGGUFRealPrefillTests.detailLayers.contains(layer),
+                   let ids = runner.capture?.integers[key.replacingOccurrences(of: "router_weights", with: "router_indices")]?.first {
+                    side.routes[layer] = (ids, value)
+                }
                 if name == "stream_out" { side.layers[layer] = value }
                 if FlashNextGGUFRealPrefillTests.detailLayers.contains(layer),
                    ["block_out", "mlp_hc_mixed", "moe_out"].contains(name) {
@@ -127,11 +133,13 @@ import Testing
             let lastChunkRows = prompt.count - (prompt.count - 1) / chunk * chunk
             var layers: [Int: [Float]] = [:]
             var detail: [Int: [String: [Float]]] = [:]
+            var routes: [Int: (ids: [Int], weights: [Float])] = [:]
             runner.prefillDidCompleteLayer = { [runner] layer in
                 // The hook fires for every chunk; the last chunk's values win.
                 let row = lastChunkRows - 1
                 if let v = try runner.prefillScratchRow(.stream, row: row) { layers[layer] = v }
                 guard FlashNextGGUFRealPrefillTests.detailLayers.contains(layer) else { return }
+                if let r = runner.prefillRoutes(row: row) { routes[layer] = r }
                 for (name, tensor) in [("block_out", FlashNextForwardRunner.PrefillScratchTensor.blockOut),
                                        ("mlp_hc_mixed", .mlpMixed), ("moe_out", .moeOut)] {
                     if let v = try runner.prefillScratchRow(tensor, row: row) { detail[layer, default: [:]][name] = v }
@@ -145,6 +153,7 @@ import Testing
             side.replayed = result.execution?.replayedTokens ?? -1
             side.layers = layers
             side.detail = detail
+            side.routes = routes
             side.promptLogits = FlashNextGGUFRealPrefillTests.floats(logits, count: vocab)
             try await rollout(from: prompt.count, steps: rolloutSteps, side: &side)
             return side
@@ -187,6 +196,19 @@ import Testing
                 print("[gguf-prefill-sublayer] case=\(label) layer=\(L) tensor=\(name) "
                       + "max_abs=\(r.maxAbs) relative=\(r.relative)")
             }
+        }
+        for L in detailLayers.sorted() {
+            guard let c = chunked.routes[L], let s = sequential.routes[L] else {
+                print("[gguf-prefill-routes] case=\(label) layer=\(L) missing"); continue
+            }
+            let onlyChunked = Set(c.ids).subtracting(s.ids).sorted()
+            let onlySequential = Set(s.ids).subtracting(c.ids).sorted()
+            let weightGap = zip(c.weights, s.weights).map { abs($0 - $1) }.max() ?? 0
+            print("[gguf-prefill-routes] case=\(label) layer=\(L) same_set=\(onlyChunked.isEmpty) "
+                  + "same_order=\(c.ids == s.ids) only_chunked=\(onlyChunked) only_sequential=\(onlySequential) "
+                  + "chunked=\(c.ids) sequential=\(s.ids) "
+                  + "weights_chunked=\(c.weights.map { String(format: "%.4f", $0) }) "
+                  + "weights_sequential=\(s.weights.map { String(format: "%.4f", $0) }) max_weight_gap=\(weightGap)")
         }
         return (p.relative, n.relative, argmaxOK, rolloutOK)
     }
