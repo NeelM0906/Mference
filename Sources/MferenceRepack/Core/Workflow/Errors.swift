@@ -40,6 +40,9 @@ public enum RepackError: Error, CustomStringConvertible {
     case remoteHTTPResponse(url: String, status: Int, retryAfter: String?)
     case remoteBodyTruncated(path: String, expected: UInt64, actual: UInt64)
     case remoteBodyExceeded(path: String, limit: UInt64, attempted: UInt64)
+    /// A range transfer made no progress (no redirect, response or body bytes)
+    /// for `seconds`, so it was cancelled. Retryable.
+    case remoteRangeStalled(path: String, seconds: Double)
     case remoteRedirectRejected(url: String, detail: String)
     case remoteRetryDelayExceeded(value: String, capSeconds: UInt64)
     case remoteFileTooLarge(path: String, size: UInt64, cap: UInt64)
@@ -107,6 +110,8 @@ public enum RepackError: Error, CustomStringConvertible {
             return "remote body for \(p) was truncated: expected \(e), received \(a)"
         case .remoteBodyExceeded(let p, let l, let a):
             return "remote body for \(p) exceeded \(l) bytes at \(a) bytes"
+        case .remoteRangeStalled(let p, let s):
+            return "remote range for \(p) made no progress for \(String(format: "%g", s)) s; cancelled"
         case .remoteRedirectRejected(let u, let d):
             return "remote redirect rejected for \(u): \(d)"
         case .remoteRetryDelayExceeded(let v, let c):

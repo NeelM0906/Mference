@@ -32,24 +32,36 @@ public enum RemoteRangeTransfer {
                            targetPath: String,
                            expectation: RemoteRangeExpectation,
                            maximumRedirects: Int,
+                           stallTimeoutSeconds: TimeInterval = 300,
                            progress: @escaping @Sendable (UInt64) -> Void = { _ in })
         async throws -> RemoteRangeTransferResult {
         try Posix.mkdirP((targetPath as NSString).deletingLastPathComponent)
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .utility
         let delegate = try RemoteRangeTransferDelegate(
             targetPath: targetPath,
             expectation: expectation,
             maximumRedirects: maximumRedirects,
             originalRequest: request,
+            delegateQueue: queue,
+            stallTimeoutSeconds: stallTimeoutSeconds,
             progress: progress)
-        let queue = OperationQueue()
-        queue.maxConcurrentOperationCount = 1
-        queue.qualityOfService = .utility
         let session = URLSession(configuration: configuration,
                                  delegate: delegate,
                                  delegateQueue: queue)
         return try await withTaskCancellationHandler {
-            defer { session.finishTasksAndInvalidate() }
-            return try await delegate.start(session: session, request: request)
+            do {
+                let result = try await delegate.start(session: session, request: request)
+                session.finishTasksAndInvalidate()
+                return result
+            } catch {
+                // A failed transfer may still have a task the session holds
+                // (a stall force-finished before its completion arrived), so
+                // cancel it rather than wait on it with the delegate retained.
+                session.invalidateAndCancel()
+                throw error
+            }
         } onCancel: {
             delegate.cancel()
         }
@@ -72,16 +84,31 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
     private var responseAccepted = false
     private var lastProgressNanoseconds: UInt64?
 
+    // No-progress watchdog. Every callback that shows the transfer is alive
+    // (redirect, response, body bytes) refreshes `lastActivityNanoseconds`.
+    // The timer only enqueues `checkStall` on the session's serial delegate
+    // queue, so a stall cancel or forced finish is ordered with the delegate
+    // callbacks that `pwrite` into, and `finish` closes, the temp file.
+    private let delegateQueue: OperationQueue
+    private let stallTimeoutSeconds: TimeInterval
+    private var lastActivityNanoseconds: UInt64 = 0
+    private var stallCancelledAtNanoseconds: UInt64?
+    private var watchdog: DispatchSourceTimer?
+
     init(targetPath: String,
          expectation: RemoteRangeExpectation,
          maximumRedirects: Int,
          originalRequest: URLRequest,
+         delegateQueue: OperationQueue,
+         stallTimeoutSeconds: TimeInterval,
         progress: @escaping @Sendable (UInt64) -> Void) throws {
         self.targetPath = targetPath
         self.expectation = expectation
         self.redirectPolicy = RemoteRedirectPolicy(
             originalRequest: originalRequest,
             maximumRedirects: maximumRedirects)
+        self.delegateQueue = delegateQueue
+        self.stallTimeoutSeconds = stallTimeoutSeconds
         self.progress = progress
         let fd = open(targetPath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else {
@@ -97,13 +124,83 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
             let task = session.dataTask(with: request)
             self.task = task
             let shouldCancel = terminal || rejection != nil
+            lastActivityNanoseconds = DispatchTime.now().uptimeNanoseconds
             lock.unlock()
             if shouldCancel {
                 task.cancel()
             } else {
+                startWatchdog()
                 task.resume()
             }
         }
+    }
+
+    private func markActivity() {
+        lock.lock()
+        lastActivityNanoseconds = DispatchTime.now().uptimeNanoseconds
+        lock.unlock()
+    }
+
+    private func startWatchdog() {
+        guard stallTimeoutSeconds > 0, stallTimeoutSeconds.isFinite else { return }
+        let interval = min(max(stallTimeoutSeconds / 4, 0.05), 1.0)
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.delegateQueue.addOperation { [weak self] in self?.checkStall() }
+        }
+        lock.lock()
+        guard !terminal else {
+            lock.unlock()
+            // Never release a source that was never activated.
+            timer.cancel()
+            timer.activate()
+            return
+        }
+        watchdog = timer
+        lock.unlock()
+        timer.activate()
+    }
+
+    /// Runs on the delegate queue. A stalled transfer is rejected and its task
+    /// cancelled; if the cancellation's `didCompleteWithError` has not arrived
+    /// within a short grace period, the transfer is finished here, so a lost
+    /// callback cannot hang the install either.
+    private func checkStall() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        // Clamped so a huge configured timeout cannot overflow the conversion.
+        let stallNanoseconds = UInt64(min(stallTimeoutSeconds, 1e9) * 1_000_000_000)
+        let graceNanoseconds = min(stallNanoseconds, 5_000_000_000)
+        lock.lock()
+        guard !terminal else {
+            lock.unlock()
+            return
+        }
+        if let cancelledAt = stallCancelledAtNanoseconds {
+            let overdue = now &- cancelledAt >= graceNanoseconds
+            let error = rejection ?? stalledError()
+            lock.unlock()
+            if overdue {
+                finish(.failure(error))
+            }
+            return
+        }
+        guard now &- lastActivityNanoseconds >= stallNanoseconds else {
+            lock.unlock()
+            return
+        }
+        if rejection == nil {
+            rejection = stalledError()
+        }
+        stallCancelledAtNanoseconds = now
+        let task = task
+        lock.unlock()
+        task?.cancel()
+    }
+
+    private func stalledError() -> RepackError {
+        RepackError.remoteRangeStalled(path: expectation.filename, seconds: stallTimeoutSeconds)
     }
 
     func cancel() {
@@ -121,6 +218,7 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
+        markActivity()
         do {
             completionHandler(try redirectPolicy.request(
                 response: response,
@@ -135,6 +233,7 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
                     dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        markActivity()
         do {
             if let cancellation = rejectionSnapshot() {
                 throw cancellation
@@ -159,6 +258,9 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
                     didReceive data: Data) {
         lock.lock()
         let mayReceive = responseAccepted && rejection == nil
+        if mayReceive {
+            lastActivityNanoseconds = DispatchTime.now().uptimeNanoseconds
+        }
         lock.unlock()
         guard mayReceive else { return }
         let attempted = receivedBytes + UInt64(data.count)
@@ -180,6 +282,7 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
                                     offset: receivedBytes)
             }
             receivedBytes = attempted
+            markActivity()
             emitProgressIfNeeded(force: receivedBytes == expectation.length)
         } catch {
             reject(error)
@@ -287,8 +390,11 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
         let continuation = continuation
         self.continuation = nil
         self.task = nil
+        let watchdog = watchdog
+        self.watchdog = nil
         lock.unlock()
 
+        watchdog?.cancel()
         close(fd)
         if case .failure = result {
             try? FileManager.default.removeItem(atPath: targetPath)
