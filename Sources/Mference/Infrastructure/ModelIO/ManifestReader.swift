@@ -986,10 +986,10 @@ public enum ManifestReader {
     /// Empty today. Earlier occupants were `qwen38flashnext` (removed
     /// 2026-09-10 when `FlashNextForwardRunner` landed), `glm53Flash` (removed
     /// when `Glm53ForwardRunner` landed) and `qwen38flashnextudiq3xxs` (WS4,
-    /// removed when U4 wired it onto `FlashNextForwardRunner`; the paths it
-    /// does not run yet — chunked prefill, resident expert mode — refuse by
-    /// name there). Remove an entry only when `ForwardRunnerFactory` actually
-    /// dispatches to the family's runner.
+    /// removed when U4 wired it onto `FlashNextForwardRunner`; the one mode it
+    /// does not run, resident experts, is refused by name in
+    /// `Model.ggufExpertModeRefusal`). Remove an entry only when
+    /// `ForwardRunnerFactory` actually dispatches to the family's runner.
     ///
     /// Add an entry the moment a new family gains an `ArchInfo` install path,
     /// keyed by its `manifest.arch.family` string and valued with the axis

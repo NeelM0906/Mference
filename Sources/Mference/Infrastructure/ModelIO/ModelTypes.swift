@@ -22,8 +22,8 @@ public enum ModelFamily: String, Sendable, Hashable, CaseIterable {
     /// quantize-in-flight repack rather than a pre-converted download.
     case qwen38flashnext = "qwen38flashnext"
     /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4). Same
-    /// architecture, GGUF tensor names and ggml formats; installable, but gated
-    /// in `ManifestReader.familiesWithoutRunner` until U4's runner lands.
+    /// architecture, GGUF tensor names and ggml formats. `FlashNextForwardRunner`
+    /// executes it with the slot cache (resident expert mode is refused by name).
     case qwen38flashnextudiq3xxs = "qwen38flashnextudiq3xxs"
     /// MiniCPM5-2B: a plain-llama dense family (`LlamaForCausalLM`), the
     /// project's first, installed from the vendor's BF16 upload through the
@@ -1107,8 +1107,8 @@ public struct ArchConfig: Sendable, Equatable {
     /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4, ruling R1).
     /// Field for field the vendor baseline above, except the family and the
     /// two storage-shaped PLE fields, read from the pinned GGUF header
-    /// (`docs/families/qwen38flashnext-unsloth-ud-iq3_xxs.tensors.json`). Gated
-    /// in `ManifestReader.familiesWithoutRunner` until its runner lands (U4).
+    /// (`docs/families/qwen38flashnext-unsloth-ud-iq3_xxs.tensors.json`). Run by
+    /// `FlashNextForwardRunner`.
     public static let qwen38FlashNextUnslothUDIQ3XXS = ArchConfig(
         hiddenSize: 2560,
         intermediateSize: 640,

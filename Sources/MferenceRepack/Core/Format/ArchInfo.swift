@@ -22,8 +22,8 @@ enum RepackModelFamily: String, Sendable, Equatable {
     /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4, ruling R1).
     /// Same architecture as `qwen38flashnext`, but its tensors keep GGUF names
     /// and ggml formats, so it is a distinct family with its own baseline.
-    /// Installed by `FlashNextGGUFPlanner`; gated in
-    /// `ManifestReader.familiesWithoutRunner` until its runner lands (U4).
+    /// Installed by `FlashNextGGUFPlanner`; the runtime runs it on
+    /// `FlashNextForwardRunner`.
     case qwen38flashnextudiq3xxs = "qwen38flashnextudiq3xxs"
     /// MiniCPM5-2B: plain-llama dense. Installed from the vendor's BF16 repo
     /// (quantize-in-flight) and, as the W2.1b control, from the vendor's own

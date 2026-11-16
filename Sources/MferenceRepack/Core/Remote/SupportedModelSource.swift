@@ -326,7 +326,7 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// install keeps every tensor in its GGUF format (U1/U2 design notes under
     /// scratch/program/design/ws4-*). `sourceIndexSHA256` is the pin
     /// fingerprint (`GGUFSourcePin.fingerprint`), not an index hash.
-    /// The runtime does not run this label yet (U4).
+    /// The runtime runs this label on `FlashNextForwardRunner`.
     public static let qwen38FlashNextUnslothUDIQ3XXS = SupportedModelSource(
         name: "qwen38flashnextudiq3xxs",
         displayName: "Qwen3.8-Flash-Next 180B-A3.5B, Unsloth UD-IQ3_XXS GGUF (third-party quant)",
