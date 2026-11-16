@@ -216,8 +216,8 @@ private let qwenGroupedGEMMAvailable: Bool = {
     func qwenRoutedTile(rowsPerExpert: Int) throws {
         let experts = 16, topK = 8
         let tokens = rowsPerExpert * experts / topK
-        let pairs = (0..<tokens).flatMap { token in
-            (0..<topK).map { rank in
+        let pairs = (0..<tokens).flatMap { (token: Int) -> [PrefillTokenExpertPair] in
+            (0..<topK).map { (rank: Int) -> PrefillTokenExpertPair in
                 PrefillGroupedRoutedMoETests.pair(
                     token: UInt32(token), expert: UInt32((token * topK + rank) % experts), rank: UInt32(rank))
             }
@@ -385,10 +385,15 @@ private let qwenGroupedGEMMAvailable: Bool = {
           arguments: [40, 48, 56, 64, 72, 80, 88, 92, 96, 104, 112, 120, 128, 136, 160, 192, 256])
     func uniformRowsPerExpert(rows: Int) throws {
         let tokens = 2 * rows
-        let pairs = (0..<tokens).flatMap { token in
-            (0..<8).map { rank in
-                PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: UInt32((token * 8 + rank) % 16),
-                                                  rank: UInt32(rank))
+        // A plain loop: the nested flatMap/map closure timed out the type
+        // checker on the CI runners.
+        var pairs: [PrefillTokenExpertPair] = []
+        pairs.reserveCapacity(tokens * 8)
+        for token in 0..<tokens {
+            for rank in 0..<8 {
+                let expert: Int = (token * 8 + rank) % 16
+                pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: UInt32(expert),
+                                                               rank: UInt32(rank)))
             }
         }
         Self.report("rows=\(rows)", try Self.timeTiles(tokens: tokens, pairs: pairs, experts: 16))
