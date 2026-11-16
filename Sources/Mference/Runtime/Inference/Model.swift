@@ -759,10 +759,8 @@ public struct Model {
             // sized from the layer's own slot stride, never the top-level
             // `expertStride` (R2), and only the runner's raw-expansion read
             // may fill them.
-            guard case .pread = streamingMode else {
-                throw ModelError.familyRunnerNotImplemented(
-                    family: config.family.rawValue,
-                    missingAxes: ["residentExpertMode"])
+            if let refusal = Self.ggufExpertModeRefusal(family: config.family, mode: streamingMode) {
+                throw refusal
             }
             layout = StreamLayout(
                 path: url.path,
@@ -798,6 +796,15 @@ public struct Model {
                 device: device,
                 strategy: Self.residentStrategy(for: config.family)))
         }
+    }
+
+    /// GGUF-block experts (WS4) need the slot cache: a slot is where the
+    /// runner expands the raw blocks to LUT4, and the mapped resident layer
+    /// would hand the kernels unexpanded bytes. Resident mode is refused by
+    /// name; nil means the mode runs.
+    static func ggufExpertModeRefusal(family: ModelFamily, mode: ExpertStreamingMode) -> ModelError? {
+        guard case .resident = mode else { return nil }
+        return .familyRunnerNotImplemented(family: family.rawValue, missingAxes: ["residentExpertMode"])
     }
 
     /// How `.resident` holds a layer's experts. GLM-5.3-Flash's runner

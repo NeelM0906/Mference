@@ -77,6 +77,10 @@ final class FlashNextMTPDraftRunner {
         let fn = cfg.flashNext
         let d = cfg.hiddenSize
         let rotary = Int(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor)
+        guard FlashNextMTPWeights.supportedFamilies.contains(cfg.family) else {
+            throw FlashNextForwardRunnerError.invalidConfiguration(
+                "native MTP is not available for \(cfg.family.rawValue)")
+        }
         guard cfg.family == .qwen38flashnext, maxContext > 0,
               fn.hcCount > 1, fn.hcLowRank > 0,
               MoE.routedComputeWidths.contains(UInt32(cfg.topKExperts)),

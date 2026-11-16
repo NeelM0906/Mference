@@ -14,6 +14,22 @@ import Testing
         #expect(ManifestReader.capabilityRefusal(family: "qwen38flashnext") == nil)
     }
 
+    /// With the capability gate lifted, the paths the GGUF install does not
+    /// run still refuse it by name: resident expert mode (the slots are where
+    /// the raw blocks become LUT4), native MTP (the install carries no
+    /// sidecar), and every plain expert read of a raw-expansion layout
+    /// (`PreadExpertStreamerRawTests`). The slot cache is not refused, and the
+    /// vendor family keeps both.
+    @Test func unwiredPathsStillRefuseTheGGUFFamilyByName() {
+        #expect(Model.ggufExpertModeRefusal(family: .qwen38flashnextudiq3xxs, mode: .resident)
+                == .familyRunnerNotImplemented(family: "qwen38flashnextudiq3xxs",
+                                               missingAxes: ["residentExpertMode"]))
+        #expect(Model.ggufExpertModeRefusal(family: .qwen38flashnextudiq3xxs,
+                                            mode: .pread(slotCount: 16)) == nil)
+        #expect(!FlashNextMTPWeights.supportedFamilies.contains(.qwen38flashnextudiq3xxs))
+        #expect(FlashNextMTPWeights.supportedFamilies.contains(.qwen38flashnext))
+    }
+
     /// One layer of two experts in the installer's GGUF layout keys
     /// (`GTurboJSON.encodeGGUFLayout`): IQ2_S gate/up [64, 256], IQ4_NL down
     /// [256, 64], stored back to back at a fixed stride.
