@@ -81,6 +81,9 @@ public struct Model {
     /// while still letting accessors mutate layer state via a serial queue.
     let streamersBox: StreamersBox
     let streamersQueue: DispatchQueue
+    /// Whether prefill sweeps read their experts past the page cache, decided
+    /// once at load by `RuntimeConfiguration.prefillSweepBypassesPageCache`.
+    let prefillSweepBypassesPageCache: Bool
 
     /// Lazily converted FP32 copies of small BF16 tensors that kernels bind
     /// as `device const float*` (DeepSeek V4's compressor `ape` tables).
@@ -120,6 +123,36 @@ public struct Model {
         self.directoryURL = directoryURL
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "mference.expert-streamers")
+        self.prefillSweepBypassesPageCache = Self.prefillSweepBypassesPageCache(
+            family: config.family,
+            streamingMode: streamingMode,
+            layout: packedExpertsLayout,
+            coreWeightsBytes: residentIndex.header.indexSize + residentIndex.header.residentSize)
+    }
+
+    /// Feeds the regime rule this install's sizes. Only `.pread` sweeps exist;
+    /// `indexSize + residentSize` is `model_weights.bin`, which load checks.
+    static func prefillSweepBypassesPageCache(
+        family: ModelFamily,
+        streamingMode: ExpertStreamingMode,
+        layout: PackedExpertsLayout,
+        coreWeightsBytes: UInt64,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Bool {
+        guard case .pread(let slotCount) = streamingMode else { return false }
+        // File bytes, since those are what the page cache would hold.
+        let poolBytes = layout.layers.reduce(UInt64(0)) { total, layer in
+            total + UInt64(layer.experts.count) * layout.storedExpertStride
+        }
+        let routedLayers = UInt64(layout.layers.filter { !$0.experts.isEmpty }.count)
+        let slotBytes = UInt64(PreadExpertStreamer.slotAllocationSize(
+            expertStride: layout.expertStride))
+        return RuntimeConfiguration.prefillSweepBypassesPageCache(
+            for: family,
+            physicalMemoryBytes: physicalMemoryBytes,
+            expertPoolBytes: poolBytes,
+            wiredSlotBytes: UInt64(slotCount) * routedLayers * slotBytes,
+            coreWeightsBytes: coreWeightsBytes)
     }
 
     // MARK: - Resident accessors
@@ -704,7 +737,8 @@ public struct Model {
                 layout: layout,
                 device: device,
                 slotCount: slotCount,
-                cachePolicy: expertCachePolicy))
+                cachePolicy: expertCachePolicy,
+                unbufferedSweep: prefillSweepBypassesPageCache))
         case .resident:
             streamersBox.streamers[L] = .resident(try ResidentExpertStreamer(
                 layout: layout,

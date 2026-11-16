@@ -2892,8 +2892,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                         if !reservation.isEmpty {
                             let record = SpeculativeExpertPrefetch(layer: L + 1, predicted: Set(ahead))
                             prefillLookahead = record
+                            // Part of the sweep: unbuffered wherever the
+                            // model's regime rule made the sweep unbuffered.
                             DispatchQueue.global(qos: .userInitiated).async {
-                                record.complete(bytes: streamer.executeSpeculativeReservation(reservation))
+                                record.complete(bytes: streamer.executeSpeculativeReservation(
+                                    reservation, sweep: true))
                             }
                         }
                     }

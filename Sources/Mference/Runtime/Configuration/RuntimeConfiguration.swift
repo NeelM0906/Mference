@@ -213,6 +213,39 @@ public struct RuntimeConfiguration: Sendable, Equatable {
             physicalMemoryBytes: physicalMemoryBytes))
     }
 
+    /// Memory the prefill-sweep rule treats as unavailable to the page cache
+    /// beside the wired expert slots: the OS, other processes, and the
+    /// process's own KV, scratch and Metal heaps. On the M1 Max 32 GiB
+    /// (2026-11-15 A/B), file-backed pages never exceeded 14.36 GB while
+    /// Qwen 3.6 ran 96 slots (6.79 GB), so at least 34.36 − 6.79 − 14.36 =
+    /// 13.2 GB (12.3 GiB) was unavailable; 12 GiB rounds that down.
+    static let prefillSweepReserveBytes = UInt64(12) << 30
+
+    /// Whether prefill expert sweeps read through an `F_NOCACHE` descriptor.
+    /// A buffered sweep pulls most of each layer's experts through the page
+    /// cache; when the pool cannot stay cached anyway, that pass only evicts
+    /// pages decode reuses, the mapped core weights among them. Measured on
+    /// Qwen 3.6 at 32 GiB (2026-11-15, A B B A): the unbuffered sweep cut
+    /// medium-review prefill 9–18% and the server's 2,940-token TTFT 12–15%,
+    /// with identical output. Every other family keeps buffered sweeps: none
+    /// was measured, and `F_NOCACHE` would change its I/O.
+    static func prefillSweepBypassesPageCache(
+        for family: ModelFamily,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+        expertPoolBytes: UInt64,
+        wiredSlotBytes: UInt64,
+        coreWeightsBytes: UInt64
+    ) -> Bool {
+        guard family == .qwen36 else { return false }
+        var required = prefillSweepReserveBytes
+        for term in [expertPoolBytes, wiredSlotBytes, coreWeightsBytes] {
+            let (sum, overflow) = required.addingReportingOverflow(term)
+            if overflow { return true }
+            required = sum
+        }
+        return required > physicalMemoryBytes
+    }
+
     /// Auto pool sizing for the paged KV cache: everything resident when it
     /// fits, otherwise whatever RAM remains after weights and headroom
     /// (~physical − 22 GiB on the 24 GiB M5 → ~2 GiB of pool ≈ 32k resident

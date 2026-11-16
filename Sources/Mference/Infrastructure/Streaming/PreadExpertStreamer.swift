@@ -63,8 +63,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public let cachePolicy: ExpertCachePolicy
 
     private let fd: Int32
-    /// Same file, opened F_NOCACHE, for plans that sweep the layer (prefill).
-    private let sweepFD: Int32
+    /// Same file opened `F_NOCACHE`, for plans that sweep the layer
+    /// (prefill). Present only when the model's regime rule asked for
+    /// unbuffered sweeps and `fcntl` succeeded; otherwise sweeps read `fd`.
+    private let sweepFD: Int32?
     private let slotPointers: [UnsafeMutableRawPointer]
     /// One contiguous wired allocation holding every slot; slot `n` lives at
     /// byte offset `n * slotAllocationSize`. A single buffer lets the GPU
@@ -101,28 +103,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 device: MTLDevice,
                 slotCount: Int,
                 cachePolicy: ExpertCachePolicy = .lfu,
-                readStats: ExpertReadStats? = ExpertReadStats.shared) throws {
+                readStats: ExpertReadStats? = ExpertReadStats.shared,
+                unbufferedSweep: Bool = false) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
         self.cachePolicy = cachePolicy
         self.readStats = readStats
-        let pageSize = Int(getpagesize())
 
         let openedFD = open(layout.path, O_RDONLY)
         guard openedFD >= 0 else {
             throw StreamerError.openFailed(path: layout.path, errno: errno)
         }
         self.fd = openedFD
-        // Prefill sweeps nearly every expert of the layer once: through the
-        // file cache that pass only evicts pages other reads could reuse.
-        let sweepFD = open(layout.path, O_RDONLY)
-        guard sweepFD >= 0 else {
-            close(openedFD)
-            throw StreamerError.openFailed(path: layout.path, errno: errno)
-        }
-        _ = fcntl(sweepFD, F_NOCACHE, 1)
-        self.sweepFD = sweepFD
 
         var fileStats = stat()
         if fstat(openedFD, &fileStats) == 0 {
@@ -135,7 +128,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
         }
 
-        let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
+        let allocationSize = Self.slotAllocationSize(expertStride: layout.expertStride)
         var slabRaw: UnsafeMutableRawPointer?
         let allocResult = posix_memalign(&slabRaw, Self.scratchAlignment,
                                          allocationSize * slotCount)
@@ -164,6 +157,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard let table = device.makeBuffer(
             length: tableEntries * MemoryLayout<Int16>.stride,
             options: .storageModeShared) else {
+            close(openedFD)
             throw StreamerError.bufferWrapFailed
         }
         self.slotOfBuffer = table
@@ -174,12 +168,35 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.speculativeInFlight = [Bool](repeating: false, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
+        // Opened after the last throwing step, so no failure path can leak it.
+        // A failure here only costs the page-cache bypass: sweeps read `fd`.
+        self.sweepFD = unbufferedSweep ? Self.openUnbuffered(path: layout.path) : nil
     }
 
     deinit {
         close(fd)
-        close(sweepFD)
+        if let sweepFD { close(sweepFD) }
     }
+
+    /// Bytes one slot occupies: the expert stride rounded up to whole pages.
+    static func slotAllocationSize(expertStride: UInt64) -> Int {
+        let pageSize = Int(getpagesize())
+        return ((Int(expertStride) + pageSize - 1) / pageSize) * pageSize
+    }
+
+    /// A descriptor with `F_NOCACHE` set, or nil when either call fails.
+    private static func openUnbuffered(path: String) -> Int32? {
+        let descriptor = open(path, O_RDONLY)
+        guard descriptor >= 0 else { return nil }
+        guard fcntl(descriptor, F_NOCACHE, 1) != -1 else {
+            close(descriptor)
+            return nil
+        }
+        return descriptor
+    }
+
+    /// Whether `sweep: true` reads bypass the page cache.
+    var sweepsBypassPageCache: Bool { sweepFD != nil }
 
     public func loadExpert(layer: Int, expert: Int) throws
         -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
@@ -199,7 +216,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard regionOffset + layout.storedExpertStride <= layout.streamSize else {
             throw StreamerError.offsetOutOfRange(regionOffset)
         }
-        try readExpertRun(into: [slotPointers[slot]],
+        try readExpertRun(into: [slotPointers[slot]], fd: fd,
                           fileOffset: layout.streamOffset + regionOffset)
         return (slotSlabBuffer, UInt64(slot * slotAllocationSize),
                 layout.expertStride)
@@ -297,6 +314,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         let runs = Self.coalescedReadRuns(offsets: missFileOffsets,
                                           stride: layout.storedExpertStride)
+        let readFD = sweep ? (sweepFD ?? fd) : fd
         let errorLock = NSLock()
         nonisolated(unsafe) var firstError: Error?
         DispatchQueue.concurrentPerform(iterations: runs.count) { runIndex in
@@ -306,6 +324,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
             do {
                 try self.readExpertRun(into: destinations,
+                                       fd: readFD,
                                        fileOffset: missFileOffsets[run[0]])
             } catch {
                 errorLock.lock()
@@ -398,9 +417,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// an expert; the in-flight mark is always cleared. Returns the bytes read.
     @discardableResult
     public func executeSpeculativeReservation(
-        _ reservation: [(expert: Int, slot: Int)]
+        _ reservation: [(expert: Int, slot: Int)],
+        sweep: Bool = false
     ) -> UInt64 {
         guard !reservation.isEmpty else { return 0 }
+        let readFD = sweep ? (sweepFD ?? fd) : fd
         let fileOffsets = reservation.map { entry in
             (try? fileOffsetForExpert(entry.expert)) ?? UInt64.max
         }
@@ -414,6 +435,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             let destinations = entries.map { self.slotPointers[reservation[$0].slot] }
             guard (try? self.readExpertRun(
                 into: destinations,
+                fd: readFD,
                 fileOffset: fileOffsets[entries[0]])) != nil else { return }
             loadedLock.lock()
             loaded.append(contentsOf: entries)
@@ -629,11 +651,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// expanded experts, or through `ExpertStorage` when the file omits bytes.
     @inline(__always)
     private func readExpertRun(into destinations: [UnsafeMutableRawPointer],
+                               fd: Int32,
                                fileOffset: UInt64) throws {
         if let readStats {
-            return try readExpertRunTimed(readStats, into: destinations, fileOffset: fileOffset)
+            return try readExpertRunTimed(readStats, into: destinations, fd: fd,
+                                          fileOffset: fileOffset)
         }
-        try readExpertRunUntimed(into: destinations, fileOffset: fileOffset)
+        try readExpertRunUntimed(into: destinations, fd: fd, fileOffset: fileOffset)
     }
 
     /// Phase-report path only: kept out of line so the default read path is
@@ -641,9 +665,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     @inline(never)
     private func readExpertRunTimed(_ readStats: ExpertReadStats,
                                     into destinations: [UnsafeMutableRawPointer],
+                                    fd: Int32,
                                     fileOffset: UInt64) throws {
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        try readExpertRunUntimed(into: destinations, fileOffset: fileOffset)
+        try readExpertRunUntimed(into: destinations, fd: fd, fileOffset: fileOffset)
         readStats.record(experts: destinations.count,
                          bytes: UInt64(destinations.count) * layout.storedExpertStride,
                          nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start)
@@ -651,6 +676,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     @inline(__always)
     private func readExpertRunUntimed(into destinations: [UnsafeMutableRawPointer],
+                                      fd: Int32,
                                       fileOffset: UInt64) throws {
         if let storage = layout.storage {
             try storage.readExperts(fd: fd, fileOffset: fileOffset, into: destinations)
