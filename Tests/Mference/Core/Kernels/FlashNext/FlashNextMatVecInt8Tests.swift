@@ -165,6 +165,7 @@ import MferenceValidationSupport
         case .int4: #expect(bits == 4)
         case .int8: #expect(bits == 8)
         case .bf16: Issue.record("dtype 0 must not resolve to BF16")
+        case .ggufInt8TwoLevel, .ggufQ6KRows: Issue.record("dtype 0 must not resolve to a GGUF matrix")
         }
     }
 }

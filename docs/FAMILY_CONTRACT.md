@@ -56,10 +56,11 @@ runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
 authoritative capability gate, and `peekFamily` consults it before any of this
 machinery is reached.
 
-That table has **one entry today: FNU**, added 2026-11-15 with its GGUF
-install path; it stays there until its runner lands. Earlier entries were G53,
-added 2026-09-11 with its Day-0 contract
-([GLM-5.3-Flash](families/GLM53_FLASH.md)) and lifted when its runner landed,
+That table is **empty today**. Earlier entries were FNU, added 2026-11-15
+with its GGUF install path and lifted once `FlashNextForwardRunner` ran it
+(the paths it does not run yet refuse by name in the runner); G53, added
+2026-09-11 with its Day-0 contract
+([GLM-5.3-Flash](families/GLM53_FLASH.md)) and lifted when its runner landed;
 and FNX, whose gate was lifted on 2026-09-10 once `FlashNextForwardRunner`
 landed.
 

@@ -3,73 +3,78 @@ import Testing
 @testable import Mference
 
 /// WS4 ruling R1: the Unsloth UD-IQ3_XXS GGUF install is its own family,
-/// `qwen38flashnextudiq3xxs`, with its own baseline, refused by name until its
-/// runner lands.
+/// `qwen38flashnextudiq3xxs`, with its own baseline. U4 wired it onto
+/// `FlashNextForwardRunner`, so it is no longer gated.
 @Suite struct FlashNextGGUFFamilyTests {
-    private static func writeManifest(family: String, pleNgramShardCount: Int) throws -> URL {
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("mference-gguf-family-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let manifest: [String: Any] = [
-            "magic": "GTURBO", "versionMajor": 1, "versionMinor": 0,
-            "flags": ["streamingPresent": true, "turboQuantKV": false, "aneSharedExpert": false],
-            "modelID": "unsloth-qwen3.8-flash-next-ud-iq3_xxs",
-            "sourceSnapshotHash": "sha256:0",
-            "arch": ["family": family, "hiddenSize": 2_560, "numLayers": 48,
-                     "pleNgramShardCount": pleNgramShardCount, "pleNgramVocabSizeBase": 0],
-            "quant": ["routedExpert": ["scheme": "gguf"]],
-            "files": [:], "expertsPerLayer": 512, "numLayers": 48, "expertStride": 2_670_592,
-        ]
-        try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
-            .write(to: directory.appendingPathComponent("manifest.json"))
-        return directory
-    }
-
-    /// Refused by name through the capability gate, even with PLE fields that
-    /// agree with its own baseline, so the refusal cannot be the accidental
-    /// `pleNgramShardCount` mismatch against the vendor baseline.
-    @Test func ggufFamilyIsRefusedByName() throws {
-        let directory = try Self.writeManifest(family: "qwen38flashnextudiq3xxs", pleNgramShardCount: 1)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let expected = ModelError.familyRunnerNotImplemented(
-            family: "qwen38flashnextudiq3xxs",
-            missingAxes: ManifestReader.qwen38FlashNextGGUFRequiredAxes)
-        #expect(throws: expected) { try ManifestReader.peekFamily(directoryURL: directory) }
-        #expect(ManifestReader.missingRunnerAxes(forRawFamily: "qwen38flashnextudiq3xxs")
-                == ManifestReader.qwen38FlashNextGGUFRequiredAxes)
-        // The vendor family stays loadable.
+    /// U4: the family runs on `FlashNextForwardRunner`, so the capability gate
+    /// no longer lists it. The vendor family stays ungated too.
+    @Test func ggufFamilyIsNoLongerGated() throws {
+        #expect(ManifestReader.capabilityRefusal(family: "qwen38flashnextudiq3xxs") == nil)
+        #expect(ManifestReader.missingRunnerAxes(forRawFamily: "qwen38flashnextudiq3xxs") == nil)
         #expect(ManifestReader.capabilityRefusal(family: "qwen38flashnext") == nil)
     }
 
-    /// R2: today's layout reader refuses GGUF expert storage by its format
-    /// string instead of reading GGUF blocks as INT4 or BF16 experts. The keys
-    /// mirror `GTurboJSON.encodeGGUFLayout` in the installer.
-    @Test func layoutReaderRefusesGGUFExpertStorage() throws {
+    /// One layer of two experts in the installer's GGUF layout keys
+    /// (`GTurboJSON.encodeGGUFLayout`): IQ2_S gate/up [64, 256], IQ4_NL down
+    /// [256, 64], stored back to back at a fixed stride.
+    static func ggufLayout(downFormat: String = "IQ4_NL", downSize: Int = 9_216,
+                           slotStride: Int = 32_768) -> [String: Any] {
+        func expert(_ e: Int) -> [String: Any] {
+            ["expert": e, "offset": e * 20_480, "size": 20_480, "tensors": [
+                "gate": ["offset": 0, "size": 5_248, "dtype": "GGML", "format": "IQ2_S", "shape": [64, 256]],
+                "up": ["offset": 5_248, "size": 5_248, "dtype": "GGML", "format": "IQ2_S", "shape": [64, 256]],
+                "down": ["offset": 10_496, "size": downSize, "dtype": "GGML", "format": downFormat,
+                         "shape": [256, 64]],
+            ]]
+        }
+        return [
+            "expertStride": 20_480, "numLayers": 1, "expertsPerLayer": 2,
+            "layers": [["layer": 0, "file": "layer_00.bin", "expertStride": 20_480,
+                        "experts": [expert(0), expert(1)]]],
+            "expertStorage": ["format": "ggufNativeBlocksV1", "storedExpertStride": 20_480,
+                              "storedExpertStrides": [20_480], "slotFormat": "lut4",
+                              "slotStrides": [slotStride]],
+        ]
+    }
+
+    static func loadLayout(_ layout: [String: Any]) throws -> PackedExpertsLayout {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("mference-gguf-layout-\(UUID().uuidString)")
         let packed = directory.appendingPathComponent("packed_experts")
         try FileManager.default.createDirectory(at: packed, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        func expert(_ e: Int) -> [String: Any] {
-            ["expert": e, "offset": e * 16_384, "size": 16_384, "tensors": [
-                "gate": ["offset": 0, "size": 5_248, "dtype": "GGML", "format": "IQ2_S", "shape": [64, 256]],
-                "up": ["offset": 5_376, "size": 5_248, "dtype": "GGML", "format": "IQ2_S", "shape": [64, 256]],
-                "down": ["offset": 10_752, "size": 4_608, "dtype": "GGML", "format": "IQ4_NL", "shape": [256, 64]],
-            ]]
-        }
-        let layout: [String: Any] = [
-            "expertStride": 16_384, "numLayers": 1, "expertsPerLayer": 2,
-            "layers": [["layer": 0, "file": "layer_00.bin", "expertStride": 16_384,
-                        "experts": [expert(0), expert(1)]]],
-            "expertStorage": ["format": "ggufNativeBlocksV1", "storedExpertStride": 16_384,
-                              "storedExpertStrides": [16_384], "slotFormat": "lut4", "slotStrides": [32_768]],
-        ]
         try JSONSerialization.data(withJSONObject: layout).write(to: packed.appendingPathComponent("layout.json"))
-        do {
-            _ = try PackedExpertsLayoutReader.load(directoryURL: directory)
-            Issue.record("GGUF expert storage was accepted")
-        } catch let error as ModelError {
-            #expect(error.description.contains("expertStorage has an unknown format"), "\(error)")
+        return try PackedExpertsLayoutReader.load(directoryURL: directory)
+    }
+
+    /// R2 / U4: the layout reader parses GGUF expert storage into per-layer
+    /// stored and slot strides and LUT4 slot sections (indices, D, M per
+    /// projection, 16-aligned), and never as INT4 or BF16 experts.
+    @Test func layoutReaderParsesGGUFExpertStorage() throws {
+        let layout = try Self.loadLayout(Self.ggufLayout())
+        #expect(layout.storage == nil)
+        let layer = try #require(layout.gguf?.layers.first)
+        #expect(layer.storedStride == 20_480 && layer.slotStride == 32_768)
+        #expect(layer.gate.type == .iq2_s && layer.up.type == .iq2_s && layer.down.type == .iq4_nl)
+        #expect(layer.gate.storedOffset == 0 && layer.up.storedOffset == 5_248 && layer.down.storedOffset == 10_496)
+        // IQ2_S, 16,384 weights: 8,192 B indices, 128 B D, 1,024 B M.
+        #expect([layer.gate.indexOffset, layer.gate.dOffset, layer.gate.mOffset] == [0, 8_192, 8_320])
+        #expect([layer.up.indexOffset, layer.up.dOffset, layer.up.mOffset] == [9_344, 17_536, 17_664])
+        // IQ4_NL: 8,192 B indices, 1,024 B D, no M.
+        #expect([layer.down.indexOffset, layer.down.dOffset, layer.down.mOffset] == [18_688, 26_880, 27_904])
+        #expect(layer.slotBytes == 27_904 && layer.gate.blocks == 64 && layer.down.blocks == 512)
+        for p in layer.projections {
+            #expect(p.indexOffset % 16 == 0 && p.dOffset % 16 == 0 && p.mOffset % 16 == 0)
+        }
+    }
+
+    /// Blocks that do not tile their shape, a slot too small for its LUT4
+    /// sections, and a format with no LUT4 form are all refused.
+    @Test func layoutReaderRefusesInconsistentGGUFStorage() throws {
+        for (label, layout) in [("block size", Self.ggufLayout(downSize: 4_608)),
+                                ("slot stride", Self.ggufLayout(slotStride: 16_384)),
+                                ("format", Self.ggufLayout(downFormat: "Q4_K"))] {
+            #expect(throws: ModelError.self, "\(label)") { _ = try Self.loadLayout(layout) }
         }
     }
 

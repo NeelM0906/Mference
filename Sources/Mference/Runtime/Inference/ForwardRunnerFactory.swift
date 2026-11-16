@@ -61,7 +61,9 @@ public enum ForwardRunnerFactory {
                                   prefillConfig: runtimeConfiguration.prefillConfig,
                                   kvStorageMode: .fp16)
         }
-        if model.config.family == .qwen38flashnext {
+        // The WS4 GGUF install runs on the same runner, through its GGUF
+        // seams (`FlashNextWeightMatrix.fromGGUF`, the LUT4 routed path).
+        if model.config.family == .qwen38flashnext || model.config.family == .qwen38flashnextudiq3xxs {
             return ForwardRuntime(producer: try FlashNextForwardRunner(
                 model: model, context: context, maxContext: maxContext,
                 runtimeConfiguration: runtimeConfiguration),

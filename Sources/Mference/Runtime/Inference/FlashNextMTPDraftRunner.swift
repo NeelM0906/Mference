@@ -235,7 +235,7 @@ final class FlashNextMTPDraftRunner {
             enc.dispatchThreads(MTLSize(width: d, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: min(d, min(embedBF16.maxTotalThreadsPerThreadgroup, 256)), height: 1, depth: 1))
             enc.endEncoding()
-        case .int8:
+        case .int8, .ggufInt8TwoLevel, .ggufQ6KRows:
             throw failure("unsupported draft embedding dtype")
         }
         try finish(cb)

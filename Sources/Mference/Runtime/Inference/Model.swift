@@ -243,16 +243,20 @@ public struct Model {
     }
 
     public func qProj(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.q_proj.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "attn_q.weight")) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).self_attn.q_proj.weight")
     }
     public func kProj(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.k_proj.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "attn_k.weight")) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).self_attn.k_proj.weight")
     }
     public func vProj(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.v_proj.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "attn_v.weight")) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).self_attn.v_proj.weight")
     }
     public func oProj(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).self_attn.o_proj.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "attn_output.weight")) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).self_attn.o_proj.weight")
     }
     /// Gemma's writer emits `.router.proj.weight` (no `.mlp.` segment);
     /// Qwen's router is the source-named `.mlp.gate.weight`.
@@ -261,7 +265,8 @@ public struct Model {
         case .gemma4:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
         case .qwen38flashnextudiq3xxs:
-            return try resident(name: "blk.\(L).ffn_gate_inp.weight")
+            // F32 in the GGUF, BF16-exact (U2 R8): narrowed, exactness re-proven.
+            return try ggufBF16(name: Self.ggufLayerName(L, "ffn_gate_inp.weight"), mode: .exact)
         case .qwen36, .qwen38, .qwen38flashnext:
             // Qwen 3.8 is dense and has no router tensor; the accessor throws
             // tensorNotFound if a caller ever asks.
@@ -328,7 +333,13 @@ public struct Model {
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
     /// 8-bit projection whose sigmoid multiplies the shared FFN output.
     public func sharedExpertScalarGate(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).mlp.shared_expert_gate.weight")
+        if isFlashNextGGUF {
+            // `ffn_gate_inp_shexp` is an F32 `[hidden]` vector (BF16-exact);
+            // the runner multiplies it as a `[1, hidden]` row.
+            return try ggufBF16(name: Self.ggufLayerName(L, "ffn_gate_inp_shexp.weight"), mode: .exact,
+                                shape: (1, UInt32(config.hiddenSize), 0, 0))
+        }
+        return try resident(name: "\(trunkPrefix)layers.\(L).mlp.shared_expert_gate.weight")
     }
     /// Pre-attention norm. Qwen3.8-Flash-Next has none: the attention
     /// hyper-connection's group norm stands in its place, so a caller asking
@@ -445,35 +456,46 @@ public struct Model {
     // weight, A_log, dt_bias, and the gated output norm are BF16.
 
     public func linearInProjQKV(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_qkv.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "attn_qkv.weight")) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_qkv.weight")
     }
     public func linearInProjZ(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_z.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "attn_gate.weight")) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_z.weight")
     }
     public func linearInProjA(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_a.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ssm_alpha.weight"), mode: .exact) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_a.weight")
     }
     public func linearInProjB(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_b.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ssm_beta.weight"), mode: .exact) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.in_proj_b.weight")
     }
     public func linearOutProj(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.out_proj.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "ssm_out.weight")) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.out_proj.weight")
     }
     /// Depthwise causal conv weight, source shape `[convDim, kernel, 1]`, BF16.
     public func linearConv1d(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.conv1d.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ssm_conv1d.weight"), mode: .exact) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.conv1d.weight")
     }
-    /// Per-value-head decay base, shape `[numVHeads]`, BF16.
+    /// Per-value-head decay base, shape `[numVHeads]`, BF16. For the WS4 GGUF
+    /// install this is `ssm_a = -exp(A_log)` in F32, which the GDN kernels read
+    /// under `GDN.CheckpointLayout.gguf`.
     public func linearALog(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.A_log")
+        if isFlashNextGGUF { return try ggufSSMA(layer: L) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.A_log")
     }
     /// Per-value-head dt bias, shape `[numVHeads]`, BF16.
     public func linearDtBias(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.dt_bias")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ssm_dt.bias"), mode: .exact) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.dt_bias")
     }
     /// Gated RMSNorm weight over the value head dim, shape `[valueHeadDim]`.
     public func linearNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.norm.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ssm_norm.weight"), mode: .exact) }
+        return try resident(name: "\(trunkPrefix)layers.\(L).linear_attn.norm.weight")
     }
 
     // MARK: - DeepSeek-V4 compressed attention, mHC, and MoE auxiliaries
@@ -731,16 +753,37 @@ public struct Model {
             }
             streamersBox.layerVerified[L] = true
         }
-        let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.storedExpertStride
-        let layout = StreamLayout(
-            path: url.path,
-            streamOffset: 0,
-            streamSize: streamSize,
-            expertsPerLayer: packedExpertsLayout.expertsPerLayer,
-            expertStride: packedExpertsLayout.expertStride,
-            expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset),
-            storage: packedExpertsLayout.storage)
+        let layout: StreamLayout
+        if let gguf = packedExpertsLayout.gguf?.layers[L] {
+            // Native GGUF blocks on disk, LUT4 in the slots (WS4): slots are
+            // sized from the layer's own slot stride, never the top-level
+            // `expertStride` (R2), and only the runner's raw-expansion read
+            // may fill them.
+            guard case .pread = streamingMode else {
+                throw ModelError.familyRunnerNotImplemented(
+                    family: config.family.rawValue,
+                    missingAxes: ["residentExpertMode"])
+            }
+            layout = StreamLayout(
+                path: url.path,
+                streamOffset: 0,
+                streamSize: UInt64(packedExpertsLayout.expertsPerLayer) * gguf.storedStride,
+                expertsPerLayer: packedExpertsLayout.expertsPerLayer,
+                expertStride: gguf.slotStride,
+                expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset),
+                rawStoredExpertStride: gguf.storedStride)
+        } else {
+            let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
+                * packedExpertsLayout.storedExpertStride
+            layout = StreamLayout(
+                path: url.path,
+                streamOffset: 0,
+                streamSize: streamSize,
+                expertsPerLayer: packedExpertsLayout.expertsPerLayer,
+                expertStride: packedExpertsLayout.expertStride,
+                expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset),
+                storage: packedExpertsLayout.storage)
+        }
         switch streamingMode {
         case .pread(let slotCount):
             streamersBox.streamers[L] = .pread(try PreadExpertStreamer(

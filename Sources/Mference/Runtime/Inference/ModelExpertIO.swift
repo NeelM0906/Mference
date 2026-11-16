@@ -283,6 +283,35 @@ extension Model {
         }
     }
 
+    /// Raw-expansion layers (WS4 GGUF): plan `experts` against the layer's
+    /// slot cache, read the misses' stored bytes into `staging`, and return
+    /// the slot views with the expansion jobs the caller must encode before
+    /// any GPU read of those slots. See
+    /// `PreadExpertStreamer.executeExpertCachePlanRaw`.
+    public func fetchRoutedExpertsRaw(layer: Int, experts: [Int],
+                                      staging: MTLBuffer) async throws
+        -> (views: [TensorView], misses: [(slotOffset: Int, stagingOffset: Int)], slab: MTLBuffer) {
+        try ensureLayerOpened(layer)
+        guard case .pread(let streamer) = expertBackend(layer) else {
+            throw StreamerError.noSlotCache
+        }
+        let plan = streamer.planExpertsCached(experts: experts)
+        nonisolated(unsafe) let stagingBuffer = staging
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let result = try streamer.executeExpertCachePlanRaw(
+                        plan, staging: stagingBuffer.contents(), stagingBytes: stagingBuffer.length)
+                    continuation.resume(returning: (
+                        Self.makeExpertViews(result.buffers, layer: layer, experts: experts),
+                        result.misses, streamer.slotMapBinding.slab))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
         try ensureLayerOpened(layer)
         switch expertBackend(layer) {

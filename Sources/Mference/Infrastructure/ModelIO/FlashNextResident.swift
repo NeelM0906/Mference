@@ -148,36 +148,53 @@ extension Model {
     /// `[hcLowRank, hcCount * hidden]` — collapses the normed residual bundle
     /// to the low-rank mix vector.
     public func hcMixDown(site: HyperConnectionSite, layer L: Int) throws -> TensorView {
-        try resident(name: hcSite(site, layer: L) + "input_mix_weight_down.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, Self.ggufHCStem(site) + "_down.weight")) }
+        return try resident(name: hcSite(site, layer: L) + "input_mix_weight_down.weight")
     }
     /// `[hcCount * hidden, hcLowRank]` — expands the mix vector back to a
     /// per-channel sigmoid gate over the bundle.
     public func hcMixUp(site: HyperConnectionSite, layer L: Int) throws -> TensorView {
-        try resident(name: hcSite(site, layer: L) + "input_mix_weight_up.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, Self.ggufHCStem(site) + "_up.weight")) }
+        return try resident(name: hcSite(site, layer: L) + "input_mix_weight_up.weight")
     }
     /// `[hcCount, hcCount * hidden]` — the per-stream placement weights the
     /// block output is injected with.
     public func hcInject(site: HyperConnectionSite, layer L: Int) throws -> TensorView {
-        try resident(name: hcSite(site, layer: L) + "block_inject_weight.weight")
+        if isFlashNextGGUF {
+            return try ggufBF16(name: Self.ggufLayerName(L, Self.ggufHCStem(site) + "_inject.weight"), mode: .exact)
+        }
+        return try resident(name: hcSite(site, layer: L) + "block_inject_weight.weight")
     }
     /// `[hcCount * hidden]` — group RMSNorm weight, group size `hidden`: each
     /// stream is normalized independently over its own channels against one
     /// shared bundle-wide vector.
     public func hcNorm(site: HyperConnectionSite, layer L: Int) throws -> TensorView {
-        try normWeight(name: hcSite(site, layer: L) + "hc_norm.weight")
+        if isFlashNextGGUF {
+            return try ggufBF16(name: Self.ggufLayerName(L, Self.ggufHCStem(site) + "_norm.weight"), mode: .nearestEven)
+        }
+        return try normWeight(name: hcSite(site, layer: L) + "hc_norm.weight")
     }
 
     /// The global mixer that collapses the residual bundle to `hidden` after
     /// the last layer. It is a `GatedResidual` without the inject path, and it
     /// stands in for the final norm — this family has none.
     public var hcGlobalMixDown: TensorView {
-        get throws { try resident(name: "\(trunkPrefix)hyper_connection_mixer.input_mix_weight_down.weight") }
+        get throws {
+            if isFlashNextGGUF { return try resident(name: "output_hc_down.weight") }
+            return try resident(name: "\(trunkPrefix)hyper_connection_mixer.input_mix_weight_down.weight")
+        }
     }
     public var hcGlobalMixUp: TensorView {
-        get throws { try resident(name: "\(trunkPrefix)hyper_connection_mixer.input_mix_weight_up.weight") }
+        get throws {
+            if isFlashNextGGUF { return try resident(name: "output_hc_up.weight") }
+            return try resident(name: "\(trunkPrefix)hyper_connection_mixer.input_mix_weight_up.weight")
+        }
     }
     public var hcGlobalNorm: TensorView {
-        get throws { try normWeight(name: "\(trunkPrefix)hyper_connection_mixer.hc_norm.weight") }
+        get throws {
+            if isFlashNextGGUF { return try ggufBF16(name: "output_hc_norm.weight", mode: .nearestEven) }
+            return try normWeight(name: "\(trunkPrefix)hyper_connection_mixer.hc_norm.weight")
+        }
     }
 
     // MARK: - QSA indexer
@@ -189,11 +206,26 @@ extension Model {
     /// `[(indexerNumHeads + indexerNumKVHeads) * indexerHeadDim, hidden]`,
     /// fused: the query heads first, then the single key head.
     public func indexerQKProj(layer L: Int) throws -> TensorView {
-        try resident(name: indexerPrefix(layer: L) + "index_qk_proj.weight")
+        // The GGUF converter split the fused projection into
+        // `indexerQProj` / `indexerKProj`.
+        if isFlashNextGGUF { throw accessorNotAvailableForGGUF("indexerQKProj") }
+        return try resident(name: indexerPrefix(layer: L) + "index_qk_proj.weight")
+    }
+    /// WS4 GGUF only: the query rows of the split indexer projection,
+    /// `[indexerNumHeads * indexerHeadDim, hidden]`, BF16.
+    public func indexerQProj(layer L: Int) throws -> TensorView {
+        guard isFlashNextGGUF else { throw accessorNotAvailableForGGUF("indexerQProj") }
+        return try resident(name: Self.ggufLayerName(L, "indexer.q_proj.weight"))
+    }
+    /// WS4 GGUF only: the key rows, `[indexerNumKVHeads * indexerHeadDim, hidden]`.
+    public func indexerKProj(layer L: Int) throws -> TensorView {
+        guard isFlashNextGGUF else { throw accessorNotAvailableForGGUF("indexerKProj") }
+        return try resident(name: Self.ggufLayerName(L, "indexer.k_proj.weight"))
     }
     /// `[indexerHeadDim]`, zero-centered.
     public func indexerQNorm(layer L: Int) throws -> TensorView {
-        try normWeight(name: indexerPrefix(layer: L) + "q_layernorm.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "indexer.q_norm.weight"), mode: .nearestEven) }
+        return try normWeight(name: indexerPrefix(layer: L) + "q_layernorm.weight")
     }
     /// `[indexerHeadDim]`, zero-centered. Applied to the pooled block key
     /// *after* the float32 mean, not to the raw per-token keys.
@@ -204,7 +236,24 @@ extension Model {
     /// plus the always-selected incomplete tail — so no layer of this plumbing
     /// may add one.
     public func indexerKNorm(layer L: Int) throws -> TensorView {
-        try normWeight(name: indexerPrefix(layer: L) + "k_layernorm.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "indexer.k_norm.weight"), mode: .nearestEven) }
+        return try normWeight(name: indexerPrefix(layer: L) + "k_layernorm.weight")
+    }
+
+    /// Per-head attention q / k RMSNorm weights, `[headDim]`, zero-centered.
+    public func attnQNorm(layer L: Int) throws -> TensorView {
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "attn_q_norm.weight"), mode: .nearestEven) }
+        return try normWeight(name: "\(trunkPrefix)layers.\(L).self_attn.q_norm.weight")
+    }
+    public func attnKNorm(layer L: Int) throws -> TensorView {
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "attn_k_norm.weight"), mode: .nearestEven) }
+        return try normWeight(name: "\(trunkPrefix)layers.\(L).self_attn.k_norm.weight")
+    }
+
+    /// Named refusal for a Flash-Next accessor that does not exist in the
+    /// other install format (vendor vs WS4 GGUF).
+    func accessorNotAvailableForGGUF(_ accessor: String) -> ModelError {
+        .familyRunnerNotImplemented(family: config.family.rawValue, missingAxes: [accessor])
     }
 
     // MARK: - PLE n-gram embedding
@@ -216,25 +265,31 @@ extension Model {
     /// `[hcCount * hidden, hidden]` — projects the gathered n-gram embedding
     /// to the per-stream key.
     public func pleKeyProj(layer L: Int) throws -> TensorView {
-        try resident(name: plePrefix(layer: L) + "key_proj.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "ple_key.weight")) }
+        return try resident(name: plePrefix(layer: L) + "key_proj.weight")
     }
     /// `[hidden, hidden]` — the value the per-stream gate scales.
     public func pleValueProj(layer L: Int) throws -> TensorView {
-        try resident(name: plePrefix(layer: L) + "value_proj.weight")
+        if isFlashNextGGUF { return try resident(name: Self.ggufLayerName(L, "ple_value.weight")) }
+        return try resident(name: plePrefix(layer: L) + "value_proj.weight")
     }
     /// `[hcCount * hidden, 1, pleConvKernelSize]` — depthwise causal conv over
     /// the gated value, dilated by the n-gram size.
     public func pleConv1d(layer L: Int) throws -> TensorView {
-        try resident(name: plePrefix(layer: L) + "conv1d.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ple_conv1d.weight"), mode: .exact) }
+        return try resident(name: plePrefix(layer: L) + "conv1d.weight")
     }
     public func pleNormConv(layer L: Int) throws -> TensorView {
-        try normWeight(name: plePrefix(layer: L) + "norm_conv.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ple_norm_conv.weight"), mode: .nearestEven) }
+        return try normWeight(name: plePrefix(layer: L) + "norm_conv.weight")
     }
     public func pleNormKey(layer L: Int) throws -> TensorView {
-        try normWeight(name: plePrefix(layer: L) + "norm_key.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ple_norm_key.weight"), mode: .nearestEven) }
+        return try normWeight(name: plePrefix(layer: L) + "norm_key.weight")
     }
     public func pleNormQuery(layer L: Int) throws -> TensorView {
-        try normWeight(name: plePrefix(layer: L) + "norm_query.weight")
+        if isFlashNextGGUF { return try ggufBF16(name: Self.ggufLayerName(L, "ple_norm_query.weight"), mode: .nearestEven) }
+        return try normWeight(name: plePrefix(layer: L) + "norm_query.weight")
     }
 
     /// The three splitmix64-derived n-gram hash multipliers, I64 `[3]`.
@@ -244,17 +299,20 @@ extension Model {
     /// re-derivation that disagreed by one bit would index a different row and
     /// be undetectable at load. Their count is also the n-gram size.
     public func pleLayerMultipliers(layer L: Int) throws -> [Int64] {
-        try residentInt64(name: plePrefix(layer: L) + "ple_embedding.layer_multipliers")
+        if isFlashNextGGUF { return try ggufPleHash(layer: L).layerMultipliers }
+        return try residentInt64(name: plePrefix(layer: L) + "ple_embedding.layer_multipliers")
     }
     /// Per-head base row offsets into the pool, I64 `[ngramHeads]`. Loaded,
     /// never re-derived.
     public func pleNgramHeadOffsets(layer L: Int) throws -> [Int64] {
-        try residentInt64(name: plePrefix(layer: L) + "ple_embedding.ngram_heads_offsets")
+        if isFlashNextGGUF { return try ggufPleHash(layer: L).headOffsets }
+        return try residentInt64(name: plePrefix(layer: L) + "ple_embedding.ngram_heads_offsets")
     }
     /// Per-head vocabulary sizes (consecutive primes), I64 `[ngramHeads]`.
     /// A head's row is `hash % vocabSizes[h] + offsets[h]`.
     public func pleNgramHeadVocabSizes(layer L: Int) throws -> [Int64] {
-        try residentInt64(name: plePrefix(layer: L) + "ple_embedding.ngram_heads_vocab_sizes")
+        if isFlashNextGGUF { return try ggufPleHash(layer: L).headVocabSizes }
+        return try residentInt64(name: plePrefix(layer: L) + "ple_embedding.ngram_heads_vocab_sizes")
     }
 
     /// N-gram size for a PLE layer, i.e. `layer_multipliers.count`. The token

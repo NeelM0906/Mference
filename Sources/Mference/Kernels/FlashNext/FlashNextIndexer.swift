@@ -192,6 +192,33 @@ final class FlashNextIndexer {
             tokens: rows)
     }
 
+    /// The split form of `encodeProjection` for a WS4 GGUF install, whose
+    /// converter wrote `index_qk_proj` as two tensors (`indexer.q_proj` then
+    /// `indexer.k_proj`, the fused rows in order). Writes the same FP32
+    /// `[rows, projRows]` block, one GEMV pair per row.
+    func encodeProjection(commandBuffer: MTLCommandBuffer,
+                          query: FlashNextWeightMatrix,
+                          key: FlashNextWeightMatrix,
+                          x: MTLBuffer, xOffset: Int,
+                          hidden: Int,
+                          scratch: Scratch,
+                          rows: Int) {
+        precondition(rows <= scratch.maxRows)
+        let qRows = geometry.keyOffset
+        let kRows = geometry.projRows - qRows
+        let f32 = MemoryLayout<Float>.stride
+        for row in 0..<rows {
+            let x0 = xOffset + row * hidden * MemoryLayout<Float16>.stride
+            let y0 = row * geometry.projRows * f32
+            matVec.encode(commandBuffer: commandBuffer, matrix: query, x: x, xOffset: x0,
+                          y: scratch.projection, yOffset: y0,
+                          rows: qRows, cols: hidden, outputFloat32: true)
+            matVec.encode(commandBuffer: commandBuffer, matrix: key, x: x, xOffset: x0,
+                          y: scratch.projection, yOffset: y0 + qRows * f32,
+                          rows: kRows, cols: hidden, outputFloat32: true)
+        }
+    }
+
     /// Query heads (norm + RoPE at each row's own position), the raw-key append,
     /// and the pooled block keys for whichever blocks this call completed.
     func encodePrepare(commandBuffer: MTLCommandBuffer,

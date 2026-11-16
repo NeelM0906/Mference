@@ -147,9 +147,31 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     }
 
     private struct IndexerTensors {
-        let qkProj: FlashNextWeightMatrix
+        /// The fused `index_qk_proj` (vendor install), or the GGUF converter's
+        /// split `q_proj` / `k_proj` pair.
+        enum Projection {
+            case fused(FlashNextWeightMatrix)
+            case split(query: FlashNextWeightMatrix, key: FlashNextWeightMatrix)
+        }
+        let projection: Projection
         let qNorm: TensorView
         let kNorm: TensorView
+    }
+
+    /// WS4 GGUF install: routed experts stream as native GGUF blocks and run
+    /// as LUT4 slots. A miss is read into `staging` and expanded on the GPU at
+    /// the head of its layer's MoE command buffer; the LUT4 decode kernels
+    /// follow in the same command buffer.
+    private struct GGUFRouted {
+        let expand: GGUFLUT4Expand
+        let moe: GGUFLUT4MoE
+        /// Stored bytes of up to `topK` missed experts, reused layer to layer:
+        /// layer L+1 reads into it only after `joinPendingMoE` has waited for
+        /// layer L's command buffer, whose expansion is the last reader.
+        let staging: MTLBuffer
+        let layers: [GGUFExpertLayout.Layer]
+        /// One-element token id buffer for the Q6_K embedding gather.
+        let tokenID: MTLBuffer
     }
 
     private struct MoETensors {
@@ -335,6 +357,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     /// INT4 reduce does not implement and never needs to.
     private let moeInt4: MoE?
     private let moeBF16: FlashNextMoE
+    /// Whether this runner drives the WS4 GGUF install
+    /// (`qwen38flashnextudiq3xxs`); every GGUF-only branch keys on it.
+    private let isGGUF: Bool
+    private let ggufRouted: GGUFRouted?
     /// The shipped Qwen 3.8 GDN kernels, with the gated norm on SIGMOID. Nil
     /// when the install's GDN geometry is below their 32-lane floor — only the
     /// parity toy, whose Dk is 8.
@@ -537,6 +563,14 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 runtimeConfiguration: RuntimeConfiguration = .production) throws {
         let cfg = model.config
         try Self.validate(config: cfg, maxContext: maxContext)
+        let isGGUF = cfg.family == .qwen38flashnextudiq3xxs
+        self.isGGUF = isGGUF
+        // Vendor install: the shipped dispatch, untouched. GGUF install: the
+        // throwing whitelist (WS4 R5).
+        func matrix(_ view: TensorView, _ what: @autoclosure () -> String) throws
+            -> FlashNextWeightMatrix {
+            isGGUF ? try FlashNextWeightMatrix.fromGGUF(view, name: what()) : .from(view)
+        }
         self.model = model
         self.ctx = context
         self.cfg = cfg
@@ -560,7 +594,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         // `[1, hidden]` — are `hidden` wide, so that is the widest INT8 row
         // this runner can ask for.
         self.matVec = try FlashNextMatVec(context: context, int4: int4,
-                                          int8Columns: cfg.hiddenSize)
+                                          int8Columns: cfg.hiddenSize,
+                                          ggufInt8TwoLevel: isGGUF)
         self.rms = try RMSNorm(context: context)
         self.elementwise = try Elementwise(context: context)
         self.hc = try FlashNextHyperConnections(
@@ -589,10 +624,36 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         // Which expert compute path the install needs is read from the layout,
         // not assumed: a sub-tensor with no `_scales` companion is dense BF16.
         let expert0 = model.packedExpertsLayout.expert(layer: 0, expert: 0)
-        let expertsAreBF16 = expert0.subTensors["gate_scales"] == nil
-        if expertsAreBF16 {
+        let expertsAreBF16 = !isGGUF && expert0.subTensors["gate_scales"] == nil
+        if isGGUF {
+            guard let layout = model.packedExpertsLayout.gguf,
+                  layout.layers.count == cfg.numLayers else {
+                throw FlashNextForwardRunnerError.invalidConfiguration(
+                    "the GGUF Flash-Next install needs ggufNativeBlocksV1 expert storage")
+            }
+            guard cfg.topKExperts <= GGUFLUT4MoE.routedSlots,
+                  layout.layers.allSatisfy({ $0.gate.rows == cfg.moeIntermediateSize
+                                             && $0.gate.columns == cfg.hiddenSize }) else {
+                throw FlashNextForwardRunnerError.invalidConfiguration(
+                    "GGUF expert shapes or top-\(cfg.topKExperts) do not fit the LUT4 kernels")
+            }
+            let maxStored = Int(layout.layers.map(\.storedStride).max() ?? 0)
+            guard let staging = context.device.makeBuffer(
+                    length: cfg.topKExperts * maxStored, options: .storageModeShared),
+                  let tokenID = context.device.makeBuffer(
+                    length: MemoryLayout<UInt32>.stride, options: .storageModeShared) else {
+                throw MetalError.noDevice
+            }
+            self.ggufRouted = GGUFRouted(expand: try GGUFLUT4Expand(context: context),
+                                         moe: try GGUFLUT4MoE(context: context),
+                                         staging: staging, layers: layout.layers,
+                                         tokenID: tokenID)
+            self.moeInt4 = nil
+        } else if expertsAreBF16 {
+            self.ggufRouted = nil
             self.moeInt4 = nil
         } else {
+            self.ggufRouted = nil
             guard MoE.routedComputeWidths.contains(UInt32(cfg.topKExperts)) else {
                 throw FlashNextForwardRunnerError.invalidConfiguration(
                     "INT4 routed experts at top-\(cfg.topKExperts); the reduce "
@@ -618,10 +679,15 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         let shippedGDNApplies = la.keyHeadDim % 32 == 0
             && la.keyHeadDim / 32 <= 8
             && la.valueHeadDim % 4 == 0
+        if isGGUF && !shippedGDNApplies {
+            throw FlashNextForwardRunnerError.invalidConfiguration(
+                "the GGUF Flash-Next GDN layout is wired for the shipped kernels only")
+        }
         if shippedGDNApplies {
             self.gdn = try GDN(context: context, config: la,
                                specializedHiddenSize: hidden,
-                               outputGate: .sigmoid)
+                               outputGate: .sigmoid,
+                               checkpointLayout: isGGUF ? .gguf : .vendor)
             self.gdnState = try GDNStateManager(device: context.device, config: cfg)
             self.genericGDN = nil
             self.genericGDNScratch = nil
@@ -658,14 +724,16 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         self.prefillMPPGroupedMoE = MPPGroupedRoutedMoE(context: context)
 
         self.embedding = model.embedding
-        self.embeddingMatrix = FlashNextWeightMatrix.from(model.embedding)
-        self.lmHead = FlashNextWeightMatrix.from(model.lmHead)
+        self.embeddingMatrix = isGGUF
+            ? try FlashNextWeightMatrix.ggufEmbedding(model.embedding, name: "token_embd")
+            : FlashNextWeightMatrix.from(model.embedding)
+        self.lmHead = try matrix(model.lmHead, "lm_head")
         let globalNorm = try model.hcGlobalNorm
         self.mixer = FlashNextHyperConnections.Weights(
             norm: globalNorm.buffer,
             normOffset: Int(globalNorm.offset),
-            mixDown: .from(try model.hcGlobalMixDown),
-            mixUp: .from(try model.hcGlobalMixUp),
+            mixDown: try matrix(try model.hcGlobalMixDown, "hc mixer down"),
+            mixUp: try matrix(try model.hcGlobalMixUp, "hc mixer up"),
             inject: nil)
 
         // Per-layer tensors, resolved once.
@@ -677,9 +745,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 -> FlashNextHyperConnections.Weights {
                 let norm = try model.hcNorm(site: site, layer: L)
                 return .init(norm: norm.buffer, normOffset: Int(norm.offset),
-                             mixDown: .from(try model.hcMixDown(site: site, layer: L)),
-                             mixUp: .from(try model.hcMixUp(site: site, layer: L)),
-                             inject: .from(try model.hcInject(site: site, layer: L)))
+                             mixDown: try matrix(try model.hcMixDown(site: site, layer: L),
+                                                 "layer \(L) \(site) hc down"),
+                             mixUp: try matrix(try model.hcMixUp(site: site, layer: L),
+                                               "layer \(L) \(site) hc up"),
+                             inject: try matrix(try model.hcInject(site: site, layer: L),
+                                                "layer \(L) \(site) hc inject"))
             }
             var gdnTensors: GDNTensors?
             var attnWeights: FlashNextAttention.Weights?
@@ -691,8 +762,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 let b = try model.linearInProjB(layer: L)
                 let allInt4 = [qkv, z, a, b].allSatisfy { $0.dtype == 0 }
                 gdnTensors = GDNTensors(
-                    qkv: .from(qkv), z: .from(z), a: .from(a), b: .from(b),
-                    out: .from(try model.linearOutProj(layer: L)),
+                    qkv: try matrix(qkv, "layer \(L) gdn qkv"), z: try matrix(z, "layer \(L) gdn z"),
+                    a: try matrix(a, "layer \(L) gdn a"), b: try matrix(b, "layer \(L) gdn b"),
+                    out: try matrix(try model.linearOutProj(layer: L), "layer \(L) gdn out"),
                     conv: try model.linearConv1d(layer: L),
                     aLog: try model.linearALog(layer: L),
                     dtBias: try model.linearDtBias(layer: L),
@@ -701,20 +773,21 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                     norm: try model.linearNorm(layer: L),
                     fusedInProj: allInt4 ? (qkv, z, a, b) : nil)
             } else {
-                let qNorm = try model.normWeight(
-                    name: "\(model.trunkPrefix)layers.\(L).self_attn.q_norm.weight")
-                let kNorm = try model.normWeight(
-                    name: "\(model.trunkPrefix)layers.\(L).self_attn.k_norm.weight")
-                attnWeights = .init(q: .from(try model.qProj(layer: L)),
-                                    k: .from(try model.kProj(layer: L)),
-                                    v: .from(try model.vProj(layer: L)),
-                                    o: .from(try model.oProj(layer: L)),
+                let qNorm = try model.attnQNorm(layer: L)
+                let kNorm = try model.attnKNorm(layer: L)
+                attnWeights = .init(q: try matrix(try model.qProj(layer: L), "layer \(L) q"),
+                                    k: try matrix(try model.kProj(layer: L), "layer \(L) k"),
+                                    v: try matrix(try model.vProj(layer: L), "layer \(L) v"),
+                                    o: try matrix(try model.oProj(layer: L), "layer \(L) o"),
                                     qNorm: qNorm.buffer,
                                     qNormOffset: Int(qNorm.offset),
                                     kNorm: kNorm.buffer,
                                     kNormOffset: Int(kNorm.offset))
                 indexerTensors = IndexerTensors(
-                    qkProj: .from(try model.indexerQKProj(layer: L)),
+                    projection: isGGUF
+                        ? .split(query: try matrix(try model.indexerQProj(layer: L), "layer \(L) indexer q"),
+                                 key: try matrix(try model.indexerKProj(layer: L), "layer \(L) indexer k"))
+                        : .fused(.from(try model.indexerQKProj(layer: L))),
                     qNorm: try model.indexerQNorm(layer: L),
                     kNorm: try model.indexerKNorm(layer: L))
             }
@@ -727,13 +800,14 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 attention: attnWeights,
                 indexer: indexerTensors,
                 moe: MoETensors(
-                    router: .from(try model.router(layer: L)),
-                    sharedGate: .from(try model.sharedExpertScalarGate(layer: L)),
-                    sharedGateProj: .from(try model.sharedExpertGate(layer: L)),
-                    sharedUp: .from(try model.sharedExpertUp(layer: L)),
-                    sharedDown: .from(try model.sharedExpertDown(layer: L)),
+                    router: try matrix(try model.router(layer: L), "layer \(L) router"),
+                    sharedGate: try matrix(try model.sharedExpertScalarGate(layer: L),
+                                           "layer \(L) shared gate scalar"),
+                    sharedGateProj: try matrix(try model.sharedExpertGate(layer: L), "layer \(L) shared gate"),
+                    sharedUp: try matrix(try model.sharedExpertUp(layer: L), "layer \(L) shared up"),
+                    sharedDown: try matrix(try model.sharedExpertDown(layer: L), "layer \(L) shared down"),
                     expertOffsets: model.routedExpertOffsets(layer: L),
-                    expertsAreBF16: entry.subTensors["gate_scales"] == nil)))
+                    expertsAreBF16: !isGGUF && entry.subTensors["gate_scales"] == nil)))
         }
         self.layers = built
 
@@ -751,8 +825,8 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             let conv = try model.pleConv1d(layer: pleLayer)
             self.ple = p
             self.pleWeights = .init(
-                keyProj: .from(try model.pleKeyProj(layer: pleLayer)),
-                valueProj: .from(try model.pleValueProj(layer: pleLayer)),
+                keyProj: try matrix(try model.pleKeyProj(layer: pleLayer), "ple key"),
+                valueProj: try matrix(try model.pleValueProj(layer: pleLayer), "ple value"),
                 conv: conv.buffer, convOffset: Int(conv.offset),
                 normKey: normKey.buffer, normKeyOffset: Int(normKey.offset),
                 normQuery: normQuery.buffer, normQueryOffset: Int(normQuery.offset),
@@ -864,9 +938,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     }
 
     private static func validate(config: ArchConfig, maxContext: Int) throws {
-        guard config.family == .qwen38flashnext else {
+        guard config.family == .qwen38flashnext || config.family == .qwen38flashnextudiq3xxs else {
             throw FlashNextForwardRunnerError.invalidConfiguration(
-                "FlashNextForwardRunner requires the qwen38flashnext family")
+                "FlashNextForwardRunner requires the qwen38flashnext family "
+                + "or its WS4 GGUF install")
         }
         guard config.hasLowRankHyperConnections else {
             throw FlashNextForwardRunnerError.invalidConfiguration(
@@ -1155,6 +1230,22 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 "Flash-Next logits buffer is too small")
         }
 
+        if isGGUF {
+            // WS4 U4, first pass: the LUT4 routed prefill and the Q6_K chunk
+            // gather are not wired yet, so the prompt runs as decode steps
+            // through the wired decode path. Correct, and as slow as decode.
+            for (i, token) in tokens.enumerated() {
+                try Task.checkCancellation()
+                let last = i == tokens.count - 1
+                try await produceToken(token: token, position: startPosition + i,
+                                       into: last ? logits : nil)
+                execution.recordReplay(1, reason: "gguf_prefill_not_wired")
+                onProgress(i + 1)
+            }
+            beginDecodePhaseWindow()
+            return PrefillResult(newPosition: startPosition + tokens.count,
+                                 seed: .logitsWritten, execution: execution)
+        }
         let scratch = try ensurePrefillScratch(config: config)
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
                                               startPosition: startPosition,
@@ -1263,6 +1354,10 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 t: UInt32(t), d: UInt32(hidden), outScale: 1)
         case .int8:
             preconditionFailure("Flash-Next embedding policy never emits INT8")
+        case .ggufQ6KRows, .ggufInt8TwoLevel:
+            // `prefillChunked` runs the GGUF install as decode steps and never
+            // reaches the chunked encoder.
+            preconditionFailure("chunked prefill is not wired for the GGUF install")
         case let .bf16(buffer, offset):
             for row in 0..<t {
                 guard let enc = cb.makeComputeCommandEncoder() else { continue }
@@ -1449,11 +1544,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             throw FlashNextForwardRunnerError.invalidConfiguration(
                 "Flash-Next full-attention layer \(index) is incomplete")
         }
-        indexer.encodeProjection(commandBuffer: cb,
-                                 weight: indexWeights.qkProj,
-                                 x: scratch.mixed, xOffset: 0,
-                                 hidden: hidden, scratch: scratch.indexer,
-                                 rows: rows)
+        encodeIndexerProjection(commandBuffer: cb, weights: indexWeights,
+                                x: scratch.mixed, xOffset: 0,
+                                scratch: scratch.indexer, rows: rows)
         indexer.encodePrepare(
             commandBuffer: cb,
             qNorm: indexWeights.qNorm.buffer,
@@ -1530,7 +1623,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 queryCount: UInt32(rows), numExperts: UInt32(numExperts),
                 d: UInt32(hidden), topK: UInt32(topK),
                 hiddenStrideElements: UInt32(hidden))
-        case .int4, .bf16:
+        case .int4, .bf16, .ggufInt8TwoLevel, .ggufQ6KRows:
             matVec.encodeBatched(commandBuffer: cb, matrix: layer.moe.router,
                                  x: scratch.mixed, y: scratch.routerLogits,
                                  matrixRows: numExperts, matrixColumns: hidden,
@@ -2012,9 +2105,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 throw FlashNextForwardRunnerError.invalidConfiguration(
                     "layer \(L) is a full-attention layer with no indexer")
             }
-            indexer.encodeProjection(commandBuffer: cb, weight: idx.qkProj,
-                                     x: mixed, xOffset: 0, hidden: hidden,
-                                     scratch: indexerScratch, rows: 1)
+            encodeIndexerProjection(commandBuffer: cb, weights: idx,
+                                    x: mixed, xOffset: 0,
+                                    scratch: indexerScratch, rows: 1)
             indexer.encodePrepare(commandBuffer: cb,
                                   qNorm: idx.qNorm.buffer,
                                   qNormOffset: Int(idx.qNorm.offset),
@@ -2166,15 +2259,25 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         }
         try checkSlotBudget(layer: L)
         let tIoStart = Self.phaseClock()
-        let blobs = try await fetchExperts(layer: L, experts: experts)
-        if Self.phaseInstrumentationEnabled {
-            totalIoNanos &+= Self.phaseClock() - tIoStart
-        }
-
         guard var moeCB = ctx.queue.makeCommandBuffer() else {
             throw FlashNextForwardRunnerError.commandFailed("no command buffer")
         }
-        encodeRoutedExperts(commandBuffer: moeCB, layer: layer, blobs: blobs)
+        if let routed = ggufRouted {
+            let fetched = try await model.fetchRoutedExpertsRaw(layer: L, experts: experts,
+                                                               staging: routed.staging)
+            if Self.phaseInstrumentationEnabled {
+                totalIoNanos &+= Self.phaseClock() - tIoStart
+            }
+            encodeGGUFRoutedExperts(commandBuffer: moeCB, routed: routed, layer: L,
+                                    blobs: fetched.views.map { (buffer: $0.buffer, offset: Int($0.offset)) },
+                                    misses: fetched.misses, slab: fetched.slab)
+        } else {
+            let blobs = try await fetchExperts(layer: L, experts: experts)
+            if Self.phaseInstrumentationEnabled {
+                totalIoNanos &+= Self.phaseClock() - tIoStart
+            }
+            encodeRoutedExperts(commandBuffer: moeCB, layer: layer, blobs: blobs)
+        }
         // `out = sum_rank w_rank * expert_rank(x)` then `+ sigmoid(g) * shared`,
         // the reference's order: the routed reduce runs against a zero residual
         // and the gated shared expert is added afterwards.
@@ -2202,8 +2305,36 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
     // MARK: - Blocks
 
+    private func encodeIndexerProjection(commandBuffer cb: MTLCommandBuffer,
+                                         weights: IndexerTensors,
+                                         x: MTLBuffer, xOffset: Int,
+                                         scratch: FlashNextIndexer.Scratch, rows: Int) {
+        switch weights.projection {
+        case let .fused(qk):
+            indexer.encodeProjection(commandBuffer: cb, weight: qk, x: x, xOffset: xOffset,
+                                     hidden: hidden, scratch: scratch, rows: rows)
+        case let .split(query, key):
+            indexer.encodeProjection(commandBuffer: cb, query: query, key: key,
+                                     x: x, xOffset: xOffset, hidden: hidden,
+                                     scratch: scratch, rows: rows)
+        }
+    }
+
     private func encodeEmbedRow(commandBuffer cb: MTLCommandBuffer, token: UInt32) {
         switch embeddingMatrix {
+        case let .ggufQ6KRows(buffer, offset):
+            guard let routed = ggufRouted else {
+                preconditionFailure("a Q6_K embedding reached a runner without the GGUF path")
+            }
+            // The id buffer is rewritten per token; the previous token's
+            // gather completed before this layer-0 command buffer is built
+            // (`produceToken` drains each step).
+            routed.tokenID.contents().storeBytes(of: token, as: UInt32.self)
+            matVec.ggufQ6KEmbedRows(commandBuffer: cb, table: buffer, tableOffset: offset,
+                                    ids: routed.tokenID, out: embedRow,
+                                    hidden: hidden, tokens: 1)
+        case .ggufInt8TwoLevel:
+            preconditionFailure("the GGUF install's token_embd is native Q6_K, never INT8-2L")
         case .int4:
             embedInt4.encode(commandBuffer: cb,
                              table: embedding.buffer,
@@ -2432,6 +2563,48 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
                 routingWeights: routerWeights, residual: zeroResidual, y: moeOut,
                 d: UInt32(hidden), f: UInt32(moeIntermediate), topK: UInt32(topK))
         }
+    }
+
+    /// LUT4 routed experts for the GGUF install: expand this layer's misses
+    /// from `staging` into their slots, then gate/up/act and down/reduce over
+    /// the routed slots. Same contract as the INT4 pair: a zero residual,
+    /// rank-order FP32 reduce, half output in `moeOut`.
+    private func encodeGGUFRoutedExperts(commandBuffer cb: MTLCommandBuffer,
+                                         routed: GGUFRouted, layer L: Int,
+                                         blobs: [(buffer: MTLBuffer, offset: Int)],
+                                         misses: [(slotOffset: Int, stagingOffset: Int)],
+                                         slab: MTLBuffer) {
+        let geometry = routed.layers[L]
+        var jobs: [GGUFLUT4.SourceType: [GGUFLUT4Expand.Job]] = [:]
+        for miss in misses {
+            for projection in geometry.projections {
+                jobs[projection.type, default: []].append(GGUFLUT4Expand.Job(
+                    srcOffset: UInt64(miss.stagingOffset) + projection.storedOffset,
+                    dstIndexOffset: UInt64(miss.slotOffset) + projection.indexOffset,
+                    dstDOffset: UInt64(miss.slotOffset) + projection.dOffset,
+                    dstMOffset: UInt64(miss.slotOffset) + projection.mOffset,
+                    blocks: UInt32(projection.blocks)))
+            }
+        }
+        for type in GGUFLUT4.SourceType.allCases {
+            guard let typed = jobs[type] else { continue }
+            routed.expand.encode(commandBuffer: cb, type: type,
+                                 src: routed.staging, dst: slab, jobs: typed)
+        }
+        let offsets = GGUFLUT4MoE.ExpertOffsets(
+            gateIndex: UInt32(geometry.gate.indexOffset), gateD: UInt32(geometry.gate.dOffset),
+            gateM: UInt32(geometry.gate.mOffset),
+            upIndex: UInt32(geometry.up.indexOffset), upD: UInt32(geometry.up.dOffset),
+            upM: UInt32(geometry.up.mOffset),
+            downIndex: UInt32(geometry.down.indexOffset), downD: UInt32(geometry.down.dOffset),
+            downM: UInt32(geometry.down.mOffset))
+        routed.moe.encodePhase1(commandBuffer: cb, blobs: blobs, offsets: offsets,
+                                gateUp: geometry.gate.type, x: mixed, acts: moeActs,
+                                d: UInt32(hidden), f: UInt32(moeIntermediate))
+        routed.moe.encodePhase2(commandBuffer: cb, blobs: blobs, offsets: offsets,
+                                down: geometry.down.type, acts: moeActs,
+                                routingWeights: routerWeights, residual: zeroResidual,
+                                y: moeOut, d: UInt32(hidden), f: UInt32(moeIntermediate))
     }
 
     // MARK: - Expert streaming
