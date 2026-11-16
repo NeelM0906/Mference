@@ -154,7 +154,8 @@ public struct ManifestPlePoolLayer: Decodable, Equatable, Sendable {
     public let rows: Int
     public let rowDim: Int
     /// `"bf16"` or `"int4AffineG64"`. Chosen from the row width at install:
-    /// group-64 needs `rowDim % 64 == 0`, which 160 does not satisfy.
+    /// group-64 needs `rowDim % 64 == 0`, which 160 does not satisfy. A WS4
+    /// GGUF install writes `"iq4nl"` (native IQ4_NL blocks).
     public let storage: String
     public let weightBits: Int
     public let groupSize: Int

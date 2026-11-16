@@ -80,4 +80,24 @@ public enum GGUFBlockDecode {
         }
         return out
     }
+
+    public static let iq4NLBlockBytes = 18
+
+    /// Dequantizes whole IQ4_NL blocks (`block_iq4_nl`: fp16 `d`, `qs[16]`;
+    /// weight `j < 16` is the low nibble of `qs[j]`, weight `j ≥ 16` the high
+    /// nibble of `qs[j − 16]`). A weight is `fp16(d) · kvalues_iq4nl[nibble]`,
+    /// exact in fp32 and llama.cpp's own expression. Used for the PLE n-gram
+    /// rows of a WS4 install (U1 §3c). Written per element; it is checked
+    /// against the llama.cpp-shaped `GGUFReferenceDequant.iq4NL`.
+    public static func dequantizeIQ4NL(_ blocks: UnsafeRawBufferPointer) -> [Float] {
+        precondition(blocks.count % iq4NLBlockBytes == 0)
+        let n = blocks.count / iq4NLBlockBytes * 32
+        return (0..<n).map { e in
+            let base = (e / 32) * iq4NLBlockBytes, j = e % 32
+            let byte = blocks[base + 2 + j % 16]
+            let nibble = j < 16 ? byte & 0x0F : byte >> 4
+            let d = fp16ToFloat(UInt16(blocks[base]) | UInt16(blocks[base + 1]) << 8)
+            return d * Float(GGUFQuantTables.kvaluesIQ4NL[Int(nibble)])
+        }
+    }
 }
