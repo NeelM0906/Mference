@@ -291,7 +291,7 @@ comparison, plus the [M3 Ultra report](docs/BENCHMARKS_M3_ULTRA.md).
 - [Benchmarks](docs/BENCHMARKS.md) and the [community protocol](docs/COMMUNITY_BENCHMARKS.md): measured numbers and how to add yours.
 - [Quantizer quality](docs/QUANTIZER_QUALITY.md): how in-flight quantization is checked.
 - [Family gate](docs/FAMILY_GATE.md) and [family contract](docs/FAMILY_CONTRACT.md): how to add a model family.
-- Per-family dossiers: [Flash-Next](docs/families/QWEN38_FLASH_NEXT.md), [GLM-5.3-Flash](docs/families/GLM53_FLASH.md), [DeepSeek-V4-Flash](docs/DEEPSEEK_V4_FLASH.md), [Inkling-Small](docs/INKLING_SMALL.md), [Gemma 4 QAT](docs/families/GEMMA4_QAT.md), [MiniCPM5](docs/families/MINICPM5.md), [Flint](docs/families/FLINT.md).
+- Per-family dossiers: [Flash-Next](docs/families/QWEN38_FLASH_NEXT.md), [Flash-Next Unsloth UD-IQ3_XXS GGUF](docs/families/QWEN38_FLASH_NEXT_UNSLOTH.md), [GLM-5.3-Flash](docs/families/GLM53_FLASH.md), [DeepSeek-V4-Flash](docs/DEEPSEEK_V4_FLASH.md), [Inkling-Small](docs/INKLING_SMALL.md), [Gemma 4 QAT](docs/families/GEMMA4_QAT.md), [MiniCPM5](docs/families/MINICPM5.md), [Flint](docs/families/FLINT.md).
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request, and
 [SECURITY.md](SECURITY.md) to report a security issue.

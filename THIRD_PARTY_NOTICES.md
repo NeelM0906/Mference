@@ -57,7 +57,9 @@ from `ggml/src/ggml-common.h` in llama.cpp at commit
 `b1b770d90d94cad9e9ea5b993bdbc383a522fb28`, by
 `Scripts/parity/gguf_make_quant_tables.py`. The GGUF block decoders follow
 the block layouts and dequantization order of that commit's
-`ggml/src/ggml-quants.c`. ggml is under the MIT license; its copyright
+`ggml/src/ggml-quants.c`. The test-only reference decoders in
+`Sources/MferenceValidation/Support/Reference/Quant/GGUFReferenceDequant.swift`
+transliterate its `dequantize_row_*` loops. ggml is under the MIT license; its copyright
 notice is preserved in [`LICENSE-GGML`](LICENSE-GGML).
 
 ## Model weights
