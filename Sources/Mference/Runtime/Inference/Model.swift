@@ -1065,7 +1065,16 @@ extension Model {
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(detail: "manifest missing \(relativePath)")
             }
-            let expectedSize = UInt64(layout.expertsPerLayer) * layout.storedExpertStride
+            // The GGUF install (WS4) stores each layer at its own stride
+            // (`expertStorage.storedExpertStrides`); every other install has
+            // the one top-level stride checked above.
+            let storedStride = layout.gguf?.layers[layer.layer].storedStride
+                ?? layout.storedExpertStride
+            guard storedStride % pageSize == 0 else {
+                throw ModelError.trustedReceiptInvalid(
+                    detail: "\(relativePath) stored stride \(storedStride) is not page-aligned")
+            }
+            let expectedSize = UInt64(layout.expertsPerLayer) * storedStride
             guard manifestEntry.size == expectedSize else {
                 throw ModelError.trustedReceiptInvalid(
                     detail: "\(relativePath) manifest size \(manifestEntry.size) != \(expectedSize)")
@@ -1082,7 +1091,7 @@ extension Model {
                 throw ModelError.trustedReceiptInvalid(detail: "\(relativePath) expert count mismatch")
             }
             for expert in layer.experts {
-                guard expert.size == layout.storedExpertStride else {
+                guard expert.size == storedStride else {
                     throw ModelError.trustedReceiptInvalid(
                         detail: "\(relativePath) expert \(expert.expert) size mismatch")
                 }
