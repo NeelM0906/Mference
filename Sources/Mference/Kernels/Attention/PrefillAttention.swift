@@ -44,6 +44,7 @@ final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
+    private var psoGQASimd: MTLComputePipelineState?
     private let gemmaQAT: GemmaQATPrefillAttention?
 
     /// Whether the MPP tensor-ops full-attention kernel is usable here. False
@@ -52,11 +53,29 @@ final class PrefillAttention {
     /// batched kernels.
     var tensorOpsPipelineAvailable: Bool { psoFullTensorOps2DValidityV2 != nil }
 
+    /// Whether `attention_prefill_gqa8_d256_simd` was requested and built. The
+    /// caller requests it only where it is the chosen default (Qwen 3.6 on GPUs
+    /// without the Apple10 TensorOps path); everyone else keeps the tiled kernel.
+    var gqaSimdPipelineAvailable: Bool { psoGQASimd != nil }
+
+    /// Dispatches of the GQA kernel so far, so the real-model tolerance gate
+    /// can prove the candidate ran it.
+    private(set) var gqaSimdDispatches = 0
+
+    /// Tests only: send the shapes the GQA kernel covers back to the tiled
+    /// kernel, so the tolerance gate compares both in one process.
+    func useTiledKernelForGQAShapes() { psoGQASimd = nil }
+
     /// `gemmaQATFullAttentionTensorOps` lets the QAT profile's full-attention
     /// layers use the tensor-ops kernel; its sliding-window layers and every
     /// fallback keep the source arithmetic.
+    /// `gqaSimdgroup` selects the GQA-shared simdgroup-matrix kernel for the
+    /// shapes it covers (headDim 256, 8 query heads per KV head, no window clip,
+    /// ring or sinks) in place of the tiled kernel. It changes output within
+    /// FP32-reassociation tolerance, so only the caller's default may set it.
     init(context: MetalContext, gemmaQATMaxContext: Int? = nil,
-         gemmaQATFullAttentionTensorOps: Bool = false) throws {
+         gemmaQATFullAttentionTensorOps: Bool = false,
+         gqaSimdgroup: Bool = false) throws {
         self.context = context
         self.gemmaQAT = try gemmaQATMaxContext.map { try GemmaQATPrefillAttention(context: context, maxContext: $0) }
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
@@ -65,6 +84,9 @@ final class PrefillAttention {
         // attention. Below MSL 4.0 it is not in the library.
         self.psoFullTensorOps2DValidityV2 = gemmaQATMaxContext == nil || gemmaQATFullAttentionTensorOps
             ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
+            : nil
+        self.psoGQASimd = gqaSimdgroup
+            ? try context.pipeline("attention_prefill_gqa8_d256_simd")
             : nil
     }
 
@@ -112,8 +134,15 @@ final class PrefillAttention {
         }
 
         let useTensorOps = tensorOpsPipeline != nil
+        let gqaSimdPipeline = useTensorOps ? nil : gqaSimdPipeline(for: params,
+                                                                  kvRingCapacity: kvRingCapacity,
+                                                                  numSinks: numSinks,
+                                                                  windowNeverClips: windowNeverClips)
         let pipeline: MTLComputePipelineState
-        if let tensorOpsPipeline {
+        if let gqaSimdPipeline {
+            pipeline = gqaSimdPipeline
+            gqaSimdDispatches += 1
+        } else if let tensorOpsPipeline {
             pipeline = tensorOpsPipeline
         } else if tensorOpsShape
                     && path == .fullTensorOps2DValidityV2
@@ -130,7 +159,7 @@ final class PrefillAttention {
         }
         let headDim = Int(params.headDim)
         let threadWidth = max(1, pipeline.threadExecutionWidth)
-        let threadCount = useTensorOps
+        let threadCount = useTensorOps || gqaSimdPipeline != nil
             ? 128
             : roundUp(max(threadWidth, headDim), toMultipleOf: threadWidth)
         precondition(threadCount <= pipeline.maxTotalThreadsPerThreadgroup,
@@ -147,7 +176,12 @@ final class PrefillAttention {
         enc.setBuffer(sinks ?? out, offset: sinksOffset, index: 5)
         var sinkCount = numSinks
         enc.setBytes(&sinkCount, length: MemoryLayout<UInt32>.size, index: 6)
-        let groups = useTensorOps
+        let groups = gqaSimdPipeline != nil
+            ? MTLSize(width: (Int(params.queryCount) + Self.gqaSimdTokensPerGroup - 1)
+                          / Self.gqaSimdTokensPerGroup,
+                      height: Int(params.numKVHeads),
+                      depth: 1)
+            : useTensorOps
             ? MTLSize(width: Int(params.queryCount),
                       height: Int(params.numQHeads) / 8,
                       depth: 1)
@@ -179,6 +213,23 @@ final class PrefillAttention {
                      "kvValidCount must include all in-flight query rows")
     }
 
+
+    /// Query tokens per threadgroup of the GQA kernel (one per simdgroup).
+    static let gqaSimdTokensPerGroup = 4
+
+    /// The GQA kernel covers exactly Qwen 3.6's full-attention shape.
+    private func gqaSimdPipeline(for params: PrefillAttentionParams,
+                                 kvRingCapacity: UInt32,
+                                 numSinks: UInt32,
+                                 windowNeverClips: Bool) -> MTLComputePipelineState? {
+        guard let psoGQASimd,
+              kvRingCapacity == 0,
+              numSinks == 0,
+              windowNeverClips,
+              params.headDim == 256,
+              params.numQHeads == params.numKVHeads * 8 else { return nil }
+        return psoGQASimd
+    }
 
     private func roundUp(_ value: Int, toMultipleOf multiple: Int) -> Int {
         ((value + multiple - 1) / multiple) * multiple
