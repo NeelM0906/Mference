@@ -137,3 +137,130 @@ import Testing
         }
     }
 }
+
+/// The per-component grouped kernel against the batched one
+/// (`attention_decode_full_grouped_vec256_batched_partial`), same harness,
+/// same combine pass, at 16, 32 and 64 chunks. Each line also prints max|d| of the last
+/// layer's output against production at the same chunk count, and against a
+/// CPU reference (FP32, exact softmax).
+extension DecodeAttentionKernelBenchmarks {
+    private static func cpuReference(q: MTLBuffer, k: MTLBuffer, v: MTLBuffer, seqLen: Int) -> [Float] {
+        let hd = 256, nq = 16, nkv = 2
+        let qp = q.contents().bindMemory(to: Float16.self, capacity: nq * hd)
+        let kp = k.contents().bindMemory(to: Float16.self, capacity: seqLen * nkv * hd)
+        let vp = v.contents().bindMemory(to: Float16.self, capacity: seqLen * nkv * hd)
+        var out = [Float](repeating: 0, count: nq * hd)
+        var scores = [Double](repeating: 0, count: seqLen)
+        for h in 0..<nq {
+            let kvh = h / (nq / nkv)
+            var mx = -Double.infinity
+            for p in 0..<seqLen {
+                var s = 0.0
+                for i in 0..<hd { s += Double(qp[h * hd + i]) * Double(kp[(p * nkv + kvh) * hd + i]) }
+                s *= 0.0625
+                scores[p] = s; mx = max(mx, s)
+            }
+            var denom = 0.0
+            var acc = [Double](repeating: 0, count: hd)
+            for p in 0..<seqLen {
+                let w = exp(scores[p] - mx); denom += w
+                for i in 0..<hd { acc[i] += w * Double(vp[(p * nkv + kvh) * hd + i]) }
+            }
+            for i in 0..<hd { out[h * hd + i] = Float(acc[i] / denom) }
+        }
+        return out
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["MFERENCE_DECODE_ATTN_KBENCH"] == "1"),
+          arguments: [256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
+    func qwenGroupedBatchedVariants(seqLen: Int) throws {
+        let ctx = try MetalContext()
+        let device = ctx.device
+        let layers = 10, rowElems = 2 * 256
+        let q = Self.halfBufferPublic(device, 16 * 256, salt: 1)
+        let ks = (0..<layers).map { Self.halfBufferPublic(device, seqLen * rowElems, salt: 2 + $0) }
+        let vs = (0..<layers).map { Self.halfBufferPublic(device, seqLen * rowElems, salt: 40 + $0) }
+        let m = device.makeBuffer(length: 16 * 64 * 4, options: .storageModeShared)!
+        let d = device.makeBuffer(length: 16 * 64 * 4, options: .storageModeShared)!
+        let o = device.makeBuffer(length: 16 * 64 * 256 * 4, options: .storageModeShared)!
+        let outs = (0..<layers).map { _ in device.makeBuffer(length: 16 * 256 * 2, options: .storageModeShared)! }
+        let reference = Self.cpuReference(q: q, k: ks[layers - 1], v: vs[layers - 1], seqLen: seqLen)
+        let kvBytes = Double(layers * 2 * seqLen * rowElems * 2)
+        func constants(_ chunks: Int?) -> [MetalFunctionConstant] {
+            var c = [MetalFunctionConstant(index: 60, value: .uint32(256)),
+                     MetalFunctionConstant(index: 61, value: .uint32(16)),
+                     MetalFunctionConstant(index: 62, value: .uint32(2)),
+                     MetalFunctionConstant(index: 63, value: .bool(true))]
+            if let chunks { c.append(MetalFunctionConstant(index: 65, value: .uint32(UInt32(chunks)))) }
+            return c
+        }
+        for chunks in [16, 32, 64] {
+            let combine = try ctx.pipeline("attention_decode_combine", constants: constants(chunks == 16 ? 16 : nil))
+            let chunkLen = (seqLen + chunks - 1) / chunks
+            var production: [Float16]?
+            for name in ["attention_decode_full_grouped_vec256_partial",
+                         "attention_decode_full_grouped_vec256_batched_partial"] {
+                let partial = try ctx.pipeline(name, constants: constants(nil))
+                var best = Double.infinity
+                for _ in 0..<7 {
+                    let cb = ctx.queue.makeCommandBuffer()!
+                    for layer in 0..<layers {
+                        let p1 = cb.makeComputeCommandEncoder()!
+                        p1.setComputePipelineState(partial)
+                        p1.setBuffer(q, offset: 0, index: 0)
+                        p1.setBuffer(ks[layer], offset: 0, index: 1)
+                        p1.setBuffer(vs[layer], offset: 0, index: 2)
+                        p1.setBuffer(m, offset: 0, index: 3)
+                        p1.setBuffer(d, offset: 0, index: 4)
+                        p1.setBuffer(o, offset: 0, index: 5)
+                        var hd = UInt32(256), nq = UInt32(16), nkv = UInt32(2), sl = UInt32(seqLen)
+                        var kst = UInt32(0), cl = UInt32(chunkLen), nc = UInt32(chunks), sc = Float(0.0625)
+                        p1.setBytes(&hd, length: 4, index: 6); p1.setBytes(&nq, length: 4, index: 7)
+                        p1.setBytes(&nkv, length: 4, index: 8); p1.setBytes(&sl, length: 4, index: 9)
+                        p1.setBytes(&kst, length: 4, index: 10); p1.setBytes(&cl, length: 4, index: 11)
+                        p1.setBytes(&nc, length: 4, index: 12); p1.setBytes(&sc, length: 4, index: 13)
+                        p1.dispatchThreadgroups(MTLSize(width: 2 * chunks, height: 1, depth: 1),
+                                                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                        p1.endEncoding()
+                        let p2 = cb.makeComputeCommandEncoder()!
+                        p2.setComputePipelineState(combine)
+                        p2.setBuffer(m, offset: 0, index: 0); p2.setBuffer(d, offset: 0, index: 1)
+                        p2.setBuffer(o, offset: 0, index: 2); p2.setBuffer(outs[layer], offset: 0, index: 3)
+                        var hd2 = UInt32(256), nc2 = UInt32(chunks)
+                        p2.setBytes(&hd2, length: 4, index: 4); p2.setBytes(&nc2, length: 4, index: 5)
+                        p2.dispatchThreadgroups(MTLSize(width: 16, height: 1, depth: 1),
+                                                threadsPerThreadgroup: MTLSize(width: min(256, combine.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                        p2.endEncoding()
+                    }
+                    cb.commit(); cb.waitUntilCompleted()
+                    #expect(cb.status == .completed)
+                    best = min(best, cb.gpuEndTime - cb.gpuStartTime)
+                }
+                let n = 16 * 256
+                let row = Array(UnsafeBufferPointer(
+                    start: outs[layers - 1].contents().bindMemory(to: Float16.self, capacity: n), count: n))
+                var vsProd: Float = 0, vsRef: Float = 0, refMax: Float = 0
+                for i in 0..<n {
+                    if let production { vsProd = max(vsProd, abs(Float(row[i]) - Float(production[i]))) }
+                    vsRef = max(vsRef, abs(Float(row[i]) - reference[i]))
+                    refMax = max(refMax, abs(reference[i]))
+                }
+                if production == nil { production = row }
+                let label = name.replacingOccurrences(of: "attention_decode_full_grouped_vec256_", with: "")
+                    .replacingOccurrences(of: "_partial", with: "")
+                print(String(format: "[decode-attn-variants] seq=%d chunks=%d %@ best %.3f ms (10 layers), %.1f GB/s; "
+                             + "max|d| vs production %g, vs CPU ref %g (ref max %.3f)",
+                             seqLen, chunks, label == "partial" ? "per-component" : label, best * 1000,
+                             kvBytes / best / 1e9, Double(vsProd), Double(vsRef), Double(refMax)))
+                #expect(vsRef < 0.01, "\(name) at \(seqLen)/\(chunks): max|d| vs CPU \(vsRef)")
+            }
+        }
+    }
+
+    fileprivate static func halfBufferPublic(_ device: MTLDevice, _ count: Int, salt: Int) -> MTLBuffer {
+        let buffer = device.makeBuffer(length: max(1, count) * 2, options: .storageModeShared)!
+        let pointer = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+        for i in 0..<count { pointer[i] = Float16(Float((i &* 31 &+ salt) % 97) / 97 * 0.7 - 0.35) }
+        return buffer
+    }
+}

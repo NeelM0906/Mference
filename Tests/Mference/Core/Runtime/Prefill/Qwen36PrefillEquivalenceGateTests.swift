@@ -6,9 +6,9 @@ import Testing
 
 /// Quality gates for Qwen 3.6 kernels that reorder floating-point sums: the
 /// GQA-shared prefill attention kernel (`attention_prefill_gqa8_d256_simd`),
-/// the grouped-GEMM routed experts (`MPPGroupedRoutedMoE`), and decode full
-/// attention's length-based split count (scored on the teacher-forced decode
-/// steps that follow each prefill).
+/// the grouped-GEMM routed experts (`MPPGroupedRoutedMoE`), and the batched
+/// decode full-attention kernel (scored on the teacher-forced decode steps
+/// that follow each prefill).
 ///
 /// Set `MFERENCE_QWEN36_PREFILL_GATE` to an installed `qwen36.gturbo`; the
 /// install is read-only. In each test, control is the default runner with that
@@ -112,21 +112,21 @@ struct Qwen36PrefillEquivalenceGateTests {
             })
     }
 
-    /// Decode full attention split by length (`groupedFull256LengthChunks`)
-    /// against the fixed 16-chunk split. Decode positions from 512 use 32
-    /// chunks and from 8,192 use 64. The medium items differ only past
-    /// position 512 and the long items use 32 chunks throughout; this gate
-    /// lengthens the docs item to 8,400 prompt tokens so its whole decode
-    /// uses 64.
-    @Test func lengthSplitDecodeAttentionKeepsTeacherForcedPerplexity() async throws {
+    /// Decode full attention: the batched grouped kernel and its split
+    /// (`groupedFull256Batched`) against the per-component grouped kernel at
+    /// a fixed 16 chunks. Every teacher-forced decode step runs the new kernel:
+    /// 16 chunks below 4,096 positions (the medium and long items), 32 from
+    /// 4,096. This gate lengthens the docs item to 8,400 prompt tokens so its
+    /// whole decode runs at 32 chunks past 8K.
+    @Test func batchedDecodeAttentionKeepsTeacherForcedPerplexity() async throws {
         try await runGate(
-            label: "16-chunk->length-split decode attention", outKey: "decodeAttentionLengthSplit",
+            label: "per-component->batched decode attention", outKey: "decodeAttentionBatched",
             documentTokenCount: 8_400,
             precondition: { model, _ in
                 try #require(model.config.family == .qwen36)
             },
-            configureControl: { $0.useFixedDecodeAttentionChunks() },
-            dispatches: { $0.decodeAttentionSplitsByLength ? 1 : 0 },
+            configureControl: { $0.usePerComponentDecodeAttention() },
+            dispatches: { $0.decodeAttentionIsBatched ? 1 : 0 },
             checkDispatches: { control, candidate, _ in
                 #expect(control == 0)
                 #expect(candidate == 1)
