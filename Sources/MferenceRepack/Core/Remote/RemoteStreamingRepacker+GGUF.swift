@@ -4,7 +4,8 @@ import Foundation
 /// checkpoint, output-recording and promotion machinery with the safetensors
 /// path, but nothing safetensors-specific: the pin is per shard, the
 /// tokenizer sidecars are synthesized from GGUF metadata (nothing is fetched
-/// from a vendor repo), and every tensor byte is an identity copy.
+/// from a vendor repo), and every tensor byte is copied unchanged except the
+/// Q6_K and Q8_0 resident matrices, which are expanded to INT8-2L in range.
 extension RemoteStreamingRepacker {
     func runPreparedGGUF(paths: RemoteInstallPaths,
                          pin: GGUFSourcePin,

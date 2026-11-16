@@ -2,7 +2,7 @@ import Foundation
 
 /// `layout.json` and manifest additions for an install planned from GGUF bytes
 /// (WS4). The schema is the existing one plus fields an old reader rejects or
-/// ignores; see `scratch/program/design/ws4-u2-installer.md` §2.
+/// ignores; see docs/families/QWEN38_FLASH_NEXT_UNSLOTH.md.
 extension GTurboJSON {
     /// ggml type name for a planned dtype code (`FlashNextGGUFPlanner.dtypeCode`).
     static func ggufFormatName(dtypeCode: UInt8) -> String {

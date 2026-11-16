@@ -1017,7 +1017,8 @@ public enum ManifestReader {
     /// The kernels a `qwen38flashnextudiq3xxs` (Unsloth UD-IQ3_XXS GGUF) install
     /// needs (WS4 U1 §4): LUT4 routed-expert slots expanded from GGUF IQ
     /// blocks, INT8-2L resident matmuls, and IQ4_NL n-gram rows. All three are
-    /// implemented; the installer still publishes them as `arch.requiredAxes`.
+    /// implemented. Documentation only: the install's `arch.requiredAxes`
+    /// carries the shared `FlashNextAxes.requiredAxisNames`, not these.
     public static let qwen38FlashNextGGUFRequiredAxes: [String] = [
         "ggufLUT4RoutedExperts",
         "ggufInt8TwoLevelResident",

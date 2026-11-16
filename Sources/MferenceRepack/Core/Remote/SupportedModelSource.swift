@@ -15,9 +15,10 @@ public struct SupportedModelSource: Sendable, Equatable {
         /// affine group-64 in flight (Workstream 2). Pinning and SHA discipline
         /// are identical — only the byte transform differs.
         case originalRepoQuantize
-        /// A third-party GGUF quant (WS4): every tensor is copied in its own
-        /// ggml format, pinned per shard by `ggufPin`. Nothing is quantized
-        /// or transformed at install.
+        /// A third-party GGUF quant (WS4), pinned per shard by `ggufPin`.
+        /// Nothing is quantized at install: tensors keep their ggml format,
+        /// except Q6_K and Q8_0 resident matrices, which are expanded to
+        /// INT8-2L (`GGUFInt8TwoLevelExpander`).
         case gguf
     }
 
@@ -323,8 +324,9 @@ public struct SupportedModelSource: Sendable, Equatable {
 
     /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4): a
     /// third-party quant whose task-benchmark figures are Unsloth's own. The
-    /// install keeps every tensor in its GGUF format (U1/U2 design notes under
-    /// scratch/program/design/ws4-*). `sourceIndexSHA256` is the pin
+    /// install keeps every tensor in its GGUF format except the INT8-2L
+    /// resident matrices (docs/families/QWEN38_FLASH_NEXT_UNSLOTH.md).
+    /// `sourceIndexSHA256` is the pin
     /// fingerprint (`GGUFSourcePin.fingerprint`), not an index hash.
     /// The runtime runs this label on `FlashNextForwardRunner`.
     public static let qwen38FlashNextUnslothUDIQ3XXS = SupportedModelSource(
@@ -428,8 +430,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     ]
 
     /// Installable by name but not advertised (R9): kept out of `all`, and so
-    /// out of the usage alternation `mference-ui.sh install` reads, until a
-    /// runner can execute them. The fingerprint table and `named` include them.
+    /// out of the usage alternation `mference-ui.sh install` reads. The
+    /// fingerprint table and `named` include them.
     public static let unlisted: [SupportedModelSource] = [qwen38FlashNextUnslothUDIQ3XXS]
 
     /// `all` plus `unlisted`: every source the installer can resolve.

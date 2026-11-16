@@ -134,9 +134,11 @@ case "${family}" in
   flint)           suite_filter='Flint' ;;
   qwen38flashnext) suite_filter='FlashNext' ;;
   # Unsloth UD-IQ3_XXS GGUF install: GGUF quant tables, LUT4 expansion and MoE,
-  # INT8-2L, the family/manifest and installer suites. Its real-install suites
-  # are env-gated (MFERENCE_UNSLOTH_GTURBO) and skip here.
-  qwen38flashnextudiq3xxs) suite_filter='GGUF' ;;
+  # INT8-2L, the family/manifest and installer suites, the lower-case gguf*
+  # install tests in RemotePayloadCopyTests, the IQ4_NL PLE rows, the raw
+  # streamer path and the forced-routes parser. Its real-install suites are
+  # env-gated (MFERENCE_UNSLOTH_GTURBO) and skip here.
+  qwen38flashnextudiq3xxs) suite_filter='GGUF|gguf|PleRowPoolIQ4NL|PreadExpertStreamerRaw|FlashNextForcedRoutes' ;;
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).
   minicpm5)        suite_filter='[Mm]iniCPM5' ;;
