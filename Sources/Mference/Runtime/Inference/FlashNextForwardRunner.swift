@@ -166,6 +166,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         let expand: GGUFLUT4Expand
         let moe: GGUFLUT4MoE
         let prefill: GGUFLUT4Prefill
+        /// Grouped LUT4 GEMM for well-filled prefill tiles
+        /// (`usesSimdgroupLUT4RoutedExperts`); nil elsewhere.
+        let grouped: SimdgroupGroupedRoutedMoE?
         /// Stored bytes of up to `max(topK, 16)` missed experts (a decode
         /// step's routes or one prefill tile), reused: decode layer L+1 reads
         /// into it only after `joinPendingMoE` has waited for layer L's
@@ -668,6 +671,13 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             self.ggufRouted = GGUFRouted(expand: try GGUFLUT4Expand(context: context),
                                          moe: try GGUFLUT4MoE(context: context),
                                          prefill: try GGUFLUT4Prefill(context: context),
+                                         grouped: Self.usesSimdgroupLUT4RoutedExperts(
+                                            supportsApple10TensorOps: context.device.supportsApple10TensorOps)
+                                            && SimdgroupGroupedRoutedMoE.supportsLUT4(
+                                                d: cfg.hiddenSize, routedIntermediate: cfg.moeIntermediateSize)
+                                            // A pipeline that fails to build leaves the row kernel.
+                                            ? try? SimdgroupGroupedRoutedMoE(context: context, dequant: .lut4)
+                                            : nil,
                                          staging: staging, layers: layout.layers,
                                          tokenID: tokenID)
             self.moeInt4 = nil
@@ -2675,6 +2685,25 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         }
     }
 
+    /// Whether GGUF LUT4 prefill tiles may take the simdgroup grouped GEMM
+    /// (`SimdgroupGroupedRoutedMoE`, LUT4 family) when they pass
+    /// `PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM`. Only where the
+    /// Apple10 TensorOps path is absent (D8); it changes output within
+    /// tolerance (weights are rounded to half once), so other hosts keep the
+    /// row kernel's bytes.
+    static func usesSimdgroupLUT4RoutedExperts(supportsApple10TensorOps: Bool) -> Bool {
+        !supportsApple10TensorOps
+    }
+
+    /// Test-only: false sends every GGUF prefill tile to the LUT4 row kernel,
+    /// the control arm of the class T check.
+    private var prefillSimdLUT4Enabled = true
+    /// GGUF prefill tiles that ran on the grouped LUT4 GEMM.
+    private(set) var prefillSimdLUT4Tiles = 0
+
+    /// Test-only: every GGUF prefill tile takes the LUT4 row kernel.
+    func useRowKernelForGGUFPrefill() { prefillSimdLUT4Enabled = false }
+
     private static func lut4Offsets(_ g: GGUFExpertLayout.Layer) -> GGUFLUT4MoE.ExpertOffsets {
         GGUFLUT4MoE.ExpertOffsets(
             gateIndex: UInt32(g.gate.indexOffset), gateD: UInt32(g.gate.dOffset), gateM: UInt32(g.gate.mOffset),
@@ -2721,6 +2750,15 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             }
             encodeGGUFExpansion(commandBuffer: cb, routed: routed, geometry: geometry,
                                 misses: fetched.misses, slab: fetched.slab)
+            if prefillSimdLUT4Enabled, let grouped = routed.grouped,
+               try encodeGroupedLUT4Tile(grouped: grouped, commandBuffer: cb, tile: tile, routes: routes,
+                                         metadata: metadata, experts: experts, views: fetched.views,
+                                         geometry: geometry, offsets: offsets, scratch: scratch) {
+                prefillSimdLUT4Tiles += 1
+                trackGpuInterval(cb)
+                try withExtendedLifetime(metadata) { try finish(cb) }
+                continue
+            }
             let blobs = fetched.views.map { (buffer: $0.buffer, offset: Int($0.offset)) }
             var start = 0
             while start < Int(tile.pairCount) {
@@ -2747,6 +2785,48 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             routeWeights: scratch.routeWeights, h2: scratch.moeOut,
             queryCount: UInt32(rows), topK: UInt32(topK), d: UInt32(hidden))
         try finish(reduce)
+    }
+
+    /// Encodes one GGUF prefill tile on the grouped LUT4 GEMM when its fill
+    /// passes the 8x padding rule and its activation fits the routed
+    /// gate/up/act scratch it borrows (3 x 256 pair rows x F halves). Returns
+    /// false, encoding nothing, when the tile stays on the row kernel.
+    private func encodeGroupedLUT4Tile(
+        grouped: SimdgroupGroupedRoutedMoE, commandBuffer cb: MTLCommandBuffer,
+        tile: PrefillMoETile, routes: PrefillMoEGroupedRoutes,
+        metadata: PrefillGroupedRoutedMoEStreamedMetadataBuffers, experts: [Int], views: [TensorView],
+        geometry: GGUFExpertLayout.Layer, offsets: GGUFLUT4MoE.ExpertOffsets, scratch: PrefillScratch
+    ) throws -> Bool {
+        let groups = routes.groups[Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
+        let pairCounts = groups.map { Int($0.pairCount) }
+        guard PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: pairCounts),
+              Int(tile.pairCount) * moeIntermediate * MemoryLayout<Float16>.stride
+                <= scratch.routedGateUpAct.length else { return false }
+        let binding = try PrefillStreamedTileBinding(expertIDs: experts, views: views)
+        var params = PrefillGroupedRoutedMoEStreamedParams(
+            pairStart: tile.pairStart, pairCount: tile.pairCount, d: UInt32(hidden),
+            routedIntermediate: UInt32(moeIntermediate), topK: UInt32(topK),
+            hiddenStrideElements: UInt32(hidden), binding: binding,
+            offsets: MoEExpertOffsets(gateWOff: offsets.gateIndex, gateSOff: offsets.gateD, gateBOff: offsets.gateM,
+                                      upWOff: offsets.upIndex, upSOff: offsets.upD, upBOff: offsets.upM,
+                                      downWOff: offsets.downIndex, downSOff: offsets.downD,
+                                      downBOff: offsets.downM))
+        guard SimdgroupGroupedRoutedMoE.supportsOffsets(params, lut4: true) else { return false }
+        // The grouped kernels take the tile's group range.
+        params.pairStart = tile.groupStart
+        params.pairCount = tile.groupCount
+        let argument = try grouped.makeArgumentBuffer(device: ctx.device, binding: binding)
+        let lut4 = [GGUFLUT4MoE.ProjParams(geometry.gate.type), GGUFLUT4MoE.ProjParams(geometry.up.type),
+                    GGUFLUT4MoE.ProjParams(geometry.down.type)]
+        let encoded = grouped.encode(
+            commandBuffer: cb, hidden: scratch.mixed, sortedPairs: metadata.sortedPairs,
+            groups: metadata.groups, activation: scratch.routedGateUpAct, routePartials: scratch.routePartials,
+            argumentBuffer: argument, binding: binding, params: params,
+            maxPairsPerGroup: pairCounts.max() ?? 0, lut4: lut4)
+        guard encoded else {
+            throw FlashNextForwardRunnerError.commandFailed("grouped LUT4 tile did not encode")
+        }
+        return true
     }
 
     // MARK: - Expert streaming
