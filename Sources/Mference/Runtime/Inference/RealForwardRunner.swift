@@ -352,6 +352,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var prefillGroupedGEMMEnabled = true
     /// Routed prefill tiles that ran as grouped GEMM rather than per-row GEMV.
     private(set) var prefillGroupedExpertTiles = 0
+    /// Simdgroup-matrix grouped routed experts for Qwen 3.6 prefill tiles on
+    /// GPUs without the Apple10 TensorOps path
+    /// (`usesSimdgroupGroupedRoutedExperts`). Ahead of the MPP kernel, which
+    /// stays the fallback where this one is absent.
+    private let prefillSimdGroupedGEMM: SimdgroupGroupedRoutedMoE?
+    /// Test-only: false leaves routed tiles to MPP and the row kernel, as
+    /// before this kernel (the control arm of its tolerance gate).
+    private var prefillSimdGroupedGEMMEnabled = true
+    /// Routed prefill tiles that ran on the simdgroup grouped kernel.
+    private(set) var prefillSimdGroupedExpertTiles = 0
     /// Prefill attention layer chunks that ran the tensor-ops kernel. It falls
     /// back to the tiled or QAT kernels silently when the pipeline is missing.
     private(set) var prefillTensorOpsAttentionLayers = 0
@@ -745,6 +755,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             gemmaBatchedExperts: policy.batchedExperts,
             supportsApple10TensorOps: context.device.supportsApple10TensorOps)
             ? MPPGroupedRoutedMoE(context: context, groupSize: int4GroupSize, gelu: !silu)
+            : nil
+        self.prefillSimdGroupedGEMM = Self.usesSimdgroupGroupedRoutedExperts(
+            family: cfg.family,
+            supportsApple10TensorOps: context.device.supportsApple10TensorOps)
+            && silu
+            && SimdgroupGroupedRoutedMoE.supports(d: cfg.hiddenSize,
+                                                  routedIntermediate: cfg.moeIntermediateSize,
+                                                  groupSize: int4GroupSize)
+            // A pipeline that fails to build leaves MPP and the row kernel.
+            ? try? SimdgroupGroupedRoutedMoE(context: context, groupSize: int4GroupSize)
             : nil
         self.prefillMoE = try PrefillMoE(context: context, sourceFP16: sourceFP16)
         self.prefillLayerTail = try PrefillLayerTail(context: context, sourceFP16: sourceFP16)
@@ -1927,7 +1947,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             config: cfg, runtime: config,
             batchedSharedExpert: cfg.family == .gemma4 && gemmaPrefillPolicy.batchedExperts
                 && model.sharedExpertWeightBits == 4,
-            groupedExperts: prefillGroupedGEMM?.isAvailable == true)
+            groupedExperts: prefillGroupedGEMM?.isAvailable == true || prefillSimdGroupedGEMM != nil)
         if let scratch = prefillScratch, scratch.layout == layout {
             return scratch
         }
@@ -2835,7 +2855,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
                             .map { Int($0.pairCount) }
                         let argumentBuffer: PrefillStreamedTileArgumentBuffer
-                        if prefillGroupedGEMMEnabled,
+                        if prefillSimdGroupedGEMMEnabled, prefillGroupedGEMMEnabled,
+                           let simd = prefillSimdGroupedGEMM,
+                           let activation = scratch.groupedExpertActivation,
+                           SimdgroupGroupedRoutedMoE.supportsOffsets(streamedParams),
+                           PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM(pairCounts: tilePairCounts) {
+                            // Same group-range contract as the MPP branch below.
+                            argumentBuffer = try simd.makeArgumentBuffer(device: ctx.device,
+                                                                         binding: fetch.binding)
+                            var groupedParams = streamedParams
+                            groupedParams.pairStart = tile.groupStart
+                            groupedParams.pairCount = tile.groupCount
+                            let encoded = simd.encode(
+                                commandBuffer: tileCB,
+                                hidden: scratch.routedX,
+                                sortedPairs: metadata.sortedPairs,
+                                groups: metadata.groups,
+                                activation: activation,
+                                routePartials: scratch.routePartials,
+                                argumentBuffer: argumentBuffer,
+                                binding: fetch.binding,
+                                params: groupedParams,
+                                maxPairsPerGroup: tilePairCounts.max() ?? 0)
+                            guard encoded else { throw ModelError.residentBufferWrapFailed }
+                            prefillSimdGroupedExpertTiles += 1
+                        } else if prefillGroupedGEMMEnabled,
                            let grouped = prefillGroupedGEMM, grouped.isAvailable,
                            let activation = scratch.groupedExpertActivation,
                            PrefillGroupedExpertGate.usesGroupedGEMM(pairCounts: tilePairCounts) {
@@ -3922,8 +3966,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+    /// Whether chunked prefill's routed experts may take the simdgroup-matrix
+    /// grouped kernel (`SimdgroupGroupedRoutedMoE`) for tiles that pass
+    /// `PrefillGroupedExpertGate.usesSimdgroupGroupedGEMM`. Only Qwen 3.6, and
+    /// only where the Apple10 TensorOps path is absent, the hardware it was
+    /// measured on; it changes output within tolerance, so every other family
+    /// and M5-class host keeps its bytes. Ahead of the MPP kernel, which stays
+    /// the fallback for tiles this one skips.
+    static func usesSimdgroupGroupedRoutedExperts(family: ModelFamily,
+                                                  supportsApple10TensorOps: Bool) -> Bool {
+        family == .qwen36 && !supportsApple10TensorOps
+    }
+
     /// Test-only: routes every prefill tile to the row kernel.
-    func useRowKernelForRoutedExperts() { prefillGroupedGEMMEnabled = false }
+    func useRowKernelForRoutedExperts() {
+        prefillGroupedGEMMEnabled = false
+        prefillSimdGroupedGEMMEnabled = false
+    }
+
+    /// Test-only: leaves routed tiles to the MPP grouped kernel and the row
+    /// kernel, the selection before the simdgroup kernel.
+    func useMPPOrRowKernelForRoutedExperts() { prefillSimdGroupedGEMMEnabled = false }
 
     /// Test-only: decode full attention goes back to the per-component
     /// grouped kernel at a fixed 16 chunks.
