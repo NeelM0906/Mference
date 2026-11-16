@@ -234,3 +234,163 @@ private let qwenGroupedGEMMAvailable: Bool = {
                      outputs.rowSeconds / outputs.groupedSeconds))
     }
 }
+
+/// Padding sweep behind Qwen 3.6's grouped-expert fill rule: GPU time of every
+/// routed tile of one simulated chunk through the row kernel and the grouped
+/// kernel, at Qwen's shape (256 experts, topK 8, 16 experts per tile, d 2,048,
+/// f 512). Routing is synthetic: each token picks 8 distinct experts, either
+/// uniformly or with a fixed skew (weight ~ 1 / (rank + 1)^0.6 over a seeded
+/// permutation). For each fill-rule limit it prints the chunk's total routed
+/// time with tiles under the limit grouped and the rest on the row kernel.
+/// Env-gated: `MFERENCE_PREFILL_MOE_SWEEP=1`. Asserts nothing about speed.
+@Suite(.serialized) struct QwenGroupedRoutedExpertPaddingSweep {
+    private static var enabled: Bool {
+        ProcessInfo.processInfo.environment["MFERENCE_PREFILL_MOE_SWEEP"] == "1"
+            && qwenGroupedGEMMAvailable
+    }
+
+    static let limits: [Double] = [1.0, 1.1, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5, 1.6, 2.0, 99]
+
+    /// Seeded routing: `tokens` tokens, each with `topK` distinct experts.
+    static func route(tokens: Int, topK: Int, experts: Int, skewed: Bool, seed: UInt64)
+        -> [PrefillTokenExpertPair] {
+        var state = seed
+        func next() -> Double {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Double(state >> 11) / Double(1 << 53)
+        }
+        var order = Array(0..<experts)
+        for i in stride(from: experts - 1, to: 0, by: -1) {
+            order.swapAt(i, Int(next() * Double(i + 1)))
+        }
+        var weight = [Double](repeating: 1, count: experts)
+        if skewed { for (rank, expert) in order.enumerated() { weight[expert] = 1 / pow(Double(rank + 1), 0.6) } }
+        var pairs: [PrefillTokenExpertPair] = []
+        pairs.reserveCapacity(tokens * topK)
+        for token in 0..<tokens {
+            var chosen = Set<Int>()
+            var remaining = weight
+            for rank in 0..<topK {
+                let total = remaining.reduce(0, +)
+                var pick = next() * total, expert = 0
+                while expert < experts - 1 && pick >= remaining[expert] { pick -= remaining[expert]; expert += 1 }
+                while chosen.contains(expert) { expert = (expert + 1) % experts }
+                chosen.insert(expert); remaining[expert] = 0
+                pairs.append(PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: UInt32(expert),
+                                                               rank: UInt32(rank)))
+            }
+        }
+        return pairs
+    }
+
+    struct TileTime { let real: Int; let padded: Int; let row: Double; let grouped: Double }
+
+    static func timeTiles(tokens: Int, pairs: [PrefillTokenExpertPair], experts: Int) throws -> [TileTime] {
+        let d = 2048, f = 512, topK = 8
+        let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+            pairs, queryCount: tokens, topK: topK, numExperts: experts, tileExpertCount: 16)
+        let context = try MetalContext()
+        let pool = QwenGroupedRoutedExpertTests.syntheticPool(numExperts: 2, d: d, f: f)
+        let rowKernel = try PrefillGroupedRoutedMoE(context: context, siluActivation: true)
+        let grouped = MPPGroupedRoutedMoE(context: context)
+        try #require(grouped.isAvailable)
+        let metadata = try rowKernel.makeStreamedMetadataBuffers(device: context.device, routes: routes)
+        let hidden = (0..<(tokens * d)).map { Float16(0.05 + Float(($0 % 23) - 11) * 0.004) }
+        let hiddenBuffer = try #require(Fp16Buffer.make(context.device, halves: hidden))
+        func buffer(_ elements: Int) throws -> MTLBuffer {
+            try #require(context.device.makeBuffer(length: elements * 2, options: .storageModePrivate))
+        }
+        let microbatch = 32
+        let partials = try buffer(tokens * topK * d)
+        let rowAct = try buffer(3 * microbatch * f)
+        let rowDown = try buffer(microbatch * d)
+        let groupedAct = try buffer(tokens * topK * f)
+        func best(_ encode: (MTLCommandBuffer) -> Void) throws -> Double {
+            var best = Double.infinity
+            for _ in 0..<3 {
+                let cb = try #require(context.queue.makeCommandBuffer())
+                encode(cb)
+                cb.commit()
+                cb.waitUntilCompleted()
+                try #require(cb.error == nil)
+                best = min(best, cb.gpuEndTime - cb.gpuStartTime)
+            }
+            return best
+        }
+        var result: [TileTime] = []
+        for tile in routes.tiles {
+            let groups = routes.groups[Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
+            let ids = groups.map { Int($0.expert) }
+            let binding = try PrefillStreamedTileBinding(
+                expertIDs: ids,
+                views: PrefillGroupedRoutedMoETests.streamedViewsWithNonzeroOffsets(
+                    device: context.device, pool: pool, expertIDs: ids.indices.map { $0 % 2 }))
+            let rowArgument = try rowKernel.makeStreamedArgumentBuffer(device: context.device, binding: binding)
+            let groupedArgument = try grouped.makeArgumentBuffer(device: context.device, binding: binding)
+            let params = PrefillGroupedRoutedMoEStreamedParams(
+                pairStart: tile.pairStart, pairCount: tile.pairCount,
+                d: UInt32(d), routedIntermediate: UInt32(f), topK: UInt32(topK),
+                hiddenStrideElements: UInt32(d), binding: binding, offsets: pool.offsets)
+            var groupedParams = params
+            groupedParams.pairStart = tile.groupStart
+            groupedParams.pairCount = tile.groupCount
+            let counts = groups.map { Int($0.pairCount) }
+            let row = try best { cb in
+                _ = rowKernel.encodeStreamedBatched(
+                    commandBuffer: cb, hidden: hiddenBuffer, sortedPairs: metadata.sortedPairs,
+                    routePartials: partials, gateUpActScratch: rowAct, downScratch: rowDown,
+                    argumentBuffer: rowArgument, binding: binding, params: params,
+                    pairMicrobatchRows: microbatch)
+            }
+            let groupedTime = try best { cb in
+                _ = grouped.encode(
+                    commandBuffer: cb, hidden: hiddenBuffer, sortedPairs: metadata.sortedPairs,
+                    groups: metadata.groups, activation: groupedAct, routePartials: partials,
+                    argumentBuffer: groupedArgument, binding: binding, params: groupedParams,
+                    maxPairsPerGroup: counts.max() ?? 0)
+            }
+            let tileRows = PrefillGroupedExpertGate.tileRows
+            result.append(TileTime(real: counts.reduce(0, +),
+                                   padded: counts.reduce(0) { $0 + ($1 + tileRows - 1) / tileRows * tileRows },
+                                   row: row, grouped: groupedTime))
+        }
+        return result
+    }
+
+    static func report(_ label: String, _ tiles: [TileTime]) {
+        for t in tiles {
+            print(String(format: "[moe-sweep] %@ tile real=%d padded=%d ratio=%.3f row %.3f ms grouped %.3f ms (%.2fx)",
+                         label, t.real, t.padded, Double(t.padded) / Double(t.real),
+                         t.row * 1000, t.grouped * 1000, t.row / t.grouped))
+        }
+        let allRow = tiles.reduce(0) { $0 + $1.row }
+        for limit in limits {
+            let total = tiles.reduce(0.0) { $0 + (Double($1.padded) <= limit * Double($1.real) ? $1.grouped : $1.row) }
+            print(String(format: "[moe-sweep] %@ limit=%.2f routed %.2f ms (row-only %.2f ms, %+.1f%%)",
+                         label, limit, total * 1000, allRow * 1000, (total / allRow - 1) * 100))
+        }
+    }
+
+    @Test(.enabled(if: enabled), arguments: [2048, 2940, 4096])
+    func simulatedChunk(tokens: Int) throws {
+        for skewed in [false, true] {
+            let pairs = Self.route(tokens: tokens, topK: 8, experts: 256, skewed: skewed, seed: 20261116)
+            let tiles = try Self.timeTiles(tokens: tokens, pairs: pairs, experts: 256)
+            Self.report("chunk=\(tokens) \(skewed ? "skewed" : "uniform")", tiles)
+        }
+    }
+
+    /// 16 experts with the same row count each: one ratio per run.
+    @Test(.enabled(if: enabled),
+          arguments: [40, 48, 56, 64, 72, 80, 88, 92, 96, 104, 112, 120, 128, 136, 160, 192, 256])
+    func uniformRowsPerExpert(rows: Int) throws {
+        let tokens = 2 * rows
+        let pairs = (0..<tokens).flatMap { token in
+            (0..<8).map { rank in
+                PrefillGroupedRoutedMoETests.pair(token: UInt32(token), expert: UInt32((token * 8 + rank) % 16),
+                                                  rank: UInt32(rank))
+            }
+        }
+        Self.report("rows=\(rows)", try Self.timeTiles(tokens: tokens, pairs: pairs, experts: 16))
+    }
+}
