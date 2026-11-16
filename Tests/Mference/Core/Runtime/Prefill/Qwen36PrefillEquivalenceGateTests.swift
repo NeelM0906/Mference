@@ -25,7 +25,8 @@ import Testing
 /// also distinguishable from zero (batch-means 95 % interval), on a mean shift
 /// above 0.02, or on top-1 agreement below 0.98. Per-item means and the
 /// per-position max |shift| are printed as diagnostics, not asserted.
-/// `MFERENCE_QWEN36_PREFILL_GATE_OUT` saves the rows.
+/// `MFERENCE_QWEN36_PREFILL_GATE_OUT` saves the rows, one key per gate in one
+/// JSON document.
 enum Qwen36PrefillGateFixture {
     static let answerNames = ["medium-review.qwen36", "long-synthesis.qwen36"]
 
@@ -271,8 +272,18 @@ struct Qwen36PrefillEquivalenceGateTests {
         #expect(meanDifference <= 0.02, "dNLL=\(meanDifference)")
         #expect(agreement >= 0.98, "agreement=\(agreement)")
         if let path = ProcessInfo.processInfo.environment["MFERENCE_QWEN36_PREFILL_GATE_OUT"] {
-            try JSONSerialization.data(withJSONObject: ["modelID": model.modelID, outKey: saved])
-                .write(to: URL(fileURLWithPath: path))
+            // Both gates share this file: keep the other gate's rows for the
+            // same model and replace only this gate's key.
+            let url = URL(fileURLWithPath: path)
+            var document: [String: Any] = [:]
+            if let data = try? Data(contentsOf: url),
+               let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               existing["modelID"] as? String == model.modelID {
+                document = existing
+            }
+            document["modelID"] = model.modelID
+            document[outKey] = saved
+            try JSONSerialization.data(withJSONObject: document).write(to: url)
         }
     }
 }
