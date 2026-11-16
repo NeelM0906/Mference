@@ -77,3 +77,61 @@ kernel void gguf_int8_2l_gemv_f32out(
     const float v = int8_2l_row_dot(values, dbits, m, p, x, row, lane);
     if (lane == 0) { y[row] = v; }
 }
+
+// Batched form for prefill: Y[t][row] = W[row] · X[t] for `tokens` rows of X
+// (row stride x_stride halves) and Y (row stride y_stride). One simdgroup per
+// (output row, group of 8 tokens): each 8-weight chunk and its scale are
+// loaded once and feed eight FP32 accumulators. Per token the arithmetic is
+// the GEMV's (same chunking, same per-chunk FMA order, same simd_sum), so a
+// batched row equals the single-token GEMV of that token bit for bit.
+struct Int8TwoLevelBatchParams {
+    uint tokens;
+    uint x_stride;
+    uint y_stride;
+    uint pad;
+};
+
+kernel void gguf_int8_2l_gemm_t8_f16out(
+    device const char* values [[buffer(0)]],
+    device const ushort* dbits [[buffer(1)]],
+    device const char* m [[buffer(2)]],
+    constant Int8TwoLevelParams& p [[buffer(3)]],
+    device const half* x [[buffer(4)]],
+    device half* y [[buffer(5)]],
+    constant Int8TwoLevelBatchParams& bp [[buffer(6)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    const uint row = tg.x * 8 + sg_idx;
+    const uint t0 = tg.y * 8;
+    if (row >= p.rows || t0 >= bp.tokens) { return; }
+    const uint nt = min(8u, bp.tokens - t0);
+    const uint n = p.n;
+    device const char* row_v = values + ulong(row) * n;
+    const ulong row_w = ulong(row) * n;
+    float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (uint c = lane; c < n / 8; c += 32) {
+        const uint w = 8 * c;
+        const char4 va = *((device const char4*)(row_v + w));
+        const char4 vb = *((device const char4*)(row_v + w + 4));
+        const ulong gw = row_w + w;
+        float scale = float(as_type<half>(dbits[gw >> p.bd_shift]));
+        if (p.has_m != 0) { scale *= float(m[gw >> 4]); }
+        for (uint t = 0; t < nt; ++t) {
+            device const half* xt = x + ulong(t0 + t) * bp.x_stride;
+            const half4 xa = *((device const half4*)(xt + w));
+            const half4 xb = *((device const half4*)(xt + w + 4));
+            float s = 0.0f;
+            s = fma(float(va.x), float(xa.x), s); s = fma(float(va.y), float(xa.y), s);
+            s = fma(float(va.z), float(xa.z), s); s = fma(float(va.w), float(xa.w), s);
+            s = fma(float(vb.x), float(xb.x), s); s = fma(float(vb.y), float(xb.y), s);
+            s = fma(float(vb.z), float(xb.z), s); s = fma(float(vb.w), float(xb.w), s);
+            acc[t] = fma(scale, s, acc[t]);
+        }
+    }
+    for (uint t = 0; t < nt; ++t) {
+        const float v = simd_sum(acc[t]);
+        if (lane == 0) { y[ulong(t0 + t) * bp.y_stride + row] = half(v); }
+    }
+}

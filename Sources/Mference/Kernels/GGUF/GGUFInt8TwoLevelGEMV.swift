@@ -24,17 +24,23 @@ final class GGUFInt8TwoLevelGEMV {
     /// Mirror of the Metal `Int8TwoLevelParams`.
     struct Params { var rows: UInt32; var n: UInt32; var bdShift: UInt32; var hasM: UInt32 }
 
+    /// Mirror of the Metal `Int8TwoLevelBatchParams`.
+    struct BatchParams { var tokens: UInt32; var xStride: UInt32; var yStride: UInt32; var pad: UInt32 = 0 }
+
     private let f16Out: MTLComputePipelineState
     private let f32Out: MTLComputePipelineState
+    private let batchedF16Out: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         let library = try MetalContext.moduleLibrary(device: context.device, module: "gguf_int8_2l")
         guard let a = library.makeFunction(name: "gguf_int8_2l_gemv_f16out"),
-              let b = library.makeFunction(name: "gguf_int8_2l_gemv_f32out") else {
-            throw MetalError.missingFunction("gguf_int8_2l_gemv_*")
+              let b = library.makeFunction(name: "gguf_int8_2l_gemv_f32out"),
+              let c = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f16out") else {
+            throw MetalError.missingFunction("gguf_int8_2l_*")
         }
         f16Out = try context.device.makeComputePipelineState(function: a)
         f32Out = try context.device.makeComputePipelineState(function: b)
+        batchedF16Out = try context.device.makeComputePipelineState(function: c)
     }
 
     func encode(commandBuffer: MTLCommandBuffer, weights w: Weights,
@@ -55,6 +61,33 @@ final class GGUFInt8TwoLevelGEMV {
         encoder.setBuffer(x, offset: xOffset, index: 4)
         encoder.setBuffer(y, offset: yOffset, index: 5)
         encoder.dispatchThreadgroups(MTLSize(width: (w.rows + 7) / 8, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// Prefill form: `Y[t] = W · X[t]` for `tokens` rows, half output. Each
+    /// token's row is bit-identical to `encode(…, floatOutput: false)` on that
+    /// token alone; the weights are read once per group of 8 tokens.
+    func encodeBatched(commandBuffer: MTLCommandBuffer, weights w: Weights,
+                       x: MTLBuffer, xOffset: Int = 0, xStride: Int,
+                       y: MTLBuffer, yOffset: Int = 0, yStride: Int, tokens: Int) {
+        precondition(w.n % w.source.blockWeights == 0 && w.n % 8 == 0)
+        precondition((w.source == .q6_K) == (w.m != nil), "Q6_K needs m; Q8_0 has none")
+        precondition(xStride >= w.n && xStride % 4 == 0 && yStride >= w.rows && tokens > 0)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        var params = Params(rows: UInt32(w.rows), n: UInt32(w.n),
+                            bdShift: UInt32(w.source.blockWeights.trailingZeroBitCount),
+                            hasM: w.m == nil ? 0 : 1)
+        var batch = BatchParams(tokens: UInt32(tokens), xStride: UInt32(xStride), yStride: UInt32(yStride))
+        encoder.setComputePipelineState(batchedF16Out)
+        encoder.setBuffer(w.values.buffer, offset: w.values.offset, index: 0)
+        encoder.setBuffer(w.d.buffer, offset: w.d.offset, index: 1)
+        encoder.setBuffer(w.m?.buffer ?? w.values.buffer, offset: w.m?.offset ?? w.values.offset, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<Params>.stride, index: 3)
+        encoder.setBuffer(x, offset: xOffset, index: 4)
+        encoder.setBuffer(y, offset: yOffset, index: 5)
+        encoder.setBytes(&batch, length: MemoryLayout<BatchParams>.stride, index: 6)
+        encoder.dispatchThreadgroups(MTLSize(width: (w.rows + 7) / 8, height: (tokens + 7) / 8, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
     }

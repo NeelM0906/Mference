@@ -18,11 +18,11 @@ import MferenceValidationSupport
     static let cases = [Case(q6K: true, rows: 512, n: 2560), Case(q6K: true, rows: 256, n: 6144),
                         Case(q6K: false, rows: 512, n: 2560), Case(q6K: false, rows: 2560, n: 640)]
 
-    @Test(arguments: cases)
-    func gemvMatchesReference(c: Case) throws {
-        let ctx = try MetalContext()
-        let kernel = try GGUFInt8TwoLevelGEMV(context: ctx)
-        var rng = SeedTree(0x4932_4C47).key("int8-2l-\(c.testDescription)")
+    /// Random Q6_K / Q8_0 blocks with a realistic positive scale, expanded to
+    /// INT8-2L regions laid out as the installer writes them, plus the exact
+    /// fp32 weights from `GGUFBlockDecode`.
+    static func makeWeights(_ c: Case, ctx: MetalContext, rng: inout SplitMix64) throws
+        -> (GGUFInt8TwoLevelGEMV.Weights, [Float]) {
         let blockBytes = c.q6K ? GGUFBlockDecode.q6KBlockBytes : GGUFBlockDecode.q8_0BlockBytes
         let blockWeights = c.q6K ? 256 : 32
         let blocks = c.rows * c.n / blockWeights
@@ -58,6 +58,15 @@ import MferenceValidationSupport
         let w = GGUFInt8TwoLevelGEMV.Weights(
             source: c.q6K ? .q6_K : .q8_0, rows: c.rows, n: c.n,
             values: (buf, vAt), d: (buf, dOff), m: c.q6K ? (buf, mOff) : nil)
+        return (w, weights)
+    }
+
+    @Test(arguments: cases)
+    func gemvMatchesReference(c: Case) throws {
+        let ctx = try MetalContext()
+        let kernel = try GGUFInt8TwoLevelGEMV(context: ctx)
+        var rng = SeedTree(0x4932_4C47).key("int8-2l-\(c.testDescription)")
+        let (w, weights) = try Self.makeWeights(c, ctx: ctx, rng: &rng)
 
         let x = (0..<c.n).map { _ in Float16(rng.uniform(-1, 1)) }
         let xBuf = try #require(x.withUnsafeBytes {
@@ -77,6 +86,45 @@ import MferenceValidationSupport
                 : Array(UnsafeBufferPointer(start: yBuf.contents().bindMemory(to: Float16.self, capacity: c.rows), count: c.rows)).map(Float.init)
             let err = RelError.compute(actual: got, reference: reference)
             #expect(err < Tolerance.fp16Reduction, "\(floatOutput ? "f32" : "f16") out rel error \(err)")
+        }
+    }
+
+    /// The batched prefill form equals the single-token GEMV bit for bit for
+    /// every token, including a partial last group of 8, with padded x and y
+    /// row strides.
+    @Test(arguments: [cases[0], cases[3]])
+    func batchedMatchesSingleTokenBitForBit(c: Case) throws {
+        let ctx = try MetalContext()
+        let kernel = try GGUFInt8TwoLevelGEMV(context: ctx)
+        var rng = SeedTree(0x4932_4C42).key("int8-2l-batched-\(c.testDescription)")
+        let (w, _) = try Self.makeWeights(c, ctx: ctx, rng: &rng)
+        for tokens in [1, 7, 8, 13] {
+            let xStride = c.n + 8, yStride = c.rows + 4
+            let x = (0..<(tokens * xStride)).map { _ in Float16(rng.uniform(-1, 1)) }
+            let xBuf = try #require(x.withUnsafeBytes {
+                ctx.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+            })
+            let yBuf = try #require(ctx.device.makeBuffer(length: tokens * yStride * 2, options: .storageModeShared))
+            let single = try #require(ctx.device.makeBuffer(length: tokens * c.rows * 2, options: .storageModeShared))
+            memset(yBuf.contents(), 0xFF, tokens * yStride * 2)
+            let cb = try #require(ctx.queue.makeCommandBuffer())
+            kernel.encodeBatched(commandBuffer: cb, weights: w, x: xBuf, xStride: xStride,
+                                 y: yBuf, yStride: yStride, tokens: tokens)
+            for t in 0..<tokens {
+                kernel.encode(commandBuffer: cb, weights: w, x: xBuf, xOffset: t * xStride * 2,
+                              y: single, yOffset: t * c.rows * 2, floatOutput: false)
+            }
+            cb.commit(); cb.waitUntilCompleted()
+            #expect(cb.status == .completed)
+            let yb = yBuf.contents().bindMemory(to: UInt16.self, capacity: tokens * yStride)
+            let ys = single.contents().bindMemory(to: UInt16.self, capacity: tokens * c.rows)
+            var mismatches = 0, padTouched = 0
+            for t in 0..<tokens {
+                for r in 0..<c.rows where yb[t * yStride + r] != ys[t * c.rows + r] { mismatches += 1 }
+                for r in c.rows..<yStride where yb[t * yStride + r] != 0xFFFF { padTouched += 1 }
+            }
+            #expect(mismatches == 0, "\(tokens) tokens: \(mismatches) rows differ from the single-token GEMV")
+            #expect(padTouched == 0, "\(tokens) tokens: wrote into the y row padding")
         }
     }
 }
