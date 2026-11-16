@@ -344,8 +344,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Internal fault-injection boundary; production leaves this unset.
     var dsv4PrefillDidCompleteLayer: ((Int) throws -> Void)?
     private let gemmaPrefillPolicy: GemmaPrefillPolicy
-    /// Grouped-GEMM routed experts for well-filled Gemma prefill tiles.
+    /// Grouped-GEMM routed experts for well-filled Gemma and Qwen 3.6 prefill
+    /// tiles (`usesGroupedRoutedExpertGEMM`).
     private let prefillGroupedGEMM: MPPGroupedRoutedMoE?
+    /// Test-only: false sends every routed tile to the row kernel, the control
+    /// arm of the Qwen 3.6 prefill tolerance gate.
+    private var prefillGroupedGEMMEnabled = true
     /// Routed prefill tiles that ran as grouped GEMM rather than per-row GEMV.
     private(set) var prefillGroupedExpertTiles = 0
     /// Prefill attention layer chunks that ran the tensor-ops kernel. It falls
@@ -733,7 +737,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                              siluActivation: silu,
                                                              groupSize: int4GroupSize,
                                                              sourceFP16: prefillMatmulSourceFP16)
-        self.prefillGroupedGEMM = cfg.family == .gemma4 && policy.batchedExperts
+        self.prefillGroupedGEMM = Self.usesGroupedRoutedExpertGEMM(
+            family: cfg.family,
+            gemmaBatchedExperts: policy.batchedExperts,
+            supportsApple10TensorOps: context.device.supportsApple10TensorOps)
             ? MPPGroupedRoutedMoE(context: context, groupSize: int4GroupSize, gelu: !silu)
             : nil
         self.prefillMoE = try PrefillMoE(context: context, sourceFP16: sourceFP16)
@@ -2825,7 +2832,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             Int(tile.groupStart)..<Int(tile.groupStart + tile.groupCount)]
                             .map { Int($0.pairCount) }
                         let argumentBuffer: PrefillStreamedTileArgumentBuffer
-                        if let grouped = prefillGroupedGEMM, grouped.isAvailable,
+                        if prefillGroupedGEMMEnabled,
+                           let grouped = prefillGroupedGEMM, grouped.isAvailable,
                            let activation = scratch.groupedExpertActivation,
                            PrefillGroupedExpertGate.usesGroupedGEMM(pairCounts: tilePairCounts) {
                             // Whole 64-row matrix tiles per expert; its group
@@ -3892,6 +3900,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          supportsApple10TensorOps: Bool) -> Bool {
         family == .qwen36 && !supportsApple10TensorOps
     }
+
+    /// Whether chunked prefill's routed experts may take the grouped-GEMM
+    /// kernel (`MPPGroupedRoutedMoE`) for tiles that pass
+    /// `PrefillGroupedExpertGate`. Gemma 4 keeps its batched-experts policy.
+    /// Qwen 3.6 takes it only where the Apple10 TensorOps path is absent, the
+    /// hardware it was measured on; it changes output within tolerance, so
+    /// every other family and M5-class host keeps its bytes. Where the
+    /// `tensorops` module does not build (the macOS 15 floor) the kernel is
+    /// unavailable and the row kernel runs.
+    static func usesGroupedRoutedExpertGEMM(family: ModelFamily,
+                                            gemmaBatchedExperts: Bool,
+                                            supportsApple10TensorOps: Bool) -> Bool {
+        switch family {
+        case .gemma4: return gemmaBatchedExperts
+        case .qwen36: return !supportsApple10TensorOps
+        default: return false
+        }
+    }
+
+    /// Test-only: routes every prefill tile to the row kernel.
+    func useRowKernelForRoutedExperts() { prefillGroupedGEMMEnabled = false }
 
     /// Splits Inkling prefill's routed-expert loop into fetch / encode / drain,
     /// the prefill counterpart to `MFERENCE_PHASES` for decode. Off by default:

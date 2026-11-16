@@ -4,15 +4,17 @@ import Metal
 import Testing
 @testable import Mference
 
-/// Quality gate for the Qwen 3.6 GQA-shared prefill attention kernel
-/// (`attention_prefill_gqa8_d256_simd`), which reorders floating-point sums.
+/// Quality gates for Qwen 3.6 prefill kernels that reorder floating-point
+/// sums: the GQA-shared attention kernel (`attention_prefill_gqa8_d256_simd`)
+/// and the grouped-GEMM routed experts (`MPPGroupedRoutedMoE`).
 ///
 /// Set `MFERENCE_QWEN36_PREFILL_GATE` to an installed `qwen36.gturbo`; the
-/// install is read-only. Control is the default runner with the tiled
-/// attention kernel restored; candidate is the default runner, which selects
-/// the GQA kernel on GPUs without the Apple10 TensorOps path. Both prefill the
-/// same prompts in 4,096-token chunks and are teacher-forced through the same
-/// saved answers, so every difference comes from full-attention prefill.
+/// install is read-only. In each test, control is the default runner with that
+/// one kernel replaced by its predecessor (the tiled attention kernel, or the
+/// row kernel for every routed tile); candidate is the default runner, which
+/// selects both kernels on GPUs without the Apple10 TensorOps path. Both
+/// prefill the same prompts in 4,096-token chunks and are teacher-forced
+/// through the same saved answers, so every difference comes from that kernel.
 ///
 /// The items are the frozen community prompts with Qwen's and Gemma's answers,
 /// and one prompt of about 8K tokens built from the repository's design docs,
@@ -60,7 +62,7 @@ struct Qwen36PrefillEquivalenceGateTests {
     struct Outcome {
         var rows: [String: [Row]] = [:]
         var prefillSeconds: [String: Double] = [:]
-        var gqaDispatches = 0
+        var dispatches = 0
     }
 
     private static func messages(_ url: URL) throws -> [MFTokenizer.Message] {
@@ -72,6 +74,47 @@ struct Qwen36PrefillEquivalenceGateTests {
     }
 
     @Test func gqaPrefillAttentionKeepsTeacherForcedPerplexity() async throws {
+        try await runGate(
+            label: "tiled->gqa", outKey: "tiledToGQA",
+            precondition: { model, context in
+                let usesGQA = RealForwardRunner.usesQwenGQASimdAttention(
+                    family: model.config.family, supportsApple10TensorOps: context.device.supportsApple10TensorOps)
+                try #require(usesGQA, "the GQA kernel is the default only on GPUs without the Apple10 TensorOps path")
+            },
+            configureControl: { $0.prefillAttentionKernels.useTiledKernelForGQAShapes() },
+            dispatches: { $0.prefillAttentionKernels.gqaSimdDispatches },
+            checkDispatches: { control, candidate, itemCount in
+                #expect(control == 0)
+                // 10 full-attention layers per chunk: 1 chunk for each short item, 2 for the 8K item.
+                #expect(candidate == 10 * (itemCount + 1), "candidate GQA dispatches \(candidate)")
+            })
+    }
+
+    @Test func groupedRoutedExpertsKeepTeacherForcedPerplexity() async throws {
+        try await runGate(
+            label: "row->grouped", outKey: "rowToGrouped",
+            precondition: { model, context in
+                let selected = RealForwardRunner.usesGroupedRoutedExpertGEMM(
+                    family: model.config.family, gemmaBatchedExperts: true,
+                    supportsApple10TensorOps: context.device.supportsApple10TensorOps)
+                try #require(selected, "grouped routed experts are the Qwen default only off Apple10")
+                try #require(MPPGroupedRoutedMoE(context: context).isAvailable,
+                             "the tensorops grouped kernel does not build on this host")
+            },
+            configureControl: { $0.useRowKernelForRoutedExperts() },
+            dispatches: { $0.prefillGroupedExpertTiles },
+            checkDispatches: { control, candidate, _ in
+                #expect(control == 0)
+                #expect(candidate > 0, "candidate grouped tiles \(candidate)")
+            })
+    }
+
+    private func runGate(label: String, outKey: String,
+                         precondition: (Model, MetalContext) throws -> Void,
+                         configureControl: (RealForwardRunner) -> Void,
+                         dispatches: (RealForwardRunner) -> Int,
+                         checkDispatches: (_ control: Int, _ candidate: Int, _ itemCount: Int) -> Void)
+        async throws {
         let install = URL(fileURLWithPath: try #require(
             ProcessInfo.processInfo.environment["MFERENCE_QWEN36_PREFILL_GATE"]))
         let root = GemmaPrefillGateFixture.repositoryRoot
@@ -161,11 +204,11 @@ struct Qwen36PrefillEquivalenceGateTests {
             return Row(nll: Double(maximum + log(sum) - values[Int(target)]), top1: Int(index))
         }
 
-        func run(tiledAttention: Bool) async throws -> Outcome {
+        func run(control: Bool) async throws -> Outcome {
             let runner = try RealForwardRunner(
                 model: model, context: context, maxContext: longest + 64,
                 runtimeConfiguration: RuntimeConfiguration(prefillChunkTokens: 4096, forceLogitsHead: true))
-            if tiledAttention { runner.prefillAttentionKernels.useTiledKernelForGQAShapes() }
+            if control { configureControl(runner) }
             var outcome = Outcome()
             for item in items {
                 runner.reset()
@@ -181,18 +224,14 @@ struct Qwen36PrefillEquivalenceGateTests {
                 }
                 outcome.rows[item.name] = rows
             }
-            outcome.gqaDispatches = runner.prefillAttentionKernels.gqaSimdDispatches
+            outcome.dispatches = dispatches(runner)
             return outcome
         }
 
-        let usesGQA = RealForwardRunner.usesQwenGQASimdAttention(
-            family: model.config.family, supportsApple10TensorOps: context.device.supportsApple10TensorOps)
-        try #require(usesGQA, "the GQA kernel is the default only on GPUs without the Apple10 TensorOps path")
-        let control = try await run(tiledAttention: true)
-        let candidate = try await run(tiledAttention: false)
-        #expect(control.gqaDispatches == 0)
-        // 10 full-attention layers per chunk: 1 chunk for each short item, 2 for the 8K item.
-        #expect(candidate.gqaDispatches == 10 * (items.count + 1), "candidate GQA dispatches \(candidate.gqaDispatches)")
+        try precondition(model, context)
+        let control = try await run(control: true)
+        let candidate = try await run(control: false)
+        checkDispatches(control.dispatches, candidate.dispatches, items.count)
 
         var differences: [Double] = [], baseSum = 0.0, sameTop = 0
         var saved: [[String: Any]] = []
@@ -224,15 +263,15 @@ struct Qwen36PrefillEquivalenceGateTests {
         let halfWidth = 1.96 * (batchVariance / Double(batches.count)).squareRoot()
         let agreement = Double(sameTop) / Double(predictions)
         let maxAbs = differences.map(abs).max() ?? 0
-        print(String(format: "[qwen36-prefill-gate] tiled->gqa %@ predictions=%d base NLL=%.5f dNLL=%+.5f (95%% %+.5f..%+.5f) max|d|=%.4f top1 agreement=%.4f",
-                     model.modelID, predictions, baseSum / Double(predictions), meanDifference,
+        print(String(format: "[qwen36-prefill-gate] %@ %@ predictions=%d base NLL=%.5f dNLL=%+.5f (95%% %+.5f..%+.5f) max|d|=%.4f top1 agreement=%.4f",
+                     label, model.modelID, predictions, baseSum / Double(predictions), meanDifference,
                      meanDifference - halfWidth, meanDifference + halfWidth, maxAbs, agreement))
         let material = meanDifference > 0.005 && meanDifference - halfWidth > 0
         #expect(!material, "dNLL=\(meanDifference) +/- \(halfWidth)")
         #expect(meanDifference <= 0.02, "dNLL=\(meanDifference)")
         #expect(agreement >= 0.98, "agreement=\(agreement)")
         if let path = ProcessInfo.processInfo.environment["MFERENCE_QWEN36_PREFILL_GATE_OUT"] {
-            try JSONSerialization.data(withJSONObject: ["modelID": model.modelID, "tiledToGQA": saved])
+            try JSONSerialization.data(withJSONObject: ["modelID": model.modelID, outKey: saved])
                 .write(to: URL(fileURLWithPath: path))
         }
     }
