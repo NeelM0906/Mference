@@ -280,3 +280,99 @@ kernel void gguf_lut4_moe_phase2_down_reduce(
         y[d] = half(acc);
     }
 }
+
+// ============================================================================
+// LUT4 routed-expert prefill, streamed tile (row form). Same interface as
+// prefill_grouped_routed_moe_batched_phase1 / _down in prefill.metal, so the
+// runner's tile binding, pair sorting and token-major reduce are reused:
+//   - pairs are PrefillTokenExpertPairMSL {token, expert, rank, weight bits};
+//   - routed is the 16-slot tile blob table;
+//   - params is PrefillGroupedRoutedMoEStreamedParamsMSL with the nine
+//     per-projection offsets read as LUT4 (index, D, M) for gate, up, down;
+//   - phase 1 writes gate, up and silu(gate)·up into gate_up_act_scratch
+//     (three planes of pair_count × F half); down writes the unweighted
+//     down value to down_scratch and route_partials[(token·top_k + rank)·D + d].
+// One simdgroup per (output row, pair), using lut4_row_dot (decode-tested).
+// A grouped simdgroup-matrix form is a later optimization (WS1 P3b's tiling).
+// ============================================================================
+
+constant uint kLUT4PrefillMaxTileExperts = 16;
+
+struct LUT4PrefillPair { uint token; uint expert; uint rank; uint weight_bits; };
+
+struct LUT4PrefillBlobs { device const uchar* blob[kLUT4PrefillMaxTileExperts]; };
+
+struct LUT4PrefillParams {
+    uint pair_start, pair_count, D, F, top_k, hidden_stride_elements, live_expert_count;
+    uint local_expert[kLUT4PrefillMaxTileExperts];
+    uint gate_idx, gate_d, gate_m, up_idx, up_d, up_m, down_idx, down_d, down_m;
+};
+
+static inline uint lut4_prefill_local_slot(constant LUT4PrefillParams& p, uint expert) {
+    for (uint s = 0; s < p.live_expert_count; ++s) {
+        if (p.local_expert[s] == expert) { return s; }
+    }
+    return kLUT4PrefillMaxTileExperts;
+}
+
+// Grid: x = F * 32 (one simdgroup per row f), y = pair_count.
+// Threadgroup: (256, 1, 1).
+kernel void gguf_lut4_prefill_phase1(
+    device const half* hidden [[buffer(0)]],
+    device const LUT4PrefillPair* sorted_pairs [[buffer(1)]],
+    device half* gate_up_act_scratch [[buffer(7)]],
+    device const LUT4PrefillBlobs& routed [[buffer(9)]],
+    constant LUT4PrefillParams& p [[buffer(10)]],
+    constant LUT4ProjParams& gu [[buffer(11)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup float T[16];
+    if (tid < 16) { T[tid] = gu.table[tid]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint f = gid.x / 32, lane = gid.x % 32, pair_local = gid.y;
+    if (f >= p.F || pair_local >= p.pair_count) { return; }
+    const LUT4PrefillPair pair = sorted_pairs[p.pair_start + pair_local];
+    const uint slot = lut4_prefill_local_slot(p, pair.expert);
+    if (slot >= p.live_expert_count) { return; }
+    device const uchar* base = routed.blob[slot];
+    device const half* x = hidden + pair.token * p.hidden_stride_elements;
+    const float g = lut4_row_dot(base + p.gate_idx, (device const ushort*)(base + p.gate_d),
+                                 (device const char*)(base + p.gate_m), gu, T, x, f, p.D, lane);
+    const float u = lut4_row_dot(base + p.up_idx, (device const ushort*)(base + p.up_d),
+                                 (device const char*)(base + p.up_m), gu, T, x, f, p.D, lane);
+    if (lane != 0) { return; }
+    const uint plane = p.pair_count * p.F, index = pair_local * p.F + f;
+    gate_up_act_scratch[index] = half(g);
+    gate_up_act_scratch[plane + index] = half(u);
+    gate_up_act_scratch[2 * plane + index] = half((g / (1.0f + exp(-g))) * u);
+}
+
+// Grid: x = D * 32 (one simdgroup per output row d), y = pair_count.
+kernel void gguf_lut4_prefill_down(
+    device const LUT4PrefillPair* sorted_pairs [[buffer(1)]],
+    device half* route_partials [[buffer(5)]],
+    device const half* gate_up_act_scratch [[buffer(7)]],
+    device half* down_scratch [[buffer(8)]],
+    device const LUT4PrefillBlobs& routed [[buffer(9)]],
+    constant LUT4PrefillParams& p [[buffer(10)]],
+    constant LUT4ProjParams& dp [[buffer(11)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup float T[16];
+    if (tid < 16) { T[tid] = dp.table[tid]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint d = gid.x / 32, lane = gid.x % 32, pair_local = gid.y;
+    if (d >= p.D || pair_local >= p.pair_count) { return; }
+    const LUT4PrefillPair pair = sorted_pairs[p.pair_start + pair_local];
+    const uint slot = lut4_prefill_local_slot(p, pair.expert);
+    if (slot >= p.live_expert_count) { return; }
+    device const uchar* base = routed.blob[slot];
+    device const half* act = gate_up_act_scratch + 2 * p.pair_count * p.F + pair_local * p.F;
+    const half value = half(lut4_row_dot(base + p.down_idx, (device const ushort*)(base + p.down_d),
+                                         (device const char*)(base + p.down_m), dp, T, act, d, p.F, lane));
+    if (lane != 0) { return; }
+    down_scratch[pair_local * p.D + d] = value;
+    route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
+}
