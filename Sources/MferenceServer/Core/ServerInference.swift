@@ -345,7 +345,7 @@ public actor ServerModelSession: ServerLoadedModel {
                                          prefillConfig: forwardRuntime.prefillConfig,
                                          maxContext: maxContext,
                                          promptCacheMode: promptCacheMode,
-                                         promptCacheBytes: promptCacheBytes.resolved(),
+                                         promptCacheBytes: promptCacheBytes.resolved(family: family),
                                          promptCacheDomain: promptCacheDomain)
         await session.startMemoryPressureRelief()
         return session

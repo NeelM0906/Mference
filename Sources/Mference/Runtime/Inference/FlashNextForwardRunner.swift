@@ -2915,3 +2915,235 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         }
     }
 }
+
+// MARK: - Prefix state snapshots (server multi-prefix cache)
+
+/// Flash-Next's numerical state at a position, for the server's multi-prefix
+/// cache (`PrefixStateCache`):
+///
+/// * rows: per full-attention layer, KV rows [0, n), indexer raw keys [0, n)
+///   and the pooled block keys of the ⌊n / compressRatio⌋ blocks complete at
+///   n. All three are append-only and addressed by absolute position, so a
+///   rewind within the live lineage needs no copy (as `reset()` relies on);
+///   a block row past a rewound position is never read, because each query
+///   scores only the blocks complete at its own position, and it is rewritten
+///   when that block completes again;
+/// * recurrent: everything `checkpointBuffers()` holds (GDN state and conv
+///   tails, PLE conv state), the committed MTP hidden bundle, the PLE id
+///   history, the sequential-prefill flag and the position it was taken at.
+///
+/// The attention and indexer caches are private storage, so copies are GPU
+/// blits into the region, wrapped without a copy. Runners with a capture,
+/// forced routes (diagnostics) or an MTP rows consumer report no support, and
+/// the server keeps its single-prefix behaviour for them.
+extension FlashNextForwardRunner: PrefixStateSnapshotting {
+    /// position, history count, flags, reserved: four Int64s.
+    private static let prefixSnapshotHeaderBytes = 32
+    private static let prefixSnapshotHasHidden: Int64 = 1
+    private static let prefixSnapshotSequentialPrefill: Int64 = 2
+
+    public var supportsPrefixStateSnapshots: Bool {
+        (model.config.family == .qwen38flashnext
+            || model.config.family == .qwen38flashnextudiq3xxs)
+            && capture == nil && forcedRoutes == nil && consumeTargetHiddenRows == nil
+            && !kvCaches.isEmpty
+            && kvCaches.keys.allSatisfy { indexerCaches[$0] != nil }
+    }
+
+    private var prefixSnapshotLayers: [Int] { kvCaches.keys.sorted() }
+    private var prefixKVRowStride: Int { attention.geometry.kvDim * MemoryLayout<Float16>.stride }
+    private var prefixIndexerRowStride: Int { indexer.geometry.headDim * MemoryLayout<Float>.stride }
+    private var prefixHiddenBytes: Int { bundle * MemoryLayout<Float16>.stride }
+    private var prefixHistoryCount: Int { pleHash?.historyLength ?? 0 }
+
+    /// The copies for rows [0, count), in region order.
+    private func prefixRowRanges(count: Int) -> [(buffer: MTLBuffer, bytes: Int)] {
+        let blocks = count / indexer.geometry.compressRatio
+        return prefixSnapshotLayers.flatMap { layer -> [(buffer: MTLBuffer, bytes: Int)] in
+            guard let kv = kvCaches[layer], let keys = indexerCaches[layer] else { return [] }
+            return [(kv.keys, count * prefixKVRowStride),
+                    (kv.values, count * prefixKVRowStride),
+                    (keys.rawKeys, count * prefixIndexerRowStride),
+                    (keys.blockKeys, blocks * prefixIndexerRowStride)]
+        }
+    }
+
+    public func prefixKVRowBytes(tokens: Int) -> Int {
+        guard tokens > 0 else { return 0 }
+        return prefixRowRanges(count: tokens).reduce(0) { $0 + $1.bytes }
+    }
+
+    public var prefixRecurrentStateBytes: Int {
+        checkpointBuffers().reduce(0) { $0 + $1.length } + prefixHiddenBytes
+            + Self.prefixSnapshotHeaderBytes + prefixHistoryCount * MemoryLayout<Int64>.stride
+    }
+
+    private func requirePrefixSnapshotReady(_ operation: String) throws {
+        try Task.checkCancellation()
+        try prefillChunkState.requireClean(operation: operation)
+        guard supportsPrefixStateSnapshots else {
+            throw PrefixSnapshotError.unsupported("\(model.config.family) runner")
+        }
+        try joinPendingMoE()
+    }
+
+    /// The region as a shared buffer over the same pages. The region is
+    /// page-aligned and page-rounded by construction and outlives the blit,
+    /// which completes before this runner returns.
+    private func prefixRegionBuffer(_ region: PrefixSnapshotRegion) throws -> MTLBuffer {
+        guard let buffer = ctx.device.makeBuffer(bytesNoCopy: region.base,
+                                                 length: region.mappedLength,
+                                                 options: .storageModeShared,
+                                                 deallocator: nil) else {
+            throw PrefixSnapshotError.unsupported("the snapshot region could not be wrapped for the GPU")
+        }
+        return buffer
+    }
+
+    /// One blit command, committed and waited for. Not timed: it is not
+    /// forward-pass GPU work.
+    private func prefixBlit(_ label: String, _ encode: (MTLBlitCommandEncoder) -> Void) throws {
+        guard let cb = ctx.queue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else {
+            throw FlashNextForwardRunnerError.commandFailed("cannot encode \(label)")
+        }
+        encode(blit)
+        blit.endEncoding()
+        cb.commit()
+        try waitForCompletion(cb)
+    }
+
+    public func capturePrefixKVRows(count: Int, into region: PrefixSnapshotRegion) throws {
+        try requirePrefixSnapshotReady("prefix KV capture")
+        guard count > 0, count <= position else {
+            throw PrefixSnapshotError.outOfRange("rows 0..<\(count) with cursor at \(position)")
+        }
+        let needed = prefixKVRowBytes(tokens: count)
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        let target = try prefixRegionBuffer(region)
+        let ranges = prefixRowRanges(count: count)
+        try prefixBlit("prefix KV capture") { blit in
+            var offset = 0
+            for (buffer, bytes) in ranges where bytes > 0 {
+                blit.copy(from: buffer, sourceOffset: 0, to: target, destinationOffset: offset, size: bytes)
+                offset += bytes
+            }
+        }
+    }
+
+    public func capturePrefixRecurrentState(into region: PrefixSnapshotRegion) throws {
+        try requirePrefixSnapshotReady("prefix recurrent capture")
+        let needed = prefixRecurrentStateBytes
+        guard region.byteCount >= needed else {
+            throw PrefixSnapshotError.regionTooSmall(needed: needed, available: region.byteCount)
+        }
+        let target = try prefixRegionBuffer(region)
+        let sources = checkpointBuffers()
+        let hidden = committedHiddenSource
+        var offset = 0
+        try prefixBlit("prefix recurrent capture") { blit in
+            for source in sources {
+                blit.copy(from: source, sourceOffset: 0, to: target, destinationOffset: offset,
+                          size: source.length)
+                offset += source.length
+            }
+            if let hidden {
+                blit.copy(from: hidden.buffer, sourceOffset: hidden.offset, to: target,
+                          destinationOffset: offset, size: prefixHiddenBytes)
+            }
+        }
+        offset += prefixHiddenBytes
+        var flags: Int64 = 0
+        if hidden != nil { flags |= Self.prefixSnapshotHasHidden }
+        if inSequentialPrefill { flags |= Self.prefixSnapshotSequentialPrefill }
+        let header: [Int64] = [Int64(position), Int64(pleHistory.count), flags, 0]
+            + pleHistory.map(Int64.init)
+        header.withUnsafeBytes { bytes in
+            region.base.advanced(by: offset).copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+        }
+    }
+
+    public func restorePrefixState(rows: (region: PrefixSnapshotRegion, count: Int)?,
+                                   position target: Int,
+                                   recurrentState: PrefixSnapshotRegion) throws {
+        try requirePrefixSnapshotReady("prefix restore")
+        // Validate everything before the first copy.
+        let sources = checkpointBuffers()
+        let stateBytes = sources.reduce(0) { $0 + $1.length }
+        guard recurrentState.byteCount >= prefixRecurrentStateBytes else {
+            throw PrefixSnapshotError.regionTooSmall(needed: prefixRecurrentStateBytes,
+                                                     available: recurrentState.byteCount)
+        }
+        // The header follows buffers of any length, so it may be unaligned.
+        let headerBase = UnsafeRawPointer(recurrentState.base.advanced(by: stateBytes + prefixHiddenBytes))
+        let field = { (index: Int) in
+            headerBase.loadUnaligned(fromByteOffset: index * MemoryLayout<Int64>.stride, as: Int64.self)
+        }
+        let capturedPosition = Int(field(0)), historyCount = Int(field(1)), flags = field(2)
+        guard capturedPosition == target, historyCount == prefixHistoryCount, historyCount >= 0 else {
+            throw PrefixSnapshotError.outOfRange(
+                "recurrent state taken at \(capturedPosition) (history \(historyCount)), "
+                + "restored to \(target) (history \(prefixHistoryCount))")
+        }
+        let history = (0..<historyCount).map { Int(field(4 + $0)) }
+        if let rows {
+            let capacity = kvCaches.values.map(\.maxTokens).min() ?? 0
+            guard rows.count > 0, rows.count <= capacity, target > 0, target <= rows.count else {
+                throw PrefixSnapshotError.outOfRange(
+                    "restore of rows 0..<\(rows.count) to position \(target) with capacity \(capacity)")
+            }
+            let needed = prefixKVRowBytes(tokens: rows.count)
+            guard rows.region.byteCount >= needed else {
+                throw PrefixSnapshotError.regionTooSmall(needed: needed, available: rows.region.byteCount)
+            }
+        } else {
+            guard target > 0, target <= position else {
+                throw PrefixSnapshotError.outOfRange("rewind to \(target) with cursor at \(position)")
+            }
+        }
+        let rowSource = try rows.map { try prefixRegionBuffer($0.region) }
+        let rowRanges = rows.map { prefixRowRanges(count: $0.count) } ?? []
+        let stateSource = try prefixRegionBuffer(recurrentState)
+        let hasHidden = flags & Self.prefixSnapshotHasHidden != 0
+        var hidden: MTLBuffer?
+        if hasHidden {
+            guard let copy = ctx.device.makeBuffer(length: prefixHiddenBytes,
+                                                   options: .storageModePrivate) else {
+                throw MetalError.noDevice
+            }
+            hidden = copy
+        }
+
+        // From here a throw leaves the runner dirty until `reset()`.
+        prefillChunkState.markDirty(startPosition: target, tokenCount: 1)
+        let hiddenBytes = prefixHiddenBytes
+        try prefixBlit("prefix restore") { blit in
+            if let rowSource {
+                var offset = 0
+                for (buffer, bytes) in rowRanges where bytes > 0 {
+                    blit.copy(from: rowSource, sourceOffset: offset, to: buffer,
+                              destinationOffset: 0, size: bytes)
+                    offset += bytes
+                }
+            }
+            var offset = 0
+            for destination in sources {
+                blit.copy(from: stateSource, sourceOffset: offset, to: destination,
+                          destinationOffset: 0, size: destination.length)
+                offset += destination.length
+            }
+            if let hidden {
+                blit.copy(from: stateSource, sourceOffset: offset, to: hidden,
+                          destinationOffset: 0, size: hiddenBytes)
+            }
+        }
+        position = target
+        pleHistory = history
+        inSequentialPrefill = flags & Self.prefixSnapshotSequentialPrefill != 0
+        committedHiddenSource = hidden.map { ($0, 0) }
+        prefillChunkState.markCommitted()
+        // Decode checkpoints taken before this restore describe another state.
+        checkpointEpoch &+= 1
+    }
+}
