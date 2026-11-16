@@ -271,6 +271,33 @@ import Testing
         #expect(h.bits() == expected)
     }
 
+    /// D4: joining the previous layer's MoE behind the router readback, instead
+    /// of at the start of each layer, is exact. Every decode step's logits and
+    /// the final residual bundle match the old order bit for bit.
+    @Test func moeJoinAfterRouterReadbackMatchesJoinAtLayerStart() async throws {
+        let h = try make()
+        defer { try? FileManager.default.removeItem(at: h.directory) }
+        let tokens = (0..<24).map { Int32(4 + ($0 * 29) % 61) }
+        func decode(drainAtLayerStart: Bool) async throws -> (steps: [[UInt16]], hidden: [UInt16]) {
+            h.runner.reset()
+            h.runner.drainMoEAtLayerStart = drainAtLayerStart
+            var steps: [[UInt16]] = []
+            for (position, token) in tokens.enumerated() {
+                try await h.runner.produce(token: token, position: position, into: h.output)
+                steps.append(h.bits())
+            }
+            return (steps, try h.hiddenBits(h.runner.captureTargetHiddenBundle()))
+        }
+        let control = try await decode(drainAtLayerStart: true)
+        let candidate = try await decode(drainAtLayerStart: false)
+        h.runner.drainMoEAtLayerStart = false
+        #expect(candidate.steps.count == tokens.count)
+        for step in 0..<tokens.count {
+            #expect(candidate.steps[step] == control.steps[step], "decode step \(step)")
+        }
+        #expect(candidate.hidden == control.hidden)
+    }
+
     @Test func interruptedDecodeRejectsReuseButCanRestoreAnEarlierCheckpoint() async throws {
         let h = try make()
         defer { try? FileManager.default.removeItem(at: h.directory) }
