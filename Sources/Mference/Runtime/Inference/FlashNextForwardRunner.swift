@@ -464,14 +464,21 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private(set) var tensorOpsPrefillEncodings = 0
     var tensorOpsPrefillAvailable: Bool { prefillMPPGroupedMoE.isAvailable }
     /// The MoE sub-block's command buffer, committed without a wait so the CPU
-    /// can start the next layer's work while it runs. Joined before anything
-    /// else touches `hyper`.
-    ///
-    /// Command buffers on one queue execute in commit order, so this is belt and
-    /// braces — but it is the pattern `RealForwardRunner` uses for exactly the
-    /// same reason, and a residual-stream race would be silent in the output
-    /// rather than loud.
+    /// can start the next layer's work while it runs. In routed decode the next
+    /// layer's attention command buffer is committed behind it on the same queue
+    /// (command buffers on one queue execute in commit order, which also orders
+    /// their `hyper` and `mixed` accesses), and it is joined after that layer's
+    /// router readback, before the CPU reads routes or rewrites the expert
+    /// staging slab. Resident-routed and captured layers, and every other
+    /// caller, join before touching `hyper`.
     private var pendingMoECommand: MTLCommandBuffer?
+    /// Whether `pendingMoECommand` came from the resident-routed branch, which
+    /// has no router readback for the next layer to join behind.
+    private var pendingMoEIsResident = false
+    /// Test-only: join the previous layer's MoE command buffer at the start of
+    /// each decode layer, the order before the join moved behind the router
+    /// readback. The two orders must produce identical bits.
+    var drainMoEAtLayerStart = false
     /// Checked lazily: the LFU slot cache must hold at least `topK` experts or
     /// `PreadExpertStreamer.planExpertsCached` traps rather than degrading.
     private var slotBudgetChecked = false
@@ -2091,7 +2098,16 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     }
 
     private func encodeLayer(_ L: Int, token: Int, position p: Int) async throws {
-        try joinPendingMoE()
+        // The previous layer's MoE command buffer is joined after this layer's
+        // router readback (`finish(cb)` below), not here: `cb` is committed
+        // behind it on the same queue, so the GPU already runs them in order,
+        // and the CPU encodes this layer's attention while that MoE runs. By
+        // the time the router readback completes, the earlier MoE buffer has
+        // completed too, so the join there costs no second wake and still
+        // surfaces its error before this layer's expert fetch rewrites the
+        // raw staging slab. A resident-routed or captured previous layer
+        // keeps the join here.
+        if capture != nil || pendingMoEIsResident || drainMoEAtLayerStart { try joinPendingMoE() }
         let layer = layers[L]
         let key = String(format: "layer%02d.", L)
 
@@ -2257,8 +2273,12 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             hc.encodeInjectAccumulate(commandBuffer: cb, scratch: hcScratch,
                                       hyper: hyper, block: moeOut, rows: 1)
             trackGpuInterval(cb)
+            // A routed previous layer not yet joined (no readback ran here):
+            // join it before its handle is replaced.
+            try joinPendingMoE()
             cb.commit()
             pendingMoECommand = cb
+            pendingMoEIsResident = true
             return
         }
         if let forcedRouteLogits, forcedRoutes?.covers(position: p) == true,
@@ -2268,6 +2288,9 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             blit.endEncoding()
         }
         try finish(cb)
+        // Already complete (it ran before `cb` on this queue): no wait, but its
+        // error surfaces here and the staging slab and slots are free.
+        try joinPendingMoE()
         if let forcedRouteLogits, let ids = forcedRoutes?.ids(position: p, layer: L) {
             applyForcedRoute(ids: ids, logits: forcedRouteLogits)
         }
@@ -2312,6 +2335,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
         trackGpuInterval(moeCB)
         moeCB.commit()
         pendingMoECommand = moeCB
+        pendingMoEIsResident = false
         try captureAfterDrain(key + "stream_out", hyper, count: bundle)
     }
 
@@ -2336,6 +2360,7 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     private func joinPendingMoE() throws {
         guard let pending = pendingMoECommand else { return }
         pendingMoECommand = nil
+        pendingMoEIsResident = false
         pending.waitUntilCompleted()
         if let error = pending.error {
             throw FlashNextForwardRunnerError.commandFailed("\(error)")
