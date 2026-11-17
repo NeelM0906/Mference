@@ -44,6 +44,7 @@ documented as what has been exercised, not as what is permitted.
 | MPL | Maple Preview | `maple` | `ArchConfig.maplePreview` |
 | FLT | Flint-40B-A2.5B | `flint` | `ArchConfig.flint40B_A2_5B_JANG_4M` |
 | FNX | Qwen3.8-Flash-Next 180B-A3.5B | `qwen38flashnext` | `ArchConfig.qwen38FlashNext_180B_A3_5B` |
+| FNU | Qwen3.8-Flash-Next, Unsloth UD-IQ3_XXS GGUF (third-party quant) | `qwen38flashnextudiq3xxs` | `ArchConfig.qwen38FlashNextUnslothUDIQ3XXS` |
 | MC5 | MiniCPM5-2B | `minicpm5` | `ArchConfig.miniCPM5_2B` |
 | G53 | GLM-5.3-Flash 320B-A18B | `glm53Flash` | `ArchConfig.glm53Flash_320B_A18B` |
 
@@ -55,11 +56,20 @@ runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
 authoritative capability gate, and `peekFamily` consults it before any of this
 machinery is reached.
 
-That table has **one entry today: G53**, added 2026-09-11 with its Day-0
-contract ([GLM-5.3-Flash](families/GLM53_FLASH.md)); the three axis names it
-lists are the mechanisms of the `glm53` section below. FNX was the previous
-entry, and its gate was lifted on 2026-09-10 once `FlashNextForwardRunner`
-landed. MC5 never entered the gate: its baseline and `MiniCPM5ForwardRunner`
+That table is **empty today**. Earlier entries were FNU, added 2026-11-15
+with its GGUF install path and lifted once `FlashNextForwardRunner` ran it
+(resident expert mode and native MTP, which it does not run, are refused by
+name in `Model.ggufExpertModeRefusal` and `FlashNextMTPWeights`); G53, added
+2026-09-11 with its Day-0 contract
+([GLM-5.3-Flash](families/GLM53_FLASH.md)) and lifted when its runner landed;
+and FNX, whose gate was lifted on 2026-09-10 once `FlashNextForwardRunner`
+landed.
+
+FNU has no column of its own in the field tables below: every value equals
+FNX's except `family` and the two storage-shaped PLE fields,
+`pleNgramShardCount` (1: the GGUF stores the n-gram table as one merged
+tensor) and `pleNgramVocabSizeBase` (0: the GGUF carries the explicit per-head
+vocab sizes instead of the base). MC5 never entered the gate: its baseline and `MiniCPM5ForwardRunner`
 arrived together ([MiniCPM5](families/MINICPM5.md)). Keep the two facts
 separate — a new
 port earns its `ArchConfig` baseline, `ModelFamily` case, tensor accessors and

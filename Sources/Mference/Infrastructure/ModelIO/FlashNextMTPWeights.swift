@@ -28,7 +28,14 @@ struct FlashNextMTPWeights {
     let expertLayout: StreamLayout
     let expertOffsets: MoEExpertOffsets
 
+    /// The families whose installs carry the native MTP sidecar. The WS4
+    /// GGUF install (`qwen38flashnextudiq3xxs`) has none and is refused.
+    static let supportedFamilies: Set<ModelFamily> = [.qwen38flashnext]
+
     init(model: Model) throws {
+        guard Self.supportedFamilies.contains(model.config.family) else {
+            throw Self.invalid("native MTP is not available for \(model.config.family.rawValue)")
+        }
         guard model.config.family == .qwen38flashnext,
               model.manifest.sidecars?["mtp"]?.carried == true,
               model.manifest.sidecars?["mtp"]?.tensorCount == 31 else {

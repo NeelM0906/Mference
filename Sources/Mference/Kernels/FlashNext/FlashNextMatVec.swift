@@ -38,6 +38,66 @@ enum FlashNextWeightMatrix {
               scales: MTLBuffer, scalesOffset: Int,
               biases: MTLBuffer, biasesOffset: Int)
     case bf16(buffer: MTLBuffer, offset: Int)
+    /// WS4 GGUF install: an INT8-2L matrix (dtype `0x80 | ggml type`, Q6_K or
+    /// Q8_0 expanded at install), values / `d` / `m` in the three regions.
+    case ggufInt8TwoLevel(GGUFInt8TwoLevelGEMV.Weights)
+    /// WS4 GGUF install: the native Q6_K `token_embd` (dtype `0x40 | 14`). It
+    /// is only ever row-gathered, never multiplied.
+    case ggufQ6KRows(buffer: MTLBuffer, offset: Int)
+
+    /// Dtype codes of a GGUF install's resident index (WS4 U2): `0x40 | id`
+    /// is a native GGUF block tensor, `0x80 | id` its INT8-2L expansion.
+    static let ggufNativeDtypeBase: UInt8 = 0x40
+    static let ggufInt8TwoLevelDtypeBase: UInt8 = 0x80
+    static let ggmlQ8_0: UInt8 = 8
+    static let ggmlQ6_K: UInt8 = 14
+
+    /// A GGUF install's projection, through a throwing whitelist (WS4 R5):
+    /// dense BF16 (1) and INT8-2L Q6_K / Q8_0 only. F32 matrices are narrowed
+    /// to BF16 by the accessor before they get here; any other code throws
+    /// instead of reaching a precondition. The vendor `from` is not involved.
+    static func fromGGUF(_ view: TensorView, name: String) throws -> FlashNextWeightMatrix {
+        let rows = Int(view.shape.0)
+        let columns = Int(view.shape.1)
+        func corrupt(_ detail: String) -> ModelError {
+            .indexCorrupt(detail: "\(name) [\(rows), \(columns)] dtype \(view.dtype): \(detail)")
+        }
+        guard rows > 0, columns > 0 else { throw corrupt("not a matrix") }
+        let weights = UInt64(rows * columns)
+        switch view.dtype {
+        case 1:
+            guard view.length == weights * 2 else { throw corrupt("BF16 size \(view.length)") }
+            return .bf16(buffer: view.buffer, offset: Int(view.offset))
+        case ggufInt8TwoLevelDtypeBase | ggmlQ6_K, ggufInt8TwoLevelDtypeBase | ggmlQ8_0:
+            let q6K = view.dtype == ggufInt8TwoLevelDtypeBase | ggmlQ6_K
+            let source: GGUFInt8TwoLevelGEMV.Source = q6K ? .q6_K : .q8_0
+            guard columns % source.blockWeights == 0,
+                  view.length == weights,
+                  view.scaleLength == weights / UInt64(source.blockWeights) * 2,
+                  view.biasLength == (q6K ? weights / 16 : 0) else {
+                throw corrupt("INT8-2L regions \(view.length)/\(view.scaleLength)/\(view.biasLength)")
+            }
+            return .ggufInt8TwoLevel(.init(
+                source: source, rows: rows, n: columns,
+                values: (view.buffer, Int(view.offset)),
+                d: (view.buffer, Int(view.scaleOffset)),
+                m: q6K ? (view.buffer, Int(view.biasOffset)) : nil))
+        default:
+            throw corrupt("not a resident matrix format this runner executes")
+        }
+    }
+
+    /// A GGUF install's `token_embd`: native Q6_K rows only.
+    static func ggufEmbedding(_ view: TensorView, name: String) throws -> FlashNextWeightMatrix {
+        let rows = Int(view.shape.0)
+        let columns = Int(view.shape.1)
+        guard view.dtype == ggufNativeDtypeBase | ggmlQ6_K, rows > 0, columns % 256 == 0,
+              view.length == UInt64(rows * columns / 256 * 210) else {
+            throw ModelError.indexCorrupt(
+                detail: "\(name) [\(rows), \(columns)] dtype \(view.dtype) is not a native Q6_K table")
+        }
+        return .ggufQ6KRows(buffer: view.buffer, offset: Int(view.offset))
+    }
 
     /// Build from a loaded tensor view. Dtype 0 is affine-packed with companion
     /// scale/bias slices, at the width `sizeBytes` implies; dtype 1 is dense
@@ -123,6 +183,8 @@ final class FlashNextMatVec {
     /// the end.
     private let onesActivationScale: MTLBuffer?
     private let int8Columns: Int
+    /// INT8-2L GEMV for a WS4 GGUF install; nil for every other runner.
+    private let ggufInt8TwoLevel: GGUFInt8TwoLevelGEMV?
 
     /// Rows per threadgroup; mirrors `kFlashNextGemvRowsPerThreadgroup`.
     private static let rowsPerThreadgroup = 8
@@ -134,8 +196,10 @@ final class FlashNextMatVec {
     /// `[*, hidden]`). Zero — the default — declares that this instance sees no
     /// INT8 tensors, which is what every kernel-level test and the BF16 parity
     /// install want.
-    init(context: MetalContext, int4: DequantInt4GEMV, int8Columns: Int = 0) throws {
+    init(context: MetalContext, int4: DequantInt4GEMV, int8Columns: Int = 0,
+         ggufInt8TwoLevel: Bool = false) throws {
         self.int4 = int4
+        self.ggufInt8TwoLevel = ggufInt8TwoLevel ? try GGUFInt8TwoLevelGEMV(context: context) : nil
         self.int4MultiX = try DequantInt4GEMVMultiX(context: context)
         self.prefillQMM = try PrefillInt4QMM(context: context)
         self.prefillMPP = MPPPrefillInt4QMM(context: context)
@@ -194,6 +258,17 @@ final class FlashNextMatVec {
                        biases: biases, biasesOffset: biasesOffset,
                        x: x, xOffset: xOffset, y: y, yOffset: yOffset,
                        rows: rows, cols: cols, outputFloat32: outputFloat32)
+        case let .ggufInt8TwoLevel(w):
+            guard let kernel = ggufInt8TwoLevel else {
+                preconditionFailure("an INT8-2L matrix reached a FlashNextMatVec built without the GGUF path")
+            }
+            precondition(w.rows == rows && w.n == cols,
+                         "INT8-2L matrix is [\(w.rows), \(w.n)], caller asked for [\(rows), \(cols)]")
+            kernel.encode(commandBuffer: commandBuffer, weights: w,
+                          x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                          floatOutput: outputFloat32)
+        case .ggufQ6KRows:
+            preconditionFailure("the native Q6_K token_embd is row-gathered, never multiplied")
         case let .bf16(buffer, offset):
             guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
             let pso = outputFloat32 ? bf16F32PSO : bf16PSO
@@ -212,6 +287,20 @@ final class FlashNextMatVec {
                                                height: 1, depth: 1))
             enc.endEncoding()
         }
+    }
+
+    /// The GGUF install's native Q6_K `token_embd` gather (WS4).
+    func ggufQ6KEmbedRows(commandBuffer: MTLCommandBuffer,
+                          table: MTLBuffer, tableOffset: Int,
+                          ids: MTLBuffer, idsOffset: Int = 0,
+                          out: MTLBuffer, outOffset: Int = 0,
+                          hidden: Int, tokens: Int) {
+        guard let kernel = ggufInt8TwoLevel else {
+            preconditionFailure("a Q6_K embedding reached a FlashNextMatVec built without the GGUF path")
+        }
+        kernel.encodeQ6KEmbedRows(commandBuffer: commandBuffer, table: table, tableOffset: tableOffset,
+                                  ids: ids, idsOffset: idsOffset, out: out, outOffset: outOffset,
+                                  hidden: hidden, tokens: tokens)
     }
 
     /// `Y[T, M] = X[T, N] * W[M, N]^T` for a contiguous prefill block.
@@ -273,7 +362,16 @@ final class FlashNextMatVec {
                     outputFloat32: outputFloat32)
                 row += count
             }
-        case .int8, .bf16:
+        case let .ggufInt8TwoLevel(w) where !outputFloat32:
+            guard let kernel = ggufInt8TwoLevel else {
+                preconditionFailure("an INT8-2L matrix reached a FlashNextMatVec built without the GGUF path")
+            }
+            precondition(w.rows == matrixRows && w.n == matrixColumns)
+            // Bit-identical per token to the single-token GEMV.
+            kernel.encodeBatched(commandBuffer: commandBuffer, weights: w,
+                                 x: x, xOffset: xOffset, xStride: matrixColumns,
+                                 y: y, yOffset: yOffset, yStride: matrixRows, tokens: tokens)
+        case .int8, .bf16, .ggufInt8TwoLevel, .ggufQ6KRows:
             for row in 0..<tokens {
                 encode(commandBuffer: commandBuffer, matrix: matrix,
                        x: x, xOffset: xOffset + row * matrixColumns * half,

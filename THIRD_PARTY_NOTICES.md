@@ -48,6 +48,20 @@ The QAT affine projection helper in those same files and in
 `quantized.h` FP16 input summation and SIMD accumulation order. These portions
 also use the MIT license; see [`LICENSE-MLX`](LICENSE-MLX).
 
+## ggml (llama.cpp)
+
+The GGUF i-quant grids and value tables in
+`Sources/Mference/Infrastructure/ModelIO/GGUFQuantTables.swift`
+(`ksigns_iq2xs`, `kvalues_iq4nl`, `iq3xxs_grid` and `iq2s_grid`) are copied
+from `ggml/src/ggml-common.h` in llama.cpp at commit
+`b1b770d90d94cad9e9ea5b993bdbc383a522fb28`, by
+`Scripts/parity/gguf_make_quant_tables.py`. The GGUF block decoders follow
+the block layouts and dequantization order of that commit's
+`ggml/src/ggml-quants.c`. The test-only reference decoders in
+`Sources/MferenceValidation/Support/Reference/Quant/GGUFReferenceDequant.swift`
+transliterate its `dequantize_row_*` loops. ggml is under the MIT license; its copyright
+notice is preserved in [`LICENSE-GGML`](LICENSE-GGML).
+
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a

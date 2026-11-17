@@ -343,6 +343,57 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return expertCachePlanBuffers(plan)
     }
 
+    /// A raw-expansion layout's plan (`StreamLayout.rawStoredExpertStride`):
+    /// reads each miss's stored bytes into `staging`, miss `i` (in
+    /// `plan.misses` order) at `i * storedExpertStride`, then publishes the
+    /// slots. Returns the slot buffers in request order and, per miss, the
+    /// slot's byte offset in the slab and the staging offset its bytes are at.
+    ///
+    /// The slots hold no LUT4 until the caller's expansion runs, so the caller
+    /// must encode that expansion ahead of every GPU read of these slots on the
+    /// same queue, and must not reuse `staging` before that expansion
+    /// completes. Speculative and asynchronous fills are refused for such a
+    /// layout (they reach the plain read path), so no other writer exists.
+    public func executeExpertCachePlanRaw(_ plan: ExpertCachePlan,
+                                          staging: UnsafeMutableRawPointer,
+                                          stagingBytes: Int) throws
+        -> (buffers: [(buffer: MTLBuffer, offset: UInt64, size: UInt64)],
+            misses: [(slotOffset: Int, stagingOffset: Int)]) {
+        guard let stored = layout.rawStoredExpertStride else {
+            throw StreamerError.rawExpansionRequired
+        }
+        precondition(plan.assignedSlots.count == plan.experts.count,
+                     "expert cache plan slot count mismatch")
+        guard plan.misses.count * Int(stored) <= stagingBytes else {
+            throw StreamerError.sizeMismatch(expected: UInt64(plan.misses.count) * stored,
+                                             actual: UInt64(stagingBytes))
+        }
+        let missFileOffsets = try plan.misses.map { try fileOffsetForExpert(plan.experts[$0]) }
+        let runs = Self.coalescedReadRuns(offsets: missFileOffsets, stride: stored)
+        let start = readStats == nil ? 0 : clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        for run in runs {
+            try readScattered(fd: fd,
+                              into: run.map { staging.advanced(by: $0 * Int(stored)) },
+                              fileOffset: missFileOffsets[run[0]],
+                              strideBytes: Int(stored))
+        }
+        if let readStats {
+            readStats.record(experts: plan.misses.count,
+                             bytes: UInt64(plan.misses.count) * stored,
+                             nanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start)
+        }
+        cacheLock.lock()
+        for index in plan.misses {
+            setSlotExpert(plan.assignedSlots[index], to: plan.experts[index])
+        }
+        cacheLock.unlock()
+        let misses = plan.misses.enumerated().map { i, index in
+            (slotOffset: plan.assignedSlots[index] * slotAllocationSize,
+             stagingOffset: i * Int(stored))
+        }
+        return (expertCachePlanBuffers(plan), misses)
+    }
+
     public func expertCachePlanBuffers(_ plan: ExpertCachePlan)
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.assignedSlots.count == plan.experts.count,
@@ -678,6 +729,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private func readExpertRunUntimed(into destinations: [UnsafeMutableRawPointer],
                                       fd: Int32,
                                       fileOffset: UInt64) throws {
+        if layout.rawStoredExpertStride != nil {
+            throw StreamerError.rawExpansionRequired
+        }
         if let storage = layout.storage {
             try storage.readExperts(fd: fd, fileOffset: fileOffset, into: destinations)
         } else {

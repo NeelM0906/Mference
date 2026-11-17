@@ -19,6 +19,9 @@ public struct RemoteStreamingRepackOptions: Sendable {
     /// Optional tensor groups the install carries (spec W2.4). Only families
     /// that actually ship such a group consult it.
     public let sidecarPolicy: SidecarPolicy
+    /// A pinned GGUF upload (WS4). When set, the install takes the GGUF path
+    /// (`runPreparedGGUF`) instead of the safetensors path.
+    public var ggufPin: GGUFSourcePin? = nil
 
     public init(repoID: String,
                 revision: String,
@@ -116,9 +119,11 @@ public struct RemoteStreamingRepackResult: Sendable {
 }
 
 public final class RemoteStreamingRepacker {
-    private let options: RemoteStreamingRepackOptions
-    private let audit: RepackAudit
-    private let startTime = Date()
+    // Internal (not private) so the GGUF path in RemoteStreamingRepacker+GGUF
+    // shares them.
+    let options: RemoteStreamingRepackOptions
+    let audit: RepackAudit
+    let startTime = Date()
 
     public init(options: RemoteStreamingRepackOptions,
                 audit: RepackAudit = RepackAudit()) {
@@ -207,6 +212,9 @@ public final class RemoteStreamingRepacker {
     private func runPrepared(paths: RemoteInstallPaths,
                              progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> RemoteStreamingRepackResult {
+        if let pin = options.ggufPin {
+            return try await runPreparedGGUF(paths: paths, pin: pin, progress: progress)
+        }
         try Task.checkCancellation()
         let saved = options.resume
             ? try RemoteInstallCheckpoint.load(from: paths.checkpointFile)
@@ -533,7 +541,7 @@ public final class RemoteStreamingRepacker {
         }
     }
 
-    private func createOutputFiles(plan: RepackPlan,
+    func createOutputFiles(plan: RepackPlan,
                                    paths: RemoteInstallPaths) throws {
         try Posix.mkdirP((paths.partialDirectory as NSString)
             .appendingPathComponent("packed_experts"))
@@ -567,7 +575,7 @@ public final class RemoteStreamingRepacker {
         try Posix.fsyncDirectory(paths.partialDirectory)
     }
 
-    private func outputFilesMatch(plan: RepackPlan,
+    func outputFilesMatch(plan: RepackPlan,
                                   rangePlan: RangeCopyPlan) throws -> Bool {
         for output in rangePlan.expectedOutputs {
             let path = ((plan.resident.path as NSString).deletingLastPathComponent
@@ -636,7 +644,7 @@ public final class RemoteStreamingRepacker {
         return valid.sorted { $0.id < $1.id }
     }
 
-    private func recordOutputFile(relativePath: String,
+    func recordOutputFile(relativePath: String,
                                   path: String,
                                   progress: @Sendable (ModelInstallProgress) -> Void) throws {
         progress(.hashingOutput(relativePath))
@@ -651,7 +659,7 @@ public final class RemoteStreamingRepacker {
         audit.outputFiles.append(.init(relativePath: relativePath, size: size, sha256: sha))
     }
 
-    private func writeSmall(path: String, data: Data) throws {
+    func writeSmall(path: String, data: Data) throws {
         try Posix.mkdirP((path as NSString).deletingLastPathComponent)
         try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
         audit.recordWrite(bytes: data.count)

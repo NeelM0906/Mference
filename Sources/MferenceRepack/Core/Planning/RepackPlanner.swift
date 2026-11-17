@@ -277,6 +277,9 @@ enum RepackPlanner {
             // text tower is exactly `model.llm.`; `model.visual.` and
             // `model.audio.` fall through to the multimodal exclusion.
             return name.hasPrefix("model.llm.")
+        case .qwen38flashnextudiq3xxs:
+            // Planned by FlashNextGGUFPlanner; never reached for it.
+            return false
         case .qwen38flashnext:
             // Planned by FlashNextPlanner; this path is never reached for it.
             return name.hasPrefix(FlashNextPlanner.textPrefix)
@@ -308,7 +311,7 @@ enum RepackPlanner {
         case .inklingSmall:    routedContainer = ".mlp.experts."
         // Fused across experts and across the gate|up halves; split by
         // FlashNextPlanner, which never consults this classifier.
-        case .qwen38flashnext: return nil
+        case .qwen38flashnext, .qwen38flashnextudiq3xxs: return nil
         // Dense llama: every `.mlp.*_proj` is the layer's own FFN, resident.
         case .minicpm5:        return nil
         // `.mlp.switch_mlp.` is the stacked routed triplet; `.mlp.shared_experts.`
@@ -539,7 +542,7 @@ enum RepackPlanner {
                     name: name,
                     detail: "expected U32 packed Maple weight, got \(weight.dtype)")
             }
-            let dtype = ietnyDtype(weight.dtype)
+            let dtype = try ietnyDtype(weight.dtype)
             let isQuantizedPacked = (weight.dtype == .u32) && name.hasSuffix(".weight")
 
             if isQuantizedPacked {
@@ -849,7 +852,7 @@ enum RepackPlanner {
 
     // MARK: - Helpers
 
-    private static func ietnyDtype(_ d: SourceTensor.Dtype) -> UInt8 {
+    private static func ietnyDtype(_ d: SourceTensor.Dtype) throws -> UInt8 {
         switch d {
         case .u32: 0
         case .bf16: 1
@@ -857,6 +860,10 @@ enum RepackPlanner {
         case .fp32: 3
         case .i64: 4
         case .i32: 5
+        // Only FlashNextGGUFPlanner creates GGUF block tensors; reaching here
+        // is a planner bug, reported rather than crashed on (R10).
+        case .ggmlBlocks:
+            throw RepackError.dtypeMismatch(name: "", detail: "GGUF block bytes reached a safetensors planner")
         }
     }
 
@@ -1065,8 +1072,8 @@ enum RepackPlanner {
                 if n == "model.llm.embed_norm.weight" { return (0, 0, 1, n) }
                 if n == "model.llm.norm.weight"       { return (3, 0, 0, n) }
                 if n == "model.llm.unembed.weight"    { return (4, 0, 0, n) }
-            case .qwen38flashnext:
-                break   // FlashNextPlanner owns this family's ordering.
+            case .qwen38flashnext, .qwen38flashnextudiq3xxs:
+                break   // FlashNextPlanner / FlashNextGGUFPlanner own the ordering.
             case .minicpm5:
                 if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"          { return (3, 0, 0, n) }
@@ -1086,7 +1093,7 @@ enum RepackPlanner {
                 case .inklingSmall:    slot = inklingSlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
                 case .flint:           slot = flintSlotRank(in: n)
-                case .qwen38flashnext: slot = 100
+                case .qwen38flashnext, .qwen38flashnextudiq3xxs: slot = 100
                 case .minicpm5:        slot = miniCPM5SlotRank(in: n)
                 case .glm53Flash:      slot = glm53SlotRank(in: n)
                 }

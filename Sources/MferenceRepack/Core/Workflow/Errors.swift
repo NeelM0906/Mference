@@ -22,6 +22,9 @@ public enum RepackError: Error, CustomStringConvertible {
     case safetensorsUnknownDtype(path: String, dtype: String)
     case safetensorsTensorOutOfRange(path: String, name: String, end: UInt64, fileSize: UInt64)
 
+    case ggufInvalid(path: String, detail: String)
+    case ggufUnsupportedType(path: String, tensor: String, typeID: UInt32)
+
     case indexJsonInvalid(path: String, detail: String)
     case configJsonInvalid(path: String, detail: String)
     case quantOverrideCountMismatch(expected: Int, actual: Int, sample: [String])
@@ -85,6 +88,10 @@ public enum RepackError: Error, CustomStringConvertible {
             return "safetensors at \(p) has unsupported dtype \(d)"
         case .safetensorsTensorOutOfRange(let p, let n, let end, let sz):
             return "safetensors \(p): tensor \(n) ends at \(end), file size \(sz)"
+        case .ggufInvalid(let p, let d):
+            return "GGUF header at \(p) invalid: \(d)"
+        case .ggufUnsupportedType(let p, let t, let id):
+            return "GGUF \(p): tensor \(t) has unsupported ggml type \(id)"
         case .indexJsonInvalid(let p, let d): return "index.json \(p) invalid: \(d)"
         case .configJsonInvalid(let p, let d): return "config.json \(p) invalid: \(d)"
         case .quantOverrideCountMismatch(let exp, let got, let sample):

@@ -69,6 +69,10 @@ static inline void flashnext_indexer_rope(thread float* head,
     }
 }
 
+// WS4 GGUF install: the indexer q/k norm weights are F32 (`1 + w`, not
+// BF16-exact), read through the same binding. UNSET keeps the BF16 read.
+constant bool FC_FN_INDEXER_NORM_W_F32 [[function_constant(122)]];
+
 // RMSNorm over `n` FP32 channels with a BF16 `(1 + w)`-baked weight, serial in
 // one thread — the oracle's `rmsNorm`.
 static inline void flashnext_indexer_rmsnorm(thread float* v,
@@ -78,6 +82,11 @@ static inline void flashnext_indexer_rmsnorm(thread float* v,
     float ms = 0.0f;
     for (uint d = 0; d < n; ++d) ms += v[d] * v[d];
     const float inv = 1.0f / sqrt(ms / float(n) + eps);
+    if (is_function_constant_defined(FC_FN_INDEXER_NORM_W_F32) && FC_FN_INDEXER_NORM_W_F32) {
+        device const float* w32 = reinterpret_cast<device const float*>(weight);
+        for (uint d = 0; d < n; ++d) v[d] = v[d] * inv * w32[d];
+        return;
+    }
     for (uint d = 0; d < n; ++d) v[d] = v[d] * inv * float(weight[d]);
 }
 

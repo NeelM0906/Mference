@@ -51,6 +51,9 @@ public struct PleRowPoolGeometry: Sendable, Equatable {
     public enum Storage: String, Sendable, Equatable {
         case bf16
         case int4AffineG64
+        /// Native GGUF IQ4_NL blocks (18 B per 32 values), the WS4 Unsloth
+        /// install's `per_layer_token_embd` rows (U1 §3c). No companions.
+        case iq4nl
     }
 
     public struct Shard: Sendable, Equatable {
@@ -89,6 +92,14 @@ public struct PleRowPoolGeometry: Sendable, Equatable {
                   entry.rowWeightBytes == entry.rowDim * MemoryLayout<UInt16>.stride else {
                 throw fail("bf16 pool must carry \(entry.rowDim * 2)-byte rows "
                     + "and no scale/bias companions")
+            }
+        case .iq4nl:
+            guard entry.weightBits == 4, entry.groupSize == 32,
+                  entry.rowDim % 32 == 0,
+                  entry.rowScaleBytes == 0, entry.rowBiasBytes == 0,
+                  entry.rowWeightBytes == entry.rowDim / 32 * GGUFBlockDecode.iq4NLBlockBytes else {
+                throw fail("iq4nl pool must carry \(entry.rowDim / 32) whole 18-byte IQ4_NL "
+                    + "blocks per row and no scale/bias companions")
             }
         case .int4AffineG64:
             guard entry.weightBits == 4,
@@ -394,7 +405,8 @@ public final class PleRowPool: @unchecked Sendable {
     }
 
     /// One row widened to float. BF16 pools decode losslessly; an INT4 pool
-    /// dequantizes its group-64 affine record.
+    /// dequantizes its group-64 affine record; an IQ4_NL pool decodes its
+    /// native GGUF blocks exactly as llama.cpp does.
     public func readRow(_ row: Int) throws -> [Float] {
         let record = try readRowRecord(row)
         switch geometry.storage {
@@ -406,6 +418,10 @@ public final class PleRowPool: @unchecked Sendable {
             }
         case .int4AffineG64:
             return Self.dequantizeInt4AffineRow(record, geometry: geometry)
+        case .iq4nl:
+            return record.withUnsafeBytes {
+                GGUFBlockDecode.dequantizeIQ4NL(UnsafeRawBufferPointer(rebasing: $0[0..<geometry.rowWeightBytes]))
+            }
         }
     }
 

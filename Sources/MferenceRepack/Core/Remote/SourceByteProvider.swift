@@ -357,6 +357,11 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
             // must hold whichever side is larger.
             let blockSourceBytes = rowsPerBlock * rowSourceBytes
             capacity = scratchBytes / max(blockSourceBytes, stride) * blockSourceBytes
+        case .ggufInt8TwoLevel(let source, let component):
+            // The values component grows a Q6_K block (210 -> 256 bytes), so
+            // the scratch must hold whichever side is larger.
+            let out = GGUFInt8TwoLevelExpander.destinationBytesPerBlock(source, component)
+            capacity = scratchBytes / max(source.blockBytes, out) * source.blockBytes
         }
         guard capacity >= Int(transform.inputUnitBytes) else {
             throw RepackError.configurationInvalid(
@@ -468,6 +473,9 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                 rowSourceBytes: rowSourceBytes,
                 rowsPerBlock: rowsPerBlock,
                 blockStride: blockStride)
+        case .ggufInt8TwoLevel(let source, let component):
+            return try GGUFInt8TwoLevelExpander.expandInPlace(
+                buffer: buffer, sourceCount: sourceCount, source: source, component: component)
         }
     }
 

@@ -100,8 +100,10 @@ final class FlashNextIndexer {
     private let selectPSO: MTLComputePipelineState
     private let gatherPSO: MTLComputePipelineState
 
+    /// `normWeightsF32`: the q/k norm weights are F32 (WS4 GGUF install,
+    /// `FC_FN_INDEXER_NORM_W_F32`); false for the vendor install.
     init(context: MetalContext, matVec: FlashNextMatVec,
-         geometry: Geometry) throws {
+         geometry: Geometry, normWeightsF32: Bool = false) throws {
         precondition(geometry.headDim <= Self.maxHeadDim,
                      "indexer head dim \(geometry.headDim) exceeds the kernels' "
                      + "\(Self.maxHeadDim)-wide thread scratch")
@@ -113,9 +115,11 @@ final class FlashNextIndexer {
         precondition(geometry.blockBudget <= Self.maxBlockBudget)
         self.geometry = geometry
         self.matVec = matVec
-        self.preparePSO = try context.pipeline("flashnext_indexer_prepare_queries")
+        let normConstants = normWeightsF32
+            ? [MetalFunctionConstant(index: 122, value: .bool(true))] : []
+        self.preparePSO = try context.pipeline("flashnext_indexer_prepare_queries", constants: normConstants)
         self.appendPSO = try context.pipeline("flashnext_indexer_append_raw_keys")
-        self.poolPSO = try context.pipeline("flashnext_indexer_pool_block_keys")
+        self.poolPSO = try context.pipeline("flashnext_indexer_pool_block_keys", constants: normConstants)
         self.scoresPSO = try context.pipeline("flashnext_indexer_scores")
         self.selectPSO = try context.pipeline("flashnext_indexer_select_blocks")
         self.gatherPSO = try context.pipeline("flashnext_indexer_gather_kv")
@@ -190,6 +194,33 @@ final class FlashNextIndexer {
             x: x, xOffset: xOffset, y: scratch.projection,
             matrixRows: geometry.projRows, matrixColumns: hidden,
             tokens: rows)
+    }
+
+    /// The split form of `encodeProjection` for a WS4 GGUF install, whose
+    /// converter wrote `index_qk_proj` as two tensors (`indexer.q_proj` then
+    /// `indexer.k_proj`, the fused rows in order). Writes the same FP32
+    /// `[rows, projRows]` block, one GEMV pair per row.
+    func encodeProjection(commandBuffer: MTLCommandBuffer,
+                          query: FlashNextWeightMatrix,
+                          key: FlashNextWeightMatrix,
+                          x: MTLBuffer, xOffset: Int,
+                          hidden: Int,
+                          scratch: Scratch,
+                          rows: Int) {
+        precondition(rows <= scratch.maxRows)
+        let qRows = geometry.keyOffset
+        let kRows = geometry.projRows - qRows
+        let f32 = MemoryLayout<Float>.stride
+        for row in 0..<rows {
+            let x0 = xOffset + row * hidden * MemoryLayout<Float16>.stride
+            let y0 = row * geometry.projRows * f32
+            matVec.encode(commandBuffer: commandBuffer, matrix: query, x: x, xOffset: x0,
+                          y: scratch.projection, yOffset: y0,
+                          rows: qRows, cols: hidden, outputFloat32: true)
+            matVec.encode(commandBuffer: commandBuffer, matrix: key, x: x, xOffset: x0,
+                          y: scratch.projection, yOffset: y0 + qRows * f32,
+                          rows: kRows, cols: hidden, outputFloat32: true)
+        }
     }
 
     /// Query heads (norm + RoPE at each row's own position), the raw-key append,

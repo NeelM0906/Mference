@@ -11,6 +11,7 @@ import Testing
             .qwen36: 262_144,
             .qwen38: 262_144,
             .qwen38flashnext: 262_144,
+            .qwen38flashnextudiq3xxs: 262_144,
             .flint: 262_144,
             .minicpm5: 131_072,
             .maple: 128_000,

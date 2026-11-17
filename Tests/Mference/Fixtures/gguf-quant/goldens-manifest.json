@@ -1,0 +1,55 @@
+{
+ "schema": "mference.gguf-quant.goldens/1",
+ "generated_by": "Scripts/parity/gguf_make_quant_goldens.py",
+ "kind": "synthetic",
+ "reference": {
+  "llama_cpp_commit": "b1b770d90d94cad9e9ea5b993bdbc383a522fb28",
+  "tool": "mf-dequant (ggml_get_type_traits()->to_float)",
+  "tool_sha256": "57ac676e4f0eb71223554754d0c64efdf1c2cfb69f22ad712c7c4fba4ef7cd92"
+ },
+ "types": {
+  "q8_0": {
+   "ggml_type": 8,
+   "blocks": 24,
+   "blocks_sha256": "aa644f14e4874ddd72f5fb133fde8f6815d2f20b1048e72e27586b2160e63434",
+   "dequant_sha256": "fe047807329dd0b0e984989255600adc64e1fcd6b3b02b5702e676818fdb210b"
+  },
+  "q6_K": {
+   "ggml_type": 14,
+   "blocks": 24,
+   "blocks_sha256": "9f7c6789e72fad5781c963bb07904e26594a2724e0de2bc938bed16c662f65ea",
+   "dequant_sha256": "123975aa5d524cfc87a6157f1e5de41cfe539dc9c0bc736dbb9eba8878cd8acb"
+  },
+  "iq3_xxs": {
+   "ggml_type": 18,
+   "blocks": 24,
+   "blocks_sha256": "34746c76f4a35551fca486c0334d41e2638071c90bf52da4b5a985026404f750",
+   "dequant_sha256": "a71ea35b33deb378b821fdaae8e512023edca3cb008fe463bcc6159678540fce"
+  },
+  "iq4_nl": {
+   "ggml_type": 20,
+   "blocks": 24,
+   "blocks_sha256": "58352646f2cc91c51932d9e16c1a53b4f1004002dd904ba340b970957bd9c8ad",
+   "dequant_sha256": "20adf111cdca6c61f4ad273ace493d2fe6047cd71f0251bd2d9404a94fc66fa8"
+  },
+  "iq2_s": {
+   "ggml_type": 22,
+   "blocks": 40,
+   "blocks_sha256": "1b6ac4e549386d2dd7a0010527e2a5e32624231c88cc1c7dc9d5d0b23d0fc64e",
+   "dequant_sha256": "f8ee087634cd06f2e3b8a323a0c8ca40a272db8be3af1bdc616b4ae9e3f51074"
+  },
+  "iq4_xs": {
+   "ggml_type": 23,
+   "blocks": 24,
+   "blocks_sha256": "fb69bf2f3a82dbe1e678eb74a98fe3d722d42ff35cb5839b643696dc4336f476",
+   "dequant_sha256": "85fa974e5e3575b47ee924a17a06925c74e8ee7999b9d40966b215af208fa79f"
+  },
+  "q2_0": {
+   "ggml_type": 42,
+   "blocks": 24,
+   "blocks_sha256": "609437ae18f07b661e3fb424dd745e97ccbb29a192a65cb2f88283d3c24267c7",
+   "dequant_sha256": "b2ff48840ec25170f434e30a2c6edcd93993ee2e022bf654047584b9461a6db1"
+  }
+ },
+ "seed": 1195857222
+}

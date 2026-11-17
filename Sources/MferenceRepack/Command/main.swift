@@ -24,6 +24,10 @@ and every input file hash is checked before the output is finished.
 of carrying it. Vision towers are always skipped. Either way the decision is
 recorded in manifest.json -> sidecars rather than left implicit.
 
+qwen38flashnextudiq3xxs (unlisted) copies Unsloth's UD-IQ3_XXS GGUF quant of
+Qwen3.8-Flash-Next, a third-party quant, in its own ggml formats (~83.6 GB
+read). It installs by name; the runtime runs it with the expert slot cache.
+
 qwen38flashnext and qwen36original read the model vendor's original BF16 repo
 and quantize to INT4 affine group-64 during the install. qwen38flashnext keeps
 its two gating tensors per layer at INT8; its capability gate was lifted on

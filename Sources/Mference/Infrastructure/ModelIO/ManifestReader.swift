@@ -108,9 +108,8 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     /// it only when present. See `FlashNextConfig.pleEosTokenID`.
     public let pleEosTokenID: Int?
     /// Axis names the install claims a runner must implement. Advisory only —
-    /// `ManifestReader.familiesWithoutRunner` is the authority, and it is empty
-    /// today, so an install publishing this field does not make the family
-    /// unloadable.
+    /// `ManifestReader.familiesWithoutRunner` is the authority, so an install
+    /// publishing this field does not by itself make the family unloadable.
     public let requiredAxes: [String]?
     /// Per-head q/k RMSNorm gains on full-attention layers. Optional so every
     /// manifest predating the axis decodes unchanged; absent validates against
@@ -155,7 +154,8 @@ public struct ManifestPlePoolLayer: Decodable, Equatable, Sendable {
     public let rows: Int
     public let rowDim: Int
     /// `"bf16"` or `"int4AffineG64"`. Chosen from the row width at install:
-    /// group-64 needs `rowDim % 64 == 0`, which 160 does not satisfy.
+    /// group-64 needs `rowDim % 64 == 0`, which 160 does not satisfy. A WS4
+    /// GGUF install writes `"iq4nl"` (native IQ4_NL blocks).
     public let storage: String
     public let weightBits: Int
     public let groupSize: Int
@@ -167,6 +167,19 @@ public struct ManifestPlePoolLayer: Decodable, Equatable, Sendable {
     public let blockStride: Int
     public let fileSize: UInt64
     public let shards: [ManifestPleShard]
+    /// The n-gram hash constants, when the install carries them in the
+    /// manifest rather than as resident I64 tensors (a WS4 GGUF install: the
+    /// GGUF keeps them as metadata). A loader accepts exactly one source.
+    public let hash: ManifestPleHash?
+}
+
+/// PLE n-gram hash constants as exact JSON integers (WS4 U2 R6).
+public struct ManifestPleHash: Decodable, Equatable, Sendable {
+    public let layerMultipliers: [Int64]
+    public let headOffsets: [Int64]
+    public let headVocabSizes: [Int64]
+    public let headsPerNgram: Int
+    public let ngramSize: Int
 }
 
 public struct ManifestPlePool: Decodable, Equatable, Sendable {
@@ -204,6 +217,12 @@ public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
     public let scaleType: String
     public let biasType: String
     public let groupSize: Int
+    /// A WS4 GGUF install marks its slots advisory (U2 R7): a slot summarizes
+    /// a mix of formats, and the runtime dispatches per tensor on the index
+    /// dtype, never on the slot. Absent (nil) everywhere else.
+    public let advisory: Bool?
+    /// The slot's formats, advisory slots only (`"INT8-2L(Q6_K)"`, `"IQ2_S"`).
+    public let formats: [String]?
 }
 
 public struct ManifestQuant: Decodable, Equatable, Sendable {
@@ -514,6 +533,29 @@ public enum ManifestReader {
                   quant.sharedExpert.groupSize == 0 else {
                 throw ModelError.indexCorrupt(
                     detail: "Maple manifest must mark sharedExpert absent")
+            }
+            return
+        }
+        if expected.family == .qwen38flashnextudiq3xxs {
+            // WS4 GGUF install (U2 R7): every slot is advisory `gguf`, and the
+            // runtime dispatches per tensor on the resident index dtype
+            // (`FlashNextWeightMatrix.fromGGUF`) and per layer on the expert
+            // layout's block formats. Check only that each slot says so and
+            // names formats this runtime has kernels for.
+            let known: Set<String> = ["INT8-2L(Q6_K)", "INT8-2L(Q8_0)", "Q6_K", "F32",
+                                      "IQ2_S", "IQ3_XXS", "IQ4_NL", "IQ4_XS", "Q2_0"]
+            let slots: [(String, ManifestQuantSlot)] = [
+                ("embedding", quant.embedding), ("attention", quant.attention),
+                ("router", quant.router), ("sharedExpert", quant.sharedExpert),
+                ("routedExpert", quant.routedExpert),
+            ]
+            for (name, slot) in slots {
+                guard slot.advisory == true, slot.scheme == "gguf",
+                      let formats = slot.formats, !formats.isEmpty,
+                      formats.allSatisfy(known.contains) else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported GGUF Flash-Next quantization slot \(name)")
+                }
             }
             return
         }
@@ -941,11 +983,12 @@ public enum ManifestReader {
     /// Families `MferenceRepack` can install but no forward runner can execute,
     /// mapped to the axes whose kernels are missing.
     ///
-    /// One entry today: `glm53Flash`, added 2026-09-11 with its Day-0 contract.
-    /// `qwen38flashnext` was the previous occupant, removed 2026-09-10 when
-    /// `FlashNextForwardRunner` landed and the owner lifted its gate. The three
-    /// axis names are the runtime's own (`Glm53Config` and its doc comment name
-    /// the mechanism behind each); remove the entry only when
+    /// Empty today. Earlier occupants were `qwen38flashnext` (removed
+    /// 2026-09-10 when `FlashNextForwardRunner` landed), `glm53Flash` (removed
+    /// when `Glm53ForwardRunner` landed) and `qwen38flashnextudiq3xxs` (WS4,
+    /// removed when U4 wired it onto `FlashNextForwardRunner`; the one mode it
+    /// does not run, resident experts, is refused by name in
+    /// `Model.ggufExpertModeRefusal`). Remove an entry only when
     /// `ForwardRunnerFactory` actually dispatches to the family's runner.
     ///
     /// Add an entry the moment a new family gains an `ArchInfo` install path,
@@ -971,6 +1014,17 @@ public enum ManifestReader {
     /// `peekFamily` before any of that machinery is reached.
     static let familiesWithoutRunner: [String: [String]] = [:]
 
+    /// The kernels a `qwen38flashnextudiq3xxs` (Unsloth UD-IQ3_XXS GGUF) install
+    /// needs (WS4 U1 §4): LUT4 routed-expert slots expanded from GGUF IQ
+    /// blocks, INT8-2L resident matmuls, and IQ4_NL n-gram rows. All three are
+    /// implemented. Documentation only: the install's `arch.requiredAxes`
+    /// carries the shared `FlashNextAxes.requiredAxisNames`, not these.
+    public static let qwen38FlashNextGGUFRequiredAxes: [String] = [
+        "ggufLUT4RoutedExperts",
+        "ggufInt8TwoLevelResident",
+        "ggufIQ4NLPleRows",
+    ]
+
     /// The axes `glm53Flash` needed a runner for, in the order the port built
     /// them; `Glm53ForwardRunner` implements all three, so the family is no
     /// longer in the table. Still what the installer publishes as
@@ -982,9 +1036,8 @@ public enum ManifestReader {
     ]
 
     /// The gate lookup, factored out of `peekFamily` so it can be exercised
-    /// against an injected table: with `familiesWithoutRunner` empty there is
-    /// no shipped family left to prove the mechanism with, and the mechanism is
-    /// what the next family port depends on.
+    /// against an injected table, so the mechanism stays testable whatever the
+    /// shipped table holds.
     ///
     /// Returns the named refusal for a gated family, or nil for one the runtime
     /// can execute.

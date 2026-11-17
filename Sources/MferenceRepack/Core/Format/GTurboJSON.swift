@@ -31,7 +31,7 @@ enum GTurboJSON {
         case .minicpm5:
             return "W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX"
         case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-             .qwen38flashnext, .glm53Flash, .flint:
+             .qwen38flashnext, .qwen38flashnextudiq3xxs, .glm53Flash, .flint:
             return "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36"
         }
     }
@@ -192,7 +192,8 @@ enum GTurboJSON {
             archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
             archDict["requiredAxes"] = Glm53Axes.requiredAxisNames
         }
-        if arch.family == .qwen38flashnext, let axes = arch.flashNext {
+        if arch.family == .qwen38flashnext || arch.family == .qwen38flashnextudiq3xxs,
+           let axes = arch.flashNext {
             archDict["numSharedExperts"] = arch.numSharedExperts
             archDict["numDenseLayers"] = arch.numDenseLayers
             archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
@@ -426,8 +427,9 @@ enum GTurboJSON {
                     "rowDim": pool.rowDim,
                     "storage": pool.storage.rawValue,
                     "weightBits": pool.bits,
-                    "scheme": quantized ? "affine" : "none",
-                    "scaleType": quantized ? "BF16" : "none",
+                    // IQ4_NL rows carry their FP16 scale inside each 18-byte block.
+                    "scheme": quantized ? "affine" : pool.storage == .iq4nl ? "iq4_nl" : "none",
+                    "scaleType": quantized ? "BF16" : pool.storage == .iq4nl ? "FP16" : "none",
                     "biasType": quantized ? "BF16" : "none",
                     "groupSize": pool.groupSize,
                     "rowWeightBytes": pool.rowWeightBytes,

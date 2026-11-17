@@ -93,7 +93,8 @@ Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
   <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple
-                qwen38flashnext minicpm5 glm53flash flint
+                qwen38flashnext qwen38flashnextudiq3xxs minicpm5 glm53flash
+                flint
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
@@ -132,6 +133,12 @@ case "${family}" in
   maple)           suite_filter='Maple' ;;
   flint)           suite_filter='Flint' ;;
   qwen38flashnext) suite_filter='FlashNext' ;;
+  # Unsloth UD-IQ3_XXS GGUF install: GGUF quant tables, LUT4 expansion and MoE,
+  # INT8-2L, the family/manifest and installer suites, the lower-case gguf*
+  # install tests in RemotePayloadCopyTests, the IQ4_NL PLE rows, the raw
+  # streamer path and the forced-routes parser. Its real-install suites are
+  # env-gated (MFERENCE_UNSLOTH_GTURBO) and skip here.
+  qwen38flashnextudiq3xxs) suite_filter='GGUF|gguf|PleRowPoolIQ4NL|PreadExpertStreamerRaw|FlashNextForcedRoutes' ;;
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).
   minicpm5)        suite_filter='[Mm]iniCPM5' ;;

@@ -9,6 +9,7 @@ enum StreamerError: Error, CustomStringConvertible {
     case allocFailed(errno: Int32)
     case slotOutOfRange(Int)
     case noSlotCache
+    case rawExpansionRequired
 
     public var description: String {
         switch self {
@@ -28,6 +29,9 @@ enum StreamerError: Error, CustomStringConvertible {
             return "expert cache slot \(slot) is out of range"
         case .noSlotCache:
             return "resident expert mode has no slot cache"
+        case .rawExpansionRequired:
+            return "this layer stores experts in a format the runner expands itself; "
+                + "plain slot reads are refused"
         }
     }
 }
@@ -44,6 +48,12 @@ public struct StreamLayout: Sendable {
     /// Set when the file stores experts without bytes the kernels read;
     /// see `ExpertStorage`. Nil means each expert is stored as addressed.
     public let storage: ExpertStorage?
+    /// Set when each expert is stored in this many bytes of a format the
+    /// runner expands on the GPU (WS4: native GGUF blocks into LUT4 slots).
+    /// Slots are then `expertStride` bytes, and only
+    /// `PreadExpertStreamer.executeExpertCachePlanRaw` may fill them: every
+    /// plain read path refuses with `rawExpansionRequired`.
+    public let rawStoredExpertStride: UInt64?
 
     public init(path: String,
                 streamOffset: UInt64,
@@ -51,7 +61,9 @@ public struct StreamLayout: Sendable {
                 expertsPerLayer: Int,
                 expertStride: UInt64,
                 expertOffsets: [UInt64]? = nil,
-                storage: ExpertStorage? = nil) {
+                storage: ExpertStorage? = nil,
+                rawStoredExpertStride: UInt64? = nil) {
+        precondition(storage == nil || rawStoredExpertStride == nil)
         self.path = path
         self.streamOffset = streamOffset
         self.streamSize = streamSize
@@ -59,11 +71,14 @@ public struct StreamLayout: Sendable {
         self.expertStride = expertStride
         self.expertOffsets = expertOffsets
         self.storage = storage
+        self.rawStoredExpertStride = rawStoredExpertStride
     }
 
     /// Bytes of one expert in the file.
     @inline(__always)
-    public var storedExpertStride: UInt64 { storage?.storedExpertStride ?? expertStride }
+    public var storedExpertStride: UInt64 {
+        rawStoredExpertStride ?? storage?.storedExpertStride ?? expertStride
+    }
 
     @inline(__always)
     public func expertOffset(layer: Int, expert: Int) -> UInt64 {

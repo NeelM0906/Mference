@@ -6,14 +6,17 @@ struct SubTensorEntry: Sendable, Equatable {
     let dtype: String?
     let shape: [Int]?
     let bits: Int?
+    /// GGUF block format name (`"IQ2_S"`, ...) of a `"GGML"` tensor.
+    let format: String?
 
     init(offset: UInt64, size: UInt64, dtype: String? = nil,
-         shape: [Int]? = nil, bits: Int? = nil) {
+         shape: [Int]? = nil, bits: Int? = nil, format: String? = nil) {
         self.offset = offset
         self.size = size
         self.dtype = dtype
         self.shape = shape
         self.bits = bits
+        self.format = format
     }
 }
 
@@ -53,14 +56,20 @@ struct PackedExpertsLayout: Sendable {
     let layers: [LayerLayout]
     /// How experts are stored when the file omits bytes the kernels read.
     let storage: ExpertStorage?
+    /// Native GGUF blocks expanded to LUT4 slots (WS4); per-layer strides.
+    /// Mutually exclusive with `storage`.
+    let gguf: GGUFExpertLayout?
 
     init(expertStride: UInt64, numLayers: Int, expertsPerLayer: Int,
-         layers: [LayerLayout], storage: ExpertStorage? = nil) {
+         layers: [LayerLayout], storage: ExpertStorage? = nil,
+         gguf: GGUFExpertLayout? = nil) {
+        precondition(storage == nil || gguf == nil)
         self.expertStride = expertStride
         self.numLayers = numLayers
         self.expertsPerLayer = expertsPerLayer
         self.layers = layers
         self.storage = storage
+        self.gguf = gguf
     }
 
     /// Bytes of one expert in its layer file; expert offsets and sizes in the
@@ -145,9 +154,12 @@ enum PackedExpertsLayoutReader {
                     if let bits = t["bits"], !(bits is Int) {
                         throw ModelError.indexCorrupt(detail: "layout.json: malformed tensor bits \(role)")
                     }
+                    if let format = t["format"], !(format is String) {
+                        throw ModelError.indexCorrupt(detail: "layout.json: malformed tensor format \(role)")
+                    }
                     subTensors[role] = SubTensorEntry(offset: toff, size: tsize,
                         dtype: t["dtype"] as? String, shape: t["shape"] as? [Int],
-                        bits: t["bits"] as? Int)
+                        bits: t["bits"] as? Int, format: t["format"] as? String)
                 }
                 let expertID = expertObj["expert"] as? Int ?? experts.compactMap { $0 }.count
                 guard expertID >= 0 && expertID < expertsPerLayer else {
@@ -172,17 +184,25 @@ enum PackedExpertsLayoutReader {
         }
 
         var storage: ExpertStorage?
+        var gguf: GGUFExpertLayout?
         if let storageObj = root["expertStorage"] {
             guard let storageObj = storageObj as? [String: Any] else {
                 throw ModelError.indexCorrupt(detail: "layout.json: malformed expertStorage")
             }
-            storage = try parseStorage(storageObj, expertStride: expertStride, layers: layers)
+            if storageObj["format"] as? String == GGUFExpertLayout.format {
+                gguf = try GGUFExpertLayout.parse(storageObj, numLayers: numLayers,
+                                                  expertsPerLayer: expertsPerLayer,
+                                                  layers: layers)
+            } else {
+                storage = try parseStorage(storageObj, expertStride: expertStride, layers: layers)
+            }
         }
         return PackedExpertsLayout(expertStride: expertStride,
                                    numLayers: numLayers,
                                    expertsPerLayer: expertsPerLayer,
                                    layers: layers,
-                                   storage: storage)
+                                   storage: storage,
+                                   gguf: gguf)
     }
 
     /// Parses `expertStorage` and proves it reconstructs every byte the

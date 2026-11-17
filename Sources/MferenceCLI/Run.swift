@@ -246,6 +246,19 @@ public func run(args: Args,
             lines += ms(gpuSpan > gpuBusy ? gpuSpan - gpuBusy : 0) + " ms\n"
             lines += "  unaccounted (CPU encode + GPU waits): "
             lines += String(format: "%.1f", total - accounted) + " ms\n"
+            // Whole-run totals (prefill and decode together; nothing resets
+            // them for this family): every routed-expert read the slot cache
+            // issued, including the GGUF install's raw reads, and the bytes
+            // this process physically read from storage.
+            if let reads = ExpertReadStats.shared?.snapshot() {
+                lines += "  expert reads (whole run): \(reads.experts) experts in \(reads.reads) runs, "
+                lines += String(format: "%.1f MB, %.1f ms\n",
+                                Double(reads.bytes) / 1_048_576, Double(reads.totalNanos) / 1e6)
+            }
+            if let disk = ProcessDiskIO.current() {
+                lines += String(format: "  process disk read (whole run): %.1f MB\n",
+                                Double(disk.bytesRead) / 1_048_576)
+            }
             stderr.write(Data(lines.utf8))
         }
         // GLM-5.3-Flash: per-token path with the routed-expert read fully
