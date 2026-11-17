@@ -103,6 +103,62 @@ kernel void flashnext_gemv_bf16_f32out(
     if (lane == 0) y[row] = acc;
 }
 
+// Batched prefill form: `Y[t] = W · X[t]` for `T` contiguous rows of X
+// (stride N) and Y (stride M). One SIMD group per (output row, group of 8
+// tokens); each lane's FMA chain per token is `flashnext_gemv_bf16_row`'s,
+// followed by the same `simd_sum`, so each token's row equals the single-token
+// GEMV bit for bit while each weight is read once per 8 tokens.
+template <typename OutT>
+static inline void flashnext_gemm_bf16_t8_body(
+    device const bfloat* W, device const half* x, device OutT* y,
+    uint M, uint N, uint T, uint2 tg, uint sg_idx, uint lane)
+{
+    const uint row = tg.x * uint(kFlashNextGemvRowsPerThreadgroup) + sg_idx;
+    const uint t0 = tg.y * 8u;
+    if (row >= M || t0 >= T) return;
+    const uint nt = min(8u, T - t0);
+    device const bfloat* W_row = W + ulong(row) * ulong(N);
+    float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (uint i = lane; i < N; i += 32u) {
+        const float w = float(W_row[i]);
+        for (uint t = 0; t < nt; ++t) {
+            acc[t] = fma(w, float(x[ulong(t0 + t) * ulong(N) + i]), acc[t]);
+        }
+    }
+    for (uint t = 0; t < nt; ++t) {
+        const float v = simd_sum(acc[t]);
+        if (lane == 0) y[ulong(t0 + t) * ulong(M) + row] = OutT(v);
+    }
+}
+
+kernel void flashnext_gemm_bf16_t8(
+    device const bfloat* W   [[buffer(0)]],   // [M, N] BF16, row-major
+    device const half*   x   [[buffer(1)]],   // [T, N] FP16
+    device       half*   y   [[buffer(2)]],   // [T, M] FP16
+    constant     uint&   M   [[buffer(3)]],
+    constant     uint&   N   [[buffer(4)]],
+    constant     uint&   T   [[buffer(5)]],
+    uint2 tg     [[threadgroup_position_in_grid]],
+    uint sg_idx  [[simdgroup_index_in_threadgroup]],
+    uint lane    [[thread_index_in_simdgroup]]
+) {
+    flashnext_gemm_bf16_t8_body<half>(W, x, y, M, N, T, tg, sg_idx, lane);
+}
+
+kernel void flashnext_gemm_bf16_t8_f32out(
+    device const bfloat* W   [[buffer(0)]],
+    device const half*   x   [[buffer(1)]],
+    device       float*  y   [[buffer(2)]],
+    constant     uint&   M   [[buffer(3)]],
+    constant     uint&   N   [[buffer(4)]],
+    constant     uint&   T   [[buffer(5)]],
+    uint2 tg     [[threadgroup_position_in_grid]],
+    uint sg_idx  [[simdgroup_index_in_threadgroup]],
+    uint lane    [[thread_index_in_simdgroup]]
+) {
+    flashnext_gemm_bf16_t8_body<float>(W, x, y, M, N, T, tg, sg_idx, lane);
+}
+
 // ---------------------------------------------------------------------------
 // Hyper-connections (`Qwen4ExpTextGatedResidual`)
 //

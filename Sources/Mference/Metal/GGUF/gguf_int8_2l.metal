@@ -91,17 +91,11 @@ struct Int8TwoLevelBatchParams {
     uint pad;
 };
 
-kernel void gguf_int8_2l_gemm_t8_f16out(
-    device const char* values [[buffer(0)]],
-    device const ushort* dbits [[buffer(1)]],
-    device const char* m [[buffer(2)]],
-    constant Int8TwoLevelParams& p [[buffer(3)]],
-    device const half* x [[buffer(4)]],
-    device half* y [[buffer(5)]],
-    constant Int8TwoLevelBatchParams& bp [[buffer(6)]],
-    uint2 tg [[threadgroup_position_in_grid]],
-    uint sg_idx [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]])
+template <typename T>
+static inline void int8_2l_gemm_t8(
+    device const char* values, device const ushort* dbits, device const char* m,
+    constant Int8TwoLevelParams& p, device const half* x, device T* y,
+    constant Int8TwoLevelBatchParams& bp, uint2 tg, uint sg_idx, uint lane)
 {
     const uint row = tg.x * 8 + sg_idx;
     const uint t0 = tg.y * 8;
@@ -132,8 +126,41 @@ kernel void gguf_int8_2l_gemm_t8_f16out(
     }
     for (uint t = 0; t < nt; ++t) {
         const float v = simd_sum(acc[t]);
-        if (lane == 0) { y[ulong(t0 + t) * bp.y_stride + row] = half(v); }
+        if (lane == 0) { y[ulong(t0 + t) * bp.y_stride + row] = T(v); }
     }
+}
+
+kernel void gguf_int8_2l_gemm_t8_f16out(
+    device const char* values [[buffer(0)]],
+    device const ushort* dbits [[buffer(1)]],
+    device const char* m [[buffer(2)]],
+    constant Int8TwoLevelParams& p [[buffer(3)]],
+    device const half* x [[buffer(4)]],
+    device half* y [[buffer(5)]],
+    constant Int8TwoLevelBatchParams& bp [[buffer(6)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    int8_2l_gemm_t8<half>(values, dbits, m, p, x, y, bp, tg, sg_idx, lane);
+}
+
+// FP32-store twin for the consumers that keep FP32 pre-activations (the
+// hyper-connection low-rank and mix gates): each token's row equals
+// `gguf_int8_2l_gemv_f32out` on that token alone, bit for bit.
+kernel void gguf_int8_2l_gemm_t8_f32out(
+    device const char* values [[buffer(0)]],
+    device const ushort* dbits [[buffer(1)]],
+    device const char* m [[buffer(2)]],
+    constant Int8TwoLevelParams& p [[buffer(3)]],
+    device const half* x [[buffer(4)]],
+    device float* y [[buffer(5)]],
+    constant Int8TwoLevelBatchParams& bp [[buffer(6)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    int8_2l_gemm_t8<float>(values, dbits, m, p, x, y, bp, tg, sg_idx, lane);
 }
 
 // Q6_K row gather for `token_embd` (WS4 U1 R2): the table stays native Q6_K

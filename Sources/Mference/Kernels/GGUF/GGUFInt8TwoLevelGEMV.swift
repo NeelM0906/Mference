@@ -30,6 +30,7 @@ final class GGUFInt8TwoLevelGEMV {
     private let f16Out: MTLComputePipelineState
     private let f32Out: MTLComputePipelineState
     private let batchedF16Out: MTLComputePipelineState
+    private let batchedF32Out: MTLComputePipelineState
     private let q6KEmbedRows: MTLComputePipelineState
 
     init(context: MetalContext) throws {
@@ -40,12 +41,14 @@ final class GGUFInt8TwoLevelGEMV {
         guard let a = library.makeFunction(name: "gguf_int8_2l_gemv_f16out"),
               let b = library.makeFunction(name: "gguf_int8_2l_gemv_f32out"),
               let c = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f16out"),
+              let c32 = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f32out"),
               let e = library.makeFunction(name: "gguf_q6k_embed_rows") else {
             throw MetalError.missingFunction("gguf_int8_2l_*")
         }
         f16Out = try context.device.makeComputePipelineState(function: a)
         f32Out = try context.device.makeComputePipelineState(function: b)
         batchedF16Out = try context.device.makeComputePipelineState(function: c)
+        batchedF32Out = try context.device.makeComputePipelineState(function: c32)
         q6KEmbedRows = try context.device.makeComputePipelineState(function: e)
     }
 
@@ -71,12 +74,13 @@ final class GGUFInt8TwoLevelGEMV {
         encoder.endEncoding()
     }
 
-    /// Prefill form: `Y[t] = W · X[t]` for `tokens` rows, half output. Each
-    /// token's row is bit-identical to `encode(…, floatOutput: false)` on that
-    /// token alone; the weights are read once per group of 8 tokens.
+    /// Prefill form: `Y[t] = W · X[t]` for `tokens` rows, half or FP32
+    /// output. Each token's row is bit-identical to `encode(…, floatOutput:)`
+    /// on that token alone; the weights are read once per group of 8 tokens.
     func encodeBatched(commandBuffer: MTLCommandBuffer, weights w: Weights,
                        x: MTLBuffer, xOffset: Int = 0, xStride: Int,
-                       y: MTLBuffer, yOffset: Int = 0, yStride: Int, tokens: Int) {
+                       y: MTLBuffer, yOffset: Int = 0, yStride: Int, tokens: Int,
+                       floatOutput: Bool = false) {
         precondition(w.n % w.source.blockWeights == 0 && w.n % 8 == 0)
         precondition((w.source == .q6_K) == (w.m != nil), "Q6_K needs m; Q8_0 has none")
         precondition(xStride >= w.n && xStride % 4 == 0 && yStride >= w.rows && tokens > 0)
@@ -85,7 +89,7 @@ final class GGUFInt8TwoLevelGEMV {
                             bdShift: UInt32(w.source.blockWeights.trailingZeroBitCount),
                             hasM: w.m == nil ? 0 : 1)
         var batch = BatchParams(tokens: UInt32(tokens), xStride: UInt32(xStride), yStride: UInt32(yStride))
-        encoder.setComputePipelineState(batchedF16Out)
+        encoder.setComputePipelineState(floatOutput ? batchedF32Out : batchedF16Out)
         encoder.setBuffer(w.values.buffer, offset: w.values.offset, index: 0)
         encoder.setBuffer(w.d.buffer, offset: w.d.offset, index: 1)
         encoder.setBuffer(w.m?.buffer ?? w.values.buffer, offset: w.m?.offset ?? w.values.offset, index: 2)
