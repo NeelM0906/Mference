@@ -84,8 +84,9 @@ By default, the server runs one generation and queues up to four requests. Use
 Model integrity follows `--verify`, on the first load and on every library
 swap. The default `auto` checks the routed-expert files against the install
 receipt's sizes when that receipt validates and hashes them on first touch
-otherwise; `--verify full-sha256` always hashes, which adds that time to the
-first prefill after each load. See
+otherwise, logging a `notice: --verify auto: …` line that names the failed
+receipt check; `--verify full-sha256` always hashes, which adds that time to
+the first prefill after each load. See
 [Runtime settings](RUNTIME_CONTROLS.md#runtime-settings) for the trade-off.
 
 ## Connect a client

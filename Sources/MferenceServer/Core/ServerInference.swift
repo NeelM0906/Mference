@@ -309,6 +309,9 @@ public actor ServerModelSession: ServerLoadedModel {
             streamingMode: streamingMode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: integrityPolicy)
+        if let notice = model.verifyAutoFallbackNotice {
+            ServerLog.verifyAutoFallback(notice)
+        }
         let forwardRuntime = try ForwardRunnerFactory.make(model: model,
                                                             context: context,
                                                             maxContext: maxContext,

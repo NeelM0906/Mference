@@ -92,6 +92,9 @@ public func run(args: Args,
             streamingMode: expertStreaming.mode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
+        if let notice = model.verifyAutoFallbackNotice {
+            stderr.write(Data((notice + "\n").utf8))
+        }
         let forwardRuntime = try ForwardRunnerFactory.make(
             model: model,
             context: context,
@@ -444,6 +447,9 @@ private func runChat(args: Args,
             streamingMode: expertStreaming.mode,
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: args.verification)
+        if let notice = model.verifyAutoFallbackNotice {
+            stderr.write(Data((notice + "\n").utf8))
+        }
         let forwardRuntime = try ForwardRunnerFactory.make(
             model: model,
             context: context,

@@ -13,4 +13,14 @@ import Testing
     func otherValuesAreNotPolicies(value: String) {
         #expect(ModelIntegrityPolicy(verifyFlag: value) == nil)
     }
+
+    /// The `--verify auto` fallback notice is one stderr line that names the
+    /// failed receipt check, even when that check's detail spans lines.
+    @Test func autoFallbackNoticeIsOneLineWithTheReason() {
+        let notice = ModelIntegrityPolicy.autoFallbackNotice(detail: "verified-install.json: bad\nkey")
+        #expect(notice == "notice: --verify auto: install receipt did not validate "
+            + "(verified-install.json: bad key); hashing routed-expert files with full SHA-256 on first use")
+        let hasNewline = notice.contains { $0.isNewline }
+        #expect(!hasNewline)
+    }
 }
