@@ -29,8 +29,10 @@ public enum PrefixSnapshotError: Error, Equatable, CustomStringConvertible {
 /// Anonymous, page-aligned memory that holds one prefix snapshot payload: a
 /// copy of full-attention KV rows or of recurrent state. Never Swift heap
 /// (the bounded-memory invariant): the bytes are `mmap`ed on creation and
-/// `munmap`ed when the region is released. The CPU alone reads and writes it;
-/// a restore copies it back into the runner's own buffers.
+/// `munmap`ed when the region is released. The CPU reads and writes it, or a
+/// runner whose state is GPU-private blits into and out of it through a
+/// no-copy wrap and waits for the blit; a restore copies it back into the
+/// runner's own buffers.
 ///
 /// `@unchecked Sendable`: the owner serializes access (the server's single
 /// generation gate); the region itself holds no mutable Swift state.

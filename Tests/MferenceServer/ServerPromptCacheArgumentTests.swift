@@ -58,4 +58,21 @@ import Mference
         #expect(ServerPromptCacheBytes.auto.resolved(physicalMemoryBytes: 256 * Self.gibibyte) == 4 << 30)
         #expect(ServerPromptCacheBytes.bytes(12345).resolved(physicalMemoryBytes: 8 * Self.gibibyte) == 12345)
     }
+
+    @Test func flashNextCapsTheAutomaticBudgetAtOneAndAHalfGibibytes() {
+        for family in [ModelFamily.qwen38flashnext, .qwen38flashnextudiq3xxs] {
+            #expect(ServerPromptCacheBytes.auto.resolved(family: family,
+                physicalMemoryBytes: 32 * Self.gibibyte) == 3 << 29)
+            #expect(ServerPromptCacheBytes.auto.resolved(family: family,
+                physicalMemoryBytes: 256 * Self.gibibyte) == 3 << 29)
+            #expect(ServerPromptCacheBytes.auto.resolved(family: family,
+                physicalMemoryBytes: 16 * Self.gibibyte) == 1 << 30)
+            #expect(ServerPromptCacheBytes.auto.resolved(family: family,
+                physicalMemoryBytes: 8 * Self.gibibyte) == 0)
+            #expect(ServerPromptCacheBytes.bytes(4 << 30).resolved(family: family,
+                physicalMemoryBytes: 32 * Self.gibibyte) == 4 << 30, "an explicit budget is never capped")
+        }
+        #expect(ServerPromptCacheBytes.auto.resolved(family: .qwen36,
+            physicalMemoryBytes: 32 * Self.gibibyte) == 4 << 30)
+    }
 }

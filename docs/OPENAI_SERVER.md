@@ -146,7 +146,7 @@ usage.prompt_tokens_details.cached_tokens
 
 | Mode | Retains |
 | --- | --- |
-| `multi-prefix` (default) | Qwen 3.6: the end of every finished turn, across conversations, within `--prompt-cache-bytes`. Every other model, and any runner that cannot snapshot its state: as `single-prefix`. |
+| `multi-prefix` (default) | Qwen 3.6 and the Flash-Next models: the end of every finished turn, across conversations, within `--prompt-cache-bytes`. Every other model, and any runner that cannot snapshot its state: as `single-prefix`. |
 | `single-prefix` | The last finished turn. A different or incompatible history replaces it. |
 | `off` | Nothing; every request prefills its whole prompt. |
 
@@ -156,12 +156,17 @@ its attention KV stays in the runner and nothing else is copied. Before a
 request writes over KV that a retained turn still needs (another
 conversation, or an edited or regenerated earlier message), the conversation's
 KV up to its latest retained turn is copied out, even when only its end will
-be overwritten: 20 KiB per token, 640 MiB for a 32K-token conversation. A later request
+be overwritten: 20 KiB per token, 640 MiB for a 32K-token conversation. The
+Flash-Next models keep about 110 MiB of recurrent state per finished turn
+(Unsloth UD-IQ3_XXS install) and copy 31.5 KiB per token of attention KV and
+indexer keys, about 1 GiB for a 32K-token conversation. A later request
 that continues any retained turn restores it and prefills only what it adds.
 `--prompt-cache-bytes <bytes|auto>` caps these copies; the least recently used
 are released first, and a copy that does not fit is skipped. `auto` is the
 smaller of 4 GiB and an eighth of physical memory on Macs with at least
-24 GiB, 1 GiB from 16 GiB, and 0 below. `0` serves exactly as
+24 GiB, 1 GiB from 16 GiB, and 0 below; for the Flash-Next models it is at
+most 1.5 GiB, because their experts stream through the file cache that these
+copies take memory from. `0` serves exactly as
 `single-prefix`. The copies are released when the model is unloaded or
 swapped; cancellation and errors release only the conversation that was in
 the runner. When macOS reports memory pressure (warning or critical), the
