@@ -2701,10 +2701,17 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
     /// drift amplified by routing swaps), so the grouped path is capped here.
     static let groupedLUT4MaxPrefillChunkTokens = 1024
 
+    /// The smallest prefill chunk whose GGUF tiles may take the grouped LUT4
+    /// GEMM. The padding rule is per tile, so a sparse chunk can still pass on
+    /// one tile; smaller chunks were never class T gated and keep the row
+    /// kernel's bytes.
+    static let groupedLUT4MinPrefillChunkTokens = 512
+
     /// Whether a chunked prefill configured for `chunkTokens` tokens per chunk
-    /// may route its GGUF tiles to the grouped LUT4 GEMM.
+    /// may route its GGUF tiles to the grouped LUT4 GEMM: only the 512 and
+    /// 1,024 chunk sizes the class T gates cover.
     static func usesSimdgroupLUT4RoutedPrefill(chunkTokens: Int) -> Bool {
-        chunkTokens <= groupedLUT4MaxPrefillChunkTokens
+        (groupedLUT4MinPrefillChunkTokens...groupedLUT4MaxPrefillChunkTokens).contains(chunkTokens)
     }
 
     /// Test-only: false sends every GGUF prefill tile to the LUT4 row kernel,

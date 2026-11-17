@@ -8,10 +8,10 @@ import Testing
 /// (`FlashNextForwardRunner.usesSimdgroupLUT4RoutedExperts`). One process:
 /// control is the runner with every prefill tile on the LUT4 row kernel
 /// (`useRowKernelForGGUFPrefill`), candidate the default runner. Both prefill
-/// the same prompts at `MFERENCE_FLASHNEXT_GATE_CHUNK` tokens per chunk (1024,
-/// the grouped path's cap; the grouped kernel engages only on tiles of about
-/// 8+ rows per expert, so prompts of about 410+ tokens in one chunk) and are then
-/// teacher-forced through the same saved answer on the decode path.
+/// the same prompts at `MFERENCE_FLASHNEXT_GATE_CHUNK` tokens per chunk (1024
+/// or 512, the only chunk sizes the grouped path takes; within them it engages
+/// on tiles that pass the 8x padding rule) and are then teacher-forced through
+/// the same saved answer on the decode path.
 ///
 /// Items: the frozen long-synthesis prompt (2,940 tokens with Qwen's chat
 /// template) and about 8K tokens of the repository's design docs, each with
@@ -22,8 +22,8 @@ import Testing
 /// the grouped kernel on at least one tile.
 ///
 /// At chunk 512 the items are the ones the CLI's auto chunk rule sends to a
-/// single 512 chunk (prompts of 410-512 tokens, where grouped tiles start to
-/// qualify): the frozen medium-review prompt (426 tokens) with 200 tokens of
+/// single 512 chunk (prompts of 257-512 tokens; the items are 410-512 tokens so
+/// their tiles fill): the frozen medium-review prompt (426 tokens) with 200 tokens of
 /// its saved Qwen answer, and the opening of docs/SYSTEM_DESIGN.md cut at a
 /// sentence boundary so the templated prompt is 480-512 tokens, with 200 tokens
 /// of the long-synthesis answer. The cut text is the committed fixture
