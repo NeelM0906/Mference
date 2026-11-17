@@ -66,11 +66,11 @@ import Testing
         }
         #expect(weakStreamer == nil && weakBuffer == nil)
         let slab = try #require(base)
-        // Darwin's mincore reports an unmapped range rather than failing on it
-        // (no ENOMEM, unlike Linux), so the check is that none of the slab's
-        // pages is still resident.
-        let afterRelease = Self.pageBits(slab, length)
-        #expect(afterRelease.map { bits in bits.allSatisfy { $0 & MINCORE_INCORE == 0 } } ?? true,
-                "no slab page is resident after release")
+        // Darwin's mincore reports on a released range instead of failing on it
+        // (its only errors are EINVAL for a non-user address and EFAULT for
+        // the vector; there is no ENOMEM, unlike Linux). So the call must
+        // succeed, and none of the slab's pages may still be resident.
+        let afterRelease = try #require(Self.pageBits(slab, length), "mincore reports on the released range")
+        #expect(afterRelease.allSatisfy { $0 & MINCORE_INCORE == 0 }, "no slab page is resident after release")
     }
 }
