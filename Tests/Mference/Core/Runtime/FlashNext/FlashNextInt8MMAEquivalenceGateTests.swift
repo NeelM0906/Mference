@@ -30,7 +30,7 @@ import Testing
 /// one arm per process, so one runner and its prefill scratch per hold). The
 /// control arm writes its rows to `MFERENCE_FLASHNEXT_GATE_OUT`; the candidate
 /// arm reads them from `MFERENCE_FLASHNEXT_GATE_CONTROL_ROWS`, checks they come
-/// from the same install, chunk and prompts, and runs the same comparison as
+/// from the same install, chunk and item tokens, and runs the same comparison as
 /// the one-process gate. 16 expert slots.
 @Suite(.serialized) struct FlashNextInt8MMAEquivalenceGateTests {
     static let env = ProcessInfo.processInfo.environment
@@ -147,7 +147,8 @@ import Testing
                 let rows = try #require(one.rows[item.name])
                 print(String(format: "[flashnext-mma-gate] %@ arm control: prompt %d tok, chunk %d, prefill %.1f s, %d rows",
                              item.name, item.prefillCount, chunk, one.seconds[item.name] ?? 0, rows.count))
-                saved.append(["name": item.name, "prefill": item.prefillCount, "seconds": one.seconds[item.name] ?? 0,
+                saved.append(["name": item.name, "prefill": item.prefillCount, "tokens": Self.tokenDigest(item.tokens),
+                              "seconds": one.seconds[item.name] ?? 0,
                               "nll": rows.map(\.nll), "top1": rows.map(\.top1), "margin": rows.map { Double($0.margin) }])
             }
             try JSONSerialization.data(withJSONObject: ["modelID": model.modelID, "arm": "control",
@@ -217,8 +218,21 @@ import Testing
         }
     }
 
+    /// FNV-1a over an item's tokens (prompt and answer), as hex: stable across
+    /// processes, unlike `Hasher`.
+    static func tokenDigest(_ tokens: [Int32]) -> String {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for t in tokens {
+            let bits = UInt32(bitPattern: t)
+            for shift in stride(from: 0, to: 32, by: 8) {
+                h = (h ^ UInt64((bits >> UInt32(shift)) & 0xFF)) &* 0x100_0000_01b3
+            }
+        }
+        return String(h, radix: 16)
+    }
+
     /// The control arm's rows from an earlier process, refused unless they come
-    /// from the same install, chunk and prompt lengths, with one row per scored
+    /// from the same install, chunk and item tokens, with one row per scored
     /// position.
     static func savedControl(at path: String, modelID: String, chunk: Int, items: [Item]) throws
         -> (rows: [String: [Row]], seconds: [String: Double], tiles: Int) {
@@ -230,8 +244,11 @@ import Testing
         let saved = try #require(json["rows"] as? [[String: Any]])
         var rows: [String: [Row]] = [:], seconds: [String: Double] = [:]
         for item in items {
-            let entry = try #require(saved.first { $0["name"] as? String == item.name }, "no control rows for \(item.name)")
+            let match = saved.first { $0["name"] as? String == item.name }
+            let entry = try #require(match, "no control rows for \(item.name)")
             try #require(entry["prefill"] as? Int == item.prefillCount, "\(item.name): control prompt length differs")
+            try #require(entry["tokens"] as? String == tokenDigest(item.tokens),
+                         "\(item.name): control prompt or answer tokens differ")
             let nll = try #require(entry["nll"] as? [Double])
             let top1 = try #require(entry["top1"] as? [Int])
             let margin = try #require(entry["margin"] as? [Double])

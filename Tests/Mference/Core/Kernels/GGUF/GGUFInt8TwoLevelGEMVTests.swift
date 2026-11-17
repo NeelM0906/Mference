@@ -162,6 +162,10 @@ import MferenceValidationSupport
                 for r in 0..<c.rows { got.append(Float(y[t * yStride + r])) }
                 for r in c.rows..<yStride where raw[t * yStride + r] != 0xFFFF { padTouched += 1 }
             }
+            // y starts as 0xFFFF (an fp16 NaN) and RelError's max() skips NaN,
+            // so a row the kernel never stored would otherwise pass.
+            let allWritten = got.allSatisfy { $0.isFinite }
+            #expect(allWritten, "\(tokens) tokens: an in-range output was not written")
             let err = RelError.compute(actual: got, reference: reference)
             #expect(err < Tolerance.fp16Reduction, "\(tokens) tokens: rel error \(err)")
             #expect(padTouched == 0, "\(tokens) tokens: wrote into the y row padding")
