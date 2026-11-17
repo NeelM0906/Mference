@@ -9,7 +9,7 @@ import Testing
 /// every INT8-2L projection on the 8-token kernel
 /// (`useScalarInt8TwoLevelPrefill`), candidate the default runner. Both prefill
 /// the same prompts at `MFERENCE_FLASHNEXT_GATE_CHUNK` tokens per chunk (32 to
-/// 1,024; the GEMM takes blocks of at least 32 tokens) and are then
+/// 4,096; the GEMM takes blocks of at least 32 tokens) and are then
 /// teacher-forced through the same saved answer on the decode path, which the
 /// change does not touch, so the arms differ only through prefill-written state.
 ///
@@ -39,8 +39,8 @@ import Testing
     func int8MMAPrefillKeepsTeacherForcedPerplexity() async throws {
         let install = URL(fileURLWithPath: try #require(Self.env["MFERENCE_FLASHNEXT_MMA_GATE"]))
         let chunk = try #require(Int(Self.env["MFERENCE_FLASHNEXT_GATE_CHUNK"] ?? ""))
-        try #require((FlashNextMatVec.int8TwoLevelMMAMinTokens...1024).contains(chunk),
-                     "chunk must be 32...1024: the GEMM takes blocks of at least 32 tokens, and 1,024 is the cap")
+        try #require((FlashNextMatVec.int8TwoLevelMMAMinTokens...4096).contains(chunk),
+                     "chunk must be 32...4096: the GEMM takes blocks of at least 32 tokens, and 4,096 is the prefill scratch cap")
         let root = GemmaPrefillGateFixture.repositoryRoot
         let folder = try #require(MFTokenizer.tokenizerFolder(forModelDirectory: install))
         let tokenizer = try await MFTokenizer.load(from: folder, family: .qwen38flashnextudiq3xxs)

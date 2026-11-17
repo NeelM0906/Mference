@@ -166,8 +166,6 @@ import Testing
 
     @Test(.enabled(if: enabled)) func denseInt8TwoLevelVsFP16Roofline() throws {
         let ctx = try MetalContext()
-        let matVec = try FlashNextMatVec(context: ctx, int4: DequantInt4GEMV(context: ctx),
-                                         int8Columns: Self.hidden, ggufInt8TwoLevel: true)
         let int8 = try GGUFInt8TwoLevelGEMV(context: ctx)
         var rng = LCG(s: 0x5EED)
         let t = Self.tokens
@@ -177,12 +175,14 @@ import Testing
             let w = try Self.matrix(ctx.device, s, rng: &rng)
             let x = try Self.activations(ctx.device, count: t * s.cols, rng: &rng)
             let y = try Self.buffer(ctx.device, t * s.rows * 2)
+            guard case let .ggufInt8TwoLevel(q) = w else { preconditionFailure("dense shapes are INT8-2L") }
+            // The 8-token kernel itself: `FlashNextMatVec.encodeBatched` now
+            // routes these blocks to the MMA, so it cannot be the baseline.
             let prod = try Self.time(ctx) {
-                matVec.encodeBatched(commandBuffer: $0, matrix: w, x: x, y: y,
-                                     matrixRows: s.rows, matrixColumns: s.cols, tokens: t)
+                int8.encodeBatched(commandBuffer: $0, weights: q, x: x, xStride: s.cols,
+                                   y: y, yStride: s.rows, tokens: t, floatOutput: false)
             }
             let mps = try Self.mpsFP16(ctx, rows: s.rows, cols: s.cols, tokens: t)
-            guard case let .ggufInt8TwoLevel(q) = w else { preconditionFailure("dense shapes are INT8-2L") }
             let ref = Fp16Read.floats(y, count: t * s.rows)
             var mma: [(Timing, Double)] = []
             for tile in [GGUFInt8TwoLevelGEMV.MMAWeightTile.float, .half] {

@@ -117,4 +117,37 @@ import MferenceValidationSupport
             }
         }
     }
+
+    /// FP16-out INT8-2L blocks of `int8TwoLevelMMAMinTokens` or more take the
+    /// simdgroup-matrix GEMM; one token fewer, and every FP32-out block, keep
+    /// the decode-identical 8-token kernel.
+    @Test func int8TwoLevelBlocksFromThirtyTwoTokensTakeTheMMA() throws {
+        let ctx = try MetalContext()
+        let matVec = try FlashNextMatVec(context: ctx, int4: DequantInt4GEMV(context: ctx),
+                                         int8Columns: 2560, ggufInt8TwoLevel: true)
+        var rng = SplitMix64(seed: 0x7E57_0002)
+        let minTokens = FlashNextMatVec.int8TwoLevelMMAMinTokens
+        #expect(minTokens == 32)
+        for c in [Case(name: "int8-2l f16", rows: 16, cols: 256, int8: true, f32: false),
+                  Case(name: "int8-2l f32", rows: 16, cols: 256, int8: true, f32: true)] {
+            let w = try Self.matrix(c, ctx: ctx, rng: &rng)
+            for tokens in [minTokens - 1, minTokens, minTokens + 33] {
+                let x = try #require(ctx.device.makeBuffer(length: tokens * c.cols * 2, options: .storageModeShared))
+                let y = try #require(ctx.device.makeBuffer(length: tokens * c.rows * 4, options: .storageModeShared))
+                let cb = try #require(ctx.queue.makeCommandBuffer())
+                let t8Before = matVec.batchedT8Dispatches
+                let mmaBefore = matVec.int8TwoLevelMMADispatches
+                matVec.encodeBatched(commandBuffer: cb, matrix: w, x: x, y: y,
+                                     matrixRows: c.rows, matrixColumns: c.cols, tokens: tokens,
+                                     outputFloat32: c.f32)
+                cb.commit(); cb.waitUntilCompleted()
+                #expect(cb.status == .completed)
+                let mma = !c.f32 && tokens >= minTokens
+                #expect(matVec.int8TwoLevelMMADispatches - mmaBefore == (mma ? 1 : 0),
+                        "\(c.name), \(tokens) tokens: MMA count")
+                #expect(matVec.batchedT8Dispatches - t8Before == (mma ? 0 : 1),
+                        "\(c.name), \(tokens) tokens: t8 count")
+            }
+        }
+    }
 }
