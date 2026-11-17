@@ -127,6 +127,45 @@ import MferenceValidationSupport
             #expect(padTouched == 0, "\(tokens) tokens: wrote into the y row padding")
         }
     }
+
+    /// The FP32-output batched form (the hyper-connection gates' prefill path)
+    /// equals `gemv_f32out` per token bit for bit, at the HC shapes too
+    /// (Q8_0 10240 → 320 and 320 → 10240).
+    @Test(arguments: [cases[0], cases[3], Case(q6K: false, rows: 320, n: 10240), Case(q6K: false, rows: 10240, n: 320)])
+    func batchedFloatOutputMatchesSingleTokenBitForBit(c: Case) throws {
+        let ctx = try MetalContext()
+        let kernel = try GGUFInt8TwoLevelGEMV(context: ctx)
+        var rng = SeedTree(0x4932_4C46).key("int8-2l-batched-f32-\(c.testDescription)")
+        let (w, _) = try Self.makeWeights(c, ctx: ctx, rng: &rng)
+        for tokens in [1, 7, 8, 13] {
+            let xStride = c.n + 8, yStride = c.rows + 4
+            let x = (0..<(tokens * xStride)).map { _ in Float16(rng.uniform(-1, 1)) }
+            let xBuf = try #require(x.withUnsafeBytes {
+                ctx.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+            })
+            let yBuf = try #require(ctx.device.makeBuffer(length: tokens * yStride * 4, options: .storageModeShared))
+            let single = try #require(ctx.device.makeBuffer(length: tokens * c.rows * 4, options: .storageModeShared))
+            memset(yBuf.contents(), 0xFF, tokens * yStride * 4)
+            let cb = try #require(ctx.queue.makeCommandBuffer())
+            kernel.encodeBatched(commandBuffer: cb, weights: w, x: xBuf, xStride: xStride,
+                                 y: yBuf, yStride: yStride, tokens: tokens, floatOutput: true)
+            for t in 0..<tokens {
+                kernel.encode(commandBuffer: cb, weights: w, x: xBuf, xOffset: t * xStride * 2,
+                              y: single, yOffset: t * c.rows * 4, floatOutput: true)
+            }
+            cb.commit(); cb.waitUntilCompleted()
+            #expect(cb.status == .completed)
+            let yb = yBuf.contents().bindMemory(to: UInt32.self, capacity: tokens * yStride)
+            let ys = single.contents().bindMemory(to: UInt32.self, capacity: tokens * c.rows)
+            var mismatches = 0, padTouched = 0
+            for t in 0..<tokens {
+                for r in 0..<c.rows where yb[t * yStride + r] != ys[t * c.rows + r] { mismatches += 1 }
+                for r in c.rows..<yStride where yb[t * yStride + r] != 0xFFFF_FFFF { padTouched += 1 }
+            }
+            #expect(mismatches == 0, "\(tokens) tokens: \(mismatches) rows differ from the single-token f32 GEMV")
+            #expect(padTouched == 0, "\(tokens) tokens: wrote into the y row padding")
+        }
+    }
 }
 
 /// `token_embd` gather from a native Q6_K table against

@@ -175,6 +175,8 @@ final class FlashNextMatVec {
     private let prefillMPP: MPPPrefillInt4QMM
     private let bf16PSO: MTLComputePipelineState
     private let bf16F32PSO: MTLComputePipelineState
+    private let bf16BatchedPSO: MTLComputePipelineState
+    private let bf16BatchedF32PSO: MTLComputePipelineState
     private let int8PSO: MTLComputePipelineState
     /// A BF16 vector of ones, `int8Columns` long: the identity value for
     /// `router_gemv_gemma4_r4`'s activation scale. Sized once at init rather
@@ -210,6 +212,12 @@ final class FlashNextMatVec {
         self.bf16F32PSO = try context.pipeline("flashnext_gemv_bf16_f32out",
                                                constants: [],
                                                maxTotalThreadsPerThreadgroup: 256)
+        self.bf16BatchedPSO = try context.pipeline("flashnext_gemm_bf16_t8",
+                                                   constants: [],
+                                                   maxTotalThreadsPerThreadgroup: 256)
+        self.bf16BatchedF32PSO = try context.pipeline("flashnext_gemm_bf16_t8_f32out",
+                                                      constants: [],
+                                                      maxTotalThreadsPerThreadgroup: 256)
         // Unspecialized and 512-thread-capable: the same pipeline
         // `MoE.encodeRouterGemma4` falls back to for any shape that is not
         // Gemma's, which is the one `RouterWideTopK10Tests` drives at 512x2560.
@@ -309,9 +317,10 @@ final class FlashNextMatVec {
     /// decode-identical multi-X kernel otherwise. FP32 outputs deliberately use
     /// multi-X in groups of eight: the QSA indexer and hyper-connection gates
     /// consume pre-activations whose exact FP32 reduction order is part of the
-    /// model's discrete decisions. Dense BF16 is retained for the parity toy,
-    /// where repeated rows are a reference-only compatibility path rather than
-    /// a production checkpoint path.
+    /// model's discrete decisions. Dense BF16 (the parity toy, and the GGUF
+    /// install's narrowed F32 gates) and INT8-2L (FP16 or FP32 out) run 8
+    /// tokens per SIMD group, each token's row bit-identical to the
+    /// single-token GEMV, so prefill matches decode exactly.
     func encodeBatched(commandBuffer: MTLCommandBuffer,
                        matrix: FlashNextWeightMatrix,
                        x: MTLBuffer, xOffset: Int = 0,
@@ -362,16 +371,38 @@ final class FlashNextMatVec {
                     outputFloat32: outputFloat32)
                 row += count
             }
-        case let .ggufInt8TwoLevel(w) where !outputFloat32:
+        case let .ggufInt8TwoLevel(w):
             guard let kernel = ggufInt8TwoLevel else {
                 preconditionFailure("an INT8-2L matrix reached a FlashNextMatVec built without the GGUF path")
             }
             precondition(w.rows == matrixRows && w.n == matrixColumns)
-            // Bit-identical per token to the single-token GEMV.
+            // Bit-identical per token to the single-token GEMV, FP16 or FP32 out.
             kernel.encodeBatched(commandBuffer: commandBuffer, weights: w,
                                  x: x, xOffset: xOffset, xStride: matrixColumns,
-                                 y: y, yOffset: yOffset, yStride: matrixRows, tokens: tokens)
-        case .int8, .bf16, .ggufInt8TwoLevel, .ggufQ6KRows:
+                                 y: y, yOffset: yOffset, yStride: matrixRows, tokens: tokens,
+                                 floatOutput: outputFloat32)
+        case let .bf16(buffer, offset):
+            // Bit-identical per token to the single-token BF16 GEMV; the
+            // weights are read once per group of 8 tokens instead of once per
+            // token, in one dispatch instead of `tokens`.
+            guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+            enc.setComputePipelineState(outputFloat32 ? bf16BatchedF32PSO : bf16BatchedPSO)
+            enc.setBuffer(buffer, offset: offset, index: 0)
+            enc.setBuffer(x, offset: xOffset, index: 1)
+            enc.setBuffer(y, offset: yOffset, index: 2)
+            var rowsVar = UInt32(matrixRows)
+            var colsVar = UInt32(matrixColumns)
+            var tokensVar = UInt32(tokens)
+            enc.setBytes(&rowsVar, length: MemoryLayout<UInt32>.size, index: 3)
+            enc.setBytes(&colsVar, length: MemoryLayout<UInt32>.size, index: 4)
+            enc.setBytes(&tokensVar, length: MemoryLayout<UInt32>.size, index: 5)
+            enc.dispatchThreadgroups(
+                MTLSize(width: (matrixRows + Self.rowsPerThreadgroup - 1) / Self.rowsPerThreadgroup,
+                        height: (tokens + 7) / 8, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32 * Self.rowsPerThreadgroup,
+                                               height: 1, depth: 1))
+            enc.endEncoding()
+        case .int8, .ggufQ6KRows:
             for row in 0..<tokens {
                 encode(commandBuffer: commandBuffer, matrix: matrix,
                        x: x, xOffset: xOffset + row * matrixColumns * half,
