@@ -245,8 +245,9 @@ strides (132,169,728 B, 126 MiB, per slot). `defaultExpertCacheSlots` gives
       recorded in the family PR. Two pre-existing failures are quoted against
       `main` under the maintainer's ruling: `MapleQKNormRoPETests:74`, and the
       Flash-Next near-tie test's long case.
-- [x] **Protocol bench** — the community protocol at `54d658c`, 15 of 15
-      runs `stop=endOfTurn`; see [Measured results](#measured-results).
+- [x] **Protocol bench** — the community protocol at `54d658c`; one
+      medium-review run voided (battery) and being replaced; see
+      [Measured results](#measured-results).
 
 ## Fidelity gate (U5)
 
@@ -366,14 +367,17 @@ Protocol: [`COMMUNITY_BENCHMARKS.md`](../COMMUNITY_BENCHMARKS.md).
 **Runs.**
 - Each case had one discarded warmup, then five measured runs, each in a fresh
   process.
-- All 15 measured runs exited 0 with `stop=endOfTurn`. None was voided or
-  replaced, and swap-outs did not grow.
+- One medium-review run was voided because the host ran on battery for 45 s
+  of it. A replacement run is pending, so that row currently reports four
+  runs.
+- The other 14 measured runs exited 0 with `stop=endOfTurn`, and swap-outs did
+  not grow.
 - Output was identical across runs within each case.
 
 | Case | Prompt / generated | Prefill (median) | Decode (median) | Range | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: |
 | short-explanation | 62 / 547 | 31.96 s | 4.12 tok/s | 4.10–4.14 | 830 MiB |
-| medium-review | 426 / 706 | 49.47 s | 3.74 tok/s | 3.44–3.83 | 858 MiB |
+| medium-review (4 runs; 1 voided, replacement pending) | 426 / 706 | 50.08 s | 3.77 tok/s | 3.44–3.83 | 858 MiB |
 | long-synthesis | 2,940 / 569 | 178.59 s | 3.40 tok/s | 3.33–3.48 | 1,056 MiB |
 
 Peak memory footprint (`/usr/bin/time`) was 0.66–0.68, 1.22–1.24 and 5.35 GB
