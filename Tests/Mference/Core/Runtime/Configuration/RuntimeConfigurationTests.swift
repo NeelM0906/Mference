@@ -62,6 +62,23 @@ import Testing
             for: .qwen38flashnext, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
     }
 
+    /// The Unsloth GGUF Flash-Next install takes 1,024 on hosts with at least
+    /// 16 GiB; vendor Flash-Next is unmeasured and keeps 128.
+    @Test func serverPrefillChunkIs1024ForUnslothFlashNextOnly() {
+        let gib = UInt64(1) << 30
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib, environment: [:]) == 1024)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 16 * gib, environment: [:]) == 1024)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen38flashnext, physicalMemoryBytes: 32 * gib, environment: [:]) == 128)
+        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib,
+            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
+    }
+
     @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
