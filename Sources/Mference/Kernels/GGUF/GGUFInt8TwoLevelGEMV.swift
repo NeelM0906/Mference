@@ -31,8 +31,7 @@ final class GGUFInt8TwoLevelGEMV {
     private let f32Out: MTLComputePipelineState
     private let batchedF16Out: MTLComputePipelineState
     private let batchedF32Out: MTLComputePipelineState
-    private let mmaFloatTile: MTLComputePipelineState
-    private let mmaHalfTile: MTLComputePipelineState
+    private let mma: MTLComputePipelineState
     private let q6KEmbedRows: MTLComputePipelineState
 
     init(context: MetalContext) throws {
@@ -45,7 +44,6 @@ final class GGUFInt8TwoLevelGEMV {
               let c = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f16out"),
               let c32 = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f32out"),
               let mf = library.makeFunction(name: "gguf_int8_2l_gemm_mma_wf32_f16out"),
-              let mh = library.makeFunction(name: "gguf_int8_2l_gemm_mma_wf16_f16out"),
               let e = library.makeFunction(name: "gguf_q6k_embed_rows") else {
             throw MetalError.missingFunction("gguf_int8_2l_*")
         }
@@ -53,8 +51,7 @@ final class GGUFInt8TwoLevelGEMV {
         f32Out = try context.device.makeComputePipelineState(function: b)
         batchedF16Out = try context.device.makeComputePipelineState(function: c)
         batchedF32Out = try context.device.makeComputePipelineState(function: c32)
-        mmaFloatTile = try context.device.makeComputePipelineState(function: mf)
-        mmaHalfTile = try context.device.makeComputePipelineState(function: mh)
+        mma = try context.device.makeComputePipelineState(function: mf)
         q6KEmbedRows = try context.device.makeComputePipelineState(function: e)
     }
 
@@ -108,10 +105,6 @@ final class GGUFInt8TwoLevelGEMV {
         encoder.endEncoding()
     }
 
-    /// Weight tile element of the simdgroup-matrix GEMM: `float` keeps every
-    /// dequantized weight exact; `half` rounds each once.
-    enum MMAWeightTile: Sendable { case float, half }
-
     /// Tokens and output rows per threadgroup of the simdgroup-matrix GEMM.
     static let mmaTileTokens = 64
     static let mmaTileRows = 128
@@ -119,11 +112,11 @@ final class GGUFInt8TwoLevelGEMV {
     /// Simdgroup-matrix prefill GEMM, half output (WS1 (b), class T): the same
     /// `Y[t] = W · X[t]` as `encodeBatched`, in 64-token x 128-row tiles of
     /// 8x8 float multiply-accumulates. Not bit-identical to the GEMV: the K
-    /// reduction is re-associated.
+    /// reduction is re-associated. The weight tile is float, so every
+    /// dequantized weight is exact.
     func encodeBatchedMMA(commandBuffer: MTLCommandBuffer, weights w: Weights,
                           x: MTLBuffer, xOffset: Int = 0, xStride: Int,
-                          y: MTLBuffer, yOffset: Int = 0, yStride: Int, tokens: Int,
-                          weightTile: MMAWeightTile = .float) {
+                          y: MTLBuffer, yOffset: Int = 0, yStride: Int, tokens: Int) {
         precondition(w.n % 32 == 0 && w.n % w.source.blockWeights == 0)
         precondition((w.source == .q6_K) == (w.m != nil), "Q6_K needs m; Q8_0 has none")
         precondition(xStride >= w.n && xStride % 4 == 0 && yStride >= w.rows && tokens > 0)
@@ -132,7 +125,7 @@ final class GGUFInt8TwoLevelGEMV {
                             bdShift: UInt32(w.source.blockWeights.trailingZeroBitCount),
                             hasM: w.m == nil ? 0 : 1)
         var batch = BatchParams(tokens: UInt32(tokens), xStride: UInt32(xStride), yStride: UInt32(yStride))
-        encoder.setComputePipelineState(weightTile == .float ? mmaFloatTile : mmaHalfTile)
+        encoder.setComputePipelineState(mma)
         encoder.setBuffer(w.values.buffer, offset: w.values.offset, index: 0)
         encoder.setBuffer(w.d.buffer, offset: w.d.offset, index: 1)
         encoder.setBuffer(w.m?.buffer ?? w.values.buffer, offset: w.m?.offset ?? w.values.offset, index: 2)
