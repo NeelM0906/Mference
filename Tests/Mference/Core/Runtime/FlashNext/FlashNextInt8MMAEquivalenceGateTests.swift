@@ -26,7 +26,12 @@ import Testing
 /// `MFERENCE_FLASHNEXT_GATE_OUT` (per-position rows as JSON) and
 /// `MFERENCE_FLASHNEXT_GATE_ITEM` (`long` or `docs`: one item, both arms, so the
 /// gate splits into separate lock holds; thresholds then apply offline to the
-/// pooled rows). 16 expert slots.
+/// pooled rows) and `MFERENCE_FLASHNEXT_GATE_ARM` (`control` or `candidate`:
+/// one arm per process, so one runner and its prefill scratch per hold). The
+/// control arm writes its rows to `MFERENCE_FLASHNEXT_GATE_OUT`; the candidate
+/// arm reads them from `MFERENCE_FLASHNEXT_GATE_CONTROL_ROWS`, checks they come
+/// from the same install, chunk and prompts, and runs the same comparison as
+/// the one-process gate. 16 expert slots.
 @Suite(.serialized) struct FlashNextInt8MMAEquivalenceGateTests {
     static let env = ProcessInfo.processInfo.environment
     static var enabled: Bool { env["MFERENCE_FLASHNEXT_MMA_GATE"] != nil && env["MFERENCE_FLASHNEXT_GATE_CHUNK"] != nil }
@@ -41,6 +46,8 @@ import Testing
         let chunk = try #require(Int(Self.env["MFERENCE_FLASHNEXT_GATE_CHUNK"] ?? ""))
         try #require((FlashNextMatVec.int8TwoLevelMMAMinTokens...4096).contains(chunk),
                      "chunk must be 32...4096: the GEMM takes blocks of at least 32 tokens, and 4,096 is the prefill scratch cap")
+        let arm = Self.env["MFERENCE_FLASHNEXT_GATE_ARM"]
+        try #require(arm == nil || arm == "control" || arm == "candidate", "MFERENCE_FLASHNEXT_GATE_ARM is control or candidate")
         let root = GemmaPrefillGateFixture.repositoryRoot
         let folder = try #require(MFTokenizer.tokenizerFolder(forModelDirectory: install))
         let tokenizer = try await MFTokenizer.load(from: folder, family: .qwen38flashnextudiq3xxs)
@@ -130,7 +137,32 @@ import Testing
             return (rows, seconds, runner.int8TwoLevelMMADispatches)
         }
 
-        let control = try await run(control: true)
+        if arm == "control" {
+            let one = try await run(control: true)
+            #expect(one.tiles == 0, "control ran \(one.tiles) MMA blocks")
+            let path = try #require(Self.env["MFERENCE_FLASHNEXT_GATE_OUT"],
+                                    "the control arm writes its rows to MFERENCE_FLASHNEXT_GATE_OUT")
+            var saved: [[String: Any]] = []
+            for item in items {
+                let rows = try #require(one.rows[item.name])
+                print(String(format: "[flashnext-mma-gate] %@ arm control: prompt %d tok, chunk %d, prefill %.1f s, %d rows",
+                             item.name, item.prefillCount, chunk, one.seconds[item.name] ?? 0, rows.count))
+                saved.append(["name": item.name, "prefill": item.prefillCount, "seconds": one.seconds[item.name] ?? 0,
+                              "nll": rows.map(\.nll), "top1": rows.map(\.top1), "margin": rows.map { Double($0.margin) }])
+            }
+            try JSONSerialization.data(withJSONObject: ["modelID": model.modelID, "arm": "control",
+                                                        "chunk": chunk, "rows": saved])
+                .write(to: URL(fileURLWithPath: path))
+            return
+        }
+        let control: (rows: [String: [Row]], seconds: [String: Double], tiles: Int)
+        if arm == "candidate" {
+            let path = try #require(Self.env["MFERENCE_FLASHNEXT_GATE_CONTROL_ROWS"],
+                                    "the candidate arm reads the control rows from MFERENCE_FLASHNEXT_GATE_CONTROL_ROWS")
+            control = try Self.savedControl(at: path, modelID: model.modelID, chunk: chunk, items: items)
+        } else {
+            control = try await run(control: true)
+        }
         let candidate = try await run(control: false)
         #expect(control.tiles == 0, "control ran \(control.tiles) MMA blocks")
         #expect(candidate.tiles > 0, "candidate never ran the INT8-2L MMA GEMM")
@@ -183,5 +215,32 @@ import Testing
             try JSONSerialization.data(withJSONObject: ["modelID": model.modelID, "chunk": chunk, "rows": saved])
                 .write(to: URL(fileURLWithPath: path))
         }
+    }
+
+    /// The control arm's rows from an earlier process, refused unless they come
+    /// from the same install, chunk and prompt lengths, with one row per scored
+    /// position.
+    static func savedControl(at path: String, modelID: String, chunk: Int, items: [Item]) throws
+        -> (rows: [String: [Row]], seconds: [String: Double], tiles: Int) {
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path)))
+                                as? [String: Any])
+        try #require(json["arm"] as? String == "control", "\(path) is not a control arm's rows")
+        try #require(json["modelID"] as? String == modelID, "control rows come from another install")
+        try #require(json["chunk"] as? Int == chunk, "control rows were prefilled at another chunk")
+        let saved = try #require(json["rows"] as? [[String: Any]])
+        var rows: [String: [Row]] = [:], seconds: [String: Double] = [:]
+        for item in items {
+            let entry = try #require(saved.first { $0["name"] as? String == item.name }, "no control rows for \(item.name)")
+            try #require(entry["prefill"] as? Int == item.prefillCount, "\(item.name): control prompt length differs")
+            let nll = try #require(entry["nll"] as? [Double])
+            let top1 = try #require(entry["top1"] as? [Int])
+            let margin = try #require(entry["margin"] as? [Double])
+            let expected = item.tokens.count - item.prefillCount
+            try #require(nll.count == expected && top1.count == expected && margin.count == expected,
+                         "\(item.name): \(nll.count) control rows, expected \(expected)")
+            rows[item.name] = (0..<expected).map { Row(nll: nll[$0], top1: top1[$0], margin: Float(margin[$0])) }
+            seconds[item.name] = entry["seconds"] as? Double ?? 0
+        }
+        return (rows, seconds, 0)
     }
 }
