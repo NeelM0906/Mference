@@ -78,6 +78,11 @@ picker the next time the UI starts. Supported selectors are `gemma4`, `gemma4qat
 `minicpm5mlx`; the launcher reads that list out of `MferenceRepack`'s own help,
 so it cannot drift.
 
+The Unsloth UD-IQ3_XXS Flash-Next install (`qwen38flashnextudiq3xxs`, about
+85 GB) is an unlisted label, so the launcher does not offer it. Install it with
+`MferenceRepack` as its [family page](families/QWEN38_FLASH_NEXT_UNSLOTH.md#reproduction)
+shows; once it is in a scanned root, library mode serves it like any other model.
+
 The optional `swiftqwen38` selector installs a separately identified
 [Swift-Qwen qualification candidate](families/SWIFT_QWEN38.md), not a replacement
 of `qwen38`. Its server reasoning policy defaults to `xhigh`; see that page for

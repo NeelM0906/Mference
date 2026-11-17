@@ -379,11 +379,13 @@ routed commit submits the routed command buffer before its expert fills land,
 gated on an `MTLSharedEvent` the fill completions signal
 (`MFERENCE_EAGER_ROUTED=0` disables); a failed eager fill aborts the decode
 step with `ModelError.eagerExpertFillFailed` rather than emitting corrupt
-output. For DeepSeek-V4-Flash, shadow speculative prefetch issues a bounded
-number of non-blocking reads per layer from a router-lookahead prediction
-(`MFERENCE_SPEC_PREFETCH` selects the mode, `MFERENCE_SHADOW_BUDGET` caps the
-reads); other families keep speculation off. All three are byte-identical to
-their disabled paths.
+output. Shadow speculative prefetch issues a bounded number of non-blocking
+reads per layer from a router-lookahead prediction (`MFERENCE_SPEC_PREFETCH`
+selects the mode, `--shadow-budget` or `MFERENCE_SHADOW_BUDGET` caps the
+reads). It is on by default for DeepSeek-V4-Flash (budget 2), for Qwen 3.6 on
+16–32 GiB hosts and for Gemma 4 on 16–24 GiB hosts (budget 4 below 24 GiB, 8
+from 24 GiB), and off for other families and host sizes. All three are
+byte-identical to their disabled paths.
 
 After layer 30, the tied 4-bit head has two output modes. A pure-greedy
 configuration (temperature `0` with penalties disabled) returns the argmax
