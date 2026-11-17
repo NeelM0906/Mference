@@ -1,0 +1,37 @@
+# System design
+
+Mference is a Swift and Metal runtime for pinned MoE checkpoints on Apple
+Silicon; Gemma 4 26B-A4B is the founding family and this document's running
+example. Its text-only installation is about 14.3 GB, but the target machine
+has 8 GB of memory. The runtime keeps the common weights and working state
+available to Metal. It stores routed experts in per-layer files and reads only
+the experts chosen for the current token or prefill chunk.
+
+This document covers the current `production` path. The [optimization
+journey](OPTIMIZATION_JOURNEY.md) covers the experiments, including the
+failures and changes we later reversed.
+
+Prefill and decode are the two execution modes used below. Prefill processes
+known prompt tokens in bounded chunks; decode generates one new token at a
+time. Both use the same mapped common weights, FP16 KV cache, and per-layer
+streamed-expert cache.
+
+## Why the runtime has this shape
+
+Only a few properties of Gemma 4 determine most of the system design:
+
+- The model has 30 transformer layers: 25 sliding-window-attention layers and
+  5 full-attention layers.
+- Every layer has 128 routed experts. The router selects 8 for each token.
+- A dense shared expert forms a separate branch alongside the routed experts.
+  Its output is added without a routing weight.
+- The embedding and language-model head share the same quantized weights.
+- The pinned instruction checkpoint uses MLX affine quantization: packed 4-bit
+  values with a BF16 scale and BF16 bias for each group of 64 weights. Router
+  projections use 8-bit weights; shared and routed experts use 4-bit weights.
+
+For a visual introduction to Gemma 4's hybrid attention and MoE structure, see
+[A Visual Guide to Gemma 4](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-gemma-4).
+
+The production FP16 KV cache uses two layouts. The 25 sliding-window layers
+attend to the latest 1,024 tokens and store K/V in 1,152-row rings. The extra
