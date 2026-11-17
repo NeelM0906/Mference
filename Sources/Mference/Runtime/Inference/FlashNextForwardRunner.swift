@@ -2762,12 +2762,24 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
             }
             encodeGGUFExpansion(commandBuffer: cb, routed: routed, geometry: geometry,
                                 misses: fetched.misses, slab: fetched.slab)
+            var groupedEncoded = false
             if prefillSimdLUT4Enabled,
                Self.usesSimdgroupLUT4RoutedPrefill(chunkTokens: scratch.chunkTokens),
-               let grouped = routed.grouped,
-               try encodeGroupedLUT4Tile(grouped: grouped, commandBuffer: cb, tile: tile, routes: routes,
-                                         metadata: metadata, experts: experts, views: fetched.views,
-                                         geometry: geometry, offsets: offsets, scratch: scratch) {
+               let grouped = routed.grouped {
+                do {
+                    groupedEncoded = try encodeGroupedLUT4Tile(
+                        grouped: grouped, commandBuffer: cb, tile: tile, routes: routes,
+                        metadata: metadata, experts: experts, views: fetched.views,
+                        geometry: geometry, offsets: offsets, scratch: scratch)
+                } catch {
+                    // The fetch already committed the slot plan and `cb` holds
+                    // the misses' expansion: run it so the slots hold what the
+                    // slot map says before the error surfaces.
+                    try? withExtendedLifetime(metadata) { try finish(cb) }
+                    throw error
+                }
+            }
+            if groupedEncoded {
                 prefillSimdLUT4Tiles += 1
                 trackGpuInterval(cb)
                 try withExtendedLifetime(metadata) { try finish(cb) }
