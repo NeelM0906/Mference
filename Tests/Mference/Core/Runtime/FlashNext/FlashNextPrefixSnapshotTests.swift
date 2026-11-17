@@ -47,7 +47,12 @@ import Testing
     }
 
     private func tokens(_ count: Int, seed: Int, vocab: Int) -> [Int32] {
-        (0..<count).map { Int32(4 + ($0 * 37 + seed * 13 + 11) % (vocab - 4)) }
+        let base: Int = seed * 13 + 11
+        let span: Int = vocab - 4
+        return (0..<count).map { (index: Int) -> Int32 in
+            let offset: Int = (index * 37 + base) % span
+            return Int32(4 + offset)
+        }
     }
 
     private func plan(prompt: Int, decoded: Int, seed: Int, vocab: Int) -> Plan {
