@@ -83,6 +83,21 @@ import Testing
         #expect(chunk(.qwen38flashnextudiq3xxs, 24 * gib, ["MFERENCE_SERVER_PREFILL_CHUNK": "2048"]) == 2048)
     }
 
+    /// An override that is not an allowed size is ignored, so the Unsloth
+    /// install falls back to its RAM tier rather than to 128.
+    @Test func serverPrefillChunkInvalidOverrideFallsBackToUnslothTiers() {
+        let gib = UInt64(1) << 30
+        func chunk(_ ram: UInt64, _ value: String) -> Int {
+            RuntimeConfiguration.defaultServerPrefillChunkTokens(
+                for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: ram,
+                environment: ["MFERENCE_SERVER_PREFILL_CHUNK": value])
+        }
+        #expect(chunk(32 * gib, "1000") == 4096)
+        #expect(chunk(32 * gib, "abc") == 4096)
+        #expect(chunk(24 * gib, "1000") == 1024)
+        #expect(chunk(8 * gib, "8192") == 128)
+    }
+
     @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(

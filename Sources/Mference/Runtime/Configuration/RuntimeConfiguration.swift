@@ -130,9 +130,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// prefill batched its per-token GEMV loops; with them it takes 108-110 s
     /// at 1,024 and 87-88 s at 4,096 (one chunk, one sweep), with peak
     /// footprints of 2.3 and 4.4 GB (2026-11-17, 32 GB M1 Max). It takes
-    /// 4,096 on hosts with at least 32 GiB and 1,024 on 16-32 GiB hosts.
-    /// Vendor Flash-Next keeps 128 (unmeasured here). The server's
-    /// `--prefill-chunk` and then
+    /// 4,096 on hosts with at least 32 GiB and 1,024 on hosts from 16 GiB up
+    /// to but not including 32 GiB. Vendor Flash-Next keeps 128 (unmeasured
+    /// here). The server's `--prefill-chunk` and then
     /// `MFERENCE_SERVER_PREFILL_CHUNK` override.
     public static func defaultServerPrefillChunkTokens(
         for family: ModelFamily,
