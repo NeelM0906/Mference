@@ -28,7 +28,7 @@ private struct TinyQwen4ExpGGUF {
             t.append(("blk.\(l).ffn_down_exps.weight", [ff, hidden, experts], down))
             t.append(("blk.\(l).ffn_gate_inp.weight", [hidden, experts], .f32))
         }
-        t.append(("blk.3.attn_q.weight", [hidden, 2 * 2 * 64], .q6_K))
+        t.append(("blk.3.attn_q.weight", [hidden, UInt64(2 * 2 * 64)], .q6_K))
         t.append(("blk.3.indexer.k_proj.weight", [hidden, 32], .bf16))
         return t
     }
