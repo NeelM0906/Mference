@@ -997,6 +997,13 @@ public final class FlashNextForwardRunner: ContinuableLogitProducer,
 
     // MARK: - Lifecycle
 
+    /// Class T gate control arm (WS1 (b)): keep every INT8-2L prefill
+    /// projection on the decode-identical 8-token kernel.
+    func useScalarInt8TwoLevelPrefill() { matVec.int8TwoLevelMMAEnabled = false }
+
+    /// INT8-2L prefill blocks this runner has sent to the simdgroup-matrix GEMM.
+    var int8TwoLevelMMADispatches: Int { matVec.int8TwoLevelMMADispatches }
+
     public func reset() {
         checkpointEpoch &+= 1
         position = 0

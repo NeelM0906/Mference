@@ -196,6 +196,12 @@ final class FlashNextMatVec {
     /// 8-token kernel, so short prompts are unchanged.
     static let int8TwoLevelMMAMinTokens = 32
 
+    /// Test hook for the class T gate's control arm: false keeps every INT8-2L
+    /// block on the 8-token kernel. Production never clears it.
+    var int8TwoLevelMMAEnabled = true
+    /// INT8-2L blocks routed to the simdgroup-matrix GEMM (diagnostic count).
+    private(set) var int8TwoLevelMMADispatches = 0
+
     /// Rows per threadgroup; mirrors `kFlashNextGemvRowsPerThreadgroup`.
     private static let rowsPerThreadgroup = 8
     /// Rows per threadgroup in `router_gemv_gemma4_r4` — the `_r4` in its name.
@@ -389,7 +395,8 @@ final class FlashNextMatVec {
                 preconditionFailure("an INT8-2L matrix reached a FlashNextMatVec built without the GGUF path")
             }
             precondition(w.rows == matrixRows && w.n == matrixColumns)
-            if !outputFloat32, tokens >= Self.int8TwoLevelMMAMinTokens, w.n % 32 == 0 {
+            if int8TwoLevelMMAEnabled, !outputFloat32, tokens >= Self.int8TwoLevelMMAMinTokens, w.n % 32 == 0 {
+                int8TwoLevelMMADispatches += 1
                 // Prefill blocks: simdgroup-matrix GEMM (class T, re-associated K).
                 kernel.encodeBatchedMMA(commandBuffer: commandBuffer, weights: w,
                                         x: x, xOffset: xOffset, xStride: matrixColumns,
