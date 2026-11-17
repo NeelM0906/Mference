@@ -21,7 +21,7 @@ the attention indexer, the PLE n-gram table).
 | Pinned revision | `3f3ba9cb826b49c665510ce1702fd513a393ce39` |
 | Parameters | ~180B total, ~3.5B active (vendor model); the GGUF holds 176.94B (no MTP layer, no vision tower) |
 | Install size | 84,705,550,593 bytes |
-| Status | in port |
+| Status | **supported** — family gate green 2026-11-17 (#68 merged: `FAMILY_GATE.md` steps 1–4 and 6–8 in the family PR, protocol run 15 of 15 at `54d658c`) |
 
 ## Checkpoint selection
 
@@ -423,7 +423,17 @@ swap from Qwen 3.6 of 4.7 s; its TTFT including that load was 10.63 s. The
 process peak footprint was 7.67 GB, one model's worth, and swap-outs did not
 grow (ledger M33; `034757d`; default `--verify auto`). Footprint samples
 showed Qwen 3.6's memory leaving about 2-6 s after the swap finished rather
-than before the load began; the cause was not investigated.
+than before the load began.
+
+#78 fixed that: the expert slot slab is now mapped, so a released model's pages
+leave at once. In #78's own gated hold (`ws3-slab-mmap-switch`, `8f76f61`) the
+footprint went from 6,986 MiB before the swap to 271 MiB when it finished;
+the process peak was 7,047 MiB (7.39 GB). On the final `main`, `48461a1`
+(ledger M41), the same smoke answered both requests ("The capital of France is
+Paris.", 8 tokens each; first token 5.76 s for Qwen 3.6 and 10.62 s for this
+install after a 4.8 s swap). The footprint went 7,064 MB → 313-321 MB during
+the load → 2,837 MB steady, with a 7.41 GB process peak and swap at 0. The
+8-token decode rates (14.6 and 2.65 tok/s) are indicative only.
 
 Decode rate excludes model installation, model loading, and prompt prefill.
 Compare rows against [`BENCHMARKS.md`](../BENCHMARKS.md) only when the case,
@@ -487,6 +497,47 @@ footprint. The merged head differs from `1be8d3d` only in one test file.
 These are A/B arms, not a new five-run protocol table; the gate-5 table above
 stays the family's protocol baseline at `54d658c`.
 
+The changes below were measured by the workstream leads in their own gated
+holds (machine lock, quiet machine, AC power, swap guard). Each names its hold
+record and the commit measured. None was re-run on the final `main`,
+`48461a1`.
+
+**#71, the server prefill chunk follows host RAM** (class T, gate exact; hold
+`ws1-server-chunk`). On a 32 GiB host the server now prefills in 4,096-token
+chunks. A fresh server (`--max-context 36864`, prompt cache off, default
+`--verify auto`, the 2,940-token long-synthesis prompt, 32 tokens, one warmup
+and two measured requests) took 87.32 / 87.71 s to first token with a
+4,096-token default (`0b86be7`) and 108.30 / 110.12 s with a 1,024-token
+default (`882fe49`). Peak footprint was 4,388 MB and 2,318 MB. The merged head
+was not re-measured.
+
+**#77, simdgroup-matrix GEMM for the INT8-2L prefill projections** (class T,
+pooled top-1 0.9875; hold `ws1-b-mma`, `bb5c2a9`, whose Sources match the
+merged head). With the same server setup and the 4,096-token default chunk,
+first token took **72.11 / 72.42 s** (server-reported prefill 72.05 s; warmup
+75.38 s), at a peak footprint of 4,449 MB. Against #71's 87.32 / 87.71 s that
+is about 17.5% faster, but the two were measured in different sessions, not
+interleaved.
+
+**#75, this family in the multi-prefix prompt cache** (class E at chunks 4,096
+and 128; hold `ws3-k4d-classE-4k-defaultchunk`, `6ce8deb` against `80106b8`).
+The automatic cache budget is capped at 1.5 GiB for both Flash-Next families.
+Setup: a server at `--max-context 4096`, greedy, 32 tokens, diagnostics on, one
+sample per arm. After an unrelated 426-token turn, the 2,996-token follow-up to
+the long-synthesis turn restored 2,971 cached tokens and finished in 14.72 s
+(5.12 s prefill); `main`'s live continuation of the same turn took 13.77 s
+(4.72 s). The cold 2,940-token first turn took 100.55 s on `main` and 122.56 s
+with the change. Later cold repeats (holds `ws3-k4-abba-x1-defaultchunk` and
+`ws3-k4-ba-x1-defaultchunk`) put the change 2.9% slower on average; this is
+not attributed. Peak footprint was 3.37 GB in both arms.
+
+**#78, the slot slab is mapped** (class E on all six cases of both installs;
+holds `ws3-slab-mmap-classE`, `ws3-slab-mmap-abba-long`,
+`ws3-slab-mmap-switch`; `8f76f61`, whose Sources match the merged head). Cold
+long-synthesis prefill in an A/B/B/A read 93.63 / 91.13 s on `782715d` and
+91.88 / 94.54 s with the change, so there was no effect. The model-switch result is
+under [Measured results](#measured-results).
+
 ### Indicative readings (not protocol)
 
 **Unmerged branch build, not a protocol measurement.** Commit `135799c`
@@ -538,9 +589,11 @@ from disk; the remainder came from the page cache.
 - **3K-prompt prefill is far from the 11–16 s target** on an M1 Max with
   32 GB. Under the protocol's `--verify full-sha256`, long-synthesis prefill
   was 178.59 s at `54d658c` (ledger M32) and 120.8 s after #70 (ledger M35
-  and M36, `a68b588` and `1be8d3d`). The server's 3K TTFT at `54d658c` was
-  320.85 s (ledger M32, default `--verify auto`) and has not been re-measured
-  since #70.
+  and M36, `a68b588` and `1be8d3d`). The server's time to first token on the
+  same prompt was 320.85 s at `54d658c` (ledger M32), 87.3-87.7 s after #71
+  and **72.11 / 72.42 s after #77** (hold `ws1-b-mma`, `bb5c2a9`, default
+  `--verify auto`). That is still about 4.5 times the target's upper end. It was
+  not re-measured on `48461a1`.
   Chunked prefill uses the row-form LUT4 routed kernel and does not yet read
   each expert once per prompt.
 - **Prefill uses the row-form LUT4 routed kernel only.** A grouped form is
@@ -568,9 +621,40 @@ from disk; the remainder came from the page cache.
 - Optional or approximate features are opt-in flags with no default-path
   claims: none. `MFERENCE_U5_FORCE_ROUTES` is a diagnostic, not a control.
 - Untested: there is no valid 32K run (the one CLI attempt was void under the
-  swap-out rule; its figures are estimates only), and the server's
-  cold-then-warm 32K pair was not run. Every reading on this page is from one
-  32 GB M1 Max.
+  swap-out rule; its figures are estimates only), and neither the server's
+  cold-then-warm 32K pair nor a warm 32K follow-up was run. Every reading on
+  this page is from one 32 GB M1 Max.
+- **GGUF prefill, row path: a failed command-buffer creation leaves slots
+  planned.** In `FlashNextForwardRunner`'s row path the routed-expert fetch
+  commits the slot plan before Metal creates the command buffer. If that
+  creation fails, the throw leaves those slots planned. Decode is not affected,
+  because it creates its command buffer before the fetch. The fix is the same
+  exact reorder (create the command buffer first); it is not applied.
+- **The batched BF16 prefill kernels share decode's fast-math library.** Their
+  bit-identity with decode is checked by #70's CI test on both compilers. That
+  is a weaker guarantee than the separate safe-math module the INT8-2L kernels
+  use.
+
+### Targets and measured shortfall
+
+The program's targets for this install on a 32 GB M1 Max, against the latest
+measurement of each. None was re-run on the final `main`, `48461a1`.
+
+| Target | Latest measured | Source | Status |
+| --- | --- | --- | --- |
+| Decode, ~3K prompt: 7–10 tok/s | 3.40 tok/s, median of 5 (3.33–3.48), at `54d658c`; single runs of 3.35–3.44 tok/s after #69 and #70 (`1be8d3d`, `67951bd`) | ledger M32, M36, M39 | Short by 2–3 times; not re-measured after #77 or #78 |
+| Decode at 32K: 6.5–9.5 tok/s | No valid run. The one attempt was void (swap-outs grew); its 2.43 tok/s is an **ESTIMATE** | ledger M32 | Not measured |
+| First token, ~3K prompt: 11–16 s | 72.11 / 72.42 s (server, `bb5c2a9`) | hold `ws1-b-mma` | Short by about 4.5 times |
+| First token, 32K cold: 2.2–4.4 min | No valid run. The void attempt's 28.9 min (1,736.71 s) is an **ESTIMATE**, on code before #70 | ledger M32 | Not measured |
+| Warm 32K follow-up: 12–20 s | Not measured | — | Not measured |
+
+**Decode read-ahead was tried and dropped.** A prototype (`ef7cac1`: four
+reader queues, a budget of four reads) kept output byte-identical, but its
+measured block is void under the program's host-noise rule (other processes
+used more than 0.6 cores). In those void rows, read-ahead decoded more slowly
+than without it on every run: short-explanation 3.94–3.98 tok/s against
+4.27–4.40, and long-synthesis 2.95 against 3.15–3.16. It was closed without a
+rerun and is not on `main` (hold `ws2-readahead-block`).
 
 ## Reproduction
 

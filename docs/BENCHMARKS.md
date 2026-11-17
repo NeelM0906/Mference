@@ -19,6 +19,7 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 | M5, Mference, Qwen 3.6 35B-A3B | 23.5-29.3 tok/s | 32-slot Qwen profile (auto as of 2026-08-06) |
 | 256 GB M3 Ultra, Mference, Flash-Next 180B-A3.5B | 18.17-21.03 tok/s decode; 24.3-210.5 tok/s prefill | Resident mapped expert pool; 398-431 MiB reported RSS |
 | 32 GB M1 Max, Mference, Qwen 3.6 35B-A3B (`cb99287`; ledger M23; `--verify full-sha256`) | 27.52-34.46 tok/s | 6.98-7.54 GB footprint |
+| 32 GB M1 Max, Mference, Qwen3.8-Flash-Next Unsloth UD-IQ3_XXS (`54d658c`; ledger M32; `--verify full-sha256`) | 3.40-4.12 tok/s | 0.66-5.35 GB footprint |
 
 A separate report covers the four pre-Maple model families on a 256 GB M3 Ultra,
 including the first measured DeepSeek-V4-Flash and Inkling-Small rows:
@@ -257,7 +258,11 @@ These rows ran between 2026-11-14 and 2026-11-17 on one MacBook Pro
 named commit, on AC power, with no other model process running. Each figure
 names the ledger entry that records it (M1, M7, ...), the commit measured,
 and the `--verify` mode. The ledger is the program's measurement log, with
-raw output per entry; it is kept outside the repository.
+raw output per entry; it is kept outside the repository. Figures measured by a
+workstream lead in its own gated hold (machine lock, quiet machine, AC power,
+swap guard) name that hold's record instead, for example `ws1-b-mma`; those
+records are kept with the ledger. Apart from the library smoke (ledger M41),
+none of these figures was re-run on the final `main`, `48461a1`.
 
 Three workloads appear:
 
@@ -273,7 +278,10 @@ Three workloads appear:
   (`--max-context 32768`) or through a server (`--max-context 36864`) that
   then answers a follow-up turn reusing 31,511 cached tokens.
 
-The S and L streaming client and the 32K prompt are not in the repository.
+The S and L streaming client is
+[`Scripts/server_stream_bench.py`](../Scripts/server_stream_bench.py), and the
+32K prompt and its follow-up are the frozen
+[long-context-v1](benchmark-prompts/long-context-v1/README.md) set.
 Decode over 32 tokens is indicative only: after a 32K prefill it takes
 1.2-1.7 s (ledger M31; `8177a1a` and `b9e7a48`; `--verify auto`).
 
@@ -378,6 +386,7 @@ measurement.
 | #66 (`8177a1a`) | INT4 grouped GEMM for routed prefill off Apple10, class T | M29; `9e1482d` vs `0a138de`; tier-1 pair; `auto` | S 3K TTFT 12.281 → 9.328 s (-24.0%). L CLI cold prefill 216.46 → 179.44 s (-17.1%), reported, not claimed | Tier-1 PASS |
 | #67 (`f8143c9`) | GQA prefill attention with shared K/V staging, class E | M30; `b9e7a48` vs `8177a1a`; tier-1 pair; `auto` | L CLI cold prefill, median of 2: 183.58 → 90.77 s (-50.6%). Also: 32K follow-up TTFT 15.16 → 6.42 s (-57.6%); S 3K TTFT 9.618 → 8.443 s (-12.2%) | Claim passes; one L decode run (12.31 tok/s) tripped the 7% guard |
 | | | M31; same arms; A/B/B/A, L CLI; `auto` | L decode +20.6% then -10.1%: opposite directions, no effect. L prefill 88.98-89.27 s against 187.09-215.23 s | Guard flag cleared |
+| #72 (`80106b8`) | Shadow speculative prefetch at budget 8 on 32 GiB hosts, class E | M37; `5e1b4ef` vs `67951bd`; A/B/B/A, P long, 3 runs per segment; `auto` | P long decode +7.8% / +6.9%, ranges do not overlap; pooled 31.345 → 33.394 tok/s (+6.5%). Short +4.5%, medium +2.8% and L 32K (128 tokens) +2.0%, one run each; no footprint increase | Confirmed |
 
 Notes on reading these rows:
 
@@ -393,7 +402,9 @@ Notes on reading these rows:
 - After #67, the last Qwen 3.6 numbers in this series are that change's
   candidate arm (ledger M30, M31; `b9e7a48`; `--verify auto`): L CLI cold
   prefill 89.70 / 91.83 s (M30) and 88.98-89.27 s (M31), 32K follow-up TTFT
-  6.42 s, S 3K TTFT 8.443 s. No full baseline was re-run on a later `main`.
+  6.42 s, S 3K TTFT 8.443 s. #72's candidate arm decoded P long at
+  32.81-33.59 tok/s (ledger M37; `5e1b4ef`; `--verify auto`). No full
+  baseline was re-run on a later `main`.
 
 **Qwen3.8-Flash-Next, Unsloth UD-IQ3_XXS**
 
@@ -403,10 +414,15 @@ Notes on reading these rows:
 | #69 (`ad99455`) | Decode MoE join after the router readback, class E | M34; `c16a9cf` (merged head) vs `034757d`; A/B/B/A, P short, 3 runs per segment; `full-sha256` | Short decode +8.2% / +8.2%, ranges do not overlap; pooled medians 4.10 → 4.39 tok/s (+7.1%) | Confirmed. 2% guard PASS: short prefill +3.1% / +0.2% |
 | #70 (`67951bd`) | Batched per-token GEMV loops in GGUF prefill, class E | M35; `a68b588` vs `ad99455`; tier-1 pair, P, one run per case; `full-sha256` | Long prefill 179.11 → 120.81 s (-32.6%); medium 49.21 → 42.21 s (-14.2%); long peak footprint 5.35 → 3.39 GB | Tier-1 ACCEPT; decode -2.1% to -2.6% on all three cases flagged |
 | | | M36; `1be8d3d` (final head) vs `ad99455`; A/B/B/A, P short, 3 runs per segment; `full-sha256` | Short decode -0.1% / +0.9% (pooled 4.238 → 4.256 tok/s). Short prefill -2.8% / -2.6%, ranges do not overlap (pooled 31.94 → 31.07 s) | 2% rule PASS; M35's decode flag resolved |
+| #71 (`1a7b740`) | Server prefill chunk follows host RAM (4,096 tokens on this 32 GiB host), class T, gate exact | WS1 hold `ws1-server-chunk`; `0b86be7` (default 4,096) and `882fe49` (default 1,024); server, 1 warmup + 2 measured each; `auto` | S 3K TTFT 108.30 / 110.12 s at 1,024 → 87.32 / 87.71 s at 4,096; peak footprint 2,318 → 4,388 MB | Merged; the merged head was not re-measured |
+| #77 (`d895cf5`) | Simdgroup-matrix GEMM for INT8-2L prefill projections, class T (pooled top-1 0.9875) | WS1 hold `ws1-b-mma`; `bb5c2a9` (Sources identical to the merged head); server, default chunk 4,096, prompt cache off, 1 warmup + 2 measured; `auto` | S 3K TTFT **72.11 / 72.42 s** (server prefill 72.05 s); peak footprint 4,449 MB. Against #71's 87.32 / 87.71 s that is -17.5%, measured in a different session, not interleaved | Merged |
+| #75 (`48461a1`) | Flash-Next in the multi-prefix prompt cache (1.5 GiB automatic cap), class E at chunks 4,096 and 128 | WS3 hold `ws3-k4d-classE-4k-defaultchunk`; `6ce8deb` vs `80106b8`; server, `--max-context 4096`, greedy, 32 tokens, diagnostics on, one sample per arm; `auto` | After an unrelated 426-token turn, the 2,996-token follow-up restored 2,971 cached tokens and finished in 14.72 s (5.12 s prefill); `main`'s live continuation of the same turn took 13.77 s. The cold 2,940-token first turn took 100.55 s (`main`) and 122.56 s (candidate); later cold repeats put the candidate 2.9% slower on average (holds `ws3-k4-abba-x1-defaultchunk`, `ws3-k4-ba-x1-defaultchunk`), not attributed. Peak footprint 3.37 GB both | Merged |
+| #78 (`97890dc`) | The expert slot slab is mapped, so a released model's pages leave at once, class E on all six cases of both installs | WS3 holds `ws3-slab-mmap-switch`, `ws3-slab-mmap-abba-long`, `ws3-slab-mmap-classE`; `8f76f61` (Sources identical to the merged head) vs `782715d`; library server and CLI; `auto` | Library switch Qwen 3.6 → Unsloth: footprint 6,986 MiB (last sample before the swap) → 271 MiB when the swap finished, then 2,851 MiB steady; process peak 7,047 MiB (7.39 GB); swap 0 → 0. Cold long prefill A/B/B/A: 93.63 / 91.13 s against 91.88 / 94.54 s, no effect | Merged |
 
 The `ad99455` control in M35 and M36 was a build of `c16a9cf`, whose sources
 are identical. The merged head of #70 differs from `1be8d3d` only in one test
-file.
+file. #76 (`782715d`) adds a stderr notice when `--verify auto` falls back to a
+full SHA-256 pass and has no figures.
 
 **Unsloth gate 5 at `54d658c`** (ledger M32; `--verify full-sha256`; one
 discarded warmup per hold and five measured fresh processes per case; 15 of
@@ -437,7 +453,23 @@ five-run protocol baseline.
 A library-mode server from `034757d` found both installs and served one
 request to each, swapping from Qwen 3.6 to the Unsloth install in 4.7 s. The
 process peak footprint was 7.67 GB, one model's worth (ledger M33;
-`034757d`; `--verify auto` by default).
+`034757d`; `--verify auto` by default). There, the old model's memory left the
+footprint 2-6 s after the swap finished.
+
+On the final `main`, `48461a1` (ledger M41; the release build of that commit,
+default controls), the same smoke answered both requests with "The capital of
+France is Paris." (8 tokens each). Time to first token, including the load, was
+5.76 s for Qwen 3.6 and 10.62 s for the Unsloth install after a 4.8 s swap.
+With #78 the old model's memory now leaves before the new load: the footprint
+went 7,064 MB → 313-321 MB during the load → 2,837 MB steady. The process peak
+was 7.41 GB and swap stayed at 0. The 8-token decode rates, 14.6 and
+2.65 tok/s, are indicative only.
+
+The Unsloth install remains short of every program target on this host: about
+72 s to first token on a 3K prompt against 11-16 s, about 3.4 tok/s decode
+against 7-10 tok/s, and no valid 32K run. The
+[family page](families/QWEN38_FLASH_NEXT_UNSLOTH.md#targets-and-measured-shortfall)
+lists each target with its latest measurement.
 
 ## Same-host MLX comparison
 

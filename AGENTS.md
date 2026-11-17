@@ -2,8 +2,8 @@
 
 Swift and Metal inference for pinned checkpoints on Apple Silicon: Gemma 4
 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, Inkling-Small
-276B-A12B, Maple Preview, Qwen 3.8 27B, Qwen3.8-Flash-Next 180B-A3.5B, and
-MiniCPM5-2B. The shared core and KV cache stay resident; routed experts stream
+276B-A12B, Maple Preview, Qwen 3.8 27B, Qwen3.8-Flash-Next 180B-A3.5B (also
+as Unsloth's UD-IQ3_XXS GGUF quantization), and MiniCPM5-2B. The shared core and KV cache stay resident; routed experts stream
 from SSD per token. Qwen 3.8 27B and MiniCPM5-2B are dense and fully
 resident.
 

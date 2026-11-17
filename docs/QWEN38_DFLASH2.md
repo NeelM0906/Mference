@@ -32,6 +32,10 @@ and a top-16 path selector. Embedding and LM head are the target's own.
   reproduced the DSV4 copy-free wiring collapse (~20x). With the slab the
   drafter is ~1.05 GB wired and a draft round is 32 ms (was 2.13 s).
   `MFERENCE_DFLASH2_BF16=1` runs unquantized (parity/reference only).
+  Known limit: `DFlash2Int4Slab` still uses the `posix_memalign` + `free`
+  slab that #78 replaced for routed experts. The drafter is never released
+  before process exit today, so nothing leaks. If it is ever released
+  mid-process, map the slab with `PreadExpertStreamer.mapSlab` instead.
 - **Taps**: the verify pass stages each tap layer's output rows for the
   drafter; prefill stages the prompt's trailing context window so the first
   rounds draft warm. Continuity breaks (plain-decode gaps, continuation

@@ -282,8 +282,8 @@ Gemma 4 and Gemma 4 QAT keep 16 expert slots per layer, so only 8% of decode
 layer steps find all eight routed experts in memory and the GPU waits for the
 SSD for roughly half of decode. On hosts from 16 GiB to below 24 GiB both
 checkpoints now use shadow prefetch with a budget of four speculative reads per
-layer; `--shadow-budget` sets it on the CLI and the server, and `0` turns it
-off. It reads into the existing slots, so it costs no memory.
+layer, and on 24 GiB hosts a budget of eight; `--shadow-budget` sets it on the
+CLI and the server, and `0` turns it off. It reads into the existing slots, so it costs no memory.
 
 | M2 MacBook Air 16 GiB, 160 decoded tokens, greedy | Off | Budget 1 | Budget 2 | Budget 4 |
 | --- | ---: | ---: | ---: | ---: |
