@@ -191,6 +191,17 @@ final class FlashNextMatVec {
     /// INT8-2L GEMV for a WS4 GGUF install; nil for every other runner.
     private let ggufInt8TwoLevel: GGUFInt8TwoLevelGEMV?
 
+    /// Smallest FP16-output INT8-2L block that takes the simdgroup-matrix GEMM;
+    /// smaller blocks (and every FP32-output gate) keep the decode-identical
+    /// 8-token kernel, so short prompts are unchanged.
+    static let int8TwoLevelMMAMinTokens = 32
+
+    /// Test hook for the class T gate's control arm: false keeps every INT8-2L
+    /// block on the 8-token kernel. Production never clears it.
+    var int8TwoLevelMMAEnabled = true
+    /// INT8-2L blocks routed to the simdgroup-matrix GEMM (diagnostic count).
+    private(set) var int8TwoLevelMMADispatches = 0
+
     /// Rows per threadgroup; mirrors `kFlashNextGemvRowsPerThreadgroup`.
     private static let rowsPerThreadgroup = 8
     /// Rows per threadgroup in `router_gemv_gemma4_r4` — the `_r4` in its name.
@@ -326,7 +337,9 @@ final class FlashNextMatVec {
     /// single-token GEMV, so prefill matches decode exactly. A one-token call
     /// to BF16 or to FP32-out INT8-2L (decode's hyper-connection and indexer
     /// projections) takes the single-token GEMV itself, so decode dispatches
-    /// the kernels it always has.
+    /// the kernels it always has. FP16-output INT8-2L blocks of at least
+    /// `int8TwoLevelMMAMinTokens` take the simdgroup-matrix GEMM instead
+    /// (re-associated K, so not bit-identical to the GEMV: class T).
     func encodeBatched(commandBuffer: MTLCommandBuffer,
                        matrix: FlashNextWeightMatrix,
                        x: MTLBuffer, xOffset: Int = 0,
@@ -382,6 +395,14 @@ final class FlashNextMatVec {
                 preconditionFailure("an INT8-2L matrix reached a FlashNextMatVec built without the GGUF path")
             }
             precondition(w.rows == matrixRows && w.n == matrixColumns)
+            if int8TwoLevelMMAEnabled, !outputFloat32, tokens >= Self.int8TwoLevelMMAMinTokens, w.n % 32 == 0 {
+                int8TwoLevelMMADispatches += 1
+                // Prefill blocks: simdgroup-matrix GEMM (class T, re-associated K).
+                kernel.encodeBatchedMMA(commandBuffer: commandBuffer, weights: w,
+                                        x: x, xOffset: xOffset, xStride: matrixColumns,
+                                        y: y, yOffset: yOffset, yStride: matrixRows, tokens: tokens)
+                return
+            }
             // Bit-identical per token to the single-token GEMV, FP16 or FP32 out.
             kernel.encodeBatched(commandBuffer: commandBuffer, weights: w,
                                  x: x, xOffset: xOffset, xStride: matrixColumns,
