@@ -129,21 +129,20 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = Self.slotAllocationSize(expertStride: layout.expertStride)
-        var slabRaw: UnsafeMutableRawPointer?
-        let allocResult = posix_memalign(&slabRaw, Self.scratchAlignment,
-                                         allocationSize * slotCount)
-        guard allocResult == 0, let slab = slabRaw else {
+        let slabLength = allocationSize * slotCount
+        guard let slab = Self.mapSlab(length: slabLength, alignment: Self.scratchAlignment) else {
+            let mapErrno = errno
             close(openedFD)
-            throw StreamerError.allocFailed(errno: allocResult)
+            throw StreamerError.allocFailed(errno: mapErrno)
         }
         nonisolated(unsafe) let capturedSlab = slab
         guard let slabBuffer = device.makeBuffer(
             bytesNoCopy: slab,
-            length: allocationSize * slotCount,
+            length: slabLength,
             options: .storageModeShared,
-            deallocator: { _, _ in free(capturedSlab) })
+            deallocator: { _, _ in _ = munmap(capturedSlab, slabLength) })
         else {
-            free(slab)
+            munmap(slab, slabLength)
             close(openedFD)
             throw StreamerError.bufferWrapFailed
         }
@@ -176,6 +175,38 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     deinit {
         close(fd)
         if let sweepFD { close(sweepFD) }
+    }
+
+    /// Anonymous memory for the slot slab, `length` bytes starting on an
+    /// `alignment` boundary, or nil if the mapping fails (`errno` says why).
+    ///
+    /// Mapped, not `posix_memalign`ed, so that releasing the slab returns its
+    /// pages to the system at once. A freed block this large stays in
+    /// libmalloc's large-entry cache, still charged to `phys_footprint`, and
+    /// once that cache marks it reusable, pages touched again are resident
+    /// but uncharged. On an M1 Max a released 3 GiB slab stayed charged
+    /// through 10 s idle, and in a library swap that residue overlapped the
+    /// next model's load (ws3, 2026-11-17). The deallocator `munmap`s the
+    /// whole range, as `ReservedKVRegion` does for KV.
+    ///
+    /// The alignment keeps the slab's base where `posix_memalign` put it:
+    /// over-map by `alignment`, then unmap the unaligned head and the tail.
+    /// `length` and `alignment` must be whole pages.
+    static func mapSlab(length: Int, alignment: Int) -> UnsafeMutableRawPointer? {
+        let page = Int(getpagesize())
+        precondition(length > 0 && length % page == 0 && alignment % page == 0)
+        let span = length + alignment
+        let mapped = mmap(nil, span, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0)
+        guard mapped != MAP_FAILED, let base = mapped else { return nil }
+        let start = Int(bitPattern: base)
+        let aligned = (start + alignment - 1) / alignment * alignment
+        let head = aligned - start
+        let tail = span - head - length
+        if head > 0 { munmap(base, head) }
+        if tail > 0, let tailStart = UnsafeMutableRawPointer(bitPattern: aligned + length) {
+            munmap(tailStart, tail)
+        }
+        return UnsafeMutableRawPointer(bitPattern: aligned)
     }
 
     /// Bytes one slot occupies: the expert stride rounded up to whole pages.
