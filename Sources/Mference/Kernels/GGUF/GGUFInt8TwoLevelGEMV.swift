@@ -31,6 +31,8 @@ final class GGUFInt8TwoLevelGEMV {
     private let f32Out: MTLComputePipelineState
     private let batchedF16Out: MTLComputePipelineState
     private let batchedF32Out: MTLComputePipelineState
+    private let mmaFloatTile: MTLComputePipelineState
+    private let mmaHalfTile: MTLComputePipelineState
     private let q6KEmbedRows: MTLComputePipelineState
 
     init(context: MetalContext) throws {
@@ -42,6 +44,8 @@ final class GGUFInt8TwoLevelGEMV {
               let b = library.makeFunction(name: "gguf_int8_2l_gemv_f32out"),
               let c = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f16out"),
               let c32 = library.makeFunction(name: "gguf_int8_2l_gemm_t8_f32out"),
+              let mf = library.makeFunction(name: "gguf_int8_2l_gemm_mma_wf32_f16out"),
+              let mh = library.makeFunction(name: "gguf_int8_2l_gemm_mma_wf16_f16out"),
               let e = library.makeFunction(name: "gguf_q6k_embed_rows") else {
             throw MetalError.missingFunction("gguf_int8_2l_*")
         }
@@ -49,6 +53,8 @@ final class GGUFInt8TwoLevelGEMV {
         f32Out = try context.device.makeComputePipelineState(function: b)
         batchedF16Out = try context.device.makeComputePipelineState(function: c)
         batchedF32Out = try context.device.makeComputePipelineState(function: c32)
+        mmaFloatTile = try context.device.makeComputePipelineState(function: mf)
+        mmaHalfTile = try context.device.makeComputePipelineState(function: mh)
         q6KEmbedRows = try context.device.makeComputePipelineState(function: e)
     }
 
@@ -99,6 +105,45 @@ final class GGUFInt8TwoLevelGEMV {
         encoder.setBytes(&batch, length: MemoryLayout<BatchParams>.stride, index: 6)
         encoder.dispatchThreadgroups(MTLSize(width: (w.rows + 7) / 8, height: (tokens + 7) / 8, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// Weight tile element of the simdgroup-matrix GEMM: `float` keeps every
+    /// dequantized weight exact; `half` rounds each once.
+    enum MMAWeightTile: Sendable { case float, half }
+
+    /// Tokens and output rows per threadgroup of the simdgroup-matrix GEMM.
+    static let mmaTileTokens = 64
+    static let mmaTileRows = 128
+
+    /// Simdgroup-matrix prefill GEMM, half output (WS1 (b), class T): the same
+    /// `Y[t] = W · X[t]` as `encodeBatched`, in 64-token x 128-row tiles of
+    /// 8x8 float multiply-accumulates. Not bit-identical to the GEMV: the K
+    /// reduction is re-associated.
+    func encodeBatchedMMA(commandBuffer: MTLCommandBuffer, weights w: Weights,
+                          x: MTLBuffer, xOffset: Int = 0, xStride: Int,
+                          y: MTLBuffer, yOffset: Int = 0, yStride: Int, tokens: Int,
+                          weightTile: MMAWeightTile = .float) {
+        precondition(w.n % 32 == 0 && w.n % w.source.blockWeights == 0)
+        precondition((w.source == .q6_K) == (w.m != nil), "Q6_K needs m; Q8_0 has none")
+        precondition(xStride >= w.n && xStride % 4 == 0 && yStride >= w.rows && tokens > 0)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        var params = Params(rows: UInt32(w.rows), n: UInt32(w.n),
+                            bdShift: UInt32(w.source.blockWeights.trailingZeroBitCount),
+                            hasM: w.m == nil ? 0 : 1)
+        var batch = BatchParams(tokens: UInt32(tokens), xStride: UInt32(xStride), yStride: UInt32(yStride))
+        encoder.setComputePipelineState(weightTile == .float ? mmaFloatTile : mmaHalfTile)
+        encoder.setBuffer(w.values.buffer, offset: w.values.offset, index: 0)
+        encoder.setBuffer(w.d.buffer, offset: w.d.offset, index: 1)
+        encoder.setBuffer(w.m?.buffer ?? w.values.buffer, offset: w.m?.offset ?? w.values.offset, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<Params>.stride, index: 3)
+        encoder.setBuffer(x, offset: xOffset, index: 4)
+        encoder.setBuffer(y, offset: yOffset, index: 5)
+        encoder.setBytes(&batch, length: MemoryLayout<BatchParams>.stride, index: 6)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (w.rows + Self.mmaTileRows - 1) / Self.mmaTileRows,
+                    height: (tokens + Self.mmaTileTokens - 1) / Self.mmaTileTokens, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

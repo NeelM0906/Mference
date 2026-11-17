@@ -128,6 +128,48 @@ import MferenceValidationSupport
         }
     }
 
+    /// The simdgroup-matrix GEMM (class T) against the exact Double product,
+    /// per token, for both weight-tile types, with partial token and row tiles
+    /// (37 and 70 tokens; 200 rows) and padded strides it must not write into.
+    @Test(arguments: [cases[0], cases[3], Case(q6K: true, rows: 200, n: 2560), Case(q6K: false, rows: 320, n: 10240)])
+    func mmaMatchesReference(c: Case) throws {
+        let ctx = try MetalContext()
+        let kernel = try GGUFInt8TwoLevelGEMV(context: ctx)
+        var rng = SeedTree(0x4932_4D4D).key("int8-2l-mma-\(c.testDescription)")
+        let (w, weights) = try Self.makeWeights(c, ctx: ctx, rng: &rng)
+        for tokens in [37, 70] {
+            let xStride = c.n + 8, yStride = c.rows + 4
+            let x = (0..<(tokens * xStride)).map { _ in Float16(rng.uniform(-1, 1)) }
+            let xBuf = try #require(x.withUnsafeBytes {
+                ctx.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+            })
+            var reference = [Float]()
+            for t in 0..<tokens {
+                reference += GGUFInt8TwoLevelReference.gemv(weights: weights, rows: c.rows, n: c.n,
+                                                            x: Array(x[(t * xStride)..<(t * xStride + c.n)]))
+            }
+            for tile in [GGUFInt8TwoLevelGEMV.MMAWeightTile.float, .half] {
+                let yBuf = try #require(ctx.device.makeBuffer(length: tokens * yStride * 2, options: .storageModeShared))
+                memset(yBuf.contents(), 0xFF, tokens * yStride * 2)
+                let cb = try #require(ctx.queue.makeCommandBuffer())
+                kernel.encodeBatchedMMA(commandBuffer: cb, weights: w, x: xBuf, xStride: xStride,
+                                        y: yBuf, yStride: yStride, tokens: tokens, weightTile: tile)
+                cb.commit(); cb.waitUntilCompleted()
+                #expect(cb.status == .completed)
+                let y = yBuf.contents().bindMemory(to: Float16.self, capacity: tokens * yStride)
+                let raw = yBuf.contents().bindMemory(to: UInt16.self, capacity: tokens * yStride)
+                var got = [Float](), padTouched = 0
+                for t in 0..<tokens {
+                    for r in 0..<c.rows { got.append(Float(y[t * yStride + r])) }
+                    for r in c.rows..<yStride where raw[t * yStride + r] != 0xFFFF { padTouched += 1 }
+                }
+                let err = RelError.compute(actual: got, reference: reference)
+                #expect(err < Tolerance.fp16Reduction, "\(tile) tile, \(tokens) tokens: rel error \(err)")
+                #expect(padTouched == 0, "\(tile) tile, \(tokens) tokens: wrote into the y row padding")
+            }
+        }
+    }
+
     /// The FP32-output batched form (the hyper-connection gates' prefill path)
     /// equals `gemv_f32out` per token bit for bit, at the HC shapes too
     /// (Q8_0 10240 → 320 and 320 → 10240).

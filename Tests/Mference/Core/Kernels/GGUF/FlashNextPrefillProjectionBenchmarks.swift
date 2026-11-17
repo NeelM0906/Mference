@@ -156,16 +156,23 @@ import Testing
 
     static func line(_ s: String) { print("[fn-prefill-kbench] " + s) }
 
+    enum Fp16Read {
+        static func floats(_ b: MTLBuffer, count: Int) -> [Float] {
+            Array(UnsafeBufferPointer(start: b.contents().bindMemory(to: Float16.self, capacity: count), count: count)).map(Float.init)
+        }
+    }
+
     // MARK: - Dense FP16-output projections
 
     @Test(.enabled(if: enabled)) func denseInt8TwoLevelVsFP16Roofline() throws {
         let ctx = try MetalContext()
         let matVec = try FlashNextMatVec(context: ctx, int4: DequantInt4GEMV(context: ctx),
                                          int8Columns: Self.hidden, ggufInt8TwoLevel: true)
+        let int8 = try GGUFInt8TwoLevelGEMV(context: ctx)
         var rng = LCG(s: 0x5EED)
         let t = Self.tokens
         Self.line("dense resident projections, \(t) tokens; per-stack = calls per token over 48 layers")
-        var prodPerToken = 0.0, mpsPerToken = 0.0
+        var prodPerToken = 0.0, mpsPerToken = 0.0, mmaFPerToken = 0.0, mmaHPerToken = 0.0
         for s in Self.fp16OutShapes {
             let w = try Self.matrix(ctx.device, s, rng: &rng)
             let x = try Self.activations(ctx.device, count: t * s.cols, rng: &rng)
@@ -175,15 +182,35 @@ import Testing
                                      matrixRows: s.rows, matrixColumns: s.cols, tokens: t)
             }
             let mps = try Self.mpsFP16(ctx, rows: s.rows, cols: s.cols, tokens: t)
+            guard case let .ggufInt8TwoLevel(q) = w else { preconditionFailure("dense shapes are INT8-2L") }
+            let ref = Fp16Read.floats(y, count: t * s.rows)
+            var mma: [(Timing, Double)] = []
+            for tile in [GGUFInt8TwoLevelGEMV.MMAWeightTile.float, .half] {
+                let ym = try Self.buffer(ctx.device, t * s.rows * 2)
+                let tm = try Self.time(ctx) {
+                    int8.encodeBatchedMMA(commandBuffer: $0, weights: q, x: x, xStride: s.cols,
+                                          y: ym, yStride: s.rows, tokens: t, weightTile: tile)
+                }
+                let got = Fp16Read.floats(ym, count: t * s.rows)
+                var num = 0.0, den = 0.0
+                for i in 0..<got.count { let e = Double(got[i] - ref[i]); num += e * e; den += Double(ref[i]) * Double(ref[i]) }
+                mma.append((tm, (num / max(den, 1e-30)).squareRoot()))
+            }
             let flops = 2 * s.macs * Double(t)
             prodPerToken += prod.gpu / Double(t) * Double(s.perStack)
             mpsPerToken += mps.gpu / Double(t) * Double(s.perStack)
-            Self.line(String(format: "%@ %@ x%d: int8-2l t8 %.2f ms (%.2f TFLOP/s) | mps fp16 %.2f ms (%.2f TFLOP/s) | %.1fx",
+            mmaFPerToken += mma[0].0.gpu / Double(t) * Double(s.perStack)
+            mmaHPerToken += mma[1].0.gpu / Double(t) * Double(s.perStack)
+            Self.line(String(format: "%@ %@ x%d: int8-2l t8 %.2f ms (%.2f TFLOP/s) | mma wf32 %.2f ms (%.2f, rel %.1e) | mma wf16 %.2f ms (%.2f, rel %.1e) | mps fp16 %.2f ms (%.2f TFLOP/s)",
                              s.name as NSString, s.format.rawValue as NSString, s.perStack,
-                             prod.gpu, flops / prod.gpu / 1e9, mps.gpu, flops / mps.gpu / 1e9, prod.gpu / mps.gpu))
+                             prod.gpu, flops / prod.gpu / 1e9,
+                             mma[0].0.gpu, flops / mma[0].0.gpu / 1e9, mma[0].1,
+                             mma[1].0.gpu, flops / mma[1].0.gpu / 1e9, mma[1].1,
+                             mps.gpu, flops / mps.gpu / 1e9))
         }
-        Self.line(String(format: "dense total per prompt token: int8-2l t8 %.3f ms, mps fp16 %.3f ms; per 2,940 tokens %.1f s vs %.1f s",
-                         prodPerToken, mpsPerToken, prodPerToken * 2.94, mpsPerToken * 2.94))
+        Self.line(String(format: "dense total per prompt token: t8 %.3f ms, mma wf32 %.3f ms, mma wf16 %.3f ms, mps fp16 %.3f ms; per 2,940 tokens %.1f / %.1f / %.1f / %.1f s",
+                         prodPerToken, mmaFPerToken, mmaHPerToken, mpsPerToken,
+                         prodPerToken * 2.94, mmaFPerToken * 2.94, mmaHPerToken * 2.94, mpsPerToken * 2.94))
     }
 
     // MARK: - Per-token fallback loops vs batched prototypes
