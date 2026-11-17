@@ -9,11 +9,13 @@ import Testing
 /// projections at one 1,024-token prefill chunk, through the production
 /// `FlashNextMatVec.encodeBatched` entry, beside an FP16 roofline
 /// (`MPSMatrixMultiplication` at the same shapes) and beside batched
-/// prototypes of the paths that today fall back to one GEMV per token.
+/// prototypes of the paths that fell back to one GEMV per token before the
+/// batched BF16 / FP32-out INT8-2L kernels (that loop is rebuilt here from
+/// `FlashNextMatVec.encode`).
 /// Synthetic weights at the install's shapes and formats (INT8-2L Q6_K/Q8_0,
 /// BF16 for the narrowed F32 matrices). Env-gated:
 /// `MFERENCE_FLASHNEXT_PREFILL_KBENCH=1`. Prints one line per case; asserts
-/// only that each prototype matches the production output bit for bit.
+/// only that each prototype matches the per-token GEMV output bit for bit.
 @Suite(.serialized) struct FlashNextPrefillProjectionBenchmarks {
     private static var enabled: Bool {
         ProcessInfo.processInfo.environment["MFERENCE_FLASHNEXT_PREFILL_KBENCH"] == "1"
@@ -45,7 +47,7 @@ import Testing
         Shape(name: "shexp down 640->2560", rows: 2560, cols: 640, format: .q8_0, perStack: 48, f32: false),
     ]
 
-    /// The projections whose batched call takes the per-token GEMV loop today:
+    /// The projections whose batched call took the per-token GEMV loop:
     /// INT8-2L with an FP32 output (hyper-connection mixDown/mixUp) and every
     /// BF16 matrix (F32 tensors narrowed at load).
     static let perTokenShapes: [Shape] = [
@@ -285,7 +287,7 @@ import Testing
 
         var rng = LCG(s: 0xFA11)
         let t = Self.tokens
-        Self.line("per-token fallback (production encodeBatched) vs batched t8 prototype, \(t) tokens")
+        Self.line("per-token GEMV loop (FlashNextMatVec.encode per token) vs batched t8 prototype, \(t) tokens")
         var loopPerToken = 0.0, loopWallPerToken = 0.0, protoPerToken = 0.0, dispatchesPerToken = 0
         for s in Self.perTokenShapes {
             let w = try Self.matrix(device, s, rng: &rng)
@@ -293,10 +295,16 @@ import Testing
             let outBytes = t * s.rows * (s.f32 ? 4 : 2)
             let yLoop = try Self.buffer(device, outBytes)
             let yProto = try Self.buffer(device, outBytes)
-            let loop = try Self.time(ctx) {
-                matVec.encodeBatched(commandBuffer: $0, matrix: w, x: x, y: yLoop,
-                                     matrixRows: s.rows, matrixColumns: s.cols, tokens: t,
-                                     outputFloat32: s.f32)
+            // The fallback `encodeBatched` used before it batched these formats:
+            // one single-token GEMV per prompt token at that token's offsets.
+            let outStride = s.f32 ? 4 : 2
+            let loop = try Self.time(ctx) { cb in
+                for row in 0..<t {
+                    matVec.encode(commandBuffer: cb, matrix: w,
+                                  x: x, xOffset: row * s.cols * 2,
+                                  y: yLoop, yOffset: row * s.rows * outStride,
+                                  rows: s.rows, cols: s.cols, outputFloat32: s.f32)
+                }
             }
             let proto = try Self.time(ctx) { cb in
                 guard let enc = cb.makeComputeCommandEncoder() else { return }
