@@ -57,7 +57,7 @@ import MferenceValidationSupport
         var rng = SplitMix64(seed: 0xB47C_0000 &+ UInt64(c.rows &* 31 &+ c.cols))
         let w = try Self.matrix(c, ctx: ctx, rng: &rng)
         let width = c.f32 ? 4 : 2
-        for tokens in [1, 7, 8, 13] {
+        for tokens in [1, 7, 8, 9, 13] {
             let x = (0..<(tokens * c.cols)).map { _ in Float16(rng.uniform(-1, 1)) }
             let xBuf = try #require(x.withUnsafeBytes {
                 ctx.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
