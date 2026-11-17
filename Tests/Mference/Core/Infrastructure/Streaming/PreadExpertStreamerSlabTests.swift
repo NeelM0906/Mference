@@ -12,8 +12,8 @@ import Testing
 @Suite(.serialized) struct PreadExpertStreamerSlabTests {
     static let experts = 4, stride = 1 << 20
 
-    /// Per-page `mincore` bits for `[base, base + length)`, or nil with
-    /// `errno` set (ENOMEM when any of the range is unmapped).
+    /// Per-page `mincore` bits for `[base, base + length)`, or nil if the
+    /// call fails.
     static func pageBits(_ base: UnsafeMutableRawPointer, _ length: Int) -> [Int32]? {
         let pages = length / Int(getpagesize())
         var vec = [CChar](repeating: 0, count: pages)
@@ -66,9 +66,11 @@ import Testing
         }
         #expect(weakStreamer == nil && weakBuffer == nil)
         let slab = try #require(base)
+        // Darwin's mincore reports an unmapped range rather than failing on it
+        // (no ENOMEM, unlike Linux), so the check is that none of the slab's
+        // pages is still resident.
         let afterRelease = Self.pageBits(slab, length)
-        let releaseErrno = errno
-        #expect(afterRelease == nil, "the slab is unmapped on release")
-        #expect(releaseErrno == ENOMEM)
+        #expect(afterRelease.map { bits in bits.allSatisfy { $0 & MINCORE_INCORE == 0 } } ?? true,
+                "no slab page is resident after release")
     }
 }
