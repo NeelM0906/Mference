@@ -207,8 +207,25 @@ import Metal
             #expect(prefetchPlan(family: family, gib: 24) == .init(mode: .shadow, shadowBudget: 8))
             // Unmeasured tiers keep the previous behavior.
             #expect(prefetchPlan(family: family, gib: 8).mode == .off)
-            #expect(prefetchPlan(family: family, gib: 32).mode == .off)
+            #expect(prefetchPlan(family: family, gib: 33).mode == .off)
+            #expect(prefetchPlan(family: family, gib: 64).mode == .off)
         }
+    }
+
+    @Test func speculativePrefetchDefault_isShadowBudgetEightForQwen36OnlyAt32GiB() {
+        #expect(prefetchPlan(family: .qwen36, gib: 32) == .init(mode: .shadow, shadowBudget: 8))
+        #expect(prefetchPlan(family: .gemma4, gib: 32).mode == .off)
+        #expect(prefetchPlan(family: .qwen36, gib: 28) == .init(mode: .shadow, shadowBudget: 8))
+        #expect(prefetchPlan(family: .gemma4, gib: 28).mode == .off)
+        #expect(PrefetchMode.plan(requestedShadowBudget: nil, environment: [:], family: .qwen36,
+                                  physicalMemoryBytes: 24 * Self.gib - 1) == .init(mode: .shadow, shadowBudget: 4))
+        #expect(prefetchPlan(budget: 2, family: .qwen36, gib: 32) == .init(mode: .shadow, shadowBudget: 2))
+        #expect(prefetchPlan(environment: ["MFERENCE_SHADOW_BUDGET": "3"], family: .qwen36, gib: 32)
+                == .init(mode: .shadow, shadowBudget: 3))
+        #expect(prefetchPlan(budget: 0, family: .qwen36, gib: 32).mode == .off)
+        #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "off"], family: .qwen36, gib: 32).mode == .off)
+        #expect(PrefetchMode.plan(requestedShadowBudget: nil, environment: [:], family: .qwen36,
+                                  physicalMemoryBytes: 32 * Self.gib + 1).mode == .off)
     }
 
     @Test func speculativePrefetchDefault_keepsTheOtherFamiliesAsTheyWere() {
