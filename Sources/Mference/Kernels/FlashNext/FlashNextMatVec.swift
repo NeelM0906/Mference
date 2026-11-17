@@ -178,6 +178,9 @@ final class FlashNextMatVec {
     private let bf16BatchedPSO: MTLComputePipelineState
     private let bf16BatchedF32PSO: MTLComputePipelineState
     private let int8PSO: MTLComputePipelineState
+    /// Dispatches of the 8-token batched kernels (BF16 and INT8-2L) made by
+    /// `encodeBatched`; read by tests that pin which kernel a call routes to.
+    private(set) var batchedT8Dispatches = 0
     /// A BF16 vector of ones, `int8Columns` long: the identity value for
     /// `router_gemv_gemma4_r4`'s activation scale. Sized once at init rather
     /// than grown on demand so the INT8 path allocates nothing per token and a
@@ -320,7 +323,10 @@ final class FlashNextMatVec {
     /// model's discrete decisions. Dense BF16 (the parity toy, and the GGUF
     /// install's narrowed F32 gates) and INT8-2L (FP16 or FP32 out) run 8
     /// tokens per SIMD group, each token's row bit-identical to the
-    /// single-token GEMV, so prefill matches decode exactly.
+    /// single-token GEMV, so prefill matches decode exactly. A one-token call
+    /// to BF16 or to FP32-out INT8-2L (decode's hyper-connection and indexer
+    /// projections) takes the single-token GEMV itself, so decode dispatches
+    /// the kernels it always has.
     func encodeBatched(commandBuffer: MTLCommandBuffer,
                        matrix: FlashNextWeightMatrix,
                        x: MTLBuffer, xOffset: Int = 0,
@@ -371,7 +377,7 @@ final class FlashNextMatVec {
                     outputFloat32: outputFloat32)
                 row += count
             }
-        case let .ggufInt8TwoLevel(w):
+        case let .ggufInt8TwoLevel(w) where tokens > 1 || !outputFloat32:
             guard let kernel = ggufInt8TwoLevel else {
                 preconditionFailure("an INT8-2L matrix reached a FlashNextMatVec built without the GGUF path")
             }
@@ -381,7 +387,8 @@ final class FlashNextMatVec {
                                  x: x, xOffset: xOffset, xStride: matrixColumns,
                                  y: y, yOffset: yOffset, yStride: matrixRows, tokens: tokens,
                                  floatOutput: outputFloat32)
-        case let .bf16(buffer, offset):
+            batchedT8Dispatches += 1
+        case let .bf16(buffer, offset) where tokens > 1:
             // Bit-identical per token to the single-token BF16 GEMV; the
             // weights are read once per group of 8 tokens instead of once per
             // token, in one dispatch instead of `tokens`.
@@ -402,7 +409,10 @@ final class FlashNextMatVec {
                 threadsPerThreadgroup: MTLSize(width: 32 * Self.rowsPerThreadgroup,
                                                height: 1, depth: 1))
             enc.endEncoding()
-        case .int8, .ggufQ6KRows:
+            batchedT8Dispatches += 1
+        case .int8, .ggufQ6KRows, .bf16, .ggufInt8TwoLevel:
+            // `.bf16` and `.ggufInt8TwoLevel` reach here only for one token
+            // (FP32 out for INT8-2L): the single-token GEMV, as decode runs it.
             for row in 0..<tokens {
                 encode(commandBuffer: commandBuffer, matrix: matrix,
                        x: x, xOffset: xOffset + row * matrixColumns * half,

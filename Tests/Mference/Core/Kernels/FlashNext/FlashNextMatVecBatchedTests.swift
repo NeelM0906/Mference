@@ -83,4 +83,38 @@ import MferenceValidationSupport
             #expect(tail.allSatisfy { $0 == 0xEE }, "\(tokens) tokens: wrote past the last row")
         }
     }
+
+    /// Which kernel `encodeBatched` dispatches. One token of BF16 or of
+    /// FP32-out INT8-2L (decode's hyper-connection and indexer projections)
+    /// takes the single-token GEMV, so decode runs the kernels it always has;
+    /// two or more tokens take the 8-token batched kernel. FP16-out INT8-2L
+    /// keeps the batched kernel at one token, as before.
+    @Test func oneTokenRoutesToTheGEMVAndMoreToTheBatchedKernel() throws {
+        let ctx = try MetalContext()
+        let matVec = try FlashNextMatVec(context: ctx, int4: DequantInt4GEMV(context: ctx),
+                                         int8Columns: 2560, ggufInt8TwoLevel: true)
+        var rng = SplitMix64(seed: 0x7E57_0001)
+        let routes: [(Case, expectedAtOneToken: Int)] = [
+            (Case(name: "bf16 f16", rows: 16, cols: 256, int8: false, f32: false), 0),
+            (Case(name: "bf16 f32", rows: 16, cols: 256, int8: false, f32: true), 0),
+            (Case(name: "int8-2l f32", rows: 16, cols: 256, int8: true, f32: true), 0),
+            (Case(name: "int8-2l f16", rows: 16, cols: 256, int8: true, f32: false), 1),
+        ]
+        for (c, expectedAtOneToken) in routes {
+            let w = try Self.matrix(c, ctx: ctx, rng: &rng)
+            for tokens in [1, 2, 9] {
+                let x = try #require(ctx.device.makeBuffer(length: tokens * c.cols * 2, options: .storageModeShared))
+                let y = try #require(ctx.device.makeBuffer(length: tokens * c.rows * 4, options: .storageModeShared))
+                let cb = try #require(ctx.queue.makeCommandBuffer())
+                let before = matVec.batchedT8Dispatches
+                matVec.encodeBatched(commandBuffer: cb, matrix: w, x: x, y: y,
+                                     matrixRows: c.rows, matrixColumns: c.cols, tokens: tokens,
+                                     outputFloat32: c.f32)
+                cb.commit(); cb.waitUntilCompleted()
+                #expect(cb.status == .completed)
+                #expect(matVec.batchedT8Dispatches - before == (tokens == 1 ? expectedAtOneToken : 1),
+                        "\(c.name), \(tokens) tokens: wrong kernel")
+            }
+        }
+    }
 }
