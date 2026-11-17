@@ -95,13 +95,15 @@ public struct ServerArguments: Equatable, Sendable {
                              single-prefix keeps the last finished turn;
                              multi-prefix also keeps earlier turns and other
                              conversations under --prompt-cache-bytes. Only
-                             Qwen 3.6 keeps more than one prefix; every other
-                             model serves multi-prefix as single-prefix.
+                             Qwen 3.6 and the Flash-Next models keep more than
+                             one prefix; every other model serves multi-prefix
+                             as single-prefix.
       --prompt-cache-bytes <bytes|auto>
                              RAM ceiling for prefixes multi-prefix keeps besides
                              the live one (default auto: the smaller of 4 GiB
                              and physical memory / 8 with at least 24 GiB,
-                             1 GiB from 16 GiB, 0 below). 0 serves exactly as
+                             1 GiB from 16 GiB, 0 below; at most 1.5 GiB for
+                             the Flash-Next models). 0 serves exactly as
                              single-prefix.
       --shadow-budget <0...8>
                              Speculative expert prefetch during decode: reads
