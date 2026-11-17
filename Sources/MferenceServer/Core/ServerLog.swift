@@ -86,6 +86,12 @@ enum ServerLog {
         write("library ready models=\(models.joined(separator: ","))")
     }
 
+    /// `--verify auto` fell back to full SHA-256 for this load (see
+    /// `ModelIntegrityPolicy.autoFallbackNotice`).
+    static func verifyAutoFallback(_ notice: String) {
+        write(notice)
+    }
+
     private static func format(_ duration: Duration) -> String {
         let seconds = Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18

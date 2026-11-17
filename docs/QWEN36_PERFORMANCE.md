@@ -302,7 +302,8 @@ of decode and waits for expert reads for the rest (10.4 s busy, 10.3 s gap over
 Shadow prefetch, the accepted DeepSeek-V4-Flash default, predicts the next
 layer's experts and reads them into the existing slots without ever blocking a
 real plan. It is the Qwen 3.6 default on hosts from 16 GiB to below 24 GiB,
-with a budget of four speculative reads per layer; `--shadow-budget` sets it on
+with a budget of four speculative reads per layer (budget 8 at 24 GiB and on
+32 GiB hosts; see below); `--shadow-budget` sets it on
 the CLI and the server, and `--shadow-budget 0` restores the previous behavior.
 
 | M2 MacBook Air 16 GiB, 160 decoded tokens, greedy | Off | Budget 1 | Budget 2 | Budget 4 |
@@ -319,6 +320,39 @@ slots, and the generated text is byte-identical in every run.
 These are short diagnostic runs with brief pauses on a fanless Mac, not the
 community-protocol A/B. Decode speed varies widely between runs there, so read
 the gains as a range; the all-hit rate is exactly reproducible and rises with
-the budget. Hosts with 24 GiB or more keep prefetch off, because the file cache
-holds the whole pool there and the earlier pilot predictor lost, and hosts
-below 16 GiB are unmeasured.
+the budget. When this was written, hosts with 24 GiB or more kept prefetch
+off, because the file cache holds the whole pool there and the earlier pilot
+predictor lost. A 24 GiB M4 Pro measurement later moved 24 GiB hosts to budget
+8, and the 32 GiB measurement below did the same for Qwen 3.6 at 32 GiB. Hosts
+below 16 GiB and above 32 GiB are unmeasured and keep prefetch off.
+
+## Shadow prefetch on 32 GiB hosts (2026-11-17)
+
+On a 32 GiB M1 Max (macOS 27.2.1) at main `ad99455`, half of long-decode layer
+steps (49.8%) still found all eight experts in memory without prefetch. Shadow
+prefetch raised that to about 69.5% and shortened the GPU wait for expert reads
+by 2.7 ms per token. Qwen 3.6 now defaults to budget 8 on hosts above 24 GiB up
+to 32 GiB (only 32 GiB is measured); Gemma 4 there is unmeasured and stays off.
+
+| M1 Max 32 GiB, `ad99455` | Off | Budget 4 | Budget 8 |
+| --- | ---: | ---: | ---: |
+| Long decode, 666 tokens (tok/s) | 28.45 / 28.55 | 29.92 / 30.02 | 30.10 / 30.19 |
+| Long, all-hit layer steps | 49.8% | 69.3% | 69.5% |
+| Long, GPU busy per token (ms) | 14.44 / 14.36 | 15.45 / 15.27 | 15.29 / 15.21 |
+| 32K decode, 128 tokens (tok/s) | 23.88 / 24.41 | 23.18 | 23.96 |
+| 32K, all-hit layer steps | 42.7% | 64.0% | 64.3% |
+| 32K, GPU busy per token (ms) | 17.08 / 17.19 | 22.05 | 21.45 |
+
+Long decode gains about 6% at budget 8. **At 32K context decode is flat:** the
+miss wait falls by 3–4 ms per token, but GPU busy per token rises 25–29%, at
+budget 4 as at budget 8, and cancels the gain (budget 4's one 32K run was about
+4% below the off mean). That rise is a known effect of
+this default, and its cause is not settled. `--shadow-budget 0` turns prefetch
+off for long-context work.
+
+These are diagnostic runs at `ad99455` with phase reporting on, which lowers
+tok/s, so they are not comparable with protocol rows. They ran on AC power with
+no swap activity. The order was
+mirrored on the long case (off, 4, 8, 8, 4, off), and the 32K arms are one run
+each. All outputs were byte-identical within each case, and the speculative
+reads use the existing expert slots, so memory is unchanged.

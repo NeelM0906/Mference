@@ -257,10 +257,11 @@ extension Args {
                                 the exact head.
       --shadow-budget <0...8>   Speculative expert prefetch during decode: reads
                                 issued per layer ahead of the router. 0 turns it
-                                off. Default: 4 for Qwen 3.6 and Gemma 4 on
-                                hosts with 16 to under 24 GiB, 2 for
-                                DeepSeek-V4-Flash, off elsewhere. Output is
-                                identical at every value.
+                                off. Default: 2 for DeepSeek-V4-Flash; 4 for
+                                Qwen 3.6 and Gemma 4 on hosts with 16 to under
+                                24 GiB and 8 at 24 GiB; 8 for Qwen 3.6 up to
+                                32 GiB; off elsewhere. Output is identical at
+                                every value.
       --verify <mode>           Model integrity: auto (default) checks file
                                 sizes against the receipt written at install
                                 time when that receipt validates, and hashes

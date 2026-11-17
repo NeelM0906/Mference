@@ -124,7 +124,15 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// an A B B A run) for +351 MB of Metal allocation, 210 MB of it sliding
     /// KV ring. Qwen 3.6 has no sliding ring to grow, so 2,048 costs it +270 MB
     /// of scratch: a 2,940-token prompt went from 148.7 s to 42.7 s with decode
-    /// unchanged (2026-09-21). The server's `--prefill-chunk` and then
+    /// unchanged (2026-09-21). The Unsloth UD-IQ3_XXS Flash-Next install
+    /// re-reads its 47 GB routed-expert pool once per chunk: through the
+    /// server a 2,940-token prompt's first token took 321 s at 128 before
+    /// prefill batched its per-token GEMV loops; with them it takes 108-110 s
+    /// at 1,024 and 87-88 s at 4,096 (one chunk, one sweep), with peak
+    /// footprints of 2.3 and 4.4 GB (2026-11-17, 32 GB M1 Max). It takes
+    /// 4,096 on hosts with at least 32 GiB and 1,024 on hosts from 16 GiB up
+    /// to but not including 32 GiB. Vendor Flash-Next keeps 128 (unmeasured
+    /// here). The server's `--prefill-chunk` and then
     /// `MFERENCE_SERVER_PREFILL_CHUNK` override.
     public static func defaultServerPrefillChunkTokens(
         for family: ModelFamily,
@@ -139,6 +147,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         guard physicalMemoryBytes >= 16 * gib else { return 128 }
         switch family {
         case .gemma4, .qwen36: return 2048
+        case .qwen38flashnextudiq3xxs: return physicalMemoryBytes >= 32 * gib ? 4096 : 1024
         default: return 128
         }
     }

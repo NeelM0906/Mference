@@ -107,7 +107,8 @@ public struct ServerArguments: Equatable, Sendable {
                              Speculative expert prefetch during decode: reads
                              issued per layer ahead of the router; 0 turns it off.
                              Default: 4 for Qwen 3.6 and Gemma 4 on hosts with 16
-                             to under 24 GiB, 2 for DeepSeek-V4-Flash, off elsewhere.
+                             to under 24 GiB, 8 at 24 GiB, 8 for Qwen 3.6 up to
+                             32 GiB, 2 for DeepSeek-V4-Flash, off elsewhere.
       --prefill-chunk <n|auto>
                              Prompt tokens per prefill chunk: auto (default) or
                              32, 64, 128, 256, 512, 1024, 2048, 4096. Larger

@@ -505,27 +505,37 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// DeepSeek-V4-Flash: shadow, budget 2 (community A/B 2026-08-07, short
         /// +18%, long +13%; docs/experiments/summaries/14-dsv4-shadow-prefetch.md).
         ///
-        /// Qwen 3.6 and Gemma 4 on hosts from 16 GiB to 24 GiB: shadow,
-        /// budget 4. There the GPU idles about half of decode waiting for expert
+        /// Qwen 3.6 and Gemma 4 on hosts from 16 GiB to under 24 GiB: shadow,
+        /// budget 4; at 24 GiB, budget 8 (below). There the GPU idles about half of decode waiting for expert
         /// reads; on an M2 with 16 GiB (diagnostic runs, 2026-09-21) Qwen 3.6
         /// decoded 7.35 / 8.91 / 9.62 / 10.55 tok/s at off / 1 / 2 / 4, and Gemma
         /// 4 and Gemma 4 QAT gained about 11% from budget 2 with nothing more at
         /// 4, at no memory cost in any case. On a 24 GiB M4 Pro (2026-10-27)
         /// Qwen 3.6 went 17.8-18.3 -> 19.6-20.6 tok/s at budget 4 and
         /// 14.8-20.3 -> 19.7-21.8 at budget 8, so 24 GiB hosts run budget 8.
-        /// Larger and smaller hosts are unmeasured, so both stay off.
+        ///
+        /// Qwen 3.6 above 24 GiB up to 32 GiB: shadow, budget 8. Only 32 GiB is
+        /// measured; no current Mac sits between. On a 32 GiB M1 Max (diagnostic
+        /// runs, 2026-11-17) long decode went 28.45-28.55 -> 30.10-30.19 tok/s,
+        /// with budget 4 at 29.92-30.02. At 32K context decode stayed flat at
+        /// budget 8 (23.88-24.41 -> 23.96): fewer expert misses, but GPU busy
+        /// per token rose 25-29%, at budget 4 as at 8.
+        ///
+        /// Gemma 4 above 24 GiB, and both families below 16 GiB or above
+        /// 32 GiB, are unmeasured and stay off.
         static func plan(requestedShadowBudget: Int?,
                          environment: [String: String],
                          family: ModelFamily,
                          physicalMemoryBytes: UInt64) -> SpeculativePrefetchPlan {
             let gib = UInt64(1) << 30
-            let measuredTier = physicalMemoryBytes >= 16 * gib && physicalMemoryBytes <= 24 * gib
             let familyMode: SpeculativePrefetchMode
             let familyBudget: Int
             switch family {
             case .deepseekV4Flash:
                 familyMode = .shadow; familyBudget = 2
             case .qwen36, .gemma4:
+                let measuredCeiling = family == .qwen36 ? 32 * gib : 24 * gib
+                let measuredTier = physicalMemoryBytes >= 16 * gib && physicalMemoryBytes <= measuredCeiling
                 familyMode = measuredTier ? .shadow : .off
                 familyBudget = physicalMemoryBytes >= 24 * gib ? 8 : 4
             default:

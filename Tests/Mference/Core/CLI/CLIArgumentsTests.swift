@@ -299,6 +299,22 @@ import Mference
             for: .qwen36, physicalMemoryBytes: 8 * gib) == 128)
     }
 
+    /// Interactive `--chat` on the Unsloth Flash-Next install takes the
+    /// server's RAM tiers; an explicit chunk still wins.
+    @Test func chatAutoChunkFollowsTheUnslothFlashNextTiers() {
+        let gib = UInt64(1) << 30
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib) == 4096)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 24 * gib) == 1024)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 8 * gib) == 128)
+        #expect(PrefillChunkChoice.auto.chatChunkTokens(
+            for: .qwen38flashnext, physicalMemoryBytes: 32 * gib) == 128)
+        #expect(PrefillChunkChoice.fixed(256).chatChunkTokens(
+            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib) == 256)
+    }
+
     @Test func chatFixedChunkWinsOverTheFamilyDefault() {
         let gib = UInt64(1) << 30
         #expect(PrefillChunkChoice.fixed(256).chatChunkTokens(
