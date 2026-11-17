@@ -55,6 +55,13 @@ public struct Model {
     public let streamingMode: ExpertStreamingMode
     public let expertCachePolicy: ExpertCachePolicy
     public let integrityPolicy: ModelIntegrityPolicy
+    /// Under `.trustedReceiptWhenValid`, the receipt check that failed and
+    /// sent the load to full SHA-256; nil when no fallback happened.
+    public internal(set) var integrityFallbackDetail: String?
+    /// The one-line notice for `integrityFallbackDetail`, if any.
+    public var verifyAutoFallbackNotice: String? {
+        integrityFallbackDetail.map(ModelIntegrityPolicy.autoFallbackNotice(detail:))
+    }
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
@@ -880,14 +887,17 @@ extension Model {
         // a usable receipt loads exactly as it does under `.fullSha256`.
         var resolvedIntegrityPolicy: ModelIntegrityPolicy =
             requestedIntegrityPolicy == .trustedReceiptWhenValid ? .sizeCheckTrustedReceipt : requestedIntegrityPolicy
+        var fallbackDetail: String?
         func receiptCheck(_ check: () throws -> Void) throws {
             guard resolvedIntegrityPolicy == .sizeCheckTrustedReceipt else { return }
             let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             defer { stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start }
             do {
                 try check()
-            } catch ModelError.trustedReceiptInvalid where requestedIntegrityPolicy == .trustedReceiptWhenValid {
+            } catch ModelError.trustedReceiptInvalid(let detail)
+                        where requestedIntegrityPolicy == .trustedReceiptWhenValid {
                 resolvedIntegrityPolicy = .fullSha256
+                fallbackDetail = detail
             }
         }
 
@@ -992,7 +1002,7 @@ extension Model {
                                                   layout: layout)
         }
 
-        let model = Model(
+        var model = Model(
             device: device,
             config: expecting,
             streamingMode: streamingMode,
@@ -1003,6 +1013,7 @@ extension Model {
             packedExpertsLayout: layout,
             manifest: manifest,
             directoryURL: directoryURL)
+        model.integrityFallbackDetail = fallbackDetail
         if case .resident = streamingMode {
             let warmupStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try model.warmUpResidentBackends()
