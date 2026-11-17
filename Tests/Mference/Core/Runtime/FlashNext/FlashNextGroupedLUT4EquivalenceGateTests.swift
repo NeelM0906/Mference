@@ -49,8 +49,9 @@ import Testing
     func groupedLUT4PrefillKeepsTeacherForcedPerplexity() async throws {
         let install = URL(fileURLWithPath: try #require(Self.env["MFERENCE_FLASHNEXT_GATE"]))
         let chunk = try #require(Int(Self.env["MFERENCE_FLASHNEXT_GATE_CHUNK"] ?? ""))
-        try #require(chunk == FlashNextForwardRunner.groupedLUT4MaxPrefillChunkTokens || chunk == 512,
-                     "chunk must be 1024 or 512: larger chunks never take the grouped LUT4 path")
+        try #require(chunk == FlashNextForwardRunner.groupedLUT4MaxPrefillChunkTokens
+                        || chunk == FlashNextForwardRunner.groupedLUT4MinPrefillChunkTokens,
+                     "chunk must be 1024 or 512: no other chunk size takes the grouped LUT4 path")
         let root = GemmaPrefillGateFixture.repositoryRoot
         let folder = try #require(MFTokenizer.tokenizerFolder(forModelDirectory: install))
         let tokenizer = try await MFTokenizer.load(from: folder, family: .qwen38flashnextudiq3xxs)

@@ -541,10 +541,13 @@ from disk; the remainder came from the page cache.
   and M36, `a68b588` and `1be8d3d`). The server's 3K TTFT at `54d658c` was
   320.85 s (ledger M32, default `--verify auto`) and has not been re-measured
   since #70.
-  Chunked prefill uses the row-form LUT4 routed kernel and does not yet read
-  each expert once per prompt.
-- **Prefill uses the row-form LUT4 routed kernel only.** A grouped form is
-  separate follow-up work, not part of this family's baseline.
+  Chunked prefill does not yet read each expert once per prompt.
+- **The grouped LUT4 prefill GEMM runs only at 512- and 1,024-token chunks.**
+  Off Apple10, a routed prefill tile takes the simdgroup grouped GEMM (class T:
+  weights are rounded to half once) only when the configured prefill chunk is
+  512 or 1,024 and the tile passes the 8× padding rule. Every other chunk size,
+  including the server's 4,096 default on hosts with 32 GiB or more, keeps the
+  row-form LUT4 routed kernel.
 - **Resident expert mode is refused by name** (`residentExpertMode`): the
   family runs only on the slot path, and `auto` never selects resident mapping
   for it.
