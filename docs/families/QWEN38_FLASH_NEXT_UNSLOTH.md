@@ -245,7 +245,8 @@ strides (132,169,728 B, 126 MiB, per slot). `defaultExpertCacheSlots` gives
       recorded in the family PR. Two pre-existing failures are quoted against
       `main` under the maintainer's ruling: `MapleQKNormRoPETests:74`, and the
       Flash-Next near-tie test's long case.
-- [ ] **Protocol bench** — pending the gated protocol run (WS0, gate 5).
+- [x] **Protocol bench** — the community protocol at `54d658c`, 15 of 15
+      runs `stop=endOfTurn`; see [Measured results](#measured-results).
 
 ## Fidelity gate (U5)
 
@@ -352,14 +353,43 @@ and 97.28%.
 
 ## Measured results
 
-Pending the gated protocol run (WS0, gate 5). Protocol:
-[`COMMUNITY_BENCHMARKS.md`](../COMMUNITY_BENCHMARKS.md).
+Protocol: [`COMMUNITY_BENCHMARKS.md`](../COMMUNITY_BENCHMARKS.md).
 
-| Case | Prompt / generated | Prefill | Decode | Range | Peak RSS |
+**Setup.**
+- Commit `54d658c`, release build.
+- MacBook Pro (MacBookPro18,4), M1 Max (8P + 2E), 32 GB. macOS 27.2.1
+  (26B131), Apple Swift 6.4.2, on AC power.
+- The three frozen `real-generation-v1` cases, with `--max-new 1024
+  --max-context 4096 --temperature 0.2 --top-k 64 --top-p 0.95`, the case
+  seeds, `--verify full-sha256`, and the default slot count and prefill chunk.
+
+**Runs.**
+- Each case had one discarded warmup, then five measured runs, each in a fresh
+  process.
+- All 15 measured runs exited 0 with `stop=endOfTurn`. None was voided or
+  replaced, and swap-outs did not grow.
+- Output was identical across runs within each case.
+
+| Case | Prompt / generated | Prefill (median) | Decode (median) | Range | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: |
-| short-explanation | | | | | |
-| medium-review | | | | | |
-| long-synthesis | | | | | |
+| short-explanation | 62 / 547 | 31.96 s | 4.12 tok/s | 4.10–4.14 | 830 MiB |
+| medium-review | 426 / 706 | 49.47 s | 3.74 tok/s | 3.44–3.83 | 858 MiB |
+| long-synthesis | 2,940 / 569 | 178.59 s | 3.40 tok/s | 3.33–3.48 | 1,056 MiB |
+
+Peak memory footprint (`/usr/bin/time`) was 0.66–0.68, 1.22–1.24 and 5.35 GB
+for the three cases.
+
+**Prefill includes first-touch hashing.** Under `--verify full-sha256`, as the
+protocol requires, prefill time includes SHA-256 hashing of each expert-layer
+file on first touch. With the default `--verify auto`, which checks against
+the install receipt, the indicative readings below show short-explanation
+prefill at about 9.4 s and long-synthesis at about 151 s.
+
+**Deviations, each labelled:**
+1. The runs used a per-case driver that passes `run-benchmark.sh` `run_case`'s
+   arguments, not the script itself.
+2. long-synthesis was split across two machine holds, each with its own
+   discarded warmup.
 
 Decode rate excludes model installation, model loading, and prompt prefill.
 Compare rows against [`BENCHMARKS.md`](../BENCHMARKS.md) only when the case,
