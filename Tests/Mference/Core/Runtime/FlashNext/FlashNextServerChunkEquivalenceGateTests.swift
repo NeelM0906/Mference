@@ -5,7 +5,8 @@ import Testing
 @testable import Mference
 
 /// Class T gate for the Unsloth Flash-Next server default prefill chunk
-/// (128 -> 1,024, `RuntimeConfiguration.defaultServerPrefillChunkTokens`).
+/// (128 -> 4,096 on hosts with at least 32 GiB,
+/// `RuntimeConfiguration.defaultServerPrefillChunkTokens`).
 /// Control prefills at 128 tokens per chunk, candidate at the new default;
 /// everything else is the same runner. Both are then teacher-forced through
 /// the same saved answer on the decode path, so the arms differ only through
@@ -38,7 +39,7 @@ import Testing
         let controlChunk = 128
         let chunk = RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 << 30, environment: [:])
-        try #require(chunk == 1024, "the gate compares 128 with the Unsloth server default, 1,024")
+        try #require(chunk == 4096, "the gate compares 128 with the Unsloth server default on a 32 GiB host, 4,096")
         let arm = Self.env["MFERENCE_FLASHNEXT_GATE_ARM"]
         try #require(arm == nil || arm == "control" || arm == "candidate", "MFERENCE_FLASHNEXT_GATE_ARM is control or candidate")
         let root = GemmaPrefillGateFixture.repositoryRoot

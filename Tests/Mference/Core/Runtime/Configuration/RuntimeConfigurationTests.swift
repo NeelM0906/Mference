@@ -62,21 +62,25 @@ import Testing
             for: .qwen38flashnext, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
     }
 
-    /// The Unsloth GGUF Flash-Next install takes 1,024 on hosts with at least
-    /// 16 GiB; vendor Flash-Next is unmeasured and keeps 128.
-    @Test func serverPrefillChunkIs1024ForUnslothFlashNextOnly() {
+    /// The Unsloth GGUF Flash-Next install's server chunk follows RAM: 4,096
+    /// at 32 GiB and up, 1,024 from 16 GiB, 128 below; vendor Flash-Next is
+    /// unmeasured and keeps 128; the env override still wins.
+    @Test func serverPrefillChunkForUnslothFlashNextFollowsRAM() {
         let gib = UInt64(1) << 30
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib, environment: [:]) == 1024)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 16 * gib, environment: [:]) == 1024)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen38flashnext, physicalMemoryBytes: 32 * gib, environment: [:]) == 128)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib,
-            environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
+        func chunk(_ family: ModelFamily, _ ram: UInt64, _ env: [String: String] = [:]) -> Int {
+            RuntimeConfiguration.defaultServerPrefillChunkTokens(for: family, physicalMemoryBytes: ram, environment: env)
+        }
+        #expect(chunk(.qwen38flashnextudiq3xxs, 64 * gib) == 4096)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 32 * gib) == 4096)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 32 * gib - 1) == 1024)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 24 * gib) == 1024)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 16 * gib) == 1024)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 16 * gib - 1) == 128)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 8 * gib) == 128)
+        #expect(chunk(.qwen38flashnext, 32 * gib) == 128)
+        #expect(chunk(.qwen38flashnext, 64 * gib) == 128)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 32 * gib, ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
+        #expect(chunk(.qwen38flashnextudiq3xxs, 24 * gib, ["MFERENCE_SERVER_PREFILL_CHUNK": "2048"]) == 2048)
     }
 
     @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {
