@@ -395,9 +395,97 @@ prefill at about 9.4 s and long-synthesis at about 151 s.
 2. long-synthesis was split across two machine holds, each with its own
    discarded warmup.
 
+**Server and 32K, same build.** These complete the first baseline for this
+family at `54d658c` (ledger M32). Ledger entries name the measurement log
+described in
+[Benchmarks](../BENCHMARKS.md#m1-max-32-gb-measured-2026-11-performance-program).
+
+- **S 3K TTFT:** a fresh `MferenceServer` with `--max-context 36864
+  --prompt-cache-mode off` and the default `--verify auto`, the
+  long-synthesis prompt (2,940 tokens), 32 generated tokens, one warmup and
+  three measured requests, all on AC power. TTFT was 319.27, 320.85 and
+  322.43 s (median 320.85 s), decode 2.81-2.93 tok/s, server peak footprint
+  1.86 GB, 0 cached tokens on every request. This TTFT is about 1.8× the
+  CLI's prefill of the same prompt (178.59 s); the gap was not investigated.
+- **L 32K CLI: no valid run.** One attempt (`--max-context 32768 --max-new
+  32`, the default `--verify auto`) completed with `stop=maxTokens`, but it
+  is void because swap-outs grew by about 177 MB. The maintainer chose to
+  record its figures as **estimates, not measurements**: about 29 min of
+  prefill (1,736.71 s for 31,480 tokens) and 2.43 tok/s over 32 tokens, at a
+  peak footprint of 7.63 GB. No retry was run.
+- The server cold-then-warm 32K pair was not run.
+
+**Library mode.** A `MferenceServer --library` from `034757d` (#68 merged),
+default roots, on `127.0.0.1`, found both installs on this host (Qwen 3.6
+35B-A3B and this one) with no skips, and served one 25-token streamed
+request to each with 32 tokens allowed. The Unsloth request paid a model
+swap from Qwen 3.6 of 4.7 s; its TTFT including that load was 10.63 s. The
+process peak footprint was 7.67 GB, one model's worth, and swap-outs did not
+grow (ledger M33; `034757d`; default `--verify auto`). Footprint samples
+showed Qwen 3.6's memory leaving about 2-6 s after the swap finished rather
+than before the load began; the cause was not investigated.
+
 Decode rate excludes model installation, model loading, and prompt prefill.
 Compare rows against [`BENCHMARKS.md`](../BENCHMARKS.md) only when the case,
 prompt tokens, generated tokens, settings, and stop reason all match.
+
+### Changes since the family PR
+
+Both changes are class E: every run's output was byte-identical to `main`'s
+(short `8e18117d…`, medium `e4ab0458…`, long `138d79ce…`), every run ended at
+`stop=endOfTurn`, and swap-outs did not grow. All runs used the protocol's
+CLI arguments with `--verify full-sha256`, one discarded warmup per segment
+and fresh processes. An A/B/B/A runs control, candidate, candidate, control
+segments in one session; an effect counts only when both comparisons agree
+in direction and the ranges do not overlap.
+
+**#69, decode MoE join after the router readback** (ledger M34; `c16a9cf`
+against `main` `034757d`; A/B/B/A, short-explanation only, 3 measured runs
+per segment):
+
+| Segment | Build | Decode tok/s (median) | Prefill s (median) |
+| --- | --- | ---: | ---: |
+| 1 | `034757d` | 4.143 | 31.34 |
+| 2 | `c16a9cf` | 4.481 | 32.30 |
+| 3 | `c16a9cf` | 4.388 | 32.03 |
+| 4 | `034757d` | 4.055 | 31.97 |
+
+Short decode rose 8.2% in both comparisons with non-overlapping ranges;
+pooled medians 4.10 → 4.39 tok/s (+7.1%). Short prefill was +3.1% in one
+comparison and +0.2% in the other, so it is not slower in both. Medium and
+long were not run: the change touches decode only.
+
+**#70, batched per-token GEMV loops in prefill** (ledger M35 and M36; base
+`main` `ad99455`, measured with a build of `c16a9cf`, whose sources are
+identical). The first measurement was a single A-then-B pair on `a68b588`,
+one run per case:
+
+| Case | Prefill s | Decode tok/s | Peak footprint |
+| --- | ---: | ---: | ---: |
+| short-explanation | 32.08 → 31.15 (-2.9%) | 4.273 → 4.173 (-2.3%) | 0.68 → 0.62 GB |
+| medium-review | 49.21 → 42.21 (-14.2%) | 4.024 → 3.920 (-2.6%) | 1.23 → 0.95 GB |
+| long-synthesis | 179.11 → 120.81 (-32.6%) | 3.361 → 3.289 (-2.1%) | 5.35 → 3.39 GB |
+
+The claimed metric, long prefill, cleared the 10% bar, and no metric was more
+than 7% worse. Decode was 2.1-2.6% lower on every case, so the final head
+`1be8d3d`, which keeps the single-token GEMV for one-token calls, was
+measured as a short-explanation A/B/B/A (3 measured runs per segment):
+
+| Segment | Build | Decode tok/s (median) | Prefill s (median) |
+| --- | --- | ---: | ---: |
+| 1 | `ad99455` | 4.258 | 31.96 |
+| 2 | `1be8d3d` | 4.254 | 31.05 |
+| 3 | `1be8d3d` | 4.257 | 31.09 |
+| 4 | `ad99455` | 4.219 | 31.93 |
+
+Short decode is -0.1% and +0.9% (pooled 4.238 → 4.256 tok/s, ranges
+overlap): the decode drop seen on `a68b588` is gone. Short prefill is -2.8%
+and -2.6% with non-overlapping ranges (pooled 31.94 → 31.07 s). One
+long-synthesis run on `1be8d3d` prefilled in 120.78 s at a 3.38 GB peak
+footprint. The merged head differs from `1be8d3d` only in one test file.
+
+These are A/B arms, not a new five-run protocol table; the gate-5 table above
+stays the family's protocol baseline at `54d658c`.
 
 ### Indicative readings (not protocol)
 
@@ -447,9 +535,14 @@ from disk; the remainder came from the page cache.
 
 ## Known limits
 
-- **3K-prompt TTFT is about 151 s** on an M1 Max with 32 GB (indicative, above),
-  far from the 11–16 s target. Chunked prefill uses the row-form LUT4 routed
-  kernel and does not yet read each expert once per prompt.
+- **3K-prompt prefill is far from the 11–16 s target** on an M1 Max with
+  32 GB. Under the protocol's `--verify full-sha256`, long-synthesis prefill
+  was 178.59 s at `54d658c` (ledger M32) and 120.8 s after #70 (ledger M35
+  and M36, `a68b588` and `1be8d3d`). The server's 3K TTFT at `54d658c` was
+  320.85 s (ledger M32, default `--verify auto`) and has not been re-measured
+  since #70.
+  Chunked prefill uses the row-form LUT4 routed kernel and does not yet read
+  each expert once per prompt.
 - **Prefill uses the row-form LUT4 routed kernel only.** A grouped form is
   separate follow-up work, not part of this family's baseline.
 - **Resident expert mode is refused by name** (`residentExpertMode`): the
@@ -474,8 +567,10 @@ from disk; the remainder came from the page cache.
   Qwen 3.6's tokenizer; this affects only special-token skipping on decode.
 - Optional or approximate features are opt-in flags with no default-path
   claims: none. `MFERENCE_U5_FORCE_ROUTES` is a diagnostic, not a control.
-- Untested: 32K context and medium-review were not run, and every reading on
-  this page is from one 32 GB M1 Max through the CLI or the test harness.
+- Untested: there is no valid 32K run (the one CLI attempt was void under the
+  swap-out rule; its figures are estimates only), and the server's
+  cold-then-warm 32K pair was not run. Every reading on this page is from one
+  32 GB M1 Max.
 
 ## Reproduction
 
