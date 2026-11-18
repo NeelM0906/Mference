@@ -86,4 +86,18 @@ import Testing
         #expect(services.connections.status == .unknown)
         #expect(broker.requests.isEmpty)
     }
+
+    @Test func previewServicesTouchNothingReal() async throws {
+        let container = try AppModelContainer.inMemory()
+        let services = AppleServices.preview(engine: GatedEngine(gate: ScanTestLatch(), answer: ""), container: container)
+        await services.calendar.load()
+        #expect(services.calendar.access == .notAsked)
+        await services.calendar.requestAccess()
+        #expect(services.calendar.access == .granted)  // the in-memory calendar grants
+        await services.mail.load()
+        #expect(services.mail.status == .available(version: "V10"))
+        #expect(services.mail.messages.isEmpty)
+        await services.connections.refresh()
+        #expect(services.connections.status.mail == .connected)
+    }
 }

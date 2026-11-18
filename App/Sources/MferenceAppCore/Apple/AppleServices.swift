@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import SwiftData
 
@@ -41,4 +42,38 @@ public final class AppleServices {
                              calendar: calendar, mail: mail,
                              connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker))
     }
+
+    /// Previews, snapshots and tests: in-memory calendar, mail and planner, a
+    /// scanner that reads nothing, Apple's model reported off (Quick through
+    /// `engine`, a fake one in tests), no prompts, no Mail store, no EventKit,
+    /// no network.
+    public static func preview(engine: any EngineServicing, container: ModelContainer,
+                               calendar calendarService: any CalendarServicing = InMemoryCalendarService(
+                                   calendarAccess: .notDetermined),
+                               mail mailSource: any MailSource = InMemoryMailSource()) -> AppleServices {
+        let broker = PreviewPermissionBroker()
+        let assistant = AppleModelService(
+            primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+                                                availability: .unavailable(reason: "Apple's on-device model is off in previews."),
+                                                answer: ""),
+            fallback: QuickTextModel(engine: engine))
+        let calendar = CalendarWeekModel(service: calendarService, store: PlannerStore(url: nil))
+        let mail = MailInboxModel(source: mailSource, context: container.mainContext, assistant: assistant,
+                                  drafter: MailReplyDrafter(engine: engine), sender: RecordingMailSender(),
+                                  broker: broker,
+                                  onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
+        return AppleServices(assistant: assistant,
+                             scan: ScanSession(scanner: PreviewScanner(), assistant: assistant,
+                                               context: container.mainContext,
+                                               imageDirectory: URL.temporaryDirectory.appending(path: "mference-preview-scans")),
+                             calendar: calendar, mail: mail,
+                             connections: AppleConnections(calendar: calendarService, mail: mailSource, broker: broker))
+    }
+}
+
+/// Reads nothing: previews show Scan's empty and failed states only.
+public struct PreviewScanner: DocumentRecognizing {
+    public init() {}
+    public func recognize(imageAt url: URL) async throws -> ScanReading { throw ScanError.noTextFound }
+    public func recognize(image: CGImage) async throws -> ScanReading { throw ScanError.noTextFound }
 }
