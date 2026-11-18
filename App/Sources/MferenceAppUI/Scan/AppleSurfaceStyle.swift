@@ -183,3 +183,22 @@ struct AppleTextField: View {
         }
     }
 }
+
+/// A vertical scroll view that snapshots draw: under `appleStaticRendering`
+/// the content is laid out at full height from the top and clipped, since
+/// `ImageRenderer` does not draw scroll contents. (U1's `MFScroll` does the
+/// same; this moves to it once MferenceDesign ships it.)
+struct AppleScroll<Content: View>: View {
+    @Environment(\.appleStaticRendering) private var staticRendering
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if staticRendering {
+            Color.clear
+                .overlay(alignment: .top) { content.fixedSize(horizontal: false, vertical: true) }
+                .clipped()
+        } else {
+            ScrollView { content }.scrollIndicators(.never)
+        }
+    }
+}
