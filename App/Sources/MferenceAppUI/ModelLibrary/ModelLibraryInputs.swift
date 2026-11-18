@@ -154,7 +154,7 @@ public struct ModelEntry: Sendable, Hashable, Identifiable {
 
 /// An `addModelFile` error that points at a file the person can look at
 /// ("Show in Finder"). U2's `ModelImportError` conforms in its adapter.
-public protocol FileRevealingError: Error {
+nonisolated public protocol FileRevealingError: Error {
     var fileToShow: URL? { get }
 }
 

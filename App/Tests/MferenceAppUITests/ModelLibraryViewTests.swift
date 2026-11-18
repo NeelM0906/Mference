@@ -94,7 +94,7 @@ import Testing
             on: FixtureModelLibrary().machine).map(\.id) == [AppModel.deep.modelID])
     }
 
-    struct MissingFile: FileRevealingError, LocalizedError {
+    nonisolated struct MissingFile: FileRevealingError, LocalizedError {
         let fileToShow: URL?
         var errorDescription: String? { "That file is not a GGUF model." }
     }
