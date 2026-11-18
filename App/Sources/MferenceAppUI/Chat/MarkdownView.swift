@@ -39,7 +39,7 @@ struct MarkdownView: View {
         switch block {
         case .paragraph(let text):
             Text(inline.attributed(text)).font(MFFont.body)
-                .lineSpacing(MFSpacing.xs)
+                .lineSpacing(MFLineSpacing.relaxed)
                 .fixedSize(horizontal: false, vertical: true)
         case .heading(let level, let text):
             Text(inline.attributed(text))
@@ -96,7 +96,7 @@ struct AnswerTable: View {
             GridRow {
                 ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
                     Text(inline.attributed(cell))
-                        .font(MFFont.calloutEmphasis)
+                        .font(MFFont.calloutSemibold)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, MFSpacing.m)
                         .padding(.vertical, MFSpacing.s)
@@ -137,9 +137,9 @@ struct InlineText {
                 result += Self.markdown(run)
             case .citation(let number):
                 var gap = AttributedString("\u{2009}")
-                gap.swiftUI.font = MFFont.caption
+                gap.swiftUI.font = MFFont.micro
                 var chip = AttributedString("\u{2009}\(number)\u{2009}")
-                chip.swiftUI.font = MFFont.caption.weight(.semibold)
+                chip.swiftUI.font = MFFont.micro
                 chip.swiftUI.foregroundColor = MFColor.accent
                 chip.swiftUI.backgroundColor = MFColor.accentFill
                 chip.swiftUI.baselineOffset = 1

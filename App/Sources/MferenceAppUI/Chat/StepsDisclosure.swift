@@ -33,7 +33,7 @@ struct StepsDisclosure: View {
                         .imageScale(.small)
                         .foregroundStyle(MFColor.tertiary)
                 }
-                .font(MFFont.calloutEmphasis)
+                .font(MFFont.chip)
                 .foregroundStyle(MFColor.secondary)
                 .padding(.horizontal, MFSpacing.s + 1)
                 .frame(height: ChatMetrics.controlHeight)
@@ -58,14 +58,14 @@ struct StepsDisclosure: View {
             }
             if let pages = pagesLine {
                 Text(pages)
-                    .font(MFFont.callout)
+                    .font(MFFont.preview)
                     .foregroundStyle(MFColor.secondary)
                     .lineLimit(2)
             }
             if let reasoning, !reasoning.isEmpty {
                 ScrollView {
                     Text(reasoning)
-                        .font(MFFont.caption)
+                        .font(MFFont.preview)
                         .foregroundStyle(MFColor.secondary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -103,20 +103,20 @@ struct StepsDisclosure: View {
         switch step.kind {
         case .search:
             HStack(spacing: 0) {
-                Text("“\(step.query ?? "")”").font(MFFont.callout.monospaced())
-                Text(" · \(Self.results(step.resultCount ?? 0))").font(MFFont.callout)
+                Text("“\(step.query ?? "")”").font(MFFont.preview.monospaced())
+                Text(" · \(Self.results(step.resultCount ?? 0))").font(MFFont.preview)
             }
             .foregroundStyle(MFColor.secondary)
             .lineLimit(1)
             .accessibilityElement(children: .combine)
         case .readPage:
             Text("Read \(step.title.map { "“\($0)” · " } ?? "")\(step.url?.host() ?? "")")
-                .font(MFFont.callout)
+                .font(MFFont.preview)
                 .foregroundStyle(MFColor.secondary)
                 .lineLimit(1)
         case .failed:
             Text(step.detail ?? "A web step failed.")
-                .font(MFFont.callout)
+                .font(MFFont.preview)
                 .foregroundStyle(MFColor.preview)
         }
     }
@@ -152,10 +152,10 @@ struct SourceChip: View {
         } label: {
             HStack(spacing: MFSpacing.xs + 1) {
                 Text("\(citation.number)")
-                    .font(MFFont.calloutEmphasis)
+                    .font(MFFont.chip.weight(.semibold))
                     .foregroundStyle(MFColor.accent)
                 Text(citation.label)
-                    .font(MFFont.calloutEmphasis)
+                    .font(MFFont.chip)
                     .foregroundStyle(MFColor.secondary)
                     .lineLimit(1)
             }
