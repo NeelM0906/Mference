@@ -44,16 +44,14 @@ struct ScanContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: session.imageURL) { await loadPreview() }
+        .task(id: session.imageURL) { loadPreview() }
     }
 
-    private func loadPreview() async {
+    private func loadPreview() {
         guard let url = session.imageURL else { preview = nil; return }
         if preview?.url == url { return }
-        let image = await Task.detached(priority: .userInitiated) {
-            VisionScanner.loadImage(at: url, maximumPixelSize: 2_048)
-        }.value
-        if session.imageURL == url, let image { preview = (url, image) }
+        // Decoded once per file and bounded to 2048 px, so it is cheap here.
+        if let image = VisionScanner.loadImage(at: url, maximumPixelSize: 2_048) { preview = (url, image) }
     }
 
     // MARK: Image

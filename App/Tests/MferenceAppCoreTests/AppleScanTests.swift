@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 @testable import MferenceAppCore
 import SwiftData
 import Testing
