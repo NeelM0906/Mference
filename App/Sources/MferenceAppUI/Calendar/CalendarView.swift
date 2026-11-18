@@ -108,8 +108,8 @@ struct CalendarContent: View {
 /// The hour grid with the week's blocks.
 struct WeekGrid: View {
     var model: CalendarWeekModel
-    /// Hours share the height the screen has; never shorter than this.
-    private let minimumHourHeight: CGFloat = 36
+    /// Fixed hour rows (mockup 04); the grid scrolls through the day.
+    private let hourHeight: CGFloat = 72
     private let gutter: CGFloat = 70
 
     var body: some View {
@@ -153,7 +153,7 @@ struct WeekGrid: View {
             }
             Rectangle().fill(MFColor.hairline).frame(height: 1)
             GeometryReader { outer in
-                let hourHeight = max(minimumHourHeight, outer.size.height / CGFloat(max(hours.count, 1)))
+                AppleScroll {
                 ZStack(alignment: .topLeading) {
                     VStack(spacing: 0) {
                         ForEach(hours, id: \.self) { hour in
@@ -180,8 +180,8 @@ struct WeekGrid: View {
                                     y: CGFloat(block.top) * hourHeight + MFSpacing.xxs)
                     }
                 }
-                .frame(width: outer.size.width, height: outer.size.height, alignment: .topLeading)
-                .clipped()
+                .frame(width: outer.size.width, height: CGFloat(hours.count) * hourHeight, alignment: .topLeading)
+                }
             }
         }
     }
@@ -192,8 +192,9 @@ struct WeekGrid: View {
         let number = calendar.component(.day, from: day)
         let today = model.isToday(day)
         return HStack(spacing: MFSpacing.xs) {
-            Text(weekday).font(MFFont.body)
-            Text("\(number)").font(MFFont.bodyEmphasis)
+            Text(weekday).font(MFFont.caption)
+            Text("\(number)").font(MFFont.caption.weight(.bold))
+                .foregroundStyle(today ? MFColor.onInk : MFColor.ink)
         }
         .foregroundStyle(today ? MFColor.onInk : MFColor.secondary)
         .padding(.horizontal, today ? MFSpacing.m : 0)
@@ -220,11 +221,11 @@ struct EventBlockView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.xxs) {
             Text(block.title)
-                .font(MFFont.calloutEmphasis)
+                .font(MFFont.caption.weight(.semibold))
                 .strikethrough(isMoving)
             if let detail {
                 Text(detail)
-                    .font(MFFont.callout)
+                    .font(MFFont.caption)
                     .strikethrough(isMoving)
             }
         }
@@ -246,9 +247,9 @@ struct EventBlockView: View {
     private var detail: String? {
         switch block.kind {
         case .proposal(let proposal):
-            "\(Self.time(proposal.start)) · proposed from \(proposal.source.kindLabel)"
+            "\(CalendarTimeFormat.time(proposal.start)) · proposed from \(proposal.source.kindLabel)"
         case .moving(let event):
-            "\(Self.time(event.start)), moving"
+            "\(CalendarTimeFormat.time(event.start)), moving"
         case .event(let event):
             block.height >= 1 ? Self.range(event.start, event.end) : nil
         }
@@ -293,7 +294,7 @@ struct EventBlockView: View {
     }
 
     static func range(_ start: Date, _ end: Date) -> String {
-        "\(time(start)) to \(time(end))"
+        CalendarTimeFormat.range(start, end)
     }
 }
 
@@ -321,9 +322,9 @@ struct ProposalCard: View {
     }
 
     private var question: String {
-        let when = proposal.start.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        let when = CalendarTimeFormat.dayTime(proposal.start)
         return proposal.replacesEventID == nil
             ? "Add \(proposal.title) on \(when)?"
-            : "Move \(proposal.title.lowercased()) to \(when)?"
+            : "Move the \(proposal.title.lowercased()) to \(when)?"
     }
 }

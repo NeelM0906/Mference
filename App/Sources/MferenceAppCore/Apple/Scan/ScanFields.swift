@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// The receipt fields the Scan screen shows, in mockup order.
@@ -186,5 +187,35 @@ public enum ScanFormat {
         formatter.timeZone = TimeZone(identifier: "UTC")
         formatter.dateFormat = "MMM d, yyyy"
         return formatter
+    }
+}
+
+/// Where the confirmed fields were read on the image, so the screen can
+/// outline them (normalized boxes, origin top left).
+public enum ScanHighlights {
+    public static let keys: [ScanFieldKey] = [.merchant, .date, .tax, .total]
+
+    public static func boxes(fields: ScanFields, reading: ScanReading) -> [ScanFieldKey: CGRect] {
+        var result: [ScanFieldKey: CGRect] = [:]
+        let lines = reading.lines.filter { $0.box.width > 0 && $0.box.height > 0 }
+        for key in keys {
+            guard let value = fields.value(key) else { continue }
+            let match: ScanLine?
+            switch key {
+            case .total, .tax:
+                guard let amount = ReceiptValueParser.decimal(value) else { continue }
+                // The bottom-most line printing exactly this amount (totals
+                // come last; a line item may share the tax's digits).
+                match = lines.filter { ReceiptHeuristics.lastAmount(in: $0.text).map { abs($0) == abs(amount) } ?? false }
+                    .max { $0.box.minY < $1.box.minY }
+            case .date:
+                guard let iso = ScanFormat.isoDate(fromDisplay: value) else { continue }
+                match = lines.first { ReceiptHeuristics.date(in: [$0.text]) == iso }
+            default:
+                match = lines.first { ReceiptFieldMerger.appearsInText(value, reading: ScanReading(lines: [$0])) }
+            }
+            if let match { result[key] = match.box }
+        }
+        return result
     }
 }

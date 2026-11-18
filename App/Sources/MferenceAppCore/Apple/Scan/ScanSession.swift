@@ -53,6 +53,12 @@ public final class ScanSession {
         fields.value(.merchant).map { "Receipt from \($0)" } ?? "Receipt"
     }
 
+    /// Boxes on the image around the fields that were read there.
+    public var highlights: [ScanFieldKey: CGRect] {
+        guard let reading, phase == .review || phase == .saved else { return [:] }
+        return ScanHighlights.boxes(fields: fields, reading: reading)
+    }
+
     /// Who filled the fields, for the line under the title.
     public var filledByLabel: String? { fields.filledBy?.label }
 
