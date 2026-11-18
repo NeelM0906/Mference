@@ -164,6 +164,16 @@ enum CalendarFixtures {
         #expect(await service.reminders.count == 1)
     }
 
+    @Test @MainActor func newEventFromTheToolbarIsAddedAfterAccess() async {
+        let service = InMemoryCalendarService(calendarAccess: .notDetermined)
+        let model = Self.model(service: service)
+        await model.load()
+        #expect(await model.createEvent(title: "  ", start: CalendarFixtures.date(16, 9), end: CalendarFixtures.date(16, 10)) == false)
+        #expect(await model.createEvent(title: "Dentist", start: CalendarFixtures.date(16, 9), end: CalendarFixtures.date(16, 9, 30)))
+        #expect(await service.requests == [.calendar])
+        #expect(model.events.map(\.title) == ["Dentist"])
+    }
+
     @Test func overlappingEventsShareTheColumn() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         let events = [

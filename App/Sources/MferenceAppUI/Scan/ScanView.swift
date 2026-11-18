@@ -45,6 +45,13 @@ struct ScanContent: View {
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: session.imageURL) { loadPreview() }
+        .shellToolbar(id: "scan.actions") {
+            captureLater
+            Button("Open file", action: openFile)
+                .buttonStyle(.applePrimary)
+                .keyboardShortcut("o", modifiers: .command)
+                .help("Read a receipt or document on this Mac")
+        }
     }
 
     private func loadPreview() {
@@ -82,11 +89,9 @@ struct ScanContent: View {
                         .foregroundStyle(MFColor.secondary)
                     Button("Open file", action: openFile)
                         .buttonStyle(.applePrimary)
-                        .keyboardShortcut("o", modifiers: .command)
                     Text("or paste an image with ⌘V")
                         .font(MFFont.caption)
                         .foregroundStyle(MFColor.tertiary)
-                    captureLater
                 }
                 .padding(MFSpacing.xl)
             }
@@ -202,11 +207,6 @@ struct ScanContent: View {
                     .foregroundStyle(MFColor.ink)
                     .accessibilityAddTraits(.isHeader)
                 AppleChip(text: "Read on this Mac", tone: .success)
-                Spacer(minLength: MFSpacing.m)
-                Button("Open file", action: openFile)
-                    .buttonStyle(.appleSecondary)
-                    .keyboardShortcut("o", modifiers: .command)
-                    .help("Read another receipt or document")
             }
             Text(explanation)
                 .font(MFFont.body)

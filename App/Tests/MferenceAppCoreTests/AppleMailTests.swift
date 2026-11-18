@@ -428,6 +428,24 @@ struct GatedSorter: AppleModelServicing {
         #expect(broker.openedSettings == [.fullDiskAccess])
     }
 
+    @Test @MainActor func composeSendsOnlyAValidMessage() async throws {
+        let container = try AppModelContainer.inMemory()
+        let sender = RecordingMailSender()
+        let empty = URL.temporaryDirectory.appending(path: "no-mail-\(UUID().uuidString)")
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: empty), context: container.mainContext,
+                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+                                                                                                    answer: "{}"),
+                                                                fallback: nil),
+                                   drafter: nil, sender: sender, broker: RecordingPermissionBroker())
+        #expect(await model.sendNewMessage(to: "nobody", subject: "Hi", body: "Hello") != nil)
+        #expect(await model.sendNewMessage(to: "a@example.com", subject: "Hi", body: "  ") != nil)
+        #expect(await sender.sent.isEmpty)
+        #expect(await model.sendNewMessage(to: " a@example.com ", subject: "Hi", body: "Hello") == nil)
+        #expect(await sender.sent == [MailDraft(to: "a@example.com", subject: "Hi", body: "Hello")])
+        model.isComposing = true
+        #expect(model.isEditingText)
+    }
+
     @Test func appleScriptEscapesAndRefusesOddAddresses() {
         let draft = MailDraft(to: "priya@example.com", from: "me@example.com", subject: "Re: \"Q3\" plan",
                               body: "Line \\ one\nLine two\u{0}\" & do shell script \"x", inReplyTo: "<q\"@example.com>")
