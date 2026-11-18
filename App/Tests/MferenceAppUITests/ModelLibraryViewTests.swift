@@ -32,6 +32,31 @@ import Testing
         #expect(offered.filter { $0 == quick.id }.count == 1, "the too-large copy is left out")
     }
 
+    /// L4 holds even if MemoryFit says Deep fits a 16 GB Mac.
+    @Test func deepIsNotOfferedAt16GBEvenWhenItFits() throws {
+        let library = FixtureModelLibrary(memoryGB: 16, deep: .notInstalled)
+        var deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
+        deep.fit = .fits
+        #expect(!deep.isOffered(on: library.machine))
+    }
+
+    /// A Deep download that failed was approved when it started: Retry
+    /// restarts it without a second dialog, after checking the disk again.
+    @Test func retryAfterAnApprovedDownloadNeedsNoSecondApproval() throws {
+        let library = FixtureModelLibrary(deep: .downloadFailed("Network"))
+        let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
+        #expect(ModelLibraryView.retryDownload(deep, in: library))
+        #expect(library.downloads == [AppModel.deep.modelID])
+
+        let full = FixtureModelLibrary(freeDiskGB: 5, deep: .downloadFailed("Network"))
+        let fullDeep = try #require(full.entries.first { $0.id == AppModel.deep.modelID })
+        #expect(!ModelLibraryView.retryDownload(fullDeep, in: full), "12.1 GB does not fit in 5 GB")
+        #expect(full.downloads.isEmpty)
+
+        let ready = try #require(FixtureModelLibrary().entries.first { $0.id == AppModel.quick.modelID })
+        #expect(!ModelLibraryView.retryDownload(ready, in: library), "only failed downloads retry")
+    }
+
     @Test func diskRoomKeepsAMargin() {
         let machine = MachineSummary(chipName: "", physicalMemoryBytes: 1, freeDiskBytes: 4_000_000_000)
         #expect(machine.hasRoom(for: 1_900_000_000))

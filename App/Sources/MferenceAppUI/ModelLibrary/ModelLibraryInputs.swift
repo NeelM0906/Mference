@@ -173,6 +173,8 @@ public protocol ModelLibraryModel: AnyObject, Observable {
     func pause(_ id: String)
     func resume(_ id: String)
     func cancelDownload(_ id: String)
+    /// Loads an installed model again after a load failed.
+    func retryLoad(_ id: String)
     /// Adds a model file the person picked (a GGUF on this Mac).
     func addModelFile(at url: URL) async throws
 }

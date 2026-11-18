@@ -40,6 +40,32 @@ import Testing
         #expect(small.downloads.isEmpty, "no Deep on a 16 GB Mac, even through the button")
     }
 
+    @Test(arguments: [
+        (ModelEntryState.notInstalled, "Quick installs now."),
+        (.downloading(TransferProgress(completedBytes: 1, totalBytes: 2)), "Quick is installing now."),
+        (.paused(TransferProgress(completedBytes: 1, totalBytes: 2)), "Quick's download is paused."),
+        (.downloadFailed("Network"), "Quick didn't download."),
+        (.loadFailed("Metal"), "Quick is installed but didn't load."),
+        (.ready, "Quick is already installed."),
+    ])
+    func introFollowsQuicksState(state: ModelEntryState, line: String) {
+        let view = OnboardingView(library: FixtureModelLibrary(quick: state, deep: .notInstalled), onFinish: {})
+        #expect(view.modelsIntro.hasPrefix(line))
+    }
+
+    @Test func introSaysNoRoomAndDropsTheDeepOfferOnceDeepMoves() {
+        let full = OnboardingView(library: FixtureModelLibrary(freeDiskGB: 3, quick: .notInstalled, deep: .notInstalled),
+                                  onFinish: {})
+        #expect(full.modelsIntro.hasPrefix("Quick needs more free space."))
+        let offered = OnboardingView(library: FixtureModelLibrary(quick: .ready, deep: .notInstalled), onFinish: {})
+        #expect(offered.modelsIntro.contains("only downloads if you say yes"))
+        for deep in [ModelEntryState.downloading(TransferProgress(completedBytes: 1, totalBytes: 2)),
+                     .paused(TransferProgress(completedBytes: 1, totalBytes: 2)), .downloadFailed("x")] {
+            let view = OnboardingView(library: FixtureModelLibrary(quick: .ready, deep: deep), onFinish: {})
+            #expect(!view.modelsIntro.contains("if you say yes"))
+        }
+    }
+
     @Test func downloadingSummaryComesFromState() {
         let library = FixtureModelLibrary(quick: .downloading(TransferProgress(completedBytes: 1, totalBytes: 4)),
                                           deep: .notInstalled)
