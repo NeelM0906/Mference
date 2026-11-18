@@ -234,12 +234,18 @@ public enum EngineCatalogDiscovery {
         for (file, _) in files {
             let name = file.lastPathComponent
             let slot = productGGUFFiles[name]
+            let id = slot?.modelID ?? ggufModelID(fileName: name)
             if slot == nil, scope == .product {
+                // Keep the identifier, so a request for it gets this reason
+                // rather than "unknown model", unless it would shadow a
+                // product model's own identifier.
+                let reserved = productGGUFFiles.values.contains { $0.modelID == id }
                 skipped.append(EngineCatalogSkip(
-                    location: file, reason: "\(name) is not in the product model list; the developer catalog scope lists it"))
+                    location: file,
+                    reason: "\(name) is not in the product model list; the developer catalog scope lists it",
+                    modelID: reserved ? nil : id))
                 continue
             }
-            let id = slot?.modelID ?? ggufModelID(fileName: name)
             if isSplitShard(name) {
                 skipped.append(EngineCatalogSkip(location: file,
                                                  reason: "split GGUF files are not supported", modelID: id))

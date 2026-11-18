@@ -75,6 +75,19 @@ struct EngineCatalogDiscoveryTests {
             .contains("not in the product model list") == true)
         #expect(catalog.skipped.contains { $0.location == Self.dir("/lib/half.gturbo") })
         #expect(catalog.skipped.contains { $0.location.lastPathComponent == "Other-Model.Q8_0.gguf" })
+        // A declined GGUF keeps its identifier, so a request for it is told why.
+        #expect(catalog.unavailableReason(for: "other-model.q8_0")?
+            .contains("not in the product model list") == true)
+        do {
+            _ = try catalog.resolve("other-model.q8_0")
+            Issue.record("a declined GGUF resolved")
+        } catch let error as EngineError {
+            guard case .modelNotRunnable(let id, _) = error else {
+                Issue.record("expected modelNotRunnable, got \(error)")
+                return
+            }
+            #expect(id == "other-model.q8_0")
+        }
     }
 
     @Test func allScopeAlsoListsEverythingElseRunnable() throws {
