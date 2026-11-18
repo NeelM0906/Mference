@@ -99,7 +99,7 @@ public struct OnboardingView: View {
             pageTitle("Welcome to Mference")
             pageText("An assistant that runs entirely on this Mac. Your chats, mail and files stay here.")
             MFCard {
-                MFListRow("Runs on this Mac", subtitle: "The model runs on this computer. Nothing you type is sent to a server.")
+                MFListRow("Runs on this Mac", subtitle: "The model runs on this computer. Nothing you type is sent to a server, unless you turn on web search.")
                 MFListRow("No account", subtitle: "Nothing to sign up for, and no usage data sent anywhere.")
                 MFListRow("You decide what it sees", subtitle: "Calendar, mail and the web stay off until you turn them on.")
             }
@@ -146,14 +146,28 @@ public struct OnboardingView: View {
         String(ModelFormat.machineLine(machine).dropFirst("This Mac: ".count).dropLast())
     }
 
-    private var modelsIntro: String {
+    var modelsIntro: String {
         let quickLine: String = switch quick?.state {
         case nil: "Quick isn't available in this build yet."
-        case .some(let state) where state.isInstalled: "Quick is already installed."
-        default: "Quick installs now."
+        case .loadFailed: "Quick is installed but didn't load."
+        case .loaded, .ready, .loading: "Quick is already installed."
+        case .downloading: "Quick is installing now."
+        case .paused: "Quick's download is paused."
+        case .downloadFailed: "Quick didn't download."
+        case .notInstalled:
+            library.machine.hasRoom(for: quick?.sizeBytes) ? "Quick installs now." : "Quick needs more free space."
         }
-        return quickLine + (offersDeep && deep?.state.isInstalled == false
+        // The offer stands only while Deep is untouched; once it downloads,
+        // pauses or fails, its card says so.
+        return quickLine + (offersDeep && deep?.state == .notInstalled
                             ? " Deep also fits, and only downloads if you say yes." : "")
+    }
+
+    /// Retry after a failed download; checks the disk margin again. Deep was
+    /// approved when its download first started. Returns whether it restarted.
+    @discardableResult
+    func retryDownload(_ entry: ModelEntry) -> Bool {
+        ModelLibraryView.retryDownload(entry, in: library)
     }
 
     /// Quick's line under its card, from its state.
@@ -177,11 +191,17 @@ public struct OnboardingView: View {
                 library.resume(quick.id)
             }
         case .downloadFailed(let message):
-            retryLine("Quick didn't download: \(message)", label: "Retry", accessibility: "Retry installing Quick") {
-                library.download(quick.id)
+            if library.machine.hasRoom(for: quick.sizeBytes) {
+                retryLine("Quick didn't download: \(message)", label: "Retry", accessibility: "Retry installing Quick") {
+                    retryDownload(quick)
+                }
+            } else {
+                statusLine("Quick didn't download: \(message) It needs \(size ?? "more space") plus some room to spare; free some space, then come back to Settings > Models.")
             }
         case .loadFailed(let message):
-            statusLine("Quick is installed but didn't load: \(message)")
+            retryLine("Quick is installed but didn't load: \(message)", label: "Retry", accessibility: "Retry loading Quick") {
+                library.retryLoad(quick.id)
+            }
         case .loaded, .ready, .loading:
             EmptyView()
         }
@@ -201,7 +221,7 @@ public struct OnboardingView: View {
             }
         case .downloadFailed(let message):
             retryLine("Deep didn't download: \(message)", label: "Retry", accessibility: "Retry downloading Deep") {
-                approveDeep()
+                retryDownload(deep)
             }
         case .notInstalled:
             if declinedDeep {

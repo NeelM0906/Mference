@@ -63,6 +63,9 @@ final class FixtureModelLibrary: ModelLibraryModel {
         update(id) { $0.state = .notInstalled }
     }
 
+    private(set) var loadRetries: [String] = []
+    func retryLoad(_ id: String) { loadRetries.append(id) }
+
     private(set) var addedFiles: [URL] = []
     func addModelFile(at url: URL) async throws { addedFiles.append(url) }
 

@@ -26,7 +26,7 @@ public struct ModelLibraryView: View {
             VStack(alignment: .leading, spacing: MFSpacing.roomy) {
                 header
                 ForEach(library.entries.filter { $0.state.transfer != nil }) { entry in
-                    DownloadBanner(entry: entry, library: library)
+                    DownloadBanner(entry: entry, library: library, downloadsAllowed: downloadsAllowed)
                 }
                 modelTable
                 behaviour
@@ -63,6 +63,16 @@ public struct ModelLibraryView: View {
     /// download that needs approval starts.
     static func approveDownload(_ entry: ModelEntry, in library: any ModelLibraryModel) {
         library.download(entry.id)
+    }
+
+    /// Retry after a failed download. A model that needed approval was
+    /// approved when its download first started, so no second dialog; the
+    /// disk margin is checked again. Returns whether it restarted.
+    @discardableResult
+    static func retryDownload(_ entry: ModelEntry, in library: any ModelLibraryModel) -> Bool {
+        guard case .downloadFailed = entry.state, library.machine.hasRoom(for: entry.sizeBytes) else { return false }
+        library.download(entry.id)
+        return true
     }
 
     static func approvalMessage(for entry: ModelEntry) -> String {
@@ -127,9 +137,10 @@ public struct ModelLibraryView: View {
             .padding(.vertical, MFSpacing.s)
             .background(MFColor.canvas)
             ForEach(library.entries.filter { $0.state != .notInstalled }) { entry in
-                ModelTableRow(entry: entry, downloadsAllowed: downloadsAllowed,
+                ModelTableRow(entry: entry,
+                              canRetry: downloadsAllowed && library.machine.hasRoom(for: entry.sizeBytes),
                               onDetails: { detailsID = entry.id },
-                              onRetry: { library.download(entry.id) })
+                              onRetry: { Self.retryDownload(entry, in: library) })
             }
         }
     }
@@ -218,7 +229,8 @@ enum LibraryMetrics {
 /// One installed, downloading or failed model.
 struct ModelTableRow: View {
     let entry: ModelEntry
-    let downloadsAllowed: Bool
+    /// Downloads are allowed (not offline) and the disk has room.
+    let canRetry: Bool
     let onDetails: () -> Void
     let onRetry: () -> Void
 
@@ -247,7 +259,8 @@ struct ModelTableRow: View {
                 if case .downloadFailed = entry.state {
                     Button("Retry", action: onRetry)
                         .buttonStyle(.mfSecondary)
-                        .disabled(!downloadsAllowed)
+                        .disabled(!canRetry)
+                        .help(canRetry ? "Download \(entry.title) again" : "Offline mode is on, or the disk needs more free space.")
                         .accessibilityLabel("Retry downloading \(entry.title)")
                 } else {
                     Button("Details", action: onDetails)
@@ -290,6 +303,8 @@ struct ModelStatusBadge: View {
 struct DownloadBanner: View {
     let entry: ModelEntry
     let library: any ModelLibraryModel
+    /// False in offline mode: Resume waits until downloads are allowed.
+    var downloadsAllowed = true
 
     private var paused: Bool {
         if case .paused = entry.state { return true }
@@ -326,6 +341,8 @@ struct DownloadBanner: View {
                 if paused { library.resume(entry.id) } else { library.pause(entry.id) }
             }
             .buttonStyle(.mfSecondary)
+            .disabled(paused && !downloadsAllowed)
+            .help(paused && !downloadsAllowed ? "Offline mode is on." : "")
             .accessibilityLabel("\(paused ? "Resume" : "Pause") downloading \(entry.title)")
             Button("Cancel") { library.cancelDownload(entry.id) }
                 .buttonStyle(.mfQuiet)
