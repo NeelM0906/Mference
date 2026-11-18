@@ -123,6 +123,34 @@ struct WeekGrid: View {
                 }
             }
             .padding(.bottom, MFSpacing.s)
+            let outside = model.outsideGrid
+            if !outside.isEmpty {
+                HStack(alignment: .top, spacing: 0) {
+                    Text("All day")
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.tertiary)
+                        .frame(width: gutter, alignment: .leading)
+                    ForEach(model.days.indices, id: \.self) { day in
+                        VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+                            ForEach(outside[day] ?? []) { event in
+                                Text(event.isAllDay ? event.title : "\(EventBlockView.time(event.start)) \(event.title)")
+                                    .font(MFFont.caption)
+                                    .foregroundStyle(MFColor.ink)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, MFSpacing.s)
+                                    .padding(.vertical, MFSpacing.xxs)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(MFColor.fill))
+                                    .accessibilityLabel(event.isAllDay ? "\(event.title), all day"
+                                                        : "\(event.title), \(EventBlockView.range(event.start, event.end))")
+                            }
+                        }
+                        .padding(.horizontal, MFSpacing.xs)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                }
+                .padding(.bottom, MFSpacing.s)
+            }
             Rectangle().fill(MFColor.hairline).frame(height: 1)
             GeometryReader { outer in
                 let hourHeight = max(minimumHourHeight, outer.size.height / CGFloat(max(hours.count, 1)))
@@ -286,6 +314,7 @@ struct ProposalCard: View {
                     .buttonStyle(.appleSecondary)
                 Button("Add") { Task { await model.add(proposal) } }
                     .buttonStyle(.applePrimary)
+                    .disabled(model.addingProposals.contains(proposal.id))
                     .keyboardShortcut(.return, modifiers: .command)
             }
         }

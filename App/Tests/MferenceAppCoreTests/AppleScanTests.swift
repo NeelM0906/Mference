@@ -245,6 +245,26 @@ struct GatedScanner: DocumentRecognizing {
         #expect(session.fields.value(.total) == "44.49")
     }
 
+    @Test @MainActor func confirmFailsWithoutSavingWhenTheImageIsGone() async throws {
+        let container = try AppModelContainer.inMemory()
+        let directory = URL.temporaryDirectory.appending(path: "scan-gone-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let image = directory.appending(path: "receipt.png")
+        try Data("png".utf8).write(to: image)
+        let model = ScriptedAssistantTextModel(kind: .appleOnDevice, availability: .unavailable(reason: "off"),
+                                               answer: "unused")
+        let session = ScanSession(scanner: FixedScanner(lines: ["CORNER HARDWARE", "TOTAL 44.49"]),
+                                  assistant: AppleModelService(primary: model, fallback: nil),
+                                  context: container.mainContext, imageDirectory: directory.appending(path: "Scans"))
+        session.open(image)
+        await session.waitForReading()
+        try FileManager.default.removeItem(at: image)
+        #expect(throws: (any Error).self) { try session.confirm() }
+        #expect(session.phase == .review)
+        #expect(try container.mainContext.fetchCount(FetchDescriptor<ScanRecord>()) == 0)
+    }
+
     @Test func acceptsImageAndPDFFiles() {
         #expect(ScanSession.accepts(URL(filePath: "/x/a.HEIC")))
         #expect(ScanSession.accepts(URL(filePath: "/x/a.pdf")))
