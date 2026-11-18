@@ -21,9 +21,17 @@ public enum ServerEngineCatalog {
     /// The engine's wording for the same switch (`EngineCatalogDiscovery`).
     static let engineScopeHint = "the developer catalog scope lists it"
 
+    /// Whether this build's llama.cpp backend runs Deep with MTP draft
+    /// decoding. Deep is offered only with MTP (spec D1 and section 3), so
+    /// until the backend has it Deep is declined with `deepNeedsMTP`. The PR
+    /// that brings MTP to `LlamaBackend` flips this.
+    static let llamaBackendRunsDeepWithMTP = false
+    static let deepNeedsMTP = "Deep is served only with MTP draft decoding, which this build's llama.cpp backend does not have yet"
+
     /// `catalog` restricted to the engines that have a backend.
     public static func servable(_ catalog: EngineCatalog,
-                                engines: Set<EngineKind>) -> EngineCatalog {
+                                engines: Set<EngineKind>,
+                                deepWithMTP: Bool = llamaBackendRunsDeepWithMTP) -> EngineCatalog {
         var models: [EngineModelDescriptor] = []
         var skipped = catalog.skipped.map { skip -> EngineCatalogSkip in
             // A GGUF the product catalog declined would be declined again by
@@ -39,7 +47,10 @@ public enum ServerEngineCatalog {
                                      modelID: skip.modelID)
         }
         for model in catalog.models {
-            if engines.contains(model.engine) {
+            if model.product == .deep, engines.contains(.llamaCpp), !deepWithMTP {
+                skipped.append(EngineCatalogSkip(location: model.location, reason: deepNeedsMTP,
+                                                 modelID: model.id))
+            } else if engines.contains(model.engine) {
                 models.append(model)
             } else {
                 skipped.append(EngineCatalogSkip(location: model.location,

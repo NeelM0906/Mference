@@ -6,10 +6,11 @@ Swift and Metal inference for pinned checkpoints on Apple Silicon: Gemma 4
 as Unsloth's UD-IQ3_XXS GGUF quantization), and MiniCPM5-2B. The shared core and KV cache stay resident; routed experts stream
 from SSD per token. Qwen 3.8 27B and MiniCPM5-2B are dense and fully
 resident. Through the `MferenceEngine` library, `MferenceServer --library`
-also runs two GGUF models with llama.cpp linked in-process: Qwen3.5-4B
-(Unsloth UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
-GSQ-RCO IQ3_S with MTP, Deep). The product offers five models: Quick, Deep,
-Qwen 3.6, MiniCPM5 and Maple; see [the engine](docs/ENGINE.md).
+runs GGUF models with llama.cpp linked in-process: Qwen3.5-4B (Unsloth
+UD-Q4_K_XL, the product's Quick model) now, and Qwen3.8-27B (ISTA-DASLab
+GSQ-RCO IQ3_S, Deep) once the llama.cpp backend runs it with MTP draft
+decoding; until then Deep is declined. The product offers five models: Quick,
+Deep, Qwen 3.6, MiniCPM5 and Maple; see [the engine](docs/ENGINE.md).
 
 ## Scope
 

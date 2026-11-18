@@ -378,7 +378,8 @@ omitted-effort policies as a matched fine-tune comparison.
 The GGUF models (Quick, `qwen3.5-4b`, and Deep, `qwen3.8-27b`, in library mode)
 take their thinking switch from the chat template in the GGUF file. With
 `reasoning_effort` and `chat_template_kwargs.enable_thinking` omitted, the
-template's own default applies (for Quick: no thinking). `none` (or
+template's own default applies (Quick: no thinking; Deep's template thinks
+unless told otherwise). `none` (or
 `enable_thinking: false`) renders with `enable_thinking=false`; `low`, `medium`
 and `xhigh` (or `enable_thinking: true`) render with `enable_thinking=true`.
 They are not Qwen 3.8 source-template models in the sense above: `developer`

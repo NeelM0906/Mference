@@ -325,8 +325,10 @@ the models the product offers, under their stable identifiers:
 native installs, and the GGUF models `qwen3.5-4b` (Quick) and `qwen3.8-27b`
 (Deep). GGUF models run through llama.cpp linked into the server process, so a
 swap between a GGUF and a native model is still one process releasing one
-model before it loads the next. (A build without the llama.cpp backend declines
-them with `no llama.cpp backend in this build`.) Every
+model before it loads the next. Deep is offered only with MTP draft decoding;
+until the llama.cpp backend has it, Deep is declined with a reason that says
+so. (A build without the llama.cpp backend declines every GGUF with `no
+llama.cpp backend in this build`.) Every
 other runnable install — Flash-Next, Gemma 4 — is declined: the skip line says
 so, and a request naming it gets HTTP 400 `model_not_runnable` with a message
 that points to `--catalog all`. When a product model has several installs, the

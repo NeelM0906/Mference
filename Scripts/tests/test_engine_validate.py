@@ -388,9 +388,10 @@ class TraceParityTests(unittest.TestCase):
             self.assertNotIn("tools", body)
             for name, completion in (
                     ("chat", {"content": "A hash table maps keys to values.", "reasoning": None,
-                              "tool_calls": [], "finish_reason": "stop", "completion_tokens": 7}),
+                              "tool_calls": [], "finish_reason": "stop", "completion_tokens": 7,
+                              "prompt_tokens": 10}),
                     ("tool", {"content": "", "reasoning": None, "finish_reason": "tool_calls",
-                              "completion_tokens": 7,
+                              "completion_tokens": 7, "prompt_tokens": 10,
                               "tool_calls": [{"name": "get_weather",
                                               "arguments": "{\"city\": \"Lisbon\"}"}]})):
                 (trace / name).mkdir(parents=True)
@@ -398,8 +399,27 @@ class TraceParityTests(unittest.TestCase):
             rc = ev.main(["traceparity", "--port", str(server.port), "--model", "q",
                           "--cases", str(cases), "--trace", str(trace), "--out", str(root / "out")])
             self.assertEqual(rc, 0)
+            # The prompt is compared too.
+            (trace / "tool" / "completion.json").write_text(json.dumps(
+                {"content": "", "finish_reason": "tool_calls", "completion_tokens": 7, "prompt_tokens": 999,
+                 "tool_calls": [{"name": "get_weather", "arguments": "{\"city\": \"Lisbon\"}"}]}))
+            rc = ev.main(["traceparity", "--port", str(server.port), "--model", "q", "--case", "tool",
+                          "--modes", "nonstream", "--cases", str(cases), "--trace", str(trace),
+                          "--out", str(root / "out-prompt")])
+            self.assertEqual(rc, 1)
+            report = json.loads((root / "out-prompt" / "traceparity.json").read_text())
+            self.assertEqual(report["rows"][0]["differs_in"], ["prompt_tokens"])
+            # A trace whose own upstream comparison failed is refused.
+            (root / "compare.txt").write_text("case prompt ours ref match\nchat 3 1 1 False\n")
+            rc = ev.main(["traceparity", "--port", str(server.port), "--model", "q",
+                          "--cases", str(cases), "--trace", str(trace), "--out", str(root / "out-bad")])
+            self.assertEqual(rc, 1)
+            self.assertEqual(json.loads((root / "out-bad" / "traceparity.json").read_text())
+                             ["trace_vs_upstream"], "fail")
+            (root / "compare.txt").unlink()
             (trace / "chat" / "completion.json").write_text(json.dumps(
-                {"content": "different", "finish_reason": "stop", "completion_tokens": 7}))
+                {"content": "different", "finish_reason": "stop", "completion_tokens": 7,
+                 "prompt_tokens": 10}))
             rc = ev.main(["traceparity", "--port", str(server.port), "--model", "q", "--case", "chat",
                           "--cases", str(cases), "--trace", str(trace), "--out", str(root / "out2")])
             self.assertEqual(rc, 1)
@@ -519,6 +539,7 @@ class ShellTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cases = Path(tmp)
             (cases / "cases.tsv").write_text("a\tm.json\t-\tfalse\nb-c\tm.json\t-\ttrue\n")
+            (cases / "trace").mkdir()
             result = self.run_script("--dry-run", "--models", "quick", "--trace-cases", tmp,
                                      "--trace", f"quick={tmp}/trace", "trace")
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -527,6 +548,22 @@ class ShellTests(unittest.TestCase):
             self.assertTrue(any("trace-b-c-stream" in l for l in runs))
             self.assertTrue(runs[-1].rstrip().endswith("trace-warm"))
         self.assertNotEqual(self.run_script("--dry-run", "trace").returncode, 0)
+
+    def test_trace_phase_refuses_to_run_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "cases.tsv").write_text("a\tm.json\t-\tfalse\n")
+            (Path(tmp) / "trace").mkdir()
+            base = ["--dry-run", "--trace-cases", tmp, "trace"]
+            for extra, why in ((["--models", "quick", "--trace", f"qiuck={tmp}/trace"], "not in --models"),
+                               (["--models", "deep", "--trace", f"quick={tmp}/trace"], "not in --models"),
+                               (["--models", "qwen36", "--trace", f"qwen36={tmp}/trace"], "not a GGUF"),
+                               (["--models", "quick", "--trace", f"quick={tmp}/missing"], "no such directory")):
+                result = self.run_script(*base, *extra)
+                self.assertNotEqual(result.returncode, 0, extra)
+                self.assertIn(why, result.stderr)
+            (Path(tmp) / "cases.tsv").write_text("")
+            result = self.run_script(*base, "--models", "quick", "--trace", f"quick={tmp}/trace")
+            self.assertIn("has no cases", result.stderr)
 
     def test_unknown_model_is_rejected(self):
         result = subprocess.run(["bash", str(self.SCRIPT), "--dry-run", "--models", "flashnext"],

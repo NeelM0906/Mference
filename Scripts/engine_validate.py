@@ -942,7 +942,24 @@ def trace_expectation(trace_dir, name):
                        for c in completion.get("tool_calls") or []],
         "finish_reason": completion.get("finish_reason"),
         "completion_tokens": completion.get("completion_tokens"),
+        "prompt_tokens": completion.get("prompt_tokens"),
     }
+
+
+# The prompt token count is compared too: equal answers to a differently
+# rendered prompt would not show the server renders what the trace rendered.
+TRACE_FIELDS = IDENTITY_FIELDS + ("prompt_tokens",)
+
+
+def trace_provenance(trace_dir):
+    """The trace's own verdict against upstream, when it sits next to one:
+    T2's layout keeps `compare.txt` beside the `engine/` trace. "pass",
+    "fail", or "unknown" (no compare.txt)."""
+    compare = Path(trace_dir).parent / "compare.txt"
+    if not compare.exists():
+        return "unknown"
+    rows = [line.split() for line in compare.read_text(encoding="utf-8").splitlines()[1:] if line.strip()]
+    return "pass" if rows and all(len(r) > 4 and r[4] == "True" for r in rows) else "fail"
 
 
 def cmd_traceparity(args):
@@ -950,7 +967,14 @@ def cmd_traceparity(args):
     out = Path(args.out)
     cases = [c for c in trace_cases(args.cases) if not args.case or c["name"] in args.case.split(",")]
     modes = args.modes.split(",")
-    report = {"model": args.model, "rows": []}
+    provenance = trace_provenance(args.trace)
+    report = {"model": args.model, "rows": [], "trace": str(Path(args.trace).resolve()),
+              "trace_vs_upstream": provenance, "max_tokens": args.max_tokens}
+    if provenance == "fail":
+        print(f"refusing a trace whose own upstream comparison failed: {args.trace}", file=sys.stderr)
+        report["all_equal"] = False
+        _write(out / "traceparity.json", json.dumps(report, indent=2, sort_keys=True))
+        return 1
     ok = bool(cases)
     for case in cases:
         expected = trace_expectation(args.trace, case["name"])
@@ -967,7 +991,7 @@ def cmd_traceparity(args):
                 _write(out / f"{stem}.raw.json", raw)
             result["http_status"] = status
             diff = [] if status == 200 else ["http_status"]
-            diff += [k for k in IDENTITY_FIELDS if result.get(k) != expected.get(k)]
+            diff += [k for k in TRACE_FIELDS if result.get(k) != expected.get(k)]
             row = {"case": case["name"], "mode": mode, "equal": not diff, "differs_in": diff,
                    "cached_prompt_tokens": None, "seconds": seconds}
             if mode != "stream" and isinstance(parsed, dict):

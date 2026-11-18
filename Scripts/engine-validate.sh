@@ -60,6 +60,7 @@
 #   --trace-cases <dir>          engine trace case set (cases.tsv and files)
 #   --trace <key>=<dir>          that model's engine trace, repeatable
 #                                (for example quick=$PROGRAM/results/t2/...)
+#   --trace-max-tokens <n>       the trace's completion cap (default 256)
 #   --swap-chain <k,k,...>       swap chain to run instead of the section 8
 #                                one (for example qwen36,minicpm5,maple,qwen36
 #                                while only the native backend is in the build)
@@ -301,7 +302,8 @@ $others"
       selection=(--case "${spec%-*}" --modes "$mode")
     fi
     "${checker[@]}" traceparity --port "$PORT" --model "$model_id" --cases "$TRACE_CASES" \
-      --trace "$trace_dir" --out "$RUN_DIR" ${selection[@]+"${selection[@]}"} || rc=$?
+      --trace "$trace_dir" --max-tokens "$TRACE_MAX_TOKENS" --out "$RUN_DIR" \
+      ${selection[@]+"${selection[@]}"} || rc=$?
     # The warm pass is information, not a gate: prefix reuse may change
     # the last bits of a logit (see the engine trace's warm/cold note).
     if [ "$variant" != trace-warm ]; then RUN_STATUS=$rc; fi
@@ -368,6 +370,7 @@ NO_RELEASE_LINE=""
 SWAP_CHAIN=""
 TRACE_CASES=""
 TRACES=""
+TRACE_MAX_TOKENS=256
 
 if [ "${1:-}" = _run ]; then
   shift
@@ -382,6 +385,7 @@ if [ "${1:-}" = _run ]; then
   RESULTS=$ENGINE_VALIDATE_RESULTS NO_RELEASE_LINE=$ENGINE_VALIDATE_NO_RELEASE_LINE
   SWAP_CHAIN=${ENGINE_VALIDATE_SWAP_CHAIN:-}
   TRACE_CASES=${ENGINE_VALIDATE_TRACE_CASES:-} TRACES=${ENGINE_VALIDATE_TRACES:-}
+  TRACE_MAX_TOKENS=${ENGINE_VALIDATE_TRACE_MAX_TOKENS:-256}
   run_one "$@"
 fi
 
@@ -408,6 +412,7 @@ while [ $# -gt 0 ]; do
     --swap-chain) SWAP_CHAIN=$2; shift 2 ;;
     --trace-cases) TRACE_CASES=$2; shift 2 ;;
     --trace) TRACES="${TRACES:+$TRACES }$2"; shift 2 ;;
+    --trace-max-tokens) TRACE_MAX_TOKENS=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     models|prompts|readings|identity|swap|trace|summary) PHASES+=("$1"); shift ;;
@@ -432,6 +437,22 @@ done
 if want trace; then
   [ -n "$TRACE_CASES" ] && [ -f "$TRACE_CASES/cases.tsv" ] || fail "the trace phase needs --trace-cases <dir with cases.tsv>"
   [ -n "$TRACES" ] || fail "the trace phase needs --trace <key>=<engine trace dir>"
+  case "$TRACE_MAX_TOKENS" in ''|*[!0-9]*) fail "--trace-max-tokens must be a number" ;; esac
+  case "$TRACE_CASES" in *[[:space:]]*) fail "--trace-cases paths may not contain whitespace" ;; esac
+  # Every --trace names a selected GGUF model and an existing trace, and the
+  # case set has names: otherwise the phase would pass having run nothing.
+  for item in $TRACES; do
+    trace_key=${item%%=*} trace_path=${item#*=}
+    [ "$trace_key" != "$item" ] || fail "--trace needs <key>=<dir>: $item"
+    printf '%s\n' "${MODEL_KEYS[@]}" | grep -qx "$trace_key" || fail "--trace $trace_key is not in --models"
+    [ "$("${checker[@]}" registry "$trace_key" kind)" = gguf ] || fail "--trace $trace_key is not a GGUF model"
+    [ -d "$trace_path" ] || fail "--trace $trace_key: no such directory $trace_path"
+  done
+  trace_names=$("${checker[@]}" tracecases "$TRACE_CASES") || fail "could not read $TRACE_CASES/cases.tsv"
+  [ -n "$trace_names" ] || fail "$TRACE_CASES/cases.tsv has no cases"
+  for name in $trace_names; do
+    case "$name" in *,*) fail "trace case names may not contain commas: $name" ;; esac
+  done
 fi
 
 # Identity is only meaningful with every reference it compares against.
@@ -549,6 +570,7 @@ export ENGINE_VALIDATE_EXTRA="$EXTRA" ENGINE_VALIDATE_PORT="$PORT" ENGINE_VALIDA
 export ENGINE_VALIDATE_RESULTS="$RESULTS" ENGINE_VALIDATE_NO_RELEASE_LINE="$NO_RELEASE_LINE"
 export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN"
 export ENGINE_VALIDATE_TRACE_CASES="$TRACE_CASES" ENGINE_VALIDATE_TRACES="$TRACES"
+export ENGINE_VALIDATE_TRACE_MAX_TOKENS="$TRACE_MAX_TOKENS"
 
 abort() {
   "${checker[@]}" summary "$RESULTS" >/dev/null 2>&1 || true
