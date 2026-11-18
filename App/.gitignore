@@ -2,3 +2,6 @@
 # folders named Models are code, so re-include them.
 !Sources/**/Models/
 !Tests/**/Models/
+
+# Scripts/bundle.sh output (Mference.app).
+/build/
