@@ -15,7 +15,7 @@ public struct MFComponentGallery: View {
                 MFPill("Mail", systemImage: "envelope", isSelected: false) {}
                 MFPill("Calendar", systemImage: "calendar", isSelected: false) {}
             }
-            .padding(3)
+            .padding(MFMetrics.pillTrackPadding)
             .background(Capsule().fill(MFColor.fill))
             HStack(spacing: MFSpacing.s) {
                 MFChip("On this Mac", systemImage: "lock", tone: .success)
@@ -37,6 +37,16 @@ public struct MFComponentGallery: View {
                 MFCitationMark(2)
                 MFSourceChip(number: 1, title: "example.org") {}
             }
+            HStack(spacing: MFSpacing.s) {
+                Text("Disabled").font(MFFont.caption).foregroundStyle(MFColor.tertiary)
+                Button("Details") {}.buttonStyle(.mfSecondary)
+                Button("Connect") {}.buttonStyle(.mfPrimary)
+                Button("Track the price") {}.buttonStyle(.mfQuiet)
+                MFPill("Mail", systemImage: "envelope", isSelected: false) {}
+                Toggle("On", isOn: .constant(true)).toggleStyle(.mf)
+                Toggle("Off", isOn: .constant(false)).toggleStyle(.mf)
+            }
+            .disabled(true)
             MFSectionHeader("Today")
             MFCard {
                 MFListRow("Quick", subtitle: "Default for chat, mail, web answers and scanning.") {
@@ -47,7 +57,7 @@ public struct MFComponentGallery: View {
                     Toggle("Offline mode", isOn: $off).toggleStyle(.mf)
                 }
                 VStack(alignment: .leading) {
-                    MFProgressBar(0.62)
+                    MFProgressBar(0.62, label: "Downloading")
                 }
                 .padding(MFSpacing.l)
             }

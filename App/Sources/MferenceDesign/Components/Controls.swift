@@ -1,10 +1,10 @@
 import SwiftUI
 
 // Pills, buttons, toggles and keycaps from the mockup CSS (`.nv`, `.btn`,
-// `.sw`, `.kbd`). Token-only: every color, font, spacing and radius comes from
-// Tokens.swift or the component metrics below.
+// `.sw`, `.kbd`). Colors, fonts and spacing come from Tokens.swift; sizes that
+// belong to one component are named in `MFMetrics`.
 
-/// Component sizes taken from the mockup CSS that are not general tokens.
+/// Component sizes taken from the mockup CSS that are not shared tokens.
 enum MFMetrics {
     /// `.nv` and `.btn` height.
     static let controlHeight: CGFloat = 30
@@ -15,29 +15,32 @@ enum MFMetrics {
     /// `.sw` track and knob.
     static let toggleSize = CGSize(width: 40, height: 24)
     static let toggleKnob: CGFloat = 18
-    /// `.kbd` minimum side.
+    static let toggleKnobShadow: Double = 0.25
+    /// `.kbd` minimum side and horizontal padding.
     static let keycap: CGFloat = 20
-    /// Chip height (`.chip`, 22-24 in the boards).
+    static let keycapPadding: CGFloat = 5
+    /// Keycap fill on an ink button.
+    static let keycapOnInkFill: Double = 0.35
+    /// Chip height (`.chip`) and its icon gap.
     static let chipHeight: CGFloat = 22
+    static let chipIconGap: CGFloat = 5
     /// `.cite` side.
     static let citation: CGFloat = 17
+    /// Numbered source chip height.
+    static let sourceChipHeight: CGFloat = 28
     /// `.bar` height in the model library.
     static let progressBar: CGFloat = 6
-    /// Pill icons.
+    /// Pill icons, and the smaller chip icons.
     static let iconSize: CGFloat = 13
-}
-
-extension MFFont {
-    /// 13.5 semibold: list row titles (`.r .t b`).
-    static let rowTitle = geist(13.5, .semibold)
-    /// 12.5: list row subtitles (`.r .t span`).
-    static let rowSubtitle = geist(12.5, .regular)
-    /// 11.5 medium: chips and badges (`.chip`).
-    static let chip = geist(11.5, .medium)
-    /// 11 monospaced: keycaps (`.kbd`, Geist Mono in the mockup).
-    static let keycap = Font.system(size: 11, weight: .medium, design: .monospaced)
-    /// 10.5 semibold: citation numbers (`.cite`).
-    static let citation = geist(10.5, .semibold)
+    static let chipIconSize: CGFloat = 11
+    /// Padding inside the grey pill track.
+    static let pillTrackPadding: CGFloat = 3
+    /// A pressed secondary or primary button.
+    static let pressedOpacity: Double = 0.85
+    /// Any disabled control.
+    static let disabledOpacity: Double = 0.5
+    /// White over the material: the mockup window is white at about 90%.
+    static let windowTint: Double = 0.88
 }
 
 // MARK: - Pill
@@ -58,7 +61,7 @@ public struct MFPill: View {
 
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: MFSpacing.s - 2) {
+            HStack(spacing: MFSpacing.snug) {
                 if let systemImage {
                     Image(systemName: systemImage)
                         .font(.system(size: MFMetrics.iconSize, weight: .medium))
@@ -79,13 +82,24 @@ public struct MFPillButtonStyle: ButtonStyle {
     public init(isSelected: Bool = false) { self.isSelected = isSelected }
 
     public func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(MFFont.calloutEmphasis)
-            .foregroundStyle(isSelected ? MFColor.onInk : MFColor.secondary)
-            .padding(.horizontal, MFMetrics.pillPadding)
-            .frame(height: MFMetrics.controlHeight)
-            .background(Capsule().fill(isSelected ? MFColor.ink : (configuration.isPressed ? MFColor.hairline : .clear)))
-            .contentShape(Capsule())
+        PillBody(configuration: configuration, isSelected: isSelected)
+    }
+
+    private struct PillBody: View {
+        let configuration: Configuration
+        let isSelected: Bool
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(MFFont.calloutEmphasis)
+                .foregroundStyle(isSelected ? MFColor.onInk : MFColor.secondary)
+                .padding(.horizontal, MFMetrics.pillPadding)
+                .frame(height: MFMetrics.controlHeight)
+                .background(Capsule().fill(isSelected ? MFColor.ink : (configuration.isPressed ? MFColor.hairline : .clear)))
+                .contentShape(Capsule())
+                .opacity(isEnabled ? 1 : MFMetrics.disabledOpacity)
+        }
     }
 }
 
@@ -101,22 +115,33 @@ public struct MFButtonStyle: ButtonStyle {
     public init(_ kind: Kind = .secondary) { self.kind = kind }
 
     public func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(MFFont.calloutEmphasis)
-            .foregroundStyle(kind == .primary ? MFColor.onInk : MFColor.ink)
-            .padding(.horizontal, MFMetrics.buttonPadding)
-            .frame(minHeight: MFMetrics.controlHeight)
-            .background(Capsule().fill(fill(pressed: configuration.isPressed)))
-            .overlay(Capsule().strokeBorder(kind == .secondary ? MFColor.hairlineStrong : .clear))
-            .contentShape(Capsule())
-            .opacity(configuration.isPressed ? 0.85 : 1)
+        ButtonBody(configuration: configuration, kind: kind)
     }
 
-    private func fill(pressed: Bool) -> Color {
-        switch kind {
-        case .primary: MFColor.ink
-        case .secondary: pressed ? MFColor.fill : MFColor.surface
-        case .quiet: pressed ? MFColor.hairline : MFColor.fill
+    private struct ButtonBody: View {
+        let configuration: Configuration
+        let kind: Kind
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(MFFont.calloutEmphasis)
+                .foregroundStyle(kind == .primary ? MFColor.onInk : MFColor.ink)
+                .padding(.horizontal, MFMetrics.buttonPadding)
+                .frame(minHeight: MFMetrics.controlHeight)
+                .background(Capsule().fill(fill))
+                .overlay(Capsule().strokeBorder(kind == .secondary ? MFColor.hairlineStrong : .clear,
+                                                lineWidth: MFLayout.hairline))
+                .contentShape(Capsule())
+                .opacity(!isEnabled ? MFMetrics.disabledOpacity : configuration.isPressed ? MFMetrics.pressedOpacity : 1)
+        }
+
+        private var fill: Color {
+            switch kind {
+            case .primary: MFColor.ink
+            case .secondary: configuration.isPressed ? MFColor.fill : MFColor.surface
+            case .quiet: configuration.isPressed ? MFColor.hairline : MFColor.fill
+            }
         }
     }
 }
@@ -129,30 +154,44 @@ extension ButtonStyle where Self == MFButtonStyle {
 
 // MARK: - Toggle
 
-/// The mockup switch (`.sw`): ink track when on, grey when off, white knob.
-/// Keeps the label for accessibility and stays keyboard-operable.
+/// The mockup switch (`.sw`): ink track when on; grey track with an outline
+/// when off, so its edge keeps 3:1 against the surface. White knob. Keeps the
+/// label for accessibility, stays keyboard-operable, dims when disabled.
 public struct MFToggleStyle: ToggleStyle {
     public init() {}
 
     public func makeBody(configuration: Configuration) -> some View {
-        Button {
-            configuration.isOn.toggle()
-        } label: {
-            ZStack(alignment: configuration.isOn ? .trailing : .leading) {
-                Capsule()
-                    .fill(configuration.isOn ? MFColor.ink : MFColor.hairlineStrong)
-                Circle()
-                    .fill(MFColor.surface)
-                    .frame(width: MFMetrics.toggleKnob, height: MFMetrics.toggleKnob)
-                    .shadow(color: .black.opacity(0.25), radius: 1.5, y: 1)
-                    .padding(.horizontal, (MFMetrics.toggleSize.height - MFMetrics.toggleKnob) / 2)
+        ToggleBody(configuration: configuration)
+    }
+
+    private struct ToggleBody: View {
+        let configuration: Configuration
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            Button {
+                configuration.isOn.toggle()
+            } label: {
+                ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                    Capsule()
+                        .fill(configuration.isOn ? MFColor.ink : MFColor.toggleOff)
+                    if !configuration.isOn {
+                        Capsule().strokeBorder(MFColor.controlBorder, lineWidth: MFLayout.hairline)
+                    }
+                    Circle()
+                        .fill(MFColor.surface)
+                        .frame(width: MFMetrics.toggleKnob, height: MFMetrics.toggleKnob)
+                        .shadow(color: .black.opacity(MFMetrics.toggleKnobShadow), radius: 1.5, y: 1)
+                        .padding(.horizontal, (MFMetrics.toggleSize.height - MFMetrics.toggleKnob) / 2)
+                }
+                .frame(width: MFMetrics.toggleSize.width, height: MFMetrics.toggleSize.height)
+                .opacity(isEnabled ? 1 : MFMetrics.disabledOpacity)
+                .animation(.snappy(duration: 0.15), value: configuration.isOn)
             }
-            .frame(width: MFMetrics.toggleSize.width, height: MFMetrics.toggleSize.height)
-            .animation(.snappy(duration: 0.15), value: configuration.isOn)
-        }
-        .buttonStyle(.plain)
-        .accessibilityRepresentation {
-            Toggle(isOn: configuration.$isOn) { configuration.label }
+            .buttonStyle(.plain)
+            .accessibilityRepresentation {
+                Toggle(isOn: configuration.$isOn) { configuration.label }
+            }
         }
     }
 }
@@ -178,10 +217,12 @@ public struct MFKeycap: View {
         Text(keys)
             .font(MFFont.keycap)
             .foregroundStyle(onInk ? MFColor.onInk : MFColor.secondary)
-            .padding(.horizontal, MFSpacing.xs + 1)
+            .padding(.horizontal, MFMetrics.keycapPadding)
             .frame(minWidth: MFMetrics.keycap, minHeight: MFMetrics.keycap)
-            .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(onInk ? MFColor.secondary.opacity(0.35) : MFColor.surface))
-            .overlay(RoundedRectangle(cornerRadius: MFRadius.xs).strokeBorder(onInk ? MFColor.tertiary : MFColor.hairlineStrong))
+            .background(RoundedRectangle(cornerRadius: MFRadius.xs)
+                .fill(onInk ? MFColor.secondary.opacity(MFMetrics.keycapOnInkFill) : MFColor.surface))
+            .overlay(RoundedRectangle(cornerRadius: MFRadius.xs)
+                .strokeBorder(onInk ? MFColor.tertiary : MFColor.hairlineStrong, lineWidth: MFLayout.hairline))
             .accessibilityLabel("Shortcut \(keys)")
     }
 }

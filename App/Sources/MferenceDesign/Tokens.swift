@@ -49,6 +49,19 @@ public enum MFColor {
     public static let onInk = Color.mf(light: 0xFFFFFF, dark: 0x17181C)
     /// Destructive actions.
     public static let danger = Color.mf(light: 0xB42318, dark: 0xFF8A80)
+    /// Sidebar background (Settings, chat list). Mockup `#F6F6F8`.
+    public static let sidebar = Color.mf(light: 0xF6F6F8, dark: 0x1A1B20)
+    /// Selected sidebar row. Mockup `#E6E7EC`.
+    public static let sidebarSelected = Color.mf(light: 0xE6E7EC, dark: 0x2E3038)
+    /// Switch track when off. Mockup `#C9CCD3`.
+    public static let toggleOff = Color.mf(light: 0xC9CCD3, dark: 0x4A4D56)
+    /// Outline of an off switch, so its edge keeps 3:1 against the surface (G-A7).
+    public static let controlBorder = Color.mf(light: 0x8C9099, dark: 0x80848E)
+    /// Approval card fill and border. Mockup `#FFF9F1` / `#F2D6B0`.
+    public static let approvalFill = Color.mf(light: 0xFFF9F1, dark: 0x2A2014)
+    public static let approvalBorder = Color.mf(light: 0xF2D6B0, dark: 0x5C4321)
+    /// Toolbar and window-chrome divider. Mockup `#ECEDF0`.
+    public static let chromeDivider = Color.mf(light: 0xECEDF0, dark: 0x2E3038)
 
     /// The soft pastel wallpaper behind the frosted window (mockup backdrop).
     public static let wallpaper = LinearGradient(
@@ -82,6 +95,35 @@ public enum MFFont {
     /// 11.5 semibold, uppercase, tracked: sidebar and picker section headers.
     public static let sectionHeader = geist(11.5, .semibold)
 
+    // Emphasis variants and component sizes from the mockup CSS.
+
+    /// 24 semibold: first-run page titles.
+    public static let display = geist(24, .semibold)
+    /// 16 semibold: settings section titles, first-run card titles.
+    public static let sectionTitle = geist(16, .semibold)
+    /// 15 semibold: banner and card headlines.
+    public static let bodySemibold = geist(15, .semibold)
+    /// 14 medium: large buttons (first-run footer).
+    public static let buttonLarge = geist(14, .medium)
+    /// 14 semibold: the app name in the chrome.
+    public static let brand = geist(14, .semibold)
+    /// 13.5: first-run card body and step list.
+    public static let bodySmall = geist(13.5, .regular)
+    /// 13.5 medium: the current step, selected sidebar row.
+    public static let bodySmallEmphasis = geist(13.5, .medium)
+    /// 13.5 semibold: list row titles.
+    public static let rowTitle = geist(13.5, .semibold)
+    /// 13 semibold: table row titles, inline emphasis.
+    public static let calloutSemibold = geist(13, .semibold)
+    /// 12.5: list row subtitles.
+    public static let rowSubtitle = geist(12.5, .regular)
+    /// 11.5 medium: chips and badges.
+    public static let chip = geist(11.5, .medium)
+    /// 11 monospaced: keycaps (Geist Mono in the mockup; not bundled).
+    public static let keycap = Font.system(size: 11, weight: .medium, design: .monospaced)
+    /// 10.5 semibold: citation numbers.
+    public static let citation = geist(10.5, .semibold)
+
     public static func geist(_ size: CGFloat, _ weight: Font.Weight) -> Font {
         .custom(familyName, size: size, relativeTo: .body).weight(weight)
     }
@@ -96,6 +138,17 @@ public enum MFSpacing {
     public static let l: CGFloat = 16
     public static let xl: CGFloat = 24
     public static let xxl: CGFloat = 32
+
+    // Steps between the base scale, as the mockup CSS uses them.
+
+    /// 6: icon-to-label gaps (`.nv`, `.btn`).
+    public static let snug: CGFloat = 6
+    /// 10: row control gaps, compact paddings.
+    public static let compact: CGFloat = 10
+    /// 14: row gaps, card padding.
+    public static let comfortable: CGFloat = 14
+    /// 20: gaps between page sections.
+    public static let roomy: CGFloat = 20
 }
 
 /// Corner radii (points), from the mockup CSS.
@@ -119,6 +172,14 @@ public enum MFRadius {
 /// Fixed sizes from the mockup (1280 x 820 window at 1x).
 public enum MFLayout {
     public static let mockupWindow = CGSize(width: 1280, height: 820)
+    /// The app window as drawn on the mockup boards, and its default size.
+    public static let defaultWindow = CGSize(width: 1200, height: 748)
+    /// The smallest useful window.
+    public static let minimumWindow = CGSize(width: 960, height: 640)
+    /// Hairline separators and borders.
+    public static let hairline: CGFloat = 1
+    /// Emphasised strokes (selected card outline, current step ring).
+    public static let strokeEmphasis: CGFloat = 2
     public static let sidebarWidth: CGFloat = 270
     public static let toolbarHeight: CGFloat = 70
     public static let contentMaxWidth: CGFloat = 960
