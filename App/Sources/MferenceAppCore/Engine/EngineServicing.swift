@@ -304,6 +304,47 @@ public enum GenerationUpdate: Sendable, Hashable {
     case completed(GenerationSummary)
 }
 
+/// One generation as an async sequence. Each iteration is one request,
+/// started by `makeAsyncIterator()`; the iterator owns the request, so
+/// releasing it (or cancelling the iterating task) cancels the request.
+public struct GenerationStream: AsyncSequence, Sendable {
+    public typealias Element = GenerationUpdate
+    public typealias Continuation = AsyncThrowingStream<GenerationUpdate, any Error>.Continuation
+
+    private let start: @Sendable (Continuation) -> Task<Void, Never>
+
+    /// `start` launches the request, yields its updates into the
+    /// continuation and finishes it; it must stop when its task is cancelled.
+    public init(start: @escaping @Sendable (Continuation) -> Task<Void, Never>) {
+        self.start = start
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        let (elements, continuation) = AsyncThrowingStream<GenerationUpdate, any Error>.makeStream()
+        let task = start(continuation)
+        continuation.onTermination = { _ in task.cancel() }
+        return Iterator(base: elements.makeAsyncIterator(), request: RequestHandle(task: task))
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        var base: AsyncThrowingStream<GenerationUpdate, any Error>.Iterator
+        let request: RequestHandle
+
+        public mutating func next() async throws -> GenerationUpdate? {
+            try await base.next()
+        }
+    }
+
+    /// Cancels the request when the last iterator copy goes away.
+    final class RequestHandle: Sendable {
+        let task: Task<Void, Never>
+
+        init(task: Task<Void, Never>) { self.task = task }
+
+        deinit { task.cancel() }
+    }
+}
+
 /// Errors the service throws, each with one user-facing message.
 public enum EngineServiceError: Error, Sendable, Hashable {
     case unknownModel(String)
@@ -345,10 +386,10 @@ public protocol EngineServicing: Sendable {
     func load(_ model: AppModel) async throws
     /// Releases the resident model after the running and queued requests.
     func unload() async throws
-    /// Streams one generation. Cancelling the consuming task (or dropping the
-    /// iterator) stops it at the next token.
-    func generate(model: AppModel, turns: [ChatTurn], options: GenerationOptions)
-        -> AsyncThrowingStream<GenerationUpdate, any Error>
+    /// Streams one generation, started when iteration starts. Cancelling the
+    /// consuming task, or dropping the iterator (breaking out of the loop),
+    /// stops it at the next token, even if the caller keeps the stream.
+    func generate(model: AppModel, turns: [ChatTurn], options: GenerationOptions) -> GenerationStream
     /// Stops the running generation, if any.
     func cancelActiveGeneration() async
     /// Unloads and refuses further work; call on quit.

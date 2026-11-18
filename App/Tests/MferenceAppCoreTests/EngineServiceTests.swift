@@ -6,7 +6,8 @@ import Testing
 
 @Suite struct EngineServiceTests {
     static func service(scripts: [String: FakeEngineScript] = [:],
-                        installed: [AppModel] = AppModel.allCases) -> (EngineService, FakeEngineJournal) {
+                        installed: [AppModel] = AppModel.allCases,
+                        idleUnloadAfter: Duration? = nil) -> (EngineService, FakeEngineJournal) {
         let journal = FakeEngineJournal()
         let native = FakeEngineBackend(engine: .mference, journal: journal, scripts: scripts)
         let llama = FakeEngineBackend(engine: .llamaCpp, journal: journal, scripts: scripts)
@@ -16,7 +17,8 @@ import Testing
                                          product: EngineProductSlot(modelID: model.modelID))
         })
         let service = EngineService(discover: { catalog }) { catalog, observer in
-            EngineHost(catalog: catalog, backends: [native, llama], observer: observer)
+            EngineHost(catalog: catalog, backends: [native, llama], idleUnloadAfter: idleUnloadAfter,
+                       observer: observer)
         }
         return (service, journal)
     }
@@ -80,5 +82,45 @@ import Testing
         let data = try? JSONEncoder().encode(value)
         let back = data.flatMap { try? JSONDecoder().decode(ToolJSON.self, from: $0) }
         #expect(back == value)
+    }
+
+    @Test func droppingTheIteratorCancelsAndFreesTheEngine() async throws {
+        let reached = FakeEngineLatch()
+        let gate = FakeEngineLatch()
+        let held = FakeEngineScript(events: [.content("a"), .content("b")], holdAfterEvents: 1,
+                                    holdReached: reached, holdGate: gate)
+        let (service, journal) = Self.service(scripts: [AppModel.quick.modelID: held])
+        let stream = service.generate(model: .quick, turns: [ChatTurn(role: .user, content: "hi")],
+                                      options: GenerationOptions())
+        // Iterate in a scope and break; `stream` itself stays alive.
+        do {
+            for try await update in stream {
+                if case .content = update { break }
+            }
+        }
+        try await reached.wait()
+        // The request was cancelled, so a second one gets the engine.
+        var finished = false
+        for try await update in service.generate(model: .maple, turns: [ChatTurn(role: .user, content: "x")],
+                                                 options: GenerationOptions()) {
+            if case .completed = update { finished = true }
+        }
+        #expect(finished)
+        #expect(journal.entries.contains(.generationCancelled(AppModel.quick.modelID)))
+        withExtendedLifetime(stream) {}
+    }
+
+    @Test func idleUnloadPublishesEmpty() async throws {
+        let (service, _) = Self.service(idleUnloadAfter: .milliseconds(20))
+        var updates = service.statusUpdates().makeAsyncIterator()
+        try await service.load(.quick)
+        var sawEmptyAfterLoad = false
+        var sawReady = false
+        while let status = await updates.next() {
+            if status.phase == .ready { sawReady = true }
+            if sawReady, status.phase == .empty { sawEmptyAfterLoad = true; break }
+        }
+        #expect(sawEmptyAfterLoad)
+        #expect(service.status.phase == .empty)
     }
 }

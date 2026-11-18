@@ -39,7 +39,7 @@ public actor EngineService: EngineServicing {
         self.broadcaster = broadcaster
         self.discover = discover
         self.makeHost = makeHost
-        let host = makeHost(discover()) { _ in broadcaster.publish() }
+        let host = makeHost(discover()) { broadcaster.publish(after: $0) }
         self.host = host
         broadcaster.setHost(host)
     }
@@ -56,7 +56,7 @@ public actor EngineService: EngineServicing {
         let current = host.status
         guard current.phase == .empty, current.activeRequests == 0, current.queuedRequests == 0 else { return }
         let broadcaster = self.broadcaster
-        let fresh = makeHost(discover()) { _ in broadcaster.publish() }
+        let fresh = makeHost(discover()) { broadcaster.publish(after: $0) }
         await host.shutdown()
         host = fresh
         broadcaster.setHost(fresh)
@@ -119,21 +119,20 @@ public actor EngineService: EngineServicing {
     // MARK: Generation
 
     public nonisolated func generate(model: AppModel, turns: [ChatTurn],
-                                     options: GenerationOptions) -> AsyncThrowingStream<GenerationUpdate, any Error> {
-        let (stream, continuation) = AsyncThrowingStream<GenerationUpdate, any Error>.makeStream()
-        let task = Task {
-            do {
-                let summary = try await self.run(model: model, turns: turns, options: options) { update in
-                    continuation.yield(update)
+                                     options: GenerationOptions) -> GenerationStream {
+        GenerationStream { continuation in
+            Task {
+                do {
+                    let summary = try await self.run(model: model, turns: turns, options: options) { update in
+                        continuation.yield(update)
+                    }
+                    continuation.yield(.completed(summary))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: Self.map(error))
                 }
-                continuation.yield(.completed(summary))
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: Self.map(error))
             }
         }
-        continuation.onTermination = { _ in task.cancel() }
-        return stream
     }
 
     private func run(model: AppModel, turns: [ChatTurn], options: GenerationOptions,
@@ -282,9 +281,24 @@ final class StatusBroadcaster: Sendable {
         state.withLock { $0.host = host }
     }
 
-    func publish() {
+    /// Publishes the status a host event leads to. The host reports
+    /// `unloadFinished` (idle, requested, shutdown) just before it moves its
+    /// status from unloading to empty, so that one is published as empty.
+    func publish(after event: EngineHostEvent) {
+        guard case .unloadFinished(let modelID, let reason) = event else { return publish() }
+        // A swap keeps the status at loading; the next load publishes it.
+        if case .swap = reason { return publish() }
+        publish { status in
+            guard status.phase == .unloading, status.targetModel?.modelID == modelID else { return }
+            status.phase = .empty
+            status.targetModel = nil
+        }
+    }
+
+    func publish(adjust: (inout EngineServiceStatus) -> Void = { _ in }) {
         state.withLock { s in
-            let next = s.host.map { EngineService.status($0.status) } ?? s.last
+            var next = s.host.map { EngineService.status($0.status) } ?? s.last
+            adjust(&next)
             guard next != s.last else { return }
             s.last = next
             for continuation in s.subscribers.values { continuation.yield(next) }
