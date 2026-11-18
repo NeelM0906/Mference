@@ -47,6 +47,28 @@ final class LlamaContextHandle: @unchecked Sendable {
     deinit { free() }
 }
 
+/// Owns an `mference_mtp` (the MTP draft context and llama.cpp's speculative
+/// state). It holds the target context, so it is always freed before it.
+final class LlamaDrafter: @unchecked Sendable {
+    private(set) var pointer: OpaquePointer?
+    /// Tokens one step can return: the draft plus the target's own token.
+    let stepCapacity: Int
+    private let context: LlamaContextHandle
+
+    init(_ pointer: OpaquePointer, draftLimit: Int, context: LlamaContextHandle) {
+        self.pointer = pointer
+        self.stepCapacity = draftLimit + 1
+        self.context = context
+    }
+
+    func free() {
+        if let pointer { mference_mtp_free(pointer) }
+        pointer = nil
+    }
+
+    deinit { free() }
+}
+
 /// A GGUF vocabulary as a swift-transformers `Tokenizer`.
 ///
 /// `encode` parses special-token text (`<|im_start|>` and the like) into its

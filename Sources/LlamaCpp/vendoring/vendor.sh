@@ -41,7 +41,7 @@ fi
 # Our own files in the target directory: everything else must be in the
 # manifest.
 ours=(
-  include/module.modulemap
+  include/module.modulemap include/mference_mtp.h shim/mference_mtp.cpp
   vendoring/vendor.sh vendoring/VENDORING.md vendoring/UPSTREAM.sha256
   vendoring/LICENSE-llama.cpp vendoring/LICENSE-nlohmann-json
 )

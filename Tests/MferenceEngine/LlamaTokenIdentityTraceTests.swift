@@ -31,25 +31,28 @@ struct LlamaTokenIdentityTraceTests {
         let out = URL(fileURLWithPath: Self.environment["MFERENCE_LLAMA_TRACE_OUT"]!)
         let maxTokens = Self.environment["MFERENCE_LLAMA_TRACE_MAX_TOKENS"].flatMap(Int.init) ?? 256
 
+        // `MFERENCE_LLAMA_TRACE_DRAFT=off` turns MTP off for a GGUF that has an
+        // MTP head (on by default, as in the product).
+        let draft: EngineDraftDecoding = Self.environment["MFERENCE_LLAMA_TRACE_DRAFT"] == "off" ? .off : .automatic
+        let metadata = try EngineGGUFReader.read(url: gguf)
         let descriptor = EngineModelDescriptor(
             id: gguf.deletingPathExtension().lastPathComponent,
             displayName: gguf.lastPathComponent,
             engine: .llamaCpp,
-            format: .gguf(EngineGGUFMetadata(architecture: "qwen35", contextLength: 262_144,
-                                             tensorCount: 0, nextNTensorCount: 0)),
+            format: .gguf(metadata),
             location: gguf,
             sizeBytes: 0,
-            contextLength: 262_144,
+            contextLength: metadata.contextLength ?? 32_768,
             product: nil)
         let clock = ContinuousClock()
         let loadStart = clock.now
-        let loaded = try await LlamaBackend().load(descriptor, options: EngineLoadOptions())
+        let loaded = try await LlamaBackend().load(descriptor, options: EngineLoadOptions(draftDecoding: draft))
         let loadSeconds = (clock.now - loadStart).components
         let model = try #require(loaded as? LlamaModel)
         try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         try """
         {"load_seconds": \(Double(loadSeconds.seconds) + Double(loadSeconds.attoseconds) / 1e18), \
-        "max_context": \(model.traits.maxContext)}
+        "max_context": \(model.traits.maxContext), "uses_draft_decoding": \(model.traits.usesDraftDecoding)}
         """.write(to: out.appendingPathComponent("load.json"), atomically: true, encoding: .utf8)
 
         let table = try String(contentsOf: cases.appendingPathComponent("cases.tsv"), encoding: .utf8)
@@ -78,6 +81,8 @@ struct LlamaTokenIdentityTraceTests {
                 .write(to: directory.appendingPathComponent("prompt-tokens.txt"), atomically: true, encoding: .utf8)
             try (tokens.map(String.init).joined(separator: " ") + "\n")
                 .write(to: directory.appendingPathComponent("tokens.txt"), atomically: true, encoding: .utf8)
+            try await model.printedText(tokens)
+                .write(to: directory.appendingPathComponent("generated.txt"), atomically: true, encoding: .utf8)
             let summary: [String: Any] = [
                 "content": completion.content,
                 "reasoning": completion.reasoningContent ?? NSNull(),
@@ -88,6 +93,8 @@ struct LlamaTokenIdentityTraceTests {
                 "cached_prompt_tokens": completion.usage.cachedPromptTokens ?? NSNull(),
                 "prefill_seconds": completion.timings.prefillSeconds ?? NSNull(),
                 "decode_seconds": completion.timings.decodeSeconds ?? NSNull(),
+                "draft_tokens_proposed": completion.timings.draftTokensProposed ?? NSNull(),
+                "draft_tokens_accepted": completion.timings.draftTokensAccepted ?? NSNull(),
             ]
             try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
                 .write(to: directory.appendingPathComponent("completion.json"))
@@ -127,7 +134,7 @@ struct LlamaTokenIdentityTraceTests {
                 ]
                 try JSONSerialization.data(withJSONObject: reuse, options: [.prettyPrinted, .sortedKeys])
                     .write(to: directory.appendingPathComponent("prefix-reuse.json"))
-                #expect((warm.usage.cachedPromptTokens ?? 0) > 0)
+                #expect(model.traits.usesDraftDecoding || (warm.usage.cachedPromptTokens ?? 0) > 0)
             }
         }
         await model.unload()

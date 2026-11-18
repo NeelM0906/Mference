@@ -67,6 +67,25 @@ final class LlamaSampler: @unchecked Sendable {
         self.chain = chain
     }
 
+    /// The same settings for llama.cpp's `common_sampler`, which the MTP loop
+    /// verifies drafts with (same order and neutral thresholds as above).
+    static func mtpSampling(_ config: GenerationConfig, contextSize: Int32) -> mference_mtp_sampling {
+        var sampling = mference_mtp_default_sampling()
+        sampling.temp = config.temperature
+        sampling.top_k = config.topK.map { Int32(min($0, Int(Int32.max))) } ?? 0
+        sampling.top_p = config.topP ?? 1
+        sampling.min_p = config.minP
+        let penalised = config.repeatLastN != 0
+            && (config.repetitionPenalty != 1 || config.presencePenalty != 0 || config.frequencyPenalty != 0)
+        sampling.penalty_last_n = penalised
+            ? (config.repeatLastN < 0 ? contextSize : Int32(min(config.repeatLastN, Int(contextSize)))) : 0
+        sampling.penalty_repeat = config.repetitionPenalty
+        sampling.penalty_freq = config.frequencyPenalty
+        sampling.penalty_present = config.presencePenalty
+        sampling.seed = resolvedSeed(config.seed)
+        return sampling
+    }
+
     /// Samples from the logits of output `index` of the last decode, and
     /// records the token for the penalty window.
     func sample(context: OpaquePointer, index: Int32 = -1) -> Int32 {

@@ -47,6 +47,17 @@ struct LlamaBackendTests {
         #expect(kwargs(.medium) == true)
         #expect(kwargs(.xhigh) == true)
         #expect(kwargs(.xhigh, reads: false) == nil)
+
+        func effort(_ value: QwenReasoningEffort?) -> String? {
+            LlamaChatTemplate.keywordArguments(reasoningEffort: value, preserveThinking: false,
+                                               readsEnableThinking: true,
+                                               readsReasoningEffort: true)["reasoning_effort"] as? String
+        }
+        #expect(effort(nil) == nil)
+        #expect(effort(.off) == nil)
+        #expect(effort(.low) == "low")
+        #expect(effort(.medium) == "medium")
+        #expect(effort(.xhigh) == "xhigh")
     }
 
     @Test func defaultRenderOfQuickClosesThinking() throws {

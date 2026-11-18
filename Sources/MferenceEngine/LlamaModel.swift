@@ -16,6 +16,9 @@ actor LlamaModel: EngineModel {
 
     private let handle: LlamaModelHandle
     private let contextOwner: LlamaContextHandle
+    /// MTP speculative decoding (Deep), when the GGUF has an MTP head and
+    /// draft decoding is on; nil runs plain decoding.
+    private let drafter: LlamaDrafter?
     private var context: OpaquePointer?
     private let vocabulary: LlamaVocabulary
     private let tokenizer: MFTokenizer
@@ -41,7 +44,8 @@ actor LlamaModel: EngineModel {
             keywordArguments: LlamaChatTemplate.keywordArguments(
                 reasoningEffort: request.reasoningEffort,
                 preserveThinking: request.preserveThinking,
-                readsEnableThinking: template.readsEnableThinking))
+                readsEnableThinking: template.readsEnableThinking,
+                readsReasoningEffort: template.readsReasoningEffort))
         return template.strippingImplicitSpecialTokens(rendered, addsBOS: vocabulary.addsBOS,
                                                        addsEOS: vocabulary.addsEOS)
     }
@@ -52,10 +56,15 @@ actor LlamaModel: EngineModel {
          vocabulary: LlamaVocabulary,
          tokenizer: MFTokenizer,
          template: LlamaChatTemplate,
-         batchSize: Int) {
+         batchSize: Int,
+         mtp: OpaquePointer? = nil,
+         draftLimit: Int = LlamaBackend.draftLimit) {
         self.descriptor = descriptor
         self.handle = handle
-        self.contextOwner = LlamaContextHandle(context, model: handle)
+        let contextOwner = LlamaContextHandle(context, model: handle)
+        self.contextOwner = contextOwner
+        let drafter = mtp.map { LlamaDrafter($0, draftLimit: draftLimit, context: contextOwner) }
+        self.drafter = drafter
         self.context = context
         self.vocabulary = vocabulary
         self.tokenizer = tokenizer
@@ -65,12 +74,22 @@ actor LlamaModel: EngineModel {
             chatDialect: tokenizer.dialect,
             generationDefaults: .defaults,
             maxContext: Int(llama_n_ctx(context)),
-            acceptsReasoningEffort: template.readsEnableThinking,
-            reusesPromptPrefixes: true)
+            acceptsReasoningEffort: template.readsEnableThinking || template.readsReasoningEffort,
+            // Qwen 3.8's source template, which reads the effort level and
+            // rejects developer messages, as the server's Qwen 3.8 rules do.
+            supportsQwenReasoningEffort: template.readsReasoningEffort,
+            reusesPromptPrefixes: drafter == nil,
+            usesDraftDecoding: drafter != nil)
         llama_set_abort_callback(context, { data in
             guard let data else { return false }
             return Unmanaged<LlamaAbortFlag>.fromOpaque(data).takeUnretainedValue().isSet
         }, Unmanaged.passUnretained(abortFlag).toOpaque())
+        if let draftContext = drafter?.pointer.flatMap(mference_mtp_draft_context) {
+            llama_set_abort_callback(draftContext, { data in
+                guard let data else { return false }
+                return Unmanaged<LlamaAbortFlag>.fromOpaque(data).takeUnretainedValue().isSet
+            }, Unmanaged.passUnretained(abortFlag).toOpaque())
+        }
     }
 
     // MARK: EngineModel
@@ -106,6 +125,14 @@ actor LlamaModel: EngineModel {
         }
     }
 
+    /// The text of `tokens` with special tokens spelled out, as llama.cpp's
+    /// tools print a generation, without a final end-of-generation token.
+    func printedText(_ tokens: [Int32]) -> String {
+        var tokens = tokens
+        if let last = tokens.last, vocabulary.isEndOfGeneration(last) { tokens.removeLast() }
+        return String(decoding: tokens.flatMap { vocabulary.pieceBytes($0, special: true) }, as: UTF8.self)
+    }
+
     /// Forgets the prompt prefix the memory holds, so the next request
     /// prefills from scratch (used by the token-identity checks, which compare
     /// cold runs with the upstream tools).
@@ -116,6 +143,7 @@ actor LlamaModel: EngineModel {
     func unload() async {
         abortFlag.set()
         context = nil
+        drafter?.free()
         contextOwner.free()
         cachedTokens = []
         handle.free()
@@ -134,32 +162,10 @@ actor LlamaModel: EngineModel {
                                              param: "messages", code: "context_length_exceeded")
         }
         try request.generationConfig.validate()
-
-        // From here until a clean return, the memory may hold anything.
-        let reused = reusablePrefix(of: prompt, context: context)
-        cacheIsTrusted = false
-
-        let clock = ContinuousClock()
-        let prefillStart = clock.now
-        var position = reused
-        while position < prompt.count {
-            try Task.checkCancellation()
-            let end = min(position + batchSize, prompt.count)
-            try decode(Array(prompt[position..<end]), context: context)
-            position = end
-        }
-        // llama_decode only queues GPU work; wait for it so the prefill time
-        // is the prefill's, not the first sampled token's.
-        llama_synchronize(context)
-        let prefillSeconds = (clock.now - prefillStart).seconds
-
         let config = request.generationConfig
-        let sampler = LlamaSampler(config: config, vocabularySize: Int32(vocabulary.tokenCount),
-                                   contextSize: Int32(maxContext),
-                                   suppressedTokens: vocabulary.suppressedTokens)
-        for token in prompt { sampler.accept(token) }
         let maxNewTokens = min(request.maximumCompletionTokens, maxContext - prompt.count)
 
+        // Tokens become events the same way on both paths.
         let decoder = StructuredAssistantDecoder(
             tokenizer: tokenizer,
             allowedTools: Set(request.tools.map(\.name)),
@@ -177,29 +183,102 @@ actor LlamaModel: EngineModel {
         lastSampledTokens = []
         var generated = 0
         var hitLimit = false
-        let decodeStart = clock.now
-        while true {
-            try Task.checkCancellation()
-            guard generated < maxNewTokens else {
-                hitLimit = true
-                break
-            }
-            let token = sampler.sample(context: context)
+
+        /// Records one sampled token; false once generation must end (end of
+        /// generation, a stop string, or the token budget).
+        func take(_ token: Int32) throws -> Bool {
             lastSampledTokens.append(token)
             generated += 1
             if vocabulary.isEndOfGeneration(token)
                 || tokenizer.stopTokenIDs.contains(token)
                 || config.extraStopTokens.contains(token) {
-                break
+                return false
             }
             let delta = utf8.push(vocabulary.pieceBytes(token, special: false))
             try assembler.take(decoder.consume(tokenID: token, delta: delta))
-            if assembler.isStopped { break }
+            if assembler.isStopped { return false }
             guard generated < maxNewTokens else {
                 hitLimit = true
-                break
+                return false
             }
-            try decode([token], context: context)
+            return true
+        }
+
+        // From here until a clean return, the memory may hold anything.
+        let reused: Int
+        cacheIsTrusted = false
+        let clock = ContinuousClock()
+        let prefillSeconds: Double
+        let decodeStart: ContinuousClock.Instant
+        var draftProposed: Int?
+        var draftAccepted: Int?
+
+        if let drafter, let mtp = drafter.pointer {
+            // MTP: llama.cpp's speculative loop owns both memories and starts
+            // from empty ones (no prefix reuse).
+            reused = 0
+            cachedTokens = []
+            let prefillStart = clock.now
+            let status = prompt.withUnsafeBufferPointer { buffer in
+                mference_mtp_begin(mtp, buffer.baseAddress, Int32(buffer.count),
+                                   LlamaSampler.mtpSampling(config, contextSize: Int32(maxContext)))
+            }
+            if status == 2 || abortFlag.isSet { throw CancellationError() }
+            guard status == 0 else { throw LlamaBackendError.decodeFailed(status) }
+            llama_synchronize(context)
+            prefillSeconds = (clock.now - prefillStart).seconds
+            decodeStart = clock.now
+            var proposed = 0
+            var accepted = 0
+            var buffer = [Int32](repeating: 0, count: drafter.stepCapacity)
+            stepping: while true {
+                try Task.checkCancellation()
+                guard generated < maxNewTokens else {
+                    hitLimit = true
+                    break
+                }
+                var drafted: Int32 = 0
+                let count = mference_mtp_step(mtp, Int32(maxNewTokens - generated),
+                                              &buffer, Int32(buffer.count), &drafted)
+                if count == -2 || abortFlag.isSet { throw CancellationError() }
+                guard count > 0 else { throw LlamaBackendError.decodeFailed(count) }
+                proposed += Int(drafted)
+                accepted += Int(count) - 1
+                for token in buffer.prefix(Int(count)) {
+                    guard try take(token) else { break stepping }
+                }
+            }
+            draftProposed = proposed
+            draftAccepted = accepted
+        } else {
+            reused = reusablePrefix(of: prompt, context: context)
+            let prefillStart = clock.now
+            var position = reused
+            while position < prompt.count {
+                try Task.checkCancellation()
+                let end = min(position + batchSize, prompt.count)
+                try decode(Array(prompt[position..<end]), context: context)
+                position = end
+            }
+            // llama_decode only queues GPU work; wait for it so the prefill time
+            // is the prefill's, not the first sampled token's.
+            llama_synchronize(context)
+            prefillSeconds = (clock.now - prefillStart).seconds
+
+            let sampler = LlamaSampler(config: config, vocabularySize: Int32(vocabulary.tokenCount),
+                                       contextSize: Int32(maxContext),
+                                       suppressedTokens: vocabulary.suppressedTokens)
+            for token in prompt { sampler.accept(token) }
+            decodeStart = clock.now
+            while true {
+                try Task.checkCancellation()
+                guard generated < maxNewTokens else {
+                    hitLimit = true
+                    break
+                }
+                guard try take(sampler.sample(context: context)) else { break }
+                try decode([lastSampledTokens[lastSampledTokens.count - 1]], context: context)
+            }
         }
         try assembler.take(decoder.consumeFlushedText(utf8.finish()))
         try assembler.take(decoder.finish())
@@ -210,7 +289,9 @@ actor LlamaModel: EngineModel {
         let finishReason: EngineFinishReason =
             !assembler.toolCalls.isEmpty ? .toolCalls : (hitLimit && !assembler.isStopped ? .length : .stop)
         let counts = decoder.payloadTokenCounts
-        cacheIsTrusted = true
+        // The plain path's memory now holds exactly `cachedTokens`; the MTP
+        // loop's is not tracked, so the next request starts from empty.
+        cacheIsTrusted = drafter == nil
         return EngineCompletion(
             content: assembler.content,
             reasoningContent: reasoning.isEmpty ? nil : reasoning,
@@ -221,7 +302,9 @@ actor LlamaModel: EngineModel {
                                cachedPromptTokens: reused,
                                reasoningTokens: counts?.reasoning,
                                visibleTokens: assembler.isStopped ? nil : counts?.visible),
-            timings: EngineTimings(prefillSeconds: prefillSeconds, decodeSeconds: decodeSeconds))
+            timings: EngineTimings(prefillSeconds: prefillSeconds, decodeSeconds: decodeSeconds,
+                                   draftTokensProposed: draftProposed,
+                                   draftTokensAccepted: draftAccepted))
     }
 
     /// How many leading prompt tokens the memory already holds, after trimming
