@@ -33,9 +33,8 @@ bash -n mference-ui.sh && python3 Scripts/tests/test_mference_ui.py
   request CI leaves them out; nothing they assert changes.
 - Every test uses Swift Testing (`@Suite` / `@Test`), not XCTest. `--filter` is
   a regex over `Suite/test`; `bringup-check.sh` holds the per-family suite
-  regexes (`Qwen38`, `Maple`, `[Mm]iniCPM5`, ...). Only the product families
-  (Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5) keep behaviour suites; the other
-  families keep their contract tests (baselines, manifest validation).
+  regexes (`Qwen38`, `Maple`, `[Mm]iniCPM5`, ...) for the four families
+  (Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5).
 - The build, the Swift suite, the link check, and `Scripts/tests/test_*.py`
   (stdlib `unittest`, no dependencies) never download or load a model. CI runs
   the suite, the Python checks and the link check on `macos-26` (the MSL 4.0
@@ -46,10 +45,11 @@ bash -n mference-ui.sh && python3 Scripts/tests/test_mference_ui.py
 
 ## Architecture
 
-Read [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) first (Gemma 4 is its
-running example), then [docs/FAMILY_CONTRACT.md](docs/FAMILY_CONTRACT.md). Each
-family has a dossier under `docs/families/` or `docs/`, and the design specs
-behind the larger ports are in `docs/superpowers/specs/`.
+Read [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) first, then
+[docs/FAMILY_CONTRACT.md](docs/FAMILY_CONTRACT.md). Each family has a dossier
+or performance page under `docs/families/` or `docs/`, and the design specs
+behind the larger ports are in `docs/superpowers/specs/`. Families removed from
+the tree are listed in [docs/RETIRED_FAMILIES.md](docs/RETIRED_FAMILIES.md).
 
 ### Targets
 
@@ -93,8 +93,11 @@ LFU eviction) or `ResidentExpertStreamer` (whole layer mapped).
 `ArchConfig` in `Infrastructure/ModelIO/ModelTypes.swift` is the declarative
 contract. Every family has a compiled baseline in
 `ArchConfig.knownArchitectures`; `manifest.json -> arch` must match it field by
-field or load throws `ModelError.archMismatch`. Gemma 4's values are the
-`ArchConfig.init` defaults, so a new axis must default to Gemma 4 behavior.
+field or load throws `ModelError.archMismatch`. The `ArchConfig.init` default
+values are the original install format's (first Gemma 4's, a family since
+retired), and they stay as they are: manifest keys that are absent decode to
+them, and kept installs must decode unchanged. A new axis must default to the
+behavior existing installs assume.
 
 Adding an axis is a fixed chain, and the suite fails until it is complete: the
 stored property with a doc comment → its row in `docs/FAMILY_CONTRACT.md`
@@ -111,14 +114,11 @@ refuses a family by name until its runner lands. Family-specific tensor names
 ### Runners and generation
 
 `ForwardRunnerFactory.make` picks the runner from `model.config.family`.
-`RealForwardRunner` is the shared one (Gemma 4 and its QAT install, Qwen 3.6,
-DeepSeek-V4-Flash, Inkling-Small, with family logic in extensions such as
-`RealForwardRunner+DSV4Prefill` and `Model+Inkling`). Maple, Qwen 3.8, Flint,
-MiniCPM5, GLM-5.3-Flash, and Flash-Next each have a dedicated
-`*ForwardRunner`. All of them conform to `LogitProducer` /
+`RealForwardRunner` is the shared one, and Qwen 3.6 is its remaining family.
+Maple, Qwen 3.8 and MiniCPM5 each have a dedicated `*ForwardRunner`. All of them conform to `LogitProducer` /
 `ContinuableLogitProducer` (`Runtime/Generation/LogitProducer.swift`), and
 optional abilities are further protocols there (`ChunkedPrefillRunner`,
-`FusedHeadLogitProducer`, `GemmaPrefixRecovering`, ...). `runRawCompletion` is
+`FusedHeadLogitProducer`, ...). `runRawCompletion` is
 the outer prefill → decode → sample loop shared by the CLI and the server;
 tests drive it with `ScriptedLogitProducer` instead of a model.
 
@@ -148,8 +148,8 @@ from `MferenceValidationSupport` within a `Tolerance` bound.
 concatenates the modules listed in `shaderModules` into **one** `MTLLibrary`
 compiled at startup, so shader function names share one namespace and a new
 `.metal` file must be registered in both `shaderModules` and
-`shaderSubdirectories`. Modules outside that list (`tensorops`, `maple_*`,
-`gemma_qat_*`) compile on demand through `MetalContext.moduleLibrary`.
+`shaderSubdirectories`. Modules outside that list (`tensorops`, `maple_*`)
+compile on demand through `MetalContext.moduleLibrary`.
 
 ### Server
 

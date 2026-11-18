@@ -1,5 +1,8 @@
 # Release qualification — September 21, 2026
 
+> Dated record. The retired families it names (Gemma 4 and Qwen3.8-Flash-Next)
+> are no longer supported; see [Retired model families](RETIRED_FAMILIES.md).
+
 Continuation of [September 20](RELEASE_VALIDATION_2026-09-20.md), in
 [PR #38](https://github.com/NeelM0906/Mference/pull/38), targeting `main`.
 The starting head `8d65245be0c895ff3c3881718f8f1762350d5f05` passes macOS 15 /

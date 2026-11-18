@@ -211,8 +211,8 @@ def margin(row: torch.Tensor):
 def run_decode(model, ids):
     """Prefill with a cache, then DECODE_STEPS greedy steps. Step 0's logits are
     the cached prefill's last row (captured without hooks); steps 1.. are hooked,
-    so per-layer decode tensors have DECODE_STEPS - 1 rows (Flash-Next's
-    convention, kept so one reader serves both families)."""
+    so per-layer decode tensors have DECODE_STEPS - 1 rows (the convention
+    the shared golden reader expects)."""
     from transformers import DynamicCache
     cache = DynamicCache(config=model.config)
     with torch.no_grad():

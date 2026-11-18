@@ -1,5 +1,9 @@
 # Qwen 3.6 Prefill and Decode Acceleration Implementation Plan
 
+> Dated record. The retired families it names (Gemma 4 and DeepSeek-V4-Flash)
+> are no longer supported; see [Retired model
+> families](../../RETIRED_FAMILIES.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Expose prompt-scale prefill by default, reduce the remaining Qwen GDN prefill compute by at least 20%, and improve decode throughput by at least 15% on every community benchmark case without changing generated tokens.

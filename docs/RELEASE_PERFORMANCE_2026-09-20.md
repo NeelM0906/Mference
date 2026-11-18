@@ -1,5 +1,9 @@
 # Release performance experiments — September 20, 2026
 
+> Dated record. The retired families it names (GLM-5.3-Flash and
+> Qwen3.8-Flash-Next) are no longer supported; see [Retired model
+> families](RETIRED_FAMILIES.md).
+
 ## GLM default-profile warmups: rejected completion gate, safety stop
 
 **Not a completed-answer performance result.** Four resident warmups ran:
@@ -89,7 +93,7 @@ Refusing benchmark: memory check: The system has 274877906944 (16777216 pages wi
 System-wide memory free percentage: 53%
 ```
 
-The [historical GLM report](families/GLM53_FLASH.md#measured-results) already
+The historical GLM report already
 distinguishes the template-default Max reasoning from its separately disclosed
 Low-effort measurements. No new Low-effort comparison ran, and no defaults or
 checkpoint bytes were changed. Any such comparison needs its own explicitly

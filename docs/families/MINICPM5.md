@@ -70,7 +70,7 @@ and `configuration_llama.py` (fetched from the `v5.6.2` tag, 2026-09-10):
 - `LlamaRMSNorm.forward`: `weight * (x.float() * rsqrt(mean(x²) + eps)).to(input_dtype)`.
   **Plain `w · x̂`, no `(1 + w)` fold.** This is the convention the W2.1b
   history warns about (§7b of QUANTIZER_QUALITY.md); for this family the fold
-  must be *off*, and `FlashNextPlanner.foldsNormBias` returns `false`.
+  must be *off*, and `OriginalRepoPlanner.foldsNormBias` returns `false`.
 - `LlamaRotaryEmbedding.compute_default_rope_parameters`: `dim = head_dim`,
   `inv_freq = 1 / theta^(arange(0, dim, 2) / dim)`; `apply_rotary_pos_emb`
   uses `rotate_half` (NeoX half rotation over the whole head). `rope_scaling`
@@ -84,8 +84,8 @@ and `configuration_llama.py` (fetched from the `v5.6.2` tag, 2026-09-10):
   embedding scale; `config.json` carries none of the older MiniCPM
   `scale_emb` / `scale_depth` / `dim_model_base` fields.
 
-Every value below is set away from the Gemma 4 default of the corresponding
-`ArchConfig` axis ([FAMILY_CONTRACT.md](../FAMILY_CONTRACT.md)).
+Every value below is set away from the install-format default of the
+corresponding `ArchConfig` axis ([FAMILY_CONTRACT.md](../FAMILY_CONTRACT.md)).
 
 | Axis | Value | Covered by existing kernel? | Gap |
 |---|---|---|---|
@@ -96,7 +96,7 @@ Every value below is set away from the Gemma 4 default of the corresponding
 | `numLayers` / `numDenseLayers` | 42 | yes | — |
 | `numHeads` | 16 | yes | — |
 | `numKVHeads` / `numFullKVHeads` | 2 (GQA 8:1) | yes (`Attention.encodeFull`, `PrefillAttention`, paged kernels take arbitrary head counts) | — |
-| `headDim` / `fullHeadDim` | 128 | yes (Maple and Inkling run 128) | — |
+| `headDim` / `fullHeadDim` | 128 | yes (Maple runs 128) | — |
 | `vocabSize` | 130,560 | yes | — |
 | `slidingWindow` | 0 | yes | — |
 | `finalLogitSoftcap` | 0.0 | yes | — |
@@ -271,13 +271,13 @@ anything new. No Metal is expected to change.
    forward parity, greedy rollouts token-exact, cached decode == recompute.
 6. **Exhaustive switches** — `Model.swift` (7 sites), `ForwardRunnerFactory`,
    `ServerInference.defaultModelID`, `AppModelInstallDescriptor` (2),
-   `RepackPlanner` (4), `FlashNextPlanner` (2), `QuantBitPolicy` (1). One new
+   `RepackPlanner` (4), `OriginalRepoPlanner` (2), `QuantBitPolicy` (1). One new
    case each; nothing reordered.
 
 While the runner does not exist, `minicpm5` sits in
 `ManifestReader.familiesWithoutRunner` with the axis it is missing
-(`qkNormFreeAttention`), exactly as Flash-Next did, so an install can exist and
-validate without being loadable.
+(`qkNormFreeAttention`), as earlier families did before their runners landed,
+so an install can exist and validate without being loadable.
 
 ### Deviations from the task brief, recorded where they happened
 
@@ -290,7 +290,7 @@ validate without being loadable.
   still passed to `Scripts/test.sh` so the commands match the brief.
 - **Jinja.** The brief says the repo has no Jinja engine. It has one for the
   *tool* path only: `encodeToolChat` renders the shipped `chat_template.jinja`
-  through swift-transformers/swift-jinja for the Gemma and ChatML dialects.
+  through swift-transformers/swift-jinja for its chat dialects.
   Text-only renders are hand-coded Swift for every dialect. This family
   hand-ports both paths, as the brief asks, because the template's Python-side
   semantics (`{{- param_value }}` on non-strings, an undefined `has_tool_sep`,
@@ -554,6 +554,9 @@ achieved bandwidth at ~102 GB/s on this M5.
 - Untested: everything below the "Port status" checkboxes that is not ticked.
 
 ## Merge-compatibility note
+
+> Dated record. Qwen3.8-Flash-Next, named below, was later retired; see
+> [Retired model families](../RETIRED_FAMILIES.md).
 
 **Landed after #25 (2026-09-10).** This branch was written against
 `neel/qwen-flash-benchmarks-frontend-3d297b` (main plus the three W2.1b

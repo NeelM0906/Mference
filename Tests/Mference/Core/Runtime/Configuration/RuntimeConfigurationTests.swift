@@ -27,11 +27,7 @@ import Testing
         #expect(RuntimeConfiguration.defaultExpertCacheSlots(
             for: .qwen36, physicalMemoryBytes: eightGiB) == 16)
         #expect(RuntimeConfiguration.defaultExpertCacheSlots(
-            for: .gemma4, physicalMemoryBytes: twentyFourGiB) == 16)
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
-            for: .deepseekV4Flash, physicalMemoryBytes: twentyFourGiB) == 16)
-        #expect(RuntimeConfiguration.defaultExpertCacheSlots(
-            for: .inklingSmall, physicalMemoryBytes: twentyFourGiB) == 16)
+            for: .maple, physicalMemoryBytes: twentyFourGiB) == 16)
     }
 
     @Test func serverPrefillChunkGrowsForQwen36OnSixteenGiBHosts() {

@@ -73,27 +73,31 @@ struct ServerPromptCacheTests {
         fp16RingEnabled: true,
         templateSHA256: "template")
 
-    @Test func capturedOpenCodeToolResultUsesFrozenToolBoundary() async throws {
-        let tokenizer = try await MFTokenizer.load()
+    /// The captured OpenCode tool-result turn under ChatML: no dialect can
+    /// bridge a cached tool-call turn by token boundary, so a KV prefix that
+    /// the re-render does not reproduce misses, while one it does reproduce is
+    /// reused as an exact rendered prefix.
+    @Test func capturedOpenCodeToolResultReusesOnlyAnExactRenderedPrefix() async throws {
+        let tokenizer = try await ChatMLTokenizerFixture.load()
         let initial = try validatedFixture("opencode-1.15.11-initial.json")
         let continuation = try validatedFixture("opencode-1.15.11-tool-result.json")
         let initialPrompt = try tokenizer.encodeToolChat(
             messages: initial.messages,
             tools: initial.tools)
         let assistant = continuation.messages[initial.messages.count]
-        let prefix = try tokenizer.encodeToolChat(
-            messages: initial.messages + [assistant],
-            tools: initial.tools)
-        let callStart = try #require(prefix.lastIndex(of: tokenizer.toolCallStartID))
-        let callEnd = try #require(prefix.lastIndex(of: tokenizer.toolCallEndID))
-        let generatedCall = Array(prefix[callStart...callEnd])
-        let kvBacked = initialPrompt + generatedCall
         let historicalCall = try #require(assistant.toolCalls.first)
         let parsedCall = ParsedToolCall(
             id: historicalCall.id,
             name: historicalCall.name,
             arguments: historicalCall.arguments,
             argumentsJSON: try historicalCall.arguments.encoded())
+        let rendered = try tokenizer.encodeToolChat(
+            messages: continuation.messages,
+            tools: continuation.tools)
+
+        // What the model generated is not what the re-render produces.
+        let generated = initialPrompt + [tokenizer.toolCallStartID, tokenizer.toolCallEndID]
+        #expect(!rendered.prefix(generated.count).elementsEqual(generated))
         var cache = ServerPromptCache()
         cache.publish(
             domain: domain,
@@ -102,36 +106,41 @@ struct ServerPromptCacheTests {
             calls: [parsedCall],
             result: rawResult(
                 prompt: initialPrompt,
-                kvBacked: kvBacked,
+                kvBacked: generated,
                 boundary: tokenizer.toolResponseID,
                 reason: .toolCalls))
-        let rendered = try tokenizer.encodeToolChat(
-            messages: continuation.messages,
-            tools: continuation.tools)
-
-        let match = cache.match(
+        #expect(cache.match(
             domain: domain,
             request: continuation,
             renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
+            tokenizer: tokenizer) == .miss)
 
-        guard case .hit(let effective, let cached) = match else {
-            Issue.record("expected captured OpenCode tool-result hit")
+        // A KV prefix the re-render reproduces token for token is reused.
+        let exact = Array(rendered.dropLast())
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "",
+            calls: [parsedCall],
+            result: rawResult(
+                prompt: initialPrompt,
+                kvBacked: exact,
+                boundary: tokenizer.toolResponseID,
+                reason: .toolCalls))
+        guard case .hit(let effective, let cached) = cache.match(
+            domain: domain,
+            request: continuation,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer) else {
+            Issue.record("an exact rendered prefix must be reused")
             return
         }
-        let bridge = try tokenizer.encodeToolResultContinuation(
-            cachedMessages: initial.messages,
-            assistant: assistant,
-            incomingMessages: continuation.messages,
-            tools: continuation.tools)
-        #expect(cached == kvBacked.count)
-        #expect(effective == kvBacked + bridge)
-        #expect(bridge.first == tokenizer.toolResponseID)
-        #expect(!rendered.prefix(kvBacked.count).elementsEqual(kvBacked))
+        #expect(effective == rendered)
+        #expect(cached == exact.count)
     }
 
     @Test func mismatchedLineageDomainAndUnsafeStopsMiss() async throws {
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await ChatMLTokenizerFixture.load()
         let initial = request(messages: [
             MFTokenizer.Message(role: .user, content: "first"),
         ])
@@ -180,7 +189,7 @@ struct ServerPromptCacheTests {
     }
 
     @Test func tailCompletedStopStringDoesNotPublishPrefix() async throws {
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await ChatMLTokenizerFixture.load()
         let initial = request(messages: [
             MFTokenizer.Message(role: .user, content: "first"),
         ])
@@ -275,8 +284,10 @@ struct ServerPromptCacheTests {
         let request = try JSONDecoder().decode(
             OpenAIChatRequest.self,
             from: Data(contentsOf: url))
+        // The validator only requires that the request names the served
+        // model; the fixtures keep the identifier they were captured with.
         return try OpenAIRequestValidator.validate(
             request,
-            modelID: "gemma-4-26b-a4b-it")
+            modelID: request.model)
     }
 }

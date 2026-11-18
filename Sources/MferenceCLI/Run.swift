@@ -107,7 +107,7 @@ public func run(args: Args,
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: args.reasoningEffort, promptIDs: promptIds)
         let decoder = args.messagesFile != nil && (tokenizer.usesSourceTemplate(reasoningEffort: args.reasoningEffort)
-            || startsInThinking || tokenizer.requiresStructuredAssistantDecoding)
+            || startsInThinking)
             ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                          allowedTools: [],
                                          startsInThought: startsInThinking)
@@ -161,13 +161,12 @@ public func run(args: Args,
             writeVisible(emitted)
         }
         if let notice = emptyResponseLimitNotice(reason: stats.reason,
-            hasVisibleText: hasVisibleText, isSwiftQwen: tokenizer.isSwiftQwen) {
+            hasVisibleText: hasVisibleText) {
             stderr.write(Data(("\n" + notice + "\n").utf8))
         }
 
         if ProcessInfo.processInfo.environment["MFERENCE_PREFILL_BREAKDOWN"] == "1",
            runner is RealForwardRunner {
-            RealForwardRunner.dumpPrefillBreakdown()
             if !PrefillStageBreakdown.shared.isEmpty {
                 FileHandle.standardError.write(Data(PrefillStageBreakdown.shared.report().utf8))
             }
@@ -221,70 +220,6 @@ public func run(args: Args,
                 prefillReads: runner.lastPrefillExpertReads,
                 prefillDiskBytes: runner.lastPrefillDiskBytesRead)
             lines += "  unaccounted (GPU waits): "
-            lines += String(format: "%.1f", total - accounted) + " ms\n"
-            stderr.write(Data(lines.utf8))
-        }
-        // Qwen3.8-Flash-Next accounts a different set of phases: it has no
-        // cb1/cb2 split (no early router signal, no expert-I/O overlap — the
-        // whole read is exposed), and it adds two costs no other family pays,
-        // the indexer's CPU top-k round trip and the PLE row-pool gather.
-        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
-           let runner = runner as? FlashNextForwardRunner {
-            let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
-            let total = stats.decodeSeconds * 1000
-            let accounted = Double(runner.totalIoNanos
-                                   + runner.totalIndexerTopKNanos
-                                   + runner.totalPleRowNanos) / 1e6
-            var lines = "\n[phases over \(stats.newTokens) tokens, decode "
-            lines += String(format: "%.0f", total) + " ms]\n"
-            lines += "  expert io (all exposed): " + ms(runner.totalIoNanos) + " ms\n"
-            lines += "  indexer cpu top-k:       "
-            lines += ms(runner.totalIndexerTopKNanos) + " ms\n"
-            lines += "  ple row fetch:           "
-            lines += ms(runner.totalPleRowNanos) + " ms\n"
-            let gpuBusy = runner.totalGpuBusyNanos
-            let gpuSpan = runner.totalGpuSpanNanos
-            lines += "  gpu busy: " + ms(gpuBusy) + " ms, span: "
-            lines += ms(gpuSpan) + " ms, gap: "
-            lines += ms(gpuSpan > gpuBusy ? gpuSpan - gpuBusy : 0) + " ms\n"
-            lines += "  unaccounted (CPU encode + GPU waits): "
-            lines += String(format: "%.1f", total - accounted) + " ms\n"
-            // Whole-run totals (prefill and decode together; nothing resets
-            // them for this family): every routed-expert read the slot cache
-            // issued, including the GGUF install's raw reads, and the bytes
-            // this process physically read from storage.
-            if let reads = ExpertReadStats.shared?.snapshot() {
-                lines += "  expert reads (whole run): \(reads.experts) experts in \(reads.reads) runs, "
-                lines += String(format: "%.1f MB, %.1f ms\n",
-                                Double(reads.bytes) / 1_048_576, Double(reads.totalNanos) / 1e6)
-            }
-            if let disk = ProcessDiskIO.current() {
-                lines += String(format: "  process disk read (whole run): %.1f MB\n",
-                                Double(disk.bytesRead) / 1_048_576)
-            }
-            stderr.write(Data(lines.utf8))
-        }
-        // GLM-5.3-Flash: per-token path with the routed-expert read fully
-        // exposed, the pooled indexer's CPU top-k (sparse layers past
-        // index_topk) and the CPU router round trip per MoE layer.
-        if ProcessInfo.processInfo.environment["MFERENCE_PHASES"] == "1",
-           let g53 = runner as? Glm53ForwardRunner {
-            let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
-            let total = stats.decodeSeconds * 1000
-            let accounted = Double(g53.totalIoNanos + g53.totalIndexerTopKNanos
-                                   + g53.totalRouterNanos) / 1e6
-            var lines = "\n[phases over \(stats.newTokens) tokens, decode "
-            lines += String(format: "%.0f", total) + " ms]\n"
-            lines += "  expert io (all exposed): " + ms(g53.totalIoNanos) + " ms\n"
-            lines += "  indexer cpu top-k:       " + ms(g53.totalIndexerTopKNanos) + " ms\n"
-            lines += "  router readback wait:    " + ms(g53.totalRouterNanos) + " ms"
-            lines += g53.expertsResident ? " (resident: none)\n" : "\n"
-            let gpuBusy = g53.totalGpuBusyNanos
-            let gpuSpan = g53.totalGpuSpanNanos
-            lines += "  gpu busy: " + ms(gpuBusy) + " ms, span: " + ms(gpuSpan) + " ms, gap: "
-            lines += ms(gpuSpan > gpuBusy ? gpuSpan - gpuBusy : 0) + " ms\n"
-            lines += "  command buffers: \(g53.totalCommandBuffers)\n"
-            lines += "  unaccounted (CPU encode + GPU waits): "
             lines += String(format: "%.1f", total - accounted) + " ms\n"
             stderr.write(Data(lines.utf8))
         }
@@ -351,13 +286,9 @@ private func errored(_ stderr: FileHandle, _ message: String, _ code: Int32) -> 
     return RunResult(exitCode: code)
 }
 
-func emptyResponseLimitNotice(reason: StopReason, hasVisibleText: Bool,
-                              isSwiftQwen: Bool) -> String? {
+func emptyResponseLimitNotice(reason: StopReason, hasVisibleText: Bool) -> String? {
     guard reason == .maxTokens, !hasVisibleText else { return nil }
-    let effort = isSwiftQwen
-        ? " Swift-Qwen also supports --reasoning-effort medium or low; changing effort can change answer quality."
-        : ""
-    return "note: token limit reached before a visible answer. Increase --max-new (and --max-context if needed)." + effort
+    return "note: token limit reached before a visible answer. Increase --max-new (and --max-context if needed)."
 }
 
 private func writeRuntimeDiagnostics(stats: RawDecodeResult, model: Model,
@@ -475,11 +406,6 @@ private func runChat(args: Args,
             kvStorage: forwardRuntime.kvStorageMode.rawValue,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: "")
-        let recovery = args.reusePrefix
-            ? (runner as? any GemmaPrefixRecovering).flatMap {
-                $0.supportsGemmaPrefixRecovery && tokenizer.dialect == .gemma ? $0 : nil
-            }
-            : nil
         let promptTokens = { (messages: [MFTokenizer.Message]) throws -> Int in
             try tokenizer.encodeChat(messages: messages, reasoningEffort: args.reasoningEffort).count
         }
@@ -501,7 +427,6 @@ private func runChat(args: Args,
                 case "/clear":
                     history = opening
                     prefixCache.invalidate()
-                    recovery?.discardGemmaPrefix()
                     stderr.write(Data("history cleared\n".utf8))
                 case "/history":
                     for message in history {
@@ -528,29 +453,17 @@ private func runChat(args: Args,
             let promptIds = try tokenizer.encodeChat(messages: history, reasoningEffort: args.reasoningEffort)
             let cacheTurn = PromptPrefixCacheTurn(messages: history, reasoningEffort: args.reasoningEffort)
             var plan = ChatPrefixReuse.Plan(promptIDs: promptIds, start: .reset)
-            var checkpoint: (position: Int, capture: () throws -> Void)?
+            let checkpoint: (position: Int, capture: () throws -> Void)? = nil
             if args.reusePrefix {
                 let match = prefixCache.match(
                     domain: cacheDomain,
                     turn: cacheTurn,
                     renderedPromptIDs: promptIds,
-                    tokenizer: tokenizer,
-                    gemmaRecoverablePrefix: recovery.map { capable in { capable.gemmaRecoverablePrefix(upTo: $0) } })
+                    tokenizer: tokenizer)
                 plan = ChatPrefixReuse.plan(match: match, renderedPromptIDs: promptIds, maxContext: args.maxContext)
-                if case .resume(let cached) = plan.start {
-                    // Gemma re-renders earlier turns, so its hit can lie below
-                    // the runner's position and needs the KV state rewound.
-                    if let recovery, cached != runner.continuationPosition {
-                        _ = try recovery.recoverGemmaPrefix(to: cached)
-                    }
+                if case .resume = plan.start {
                 } else {
                     prefixCache.invalidate()
-                }
-                if let recovery,
-                   let boundary = try tokenizer.gemmaRecoveryBoundary(
-                    messages: history, tools: [], reasoningEffort: args.reasoningEffort,
-                    preserveThinking: false, promptIDs: plan.promptIDs) {
-                    checkpoint = (boundary, { _ = try recovery.captureGemmaPrefix() })
                 }
             }
             var config = baseConfig
@@ -585,7 +498,6 @@ private func runChat(args: Args,
                 } else {
                     prefixCache.invalidate()
                 }
-                if prefixCache.entry == nil { recovery?.discardGemmaPrefix() }
             }
         }
     } catch is CancellationError {
@@ -658,7 +570,7 @@ private func streamChatTurn(promptIds: [Int32],
     let startsInThinking = tokenizer.startsInThinking(
         reasoningEffort: reasoningEffort, promptIDs: promptIds)
     let decoder = tokenizer.usesSourceTemplate(reasoningEffort: reasoningEffort)
-        || startsInThinking || tokenizer.requiresStructuredAssistantDecoding
+        || startsInThinking
         ? StructuredAssistantDecoder(tokenizer: tokenizer,
                                      allowedTools: [],
                                      startsInThought: startsInThinking)
@@ -726,7 +638,7 @@ private func streamChatTurn(promptIds: [Int32],
     stdout.write(Data("\n".utf8))
     if let notice = emptyResponseLimitNotice(reason: stats.reason,
         hasVisibleText: reply.contains(where: { !$0.isWhitespace }),
-        isSwiftQwen: tokenizer.isSwiftQwen) {
+        ) {
         stderr.write(Data((notice + "\n").utf8))
     }
     writeRuntimeDiagnostics(stats: stats, model: model, runner: runner,

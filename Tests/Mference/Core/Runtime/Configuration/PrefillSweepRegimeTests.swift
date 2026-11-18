@@ -51,7 +51,7 @@ import Testing
         #expect(Self.rule(.qwen36, physical: required - 1))
     }
 
-    @Test(arguments: [ModelFamily.gemma4, .deepseekV4Flash, .flint, .qwen38flashnext])
+    @Test(arguments: [ModelFamily.qwen38, .maple, .minicpm5])
     func otherFamiliesNeverBypass(family: ModelFamily) {
         #expect(!Self.rule(family, physical: 8 * Self.gib))
         #expect(!Self.rule(family, physical: 32 * Self.gib))
@@ -96,7 +96,7 @@ import Testing
         #expect(rule(.qwen36, .pread(slotCount: 96), 32 * Self.gib))
         #expect(!rule(.qwen36, .pread(slotCount: 96), 64 * Self.gib))
         #expect(!rule(.qwen36, .resident, 8 * Self.gib))
-        #expect(!rule(.gemma4, .pread(slotCount: 16), 8 * Self.gib))
+        #expect(!rule(.maple, .pread(slotCount: 16), 8 * Self.gib))
 
         // Exactly the 40 routed layers count: at the strict boundary the
         // dense layer adding a 41st slot set would flip the answer.

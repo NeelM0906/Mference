@@ -113,7 +113,7 @@ struct Qwen36PrefillEquivalenceGateTests {
             label: "row->grouped", outKey: "rowToGrouped",
             precondition: { model, context in
                 let selected = RealForwardRunner.usesGroupedRoutedExpertGEMM(
-                    family: model.config.family, gemmaBatchedExperts: true,
+                    family: model.config.family,
                     supportsApple10TensorOps: context.device.supportsApple10TensorOps)
                 try #require(selected, "grouped routed experts are the Qwen default only off Apple10")
                 try #require(MPPGroupedRoutedMoE(context: context).isAvailable,

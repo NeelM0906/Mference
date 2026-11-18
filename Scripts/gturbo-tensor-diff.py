@@ -15,8 +15,7 @@ for a quantizer measured better than the control on 128 of 134 sampled tensors,
 so the divergence had to be structural. Running this localized it in one shot:
 100 tensors at relative difference ~1.0, all of them RMSNorm gains, all
 unquantized BF16 passthrough where quantization cannot explain any difference
-at all. The cause was the `1 + w` norm convention (see
-`FlashNextPlanner.foldsNormBias`).
+at all. The cause was the `1 + w` RMSNorm gain convention.
 
 Keep reaching for it whenever two installs of the same checkpoint disagree at
 the model level: it needs no GPU, loads no model, and answers "which tensors"

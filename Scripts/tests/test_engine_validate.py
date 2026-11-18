@@ -169,7 +169,7 @@ class ModelListTests(unittest.TestCase):
     def test_exact_product_list_passes(self):
         self.assertEqual(ev.check_model_list(product_list(), self.expected()), [])
 
-    def test_flash_next_and_missing_engine_fail(self):
+    def test_retired_model_and_missing_engine_fail(self):
         body = product_list()
         body["data"].append({"id": "qwen3.8-flash-next-int4g64", "engine": "mference",
                              "max_model_len": 1})

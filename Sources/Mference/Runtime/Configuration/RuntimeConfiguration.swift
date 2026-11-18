@@ -37,7 +37,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// `--shadow-budget`: 0 turns speculative expert prefetch off, 1...8 selects
     /// shadow prefetch with that many speculative reads per layer.
     public static let allowedShadowPrefetchBudgets = 0...8
-    /// Full-attention KV (Gemma 4, Qwen 3.6, Inkling) starts at this many tokens. A
+    /// Full-attention KV (Qwen 3.6) starts at this many tokens. A
     /// prompt that does not fit grows it to the prompt plus this many more,
     /// room for the answer; an answer that outgrows that room grows it by half
     /// as much at a time, up to `--max-context`. Metal charges a KV buffer in full once
@@ -146,8 +146,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         let gib = UInt64(1) << 30
         guard physicalMemoryBytes >= 16 * gib else { return 128 }
         switch family {
-        case .gemma4, .qwen36: return 2048
-        case .qwen38flashnextudiq3xxs: return physicalMemoryBytes >= 32 * gib ? 4096 : 1024
+        case .qwen36: return 2048
         default: return 128
         }
     }
@@ -185,38 +184,12 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// (short −2%, long −56% from page-cache thrash), and 128 near-resident
     /// slots beat nothing, because at 32 slots the page cache already holds
     /// the whole expert pool. Qwen 3.6 therefore stays on the slot rule.
-    /// Flash-Next separately selects resident mapping at ≥192 GiB when the
-    /// routed pool and core still leave the fixed headroom above.
-    ///
-    /// GLM-5.3-Flash is the other measured exception: its whole INT4 expert
-    /// set (~171 GB) fits a 256 GB host beside the ~10 GB core, and with the
-    /// experts resident its runner routes on the GPU with no per-layer CPU
-    /// round trip, so `auto` picks `.resident` whenever pool + core + the
-    /// resident reserve + 16 GiB for KV, scratch and the process fit physical
-    /// memory. Smaller hosts fall back to the slot rule.
     public static func defaultExpertStreamingMode(
         for family: ModelFamily,
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
         expertPoolBytes: UInt64,
         coreWeightsBytes: UInt64
     ) -> ExpertStreamingMode {
-        let gib = UInt64(1) << 30
-        let reserve = residentHeadroomBytes
-        if family == .qwen38flashnext,
-           physicalMemoryBytes >= 192 * gib,
-           coreWeightsBytes <= physicalMemoryBytes - reserve,
-           expertPoolBytes <= physicalMemoryBytes - reserve - coreWeightsBytes {
-            // The routed pool is ~68 GiB. Mapping it on the 256 GiB M3 Ultra
-            // improved the full protocol to 15.12/15.39/14.91 tok/s and avoids
-            // the 17 GiB zero-filled allocation of the runner-up 128-slot rung.
-            return .resident
-        }
-        if family == .glm53Flash {
-            let runtimeReserve = UInt64(16) * gib
-            let (sum1, o1) = expertPoolBytes.addingReportingOverflow(coreWeightsBytes)
-            let (sum2, o2) = sum1.addingReportingOverflow(reserve + runtimeReserve)
-            if !o1, !o2, physicalMemoryBytes >= sum2 { return .resident }
-        }
         return .pread(slotCount: defaultExpertCacheSlots(
             for: family,
             physicalMemoryBytes: physicalMemoryBytes))
