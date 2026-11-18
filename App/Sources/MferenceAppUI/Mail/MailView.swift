@@ -75,14 +75,13 @@ struct MailContent: View {
 
 struct MailSidebar: View {
     @Bindable var model: MailInboxModel
-    @State private var renaming = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.xs) {
             HStack {
                 AppleSectionHeader(text: "Sorted for you")
                 Spacer()
-                Button(renaming ? "Done" : "Rename") { renaming.toggle() }
+                Button(model.isRenamingBuckets ? "Done" : "Rename") { model.isRenamingBuckets.toggle() }
                     .buttonStyle(.plain)
                     .font(MFFont.calloutEmphasis)
                     .foregroundStyle(MFColor.accent)
@@ -90,7 +89,7 @@ struct MailSidebar: View {
             .padding(.horizontal, MFSpacing.s)
             .padding(.bottom, MFSpacing.xs)
             ForEach(model.buckets, id: \.key) { bucket in
-                if renaming {
+                if model.isRenamingBuckets {
                     BucketNameField(name: bucket.name) { model.rename(bucket: bucket.key, to: $0) }
                 } else {
                     folderRow(bucket.name, folder: .bucket(bucket.key))
@@ -193,6 +192,10 @@ struct MailList: View {
                     .background(Capsule().fill(MFColor.fill))
                 if model.isSorting {
                     ProgressView().controlSize(.small).accessibilityLabel("Sorting")
+                } else if model.needsManualSort {
+                    Button("Sort with Quick") { Task { await model.sortWithQuick() } }
+                        .buttonStyle(.appleQuiet)
+                        .help("Apple Intelligence is off. Quick sorts on this Mac; it may replace the model loaded for chat.")
                 }
                 Spacer()
             }
@@ -223,10 +226,13 @@ struct MailList: View {
 
     private var shortcuts: some View {
         HStack(spacing: MFSpacing.m) {
+            // Bare E and Z type letters while a text field is being edited.
             shortcut("E", "Done") { if let message = model.selected { model.markDone(message) } }
                 .keyboardShortcut("e", modifiers: [])
+                .disabled(model.isEditingText || model.selected == nil)
             shortcut("Z", "Undo") { model.undo() }
                 .keyboardShortcut("z", modifiers: [])
+                .disabled(model.isEditingText)
             shortcut("⌘J", "Draft") { Task { await model.writeDraft() } }
                 .keyboardShortcut("j", modifiers: .command)
             Spacer()
@@ -327,7 +333,7 @@ struct MailReader: View {
                         ProgressView().controlSize(.small)
                     }
                     if let card = model.eventCard { eventCard(card) }
-                    DraftCard(model: model)
+                    if model.canReply { DraftCard(model: model) }
                 }
                 .padding(.horizontal, MFSpacing.xl + MFSpacing.s)
                 .padding(.vertical, MFSpacing.xl)
@@ -386,7 +392,7 @@ struct MailReader: View {
 
 struct DraftCard: View {
     @Bindable var model: MailInboxModel
-    @State private var editing = false
+    private var editing: Bool { model.isEditingDraft }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -405,16 +411,27 @@ struct DraftCard: View {
             .padding(.vertical, MFSpacing.m)
             .background(MFColor.canvas)
             Rectangle().fill(MFColor.hairline).frame(height: 1)
+            if let reply = model.replyDraft {
+                VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+                    addressLine("To", reply.to)
+                    if let from = reply.from { addressLine("From", from) }
+                    addressLine("Subject", reply.subject)
+                }
+                .padding(.horizontal, MFSpacing.l + MFSpacing.xs)
+                .padding(.top, MFSpacing.m)
+            }
             content
                 .padding(.horizontal, MFSpacing.l + MFSpacing.xs)
                 .padding(.vertical, MFSpacing.l)
             Rectangle().fill(MFColor.hairline).frame(height: 1)
             HStack(spacing: MFSpacing.m) {
-                Button("Send") { Task { await model.send() } }
+                Button("Send") {
+                    model.isEditingDraft = false
+                    Task { await model.send() }
+                }
                     .buttonStyle(.applePrimary)
-                    .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                              || model.draftState == .sending || model.draftState == .sent)
-                Button(editing ? "Done" : "Edit") { editing.toggle() }
+                    .disabled(!model.canSend)
+                Button(editing ? "Done" : "Edit") { model.isEditingDraft.toggle() }
                     .buttonStyle(.appleSecondary)
                     .disabled(model.draft.isEmpty)
                 Text(footer)
@@ -461,6 +478,21 @@ struct DraftCard: View {
                     .textSelection(.enabled)
             }
         }
+    }
+
+    private func addressLine(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: MFSpacing.s) {
+            Text(label)
+                .font(MFFont.caption)
+                .foregroundStyle(MFColor.tertiary)
+                .frame(width: MFSpacing.xxl * 2, alignment: .leading)
+            Text(value)
+                .font(MFFont.callout)
+                .foregroundStyle(MFColor.ink)
+                .lineLimit(1)
+                .textSelection(.enabled)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private var footer: String {

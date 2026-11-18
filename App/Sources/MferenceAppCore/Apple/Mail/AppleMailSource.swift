@@ -55,6 +55,14 @@ public struct MailboxRef: Sendable, Hashable {
             .map { $0.removingPercentEncoding ?? String($0) }
     }
 
+    /// False for an account or folder name that could leave the Mail
+    /// folder ("..", or a "/" smuggled in as %2F): such mail is not opened.
+    public var isSafePath: Bool {
+        ([accountID] + path).allSatisfy { component in
+            !component.contains("/") && component != ".." && component != "." && !component.contains("\0")
+        } && path.allSatisfy { !$0.isEmpty }
+    }
+
     public var kind: Kind {
         let last = (path.last ?? "").lowercased()
         switch last {
@@ -98,6 +106,8 @@ public enum MailSourceError: Error, Sendable, Hashable {
 
 /// Mail on this Mac, read-only.
 public protocol MailSource: Sendable {
+    /// Takes a fresh look at the store (new mail since the last load).
+    func reload() async
     func status() async -> MailStoreStatus
     /// Newest first, from mailboxes of `kinds`, skipping deleted messages.
     func messages(in kinds: Set<MailboxRef.Kind>, limit: Int) async throws -> [MailMessageSummary]
@@ -131,12 +141,26 @@ public actor AppleMailSource: MailSource {
 
     private let mailRoot: URL
     private var database: ReadOnlySQLite?
+    /// A private copy of the Envelope Index (with its -wal and -shm) that
+    /// this source reads; Mail's own files are only ever copied, never opened
+    /// by SQLite.
+    private var snapshotDirectory: URL?
     private var versionDirectory: URL?
     private var features: (summaries: Bool, globalData: Bool, subjectPrefix: Bool) = (false, false, false)
 
     /// `mailRoot` is `~/Library/Mail` in the app, a fixture folder in tests.
     public init(mailRoot: URL = URL.libraryDirectory.appending(path: "Mail", directoryHint: .isDirectory)) {
         self.mailRoot = mailRoot
+    }
+
+    deinit {
+        if let snapshotDirectory { try? FileManager.default.removeItem(at: snapshotDirectory) }
+    }
+
+    public func reload() async {
+        database = nil
+        if let snapshotDirectory { try? FileManager.default.removeItem(at: snapshotDirectory) }
+        snapshotDirectory = nil
     }
 
     public func status() async -> MailStoreStatus {
@@ -177,26 +201,20 @@ public actor AppleMailSource: MailSource {
         guard let (version, index) = try Self.findStore(in: mailRoot) else {
             throw MailSourceError.unavailable(.notFound)
         }
-        // macOS privacy protection refuses the read itself without Full Disk
-        // Access, whatever the file mode says.
-        do {
-            let handle = try FileHandle(forReadingFrom: index)
-            defer { try? handle.close() }
-            _ = try handle.read(upToCount: 16)
-        } catch {
-            throw MailSourceError.unavailable(.needsFullDiskAccess)
-        }
+        // Copy the index, its write-ahead log and shared memory into a
+        // private 0700 folder and read the copy: SQLite never opens, locks or
+        // writes Mail's live files. On APFS the copy is a clone (no data
+        // copied). macOS privacy protection refuses the copy without Full
+        // Disk Access, whatever the file mode says.
+        let snapshot = try Self.snapshot(index)
         let connection: ReadOnlySQLite
         do {
-            connection = try Self.connect(index, immutable: false)
-        } catch {
-            // The WAL index cannot be opened read-only while Mail is closed.
-            do {
-                connection = try Self.connect(index, immutable: true)
-            } catch let failure as ReadOnlySQLite.Failure {
-                throw MailSourceError.unavailable(.unsupported(detail: failure.description))
-            }
+            connection = try Self.connect(snapshot.appending(path: index.lastPathComponent))
+        } catch let failure as ReadOnlySQLite.Failure {
+            try? FileManager.default.removeItem(at: snapshot)
+            throw MailSourceError.unavailable(.unsupported(detail: failure.description))
         }
+        snapshotDirectory = snapshot
         for (table, columns) in Self.requiredSchema {
             let present = try connection.columns(of: table).union(["ROWID"])
             let missing = columns.subtracting(present)
@@ -215,8 +233,30 @@ public actor AppleMailSource: MailSource {
         return connection
     }
 
-    private static func connect(_ index: URL, immutable: Bool) throws -> ReadOnlySQLite {
-        let connection = try ReadOnlySQLite(url: index, immutable: immutable)
+    /// Copies `index` and its "-wal" / "-shm" companions into a new private
+    /// folder and returns that folder.
+    static func snapshot(_ index: URL) throws -> URL {
+        let directory = URL.temporaryDirectory.appending(path: "mference-mail-\(UUID().uuidString)",
+                                                         directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        do {
+            for suffix in ["", "-wal", "-shm"] {
+                let source = index.deletingLastPathComponent().appending(path: index.lastPathComponent + suffix)
+                guard suffix.isEmpty || FileManager.default.fileExists(atPath: source.path) else { continue }
+                try FileManager.default.copyItem(at: source, to: directory.appending(path: source.lastPathComponent))
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw MailSourceError.unavailable(.needsFullDiskAccess)
+        }
+        return directory
+    }
+
+    /// Opens the private copy read-only. Not `immutable`: that would skip
+    /// the copied write-ahead log and with it the newest mail.
+    private static func connect(_ index: URL) throws -> ReadOnlySQLite {
+        let connection = try ReadOnlySQLite(url: index)
         _ = try connection.query("SELECT count(*) FROM sqlite_master")
         return connection
     }
@@ -315,7 +355,7 @@ public actor AppleMailSource: MailSource {
     /// The mailbox folder ("<V>/<account>/INBOX.mbox"), then its
     /// `<store>/Data/<digits>/Messages/<row>.emlx`.
     func emlxURL(for message: MailMessageSummary) -> URL? {
-        guard let version = versionDirectory else { return nil }
+        guard let version = versionDirectory, message.mailbox.isSafePath else { return nil }
         var mailboxDirectory = version.appending(path: message.mailbox.accountID.isEmpty
                                                  ? "Mailboxes" : message.mailbox.accountID)
         for component in message.mailbox.path { mailboxDirectory.append(path: "\(component).mbox") }
