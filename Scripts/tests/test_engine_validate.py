@@ -539,6 +539,21 @@ class UITests(unittest.TestCase):
         self.assertIsNone(ev.rss_tree_kb(7, table))
 
 
+class ExtraTests(unittest.TestCase):
+    def test_model_extra_merges_over_the_global_extra(self):
+        extras = 'quick={"chat_template_kwargs": {"enable_thinking": false}}\ndeep={"x": 1}'
+        self.assertEqual(ev.extra_for("quick", '{"seed": 3}', extras),
+                         {"seed": 3, "chat_template_kwargs": {"enable_thinking": False}})
+        self.assertEqual(ev.extra_for("qwen36", '{"seed": 3}', extras), {"seed": 3})
+        self.assertEqual(ev.extra_for("maple", "", ""), {})
+
+    def test_tool_schema_keys_are_sorted_below_the_wrapper(self):
+        params = ev.WEATHER_TOOL["function"]["parameters"]
+        self.assertEqual(list(params), sorted(params))
+        self.assertEqual(list(params["properties"]["city"]), sorted(params["properties"]["city"]))
+        self.assertEqual(list(ev.WEATHER_TOOL["function"]), ["name", "description", "parameters"])
+
+
 class SwapLogTests(unittest.TestCase):
     def test_release_before_start_fails(self):
         events = ev.swap_events(
@@ -682,6 +697,13 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         runs = [l for l in result.stdout.splitlines() if "_run quick ui" in l]
         self.assertEqual(len(runs), 1)
+
+    def test_model_extra_is_validated(self):
+        ok = self.run_script("--dry-run", "prompts", "--model-extra",
+                             'quick={"chat_template_kwargs": {"enable_thinking": false}}')
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        for bad in ("quick", "flashnext={}", "quick=not-json"):
+            self.assertNotEqual(self.run_script("--dry-run", "prompts", "--model-extra", bad).returncode, 0)
 
     def test_unknown_model_is_rejected(self):
         result = subprocess.run(["bash", str(self.SCRIPT), "--dry-run", "--models", "flashnext"],

@@ -59,6 +59,11 @@
 #                                control), honoured by the llama.cpp backend's
 #                                MTP path; every other run has it unset
 #   --extra '<json>'             merged into every request body
+#   --model-extra <key>='<json>' merged into that model's requests, repeatable;
+#                                for GGUF identity against upstream llama-server
+#                                give Quick '{"chat_template_kwargs":
+#                                {"enable_thinking": false}}' (llama-server
+#                                thinks by default, the engine does not)
 #   --port <n>                   loopback port (default 8091)
 #   --ui-port <n>                Open WebUI port for the ui phase (default
 #                                port + 1000)
@@ -344,6 +349,7 @@ $others"
   READY_AT=$(python3 -c 'import time; print(time.time())')
 
   local rc=0
+  local run_extra; run_extra=$("${checker[@]}" extrafor "$key" --extra "$EXTRA" --model-extras "$MODEL_EXTRAS")
   if [ "$variant" = ui ]; then
     "${checker[@]}" ui --port "$UI_PORT" --pid "$SERVER_PID" --out "$RUN_DIR" \
       --expect "$(IFS=,; echo "${MODEL_KEYS[*]}")" || rc=$?
@@ -384,15 +390,15 @@ $others"
     esac
     # Load: library mode loads on the first request and logs the duration.
     "${checker[@]}" probe --port "$PORT" --model "$model_id" --out "$RUN_DIR/load-probe.json" \
-      || RUN_STATUS=1
+      ${run_extra:+--extra "$run_extra"} || RUN_STATUS=1
     if want prompts || want identity; then
       "${checker[@]}" prompts --port "$PORT" --model "$model_id" --out "$RUN_DIR" \
-        ${EXTRA:+--extra "$EXTRA"} || RUN_STATUS=1
+        ${run_extra:+--extra "$run_extra"} || RUN_STATUS=1
     fi
     if want readings; then
       rc=0
       "${checker[@]}" readings --port "$PORT" --model "$model_id" --pid "$SERVER_PID" \
-        --runs "$RUNS" --out "$RUN_DIR/readings.json" ${EXTRA:+--extra "$EXTRA"} || rc=$?
+        --runs "$RUNS" --out "$RUN_DIR/readings.json" ${run_extra:+--extra "$run_extra"} || rc=$?
       if [ "$rc" = "$SWAP_TRIP" ]; then RUN_STATUS=$SWAP_TRIP
       elif [ "$rc" != 0 ]; then RUN_STATUS=1; fi
     fi
@@ -428,6 +434,7 @@ TRACE_CASES=""
 TRACES=""
 TRACE_MAX_TOKENS=256
 UI_PORT=""
+MODEL_EXTRAS=""
 
 if [ "${1:-}" = _run ]; then
   shift
@@ -445,6 +452,7 @@ if [ "${1:-}" = _run ]; then
   TRACE_CASES=${ENGINE_VALIDATE_TRACE_CASES:-} TRACES=${ENGINE_VALIDATE_TRACES:-}
   TRACE_MAX_TOKENS=${ENGINE_VALIDATE_TRACE_MAX_TOKENS:-256}
   UI_PORT=${ENGINE_VALIDATE_UI_PORT:-}
+  MODEL_EXTRAS=${ENGINE_VALIDATE_MODEL_EXTRAS:-}
   run_one "$@"
 fi
 
@@ -473,8 +481,12 @@ while [ $# -gt 0 ]; do
     --trace) TRACES="${TRACES:+$TRACES }$2"; shift 2 ;;
     --trace-max-tokens) TRACE_MAX_TOKENS=$2; shift 2 ;;
     --ui-port) UI_PORT=$2; shift 2 ;;
+    --model-extra)
+      case "$2" in *=*) ;; *) fail "--model-extra needs <key>=<json>" ;; esac
+      MODEL_EXTRAS="${MODEL_EXTRAS:+$MODEL_EXTRAS
+}$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,92p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,97p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     models|prompts|readings|identity|swap|trace|ui|summary) PHASES+=("$1"); shift ;;
     *) fail "unknown argument: $1 (see --help)" ;;
   esac
@@ -495,6 +507,14 @@ case "$UI_PORT" in ''|*[!0-9]*) fail "--ui-port must be a number" ;; esac
 for passthrough in "$SERVER_ARGS" "$UPSTREAM_ARGS" "$UPSTREAM_MTP_ARGS" "$MTP_OFF_ARGS"; do
   check_loopback_args "$passthrough"
 done
+
+if [ -n "$MODEL_EXTRAS" ]; then
+  while IFS= read -r line; do
+    "${checker[@]}" registry "${line%%=*}" id >/dev/null || fail "--model-extra: unknown model ${line%%=*}"
+    "${checker[@]}" extrafor "${line%%=*}" --model-extras "$line" >/dev/null 2>&1 \
+      || fail "--model-extra ${line%%=*}: not a JSON object"
+  done <<<"$MODEL_EXTRAS"
+fi
 
 if want ui; then
   case "$SERVER" in
@@ -643,6 +663,7 @@ export ENGINE_VALIDATE_RESULTS="$RESULTS" ENGINE_VALIDATE_NO_RELEASE_LINE="$NO_R
 export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN" ENGINE_VALIDATE_MODELS="$MODELS"
 export ENGINE_VALIDATE_TRACE_CASES="$TRACE_CASES" ENGINE_VALIDATE_TRACES="$TRACES"
 export ENGINE_VALIDATE_TRACE_MAX_TOKENS="$TRACE_MAX_TOKENS" ENGINE_VALIDATE_UI_PORT="$UI_PORT"
+export ENGINE_VALIDATE_MODEL_EXTRAS="$MODEL_EXTRAS"
 
 abort() {
   "${checker[@]}" summary "$RESULTS" >/dev/null 2>&1 || true

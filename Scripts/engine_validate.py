@@ -309,15 +309,18 @@ def ledger(entries, seed=20261118):
     return lines
 
 
+# The schema's keys are sorted below the function wrapper: the engine renders
+# JSON objects with sorted keys and llama.cpp in request order, so only a
+# sorted schema renders byte-identically on both (GGUF identity).
 WEATHER_TOOL = {
     "type": "function",
     "function": {
         "name": "get_weather",
         "description": "Current weather for a city.",
         "parameters": {
-            "type": "object",
-            "properties": {"city": {"type": "string", "description": "City name"}},
+            "properties": {"city": {"description": "City name", "type": "string"}},
             "required": ["city"],
+            "type": "object",
         },
     },
 }
@@ -1426,6 +1429,23 @@ def cmd_summary(args):
     return 0
 
 
+def extra_for(key, extra, model_extras):
+    """The request extras for one model: the global --extra, then that
+    model's --model-extra entries ("key=JSON" lines) on top."""
+    merged = json.loads(extra) if extra else {}
+    for line in (model_extras or "").splitlines():
+        name, _, value = line.partition("=")
+        if name.strip() == key and value.strip():
+            merged.update(json.loads(value))
+    return merged
+
+
+def cmd_extrafor(args):
+    merged = extra_for(args.key, args.extra, args.model_extras)
+    print(json.dumps(merged, sort_keys=True) if merged else "")
+    return 0
+
+
 def cmd_registry(args):
     if args.key == "all":
         print(",".join(PRODUCT_ORDER))
@@ -1500,6 +1520,12 @@ def main(argv=None):
         sp.add_argument("--label")
         sp.add_argument("--out", required=True)
         sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("extrafor")
+    sp.add_argument("key")
+    sp.add_argument("--extra", default="")
+    sp.add_argument("--model-extras", default="")
+    sp.set_defaults(func=cmd_extrafor)
 
     sp = sub.add_parser("ui")
     server(sp)
