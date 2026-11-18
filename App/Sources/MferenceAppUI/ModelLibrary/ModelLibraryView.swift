@@ -277,6 +277,15 @@ struct ModelTableRow: View {
                     .font(MFFont.caption)
                     .foregroundStyle(MFColor.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                // Why a load or download failed, so the person knows what
+                // to fix before Retry (the badge stays short).
+                if let reason = Self.failureLine(entry.state) {
+                    Text(reason)
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.preview)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Text(entry.sizeBytes.map(ModelFormat.bytes) ?? "—")
@@ -313,6 +322,17 @@ struct ModelTableRow: View {
         .padding(.vertical, MFSpacing.m)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(entry.title)
+    }
+}
+
+extension ModelTableRow {
+    /// "Didn't load: ..." / "Download failed: ...", or nil when nothing failed.
+    static func failureLine(_ state: ModelEntryState) -> String? {
+        switch state {
+        case .loadFailed(let message): "Didn't load: \(message)"
+        case .downloadFailed(let message): "Download failed: \(message)"
+        default: nil
+        }
     }
 }
 
