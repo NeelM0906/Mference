@@ -27,6 +27,8 @@ xcuserdata/
 *.pdf
 weights/
 models/
+# The vendored llama.cpp graph builders are source, not weights.
+!Sources/LlamaCpp/src/models/
 Model/
 !Tests/**/Model/
 # Committed parity goldens are small (KiB-scale) .safetensors test fixtures, not weights.

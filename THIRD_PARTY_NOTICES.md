@@ -62,6 +62,28 @@ the block layouts and dequantization order of that commit's
 transliterate its `dequantize_row_*` loops. ggml is under the MIT license; its copyright
 notice is preserved in [`LICENSE-GGML`](LICENSE-GGML).
 
+The `LlamaCpp` target (`Sources/LlamaCpp`) vendors source files of llama.cpp
+at that same commit, byte-identical to upstream and relocated only (public
+headers gathered into `include/`): ggml's core, CPU (Apple arm64) and Metal
+backends with the Metal kernel sources, libllama, and the part of `common/`
+that speculative decoding links against. `Sources/LlamaCpp/vendoring/vendor.sh`
+copies them and verifies them against `vendoring/UPSTREAM.sha256`; three
+version and build-info files are generated from upstream's templates. llama.cpp
+is under the same MIT license as ggml, with the ggml authors' notice preserved
+in [`LICENSE-GGML`](LICENSE-GGML) and in
+[`Sources/LlamaCpp/vendoring/LICENSE-llama.cpp`](Sources/LlamaCpp/vendoring/LICENSE-llama.cpp).
+Individual vendored files carry further notices of their own, kept unchanged
+in the files: for example `ggml/src/ggml-cpu/llamafile/sgemm.cpp` (Mozilla
+Foundation, MIT) and the YaRN RoPE code (Jeffrey Quesnelle and Bowen Peng,
+MIT).
+
+## nlohmann/json
+
+`Sources/LlamaCpp/vendor/nlohmann/json.hpp` and `json_fwd.hpp` are JSON for
+Modern C++ by Niels Lohmann, as vendored by llama.cpp at the commit above,
+under the MIT license; its copyright notice is preserved in
+[`Sources/LlamaCpp/vendoring/LICENSE-nlohmann-json`](Sources/LlamaCpp/vendoring/LICENSE-nlohmann-json).
+
 ## Model weights
 
 Model weights are not included in this repository. The installer downloads a
@@ -154,6 +176,25 @@ reference's arithmetic; nothing was imported from
 `glm53-m3ultra`, revision `90d71e0d`, MIT), which was read as a design
 reference only. Should a kernel be ported from it later, its notice (MIT with
 the ggml authors' copyright) will be added here at that time.
+
+GGUF models run through the `LlamaCpp` target are not installed by
+`MferenceRepack`; they are single files read in place. Two are product models,
+checked against the Hugging Face LFS object ids (SHA-256) on 2026-11-18:
+
+- Quick: `Qwen3.5-4B-UD-Q4_K_XL.gguf` from revision
+  `e87f176479d0855a907a41277aca2f8ee7a09523` of
+  [`unsloth/Qwen3.5-4B-GGUF`](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF),
+  2,912,109,728 bytes, SHA-256
+  `b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7`. Its
+  model card declares `license: apache-2.0`, a quantization of Alibaba's
+  [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B).
+- Deep: `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` from revision
+  `d562806dbafae37109975e970aae91b43e73b440` of
+  [`ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF`](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF),
+  12,120,016,960 bytes, SHA-256
+  `58fd826723939933dc86f45b7fe04545cbc2de1c70f6fe2cdd3858c87a98c12f`. Its
+  model card declares `license: apache-2.0`, a quantization of Alibaba's
+  [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.

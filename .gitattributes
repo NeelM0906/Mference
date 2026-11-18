@@ -1,3 +1,7 @@
 # The vendor chat template is kept verbatim (its SHA-256 is pinned in the
 # fixture); it carries trailing whitespace that git diff --check would flag.
 Tests/Mference/Core/Tokenization/Fixtures/MiniCPM5Tokenizer/chat_template.jinja -whitespace
+# Vendored llama.cpp is kept byte-identical to upstream (verified by
+# Sources/LlamaCpp/vendoring/vendor.sh --check); some upstream files end with a
+# blank line.
+Sources/LlamaCpp/** -whitespace
