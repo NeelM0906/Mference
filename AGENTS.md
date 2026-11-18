@@ -7,9 +7,8 @@ as Unsloth's UD-IQ3_XXS GGUF quantization), and MiniCPM5-2B. The shared core and
 from SSD per token. Qwen 3.8 27B and MiniCPM5-2B are dense and fully
 resident. Through the `MferenceEngine` library, `MferenceServer --library`
 runs GGUF models with llama.cpp linked in-process: Qwen3.5-4B (Unsloth
-UD-Q4_K_XL, the product's Quick model) now, and Qwen3.8-27B (ISTA-DASLab
-GSQ-RCO IQ3_S, Deep) once the llama.cpp backend runs it with MTP draft
-decoding; until then Deep is declined. The product offers five models: Quick,
+UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
+GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers five models: Quick,
 Deep, Qwen 3.6, MiniCPM5 and Maple; see [the engine](docs/ENGINE.md).
 
 ## Scope
