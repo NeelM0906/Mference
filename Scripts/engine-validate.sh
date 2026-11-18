@@ -164,10 +164,12 @@ stop_server() {
   # so a launcher that has to be killed cannot leave them running.
   local started_under=""
   [ -z "$SERVER_PID" ] || started_under=$(descendants "$SERVER_PID")
+  # Never signal /usr/bin/time itself: it ignores SIGINT, and a TERM would
+  # orphan the server it waits for. Signal its child.
   if [ -n "$SERVER_PID" ]; then
     kill -TERM "$SERVER_PID" 2>/dev/null || true
   else
-    kill -TERM "$TIME_PID" 2>/dev/null || true
+    pkill -TERM -P "$TIME_PID" 2>/dev/null || true
   fi
   local waited=0
   while kill -0 "$TIME_PID" 2>/dev/null && [ "$waited" -lt 120 ]; do
@@ -175,7 +177,8 @@ stop_server() {
   done
   if kill -0 "$TIME_PID" 2>/dev/null; then
     note "server ${SERVER_PID:-?} ignored TERM for 60 s; sending KILL"
-    if [ -n "$SERVER_PID" ]; then kill -KILL "$SERVER_PID" 2>/dev/null || true; fi
+    if [ -n "$SERVER_PID" ]; then kill -KILL "$SERVER_PID" 2>/dev/null || true
+    else pkill -KILL -P "$TIME_PID" 2>/dev/null || true; fi
   fi
   local pid
   for pid in $started_under; do
