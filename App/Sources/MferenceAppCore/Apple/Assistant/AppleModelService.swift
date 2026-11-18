@@ -98,7 +98,9 @@ public struct AppleModelService: AppleModelServicing {
                           let key = AssistantAnswerParser.string(value), keys.contains(key) else { continue }
                     mapped[batch[index - 1].messageID] = key
                 }
-                return mapped.isEmpty ? nil : mapped
+                // An answer naming only unknown buckets is still an answer:
+                // those messages are left out, as documented.
+                return mapped
             }
             assignments.merge(result.value) { _, new in new }
             usedModel = usedModel ?? result.model
@@ -124,7 +126,12 @@ public struct AppleModelService: AppleModelServicing {
         let request = AssistantRequest(instructions: AssistantPrompts.mailEvent, prompt: prompt, maximumTokens: 120)
         return try await run(request) { answer -> MailEventSuggestion?? in
             guard let object = AssistantAnswerParser.jsonObject(in: answer) else { return nil }
-            return .some(MailEventSuggestion(json: object, timeZone: timeZone))
+            // Only an explicit "no meeting" (no title) is a valid empty
+            // answer; a meeting whose times do not parse is unreadable, so
+            // the next model gets a try.
+            guard AssistantAnswerParser.string(object["title"]) != nil else { return .some(nil) }
+            guard let suggestion = MailEventSuggestion(json: object, timeZone: timeZone) else { return nil }
+            return .some(suggestion)
         }
     }
 
@@ -150,6 +157,7 @@ public struct AppleModelService: AppleModelServicing {
             }
             do {
                 let answer = try await model.complete(request)
+                try Task.checkCancellation()
                 if let value = parse(answer) {
                     return AssistantResult(value: value, model: model.kind)
                 }
