@@ -1,0 +1,13 @@
+// The C API of the vendored llama.cpp. The C++-only headers in this directory
+// (llama-cpp.h, ggml-cpp.h) are deliberately not part of the module.
+module LlamaCpp {
+    header "ggml.h"
+    header "ggml-alloc.h"
+    header "ggml-backend.h"
+    header "ggml-cpu.h"
+    header "ggml-metal.h"
+    header "ggml-opt.h"
+    header "gguf.h"
+    header "llama.h"
+    export *
+}
