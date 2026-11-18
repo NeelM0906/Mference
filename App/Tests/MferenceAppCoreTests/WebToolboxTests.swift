@@ -334,7 +334,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(!prompt.contains("{{date}}"))
         #expect(prompt.contains("2027"))
         #expect(prompt.contains("untrusted data"))
-        #expect(prompt.contains("<<<WEB CONTENT>>>"))
+        #expect(prompt.contains("<<<WEB CONTENT code>>>"))
         // Earlier versions stay loadable for the evaluation program.
         #expect(try WebAnswersSpec.load(version: 1).version == 1)
     }
