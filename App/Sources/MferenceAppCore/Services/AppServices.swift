@@ -18,6 +18,9 @@ public final class AppServices {
     public let modelContainer: ModelContainer
     /// GGUF product model downloads (Quick, Deep); nil where none are offered.
     public let downloads: DownloadManager?
+    /// U4's Apple surfaces (Scan, Calendar, Mail, Connections); nil only in
+    /// tests that build `AppServices` by hand.
+    public let apple: AppleServices?
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -31,10 +34,12 @@ public final class AppServices {
                 permissions: any PermissionBroker,
                 modelContainer: ModelContainer,
                 downloads: DownloadManager? = nil,
+                apple: AppleServices? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
         self.engine = engine
         self.downloads = downloads
+        self.apple = apple
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -73,11 +78,13 @@ public final class AppServices {
         let downloads = DownloadManager(
             policy: DownloadManager.Policy(isOffline: { await MainActor.run { settings.offlineMode } }),
             onInstalled: { _ in await engine.refreshCatalog() })
+        let permissions = LivePermissionBroker(presentReason: presentPermissionReason)
         return AppServices(engine: engine,
                            settings: settings,
-                           permissions: LivePermissionBroker(presentReason: presentPermissionReason),
+                           permissions: permissions,
                            modelContainer: container,
                            downloads: downloads,
+                           apple: AppleServices.live(engine: engine, broker: permissions, container: container),
                            storeError: storeError,
                            idleUnload: idleUnload)
     }
@@ -97,11 +104,13 @@ public final class AppServices {
         let downloads = DownloadManager(
             destination: FileManager.default.temporaryDirectory.appending(path: "mference-preview-downloads"),
             allowedHosts: [])
+        let container = try! AppModelContainer.inMemory()
         return AppServices(engine: engine,
                            settings: settings,
                            permissions: permissions,
-                           modelContainer: try! AppModelContainer.inMemory(),
+                           modelContainer: container,
                            downloads: downloads,
+                           apple: AppleServices.preview(engine: engine, container: container),
                            idleUnload: idleUnload)
     }
 

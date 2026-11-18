@@ -1,6 +1,7 @@
 import Foundation
 import MferenceAppCore
 @testable import MferenceAppUI
+import SwiftUI
 import Testing
 
 /// Polls `condition` for up to twenty seconds: the UI suite shares the main
@@ -175,6 +176,26 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         await connections.refresh()
         #expect(!broker.calls.contains { if case .request = $0 { true } else { false } })
         #expect(connections.connectionState(.appleCalendar) == .notConnected)
+    }
+
+    @Test func appleConnectionStatesMapForSettings() async {
+        #expect(AppleConnections.connectionState(.connected) == .connected)
+        #expect(AppleConnections.connectionState(.notConnected) == .notConnected)
+        #expect(AppleConnections.connectionState(.needsSystemSettings) == .needsSystemSettings)
+        #expect(AppleConnections.connectionState(.unsupported(detail: "new Mail format")) == .notConnected)
+        // The preview's Apple services read nothing and ask nothing.
+        let services = AppServices.preview()
+        let connections = try? #require(services.apple?.connections)
+        await connections?.refresh()
+        #expect(connections?.connectionState(.appleCalendar) == .notConnected)
+    }
+
+    @Test func environmentHelperInjectsEverything() {
+        let services = AppServices.preview()
+        let screens = ScreenModels.live(services: services)
+        // Builds the modifier chain; the screens read these from the environment.
+        _ = Text("root").mferenceEnvironment(services: services, screens: screens)
+        #expect(services.apple != nil)
     }
 
     @Test func liveScreenModelsFillEverySlot() {
