@@ -727,6 +727,11 @@ public enum ManifestReader {
         } catch {
             throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
         }
+        // A retired checkpoint on a kept architecture (Swift-Qwen3.8 is a
+        // `qwen38` install) would otherwise load as that kept family.
+        if retiredCheckpoints[manifest.modelID] != nil {
+            throw ModelError.retiredCheckpoint(modelID: manifest.modelID)
+        }
         // A manifest without `arch.family` was a Gemma 4 install, a retired
         // family, as is every name in `retiredFamilies`.
         guard let raw = manifest.arch.family else { throw ModelError.retiredFamily(family: "gemma4") }
@@ -792,6 +797,58 @@ public enum ManifestReader {
         "gemma4", "deepseekV4Flash", "inklingSmall", "flint",
         "qwen38flashnext", "qwen38flashnextudiq3xxs", "glm53Flash",
     ]
+
+    /// Retired checkpoints whose installs carry a kept `arch.family`, keyed by
+    /// `manifest.modelID`, valued with the retired family's name. Refused by
+    /// ID (`ModelError.retiredCheckpoint`) because their family would load.
+    public static let retiredCheckpoints: [String: String] = [
+        "swift-qwen3.8-27b-int4g64": "Swift-Qwen3.8",
+    ]
+
+    /// An install on disk that belongs to a retired family: the identifier a
+    /// library lists it under and the reason it is not served.
+    public struct RetiredInstall: Equatable, Sendable {
+        public let identifier: String
+        public let detail: String
+    }
+
+    /// Classifies a `manifest.json` as a retired install, or nil when it is
+    /// not one (or cannot be read: the caller's own checks report that).
+    /// Library probes use it ahead of `peekFamily` so a retired install is
+    /// listed as not runnable rather than as a broken one:
+    /// - a retired checkpoint ID (`retiredCheckpoints`), under that ID;
+    /// - a manifest without `arch.family` (the original Gemma 4 format) that
+    ///   names a `modelID`, under that ID;
+    /// - a retired `arch.family` (`retiredFamilies`), under that family name.
+    public static func retiredInstall(manifestURL: URL,
+                                      maxBytes: UInt64 = defaultMaxBytes) -> RetiredInstall? {
+        struct Peek: Decodable {
+            struct Arch: Decodable { let family: String? }
+            let arch: Arch?
+            let modelID: String?
+        }
+        guard let size = try? metadataFileSize(manifestURL, fileName: "manifest.json"),
+              size <= maxBytes,
+              let data = try? Data(contentsOf: manifestURL),
+              let peek = try? JSONDecoder().decode(Peek.self, from: data) else { return nil }
+        let notServed = "(docs/RETIRED_FAMILIES.md); the install is left on disk but not served"
+        if let id = peek.modelID, let name = retiredCheckpoints[id] {
+            return RetiredInstall(identifier: id,
+                                  detail: "\(id) is a \(name) checkpoint, a retired family \(notServed)")
+        }
+        guard let arch = peek.arch else { return nil }
+        guard let raw = arch.family else {
+            // Every Gemma 4 install names its checkpoint; a manifest without
+            // one is not an install of any family, so it stays incomplete.
+            guard let id = peek.modelID else { return nil }
+            return RetiredInstall(identifier: id,
+                                  detail: "\(id) has no arch.family: a Gemma 4 install, a retired family \(notServed)")
+        }
+        if retiredFamilies.contains(raw) {
+            return RetiredInstall(identifier: raw, detail: "\(raw) is a retired family \(notServed)")
+        }
+        return nil
+    }
 
     /// The gate lookup, factored out of `peekFamily` so it can be exercised
     /// against an injected table, so the mechanism stays testable whatever the
