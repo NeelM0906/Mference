@@ -5,25 +5,36 @@
 # alongside. Every download is checked against the SHA-256 in pins.env or
 # wheels.lock before anything from it is used.
 #
-# Usage: App/Scripts/searxng/prepare.sh [--out DIR] [--cache DIR]
+# Usage: App/Scripts/searxng/prepare.sh [--fetch] [--force] [--out DIR] [--cache DIR]
+#   (default) offline: uses only the hash-verified cache and never touches the
+#            network; fails, naming the missing file, if anything is absent
+#            or does not match its SHA-256. This is how bundle.sh calls it.
+#   --fetch  also download what the cache lacks (pinned URLs, verified before
+#            use). Run it once by hand, e.g. after changing a pin.
+#   --force  rebuild the runtime even when its MANIFEST already matches the pins
 #   --out    where the runtime goes (default App/Resources/SearXNG/runtime,
 #            gitignored); bundle.sh copies App/Resources/SearXNG into
 #            Mference.app/Contents/Resources/SearXNG and signs it
 #   --cache  verified downloads, reused across runs (default App/.build/searxng-cache)
 #
-# Re-running is cheap: cached files are re-verified, the output is rebuilt.
+# Re-running is cheap: when the runtime's MANIFEST matches the pins and the
+# cached files verify, nothing is rebuilt.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$(cd "$HERE/../.." && pwd)"
 OUT="$APP_DIR/Resources/SearXNG/runtime"
 CACHE="$APP_DIR/.build/searxng-cache"
+FETCH=0
+FORCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --fetch) FETCH=1; shift ;;
+        --force) FORCE=1; shift ;;
         --out) OUT="$2"; shift 2 ;;
         --cache) CACHE="$2"; shift 2 ;;
-        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
 done
@@ -46,13 +57,23 @@ trap cleanup EXIT
 
 sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
 
-# fetch URL SHA256 NAME: verified file at $CACHE/NAME. A fresh download lands
-# in its own new empty directory and moves into the cache only once verified.
+# fetch URL SHA256 NAME: verified file at $CACHE/NAME. Offline (the default)
+# it only verifies the cache. With --fetch a fresh download lands in its own
+# new empty directory and moves into the cache only once verified.
 fetch() {
     local url="$1" expected="$2" name="$3"
     local target="$CACHE/$name"
     if [[ -f "$target" ]] && [[ "$(sha256 "$target")" == "$expected" ]]; then
         return 0
+    fi
+    if [[ "$FETCH" != 1 ]]; then
+        if [[ -f "$target" ]]; then
+            echo "error: cached $name does not match its pinned SHA-256 ($expected)." >&2
+        else
+            echo "error: $name is not in the SearXNG cache ($CACHE)." >&2
+        fi
+        echo "Offline mode never downloads. Run once: App/Scripts/searxng/prepare.sh --fetch" >&2
+        exit 2
     fi
     rm -f "$target"
     local staging file
@@ -85,6 +106,17 @@ while read -r file url hash; do
     [[ -z "$file" || "$file" == \#* ]] && continue
     fetch "$url" "$hash" "wheels/$file"
 done < "$HERE/wheels.lock"
+
+# The MANIFEST names every pin; a runtime built from these pins is reused.
+EXPECTED_MANIFEST="python=$PYTHON_VERSION+$PYTHON_RELEASE sha256=$PYTHON_SHA256
+searxng=$SEARXNG_COMMIT sha256=$SEARXNG_SHA256
+wheels=$(grep -c '\.whl' "$HERE/wheels.lock") lock_sha256=$(sha256 "$HERE/wheels.lock")
+prepare_sha256=$(sha256 "$0") settings_sha256=$(sha256 "$APP_DIR/Resources/SearXNG/settings.yml")"
+if [[ "$FORCE" != 1 && -f "$OUT/MANIFEST" && -x "$OUT/python/bin/python3" ]] \
+    && [[ "$(cat "$OUT/MANIFEST")" == "$EXPECTED_MANIFEST" ]]; then
+    echo "==> up to date: $OUT"
+    exit 0
+fi
 
 echo "==> assembling $OUT"
 rm -rf "$OUT"
@@ -144,15 +176,12 @@ rm -rf "$SITE"/pip "$SITE"/pip-*.dist-info \
        "$OUT/python/share"
 "$PY" -I -m compileall -q -j 0 -x 'lib2to3/tests' "$SITE" "$STDLIB" >/dev/null
 
-cat > "$OUT/MANIFEST" <<EOF
-python=$PYTHON_VERSION+$PYTHON_RELEASE sha256=$PYTHON_SHA256
-searxng=$SEARXNG_COMMIT sha256=$SEARXNG_SHA256
-wheels=$(grep -c '\.whl' "$HERE/wheels.lock") lock_sha256=$(sha256 "$HERE/wheels.lock")
-EOF
-
 # Smoke: the package imports with the bundled interpreter, isolated.
 SEARXNG_SETTINGS_PATH="$OUT/settings.yml" SEARXNG_SECRET=prepare-check \
-    "$PY" -I -c 'import searx.webapp' >/dev/null 2>&1 \
+    "$PY" -I -B -c 'import searx.webapp' >/dev/null 2>&1 \
     || { echo "searx.webapp does not import with the bundled Python" >&2; exit 1; }
+
+# Written last: a runtime with a MANIFEST is complete and passed the smoke.
+printf '%s\n' "$EXPECTED_MANIFEST" > "$OUT/MANIFEST"
 
 echo "==> done: $OUT ($(du -sh "$OUT" | awk '{print $1}'))"
