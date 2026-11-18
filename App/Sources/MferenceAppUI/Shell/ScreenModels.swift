@@ -9,8 +9,13 @@ import SwiftUI
 @Observable
 public final class ScreenModels {
     public var library: (any ModelLibraryModel)?
+    public var memory: (any MemoryListModel)?
+    public var settings: (any AppSettingsModel)?
 
-    public init(library: (any ModelLibraryModel)? = nil) {
+    public init(library: (any ModelLibraryModel)? = nil, memory: (any MemoryListModel)? = nil,
+                settings: (any AppSettingsModel)? = nil) {
         self.library = library
+        self.memory = memory
+        self.settings = settings
     }
 }

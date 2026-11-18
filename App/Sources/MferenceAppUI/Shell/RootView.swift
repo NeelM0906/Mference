@@ -83,6 +83,7 @@ public struct RootView: View {
 /// The screen for one section.
 struct SectionContent: View {
     let section: AppSection
+    @Environment(ScreenModels.self) private var screenModels: ScreenModels?
 
     var body: some View {
         Group {
@@ -91,7 +92,7 @@ struct SectionContent: View {
             case .mail: MailView()
             case .calendar: CalendarView()
             case .scan: ScanView()
-            case .settings: SettingsView()
+            case .settings: SettingsView(library: screenModels?.library, memory: screenModels?.memory, settings: screenModels?.settings)
             case .notes, .errands: ComingLaterView(section: section)
             }
         }
