@@ -28,11 +28,11 @@
 #
 # SearXNG hook (team U3): when U3's App/Scripts/searxng/prepare.sh exists,
 # bundle.sh runs `prepare.sh --offline`, which builds the relocatable runtime
-# into App/.build/searxng/SearXNG from the already-verified download cache
+# into App/Resources/SearXNG/runtime from the already-verified download cache
 # only. bundle.sh never downloads: if the cache is missing it stops and says
 # to run `App/Scripts/searxng/prepare.sh --fetch` once (pinned, SHA-256-checked
-# downloads, decision P10). Without prepare.sh it falls back to
-# App/Resources/SearXNG/. It copies that directory verbatim (ditto,
+# downloads, decision P10). It copies App/Resources/SearXNG (runtime, licence
+# texts, notices) verbatim (ditto,
 # so symlinks and modes survive) to Contents/Resources/SearXNG and signs every
 # Mach-O file inside it ad hoc before sealing the app, so nothing else is
 # needed here. Keep large or downloaded payloads gitignored inside that
@@ -61,15 +61,28 @@ if [[ -z "${MFERENCE_LOCK:-}" ]]; then
     fi
 fi
 
+# App builds share the machine only with a free, unreserved lock or a build
+# hold (TEAM_RULES update 2026-11-18 ~21:00Z). A build hold's purpose starts
+# with its workstream (eng, app, a1-a4) and has "build" as a word, or says
+# "eng build" / "app build"; "post-build smoke" and other model runs do not
+# count. Plain patterns only (BSD grep has no \b).
+app_build_allowed() {
+    local lock_text="$1"
+    if grep -q '^reserved: ' <<<"$lock_text"; then
+        return 1
+    fi
+    if grep -q '^machine lock: free' <<<"$lock_text"; then
+        return 0
+    fi
+    grep -qiE '^ *purpose=((eng|app|a[1-4])( [^ ]+)* build( |$)|.*(eng|app) build( |$))' <<<"$lock_text"
+}
+
 if [[ "$build" == 1 ]]; then
     build_cmd=(swift build -c release -j 4 --package-path "$APP_DIR" --product MferenceMac)
     if [[ -n "${MFERENCE_LOCK:-}" ]]; then
         lock_status="$("$MFERENCE_LOCK" status)"
-        # App builds share the machine only with a free lock or a build hold
-        # (TEAM_RULES update 2026-11-18 ~21:00Z).
-        if ! grep -q '^machine lock: free' <<<"$lock_status" \
-            && ! grep -qiE '^ *purpose=.*\bbuild\b' <<<"$lock_status"; then
-            echo "bundle.sh: the machine lock is held by a run, not a build; not building now:" >&2
+        if ! app_build_allowed "$lock_status"; then
+            echo "bundle.sh: the machine is held or reserved for a run, not a build; not building now:" >&2
             echo "$lock_status" >&2
             exit 75
         fi
@@ -86,18 +99,16 @@ for required in Mference_Mference Mference_LlamaCpp; do
     [[ -d "$BIN_DIR/$required.bundle" ]] || { echo "bundle.sh: $BIN_DIR/$required.bundle not found" >&2; exit 1; }
 done
 
-# SearXNG (U3): prepared from the verified cache only, never downloaded here.
+# SearXNG (U3): prepare.sh builds App/Resources/SearXNG/runtime from its
+# hash-verified cache only (--offline, also its default). It never downloads
+# here: a missing or mismatched cache exits non-zero with the fix
+# (`App/Scripts/searxng/prepare.sh --fetch`), and bundle.sh stops.
 SEARXNG_PREPARE="$APP_DIR/Scripts/searxng/prepare.sh"
-SEARXNG_SRC=""
 if [[ -x "$SEARXNG_PREPARE" ]]; then
-    SEARXNG_SRC="$APP_DIR/.build/searxng/SearXNG"
-    if ! "$SEARXNG_PREPARE" --offline --out "$SEARXNG_SRC"; then
-        echo "bundle.sh: SearXNG is not prepared from a verified cache." >&2
-        echo "bundle.sh: run App/Scripts/searxng/prepare.sh --fetch once (it downloads the pinned runtime), then bundle again." >&2
+    if ! "$SEARXNG_PREPARE" --offline; then
+        echo "bundle.sh: SearXNG is not prepared; see the line above (run its --fetch once), then bundle again." >&2
         exit 1
     fi
-elif [[ -d "$RESOURCES_SRC/SearXNG" ]]; then
-    SEARXNG_SRC="$RESOURCES_SRC/SearXNG"
 fi
 
 STAGING="$OUT_DIR/Mference.app.staging"
@@ -122,8 +133,8 @@ if [[ -d "$RESOURCES_SRC/Fonts" ]]; then
 fi
 
 # SearXNG hook (U3), see the header.
-if [[ -n "$SEARXNG_SRC" ]]; then
-    ditto --norsrc --noextattr "$SEARXNG_SRC" "$STAGING/Contents/Resources/SearXNG"
+if [[ -d "$RESOURCES_SRC/SearXNG" ]]; then
+    ditto --norsrc --noextattr "$RESOURCES_SRC/SearXNG" "$STAGING/Contents/Resources/SearXNG"
     while IFS= read -r -d '' candidate; do
         if [[ "$(file -b "$candidate")" == *Mach-O* ]]; then
             codesign --force --sign - --timestamp=none "$candidate"
