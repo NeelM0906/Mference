@@ -5,10 +5,11 @@
 # alongside. Every download is checked against the SHA-256 in pins.env or
 # wheels.lock before anything from it is used.
 #
-# Usage: App/Scripts/searxng/prepare.sh [--fetch] [--force] [--out DIR] [--cache DIR]
-#   (default) offline: uses only the hash-verified cache and never touches the
-#            network; fails, naming the missing file, if anything is absent
-#            or does not match its SHA-256. This is how bundle.sh calls it.
+# Usage: App/Scripts/searxng/prepare.sh [--offline | --fetch] [--force] [--out DIR] [--cache DIR]
+#   --offline (also the default) uses only the hash-verified cache and never
+#            touches the network; fails with exit 2, naming the missing file,
+#            if anything is absent or does not match its SHA-256. bundle.sh
+#            calls `prepare.sh --offline`.
 #   --fetch  also download what the cache lacks (pinned URLs, verified before
 #            use). Run it once by hand, e.g. after changing a pin.
 #   --force  rebuild the runtime even when its MANIFEST already matches the pins
@@ -31,10 +32,11 @@ FORCE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --fetch) FETCH=1; shift ;;
+        --offline) FETCH=0; shift ;;
         --force) FORCE=1; shift ;;
         --out) OUT="$2"; shift 2 ;;
         --cache) CACHE="$2"; shift 2 ;;
-        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
 done
