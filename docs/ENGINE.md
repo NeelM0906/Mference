@@ -154,3 +154,63 @@ the engine and of its clients. It loads nothing. A model is a list of events,
 with latches to hold a load or a generation at a known point. Its journal
 records load, unload, deinit, and generation order, and counts the most
 models live and the most generations running at once.
+
+## Discovery
+
+`EngineCatalogDiscovery.discover` builds the catalog from what is on disk.
+It reads manifests, install receipts, and GGUF headers only, and never opens
+a weight file or a tensor.
+
+- **Library roots**, in order: the `Mference.libraryRoot` default (or
+  `MFERENCE_LIBRARY_ROOT`), `~/llm-models`, the package checkout's
+  `scratch/`, and `~/Library/Application Support/Mference`. These are the
+  roots `MferenceServer --library` has always scanned. Each root
+  contributes itself and its immediate subdirectories as `.gturbo`
+  candidates.
+- **`.gturbo` installs** pass `EngineInstallProbe`: a manifest whose
+  architecture matches its family's baseline, `packed_experts/layout.json`,
+  and an install receipt bound to the manifest. These are the same checks as
+  the server's probe. A partial install, or a family with no runner, is
+  reported as skipped with the reason.
+- **GGUF files** are the `.gguf` files directly in each root and in
+  `~/llm-models/gguf`. `EngineGGUFReader` reads only the header: the
+  architecture, `general.name`, `<arch>.context_length`, the tensor count,
+  and the `blk.N.nextn.*` tensors of an MTP head. Split GGUFs
+  (`-00001-of-0000N`) are skipped.
+
+### Product allowlist
+
+With the default scope (`EngineCatalogScope.product`), only the five
+product models are listed:
+
+- A native product model is the install whose family identifier is the
+  slot's ID. When several are found, the one in the earliest root wins,
+  then the one labelled `qwen36`, `minicpm5`, or `maple`, then path order.
+  The others are skipped, and the skip names the winner.
+- A product GGUF is recognized by its exact file name from D1. It needs a
+  readable header with a context length. Deep also needs its MTP tensors,
+  so a renamed non-MTP file is refused.
+- Everything else found is skipped with "not in the product model list". A
+  request for its ID gets that reason rather than "unknown model".
+
+The developer scope `.all` (the server's `--catalog all`) also lists every
+other runnable model. Native installs keep the server's identifier rules:
+the family ID, or `<id>@<directory basename>` when the ID is shared or
+already taken by a product model, then `#n`. A GGUF that is not a product
+file is listed as its lowercased file name without `.gguf`.
+
+## Native backend
+
+`NativeBackend` runs `.gturbo` installs. Its model, `NativeEngineModel`, is
+the server's `ServerModelSession` lifted unchanged:
+
+- load: `Model.load`, then `ForwardRunnerFactory.make`
+- render with the install's tokenizer
+- single- or multi-prefix prompt reuse
+- structured decoding and stop strings
+- the shared `runRawCompletion` loop
+
+It is an adapter, so its output is byte-identical to the server's. `unload()` drops the model, runner, KV, and prompt caches, so the
+memory is released before the host loads the next model. The backend's
+operator notices (`--verify` fallback, prompt-cache sheds) reach the
+`onNotice` callback for the server's log.
