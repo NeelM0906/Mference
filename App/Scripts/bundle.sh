@@ -161,4 +161,32 @@ mv "$STAGING" "$APP_BUNDLE"
 
 "$APP_BUNDLE/Contents/MacOS/Mference" --verify-bundle
 
+# The engine finds its resource bundles through SwiftPM's generated
+# accessors: Swift `Bundle.module` (Mference) and the Objective-C
+# SWIFTPM_MODULE_BUNDLE that ggml-metal uses (LlamaCpp). Check that this
+# toolchain's accessors search the app's Contents/Resources first, where the
+# bundles are placed, rather than relying on a build-directory fallback.
+check_accessor() {
+    local pattern="$1" name="$2" needle="$3" found=0 file
+    while IFS= read -r -d '' file; do
+        found=1
+        if ! grep -qF "$needle" "$file"; then
+            echo "bundle.sh: $file does not search $needle; the moved app would not find its resources" >&2
+            exit 1
+        fi
+    done < <(find "$APP_DIR/.build" -path "*Release*" -path "$pattern" -name "$name" -print0 2>/dev/null)
+    if [[ "$found" == 0 ]]; then
+        echo "bundle.sh: no release resource accessor matching $pattern to check" >&2
+        exit 1
+    fi
+}
+check_accessor '*LlamaCpp*' 'resource_bundle_accessor.m' 'NSBundle.mainBundle.resourceURL'
+check_accessor '*/Mference-t*' 'resource_bundle_accessor.swift' 'Bundle.main.resourceURL'
+
+# Moved-app check: a copy outside the build tree still finds every bundle.
+MOVED_DIR="$(mktemp -d)"
+ditto "$APP_BUNDLE" "$MOVED_DIR/Mference.app"
+"$MOVED_DIR/Mference.app/Contents/MacOS/Mference" --verify-bundle
+rm -rf "${MOVED_DIR:?}"
+
 echo "bundle.sh: $APP_BUNDLE"
