@@ -3,12 +3,10 @@
 #
 #   App/Scripts/bundle.sh [--no-build]
 #
-# 1. Builds `MferenceMac` in release with -j 4 (skipped with --no-build). On
-#    the shared Mac it follows the app build rule (TEAM_RULES update
-#    2026-11-18): `lock.sh build -- swift build ...`, not wrapped in
-#    `lock.sh run`, and only while `lock.sh status` shows a free lock or a
-#    build hold (exit 75 otherwise). `lock.sh build` itself refuses (exit 3)
-#    while the quiet flag is set. Without a lock.sh it builds directly.
+# 1. Builds `MferenceMac` in release with -j 4 (skipped with --no-build),
+#    directly. With MFERENCE_LOCK set to a lock.sh it builds only while that
+#    lock is free and unreserved or held for a build (exit 75 otherwise),
+#    through `lock.sh build` (exit 3 while the quiet flag is set).
 # 2. Lays out the bundle:
 #      Contents/MacOS/Mference                 the MferenceMac executable
 #      Contents/Info.plist, PkgInfo            from App/Resources/Info.plist
@@ -53,14 +51,9 @@ for arg in "$@"; do
     esac
 done
 
-# The shared lock lives in the main checkout's scratch/, also from worktrees.
-if [[ -z "${MFERENCE_LOCK:-}" ]]; then
-    common_dir="$(git -C "$APP_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-    if [[ -n "$common_dir" && -x "$(dirname "$common_dir")/scratch/program/lock.sh" ]]; then
-        MFERENCE_LOCK="$(dirname "$common_dir")/scratch/program/lock.sh"
-    fi
-fi
-
+# App builds run without the machine lock (TEAM_RULES "GO PARALLEL",
+# 2026-11-18). Set MFERENCE_LOCK to a lock.sh to build under its rules
+# instead (free lock or a build hold, never with the quiet flag set).
 # App builds share the machine only with a free, unreserved lock or a build
 # hold (TEAM_RULES update 2026-11-18 ~21:00Z). A build hold's purpose starts
 # with its workstream (eng, app, a1-a4) and has "build" as a word, or says
