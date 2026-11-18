@@ -229,12 +229,12 @@ check_platform() {
   [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || fail "Mference requires an Apple Silicon Mac (arm64)."
   local os_version swift_version swift_major swift_minor
   os_version="$(sw_vers -productVersion)"
-  [[ "${os_version%%.*}" -ge 15 ]] || fail "macOS 15 or newer is required; found $os_version"
-  command -v swift >/dev/null 2>&1 || fail "Swift is missing; install Xcode 16.3+ or matching Command Line Tools."
+  [[ "${os_version%%.*}" -ge 26 ]] || fail "macOS 26 or newer is required; found $os_version"
+  command -v swift >/dev/null 2>&1 || fail "Swift is missing; install Xcode 26+ or matching Command Line Tools."
   swift_version="$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9]*\.[0-9]*\).*/\1/p' | head -1)"
   [[ -n "$swift_version" ]] || fail "could not determine Swift version; check xcode-select -p and DEVELOPER_DIR"
   swift_major="${swift_version%%.*}"; swift_minor="${swift_version#*.}"
-  [[ "$swift_major" -gt 6 || ( "$swift_major" -eq 6 && "$swift_minor" -ge 1 ) ]] || fail "Swift 6.1+ required; found $swift_version"
+  [[ "$swift_major" -gt 6 || ( "$swift_major" -eq 6 && "$swift_minor" -ge 2 ) ]] || fail "Swift 6.2+ required; found $swift_version"
   note "macOS $os_version; Swift $swift_version; Apple Silicon"
 }
 
@@ -358,7 +358,7 @@ check_family() {
 
 cmd_doctor() {
   if [[ "$dry_run" -eq 1 ]]; then
-    echo "would check: Apple Silicon, macOS 15+, Swift 6.1+, no model owner, free ports $server_port/$webui_port, uv or pinned Open WebUI, disk and memory"
+    echo "would check: Apple Silicon, macOS 26+, Swift 6.2+, no model owner, free ports $server_port/$webui_port, uv or pinned Open WebUI, disk and memory"
     exit 0
   fi
   check_platform
