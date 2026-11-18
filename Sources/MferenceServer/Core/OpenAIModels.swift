@@ -260,11 +260,28 @@ public struct OpenAIModelList: Codable, Equatable, Sendable {
         public let ownedBy: String
         /// Context window for prompt plus completion, in tokens; vLLM's name.
         public let maxModelLen: Int
+        /// What runs the model: `mference` or `llama.cpp` (`EngineKind`).
+        /// Metadata for a model picker; it changes nothing about the API.
+        public let engine: String
 
         enum CodingKeys: String, CodingKey {
-            case id, object, created
+            case id, object, created, engine
             case ownedBy = "owned_by"
             case maxModelLen = "max_model_len"
+        }
+
+        public init(id: String,
+                    object: String,
+                    created: Int,
+                    ownedBy: String,
+                    maxModelLen: Int,
+                    engine: String = "mference") {
+            self.id = id
+            self.object = object
+            self.created = created
+            self.ownedBy = ownedBy
+            self.maxModelLen = maxModelLen
+            self.engine = engine
         }
     }
 

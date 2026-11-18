@@ -11,11 +11,12 @@ the **user interface** — a browser, a model picker, chats that persist — sta
 at [The Mference UI (Open WebUI)](OPEN_WEBUI.md) and run `./mference-ui.sh`,
 which does everything below for you.
 
-The `--library` mode that UI runs on serves every installed model from this one
-process, listing them all in `/v1/models` and swapping the resident model in
-place when a request names a different one. It changes nothing about the mode
+The `--library` mode that UI runs on serves the product models from this one
+process. It runs on the [engine](ENGINE.md) (`EngineCatalog` and `EngineHost`),
+lists the product models in `/v1/models`, and swaps the resident model in place
+when a request names a different one. It changes nothing about the mode
 described here, which is what runs whenever `--library` is absent. The UI guide
-covers library mode, its model identifiers, and the cost of a swap.
+covers library mode, its model identifiers, `--catalog`, and the cost of a swap.
 
 ## Start the server
 
@@ -299,8 +300,12 @@ Endpoints:
 Each model in `GET /v1/models` carries `max_model_len`, vLLM's field: the
 context window for prompt plus completion that the model runs with. That is
 the numeric `--max-context`, or with `--max-context max` the model family's
-native context. In library mode it comes from the install index, so listing
+native context. In library mode it comes from the engine catalog, so listing
 loads nothing and answers during a model load.
+
+Each model also carries `engine`: what runs it, `mference` (a `.gturbo`
+install on Mference's own runtime) or `llama.cpp` (a GGUF file). It is
+metadata for a model picker and changes nothing else about the API.
 
 Chat Completions supports JSON and Server-Sent Events responses. Set
 `"stream": true` for streaming. Set

@@ -177,16 +177,19 @@ An install the runtime cannot execute is skipped rather than listed; see
 ```
 
 It runs the server's own discovery — `MferenceServer --library --list-models` —
-so there is one source of truth for what counts as an install, and prints:
+so there is one source of truth for what counts as an install, and prints the
+models the catalog serves:
 
 ```text
-MODEL                 FAMILY  BYTES        PATH
-gemma-4-26b-a4b-it    gemma4  14291921884  /Users/you/Mference/scratch/gemma4.gturbo
-qwen3.6-35b-a3b       qwen36  19546491213  /Users/you/Mference/scratch/qwen36.gturbo
+MODEL                   ENGINE          BYTES  PATH
+maple-preview-2bit-mlx  mference   6587805726  /Users/you/llm-models/maple.gturbo
+minicpm5-2b-int4g64     mference   1425982249  /Users/you/llm-models/minicpm5.gturbo
+qwen3.6-35b-a3b         mference  19551395114  /Users/you/llm-models/qwen36.gturbo
 ```
 
-`BYTES` is the installed size the verified-install receipt records, or `-` when
-the receipt carries no sizes. Nothing is loaded and no port is bound. With
+`ENGINE` is what runs the model (`mference` or `llama.cpp`), and `BYTES` is the
+installed size the verified-install receipt records, or `-` when the receipt
+carries no sizes. Nothing is loaded and no port is bound. With
 nothing installed the output is the single line `no models installed`, and the
 launcher adds the command that fixes that. Directories discovery declined —
 partial, locked, or gated installs — are reported on stderr with the reason.
@@ -199,9 +202,10 @@ Choosing a different model in the picker sends a normal
 1. The generation that is running finishes, and so does everything already
    queued ahead of the request. Nothing is unloaded while a generation is in
    flight.
-2. The resident `ServerModelSession` is released — Metal buffers, expert cache,
-   and KV with it — *before* the replacement is loaded, so peak memory is one
-   model, not two.
+2. The resident model is released — Metal buffers, expert cache, and KV with
+   it — *before* the replacement is loaded, so peak memory is one model, not
+   two. The [engine host](ENGINE.md#the-host) owns the model and enforces this
+   order.
 3. The requested model loads, and the request is then rendered and served by it.
 
 The swapping request **blocks** until the model is ready rather than returning
@@ -212,9 +216,14 @@ minutes, so **the first token after a switch is slow — sometimes very slow**. 
 protocol would be one the API does not describe. The swap is logged:
 
 ```text
-[2026-09-10T05:04:11Z] swap started from=gemma-4-26b-a4b-it to=qwen3.6-35b-a3b
-[2026-09-10T05:05:37Z] swap finished model=qwen3.6-35b-a3b in 86.4s
+[2026-09-10T05:04:11Z] swap started from=minicpm5-2b-int4g64 to=qwen3.6-35b-a3b
+[2026-09-10T05:04:12Z] model released model=minicpm5-2b-int4g64 reason=swap
+[2026-09-10T05:05:37Z] swap finished model=qwen3.6-35b-a3b in 85.1s
 ```
+
+The `model released` line appears once the old model's memory is gone and
+before the new load begins; `swap finished` times the load alone. At shutdown
+the resident model is released the same way (`reason=shutdown`).
 
 `/health` stays answerable throughout and reports the target:
 
@@ -283,8 +292,8 @@ defaults. Nothing in it is sent anywhere — both processes are loopback-only.
 exactly as [the server guide](OPENAI_SERVER.md) describes: one model per process,
 named by `--model`.
 
-With `--library`, the server scans for completed installs and serves those
-with runtime support:
+With `--library`, the server scans for completed installs and serves the
+product models among them through the [engine](ENGINE.md):
 
 - `--library` with no value scans the default roots: the `Mference.libraryRoot`
   user default (or the `MFERENCE_LIBRARY_ROOT` environment variable) if set,
@@ -307,13 +316,29 @@ is reported once on stderr, with the reason:
 [2026-09-10T05:03:39Z] library ready models=gemma-4-26b-a4b-it,qwen3.6-35b-a3b
 ```
 
+### The product catalog
+
+By default (`--catalog product`) library mode lists only the models the product
+offers, under their stable identifiers: `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64`
+and `maple-preview-2bit-mlx` among the native installs, and the GGUF models
+`qwen3.5-4b` (Quick) and `qwen3.8-27b` (Deep) once the llama.cpp backend is in
+the build. Every other runnable install — Flash-Next, Gemma 4, a second install
+of a product model — is declined: the skip line says so, and a request naming
+it gets HTTP 400 `model_not_runnable` with a message that points to
+`--catalog all`. When two installs of one product model exist, the one whose
+directory is named after the model (`qwen36.gturbo`) is served.
+
+`--catalog all` is a developer switch: it lists every runnable install under
+its discovery identifier, as described below.
+
 The library is fixed at startup, and an empty one is not an error: the server
 starts, `/v1/models` is an empty list, and installing a model takes effect the
 next time the launcher runs.
 
 ### Model identifiers
 
-An install alone in its family is advertised under that family's identifier —
+With `--catalog all`, an install alone in its family is advertised under that
+family's identifier —
 `gemma-4-26b-a4b-it`, `qwen3.6-35b-a3b`, `qwen3.8-27b-4bit`,
 `deepseek-v4-flash-2bit-dq`, `inkling-small-4bit`, `maple-preview-2bit-mlx`,
 `qwen3.8-flash-next-int4g64`, `minicpm5-2b-int4g64`.

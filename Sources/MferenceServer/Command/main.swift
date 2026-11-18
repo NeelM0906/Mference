@@ -27,47 +27,26 @@ do {
         let index = ServerLibraryDiscovery.discover(
             roots: roots,
             explicitModelDirectory: explicitModelURL)
-        index.logDiscovery()
+        let library = ServerModelLibrary.serving(index, arguments: arguments)
+        library.logDiscovery()
         if arguments.listModels {
             // Discovery is the whole job: nothing is loaded, no port is bound,
             // and the skip lines above already went to stderr.
-            print(ServerLibraryListing.text(for: index))
+            print(library.listing)
             exit(0)
         }
         // An empty library is a normal startup state, not a failure: the UI is
         // meant to come up before the first model is installed and show an
         // empty picker rather than refusing to launch.
-        let maxContext = arguments.maxContext
-        let promptCacheMode = arguments.promptCacheMode
-        let promptCacheBytes = arguments.promptCacheBytes
-        let verification = arguments.verification
-        let shadowBudget = arguments.shadowBudget
-        let prefillChunk = arguments.prefillChunk
-        let reserveFullKV = arguments.reserveFullKV
-        let library = ServerModelLibrary(index: index, maxContext: maxContext) { directory in
-            try await ServerModelSession.load(modelDirectory: directory,
-                                              maxContext: maxContext,
-                                              promptCacheMode: promptCacheMode,
-                                              promptCacheBytes: promptCacheBytes,
-                                              integrityPolicy: verification,
-                                              shadowPrefetchBudget: shadowBudget,
-                                              prefillChunkTokens: prefillChunk,
-                                              reserveFullKV: reserveFullKV)
-        }
+        //
         // `--model` alongside `--library` preloads one install; without it the
         // first request pays the load. Either way exactly one model is ever
         // resident, and no second model process is started.
         if let explicitModelURL {
-            guard let preload = index.entries.first(where: {
-                $0.directory == explicitModelURL
-            }) else {
-                throw ServerArgumentError.invalid(
-                    "--model \(explicitModelURL.path) is not a completed install")
-            }
-            try await library.preload(modelID: preload.modelID)
+            try await library.preload(directory: explicitModelURL)
         }
         server = MferenceHTTPServer(library: library, queueLimit: arguments.queueLimit)
-        readyDetail = "mode=library models=\(index.entries.count)"
+        readyDetail = "mode=library \(library.readyDetail)"
     } else {
         guard let explicitModelURL else {
             throw ServerArgumentError.invalid("--model is required")

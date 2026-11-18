@@ -1,5 +1,6 @@
 import Foundation
 import Mference
+import MferenceEngine
 
 /// Renders what library mode would serve, without loading anything.
 ///
@@ -41,6 +42,33 @@ public enum ServerLibraryListing {
                 let padding = String(repeating: " ", count: widths[column] - value.count)
                 // Byte counts read as a column of numbers only when they line
                 // up on the right.
+                return column == 2 ? padding + value : value + padding
+            }.joined(separator: "  ")
+        }.joined(separator: "\n")
+    }
+
+    /// What library mode serves: one header row and one row per catalog model,
+    /// in `/v1/models` order. `BYTES` is the size on disk the catalog recorded
+    /// (`-` when unknown).
+    public static func text(for catalog: EngineCatalog) -> String {
+        guard !catalog.models.isEmpty else { return emptyListing }
+        return table(header: ["MODEL", "ENGINE", "BYTES", "PATH"],
+                     rows: catalog.models.map {
+                         [$0.id, $0.engine.rawValue,
+                          $0.sizeBytes > 0 ? String($0.sizeBytes) : "-",
+                          $0.location.path]
+                     })
+    }
+
+    private static func table(header: [String], rows body: [[String]]) -> String {
+        let rows = [header] + body
+        let widths = (0..<header.count).map { column in
+            rows.map { $0[column].count }.max() ?? 0
+        }
+        return rows.map { row in
+            row.enumerated().map { column, value in
+                if column == row.count - 1 { return value }
+                let padding = String(repeating: " ", count: widths[column] - value.count)
                 return column == 2 ? padding + value : value + padding
             }.joined(separator: "  ")
         }.joined(separator: "\n")
