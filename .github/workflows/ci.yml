@@ -22,8 +22,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  # Picks how much of the Swift suite this run needs (engine program spec
+  # section 12, changes 2 and 5):
+  #   pull_request  path-scoped by .github/scripts/ci-scope.sh: docs-only PRs
+  #                 skip the test job; engine, server, llama.cpp and script PRs
+  #                 run without MferenceTestsCore (t0); anything else runs the
+  #                 default suite (full).
+  #   push          main and mference-app run t0; the full suite on the merged
+  #                 tip is the coordinator's local G12 run.
+  #   workflow_call release validation runs the default suite.
+  changes:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The pull request's base and head commits are needed for the diff.
+          fetch-depth: 0
+      - name: Test the scope classifier
+        run: python3 .github/scripts/test_ci_scope.py
+      - name: Classify changed paths
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request)
+              # --no-renames lists a moved file under both its old and new
+              # path, so moving a file out of a full-scope path still counts.
+              # A failed diff leaves the list empty, which the classifier
+              # treats as full.
+              files=$(git diff --name-only --no-renames "$BASE...$HEAD" || true)
+              scope=$(printf '%s\n' "$files" | bash .github/scripts/ci-scope.sh)
+              count=$(printf '%s\n' "$files" | grep -c . || true)
+              ;;
+            push)
+              scope=t0
+              ;;
+            *)
+              scope=full
+              ;;
+          esac
+          echo "event=$EVENT changed=${count:-n/a} scope=$scope"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.scope == 't0' || needs.changes.outputs.scope == 'full'
     # macos-26 runs the suite (including the MSL 4.0 tensor-ops path). There
     # is no macos-15 leg: the maintainer removed it on 2026-11-18, so nothing
     # in CI checks the declared macOS 15 / Swift 6.1 floor any more. Release
@@ -38,8 +87,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Report toolchain
         run: swift --version
-      - name: Run serial tests
-        run: Scripts/test.sh
+      - name: Run serial tests (${{ needs.changes.outputs.scope }})
+        env:
+          SCOPE: ${{ needs.changes.outputs.scope }}
+        run: |
+          if [ "$SCOPE" = t0 ]; then
+            Scripts/test.sh --skip '^MferenceTestsCore\.'
+            # The one MferenceTestsCore suite that reads the whole Sources/
+            # tree (no Metal device outside MetalContext), so it applies to
+            # engine, server and llama.cpp code too.
+            Scripts/test.sh --skip-build --filter '^MferenceTestsCore\.MetalContextDeviceCreationTests'
+          else
+            Scripts/test.sh
+          fi
       - name: Check launcher and UI adapters without model downloads
         run: |
           bash -n mference-ui.sh
@@ -49,6 +109,7 @@ jobs:
           python3 Scripts/tests/test_release_screen_summary.py
           python3 Scripts/tests/test_qwen_efficiency_screen.py
           python3 Scripts/tests/test_source_release.py
+          python3 Scripts/tests/test_engine_validate.py
 
   docs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
