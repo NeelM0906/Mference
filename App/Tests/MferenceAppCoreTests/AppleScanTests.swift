@@ -237,7 +237,8 @@ struct GatedScanner: DocumentRecognizing {
                                   context: container.mainContext, imageDirectory: URL.temporaryDirectory)
         session.open(URL(filePath: "/fixtures/slow-failing.png"))
         session.open(URL(filePath: "/fixtures/receipt.png"))
-        for _ in 0..<1_000 where session.phase != .review { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while session.phase != .review, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         #expect(session.phase == .review)
         await gate.open()
         await session.waitForReading()

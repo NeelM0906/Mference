@@ -91,7 +91,9 @@ struct GatedSorter: AppleModelServicing {
                                    assistant: sorter, drafter: nil, sender: RecordingMailSender(),
                                    broker: RecordingPermissionBroker())
         let loading = Task { await model.load() }
-        for _ in 0..<1_000 where !model.isSorting { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !model.isSorting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        try #require(model.isSorting)
         let review = try #require(model.messages(in: .bucket("other")).first { $0.messageID == "<review@example.com>" })
         model.markDone(review)
         await gate.open()
