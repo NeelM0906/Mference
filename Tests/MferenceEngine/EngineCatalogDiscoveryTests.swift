@@ -224,16 +224,18 @@ struct EngineCatalogDiscoveryTests {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("engine-retired-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        func install(_ name: String, arch: [String: Any]) throws -> URL {
+        func install(_ name: String, arch: [String: Any], modelID: String? = nil) throws -> URL {
             let directory = root.appendingPathComponent("\(name).gturbo", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let manifest: [String: Any] = ["modelID": "test/\(name)", "arch": arch]
+            let manifest: [String: Any] = ["modelID": modelID ?? "test/\(name)", "arch": arch]
             try JSONSerialization.data(withJSONObject: manifest)
                 .write(to: directory.appendingPathComponent("manifest.json"))
             return directory
         }
         let retired = try install("flashnext-iq3", arch: ["family": "qwen38flashnextudiq3xxs"])
         let legacy = try install("legacy", arch: [:])
+        let swiftQwen = try install("swift-qwen", arch: ["family": "qwen38"],
+                                    modelID: "swift-qwen3.8-27b-int4g64")
 
         guard case .notRunnable(let family, let detail) = EngineInstallProbe.probe(directory: retired) else {
             Issue.record("a retired-family install must be reported as not runnable")
@@ -241,9 +243,23 @@ struct EngineCatalogDiscoveryTests {
         }
         #expect(family == "qwen38flashnextudiq3xxs")
         #expect(detail.contains("retired family"))
-        if case .complete = EngineInstallProbe.probe(directory: legacy) {
-            Issue.record("a manifest without arch.family must not be listed")
+        // No arch.family (the original Gemma 4 format): not runnable, under
+        // its modelID.
+        guard case .notRunnable(let legacyID, let legacyDetail) =
+            EngineInstallProbe.probe(directory: legacy) else {
+            Issue.record("a manifest without arch.family must be reported as not runnable")
+            return
         }
+        #expect(legacyID == "test/legacy")
+        #expect(legacyDetail.contains("no arch.family"))
+        // Swift-Qwen3.8 carries the kept qwen38 family; refused by checkpoint ID.
+        guard case .notRunnable(let swiftID, let swiftDetail) =
+            EngineInstallProbe.probe(directory: swiftQwen) else {
+            Issue.record("a Swift-Qwen3.8 install must be reported as not runnable")
+            return
+        }
+        #expect(swiftID == "swift-qwen3.8-27b-int4g64")
+        #expect(swiftDetail.contains("Swift-Qwen3.8"))
 
         let catalog = EngineCatalogDiscovery.discover(roots: [root], ggufDirectories: [], scope: .all,
                                                       fileSystem: .live)

@@ -123,7 +123,7 @@ struct MapleTokenizationTests {
                 forModelDirectory: model,
                 environment: [:])
             Issue.record("missing Maple tokenizer sidecar was accepted")
-        } catch MFTokenizerError.missingToolTemplate {
+        } catch MFTokenizerError.missingTokenizerSidecar {
             rejected = true
         } catch {
             Issue.record("unexpected error: \(error)")
