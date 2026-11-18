@@ -23,41 +23,20 @@ concurrency:
 jobs:
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # macos-15 holds the Swift 6.1 / macOS 15 SDK floor; macos-26 exercises the
-    # MSL 4.0 tensor-ops path. Both must build.
+    # macos-26 runs the suite (including the MSL 4.0 tensor-ops path). There
+    # is no macos-15 leg: the maintainer removed it on 2026-11-18, so nothing
+    # in CI checks the declared macOS 15 / Swift 6.1 floor any more. Release
+    # configuration is built locally before every merge (engine program G1).
     strategy:
       fail-fast: false
       matrix:
         runner:
-          - macos-15
           - macos-26
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Report toolchain
         run: swift --version
-      - name: Hold the Swift floor
-        if: matrix.runner == 'macos-15'
-        run: |
-          # This leg exists only to prove the declared floor still builds. If
-          # the runner image's default Xcode moves forward, the leg would
-          # quietly start testing a newer toolchain and the floor would rot
-          # unnoticed, so fail loudly instead.
-          version=$(swift --version 2>&1 | sed -n 's/.*Swift version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
-          # Exact match: the sed above yields major.minor only, so a glob like
-          # 6.1* would also accept a future 6.10 and silently stop testing the
-          # floor this leg exists to hold.
-          case "$version" in
-            6.1)
-              echo "floor leg is exercising Swift $version, as intended"
-              ;;
-            *)
-              echo "::error::This leg must prove the Swift 6.1 floor declared in Package.swift, but the runner provides Swift $version. Select an Xcode that ships Swift 6.1, or change the declared floor."
-              exit 1
-              ;;
-          esac
-      - name: Build release products
-        run: swift build -c release
       - name: Run serial tests
         run: Scripts/test.sh
       - name: Check launcher and UI adapters without model downloads

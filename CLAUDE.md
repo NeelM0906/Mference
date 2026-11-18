@@ -32,8 +32,10 @@ bash -n mference-ui.sh && python3 Scripts/tests/test_mference_ui.py
   regexes (`Qwen38`, `FlashNext`, `Glm53`, `Inkling`, ...).
 - The build, the Swift suite, the link check, and `Scripts/tests/test_*.py`
   (stdlib `unittest`, no dependencies) never download or load a model. CI runs
-  all of them on `macos-15` (the Swift 6.1 / MSL 3.2 floor) and `macos-26` (the
-  MSL 4.0 tensor-ops path); both legs must stay green.
+  the suite, the Python checks and the link check on `macos-26` (the MSL 4.0
+  tensor-ops path) and must stay green. There is no `macos-15` leg, so CI no
+  longer checks the declared Swift 6.1 / MSL 3.2 floor; build release locally
+  before merging.
 - The link checker covers this file too, so keep relative links valid when
   renaming or moving docs.
 
