@@ -54,6 +54,7 @@ public final class AppSettings {
         public static let thinkingByDefault = "thinkingByDefault"
         public static let blockRemoteMailContent = "blockRemoteMailContent"
         public static let hasCompletedFirstRun = "hasCompletedFirstRun"
+        public static let useAppleModel = "useAppleModel"
     }
 
     /// The choices Settings offers for idle unload; 0 is "Never".
@@ -110,6 +111,13 @@ public final class AppSettings {
         didSet { store.set(blockRemoteMailContent, forKey: Key.blockRemoteMailContent) }
     }
 
+    /// Apple's on-device model does mail sorting, titles, short summaries and
+    /// scan fields when Apple Intelligence is on; Quick does them otherwise
+    /// (L12).
+    public var useAppleModel: Bool {
+        didSet { store.set(useAppleModel, forKey: Key.useAppleModel) }
+    }
+
     /// First run finished (or skipped); the onboarding is not shown again.
     public var hasCompletedFirstRun: Bool {
         didSet { store.set(hasCompletedFirstRun, forKey: Key.hasCompletedFirstRun) }
@@ -127,6 +135,7 @@ public final class AppSettings {
         thinkingByDefault = store.object(forKey: Key.thinkingByDefault) as? Bool ?? true
         blockRemoteMailContent = store.object(forKey: Key.blockRemoteMailContent) as? Bool ?? true
         hasCompletedFirstRun = store.object(forKey: Key.hasCompletedFirstRun) as? Bool ?? false
+        useAppleModel = store.object(forKey: Key.useAppleModel) as? Bool ?? true
     }
 
     /// The idle delay for the engine; nil never unloads.
