@@ -9,13 +9,15 @@ import Testing
     @Test func scan() async throws {
         let container = try AppModelContainer.inMemory()
         let model = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: AppleUIFixtures.receiptAnswer)
-        let session = ScanSession(scanner: AppleUIFixtures.FixedScanner(lines: AppleUIFixtures.receiptLines),
+        let receipt = try AppleUIFixtures.receipt()
+        let session = ScanSession(scanner: AppleUIFixtures.FixedScanner(scanLines: receipt.lines),
                                   assistant: AppleModelService(primary: model, fallback: nil),
                                   context: container.mainContext,
                                   imageDirectory: URL.temporaryDirectory.appending(path: "mference-scan-snapshots"))
-        session.open(try AppleUIFixtures.receiptImage())
+        session.open(receipt.url)
         await session.waitForReading()
         #expect(session.phase == .review)
+        #expect(Set(session.highlights.keys) == [.merchant, .date, .tax, .total])
         for scheme in [ColorScheme.light, .dark] {
             try AppleSnapshot.render(AppleSnapshot.board(.scan) { ScanView(session: session) }, name: "07-scan", colorScheme: scheme)
         }
