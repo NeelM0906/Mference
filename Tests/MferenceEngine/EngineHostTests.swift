@@ -459,6 +459,29 @@ struct EngineHostTests {
         #expect(completion?.content == "Hello world")
     }
 
+    @Test func breakingOutOfARetainedStreamCancelsTheRequest() async throws {
+        let gate = FakeEngineLatch()
+        let fixture = Self.fixture(scripts: [
+            "a": FakeEngineScript(holdAfterEvents: 1, holdGate: gate),
+        ])
+        // The caller keeps the sequence for its whole lifetime.
+        let retained = fixture.host.stream(modelID: "a", request: Self.request)
+        for try await element in retained {
+            if case .event = element { break }
+        }
+        try await eventually("generation cancelled") {
+            fixture.backend.journal.entries.contains(.generationCancelled("a"))
+        }
+        try await eventually("request released") { fixture.host.status.activeRequests == 0 }
+        // The kept sequence can start a fresh request.
+        gate.open()
+        var completed: EngineCompletion?
+        for try await element in retained {
+            if case .completed(let done) = element { completed = done }
+        }
+        #expect(completed?.content == "Hello world")
+    }
+
     @Test func abandoningAStreamCancelsTheRequest() async throws {
         let reached = FakeEngineLatch()
         let gate = FakeEngineLatch()

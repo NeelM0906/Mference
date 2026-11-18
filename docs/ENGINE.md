@@ -91,7 +91,9 @@ tokenizer, which is why a request is validated after its model is resident.
   model loads stops before its body runs. The load itself is never
   interrupted: the old model is already released, and abandoning the new one
   halfway would leave the host empty for nothing. A cancelled waiter leaves
-  the line without running.
+  the line without running. A `stream` request belongs to its iterator: it
+  starts when iteration starts and is cancelled when iteration ends early,
+  even if the caller keeps the sequence.
 - **Load failure** leaves the host empty, with the failure in
   `status.lastLoadFailure`, and rethrows the backend's own error. The previous
   model was already released before the failed load started.

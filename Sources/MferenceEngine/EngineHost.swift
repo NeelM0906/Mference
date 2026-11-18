@@ -85,7 +85,7 @@ public enum EngineHostEvent: Sendable, Hashable {
     case unloadFinished(modelID: String, reason: EngineUnloadReason)
 }
 
-/// One element of `EngineHost.stream`.
+/// One element of an `EngineGenerationStream`.
 public enum EngineStreamElement: Sendable {
     /// The request was rendered and accepted; generation starts next.
     case prepared(promptTokens: Int)
@@ -254,26 +254,12 @@ public actor EngineHost {
         }
     }
 
-    /// `generate` as an async sequence. Ending iteration early, or cancelling
-    /// the iterating task, cancels the request.
-    public nonisolated func stream(modelID: String,
-                                   request: EngineRequest) -> AsyncThrowingStream<EngineStreamElement, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    let completion = try await self.generate(
-                        modelID: modelID,
-                        request: request,
-                        onPrepared: { continuation.yield(.prepared(promptTokens: $0.promptTokens.count)) },
-                        onEvent: { continuation.yield(.event($0)) })
-                    continuation.yield(.completed(completion))
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
+    /// `generate` as an async sequence. Each iteration is one request,
+    /// started when iteration starts. It is cancelled when the iterating
+    /// task is cancelled, or when iteration ends early and the iterator is
+    /// released, even if the sequence itself is kept.
+    public nonisolated func stream(modelID: String, request: EngineRequest) -> EngineGenerationStream {
+        EngineGenerationStream(host: self, modelID: modelID, request: request)
     }
 
     /// Cancels the request that holds the model, if any, also while it is
@@ -509,5 +495,60 @@ public actor EngineHost {
         gateBusy = true
         await unloadResident(reason: .idle)
         release()
+    }
+}
+
+/// The sequence `EngineHost.stream(modelID:request:)` returns.
+///
+/// The request belongs to the iterator, not to the sequence: making an
+/// iterator starts it, and releasing the last copy of that iterator cancels
+/// it. Breaking out of a `for try await` loop therefore stops generation and
+/// frees the host's gate, whether or not the caller keeps the sequence.
+public struct EngineGenerationStream: AsyncSequence, Sendable {
+    public typealias Element = EngineStreamElement
+
+    let host: EngineHost
+    let modelID: String
+    let request: EngineRequest
+
+    public func makeAsyncIterator() -> Iterator {
+        let (elements, continuation) = AsyncThrowingStream<Element, Error>.makeStream()
+        let host = self.host
+        let modelID = self.modelID
+        let request = self.request
+        let task = Task {
+            do {
+                let completion = try await host.generate(
+                    modelID: modelID,
+                    request: request,
+                    onPrepared: { continuation.yield(.prepared(promptTokens: $0.promptTokens.count)) },
+                    onEvent: { continuation.yield(.event($0)) })
+                continuation.yield(.completed(completion))
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        continuation.onTermination = { _ in task.cancel() }
+        return Iterator(base: elements.makeAsyncIterator(), request: RequestHandle(task: task))
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        var base: AsyncThrowingStream<Element, Error>.Iterator
+        let request: RequestHandle
+
+        public mutating func next() async throws -> Element? {
+            try await base.next()
+        }
+    }
+
+    /// Cancels the request when the last iterator copy goes away. Cancelling
+    /// a request that already finished does nothing.
+    public final class RequestHandle: Sendable {
+        let task: Task<Void, Never>
+
+        init(task: Task<Void, Never>) { self.task = task }
+
+        deinit { task.cancel() }
     }
 }
