@@ -268,8 +268,18 @@ import MferenceValidationSupport
     /// runs with no window and with the window the runner passes for full
     /// attention (`start + chunk`, which never clips), and must dispatch the
     /// GQA kernel both times.
-    @Test(arguments: [(0, 9), (37, 70), (200, 33), (5, 1)])
+    @Test(arguments: [(0, 9), (5, 1)])
     func gqaSimdMatchesReferenceAtQwenShape(_ shape: (start: Int, chunk: Int)) throws {
+        try Self.checkGQASimdAtQwenShape(shape)
+    }
+
+    /// The longer Qwen 3.6 chunks and offsets (full tier).
+    @Test(.fullTier, arguments: [(37, 70), (200, 33)])
+    func gqaSimdMatchesReferenceAtLongerQwenShape(_ shape: (start: Int, chunk: Int)) throws {
+        try Self.checkGQASimdAtQwenShape(shape)
+    }
+
+    private static func checkGQASimdAtQwenShape(_ shape: (start: Int, chunk: Int)) throws {
         let ctx = try MetalContext()
         let gqa = try PrefillAttention(context: ctx, gqaSimdgroup: true)
         #expect(gqa.gqaSimdPipelineAvailable)

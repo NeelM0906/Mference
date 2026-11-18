@@ -206,7 +206,7 @@ import MferenceValidationSupport
         }
     }
 
-    @Test func int4QMMProductionShapesMatchRepeatedGEMV() throws {
+    @Test(.fullTier) func int4QMMProductionShapesMatchRepeatedGEMV() throws {
         let shapes = [
             (t: 1, n: 4096, k: 2816),  // SWA q projection
             (t: 2, n: 2048, k: 2816),  // SWA k/v projection
@@ -222,7 +222,7 @@ import MferenceValidationSupport
         }
     }
 
-    @Test func int4QMMSelectedChunkShapesMatchRepeatedGEMV() throws {
+    @Test(.fullTier) func int4QMMSelectedChunkShapesMatchRepeatedGEMV() throws {
         let shapes = [
             (n: 4096, k: 2816),  // SWA q projection
             (n: 2048, k: 2816),  // SWA k/v projection

@@ -30,7 +30,8 @@ jobs:
   #                 default suite (full).
   #   push          main and mference-app run t0; the full suite on the merged
   #                 tip is the coordinator's local G12 run.
-  #   workflow_call release validation runs the default suite.
+  #   workflow_call release validation runs the default suite plus the
+  #                 production-shape full tier (MFERENCE_TEST_TIER=full).
   changes:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
@@ -90,6 +91,9 @@ jobs:
       - name: Run serial tests (${{ needs.changes.outputs.scope }})
         env:
           SCOPE: ${{ needs.changes.outputs.scope }}
+          # Release validation (workflow_call) also runs the production-shape
+          # cases; pull requests and pushes leave them to the nightly run.
+          MFERENCE_TEST_TIER: ${{ (github.event_name != 'pull_request' && github.event_name != 'push') && 'full' || '' }}
         run: |
           if [ "$SCOPE" = t0 ]; then
             Scripts/test.sh --skip '^MferenceTestsCore\.'
