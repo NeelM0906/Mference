@@ -176,8 +176,13 @@ public struct MFScroll<Content: View>: View {
 
     public var body: some View {
         if rendersStatically {
-            content
-                .frame(maxHeight: .infinity, alignment: .top)
+            // Take the proposed size, lay the content out at its full height
+            // from the top, and clip what a scroll view would hide.
+            Color.clear
+                .overlay(alignment: .top) {
+                    content.fixedSize(horizontal: false, vertical: true)
+                }
+                .clipped()
         } else {
             ScrollView { content }
         }
