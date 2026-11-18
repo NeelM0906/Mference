@@ -8,7 +8,7 @@ import Observation
 // Proposal recorded in $APP/notes/shell.md.
 
 /// This Mac, for the "This Mac: ..." line and the Deep offer (L4).
-public struct MachineSummary: Sendable, Hashable {
+nonisolated public struct MachineSummary: Sendable, Hashable {
     /// "Apple M1 Max". Empty when unknown (the line then omits it).
     public var chipName: String
     public var physicalMemoryBytes: UInt64
@@ -36,7 +36,7 @@ public struct MachineSummary: Sendable, Hashable {
 }
 
 /// Progress of a download, in bytes.
-public struct TransferProgress: Sendable, Hashable {
+nonisolated public struct TransferProgress: Sendable, Hashable {
     public var completedBytes: Int64
     public var totalBytes: Int64?
 
@@ -52,7 +52,7 @@ public struct TransferProgress: Sendable, Hashable {
 }
 
 /// Where a model stands on this Mac.
-public enum ModelEntryState: Sendable, Hashable {
+nonisolated public enum ModelEntryState: Sendable, Hashable {
     /// Resident in memory now.
     case loaded
     /// Installed, not resident.
@@ -83,7 +83,7 @@ public enum ModelEntryState: Sendable, Hashable {
 }
 
 /// Whether a model fits this Mac (MemoryFit).
-public enum MemoryFitVerdict: Sendable, Hashable {
+nonisolated public enum MemoryFitVerdict: Sendable, Hashable {
     case fits
     /// Offer it, download only after the person approves (Deep above 16 GB).
     case offerWithApproval
@@ -92,7 +92,7 @@ public enum MemoryFitVerdict: Sendable, Hashable {
 }
 
 /// One model: a row of the library, a choice in onboarding.
-public struct ModelEntry: Sendable, Hashable, Identifiable {
+nonisolated public struct ModelEntry: Sendable, Hashable, Identifiable {
     /// The engine catalog id (`qwen3.5-4b`, `qwen3.8-27b`, ...).
     public var id: String
     /// "Quick", "Deep", "Qwen 3.6", "MiniCPM5", "Maple".
