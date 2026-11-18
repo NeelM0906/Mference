@@ -37,9 +37,9 @@ first-use recommendation from optional qualification candidates.
    open the UI database, or change settings. It checks platform, toolchain,
    port availability and UI prerequisites, and reports free disk/memory.
 4. Run `swift build -c release`.
-5. Run `./mference-ui.sh install gemma4` for the established first-use example.
-   This downloads/repackages the pinned checkpoint, about 14 GB. Larger models
-   need substantially more storage; a model download is not an instant step.
+5. Run `./mference-ui.sh install qwen36` for the established first-use example.
+   This downloads/repackages the pinned checkpoint, about 20 GB. Check free
+   disk first; a model download is not an instant step.
 6. Run `./mference-ui.sh`. First UI launch installs pinned Open WebUI 0.11.3
    if absent; it never silently replaces a different installed version.
 7. Select the installed model in the browser and send a short request. Initial
@@ -54,13 +54,13 @@ needed. For an existing OpenAI client, see [the server guide](OPENAI_SERVER.md).
 
 ## Recovery
 
-- Interrupted install: `./mference-ui.sh install gemma4 --resume`. Verified
+- Interrupted install: `./mference-ui.sh install qwen36 --resume`. Verified
   ranges are reused; no full checkpoint staging or second model copy is needed.
 - Occupied ports: select both explicitly, for example
   `./mference-ui.sh --server-port 8081 --webui-port 3001`.
 - Different Xcode toolchain artifacts: use a separate build directory, e.g.
   `./mference-ui.sh --build-path /tmp/mference-build`. For installation the
-  option precedes `install`: `./mference-ui.sh --build-path /tmp/mference-build install gemma4`.
+  option precedes `install`: `./mference-ui.sh --build-path /tmp/mference-build install qwen36`.
   Do not purge unrelated caches as a first troubleshooting step.
 - Isolated UI verification: `./mference-ui.sh --data-dir /tmp/mference-ui-test`.
   This creates a separate UI database and secret without touching existing chats.

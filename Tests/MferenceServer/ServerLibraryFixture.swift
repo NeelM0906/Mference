@@ -6,47 +6,6 @@ import Mference
 /// against real manifests and receipts. Nothing here is loadable — the weight
 /// files are absent and no test ever asks a runtime to open one.
 enum ServerLibraryFixture {
-    /// A format-valid QAT installation fixture with real, tiny files and a
-    /// complete receipt. It is never passed to a model runner.
-    static func makeQATInstall(in root: URL, named name: String) throws -> URL {
-        let directory = try makeCompleteInstall(in: root, named: name)
-        let manifestURL = directory.appendingPathComponent("manifest.json")
-        var manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as! [String: Any]
-        manifest["modelID"] = CheckpointIdentity.gemma4QAT
-        manifest["sourceSnapshotHash"] = "sha256:7dbbeef0345505798abcf0ac54434116a48c2f1e7aad828071c17a7a871adfe7"
-        var quant: [String: Any] = [:]
-        for slot in ["embedding", "attention", "sharedExpert", "routedExpert"] {
-            var value = quantSlot(4)
-            value["groupSize"] = 32
-            quant[slot] = value
-        }
-        quant["router"] = ["weightBits": 16, "scheme": "unquantized",
-            "scaleType": "none", "biasType": "none", "groupSize": 0]
-        manifest["quant"] = quant
-        var files = manifest["files"] as! [String: Any]
-        for name in Array(files.keys) {
-            let data = name.hasSuffix("layout.json") ? Data("{}".utf8) : Data()
-            try data.write(to: directory.appendingPathComponent(name))
-            files[name] = ["size": data.count, "sha256": Sha256Verifier.hashData(data)]
-        }
-        let tokenizer = directory.appendingPathComponent("tokenizer")
-        try FileManager.default.createDirectory(at: tokenizer, withIntermediateDirectories: true)
-        for name in GemmaQATCheckpoint.requiredAssets {
-            let data = Data("{}".utf8)
-            try data.write(to: tokenizer.appendingPathComponent(name))
-            files["tokenizer/" + name] = ["size": data.count, "sha256": Sha256Verifier.hashData(data)]
-        }
-        manifest["files"] = files
-        try writeManifestAndReceipt(manifest, in: directory)
-        let manifestData = try Data(contentsOf: manifestURL)
-        files["manifest.json"] = ["size": manifestData.count, "sha256": Sha256Verifier.hashData(manifestData)]
-        let receiptURL = directory.appendingPathComponent("verified-install.json")
-        var receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: receiptURL)) as! [String: Any]
-        receipt["files"] = files
-        try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]).write(to: receiptURL)
-        return directory
-    }
-
     static func makeRoot(_ tag: String) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("mference-library-\(tag)-\(UUID().uuidString)",
@@ -55,7 +14,10 @@ enum ServerLibraryFixture {
         return root.standardizedFileURL
     }
 
-    /// A complete Gemma 4 install named `<name>.gturbo` under `root`.
+    /// A complete Qwen 3.6 install named `<name>.gturbo` under `root`: a
+    /// manifest that validates against `ArchConfig.qwen36_35B_A3B` (every
+    /// family-extension field the baseline sets away from the absent-key
+    /// defaults is written out) and a receipt bound to it.
     @discardableResult
     static func makeCompleteInstall(in root: URL, named name: String) throws -> URL {
         let directory = root.appendingPathComponent("\(name).gturbo", isDirectory: true)
@@ -64,7 +26,8 @@ enum ServerLibraryFixture {
         try FileManager.default.createDirectory(at: experts, withIntermediateDirectories: true)
         try Data("{}".utf8).write(to: experts.appendingPathComponent("layout.json"))
 
-        let arch = ArchConfig.gemma4_26B_A4B
+        let arch = ArchConfig.qwen36_35B_A3B
+        let linear = arch.linearAttention
         var files: [String: Any] = [
             "model_weights.bin": ["size": 0, "sha256": String(repeating: "0", count: 64)],
             "packed_experts/layout.json": ["size": 2,
@@ -91,7 +54,7 @@ enum ServerLibraryFixture {
                 "routedExpert": quantSlot(4),
             ],
             "arch": [
-                "family": ModelFamily.gemma4.rawValue,
+                "family": arch.family.rawValue,
                 "hiddenSize": arch.hiddenSize,
                 "ffnIntermediate": arch.intermediateSize,
                 "moeIntermediateSize": arch.moeIntermediateSize,
@@ -113,6 +76,18 @@ enum ServerLibraryFixture {
                 "attentionKEqV": arch.attentionKEqV,
                 "hiddenActivation": arch.hiddenActivation,
                 "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
+                "attnOutputGate": arch.attnOutputGate,
+                "attentionScale": arch.attentionScale,
+                "embeddingScaledBySqrtHidden": arch.embeddingScaledBySqrtHidden,
+                "routerScaled": arch.routerScaled,
+                "ffnSandwichNorms": arch.ffnSandwichNorms,
+                "sharedExpertGated": arch.sharedExpertGated,
+                "ropeNeoxSubdim": arch.ropeNeoxSubdim,
+                "linearNumKHeads": linear.numKHeads,
+                "linearNumVHeads": linear.numVHeads,
+                "linearKeyHeadDim": linear.keyHeadDim,
+                "linearValueHeadDim": linear.valueHeadDim,
+                "linearConvKernelSize": linear.convKernelSize,
             ],
             "files": files,
             "expertsPerLayer": arch.numExperts,
@@ -123,18 +98,18 @@ enum ServerLibraryFixture {
         return directory
     }
 
-    /// A directory whose manifest names a family the runtime installs but has
-    /// A stand-in capability gate table for tests: the runtime's own table is
-    /// empty since the Flash-Next lift, so the not-runnable branch needs an
-    /// injected entry to be exercised.
+    /// A stand-in capability gate table for tests: the runtime's own table
+    /// ships empty, so the not-runnable branch needs an injected entry to be
+    /// exercised.
     static let gate: [String: [String]] = ["not-yet-family": ["someAxis"]]
 
+    /// A directory whose manifest names a family the runtime installs but has
     /// no runner for. Deliberately minimal: the probe classifies it from
     /// `arch.family` alone, before any strict decode.
     @discardableResult
     static func makeGatedInstall(in root: URL,
                                  named name: String,
-                                 family: String = ModelFamily.qwen38flashnext.rawValue)
+                                 family: String = "not-yet-family")
         throws -> URL {
         let directory = root.appendingPathComponent("\(name).gturbo", isDirectory: true)
             .standardizedFileURL
@@ -143,6 +118,30 @@ enum ServerLibraryFixture {
         let manifest: [String: Any] = ["arch": ["family": family]]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))
+        return directory
+    }
+
+    /// A complete install, receipt and all, whose manifest then names a
+    /// retired family (`ManifestReader.retiredFamilies`), or carries no
+    /// `arch.family` at all when `family` is nil — what a Gemma 4 install
+    /// written before the key existed looks like. Everything but the family is
+    /// a valid Qwen 3.6 install, so only the family can keep it off the list.
+    @discardableResult
+    static func makeRetiredInstall(in root: URL,
+                                   named name: String,
+                                   family: String?) throws -> URL {
+        let directory = try makeCompleteInstall(in: root, named: name)
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        var manifest = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: manifestURL)) as! [String: Any]
+        var arch = manifest["arch"] as! [String: Any]
+        if let family {
+            arch["family"] = family
+        } else {
+            arch.removeValue(forKey: "family")
+        }
+        manifest["arch"] = arch
+        try writeManifestAndReceipt(manifest, in: directory)
         return directory
     }
 

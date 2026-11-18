@@ -34,9 +34,7 @@ to start.
 between turns and a turn prefills only what it adds. It applies the same
 single-prefix rules as the loopback server's
 [prompt reuse](OPENAI_SERVER.md#prompt-reuse): ChatML checkpoints continue from
-the turn as it was generated and append the new user message, and Gemma rewinds
-to the point where the freshly rendered conversation diverges from the cached
-one. A turn that cannot continue resets as above, for example after `/clear`,
+the turn as it was generated and append the new user message. A turn that cannot continue resets as above, for example after `/clear`,
 when history was dropped to fit the context, when a reply was ended by `--stop`,
 or when the continued prompt would no longer fit `--max-context`. A resumed turn
 reports `cached=<n>tok` in its timing footer.
@@ -44,17 +42,13 @@ reports `cached=<n>tok` in its timing footer.
 Output with `--reuse-prefix` is not guaranteed to be byte-identical to the
 default. A resumed turn's new tokens pass through prefill as one short chunk,
 and a continued ChatML turn keeps earlier replies as generated rather than
-re-rendered. For Gemma this already applies to the first turn: prefill captures
-a recovery point just before the generation suffix, which splits the last chunk
-and sends its few remaining tokens through the short-chunk kernels. Thinking
-is unaffected: every turn is rendered with the session's `--reasoning-effort`,
-and Gemma's template still removes earlier thoughts at a new user message.
+re-rendered. Thinking is unaffected: every turn is rendered with the session's
+`--reasoning-effort`.
 
 `--show-reasoning` streams the thoughts of `--chat` turns to standard error,
 each thought framed as a `[reasoning]` ... `[/reasoning]` block, while standard
 output stays the visible answer only. It shows what the chat loop already
-separates from the answer: Gemma and Swift-Qwen turns, and Qwen 3.6 turns run
-with `--reasoning-effort`. It does not change what is generated or what enters
+separates from the answer: Qwen 3.6 turns run with `--reasoning-effort`. It does not change what is generated or what enters
 the conversation history, and it requires `--chat`.
 
 `--system <string>` sets the system message for `--chat` and is repeatable;
@@ -66,45 +60,6 @@ dropped until it does. The system message and the message just typed are never
 dropped; if that pair alone still does not fit, the turn is refused and the
 conversation is left untouched.
 
-### Gemma QAT
-
-The separate `gemma4qat` checkpoint uses the existing
-`$HOME/llm-models/gemma4qat.gturbo` installation:
-
-```bash
-.build/release/MferenceCLI --model "$HOME/llm-models/gemma4qat.gturbo" \
-  --prompt "The capital of France is" --max-new 64 --seed 42
-.build/release/MferenceCLI --model "$HOME/llm-models/gemma4qat.gturbo" \
-  --chat --reasoning-effort medium --max-new 256 --seed 42
-```
-
-Omitted controls use the verified installed `generation_config.json`:
-temperature 1, Top-K 64 and Top-P 0.95. Min-P is off, repetition penalty is 1,
-and presence/frequency penalties are zero. Explicit flags override these
-values, including `--temperature 0` for greedy decoding and `--min-p 0`.
-These defaults apply to CLI raw/chat/messages and the selected server model,
-including custom aliases and library swaps. The original Gemma retains its
-existing defaults. QAT requires its installed
-tokenizer and assets; it does not fall back to a remote tokenizer or an
-environment override.
-
-Raw completion applies no chat template and can include model-generated
-channel text. The qualified raw greedy prompt `The capital of France is`
-repeats in both Mference and the pinned FP16 reference; QAT is not inherently
-loop-free. Chat uses the pinned checkpoint's own template. Thinking is off
-when omitted; `medium`, `low` and `xhigh` all enable the same binary mode.
-The source drops ordinary assistant reasoning and replays tool-call reasoning
-only within the active user turn. The HTTP server accepts `preserve_thinking`
-and normalizes it to this source policy for both Gemma checkpoints; it does
-not disable thinking or retain older thoughts. Clients still send complete tool
-history, including reasoning and matching tool-call IDs.
-
-No reinstall is needed for this runtime update. Kernel, CLI chat and both server modes
-have passed scoped qualification on M2, including tools and cache recovery.
-M2 timing observations and a separate short-chat CLI peak-memory measurement
-are recorded. General loop reduction, other hardware and wider-context resource
-limits remain unverified.
-
 ## Generation controls
 
 The CLI and server expose these generation controls:
@@ -112,21 +67,20 @@ The CLI and server expose these generation controls:
 | Control | Values | CLI flag | Default | Effect |
 | --- | --- | --- | --- | --- |
 | Maximum response | 1 up to the remaining context | `--max-new` | 1,024 tokens | Caps generated tokens, including hidden reasoning. A request may use only the context space left after formatting the prompt; a limit reached during reasoning can leave the visible answer empty. |
-| Maximum context | 1 up to the model's native context, or `max` | `--max-context` | CLI 4K; server/UI 16K | Sets prompt plus response capacity. Native contexts: 262,144 for Gemma 4 (QAT included), Qwen 3.6, Qwen 3.8 and Flash-Next; 131,072 for MiniCPM5; 128,000 for Maple; 1,048,576 for DeepSeek-V4, Inkling and GLM-5.3. A larger value refuses the load. A selectable context is not a fresh hardware qualification. |
-| Reserve full KV | Off or on | `--kv-reserve` | Off | Off: Gemma 4, Qwen 3.6 and Inkling start full-attention KV at 16,384 tokens and grow it with the conversation (a longer prompt to the prompt plus 16,384, a longer answer by 8,192 at a time), shrinking it for a new conversation. On: reserve `--max-context` at load, as the other families always do. Also on the server and `./mference-ui.sh`. |
-| Qwen 3.8 reasoning effort | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Swift: `xhigh`; base: unchanged legacy policy when omitted | Base/Swift Qwen 3.8; chat/messages mode, not raw completion. Server field: `reasoning_effort`. An explicit value selects the installed source template for either checkpoint. `medium` adds no effort instruction; `none` closes thinking in the prompt. |
-| Gemma 4 / Qwen 3.6 thinking | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Off | The first three aliases enable the same binary thinking mode; `none` disables it. Chat/messages mode only. The server also accepts `chat_template_kwargs.enable_thinking`; explicit effort wins. CLI stdout contains the visible answer, while interactive history retains reasoning for template replay. `--chat --show-reasoning` streams that reasoning to stderr. Gemma's template strips earlier ordinary reasoning at a new user turn. CLI turns still reset/re-prefill; CLI completion defaults remain 1,024 tokens. |
-| Temperature | 0...2 | `--temperature` | 0.8; QAT 1 | `0` is greedy; positive values sample. |
-| Top-K | Off or 1...256 | `--top-k` | 40; QAT 64 | Keeps at most K candidates. CLI `0` turns it off. |
+| Maximum context | 1 up to the model's native context, or `max` | `--max-context` | CLI 4K; server/UI 16K | Sets prompt plus response capacity. Native contexts: 262,144 for Qwen 3.6 and Qwen 3.8; 131,072 for MiniCPM5; 128,000 for Maple. A larger value refuses the load. A selectable context is not a fresh hardware qualification. |
+| Reserve full KV | Off or on | `--kv-reserve` | Off | Off: Qwen 3.6 starts full-attention KV at 16,384 tokens and grows it with the conversation (a longer prompt to the prompt plus 16,384, a longer answer by 8,192 at a time), shrinking it for a new conversation. On: reserve `--max-context` at load, as the other families always do. Also on the server and `./mference-ui.sh`. |
+| Qwen 3.8 reasoning effort | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Unchanged legacy policy when omitted | Qwen 3.8; chat/messages mode, not raw completion. Server field: `reasoning_effort`. An explicit value selects the installed source template. `medium` adds no effort instruction; `none` closes thinking in the prompt. |
+| Qwen 3.6 thinking | `xhigh`, `medium`, `low`, `none` | `--reasoning-effort` | Off | The first three aliases enable the same binary thinking mode; `none` disables it. Chat/messages mode only. The server also accepts `chat_template_kwargs.enable_thinking`; explicit effort wins. CLI stdout contains the visible answer, while interactive history retains reasoning for template replay. `--chat --show-reasoning` streams that reasoning to stderr. CLI turns still reset/re-prefill; CLI completion defaults remain 1,024 tokens. |
+| Temperature | 0...2 | `--temperature` | 0.8 | `0` is greedy; positive values sample. |
+| Top-K | Off or 1...256 | `--top-k` | 40 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Keeps the nucleus after Top-K, normalized over that candidate set. |
-| Min-P | 0...1 | `--min-p` | 0.05; QAT 0 | Removes candidates below this fraction of the peak probability, before temperature. `0` disables it. |
+| Min-P | 0...1 | `--min-p` | 0.05 | Removes candidates below this fraction of the peak probability, before temperature. `0` disables it. |
 | Repetition penalty | Positive finite | `--repetition-penalty` or `--repeat-penalty` | 1 | Divides positive seen-token logits and multiplies nonpositive ones. |
 | Presence penalty | -2...2 | `--presence-penalty` | 0 | Subtracts once per seen token, after repetition penalty. |
 | Frequency penalty | -2...2 | `--frequency-penalty` | 0 | Subtracts the penalty times each token's count. |
 | Penalty window | -1 or nonnegative | `--repeat-last-n` | 64 | All penalties use the most recent N prompt/generated tokens. `0` disables penalties; `-1` uses all current history. |
 
-Existing checkpoints use llama.cpp's built-in sampling preset; QAT
-uses the source defaults described above. The active chain
+Existing checkpoints use llama.cpp's built-in sampling preset. The active chain
 is repetition/frequency/presence penalties → Top-K → Top-P → Min-P →
 temperature. Seeded output is reproducible within Mference, not guaranteed
 identical to llama.cpp's RNG or different weight formats. Thinking and context
@@ -140,24 +94,23 @@ reload. They are interactive product settings, not the fixed community
 benchmark protocol.
 
 If a CLI chat exhausts its token budget before emitting visible text, stderr
-now explains the truncation and points to budget controls (and Swift's supported
-effort controls when applicable). It does not invent an answer, change settings
+now explains the truncation and points to budget controls. It does not invent an answer, change settings
 automatically, or treat a truncated reply as an end-of-turn success.
 
 ## Runtime settings
 
 | Control | Values | CLI flag | Production default | Effect |
 | --- | --- | --- | --- | --- |
-| Expert-cache slots | 8, 16, 24, 32, 64, 96, 128; CLI also accepts resident and auto | `--expert-cache-slots` | CLI/server auto | Qwen 3.6 auto uses 96 slots on hosts with at least 24 GiB, 32 with at least 16 GiB, and 16 otherwise. Flash-Next auto maps the routed-expert pool on hosts with at least 192 GiB when that pool plus the core leaves 32 GiB of headroom; otherwise it uses 16 slots. GLM selects resident when its pool plus core plus 48 GiB of reserve fits physical memory; otherwise it uses 16 slots. Other families use 16. `resident` maps every layer file once and skips the slot cache. This won for Flash-Next on the 256 GiB M3 Ultra but lost the Qwen 3.6 community A/B on 24 GiB because of page-cache pressure, so it is not a universal default. More slots retain more routed experts and reduce later reads at the cost of RAM. Ordinary RSS substantially undercounts clean file-backed pages in resident mode. |
-| Prompt prefill | On, off | — | On | On requests chunked prefill. The merged GLM bounded-expert path and DeepSeek sparse-cutover path now batch rather than replaying the full model per prompt token. Real-checkpoint and hardware coverage remains separate: see the [qualification matrix](PREFILL_QUALIFICATION.md). Recurrent scans inside a layer-major GPU batch still advance in token order where required. Off selects scalar replay, not skipped prompt processing. [Runtime diagnostics](RUNTIME_DIAGNOSTICS.md) reports actual per-request counts and separate memory metrics. |
+| Expert-cache slots | 8, 16, 24, 32, 64, 96, 128; CLI also accepts resident and auto | `--expert-cache-slots` | CLI/server auto | Qwen 3.6 auto uses 96 slots on hosts with at least 24 GiB, 32 with at least 16 GiB, and 16 otherwise. Other families use 16. `resident` maps every layer file once and skips the slot cache. It lost the Qwen 3.6 community A/B on 24 GiB because of page-cache pressure, so it is not a universal default. More slots retain more routed experts and reduce later reads at the cost of RAM. Ordinary RSS substantially undercounts clean file-backed pages in resident mode. |
+| Prompt prefill | On, off | — | On | On requests chunked prefill. Real-checkpoint and hardware coverage remains separate: see the [qualification matrix](PREFILL_QUALIFICATION.md). Recurrent scans inside a layer-major GPU batch still advance in token order where required. Off selects scalar replay, not skipped prompt processing. [Runtime diagnostics](RUNTIME_DIAGNOSTICS.md) reports actual per-request counts and separate memory metrics. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
-| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); the server's chunk (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` has no prompt at load time, so auto takes the server's chunk for the model family (below). Maple stages each chunk layer-major but preserves its fixed 512-slot sliding-cache semantics by committing and attending rows in time order. The server and `./mference-ui.sh` take `--prefill-chunk` as well; their `auto` uses 128 tokens, except on hosts with at least 16 GiB, where Gemma 4, Gemma 4 QAT and Qwen 3.6 use 2,048. For Gemma that is about 660 MB more scratch and sliding-window KV than 128, and 351 MB more than 1,024, which cut a 19,098-token QAT prefill from 386 s to 350 s; `--prefill-chunk 1024` trades that time back for the memory. Qwen 3.6 has no sliding-window KV to grow, so its 2,048 costs about 270 MB of scratch. The Unsloth UD-IQ3_XXS Flash-Next install uses 4,096 on hosts with at least 32 GiB and 1,024 on hosts from 16 GiB up to but not including 32 GiB: its server prefill re-reads the 47 GB routed-expert pool once per chunk, and a 3K prompt's first token takes 87–88 s at 4,096 and 108–110 s at 1,024 (peak footprint 4.4 and 2.3 GB), against 321 s at 128 before prefill batched its per-token loops. Vendor Flash-Next keeps 128. `MFERENCE_SERVER_PREFILL_CHUNK` accepts any listed size; the flag wins over it. |
+| Prefill chunk tokens | 32, 64, 128, 256, 512, 1024, 2048, 4096, or auto | `--prefill-chunk` | Auto (one-shot); the server's chunk (`--chat`) | Tokens processed per prefill chunk. Larger chunks re-read the routed experts fewer times, which lowers prefill I/O and time. `auto` picks the smallest allowed size that covers a one-shot prompt; interactive `--chat` has no prompt at load time, so auto takes the server's chunk for the model family (below). Maple stages each chunk layer-major but preserves its fixed 512-slot sliding-cache semantics by committing and attending rows in time order. The server and `./mference-ui.sh` take `--prefill-chunk` as well; their `auto` uses 128 tokens, except on hosts with at least 16 GiB, where Qwen 3.6 uses 2,048. Qwen 3.6 has no sliding-window KV to grow, so its 2,048 costs about 270 MB of scratch. `MFERENCE_SERVER_PREFILL_CHUNK` accepts any listed size; the flag wins over it. |
 | Maple FlashHead | Off, on | `--flash-head` | Off | Enables Maple's approximate singleton-decode candidate head when the install carries validated FlashHead tensors. It leaves all non-candidates at negative infinity, so sampling is restricted to selected rows. Prefill and the default decode head remain exact; an install without the data falls back to the exact head. |
 | Model verification | Auto, full SHA-256, trusted receipt | `--verify` (CLI and server) | Auto | `auto` checks each routed-expert file's size against the receipt written at install time when that receipt validates (it must exist, match the manifest hash and name the install's current directory), and falls back to `full-sha256` otherwise, for example for an install that was moved or has no receipt; a fallback prints one `notice: --verify auto: …` line on stderr that names the failed receipt check (the server logs it on each load). `full-sha256` re-hashes each routed-expert file on first touch, which for a 145 GB expert pool costs about 59 s inside the first prefill and, on the server, again after every model swap. `trusted-receipt` requires the receipt and fails the load without it. In every mode `manifest.json`, `model_weights.bin` and `layout.json` are hashed at load and the receipt is validated against the manifest hash. The receipt modes trade detection of size-preserving corruption of expert files for that time; choose `full-sha256` when that matters. |
-| Library catalog | `product`, `all` | `--catalog` (server with `--library`) | `product` | Which installs library mode serves. `product` lists only the product models (`qwen3.6-35b-a3b`, `minicpm5-2b-int4g64` and `maple-preview-2bit-mlx` among the native installs) under their stable identifiers; every other runnable install, Flash-Next included, is declined, and a request for it gets HTTP 400 `model_not_runnable` naming `--catalog all`. `all` is a developer switch that lists every runnable install: product models under their stable identifiers, the rest under their discovery identifiers (see [Model identifiers](OPEN_WEBUI.md#model-identifiers)). GGUF models are listed only when the build has the llama.cpp backend. See [the engine](ENGINE.md). |
-| Server prompt cache | `off`, `single-prefix`, `multi-prefix` | `--prompt-cache-mode` (server and `./mference-ui.sh`) | `multi-prefix` | Which finished turns the server keeps for KV prefix reuse. `multi-prefix` keeps every finished turn of every conversation for Qwen 3.6 and the Flash-Next models, within `--prompt-cache-bytes`, and is exactly `single-prefix` for every other model. A restored turn continues from exactly the state it ended in, so its output equals what `single-prefix` gives the same conversation without interleaved requests; see [prompt reuse](OPENAI_SERVER.md#prompt-reuse). |
-| Server prompt cache budget | Bytes, or auto | `--prompt-cache-bytes` (server and `./mference-ui.sh`) | Auto | RAM ceiling for what `multi-prefix` keeps besides the live conversation: per finished turn, about 61 MiB of recurrent state (Qwen 3.6) or 110 MiB (Flash-Next, Unsloth install), plus, for each conversation or branch that is not in the runner, 20 KiB (Qwen 3.6) or 31.5 KiB (Flash-Next) per token of attention KV and indexer keys. Least recently used turns are released first. Under system memory pressure (warning or critical) nothing new is kept, and every copy except the conversation in the runner is released between requests. Swap growth of more than 256 MiB after the copies last grew releases them back to their size before that growth, and nothing new is kept until swap has grown by less than 16 MiB over a minute. `auto` is the smaller of 4 GiB and an eighth of physical memory with at least 24 GiB, 1 GiB from 16 GiB, and 0 below, capped at 1.5 GiB for the Flash-Next models, whose experts stream through the file cache; `0` is exactly `single-prefix`. |
-| Speculative expert prefetch | 0 (off), 1–8 | `--shadow-budget` (CLI and server) | For Qwen 3.6 and Gemma 4: 4 on hosts from 16 to under 24 GiB, 8 at 24 GiB, and for Qwen 3.6 only, 8 above 24 GiB up to 32 GiB; 2 for DeepSeek-V4-Flash; off elsewhere | During decode, predicts the next layer's routed experts and reads up to this many of them per layer into the existing expert slots before the router asks, without ever blocking a real read. It shortens the time the GPU waits for the SSD, costs no memory, and produces byte-identical output at every value; a higher budget reads more from the SSD. `0` turns it off. An explicit value applies on every host and takes precedence over `MFERENCE_SPEC_PREFETCH` and `MFERENCE_SHADOW_BUDGET`. |
+| Library catalog | `product`, `all` | `--catalog` (server with `--library`) | `product` | Which installs library mode serves. `product` lists only the product models (`qwen3.6-35b-a3b`, `minicpm5-2b-int4g64` and `maple-preview-2bit-mlx` among the native installs) under their stable identifiers; every other runnable install, the native Qwen 3.8 27B included, is declined, and a request for it gets HTTP 400 `model_not_runnable` naming `--catalog all`. `all` is a developer switch that lists every runnable install: product models under their stable identifiers, the rest under their discovery identifiers (see [Model identifiers](OPEN_WEBUI.md#model-identifiers)). GGUF models are listed only when the build has the llama.cpp backend. See [the engine](ENGINE.md). |
+| Server prompt cache | `off`, `single-prefix`, `multi-prefix` | `--prompt-cache-mode` (server and `./mference-ui.sh`) | `multi-prefix` | Which finished turns the server keeps for KV prefix reuse. `multi-prefix` keeps every finished turn of every conversation for Qwen 3.6, within `--prompt-cache-bytes`, and is exactly `single-prefix` for every other model. A restored turn continues from exactly the state it ended in, so its output equals what `single-prefix` gives the same conversation without interleaved requests; see [prompt reuse](OPENAI_SERVER.md#prompt-reuse). |
+| Server prompt cache budget | Bytes, or auto | `--prompt-cache-bytes` (server and `./mference-ui.sh`) | Auto | RAM ceiling for what `multi-prefix` keeps besides the live conversation: per finished turn, about 61 MiB of recurrent state (Qwen 3.6), plus, for each conversation or branch that is not in the runner, 20 KiB per token of attention KV. Least recently used turns are released first. Under system memory pressure (warning or critical) nothing new is kept, and every copy except the conversation in the runner is released between requests. Swap growth of more than 256 MiB after the copies last grew releases them back to their size before that growth, and nothing new is kept until swap has grown by less than 16 MiB over a minute. `auto` is the smaller of 4 GiB and an eighth of physical memory with at least 24 GiB, 1 GiB from 16 GiB, and 0 below; `0` is exactly `single-prefix`. |
+| Speculative expert prefetch | 0 (off), 1–8 | `--shadow-budget` (CLI and server) | For Qwen 3.6: 4 on hosts from 16 to under 24 GiB, 8 from 24 GiB up to 32 GiB; off elsewhere | During decode, predicts the next layer's routed experts and reads up to this many of them per layer into the existing expert slots before the router asks, without ever blocking a real read. It shortens the time the GPU waits for the SSD, costs no memory, and produces byte-identical output at every value; a higher budget reads more from the SSD. `0` turns it off. An explicit value applies on every host and takes precedence over `MFERENCE_SPEC_PREFETCH` and `MFERENCE_SHADOW_BUDGET`. |
 
 The FlashHead switch is a CLI-only control; every other surface uses the default
 exact head. `--prefill-chunk` applies to the CLI, the server and `./mference-ui.sh`.
@@ -171,16 +124,14 @@ the count, requested bytes and latency histogram of every routed-expert read
 the `pread` streamer issued during decode and during the last chunked prefill
 call, and the bytes the whole process physically read from storage
 (`proc_pid_rusage`; page-cache hits excluded, but mapped core-weight faults
-and other file reads included) in each window. For the Gemma 4 and Qwen 3.6
+and other file reads included) in each window. For the Qwen 3.6
 decode path it adds routed-expert hit and miss counts with the most-missed
 layer:expert pairs and misses per layer, and the same all-hit rate recomputed
 from those counters; the per-expert counts are on
 `RealForwardRunner.expertRoutingCounters`. With resident experts nothing is
-read and every routed expert counts as a hit. Read latency includes any
-implied-bias rebuild done on the reading thread, failed reads are not
+read and every routed expert counts as a hit. Failed reads are not
 recorded, and a background read still in flight when a window opens is
-counted in the new window. `MFERENCE_PREFILL_BREAKDOWN=1` prints the
-Inkling prefill routed-expert split (fetch, encode, drain) and, for Gemma 4 and
+counted in the new window. `MFERENCE_PREFILL_BREAKDOWN=1` prints, for
 Qwen 3.6 chunked prefill, a stage table: GPU time for the attention or
 Gated-DeltaNet projections and core, router, shared expert, routed tiles, MoE
 tail and head, plus the CPU time spent waiting on routed expert reads. To time
@@ -198,34 +149,16 @@ a shared event; a failed eager fill aborts the decode step with an error
 rather than emitting corrupt output (default on). `MFERENCE_ROUTER_EVENT=0`
 disables the early mid-buffer router readback. `MFERENCE_SPEC_PREFETCH`
 selects the speculative-prefetch mode — shadow prefetch is the default for
-DeepSeek-V4-Flash, for Qwen 3.6 and Gemma 4 on hosts from 16 GiB to 24 GiB,
-and for Qwen 3.6 above 24 GiB up to 32 GiB, off elsewhere — and `MFERENCE_SHADOW_BUDGET` caps
+Qwen 3.6 on hosts from 16 GiB up to 32 GiB, off elsewhere — and `MFERENCE_SHADOW_BUDGET` caps
 its per-layer speculative reads. For Qwen 3.8, `MFERENCE_MTP=0` disables MTP
 speculative decoding (on by default for greedy decode when the install
-carries the attached MTP tensors; **off by default for the Swift-Qwen candidate**)
+carries the attached MTP tensors)
 and `MFERENCE_MTP_K` (1–6, default 3) sets
 the draft depth. `MFERENCE_DFLASH2_DIR` points at a DFlash2 drafter
 checkpoint and swaps the round's draft source to it (draft depth defaults
 to 6; see docs/QWEN38_DFLASH2.md); `MFERENCE_DFLASH2_BF16=1` skips its
 load-time INT4 quantization for reference runs. All are byte-identical
 toggles, not quality controls.
-
-Gemma prefill has two switches that are not byte-identical, because the
-defaults reorder floating-point sums. `MFERENCE_GEMMA_PREFILL_LEGACY=1` returns
-Gemma 4 and Gemma 4 QAT to the per-token shared expert and per-row routed
-experts; the default batches the INT4 shared expert and runs well-filled
-routed tiles as grouped matrix products. `MFERENCE_QAT_EXACT_PREFILL=1`
-additionally returns QAT's prefill projections, shared expert, routed experts
-and full-attention layers to the MLX FP16 reduction order, which is several
-times slower on long prompts. QAT decode, routing, normalization and
-sliding-window attention keep that order in every mode. Both exist for A/B runs
-and for the
-[prefill equivalence gate](families/GEMMA4_QAT.md#prefill-arithmetic).
-On macOS 26, full-attention prefill for both checkpoints uses the tensor-ops
-kernel wherever its pipeline builds, M2 included; it has no separate switch.
-
-Flash-Next's installer carries an MTP sidecar, but native Flash-Next speculative
-execution is not implemented. The dense Qwen MTP switches do not activate it.
 
 Changing context length, expert-cache slots, RDADVISE, model verification,
 prompt-prefill enablement, the prefill chunk size, or FlashHead selection
@@ -249,12 +182,12 @@ enabled too.
 
 Export `AGX_RELAX_CDM_CTXSTORE_TIMEOUT=0` before launching the CLI or server to
 restore stock driver behaviour; an explicit value is never overwritten. When a
-Gemma or Qwen 3.6 prefill command buffer still fails, the error names its
+Qwen 3.6 prefill command buffer still fails, the error names its
 phase label (chunk start and size, layer, phase), Metal status, error domain,
 code and description, including the IOGPU token, and no prompt or generated
 content. A failure reported only through the buffer's status, with no error
 object, is caught as well. A failed sampling command buffer also stops the
-request. The Gemma and Qwen 3.6 decode step keeps its existing handling: it
+request. The Qwen 3.6 decode step keeps its existing handling: it
 prints a failed command buffer with the same detail and continues.
 
 ## Run an experiment

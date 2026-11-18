@@ -48,8 +48,7 @@ final class MoE {
     static let maxRouterExperts: UInt32 = 512
 
     /// Top-k widths the router selection kernels implement. 8 is Gemma 4 /
-    /// Qwen 3.6; 10 is Flash-Next. (DeepSeek V4's 6 goes through its own
-    /// sqrtsoftplus kernels in `MoEDeepseekV4`.)
+    /// Qwen 3.6; 10 is Flash-Next.
     static let routerTopKWidths: Set<UInt32> = [8, 10]
 
     private let realDecodeD: UInt32
@@ -64,11 +63,6 @@ final class MoE {
     private let routerSelectK10PSO: MTLComputePipelineState
     private let routerSelectK10SpecializedPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
-    /// Qualification readback; callers must first complete the router command.
-    var routerLogitSnapshot: [Float] {
-        Array(UnsafeBufferPointer(start: routerLogits.contents().assumingMemoryBound(to: Float.self),
-                                  count: Int(realDecodeNumExperts)))
-    }
     private let phase1U16PSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
     private let slotLookupPSO: MTLComputePipelineState
@@ -100,7 +94,6 @@ final class MoE {
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
          specializedTopK: UInt32 = 8,
-         swigluLimit: Float = 0,
          groupSize: Int = Quantization.groupSize,
          routerBF16: Bool = false,
          sourceFP16: Bool = false) throws {
@@ -117,14 +110,6 @@ final class MoE {
         let quantizationConstants = Quantization.int4Constants(groupSize: groupSize)
             + Quantization.gemmaSourceConstants(enabled: sourceFP16)
         activationConstants += quantizationConstants
-        // `swigluLimit > 0` bakes DeepSeek's asymmetric pre-activation clamp
-        // (gate `<= limit`, up in `[-limit, limit]`) into the INT4 phase-1
-        // kernels through function constant 5 (`moe_swiglu_clamp`). Zero, the
-        // default, leaves the constant undefined so every existing caller's
-        // pipelines are byte-identical.
-        if swigluLimit > 0 {
-            activationConstants.append(MetalFunctionConstant(index: 5, value: .float(swigluLimit)))
-        }
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),

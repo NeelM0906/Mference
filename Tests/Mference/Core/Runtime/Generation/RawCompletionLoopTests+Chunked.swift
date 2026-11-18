@@ -5,7 +5,7 @@ import Testing
 extension RawCompletionLoopTests {
     @Test func chunkedModeRequiresChunkedProducer() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let promptIDs = tokenizer.encode("one two three", addBOS: true)
         let producer = CountingProducer(
@@ -36,7 +36,7 @@ extension RawCompletionLoopTests {
 
     @Test func chunkedModeUsesChunkedRunnerEntryPoint() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let producer = ChunkedTestProducer(vocabSize: tokenizer.vocabSize, firstToken: tokenA)
         let promptIDs = tokenizer.encode("go", addBOS: true)
@@ -68,7 +68,7 @@ extension RawCompletionLoopTests {
 
     @Test func chunkedLogitsSeedProducesFirstToken() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let producer = ChunkedTestProducer(vocabSize: tokenizer.vocabSize, firstToken: tokenA)
         let promptIDs = tokenizer.encode("go", addBOS: true)
@@ -97,7 +97,7 @@ extension RawCompletionLoopTests {
 
     @Test func chunkedPrefillRejectsGreedySeedWhenLogitsRequested() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let producer = ChunkedTestProducer(
             vocabSize: tokenizer.vocabSize,

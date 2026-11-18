@@ -71,7 +71,7 @@ private func makeIndex(_ pairs: [(id: String, path: String)]) -> ServerLibraryIn
                            familyModelID: $0.id,
                            basename: $0.id,
                            directory: URL(fileURLWithPath: $0.path, isDirectory: true),
-                           family: .gemma4)
+                           family: .qwen36)
     })
 }
 
@@ -88,7 +88,7 @@ private func makeLibrary(
         let modelID = directory.lastPathComponent
         log.append("load \(modelID)")
         return FakeLibraryModel(modelID: modelID,
-                                chatDialect: .gemma,
+                                chatDialect: .chatml,
                                 log: log,
                                 beforeGenerate: { await beforeGenerate(modelID) })
     }
@@ -98,16 +98,11 @@ private func makeLibrary(
 
 @Suite("Library model identifiers")
 struct ServerFamilyModelIDTests {
-    /// Every family the runtime knows has an identifier, including the ones
-    /// whose runner is still gated: library mode has to be able to name an
-    /// install it declines.
+    /// Every family the runtime knows has its own identifier: library mode
+    /// has to be able to name every install it lists or declines.
     @Test func everyKnownFamilyHasAnIdentifier() {
-        let families: [ModelFamily] = [
-            .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-            .qwen38flashnext, .minicpm5, .glm53Flash,
-        ]
         var identifiers = Set<String>()
-        for family in families {
+        for family in ModelFamily.allCases {
             let identifier = ServerFamilyModelID.modelID(for: family)
             #expect(!identifier.isEmpty)
             #expect(identifiers.insert(identifier).inserted,
@@ -119,15 +114,22 @@ struct ServerFamilyModelIDTests {
     /// The identifiers `ServerArguments.usage` advertises and the ones library
     /// mode derives are the same strings.
     @Test func identifiersMatchTheDocumentedDefaults() {
-        #expect(ServerFamilyModelID.modelID(for: .gemma4) == "gemma-4-26b-a4b-it")
         #expect(ServerFamilyModelID.modelID(for: .qwen36) == "qwen3.6-35b-a3b")
+        #expect(ServerFamilyModelID.modelID(for: .qwen38) == "qwen3.8-27b-4bit")
         #expect(ServerFamilyModelID.modelID(for: .maple) == "maple-preview-2bit-mlx")
         #expect(ServerFamilyModelID.modelID(for: .minicpm5) == "minicpm5-2b-int4g64")
-        #expect(ServerFamilyModelID.modelID(for: .glm53Flash) == "glm-5.3-flash-mlx-mixed-4-8bit")
     }
 
     @Test func unknownRawFamilyHasNoIdentifier() {
         #expect(ServerFamilyModelID.modelID(forRawFamily: "llama9") == nil)
+    }
+
+    /// A retired family is not a runtime family any more, so it has no API
+    /// identifier either; discovery names its skip by the raw family string.
+    @Test func retiredRawFamilyHasNoIdentifier() {
+        for raw in ManifestReader.retiredFamilies {
+            #expect(ServerFamilyModelID.modelID(forRawFamily: raw) == nil, "\(raw)")
+        }
     }
 }
 
@@ -144,8 +146,8 @@ struct ServerLibraryProbeTests {
 
     @Test func completeInstallIsAccepted() throws {
         let root = try ServerLibraryFixture.makeRoot("complete")
-        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
-        #expect(ServerLibraryProbe.probe(directory: directory) == .complete(family: .gemma4))
+        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
+        #expect(ServerLibraryProbe.probe(directory: directory) == .complete(family: .qwen36))
     }
 
     /// The repacker holds `<name>.gturbo.install.lock` next to the directory it
@@ -153,8 +155,8 @@ struct ServerLibraryProbeTests {
     /// refused.
     @Test func heldInstallLockRejectsTheDirectory() throws {
         let root = try ServerLibraryFixture.makeRoot("locked")
-        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
-        let held = try ServerLibraryFixture.holdInstallLock(in: root, named: "gemma4")
+        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
+        let held = try ServerLibraryFixture.holdInstallLock(in: root, named: "qwen36")
         defer { close(held) }
         guard case .partial(let reason) = ServerLibraryProbe.probe(directory: directory) else {
             Issue.record("a locked install must not be advertised")
@@ -168,14 +170,14 @@ struct ServerLibraryProbeTests {
     /// only a held `flock` does.
     @Test func staleInstallLockFileIsIgnored() throws {
         let root = try ServerLibraryFixture.makeRoot("stale-lock")
-        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
-        try ServerLibraryFixture.leaveStaleInstallLock(in: root, named: "gemma4")
-        #expect(ServerLibraryProbe.probe(directory: directory) == .complete(family: .gemma4))
+        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
+        try ServerLibraryFixture.leaveStaleInstallLock(in: root, named: "qwen36")
+        #expect(ServerLibraryProbe.probe(directory: directory) == .complete(family: .qwen36))
     }
 
     @Test func stagingDirectoryIsRejected() throws {
         let root = try ServerLibraryFixture.makeRoot("staging")
-        let staging = root.appendingPathComponent("gemma4.gturbo.partial", isDirectory: true)
+        let staging = root.appendingPathComponent("qwen36.gturbo.partial", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         guard case .partial = ServerLibraryProbe.probe(directory: staging) else {
             Issue.record("a .partial staging directory must not be advertised")
@@ -185,7 +187,7 @@ struct ServerLibraryProbeTests {
 
     @Test func missingReceiptIsPartialNotComplete() throws {
         let root = try ServerLibraryFixture.makeRoot("no-receipt")
-        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
+        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
         try FileManager.default.removeItem(
             at: directory.appendingPathComponent("verified-install.json"))
         guard case .partial = ServerLibraryProbe.probe(directory: directory) else {
@@ -196,7 +198,7 @@ struct ServerLibraryProbeTests {
 
     @Test func missingExpertLayoutIsPartial() throws {
         let root = try ServerLibraryFixture.makeRoot("no-layout")
-        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
+        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
         try FileManager.default.removeItem(
             at: directory.appendingPathComponent("packed_experts/layout.json"))
         guard case .partial(let reason) = ServerLibraryProbe.probe(directory: directory) else {
@@ -232,6 +234,29 @@ struct ServerLibraryProbeTests {
             in: root, named: "qwen36", family: ModelFamily.qwen36.rawValue)
         if case .notRunnable = ServerLibraryProbe.probe(directory: directory) {
             Issue.record("qwen36 has a runner and must not be reported as gated")
+        }
+    }
+
+    /// An install of a retired family stays on disk but is never served: the
+    /// probe names it as not runnable even when everything else about the
+    /// install is complete, and a legacy manifest with no `arch.family` (a
+    /// Gemma 4 install) is not complete either.
+    @Test func retiredFamilyInstallIsNotRunnableAndNeverComplete() throws {
+        let root = try ServerLibraryFixture.makeRoot("retired")
+        let directory = try ServerLibraryFixture.makeRetiredInstall(
+            in: root, named: "flashnext-iq3", family: "qwen38flashnextudiq3xxs")
+        guard case .notRunnable(let family, let detail) =
+            ServerLibraryProbe.probe(directory: directory) else {
+            Issue.record("a retired-family install must be reported as not runnable")
+            return
+        }
+        #expect(family == "qwen38flashnextudiq3xxs")
+        #expect(detail.contains("retired family"))
+
+        let legacy = try ServerLibraryFixture.makeRetiredInstall(
+            in: root, named: "legacy", family: nil)
+        if case .complete = ServerLibraryProbe.probe(directory: legacy) {
+            Issue.record("a manifest without arch.family must not be advertised")
         }
     }
 
@@ -274,9 +299,9 @@ struct ServerLibraryDiscoveryTests {
         let root = URL(fileURLWithPath: "/library", isDirectory: true)
         let index = ServerLibraryDiscovery.discover(
             roots: [root],
-            childDirectories: Self.children(["/library": ["gemma4.gturbo", "qwen36.gturbo"]]),
-            probe: Self.probe(["gemma4.gturbo": .gemma4, "qwen36.gturbo": .qwen36]))
-        #expect(index.entries.map(\.modelID) == ["gemma-4-26b-a4b-it", "qwen3.6-35b-a3b"])
+            childDirectories: Self.children(["/library": ["maple.gturbo", "qwen36.gturbo"]]),
+            probe: Self.probe(["maple.gturbo": .maple, "qwen36.gturbo": .qwen36]))
+        #expect(index.entries.map(\.modelID) == ["maple-preview-2bit-mlx", "qwen3.6-35b-a3b"])
         #expect(index.skipped.isEmpty)
     }
 
@@ -287,15 +312,15 @@ struct ServerLibraryDiscoveryTests {
         let index = ServerLibraryDiscovery.discover(
             roots: [root],
             childDirectories: Self.children([
-                "/library": ["qwen36.gturbo", "qwen36-ourquant.gturbo", "gemma4.gturbo"],
+                "/library": ["qwen36.gturbo", "qwen36-ourquant.gturbo", "maple.gturbo"],
             ]),
             probe: Self.probe([
                 "qwen36.gturbo": .qwen36,
                 "qwen36-ourquant.gturbo": .qwen36,
-                "gemma4.gturbo": .gemma4,
+                "maple.gturbo": .maple,
             ]))
         #expect(index.entries.map(\.modelID) == [
-            "gemma-4-26b-a4b-it",
+            "maple-preview-2bit-mlx",
             "qwen3.6-35b-a3b@qwen36",
             "qwen3.6-35b-a3b@qwen36-ourquant",
         ])
@@ -342,12 +367,12 @@ struct ServerLibraryDiscoveryTests {
     }
 
     @Test func aRootThatIsItselfAnInstallIsListed() {
-        let root = URL(fileURLWithPath: "/library/gemma4.gturbo", isDirectory: true)
+        let root = URL(fileURLWithPath: "/library/qwen36.gturbo", isDirectory: true)
         let index = ServerLibraryDiscovery.discover(
             roots: [root],
             childDirectories: Self.children([:]),
-            probe: Self.probe(["gemma4.gturbo": .gemma4]))
-        #expect(index.entries.map(\.modelID) == ["gemma-4-26b-a4b-it"])
+            probe: Self.probe(["qwen36.gturbo": .qwen36]))
+        #expect(index.entries.map(\.modelID) == ["qwen3.6-35b-a3b"])
     }
 
     /// `--model` alongside `--library` may point outside every root; it still
@@ -357,10 +382,10 @@ struct ServerLibraryDiscoveryTests {
             roots: [URL(fileURLWithPath: "/library", isDirectory: true)],
             explicitModelDirectory: URL(fileURLWithPath: "/elsewhere/maple.gturbo",
                                         isDirectory: true),
-            childDirectories: Self.children(["/library": ["gemma4.gturbo"]]),
-            probe: Self.probe(["gemma4.gturbo": .gemma4, "maple.gturbo": .maple]))
+            childDirectories: Self.children(["/library": ["qwen36.gturbo"]]),
+            probe: Self.probe(["qwen36.gturbo": .qwen36, "maple.gturbo": .maple]))
         #expect(index.entries.map(\.modelID) == [
-            "gemma-4-26b-a4b-it", "maple-preview-2bit-mlx",
+            "maple-preview-2bit-mlx", "qwen3.6-35b-a3b",
         ])
     }
 
@@ -368,19 +393,19 @@ struct ServerLibraryDiscoveryTests {
         let index = ServerLibraryDiscovery.discover(
             roots: [URL(fileURLWithPath: "/library", isDirectory: true),
                     URL(fileURLWithPath: "/library/", isDirectory: true)],
-            explicitModelDirectory: URL(fileURLWithPath: "/library/gemma4.gturbo",
+            explicitModelDirectory: URL(fileURLWithPath: "/library/qwen36.gturbo",
                                         isDirectory: true),
-            childDirectories: Self.children(["/library": ["gemma4.gturbo"]]),
-            probe: Self.probe(["gemma4.gturbo": .gemma4]))
+            childDirectories: Self.children(["/library": ["qwen36.gturbo"]]),
+            probe: Self.probe(["qwen36.gturbo": .qwen36]))
         #expect(index.entries.count == 1)
-        #expect(index.entries[0].modelID == "gemma-4-26b-a4b-it")
+        #expect(index.entries[0].modelID == "qwen3.6-35b-a3b")
     }
 
     /// End to end over real directories: only the complete install is
     /// advertised, and the other two are recorded with a reason.
     @Test func realRootAdvertisesOnlyCompleteInstalls() throws {
         let root = try ServerLibraryFixture.makeRoot("discovery")
-        let complete = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
+        let complete = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
         try ServerLibraryFixture.makeGatedInstall(in: root, named: "future",
                                                   family: "not-yet-family")
         try ServerLibraryFixture.makeCorruptInstall(in: root, named: "broken")
@@ -391,7 +416,7 @@ struct ServerLibraryDiscoveryTests {
             roots: [root],
             probe: { ServerLibraryProbe.probe(directory: $0,
                                               gatedFamilies: ServerLibraryFixture.gate) })
-        #expect(index.entries.map(\.modelID) == ["gemma-4-26b-a4b-it"])
+        #expect(index.entries.map(\.modelID) == ["qwen3.6-35b-a3b"])
         #expect(index.entries[0].directory == complete)
         #expect(index.skipped.count == 2)
         let reasons = index.skipped.map(\.reason).sorted()
@@ -400,6 +425,23 @@ struct ServerLibraryDiscoveryTests {
         // A directory with no manifest is not a skipped install, just a
         // directory, and must not appear in the report at all.
         #expect(!index.skipped.contains { $0.directory == notes })
+    }
+
+    /// A retired-family install in a library root is skipped with its reason
+    /// and never listed, while a kept install beside it still is.
+    @Test func retiredFamilyInstallIsSkippedNotListed() throws {
+        let root = try ServerLibraryFixture.makeRoot("discovery-retired")
+        let kept = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
+        let retired = try ServerLibraryFixture.makeRetiredInstall(
+            in: root, named: "flashnext-iq3", family: "qwen38flashnextudiq3xxs")
+
+        let index = ServerLibraryDiscovery.discover(roots: [root])
+        #expect(index.entries.map(\.directory) == [kept])
+        #expect(!index.entries.contains { $0.directory == retired })
+        let skip = try #require(index.skipped.first { $0.directory == retired })
+        #expect(skip.reason.contains("not runnable"))
+        #expect(skip.reason.contains("retired family"))
+        #expect(skip.modelID == "qwen38flashnextudiq3xxs")
     }
 }
 
@@ -485,7 +527,7 @@ struct ServerModelLibrarySwapTests {
             }
             if attempt == 1 { throw LoadFailure() }
             return FakeLibraryModel(modelID: directory.lastPathComponent,
-                                    chatDialect: .gemma,
+                                    chatDialect: .chatml,
                                     log: log)
         }
         await #expect(throws: LoadFailure.self) {
@@ -595,10 +637,10 @@ struct ServerLibraryArgumentTests {
     @Test func modelAlongsideLibraryIsAccepted() throws {
         let arguments = try ServerArguments.parse([
             "--library", "/a",
-            "--model", "/a/gemma4.gturbo",
+            "--model", "/a/qwen36.gturbo",
         ])
         #expect(arguments.library != nil)
-        #expect(arguments.model == "/a/gemma4.gturbo")
+        #expect(arguments.model == "/a/qwen36.gturbo")
     }
 
     /// One override cannot name several models, so the combination is refused
@@ -660,9 +702,9 @@ struct LibraryHTTPServerTests {
     /// the configured length, or with `max` its family's native context.
     @Test func modelsReportTheContextEachModelRunsWith() {
         let entries = [
-            ServerLibraryEntry(modelID: "gemma", familyModelID: "gemma-4-26b-a4b-it",
-                               basename: "gemma4.gturbo",
-                               directory: URL(fileURLWithPath: "/models/gemma4.gturbo"), family: .gemma4),
+            ServerLibraryEntry(modelID: "qwen", familyModelID: "qwen3.6-35b-a3b",
+                               basename: "qwen36.gturbo",
+                               directory: URL(fileURLWithPath: "/models/qwen36.gturbo"), family: .qwen36),
             ServerLibraryEntry(modelID: "maple", familyModelID: "maple-preview-2bit-mlx",
                                basename: "maple.gturbo",
                                directory: URL(fileURLWithPath: "/models/maple.gturbo"), family: .maple),
@@ -677,8 +719,8 @@ struct LibraryHTTPServerTests {
                 ($0.id, $0.maxModelLen)
             })
         }
-        #expect(lengths(nil) == ["gemma": 262_144, "maple": 128_000])
-        #expect(lengths(32_768) == ["gemma": 32_768, "maple": 32_768])
+        #expect(lengths(nil) == ["qwen": 262_144, "maple": 128_000])
+        #expect(lengths(32_768) == ["qwen": 32_768, "maple": 32_768])
     }
 
     /// The listing comes from the startup index, so it answers while a load

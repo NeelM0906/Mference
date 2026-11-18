@@ -5,8 +5,7 @@ import Testing
 
 /// Base Qwen 3.8 27B (`qwen3.8-27b-4bit`) request rules: the model ID alone
 /// enables `reasoning_effort`, and an explicit effort routes the request
-/// through the source template, which rejects developer turns. These are the
-/// base-checkpoint runs of the removed Swift-Qwen server suite.
+/// through the source template, which rejects developer turns.
 @Suite struct Qwen38ServerTests {
     @Test func effortAndHistoricalReasoningSurviveValidation() throws {
         let model = CheckpointIdentity.baseQwen38
@@ -28,10 +27,10 @@ import Testing
         let data = Data(#"{"model":"alias","reasoning_effort":"low","messages":[{"role":"user","content":"Hi"}]}"#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         #expect(try OpenAIRequestValidator.validate(request, modelID: "alias", dialect: .chatml,
-            swiftQwen: false, qwenReasoning: true).reasoningEffort == .low)
+            qwenReasoning: true).reasoningEffort == .low)
         #expect(throws: ServerRequestError.self) {
             try OpenAIRequestValidator.validate(request, modelID: "alias", dialect: .chatml,
-                swiftQwen: false, qwenReasoning: false)
+                qwenReasoning: false)
         }
         for effort in ["", "\"reasoning_effort\":\"low\","] {
             let body = Data("""

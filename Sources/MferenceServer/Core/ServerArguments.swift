@@ -11,7 +11,7 @@ public struct ServerArguments: Equatable, Sendable {
     /// Explicit --model-id value; nil defers to the loaded model's family
     /// default for the loaded model family.
     public let modelIDOverride: String?
-    public var modelID: String { modelIDOverride ?? "gemma-4-26b-a4b-it" }
+    public var modelID: String { modelIDOverride ?? "qwen3.6-35b-a3b" }
     /// `--max-context`; nil (`max`) gives each model its native context.
     public let maxContext: Int?
     public let queueLimit: Int
@@ -78,24 +78,19 @@ public struct ServerArguments: Equatable, Sendable {
                              binds only the machine's Tailscale IPv4 address
                              and fails when Tailscale is unavailable.
       --model-id <id>        API model identifier (default derived from the
-                             installed model: gemma-4-26b-a4b-it,
-                             qwen3.6-35b-a3b, qwen3.8-27b-4bit,
-                             deepseek-v4-flash-2bit-dq, inkling-small-4bit,
-                             maple-preview-2bit-mlx,
-                             qwen3.8-flash-next-int4g64,
-                             minicpm5-2b-int4g64, or the manifest's distinct
-                             GLM / Swift-Qwen checkpoint ID). Single-model mode only.
+                             installed model: qwen3.6-35b-a3b,
+                             qwen3.8-27b-4bit, maple-preview-2bit-mlx, or
+                             minicpm5-2b-int4g64). Single-model mode only.
       --max-context <tokens|max>
                              Context length in tokens (default 16384), up to
-                             the model's native context: 262144 for Gemma 4,
-                             Qwen 3.6, Qwen 3.8 and Flash-Next, 131072 for
-                             MiniCPM5, 128000 for Maple, 1048576 for
-                             DeepSeek-V4, Inkling and GLM-5.3. A model whose
+                             the model's native context: 262144 for Qwen 3.6
+                             and Qwen 3.8, 131072 for MiniCPM5, 128000 for
+                             Maple. A model whose
                              native context is shorter refuses to load. max
                              gives each model its own native context.
       --kv-reserve           Reserve full-attention KV for the whole context
-                             when a model loads. Without it, Gemma 4,
-                             Qwen 3.6 and Inkling start at 16384 tokens (a
+                             when a model loads. Without it, Qwen 3.6
+                             starts at 16384 tokens (a
                              context of 16384 or less is reserved whole); a
                              longer prompt grows it to the prompt plus 16384,
                              and an answer that outgrows that adds 8192 at a
@@ -106,30 +101,27 @@ public struct ServerArguments: Equatable, Sendable {
                              single-prefix keeps the last finished turn;
                              multi-prefix also keeps earlier turns and other
                              conversations under --prompt-cache-bytes. Only
-                             Qwen 3.6 and the Flash-Next models keep more than
-                             one prefix; every other model serves multi-prefix
-                             as single-prefix.
+                             Qwen 3.6 keeps more than one prefix; every other
+                             model serves multi-prefix as single-prefix.
       --prompt-cache-bytes <bytes|auto>
                              RAM ceiling for prefixes multi-prefix keeps besides
                              the live one (default auto: the smaller of 4 GiB
                              and physical memory / 8 with at least 24 GiB,
-                             1 GiB from 16 GiB, 0 below; at most 1.5 GiB for
-                             the Flash-Next models). 0 serves exactly as
+                             1 GiB from 16 GiB, 0 below). 0 serves exactly as
                              single-prefix.
       --shadow-budget <0...8>
                              Speculative expert prefetch during decode: reads
                              issued per layer ahead of the router; 0 turns it off.
-                             Default: 4 for Qwen 3.6 and Gemma 4 on hosts with 16
-                             to under 24 GiB, 8 at 24 GiB, 8 for Qwen 3.6 up to
-                             32 GiB, 2 for DeepSeek-V4-Flash, off elsewhere.
+                             Default: 4 for Qwen 3.6 on hosts with 16 to under
+                             24 GiB, 8 at 24 GiB, 8 for Qwen 3.6 up to
+                             32 GiB, off elsewhere.
       --prefill-chunk <n|auto>
                              Prompt tokens per prefill chunk: auto (default) or
                              32, 64, 128, 256, 512, 1024, 2048, 4096. Larger
                              chunks re-read routed experts less often but hold
-                             more memory. auto is 2048 for Gemma 4 (QAT
-                             included) and Qwen 3.6 on hosts with at least
-                             16 GiB, 128 elsewhere; 1024 saves Gemma about
-                             350 MB. Overrides MFERENCE_SERVER_PREFILL_CHUNK.
+                             more memory. auto is 2048 for Qwen 3.6 on hosts
+                             with at least 16 GiB, 128 elsewhere. Overrides
+                             MFERENCE_SERVER_PREFILL_CHUNK.
       --verify <mode>        Model integrity on load and model swap: auto
                              (default) checks file sizes against the install
                              receipt when it validates and hashes otherwise;

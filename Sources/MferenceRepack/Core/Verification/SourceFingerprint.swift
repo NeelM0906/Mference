@@ -4,7 +4,7 @@ import Foundation
 /// importer has been validated against a fresh upload of the source.
 public enum SourceFingerprint {
     public static let knownFingerprints: [String: String] = Dictionary(
-        uniqueKeysWithValues: SupportedModelSource.allIncludingUnlisted.compactMap { source in
+        uniqueKeysWithValues: SupportedModelSource.all.compactMap { source in
             source.sourceIndexSHA256.map { (source.modelID, $0) }
         })
 
@@ -18,7 +18,7 @@ public enum SourceFingerprint {
     /// hash (trust-on-first-use). Pinned sources never resolve through here,
     /// so a hash mismatch against a pinned repo still hard-fails.
     public static func trustOnFirstUseModelID(forRepoID repoID: String) -> String? {
-        SupportedModelSource.allIncludingUnlisted.first {
+        SupportedModelSource.all.first {
             $0.repoID == repoID && $0.sourceIndexSHA256 == nil
         }?.modelID
     }

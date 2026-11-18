@@ -1,5 +1,8 @@
 # Optimizing a 14.3 GB model for an 8 GB machine
 
+> Dated record. The retired families it names (Gemma 4 and DeepSeek-V4-Flash)
+> are no longer supported; see [Retired model families](RETIRED_FAMILIES.md).
+
 Mference runs Gemma 4 26B-A4B on an 8 GB Apple Silicon machine. Its
 text-only installation, without the vision tower, is about 14.3 GB. The model
 was never going to fit politely in memory.

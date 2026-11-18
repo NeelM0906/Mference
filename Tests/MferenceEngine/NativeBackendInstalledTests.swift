@@ -52,8 +52,8 @@ import MferenceEngine
     static func request(_ prompt: PromptCase, defaults: GenerationConfig) throws -> EngineRequest {
         let messages = try prompt.messages.map { message -> MFTokenizer.Message in
             // The server's validator rewrites some roles (developer becomes
-            // system outside Gemma); this harness does not, so the prompt set
-            // must not use them.
+            // system); this harness does not, so the prompt set must not use
+            // them.
             guard message.role != "developer",
                   let role = MFTokenizer.Role(rawValue: message.role) else {
                 throw EngineError.invalidRequest(message: "role \(message.role)", param: nil, code: "test")

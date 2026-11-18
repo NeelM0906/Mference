@@ -8,7 +8,7 @@ result because repeated expert choices can make decode artificially fast.
 
 The frozen prompts are in
 [`benchmark-prompts/real-generation-v1/`](benchmark-prompts/real-generation-v1/).
-Runs use the app sampling defaults with fixed seeds: temperature `0.2`, Top-K
+Runs use fixed sampling settings and seeds: temperature `0.2`, Top-K
 `64`, Top-P `0.95`, a 4,096-token context, and up to 1,024 generated tokens.
 The commands pass `--verify full-sha256`, so every run hashes the expert files
 on first touch inside its prefill, as the recorded baselines did when that was
@@ -43,7 +43,7 @@ mkdir -p benchmark-results/system benchmark-results/warmup benchmark-results/mea
   swift --version
   system_profiler SPHardwareDataType |
     awk -F': ' '/Model Name|Model Identifier|Chip|Total Number of Cores|Memory/ { print $1 ": " $2 }'
-  shasum -a 256 scratch/gemma4.gturbo/manifest.json
+  shasum -a 256 scratch/qwen36.gturbo/manifest.json
   shasum -a 256 docs/benchmark-prompts/real-generation-v1/*.json
 } 2>&1 | tee benchmark-results/system/system.txt
 ```
@@ -63,7 +63,7 @@ for case_seed in \
   case_id="${case_seed%%:*}"
   seed="${case_seed##*:}"
   .build/release/MferenceCLI \
-    --model scratch/gemma4.gturbo \
+    --model scratch/qwen36.gturbo \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
     --verify full-sha256 \
     --max-new 1024 \
@@ -87,7 +87,7 @@ for case_seed in \
   case_id="${case_seed%%:*}"
   seed="${case_seed##*:}"
   .build/release/MferenceCLI \
-    --model scratch/gemma4.gturbo \
+    --model scratch/qwen36.gturbo \
     --messages-file "docs/benchmark-prompts/real-generation-v1/${case_id}.json" \
     --verify full-sha256 \
     --max-new 1024 \
@@ -121,6 +121,5 @@ Open an issue titled `Benchmark: <chip>, <memory>, <macOS version>` and include:
 - any output-quality problem or protocol change.
 
 Compare rows only when the case, prompt tokens, generated tokens, settings, and
-stop reason match. The [reference M5 range](BENCHMARKS.md#m5-measured-decode)
-uses controlled non-repeating continuations for stable token-for-token
-measurement, while this public protocol checks autonomous product generation.
+stop reason match. The [recorded baselines](BENCHMARKS.md) say which protocol
+and verify mode produced each row.

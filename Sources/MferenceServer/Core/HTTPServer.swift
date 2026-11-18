@@ -32,7 +32,7 @@ public actor MferenceHTTPServer {
     public init(modelID: String,
                 queueLimit: Int,
                 backend: any ServerInferenceBackend,
-                chatDialect: ChatDialect = .gemma,
+                chatDialect: ChatDialect = .chatml,
                 maxModelLen: Int = ServerArguments.defaultMaxContext,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
@@ -264,7 +264,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
             let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
                                                               dialect: chatDialect,
-                                                              swiftQwen: backend.usesSwiftQwenTemplate,
                                                               acceptsReasoningEffort: backend.acceptsReasoningEffort,
                                                               qwenReasoning: backend.supportsQwenReasoningEffort,
                                                               generationDefaults: backend.generationDefaults)
@@ -441,7 +440,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                 decoded,
                                 modelID: resolved.modelID,
                                 dialect: resolved.backend.chatDialect,
-                                swiftQwen: resolved.backend.usesSwiftQwenTemplate,
                                 acceptsReasoningEffort: resolved.backend.acceptsReasoningEffort,
                                 qwenReasoning: resolved.backend.supportsQwenReasoningEffort,
                                 generationDefaults: resolved.backend.generationDefaults)

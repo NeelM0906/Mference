@@ -11,11 +11,11 @@ import Metal
     }
 
     /// Build a minimal valid `model.gturbo/` directory in a temp dir and
-    /// return the URL. Uses the toy ArchConfig `gemma4Toy()`: 2 layers,
+    /// return the URL. Uses the toy ArchConfig `defaultsToy()`: 2 layers,
     /// 8 experts, hidden 64, vocab 1024. Resident contains the embedding
     /// (alias: lmHead), final norm, and the tiny layer-resident tensors needed
     /// to construct `RealForwardRunner` in unit tests.
-    static func writeToySynthetic(config toy: ArchConfig = .gemma4Toy(),
+    static func writeToySynthetic(config toy: ArchConfig = .defaultsToy(),
                                   finiteNorms: Bool = false) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-toy-\(UUID().uuidString)")
@@ -429,6 +429,7 @@ import Metal
             "attentionKEqV": toy.attentionKEqV,
             "hiddenActivation": toy.hiddenActivation,
             "fullAttentionLayerMask": toy.fullAttentionLayerMask.map { Int($0) },
+            "family": toy.family.rawValue,
         ]
         let manifestRoot: [String: Any] = [
             "magic": "GTURBO",
@@ -449,7 +450,7 @@ import Metal
     }
 
     static func writeVerifiedInstallReceipt(directoryURL dir: URL) throws {
-        let manifest = try ManifestReader.load(directoryURL: dir, expecting: .gemma4Toy())
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: .defaultsToy())
         let manifestURL = dir.appendingPathComponent("manifest.json")
         let manifestSha = try Sha256Verifier.hashFile(at: manifestURL)
         let manifestSize = try FileManager.default

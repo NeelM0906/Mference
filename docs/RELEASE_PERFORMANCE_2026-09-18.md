@@ -1,5 +1,8 @@
 # Release performance experiments — September 18, 2026
 
+> Dated record. The retired family it names (Swift-Qwen3.8) is no longer
+> supported; see [Retired model families](RETIRED_FAMILIES.md).
+
 Measurements and failed attempts, not performance ceilings. This record does
 not establish a release recommendation or broad model-quality parity.
 

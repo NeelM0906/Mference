@@ -16,8 +16,6 @@ import time
 import urllib.error
 import urllib.request
 
-from swift_qwen_task_screen import score as legacy_score
-
 
 def equivalent(actual, expected):
     """JSON value equality, without Python's True == 1 loophole."""
@@ -34,9 +32,28 @@ def equivalent(actual, expected):
     return type(actual) is type(expected) and actual == expected
 
 
+def text_score(case, response):
+    """Exact trimmed text, or exact JSON, for a completed (`stop`) answer."""
+    choices = response.get("choices", [])
+    if not choices:
+        return False, "missing choice"
+    choice = choices[0]
+    if choice.get("finish_reason") != "stop":
+        return False, "incomplete answer"
+    content = (choice.get("message", {}).get("content") or "").strip()
+    if "expected_json" in case:
+        try:
+            actual = json.loads(content)
+        except ValueError:
+            return False, "invalid JSON or extra prose"
+        # JSON serialization avoids Python treating True and 1 as equal.
+        return json.dumps(actual, sort_keys=True) == json.dumps(case["expected_json"], sort_keys=True), "exact JSON"
+    return content == case["expected"], "exact trimmed text"
+
+
 def score(case, response):
     if "expected_call" not in case:
-        return legacy_score(case, response)
+        return text_score(case, response)
     choices = response.get("choices", [])
     if not choices:
         return False, "missing choice"
