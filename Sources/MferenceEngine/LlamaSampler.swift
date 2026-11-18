@@ -37,7 +37,12 @@ final class LlamaSampler: @unchecked Sendable {
         let penalised = config.repeatLastN != 0
             && (config.repetitionPenalty != 1 || config.presencePenalty != 0 || config.frequencyPenalty != 0)
         if penalised {
-            let window = config.repeatLastN < 0 ? contextSize : Int32(config.repeatLastN)
+            // No more history than the context can exist, so a larger window
+            // penalises the same tokens; clamping also keeps the Int32
+            // conversion from trapping and llama.cpp from sizing its history
+            // buffer by the request.
+            let window = config.repeatLastN < 0
+                ? contextSize : Int32(min(config.repeatLastN, Int(contextSize)))
             llama_sampler_chain_add(chain, llama_sampler_init_penalties(
                 vocabularySize, window, config.repetitionPenalty,
                 config.frequencyPenalty, config.presencePenalty))
@@ -46,7 +51,9 @@ final class LlamaSampler: @unchecked Sendable {
             llama_sampler_chain_add(chain, llama_sampler_init_greedy())
         } else {
             if let topK = config.topK, topK > 0 {
-                llama_sampler_chain_add(chain, llama_sampler_init_top_k(Int32(topK)))
+                // Top-k at or above the vocabulary keeps every token.
+                llama_sampler_chain_add(chain, llama_sampler_init_top_k(
+                    Int32(min(topK, Int(vocabularySize)))))
             }
             if let topP = config.topP, topP < 1 {
                 llama_sampler_chain_add(chain, llama_sampler_init_top_p(topP, 1))

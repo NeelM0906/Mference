@@ -142,6 +142,19 @@ struct LlamaBackendTests {
         #expect(events.all == [.toolCall(call)])
     }
 
+    // MARK: Sampling
+
+    /// Request values beyond Int32 (validated as any nonnegative Int) must
+    /// build a chain, not trap: the penalty window is clamped to the context
+    /// and top-k to the vocabulary, where they mean the same thing.
+    @Test func samplerClampsOversizedWindows() {
+        var config = GenerationConfig(temperature: 0.7, topK: Int.max, repetitionPenalty: 1.1,
+                                      repeatLastN: Int.max)
+        _ = LlamaSampler(config: config, vocabularySize: 1_000, contextSize: 4_096)
+        config.repeatLastN = -1
+        _ = LlamaSampler(config: config, vocabularySize: 1_000, contextSize: 4_096)
+    }
+
     // MARK: Loading
 
     @Test func refusesANativeDescriptor() async {
