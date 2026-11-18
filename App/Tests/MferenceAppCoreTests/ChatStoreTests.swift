@@ -44,6 +44,42 @@ import Testing
         #expect(turns[2].toolName == "web_search")
     }
 
+    @Test func earlierAnswersLeaveTheirToolTurnsAndMarkersOut() throws {
+        let store = ConversationStore(container: try AppModelContainer.inMemory())
+        let conversation = try store.createConversation(model: .quick)
+        let call = ToolCall(id: "c1", name: "web_search", arguments: .object([:]), argumentsJSON: "{}")
+        try store.append(to: conversation, role: .user, content: "First?")
+        try store.append(to: conversation, role: .assistant, content: "", reasoning: "search") { $0.toolCalls = [call] }
+        try store.append(to: conversation, role: .tool, content: "long page text") {
+            $0.toolCallID = "c1"
+            $0.toolName = "web_search"
+        }
+        try store.append(to: conversation, role: .assistant, content: "It is on sale [1].", reasoning: "found it") {
+            $0.citations = [ChatCitation(number: 1, url: URL(string: "https://a.example/")!, title: "A")]
+        }
+        try store.append(to: conversation, role: .user, content: "Second?")
+        try store.append(to: conversation, role: .assistant, content: "") { $0.toolCalls = [call] }
+        try store.append(to: conversation, role: .tool, content: "new results") {
+            $0.toolCallID = "c1"
+            $0.toolName = "web_search"
+        }
+
+        let turns = store.turns(for: conversation)
+        #expect(turns.map(\.role) == [.user, .assistant, .user, .assistant, .tool])
+        #expect(turns[1].content == "It is on sale .")
+        #expect(turns[1].reasoning == "found it")
+        #expect(turns[4].content == "new results")
+    }
+
+    @Test func writesToADeletedChatAreRefused() throws {
+        let store = ConversationStore(container: try AppModelContainer.inMemory())
+        let conversation = try store.createConversation(model: .quick)
+        try store.delete(conversation)
+        #expect(throws: ConversationStoreError.conversationDeleted) {
+            try store.append(to: conversation, role: .assistant, content: "late")
+        }
+    }
+
     @Test func deleteFromIndexDropsTheTail() throws {
         let store = ConversationStore(container: try AppModelContainer.inMemory())
         let conversation = try store.createConversation(model: .quick)

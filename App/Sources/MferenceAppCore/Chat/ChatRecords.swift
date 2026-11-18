@@ -89,7 +89,7 @@ public enum ChatStepsSummary {
     }
 
     /// Shown under the queries whenever the web was used.
-    public static let privacyNote = "Only these search queries left your Mac, through SearXNG (web search is opt-in). The model and everything it read stay here."
+    public static let privacyNote = "These searches went to search engines through SearXNG on this Mac, and the pages were fetched from this Mac (web search is opt-in). The model and what it read stay here."
 }
 
 /// What a finished or stopped assistant message records in `finishRawValue`.

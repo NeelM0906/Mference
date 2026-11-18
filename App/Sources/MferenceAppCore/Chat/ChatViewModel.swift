@@ -88,7 +88,11 @@ public final class ChatViewModel {
     }
     public var draft = ""
     public private(set) var isGenerating = false
-    public var errorMessage: String?
+    public var errorMessage: String? {
+        didSet { if errorMessage == nil { canRetryAfterError = false } }
+    }
+    /// The error came from writing an answer, so "Try again" regenerates it.
+    public private(set) var canRetryAfterError = false
     public private(set) var modelOptions: [ModelOption] = AppModel.allCases.map {
         ModelOption(model: $0, availability: .notInstalled(reason: "Looking for models…"))
     }
@@ -179,9 +183,14 @@ public final class ChatViewModel {
         warmUp(model)
     }
 
-    public func delete(_ id: UUID) {
+    /// Deletes a chat. If its answer is being written, that answer is stopped
+    /// and finishes saving first, so nothing writes to a deleted chat.
+    public func delete(_ id: UUID) async {
+        if generatingConversationID == id {
+            stop()
+            await waitUntilIdle()
+        }
         guard let conversation = try? store.conversation(id: id) else { return }
-        if generatingConversationID == id { stop() }
         try? store.delete(conversation)
         if selectedID == id { newChat() }
         reloadConversations()
@@ -303,6 +312,9 @@ public final class ChatViewModel {
         var round = 0
         var content = ""
         var reasoning = ""
+        // Calls the model made that have no tool result yet; a stop answers
+        // them with "Stopped." so the history stays well formed.
+        var unanswered: [ToolCall] = []
         defer { finishGeneration(conversationID: conversation.id) }
 
         do {
@@ -340,17 +352,20 @@ public final class ChatViewModel {
                         $0.toolCalls = summary.toolCalls
                         $0.finishRawValue = ChatFinish.toolCalls.rawValue
                     }
+                    unanswered = summary.toolCalls
                     for call in summary.toolCalls {
-                        let outcome = await toolbox.run(call)
                         try Task.checkCancellation()
-                        steps += outcome.steps
-                        Self.merge(outcome.citations, into: &citations)
+                        let outcome = await toolbox.run(call)
                         try store.append(to: conversation, role: .tool, content: outcome.content, now: now()) {
                             $0.toolCallID = call.id
                             $0.toolName = call.name
                         }
+                        unanswered.removeFirst()
+                        steps += outcome.steps
+                        Self.merge(outcome.citations, into: &citations)
                         updateStreaming { $0.steps = steps; $0.citations = citations }
                     }
+                    try Task.checkCancellation()
                     round += 1
                     updateStreaming { $0.content = ""; $0.reasoning = nil }
                     continue
@@ -367,18 +382,24 @@ public final class ChatViewModel {
                 appendFinished(saved, conversationID: conversation.id)
                 return
             }
-        } catch is CancellationError {
-            savePartial(conversation: conversation, model: model, content: content, reasoning: reasoning,
-                        steps: steps, citations: citations, finish: .cancelled)
         } catch {
-            if Task.isCancelled {
-                savePartial(conversation: conversation, model: model, content: content, reasoning: reasoning,
-                            steps: steps, citations: citations, finish: .cancelled)
-                return
-            }
+            let cancelled = error is CancellationError || Task.isCancelled
+            answerUnanswered(unanswered, in: conversation, with: cancelled ? "Stopped." : "Failed.")
             savePartial(conversation: conversation, model: model, content: content, reasoning: reasoning,
-                        steps: steps, citations: citations, finish: .failed)
-            if selectedID == conversation.id { errorMessage = Self.message(for: error) }
+                        steps: steps, citations: citations, finish: cancelled ? .cancelled : .failed)
+            if !cancelled, selectedID == conversation.id {
+                errorMessage = Self.message(for: error)
+                canRetryAfterError = true
+            }
+        }
+    }
+
+    private func answerUnanswered(_ calls: [ToolCall], in conversation: Conversation, with text: String) {
+        for call in calls {
+            _ = try? store.append(to: conversation, role: .tool, content: text, now: now()) {
+                $0.toolCallID = call.id
+                $0.toolName = call.name
+            }
         }
     }
 

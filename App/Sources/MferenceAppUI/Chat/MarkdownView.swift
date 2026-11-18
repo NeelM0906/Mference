@@ -17,10 +17,19 @@ struct MarkdownView: View {
         .foregroundStyle(MFColor.ink)
         .textSelection(.enabled)
         .environment(\.openURL, OpenURLAction { url in
-            guard url.scheme == InlineText.citationScheme else { return .systemAction }
-            let number = Int(url.host() ?? url.path()) ?? 0
-            guard let source = citations.first(where: { $0.number == number }) else { return .discarded }
-            return .systemAction(source.url)
+            // Only web links and citation chips open; a model can write any
+            // URL scheme into its answer.
+            switch url.scheme?.lowercased() {
+            case InlineText.citationScheme:
+                let number = Int(url.host() ?? url.path()) ?? 0
+                guard let source = citations.first(where: { $0.number == number }),
+                      InlineText.isWebLink(source.url) else { return .discarded }
+                return .systemAction(source.url)
+            case "http", "https":
+                return .systemAction(url)
+            default:
+                return .discarded
+            }
         })
     }
 
@@ -147,9 +156,19 @@ struct InlineText {
         guard var parsed = try? AttributedString(markdown: text, options: options) else {
             return AttributedString(text)
         }
-        for run in parsed.runs where run.link != nil {
-            parsed[run.range].swiftUI.foregroundColor = MFColor.accent
+        for run in parsed.runs {
+            guard let link = run.link else { continue }
+            if isWebLink(link) {
+                parsed[run.range].swiftUI.foregroundColor = MFColor.accent
+            } else {
+                parsed[run.range].link = nil
+            }
         }
         return parsed
+    }
+
+    static func isWebLink(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
     }
 }

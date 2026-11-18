@@ -75,7 +75,7 @@ struct ChatSidebar: View {
                 ConversationRow(row: row, isSelected: row.id == model.selectedID) {
                     model.select(row.id)
                 } onDelete: {
-                    model.delete(row.id)
+                    Task { await model.delete(row.id) }
                 }
             }
         }

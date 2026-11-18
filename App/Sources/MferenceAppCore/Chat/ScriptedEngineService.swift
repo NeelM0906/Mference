@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import Synchronization
 
@@ -5,6 +6,7 @@ import Synchronization
 /// snapshots and view-model tests that need several different rounds (a tool
 /// call, then an answer). It loads no model and touches no network. Tests of
 /// the real service path use `EngineService` over `FakeEngineBackend`.
+/// Debug builds only: it never ships in the release app.
 public final class ScriptedEngineService: EngineServicing {
     /// One scripted generation.
     public struct Reply: Sendable {
@@ -160,3 +162,4 @@ public final class ScriptedEngineService: EngineServicing {
         for continuation in subscribers { continuation.finish() }
     }
 }
+#endif

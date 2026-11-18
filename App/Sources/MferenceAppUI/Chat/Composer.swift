@@ -77,7 +77,7 @@ struct Composer: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Web search")
         .accessibilityValue(model.webEnabled ? "On" : "Off")
-        .accessibilityHint("Only search queries leave this Mac, through SearXNG")
+        .accessibilityHint("Searches go through SearXNG on this Mac; pages are fetched from this Mac")
     }
 
     private var modelButton: some View {

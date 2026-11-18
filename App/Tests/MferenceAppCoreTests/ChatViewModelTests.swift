@@ -24,6 +24,23 @@ struct StubToolbox: ChatToolbox, ChatToolboxProvider {
     func webUsageChanged(enabled: Bool) {}
 }
 
+/// A toolbox whose tool runs until it is cancelled.
+struct HangingToolbox: ChatToolbox, ChatToolboxProvider {
+    let started: FakeEngineLatch
+
+    func systemPrompt(now: Date) -> String? { nil }
+    var definitions: [ToolDefinition] { StubToolbox().definitions }
+
+    func run(_ call: ToolCall) async -> ToolOutcome {
+        started.open()
+        try? await Task.sleep(for: .seconds(30))
+        return ToolOutcome(content: "interrupted")
+    }
+
+    func makeToolbox(webEnabled: Bool) -> (any ChatToolbox)? { self }
+    func webUsageChanged(enabled: Bool) {}
+}
+
 @MainActor
 @Suite struct ChatViewModelTests {
     static func fakeService(_ script: FakeEngineScript) -> EngineService {
@@ -170,6 +187,9 @@ struct StubToolbox: ChatToolbox, ChatToolboxProvider {
         await chat.waitUntilIdle()
 
         #expect(chat.errorMessage == EngineServiceError.busy.userMessage)
+        #expect(chat.canRetryAfterError)
+        chat.errorMessage = nil
+        #expect(!chat.canRetryAfterError)
         #expect(try Self.storedMessages(container).map(\.role) == [.user])
     }
 
@@ -202,6 +222,47 @@ struct StubToolbox: ChatToolbox, ChatToolboxProvider {
         #expect(second.turns.map(\.role) == [.system, .user, .assistant, .tool])
         #expect(second.turns[2].reasoning == "I should search.")
         #expect(second.options.tools.map(\.name) == ["web_search"])
+    }
+
+    @Test func deletingTheChatBeingAnsweredStopsItFirst() async throws {
+        let reached = FakeEngineLatch()
+        let service = Self.fakeService(FakeEngineScript(
+            events: [.content("Partial"), .content(" never")],
+            holdAfterEvents: 1, holdReached: reached, holdGate: FakeEngineLatch()))
+        let (chat, container) = try Self.viewModel(service)
+        chat.draft = "Question"
+        chat.send()
+        let id = try #require(chat.selectedID)
+        try await reached.wait()
+        await chat.delete(id)
+
+        #expect(!chat.isGenerating)
+        #expect(chat.selectedID == nil)
+        #expect(chat.groups.groups.isEmpty)
+        #expect(try Self.storedMessages(container).isEmpty)
+        #expect(try ModelContext(container).fetch(FetchDescriptor<Conversation>()).isEmpty)
+    }
+
+    @Test func stoppingDuringToolsAnswersEveryCall() async throws {
+        let calls = [
+            ToolCall(id: "a", name: "web_search", arguments: .object([:]), argumentsJSON: "{}"),
+            ToolCall(id: "b", name: "web_search", arguments: .object([:]), argumentsJSON: "{}"),
+        ]
+        let started = FakeEngineLatch()
+        let service = ScriptedEngineService(replies: [.init(content: "", toolCalls: calls)])
+        let (chat, container) = try Self.viewModel(service, tools: HangingToolbox(started: started))
+        chat.draft = "Search twice"
+        chat.send()
+        try await started.wait()
+        chat.stop()
+        await chat.waitUntilIdle()
+
+        let stored = try Self.storedMessages(container)
+        #expect(stored.map(\.role) == [.user, .assistant, .tool, .tool])
+        #expect(stored[2].toolCallID == "a")
+        #expect(stored[3].toolCallID == "b")
+        #expect(stored[3].content == "Stopped.")
+        #expect(chat.errorMessage == nil)
     }
 
     @Test func toolsAreWithheldWhenWebIsOff() async throws {

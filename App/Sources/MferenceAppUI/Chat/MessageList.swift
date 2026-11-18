@@ -27,7 +27,7 @@ struct MessageList: View {
                         MessageView(message: streaming, isLastAnswer: false, stepsExpanded: false, onRegenerate: {})
                     }
                     if let error = model.errorMessage {
-                        ErrorLine(message: error) { model.regenerate() }
+                        ErrorLine(message: error, retry: model.canRetryAfterError ? { model.regenerate() } : nil)
                     }
                     Color.clear.frame(height: ChatMetrics.hairlineWidth).id(Self.bottomID)
                 }
@@ -67,7 +67,8 @@ struct EmptyChat: View {
 
 struct ErrorLine: View {
     let message: String
-    let retry: () -> Void
+    /// "Try again", only when the error came from writing an answer.
+    let retry: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: MFSpacing.s) {
@@ -75,10 +76,12 @@ struct ErrorLine: View {
                 .accessibilityHidden(true)
             Text(message)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Try again", action: retry)
-                .buttonStyle(.plain)
-                .font(MFFont.calloutEmphasis)
-                .foregroundStyle(MFColor.accent)
+            if let retry {
+                Button("Try again", action: retry)
+                    .buttonStyle(.plain)
+                    .font(MFFont.calloutEmphasis)
+                    .foregroundStyle(MFColor.accent)
+            }
         }
         .font(MFFont.callout)
         .foregroundStyle(MFColor.danger)

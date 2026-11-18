@@ -61,6 +61,9 @@ public final class ConversationStore {
     public func append(to conversation: Conversation, role: ChatTurn.Role, content: String,
                        reasoning: String? = nil, model: AppModel? = nil, now: Date = .now,
                        configure: (StoredMessage) -> Void = { _ in }) throws -> StoredMessage {
+        guard conversation.modelContext != nil, !conversation.isDeleted else {
+            throw ConversationStoreError.conversationDeleted
+        }
         let next = (conversation.messages.map(\.index).max() ?? -1) + 1
         let message = StoredMessage(index: next, role: role, content: content,
                                     reasoning: reasoning?.isEmpty == true ? nil : reasoning,
@@ -84,10 +87,36 @@ public final class ConversationStore {
         try context.save()
     }
 
-    /// The history sent to the model: every stored turn, in order, reasoning
-    /// included (engine contract).
+    /// The history sent to the model, in order, reasoning included (engine
+    /// contract). Tool calls and tool results of earlier answers are left
+    /// out: their page text would grow the history without bound, and their
+    /// source numbers restart with each answer. Earlier answers also lose
+    /// their "[n]" markers for the same reason. The answer being written keeps
+    /// all of its tool turns.
     public func turns(for conversation: Conversation) -> [ChatTurn] {
-        conversation.orderedMessages.map(\.turn)
+        let ordered = conversation.orderedMessages
+        let lastUser = ordered.lastIndex { $0.role == .user } ?? -1
+        return ordered.enumerated().compactMap { offset, message in
+            guard offset < lastUser else { return message.turn }
+            switch message.role {
+            case .tool:
+                return nil
+            case .assistant where !message.toolCalls.isEmpty:
+                return nil
+            case .assistant:
+                var turn = message.turn
+                let numbers = Set(message.citations.map(\.number))
+                if !numbers.isEmpty, let content = turn.content {
+                    turn.content = CitationMarkers.segments(content, valid: numbers).compactMap {
+                        if case .text(let text) = $0 { return text }
+                        return nil
+                    }.joined()
+                }
+                return turn
+            default:
+                return message.turn
+            }
+        }
     }
 
     /// Enabled memory items, for the sidebar card.
@@ -108,6 +137,11 @@ public final class ConversationStore {
         else if words.count > 6 { title += "…" }
         return title
     }
+}
+
+public enum ConversationStoreError: Error, Sendable, Hashable {
+    /// The chat was deleted while something was still writing to it.
+    case conversationDeleted
 }
 
 extension Conversation {
