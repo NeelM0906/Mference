@@ -135,6 +135,60 @@ import Testing
         #expect(ReceiptValueParser.isoDate("02/30/2026") == nil)
     }
 
+    @Test func malformedEventFallsBackButNoMeetingDoesNot() async throws {
+        let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [
+            .success(#"{"title": "Checkup", "start": "not a date"}"#),
+            .success(#"{"title": null}"#),
+        ])
+        let quick = ScriptedAssistantTextModel(kind: .quick, answer: #"{"title": "Checkup", "start": "2026-09-17T15:30"}"#)
+        let service = AppleModelService(primary: apple, fallback: quick)
+        let zone = TimeZone(identifier: "UTC")!
+        let found = try await service.suggestEvent(subject: "Checkup", body: "Thursday 3:30?", received: .now, timeZone: zone)
+        #expect(found.model == .quick)
+        #expect(found.value?.title == "Checkup")
+        let none = try await service.suggestEvent(subject: "Hi", body: "No meeting.", received: .now, timeZone: zone)
+        #expect(none.model == .appleOnDevice)
+        #expect(none.value == nil)
+        #expect(quick.requests.count == 1)
+    }
+
+    @Test func sortingKeepsEarlierBatchesWhenALaterOneNamesOnlyUnknownBuckets() async throws {
+        let messages = (1...9).map {
+            MailSortItem(messageID: "<m\($0)@example.com>", sender: "S", subject: "Subject", snippet: "Body")
+        }
+        let first = (1...8).map { "\"\($0)\": \"other\"" }.joined(separator: ", ")
+        let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [
+            .success("{\(first)}"), .success(#"{"1": "nonsense"}"#),
+        ])
+        let service = AppleModelService(primary: apple, fallback: nil)
+        let result = try await service.sortMail(messages, into: [MailSortBucket(key: "other", description: "All")])
+        #expect(result.value.count == 8)
+        #expect(result.value["<m9@example.com>"] == nil)
+    }
+
+    @Test func cancelledQuickRequestNeverReturnsPartialText() async throws {
+        let gate = FakeEngineLatch()
+        let reached = FakeEngineLatch()
+        let script = FakeEngineScript(events: [.content("Partial"), .content(" title")], holdAfterEvents: 1,
+                                      holdReached: reached, holdGate: gate)
+        let llama = FakeEngineBackend(engine: .llamaCpp, scripts: [AppModel.quick.modelID: script])
+        let catalog = EngineCatalog(models: [
+            FakeEngineBackend.descriptor(id: AppModel.quick.modelID, engine: .llamaCpp,
+                                         product: EngineProductSlot(modelID: AppModel.quick.modelID)),
+        ])
+        let engine = EngineService(discover: { catalog }) { catalog, observer in
+            EngineHost(catalog: catalog, backends: [llama], idleUnloadAfter: nil, observer: observer)
+        }
+        let service = AppleModelService(primary: QuickTextModel(engine: engine), fallback: nil)
+        let task = Task { try await service.title(for: "Some text") }
+        try await reached.wait()
+        task.cancel()
+        gate.open()
+        let result = await task.result
+        #expect(throws: (any Error).self) { try result.get() }
+        await engine.shutdown()
+    }
+
     @Test func clipsLongInputAtAWord() {
         let clipped = AssistantPrompts.clip(String(repeating: "word ", count: 100), to: 22)
         #expect(clipped == "word word word word…")
