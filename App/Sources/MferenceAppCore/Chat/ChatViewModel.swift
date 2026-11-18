@@ -165,10 +165,13 @@ public final class ChatViewModel {
     }
 
     /// Starts an empty chat; it is stored when its first message is sent.
+    /// Web search starts off: each chat opts in on its own (L7), so one chat's
+    /// opt-in never carries into another, private or not.
     public func newChat(isPrivate: Bool = false) {
         selectedID = nil
         messages = []
         errorMessage = nil
+        webEnabled = false
         self.isPrivate = isPrivate
         title = Conversation.defaultTitle
     }

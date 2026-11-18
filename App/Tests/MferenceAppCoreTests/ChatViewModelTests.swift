@@ -297,6 +297,29 @@ struct HangingToolbox: ChatToolbox, ChatToolboxProvider {
         #expect(chat.webEnabled)
     }
 
+    @Test func aNewChatStartsWithWebOff() async throws {
+        let service = ScriptedEngineService(replies: [.init(content: "One"), .init(content: "Two")])
+        let (chat, _) = try Self.viewModel(service, tools: StubToolbox())
+        chat.setWebEnabled(true)
+        chat.draft = "First"
+        chat.send()
+        await chat.waitUntilIdle()
+        let first = try #require(chat.selectedID)
+
+        for isPrivate in [false, true] {
+            chat.newChat(isPrivate: isPrivate)
+            #expect(!chat.webEnabled)
+        }
+        chat.draft = "Second, private"
+        chat.send()
+        await chat.waitUntilIdle()
+        #expect(service.requests.last?.options.tools.isEmpty == true)
+        #expect(chat.selectedConversation?.webEnabled == false)
+
+        chat.select(first)
+        #expect(chat.webEnabled)
+    }
+
     @Test func answersKeepOnlyTheSourcesTheyCite() async throws {
         let call = ToolCall(id: "c", name: "web_search", arguments: .object([:]), argumentsJSON: "{}")
         let service = ScriptedEngineService(replies: [
