@@ -473,6 +473,13 @@ class ShellTests(unittest.TestCase):
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("already exists", second.stderr)
 
+    def test_swap_chain_option(self):
+        ok = self.run_script("--dry-run", "swap", "--swap-chain", "qwen36,minicpm5,qwen36")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("swap\\ chain", ok.stdout)
+        bad = self.run_script("--dry-run", "swap", "--swap-chain", "qwen36,flashnext")
+        self.assertNotEqual(bad.returncode, 0)
+
     def test_unknown_model_is_rejected(self):
         result = subprocess.run(["bash", str(self.SCRIPT), "--dry-run", "--models", "flashnext"],
                                 capture_output=True, text=True)
