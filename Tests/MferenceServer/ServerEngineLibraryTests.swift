@@ -80,7 +80,7 @@ struct ServerEngineCatalogTests {
         entries: [
             entry("qwen3.6-35b-a3b@qwen36", family: .qwen36, basename: "qwen36",
                   familyID: "qwen3.6-35b-a3b"),
-            entry("qwen3.6-35b-a3b@qwen36-ourquant", family: .qwen36, basename: "qwen36-ourquant",
+            entry("qwen3.6-35b-a3b@a-quant", family: .qwen36, basename: "a-quant",
                   familyID: "qwen3.6-35b-a3b"),
             entry("minicpm5-2b-int4g64", family: .minicpm5, basename: "minicpm5"),
             entry("maple-preview-2bit-mlx", family: .maple, basename: "maple"),
@@ -107,8 +107,11 @@ struct ServerEngineCatalogTests {
         let catalog = ServerEngineCatalog.catalog(for: Self.index, scope: .product)
         let flashNext = try #require(catalog.unavailableReason(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs"))
         #expect(flashNext.contains("--catalog all"))
-        #expect(catalog.unavailableReason(for: "qwen3.6-35b-a3b@qwen36-ourquant")?
+        #expect(catalog.unavailableReason(for: "qwen3.6-35b-a3b@a-quant")?
             .contains("another install") == true)
+        // The served install's discovery identifier explains the stable one.
+        #expect(catalog.unavailableReason(for: "qwen3.6-35b-a3b@qwen36")?
+            .contains("served as qwen3.6-35b-a3b") == true)
         #expect(catalog.skipped.contains { $0.reason == "incomplete install: x" })
         #expect(throws: EngineError.self) { _ = try catalog.resolve("unsloth-qwen3.8-flash-next-ud-iq3_xxs") }
         #expect(catalog.descriptor(for: "qwen3.6-35b-a3b@qwen36") == nil)
@@ -119,6 +122,31 @@ struct ServerEngineCatalogTests {
         #expect(catalog.models.map(\.id) == Self.index.entries.map(\.modelID).sorted())
         #expect(catalog.descriptor(for: "minicpm5-2b-int4g64")?.product == .minicpm5)
         #expect(catalog.descriptor(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs")?.product == nil)
+    }
+
+    @Test func explicitModelDirectoryWinsItsProductSlot() throws {
+        let catalog = ServerEngineCatalog.catalog(
+            for: Self.index, scope: .product,
+            preferredDirectory: URL(fileURLWithPath: "/models/a-quant.gturbo"))
+        #expect(try #require(catalog.descriptor(for: "qwen3.6-35b-a3b")).location.lastPathComponent
+                == "a-quant.gturbo")
+        #expect(catalog.unavailableReason(for: "qwen3.6-35b-a3b@qwen36")?
+            .contains("another install") == true)
+    }
+
+    @Test func earlierRootWinsBetweenInstallsWithTheSameName() throws {
+        func install(_ root: String) -> ServerLibraryEntry {
+            ServerLibraryEntry(modelID: "minicpm5-2b-int4g64@minicpm5", familyModelID: "minicpm5-2b-int4g64",
+                               basename: "minicpm5",
+                               directory: URL(fileURLWithPath: "\(root)/minicpm5.gturbo", isDirectory: true),
+                               family: .minicpm5)
+        }
+        let index = ServerLibraryIndex(entries: [install("/a-scratch"), install("/z-models")])
+        let catalog = ServerEngineCatalog.catalog(
+            for: index, scope: .product,
+            rootOrder: [URL(fileURLWithPath: "/z-models"), URL(fileURLWithPath: "/a-scratch")])
+        #expect(try #require(catalog.descriptor(for: "minicpm5-2b-int4g64")).location.path
+                == "/z-models/minicpm5.gturbo")
     }
 
     @Test func contextIsTheConfiguredLengthOrTheFamilyMaximum() throws {
@@ -138,6 +166,11 @@ struct ServerEngineCatalogTests {
         #expect(lines.count == 4)
         #expect(lines.dropFirst().allSatisfy { $0.contains("mference") && $0.contains("1000") })
         #expect(ServerLibraryListing.text(for: .empty) == ServerLibraryListing.emptyListing)
+        let onlyOthers = ServerEngineCatalog.catalog(
+            for: ServerLibraryIndex(entries: [entry("gemma-4-26b-a4b-it", family: .gemma4, basename: "gemma4")]),
+            scope: .product)
+        #expect(ServerLibraryListing.text(for: onlyOthers)
+                == "no product models installed (1 other install; --catalog all lists them)")
     }
 
     @Test func catalogArgument() throws {
@@ -150,6 +183,25 @@ struct ServerEngineCatalogTests {
             _ = try ServerArguments.parse(["--model", "/m", "--catalog", "all"])
         }
         #expect(ServerArguments.usage.contains("--catalog <product|all>"))
+    }
+
+    /// `serving` is the production wiring: the default product catalog, the
+    /// explicit `--model` preference and root order, and nothing loaded.
+    @Test func servingUsesTheProductCatalogByDefault() throws {
+        let product = ServerModelLibrary.serving(Self.index, arguments: try ServerArguments.parse(["--library"]))
+        #expect(product.snapshot.catalog.models.map(\.id)
+                == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.6-35b-a3b"])
+        #expect(product.readyDetail == "catalog=product models=3")
+        #expect(product.snapshot.health.model == nil)
+        let preferred = ServerModelLibrary.serving(
+            Self.index,
+            arguments: try ServerArguments.parse(["--library", "--model", "/models/a-quant.gturbo"]))
+        #expect(preferred.snapshot.descriptor(for: "qwen3.6-35b-a3b")?.location.lastPathComponent
+                == "a-quant.gturbo")
+        let all = ServerModelLibrary.serving(Self.index,
+                                             arguments: try ServerArguments.parse(["--library", "--catalog", "all"]))
+        #expect(all.snapshot.catalog.models.count == Self.index.entries.count)
+        #expect(all.readyDetail == "catalog=all models=5")
     }
 }
 
@@ -190,10 +242,14 @@ struct ServerHostLogTests {
             observer: { event in ServerLog.hostEventMessage(event).map(events.append) })
         try await host.load("a")
         try await host.load("b")
-        #expect(events.all == [
-            "swap started to=a", "load a", "swap finished model=a in 0.0s",
+        // Durations depend on the machine; compare the lines without them.
+        let lines = events.all.map {
+            $0.hasPrefix("swap finished") ? $0.components(separatedBy: " in ")[0] : $0
+        }
+        #expect(lines == [
+            "swap started to=a", "load a", "swap finished model=a",
             "swap started from=a to=b", "release a", "model released model=a reason=swap",
-            "load b", "swap finished model=b in 0.0s",
+            "load b", "swap finished model=b",
         ])
         await host.shutdown()
         #expect(events.all.suffix(2) == ["release b", "model released model=b reason=shutdown"])
@@ -325,6 +381,68 @@ struct ServerEngineLibraryTests {
         await #expect(throws: ServerArgumentError.self) {
             try await library.preload(directory: URL(fileURLWithPath: "/elsewhere/c.gturbo"))
         }
+    }
+
+    /// `--library --model` naming an install the product catalog declines
+    /// fails with the catalog's reason, which names `--catalog all`.
+    @Test func preloadOfADeclinedInstallSaysWhy() async throws {
+        let index = ServerLibraryIndex(entries: [entry("gemma-4-26b-a4b-it", family: .gemma4, basename: "gemma4")])
+        let library = ServerModelLibrary(
+            catalog: ServerEngineCatalog.catalog(for: index, scope: .product),
+            backends: [ServerLoaderBackend { _ in BridgedModel(Events(), "x") }],
+            loadOptions: EngineLoadOptions())
+        do {
+            try await library.preload(directory: URL(fileURLWithPath: "/models/gemma4.gturbo"))
+            Issue.record("preload of a declined install succeeded")
+        } catch let error as ServerArgumentError {
+            #expect(String(describing: error).contains("--catalog all"))
+        }
+    }
+
+    /// The default product catalog over discovery, through HTTP: a product
+    /// model is served by the bridged session, anything else is a 400 that
+    /// says why, and the listing names only the product model.
+    @Test func productCatalogOverDiscoveryServesAndDeclines() async throws {
+        let events = Events()
+        let index = ServerLibraryIndex(entries: [
+            entry("qwen3.6-35b-a3b", family: .qwen36, basename: "qwen36"),
+            entry("gemma-4-26b-a4b-it", family: .gemma4, basename: "gemma4"),
+        ])
+        let library = ServerModelLibrary(
+            catalog: ServerEngineCatalog.catalog(for: index, scope: .product),
+            backends: [ServerLoaderBackend { directory in
+                let id = directory.deletingPathExtension().lastPathComponent
+                events.append("load \(id)")
+                return BridgedModel(events, id)
+            }],
+            loadOptions: EngineLoadOptions())
+        let server = MferenceHTTPServer(library: library, queueLimit: 1)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        func post(_ model: String) async throws -> (Int, String) {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = Data(#"{"model":"\#(model)","messages":[{"role":"user","content":"hi"}]}"#.utf8)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            return ((response as? HTTPURLResponse)?.statusCode ?? 0, String(decoding: data, as: UTF8.self))
+        }
+        let listing = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0
+        #expect(String(decoding: listing, as: UTF8.self).contains(#""id":"qwen3.6-35b-a3b""#))
+        #expect(!String(decoding: listing, as: UTF8.self).contains("gemma"))
+
+        let (declinedStatus, declinedBody) = try await post("gemma-4-26b-a4b-it")
+        #expect(declinedStatus == 400)
+        #expect(declinedBody.contains("model_not_runnable") && declinedBody.contains("--catalog all"))
+        #expect(events.all.isEmpty)
+
+        let (servedStatus, servedBody) = try await post("qwen3.6-35b-a3b")
+        #expect(servedStatus == 200, "\(servedBody)")
+        #expect(servedBody.contains(#""content":"qwen36""#))
+        #expect(events.all == ["load qwen36"])
+        try await server.shutdown()
+        #expect(events.all == ["load qwen36", "release qwen36"])
     }
 
     @Test func modelsCarryTheEngineAndAnEngineModelServesChat() async throws {

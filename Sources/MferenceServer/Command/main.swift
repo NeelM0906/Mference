@@ -27,7 +27,7 @@ do {
         let index = ServerLibraryDiscovery.discover(
             roots: roots,
             explicitModelDirectory: explicitModelURL)
-        let library = ServerModelLibrary.serving(index, arguments: arguments)
+        let library = ServerModelLibrary.serving(index, roots: roots, arguments: arguments)
         library.logDiscovery()
         if arguments.listModels {
             // Discovery is the whole job: nothing is loaded, no port is bound,

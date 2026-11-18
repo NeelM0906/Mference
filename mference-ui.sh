@@ -20,6 +20,7 @@ max_context=16384
 prompt_cache_mode=multi-prefix
 prompt_cache_bytes=auto
 prefill_chunk=auto
+catalog=product
 kv_reserve=0
 preload_model=""
 library_roots=()
@@ -73,6 +74,10 @@ usage: ./mference-ui.sh [options]                      start the UI
                          MferenceServer: auto (default; 2048 for Gemma 4, QAT
                          and Qwen 3.6 on 16 GiB+ Macs) or 32 ... 4096. 1024
                          saves Gemma about 350 MB at slower long prompts.
+  --catalog <product|all>
+                         Which installs MferenceServer serves (default
+                         product: the product models only; all lists every
+                         runnable install, a developer switch).
   --kv-reserve           Reserve full-attention KV for the whole context
                          up front, passed through to MferenceServer. By
                          default Gemma 4, Qwen 3.6 and Inkling grow it with
@@ -116,6 +121,7 @@ while [[ $# -gt 0 ]]; do
     --prompt-cache-mode) require_value "$@"; prompt_cache_mode="$2"; shift 2 ;;
     --prompt-cache-bytes) require_value "$@"; prompt_cache_bytes="$2"; shift 2 ;;
     --prefill-chunk) require_value "$@"; prefill_chunk="$2"; shift 2 ;;
+    --catalog) require_value "$@"; catalog="$2"; shift 2 ;;
     --kv-reserve) kv_reserve=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -145,6 +151,7 @@ if [[ "$prompt_cache_bytes" != auto ]]; then
   prompt_cache_bytes="$((10#$prompt_cache_bytes))"
 fi
 case "$prefill_chunk" in auto|32|64|128|256|512|1024|2048|4096) ;; *) fail "--prefill-chunk must be auto, 32, 64, 128, 256, 512, 1024, 2048 or 4096" ;; esac
+case "$catalog" in product|all) ;; *) fail "--catalog must be product or all" ;; esac
 [[ "$build_path" == /* ]] || build_path="$repository_root/$build_path"
 [[ "$data_directory" == /* ]] || data_directory="$repository_root/$data_directory"
 server_binary="$build_path/release/MferenceServer"
@@ -155,6 +162,7 @@ server_arguments=(
   --prompt-cache-mode "$prompt_cache_mode"
   --prompt-cache-bytes "$prompt_cache_bytes"
   --prefill-chunk "$prefill_chunk"
+  --catalog "$catalog"
 )
 if [[ "$kv_reserve" -eq 1 ]]; then
   server_arguments+=(--kv-reserve)
@@ -179,7 +187,7 @@ else
     list_arguments+=(--library "$root")
   done
 fi
-list_arguments+=(--list-models)
+list_arguments+=(--catalog "$catalog" --list-models)
 
 # Every one of these would otherwise fire an extra generation into a queue that
 # runs one generation at a time: a title, tags, follow-ups, an autocomplete, and
@@ -426,8 +434,8 @@ cmd_models() {
   local listed
   listed="$("$server_binary" "${list_arguments[@]}")"
   printf '%s\n' "$listed"
-  if [[ "$listed" == "no models installed" ]]; then
-    note "install one with: ./mference-ui.sh install gemma4"
+  if [[ "$listed" == "no models installed" || "$listed" == "no product models installed"* ]]; then
+    note "install one with: ./mference-ui.sh install minicpm5 (or qwen36, maple)"
   fi
 }
 
@@ -549,7 +557,7 @@ wait_for_server() {
   models="$(curl --silent --max-time 5 "http://127.0.0.1:$server_port/v1/models" || true)"
   if [[ "$models" == *'"data":[]'* || "$models" == *'"data": []'* ]]; then
     note "no models installed — the picker will be empty."
-    note "install one with: ./mference-ui.sh install gemma4"
+    note "install one with: ./mference-ui.sh install minicpm5 (or qwen36, maple)"
   else
     note "serving: $models"
   fi

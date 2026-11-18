@@ -12,6 +12,8 @@ public enum ServerLibraryListing {
     /// that state — `/v1/models` is simply empty — so this is a normal result
     /// and not an error.
     public static let emptyListing = "no models installed"
+    /// Printed, with a count, when installs exist but none is a product model.
+    public static let noProductModelsListing = "no product models installed"
 
     private static let headers = ["MODEL", "FAMILY", "BYTES", "PATH"]
 
@@ -51,7 +53,11 @@ public enum ServerLibraryListing {
     /// in `/v1/models` order. `BYTES` is the size on disk the catalog recorded
     /// (`-` when unknown).
     public static func text(for catalog: EngineCatalog) -> String {
-        guard !catalog.models.isEmpty else { return emptyListing }
+        guard !catalog.models.isEmpty else {
+            let declined = ServerEngineCatalog.declinedRunnableInstalls(catalog)
+            return declined == 0 ? emptyListing
+                : "\(noProductModelsListing) (\(declined) other install\(declined == 1 ? "" : "s"); --catalog all lists them)"
+        }
         return table(header: ["MODEL", "ENGINE", "BYTES", "PATH"],
                      rows: catalog.models.map {
                          [$0.id, $0.engine.rawValue,

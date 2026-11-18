@@ -128,8 +128,13 @@ public final class ServerModelLibrary: Sendable {
     /// `ServerModelSession` with the server's runtime flags, behind the
     /// engine's backend protocol — exactly the code single-model mode runs.
     public static func serving(_ index: ServerLibraryIndex,
+                               roots: [URL] = [],
                                arguments: ServerArguments) -> ServerModelLibrary {
-        let catalog = ServerEngineCatalog.catalog(for: index, scope: arguments.catalogScope)
+        let catalog = ServerEngineCatalog.catalog(
+            for: index,
+            scope: arguments.catalogScope,
+            preferredDirectory: arguments.model.map { URL(fileURLWithPath: $0) },
+            rootOrder: roots)
         let maxContext = arguments.maxContext
         let promptCacheMode = arguments.promptCacheMode
         let promptCacheBytes = arguments.promptCacheBytes
@@ -166,12 +171,17 @@ public final class ServerModelLibrary: Sendable {
 
     /// Preloads the catalog model at `directory` (`--model` with `--library`).
     public func preload(directory: URL) async throws {
-        let directory = directory.standardizedFileURL
+        // Compared by path: a directory URL may or may not carry a trailing
+        // slash depending on how it was made.
+        let path = directory.standardizedFileURL.path
         guard let model = snapshot.catalog.models.first(where: {
-            $0.location.standardizedFileURL == directory
+            $0.location.standardizedFileURL.path == path
         }) else {
-            throw ServerArgumentError.invalid(
-                "--model \(directory.path) is not a model the library serves")
+            // Say why: a declined install's reason names --catalog all.
+            let reason = snapshot.catalog.skipped.first {
+                $0.location.standardizedFileURL.path == path
+            }?.reason ?? "not a completed install"
+            throw ServerArgumentError.invalid("--model \(path): \(reason)")
         }
         try await preload(modelID: model.id)
     }
