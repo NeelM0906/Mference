@@ -93,7 +93,8 @@ tokenizer, which is why a request is validated after its model is resident.
   halfway would leave the host empty for nothing. A cancelled waiter leaves
   the line without running. A `stream` request belongs to its iterator: it
   starts when iteration starts and is cancelled when iteration ends early,
-  even if the caller keeps the sequence.
+  even if the caller keeps the sequence. A stream ends with `.completed` or
+  throws; cancelling the iterating task makes it throw `CancellationError`.
 - **Load failure** leaves the host empty, with the failure in
   `status.lastLoadFailure`, and rethrows the backend's own error. The previous
   model was already released before the failed load started.

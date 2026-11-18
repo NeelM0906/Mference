@@ -482,6 +482,28 @@ struct EngineHostTests {
         #expect(completed?.content == "Hello world")
     }
 
+    @Test func cancellingTheIteratingTaskThrowsCancellationError() async throws {
+        let reached = FakeEngineLatch()
+        let gate = FakeEngineLatch()
+        let fixture = Self.fixture(scripts: [
+            "a": FakeEngineScript(holdAfterEvents: 1, holdReached: reached, holdGate: gate),
+        ])
+        let host = fixture.host
+        let consumer = Task {
+            var sawCompletion = false
+            for try await element in host.stream(modelID: "a", request: Self.request) {
+                if case .completed = element { sawCompletion = true }
+            }
+            return sawCompletion
+        }
+        try await reached.wait()
+        consumer.cancel()
+        await #expect(throws: CancellationError.self) { try await consumer.value }
+        try await eventually("generation cancelled") {
+            fixture.backend.journal.entries.contains(.generationCancelled("a"))
+        }
+    }
+
     @Test func abandoningAStreamCancelsTheRequest() async throws {
         let reached = FakeEngineLatch()
         let gate = FakeEngineLatch()
