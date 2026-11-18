@@ -47,8 +47,11 @@ public struct RootView: View {
                         }
                     }
                     .sharedBackgroundVisibility(.hidden)
+                    ToolbarSpacer(.flexible)
                     ToolbarItem(placement: .primaryAction) {
                         ShellTrailingControls(model: model)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.trailing, MFSpacing.xs)
                     }
                     .sharedBackgroundVisibility(.hidden)
                 }
