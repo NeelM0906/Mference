@@ -38,7 +38,7 @@ class CIScopeTests(unittest.TestCase):
         self.assertEqual(scope("docs/FAMILY_CONTRACT.md"), "full")
         self.assertEqual(scope("docs/FAMILY_CONTRACT.md", "Sources/MferenceEngine/A.swift"), "full")
         # Non-Markdown under docs/ (tensor maps, prompt sets) is test input.
-        self.assertEqual(scope("docs/families/qwen38flashnext-unsloth-ud-iq3_xxs.tensors.json"), "full")
+        self.assertEqual(scope("docs/families/minicpm5.tensors.json"), "full")
         self.assertEqual(scope("docs/benchmark-prompts/release-screen-v1/cases.json"), "full")
         self.assertEqual(scope("docs/assets/probe.png"), "full")
         self.assertEqual(scope("site/index.html"), "full")

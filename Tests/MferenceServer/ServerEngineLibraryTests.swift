@@ -99,8 +99,8 @@ private let libraryInstalls: [String: ModelFamily] = [
     "/models/qwen36.gturbo": .qwen36,
     "/models/minicpm5.gturbo": .minicpm5,
     "/models/maple.gturbo": .maple,
-    "/models/qwen38flashnextudiq3xxs.gturbo": .qwen38flashnextudiq3xxs,
-    "/models/gemma4.gturbo": .gemma4,
+    // Runnable, but not a product model: the catalog declines it.
+    "/models/qwen38.gturbo": .qwen38,
 ]
 private let libraryGGUFs = ["/models/gguf": ["Qwen3.5-4B-UD-Q4_K_XL.gguf",
                                              "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
@@ -132,9 +132,8 @@ struct ServerEngineCatalogTests {
         // So does a non-product GGUF: --catalog all would not help without it.
         #expect(catalog.unavailableReason(for: "some-other-model.q4_k_m") == "no llama.cpp backend in this build")
         // Installs the product does not offer name the server's switch.
-        let flashNext = try #require(catalog.unavailableReason(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs"))
-        #expect(flashNext.hasSuffix("--catalog all lists it"))
-        #expect(catalog.unavailableReason(for: "gemma-4-26b-a4b-it")?.hasSuffix("--catalog all lists it") == true)
+        let declined = try #require(catalog.unavailableReason(for: "qwen3.8-27b-4bit"))
+        #expect(declined.hasSuffix("--catalog all lists it"))
         #expect(!catalog.skipped.contains { $0.reason.contains("developer catalog scope") })
         #expect(library.snapshot.health.model == nil)
     }
@@ -189,9 +188,9 @@ struct ServerEngineCatalogTests {
 
     @Test func allScopeListsEveryRunnableInstall() throws {
         let library = try servingLibrary(["--library", "--catalog", "all"])
-        #expect(library.snapshot.catalog.models.count == 5)
-        #expect(library.snapshot.descriptor(for: "gemma-4-26b-a4b-it") != nil)
-        #expect(library.readyDetail == "catalog=all models=5")
+        #expect(library.snapshot.catalog.models.count == 4)
+        #expect(library.snapshot.descriptor(for: "qwen3.8-27b-4bit") != nil)
+        #expect(library.readyDetail == "catalog=all models=4")
     }
 
     @Test func explicitModelIsTheInstallServedForItsProductModel() throws {
@@ -238,7 +237,7 @@ struct ServerEngineCatalogTests {
         #expect(lines.count == 4)
         #expect(lines.dropFirst().allSatisfy { $0.contains("mference") && $0.contains("42") })
         #expect(ServerLibraryListing.text(for: .empty) == ServerLibraryListing.emptyListing)
-        let onlyOthers = try servingLibrary(["--library"], installs: ["/models/gemma4.gturbo": .gemma4])
+        let onlyOthers = try servingLibrary(["--library"], installs: ["/models/qwen38.gturbo": .qwen38])
         // The GGUF files (two product, one other) are not counted: without a
         // llama.cpp backend --catalog all would not list them either.
         #expect(onlyOthers.listing == "no product models installed (1 other install; --catalog all lists them)")
@@ -261,7 +260,7 @@ struct ServerEngineCatalogTests {
     @Test func engineScopeWordingIsTheOneTheServerRewrites() {
         let catalog = EngineCatalogDiscovery.discover(
             roots: [URL(fileURLWithPath: "/models", isDirectory: true)], ggufDirectories: [],
-            fileSystem: fakeFileSystem(installs: ["/models/gemma4.gturbo": .gemma4]))
+            fileSystem: fakeFileSystem(installs: ["/models/qwen38.gturbo": .qwen38]))
         #expect(catalog.skipped.first?.reason.hasSuffix(ServerEngineCatalog.engineScopeHint) == true)
     }
 }
@@ -446,10 +445,10 @@ struct ServerEngineLibraryTests {
     /// `--library --model` naming an install the product catalog declines
     /// fails with the catalog's reason, which names `--catalog all`.
     @Test func preloadOfADeclinedInstallSaysWhy() async throws {
-        let gemma = URL(fileURLWithPath: "/models/gemma4.gturbo", isDirectory: true)
-        let library = try servingLibrary(["--library"], explicitModel: gemma)
+        let declined = URL(fileURLWithPath: "/models/qwen38.gturbo", isDirectory: true)
+        let library = try servingLibrary(["--library"], explicitModel: declined)
         do {
-            try await library.preload(directory: gemma)
+            try await library.preload(directory: declined)
             Issue.record("preload of a declined install succeeded")
         } catch let error as ServerArgumentError {
             #expect(String(describing: error).contains("--catalog all"))
@@ -480,9 +479,9 @@ struct ServerEngineLibraryTests {
         let listing = String(decoding: try await URLSession.shared.data(
             from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0, as: UTF8.self)
         #expect(listing.contains(#""id":"qwen3.6-35b-a3b""#))
-        #expect(!listing.contains("gemma") && !listing.contains("qwen3.5-4b"))
+        #expect(!listing.contains("qwen3.8-27b-4bit") && !listing.contains("qwen3.5-4b"))
 
-        for declined in ["gemma-4-26b-a4b-it", "qwen3.5-4b"] {
+        for declined in ["qwen3.8-27b-4bit", "qwen3.5-4b"] {
             let (status, body) = try await post(declined)
             #expect(status == 400, "\(declined): \(body)")
             #expect(body.contains("model_not_runnable"))
@@ -502,8 +501,8 @@ struct ServerEngineLibraryTests {
             FakeEngineBackend.descriptor(id: "native", contextLength: 4_096, product: .qwen36),
             FakeEngineBackend.descriptor(id: "gguf", engine: .llamaCpp, contextLength: 65_536,
                                          product: .quick),
-        ], skipped: [EngineCatalogSkip(location: URL(fileURLWithPath: "/m/flash"),
-                                       reason: "not offered", modelID: "flash")])
+        ], skipped: [EngineCatalogSkip(location: URL(fileURLWithPath: "/m/other"),
+                                       reason: "not offered", modelID: "other")])
         let library = ServerModelLibrary(
             catalog: catalog,
             backends: [FakeEngineBackend(),
@@ -539,7 +538,7 @@ struct ServerEngineLibraryTests {
         var declined = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         declined.httpMethod = "POST"
         declined.setValue("application/json", forHTTPHeaderField: "content-type")
-        declined.httpBody = Data(#"{"model":"flash","messages":[{"role":"user","content":"hi"}]}"#.utf8)
+        declined.httpBody = Data(#"{"model":"other","messages":[{"role":"user","content":"hi"}]}"#.utf8)
         let (data, response) = try await URLSession.shared.data(for: declined)
         #expect((response as? HTTPURLResponse)?.statusCode == 400)
         #expect(String(decoding: data, as: UTF8.self).contains("model_not_runnable"))

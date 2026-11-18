@@ -1,5 +1,8 @@
 # mlx-lm Qwen 3.6 baseline attempt — M5/24 GB, 2026-08-07
 
+> Dated record. The retired family it names (Gemma 4) is no longer supported;
+> see [Retired model families](../../RETIRED_FAMILIES.md).
+
 Goal: measure mlx-lm decoding `mlx-community/Qwen3.6-35B-A3B-4bit` on the
 24 GB M5 (`Mac17,8`-class host `Mac17,2`) with the three frozen community
 prompts, as the same-host bar for the residency-ladder program.

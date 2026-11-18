@@ -49,9 +49,7 @@ public struct PreparedGeneration: Sendable {
 }
 
 public protocol ServerInferenceBackend: Sendable {
-    var isGemmaQAT: Bool { get }
     var generationDefaults: GenerationConfig { get }
-    var usesSwiftQwenTemplate: Bool { get }
     var acceptsReasoningEffort: Bool { get }
     var supportsQwenReasoningEffort: Bool { get }
     /// Everything that can reject a request must happen here, because the
@@ -65,11 +63,9 @@ public protocol ServerInferenceBackend: Sendable {
 }
 
 extension ServerInferenceBackend {
-    public var isGemmaQAT: Bool { false }
     public var generationDefaults: GenerationConfig { .defaults }
-    public var usesSwiftQwenTemplate: Bool { false }
     public var acceptsReasoningEffort: Bool { supportsQwenReasoningEffort }
-    public var supportsQwenReasoningEffort: Bool { usesSwiftQwenTemplate }
+    public var supportsQwenReasoningEffort: Bool { false }
     /// Backends that do not tokenize inherit a pass-through. A backend that
     /// renders a prompt must override this, or `generate` receives no tokens.
     public func prepare(_ request: ValidatedChatRequest) async throws -> PreparedGeneration {
@@ -185,9 +181,7 @@ public actor ServerCoordinator {
 }
 
 public actor ServerModelSession: ServerLoadedModel {
-    public nonisolated let isGemmaQAT: Bool
     public nonisolated let generationDefaults: GenerationConfig
-    public nonisolated let usesSwiftQwenTemplate: Bool
     public nonisolated let acceptsReasoningEffort: Bool
     public nonisolated let supportsQwenReasoningEffort: Bool
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
@@ -267,22 +261,10 @@ public actor ServerModelSession: ServerLoadedModel {
         }
         let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelDirectory)
-        // DeepSeek ships no chat_template.jinja — its chat framing is native
-        // Swift — so the prompt-cache identity hashes a pinned constant that
-        // changes only when that native render does. Every other dialect
-        // still requires the bundled template.
+        // The prompt-cache identity hashes the installed chat template.
         let templateData: Data
-        if tokenizer.dialect == .gemma {
-            templateData = try tokenizer.effectiveGemmaChatTemplateData()
-        } else if tokenizer.dialect == .glm5 {
-            // GLM-5.3 ships a chat_template.jinja but the dialect renders
-            // natively (`Glm5ChatTemplate.swift`); the identity follows the
-            // native render, not the sidecar.
-            templateData = Data("native:glm5:v1".utf8)
-        } else if FileManager.default.fileExists(atPath: templateURL.path) {
+        if FileManager.default.fileExists(atPath: templateURL.path) {
             templateData = try Data(contentsOf: templateURL)
-        } else if tokenizer.dialect == .deepseek {
-            templateData = Data("native:deepseek:v1".utf8)
         } else {
             throw MFTokenizerError.missingToolTemplate
         }
@@ -367,9 +349,7 @@ public actor ServerModelSession: ServerLoadedModel {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
-        self.isGemmaQAT = tokenizer.isGemmaQAT
         self.generationDefaults = tokenizer.generationDefaults
-        self.usesSwiftQwenTemplate = tokenizer.isSwiftQwen
         self.acceptsReasoningEffort = tokenizer.acceptsReasoningEffort
         self.supportsQwenReasoningEffort = tokenizer.supportsQwenReasoningEffort
         self.chatDialect = tokenizer.dialect
@@ -478,11 +458,6 @@ public actor ServerModelSession: ServerLoadedModel {
             endRequest()
         }
 
-        let recovery = (runner as? any GemmaPrefixRecovering).flatMap {
-            $0.supportsGemmaPrefixRecovery && tokenizer.dialect == .gemma ? $0 : nil
-        }
-        var recoveryOutcome = promptCacheMode == .off ? "cache_disabled" : "cold_or_incompatible_history"
-        var captureOutcome: String?
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
         if let prefixStates, let snapshotRunner {
@@ -500,21 +475,13 @@ public actor ServerModelSession: ServerLoadedModel {
                 domain: promptCacheDomain,
                 request: request,
                 renderedPromptIDs: promptIDs,
-                tokenizer: tokenizer,
-                gemmaRecoverablePrefix: recovery.map { capable in { limit in
-                    let available = capable.gemmaRecoverablePrefix(upTo: limit)
-                    if available == 0 { recoveryOutcome = "state_unavailable" }
-                    return available
-                } }).fitting(maxContext: maxContext) {
+                tokenizer: tokenizer).fitting(maxContext: maxContext) {
             case .miss:
                 promptCache.invalidate()
                 effectivePromptIDs = promptIDs
                 completionStart = .reset
             case .hit(let effective, let cached):
                 effectivePromptIDs = effective
-                if let recovery, cached != runner.continuationPosition {
-                    recoveryOutcome = try recovery.recoverGemmaPrefix(to: cached).rawValue + "_prefix"
-                } else { recoveryOutcome = "full_prefix" }
                 completionStart = .resume(cachedPromptTokens: cached)
             }
         } else {
@@ -538,9 +505,8 @@ public actor ServerModelSession: ServerLoadedModel {
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let countsPayloadTokens = tokenizer.dialect == .chatml
-            || tokenizer.dialect == .glm5 || tokenizer.dialect == .minicpm
+            || tokenizer.dialect == .minicpm
         let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
-            || tokenizer.dialect == .gemma || tokenizer.requiresStructuredAssistantDecoding
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),
@@ -560,15 +526,7 @@ public actor ServerModelSession: ServerLoadedModel {
         var decodingError: Error?
         var shouldStop = false
 
-        var checkpoint: (position: Int, capture: () throws -> Void)?
-        if promptCacheMode == .singlePrefix, let recovery,
-           let boundary = try tokenizer.gemmaRecoveryBoundary(messages: request.messages,
-                tools: request.tools, reasoningEffort: request.reasoningEffort,
-                preserveThinking: request.preserveThinking, promptIDs: effectivePromptIDs) {
-            checkpoint = (boundary, {
-                captureOutcome = try recovery.captureGemmaPrefix() ? "captured" : "unavailable"
-            })
-        }
+        let checkpoint: (position: Int, capture: () throws -> Void)? = nil
 
         let result = try await runRawCompletion(
             producer: runner,
@@ -649,7 +607,7 @@ public actor ServerModelSession: ServerLoadedModel {
             }
         }
         if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
-            throw GemmaToolCallParserError.malformed
+            throw ToolCallParserError.malformed
         }
         let tail = stopMatcher.finish()
         if !tail.isEmpty {
@@ -685,7 +643,6 @@ public actor ServerModelSession: ServerLoadedModel {
                 result: result,
                 reasoningContent: reasoning.isEmpty ? nil : reasoning,
                 stopStringFiltered: stopMatcher.isStopped)
-            if promptCache.entry == nil { recovery?.discardGemmaPrefix() }
         }
         completed = true
         endRequest()
@@ -704,8 +661,6 @@ public actor ServerModelSession: ServerLoadedModel {
             diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
                 result: result,
                 memory: .capture(model: model, producer: runner, scratch: scratch),
-                gemmaRecovery: recovery.map { .init(outcome: recoveryOutcome,
-                    capture: captureOutcome, allocatedBytes: $0.gemmaRecoveryBytes) },
                 prefixCache: prefixStates.map {
                     PrefixCacheDiagnostics(cache: $0, memory: memoryGovernor?.report)
                 }) : nil)

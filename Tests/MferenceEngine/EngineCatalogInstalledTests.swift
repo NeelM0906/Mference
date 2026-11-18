@@ -25,6 +25,7 @@ import MferenceEngine
         #expect(catalog.descriptor(for: "qwen3.8-27b").map {
             if case .gguf(let metadata) = $0.format { metadata.hasMTP } else { false }
         } == true)
+        // A retired Flash-Next install may still be on disk; it is never listed.
         #expect(!catalog.models.contains { $0.id.contains("flash-next") })
     }
 }

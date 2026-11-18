@@ -32,12 +32,6 @@ metadata automatically. Explicit Mference request/CLI values override defaults.
 The values are declared once, in `GenerationConfig.init`; the CLI and server
 read `GenerationConfig.defaults` only for a parameter the caller omitted.
 
-The later, separate Gemma QAT checkpoint is an explicit exception: its CLI and
-server paths use the verified installed generation settings (temperature 1, Top-K 64,
-Top-P 0.95, Min-P off and neutral penalties). Explicit controls still override
-that profile. The sampler calculations and original checkpoint defaults stay
-unchanged; see [QAT controls](RUNTIME_CONTROLS.md#gemma-qat).
-
 1. On post-softcap model logits, count occurrences in the most recent
    `repeat_last_n` prompt/generated tokens. `0` disables all penalties; `-1`
    uses the complete effective history. For each seen token, divide positive
@@ -71,9 +65,10 @@ storage, and checkpoint quantization/runtime arithmetic can differ.
 
 Validation ran on the dirty working tree based on commit
 `4534be371e4c472c5fecf11db5dee9104aaff074`, Mac14,2 / Apple M2 / 16 GiB,
-macOS 26.6.2 (25G83), Apple Swift 6.4. The existing Gemma install is
-`$HOME/llm-models/gemma4.gturbo`; its receipt's manifest hash and all
-37 recorded file sizes passed. Before model execution, memory pressure showed
+macOS 26.6.2 (25G83), Apple Swift 6.4. The real-checkpoint HTTP and CLI
+checks of this record ran on a family since retired (see
+[Retired model families](RETIRED_FAMILIES.md)), so they are not repeated here.
+Before model execution, memory pressure showed
 61% free and disk had 9.6 GiB available. No checkpoint was downloaded or copied.
 
 The first prerequisite check found the user's existing server (PID 4034).
@@ -111,7 +106,7 @@ Broader command: `Scripts/test.sh --skip-build`, **failed**, exit 1; full output
 `/tmp/mference-llama-sampling-full.log`.
 
 - Core: 986 tests / 185 suites, 351.135 seconds, one failing Maple assertion
-  plus the existing optional FlashNext fixture issue.
+  plus an existing optional-fixture issue for a since-retired family.
 - Server: 163 tests / 23 suites, passed, 8.491 seconds.
 - Repack: 169 tests / 23 suites, passed, 60.544 seconds.
 - Vendored Jinja compatibility: 835 tests / 15 suites, passed, 2.180 seconds.
@@ -119,12 +114,11 @@ Broader command: `Scripts/test.sh --skip-build`, **failed**, exit 1; full output
 The Maple reproducer is `MapleQKNormRoPETests.swift:74`: expected max absolute
 error at most `0.0078125`, observed `0.0234375`. It calls the Maple Q/K wrapper
 and `maple_attention.metal` directly; those two sources and the test have no
-working-tree diff. The exact failure was already recorded during the Gemma
-thinking work and in the earlier Qwen sampling baseline.
-It remains unresolved and the full package gate is not green. The FlashNext
-fixture issue is the existing missing optional checkpoint assertion in
-`FlashNextToyInstallTests.swift:17` (removed 2026-11-18; tests for this
-family were deleted from the suite).
+working-tree diff. The exact failure was already recorded in earlier work and
+in the earlier Qwen sampling baseline.
+It remains unresolved and the full package gate is not green. The optional-fixture
+issue was a missing optional checkpoint assertion whose tests were removed
+with their family on 2026-11-18.
 
 A standalone `xcrun -sdk macosx metal -std=metal3.2 -c
 Sources/Mference/Metal/Sampling/logit.metal -o /tmp/mference-llama-logit.air`
@@ -133,62 +127,13 @@ installed; the passing runtime Metal tests above supply shader verification.
 These are correctness checks, not community performance measurements.
 
 
-## Real Gemma entry-point checks
-
-After the serial suite and release build exited, the owner check had no
-matches and memory pressure showed 66% free. The server command was:
-
-```bash
-.build/release/MferenceServer --model $HOME/llm-models/gemma4.gturbo --port 18080 --max-context 4096
-python3 /tmp/mference-llama-sampling-smoke.py
-```
-
-**Passed**, client exit 0: four real HTTP requests, JSON and SSE each with
-omitted sampling fields and with `min_p=0.25`, `frequency_penalty=0.5`,
-`presence_penalty=0.25`, `repeat_penalty=1.1`, `repeat_last_n=64`. Each request
-used seed 777, a 16-token cap, and the prompt `Reply with exactly READY.`.
-All returned `READY.` with 18 prompt / 3 completion tokens. SSE ended in
-`[DONE]` and included usage. The server was bound only to loopback and exited
-0 after the test session received Ctrl-C. No user-owned process was stopped.
-
-Complete server timing lines:
-
-```text
-[2026-09-19T08:41:54Z] request chatcmpl-4e454755b9e24f41bf491405bfb03942 completed in 11.0s prompt=18 cached=0 completion=3 finish=stop prefill=10.637s
-[2026-09-19T08:41:58Z] request chatcmpl-51be85122b9d46c3afc9251c7b09f1c2 completed in 3.5s prompt=18 cached=0 completion=3 finish=stop prefill=3.087s
-[2026-09-19T08:42:01Z] request chatcmpl-1f63d5b4302a4b02a7a45054cfd95697 completed in 3.1s prompt=18 cached=0 completion=3 finish=stop prefill=2.782s
-[2026-09-19T08:42:05Z] request chatcmpl-3731fff9c3104c42993d4ca74c9f3909 completed in 4.0s prompt=18 cached=0 completion=3 finish=stop prefill=3.635s
-```
-
-Full artifacts: `/tmp/mference-llama-sampling-server.log`,
-`/tmp/mference-llama-sampling-smoke.log`, and
-`/tmp/mference-llama-sampling-smoke-results.json`.
-These short requests exercised fresh-prefill paths (`cached=0`); cached history
-and resume penalty counts were verified by the focused raw-completion tests.
-
-After confirming the server had exited, memory pressure showed 54% free.
-The CLI smoke command was:
-
-```bash
-.build/release/MferenceCLI --model $HOME/llm-models/gemma4.gturbo --prompt 'The capital of France is' --max-new 8 --max-context 1024 --min-p 0.25 --frequency-penalty 0.5 --presence-penalty 0.25 --repeat-penalty 1.1 --repeat-last-n 64 --seed 777 --verify trusted-receipt
-```
-
-**Passed execution**, exit 0: parsed the new flags and generated eight tokens
-through the real shared sampler. This raw-completion smoke checks wiring and
-execution, not answer quality. Full stdout/stderr is
-`/tmp/mference-llama-sampling-cli.log`; complete footer:
-
-```text
-[stop=maxTokens prefill=6tok/1.67s new=8tok decode=1.51s tok/s=5.311]
-```
-
 ## Outcome accounting
 
 - **Passed:** all-family defaults in core, CLI and server; Min-P implementation;
-  repetition/presence/frequency formulas and 64-token window; real Gemma JSON,
-  SSE and CLI execution; final release build and whitespace check.
+  repetition/presence/frequency formulas and 64-token window; final release
+  build and whitespace check.
 - **Failed, pre-existing:** full-package gate due to the Maple assertion above;
-  the optional FlashNext fixture remains a reported known issue.
+  the optional-fixture issue above was a reported known issue.
 - **Unverified:** generated-sequence equivalence with llama.cpp and real-weight
   runs for other installed model families. Neither is claimed by the shared
   policy/defaults proof. Different engines retain different numerical/RNG paths.

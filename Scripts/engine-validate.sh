@@ -9,7 +9,7 @@
 #
 # Phases (default: models prompts readings identity swap summary):
 #   models     /v1/models lists exactly the five product models, each with
-#              `engine`; Flash-Next absent (checked in every engine run)
+#              `engine`; no retired model listed (checked in every engine run)
 #   prompts    fixed prompt set (short chat, 2K-token document question, tool
 #              round-trip, JSON answer) non-streaming and streaming at
 #              temperature 0: the two must agree, and the tool round-trip must
@@ -30,7 +30,7 @@
 #              cases on one server, reported but not gated
 #   ui         ./mference-ui.sh --no-browser --no-build as one model hold, with
 #              the launcher's defaults (the server's defaults): Open WebUI lists
-#              the --models models (and no Flash-Next), each with builtin tools
+#              the --models models (and no retired model), each with builtin tools
 #              off, and completes one streamed chat per model through its own
 #              API with a non-empty answer that ends in `stop`; the RSS of the
 #              whole UI stack (launcher, MferenceServer, Open WebUI) is sampled.

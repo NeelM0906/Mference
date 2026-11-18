@@ -34,7 +34,7 @@ any corpus correction requires a new protocol version and complete rerun.
   omits visible counts because the cutoff can fall inside a token. Legacy
   base-Qwen hidden reasoning is not streamed, so its first emitted delta is not
   its first generated token. Explicit base reasoning-effort requests now return
-  reasoning deltas like Swift; record which policy was used.
+  reasoning deltas; record which policy was used.
 - Latency summaries must distinguish all requests from successful requests;
   report median/range across the three repeats, not the best repeat.
 
@@ -57,17 +57,16 @@ arguments also include `--engine-commit`, `--machine-record` and `--output`.
 Output creation refuses to overwrite existing evidence. Interrupted files stay
 partial and must not be called complete results.
 
-For Swift/base comparison use matching supported reasoning policies separately
+To compare checkpoints, use matching supported reasoning policies separately
 from each checkpoint's product defaults. The legacy base tool template disables
 thinking; those tool rows are not effort-matched. Never attribute fine-tune
-token savings or shorter reasoning policy to a kernel speedup. Flash-Next/GLM
-comparisons use their own explicit supported policies, with differences shown.
-The existing `swift-screen-v1` and frozen community prompts remain unchanged.
+token savings or shorter reasoning policy to a kernel speedup. The frozen
+community prompts remain unchanged.
 
-The separately selected `matched-low.json` profiles exercise explicit low
-effort on both base and Swift with identical rendered inputs. They do not
+The separately selected `matched-low.json` profile exercises explicit low
+effort on the base checkpoint. It does not
 change this frozen corpus, budget, sampling or repetition protocol, and they
-are not a test of source-default xhigh. Summarize a completed or partial run
+is not a test of source-default xhigh. Summarize a completed or partial run
 with `python3 Scripts/release_screen_summary.py OUTPUT.jsonl`; missing/duplicate
 records cannot silently become a completed result, and failures remain in the
 denominator. Paired token counts conditional on both answers passing are

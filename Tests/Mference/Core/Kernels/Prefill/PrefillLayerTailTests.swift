@@ -5,7 +5,7 @@ import Metal
 import MferenceValidationSupport
 
 @Suite struct PrefillLayerTailTests {
-    private static let d = ArchConfig.gemma4_26B_A4B.hiddenSize
+    private static let d = ArchConfig.retiredGemma4Shape.hiddenSize
     private static let eps: Float = 1e-6
 
     @Test(arguments: [false, true]) func blockLayerTailMatchesRepeatedFusedRows(sourceFP16: Bool) throws {

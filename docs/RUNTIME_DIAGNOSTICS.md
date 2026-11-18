@@ -39,33 +39,12 @@ and subsequent decode tokens never contribute to the prefill report.
 Counters are local to each completed prefill call, not cumulative runner
 statistics. Token-ordered recurrent operations *within* a layer-major batch do
 not count as full-model token-by-token replay. Chunk sizes describe execution,
-not an inference from the requested chunk size. GLM honors the requested chunk
-size within its 256-row scratch capacity for resident and streamed experts.
-
-For example, the DeepSeek synthetic 60-token cutover regression now reports:
-
-```json
-{"executedMode":"chunked","batchedTokens":60,"replayedTokens":0,"batchedChunkSizes":[32,28],"replayReasons":{}}
-```
-
-This is a test fixture, not a real-checkpoint benchmark. Before GPU sparse
-selection, it reported 51 batched / 9 replayed tokens. Mixed reports remain
+not an inference from the requested chunk size. Mixed reports remain
 supported for paths that actually mix execution modes.
 
 Known reasons:
 
 - `prefill_disabled`: explicitly requested sequential prefill.
-- `inkling_reference_override`: Inkling's existing sequential reference override.
-- `glm_streamed_experts`: historical streamed-expert fallback; production GLM
-  now batches streamed experts and no longer emits this reason.
-- `glm_batched_prefill_disabled`, `glm_capture_reference`,
-  `glm_dense_selection_reference`, `glm_batched_engine_unavailable`:
-  other GLM eligibility/reference conditions.
-- `deepseek_sparse_selection_cutover`: historical lightning-indexer fallback;
-  production DeepSeek now batches above the cutover and no longer emits it.
-- `deepseek_batched_prefill_disabled`, `deepseek_batched_engine_unavailable`,
-  `deepseek_expert_slots_unavailable`, `deepseek_unsupported_geometry`:
-  other DeepSeek eligibility conditions.
 
 A legacy/uninstrumented producer yields explicit JSON `"prefill":null`.
 Never interpret this as evidence of batching. The old factory property
@@ -109,17 +88,7 @@ The JSON envelope has `schemaVersion:1`; consumers should tolerate additive
 fields and reason codes. Memory `scope` explicitly says the categories overlap
 and the snapshot is not a peak.
 
-## Gemma prefix recovery
-
-Completed Gemma server requests also report `gemmaRecovery`: `outcome` is
-`full_prefix`, `current_prefix`, `snapshot_prefix`, `cold_or_incompatible_history`,
-`state_unavailable`, or `cache_disabled`. `capture` is `captured`, `unavailable`,
-or omitted when the active turn keeps its image. `allocatedBytes` and
-`memory.bytes.gemmaPrefixRecoveryBuffers` report the one auxiliary allocation;
-they overlap and are separate from `targetKVStateBuffers`. The allocation is
-bounded by 209,510,400 bytes (199.81 MiB) for the pinned Gemma shape. Current
-KV can still be reused if capture allocation fails. Snapshot-copy failures
-invalidate the request and require reset.
+## Prefix reuse
 
 Cached counts include only actually retained/restored tokens. Replaying tokens
 from an older snapshot contributes to computed prefill, even if some token IDs

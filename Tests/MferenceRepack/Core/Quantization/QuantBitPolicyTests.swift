@@ -9,8 +9,7 @@ import Testing
 /// `mlp.gate` and `mlp.shared_expert_gate` to INT8 group-64 and leaves the rest
 /// at INT4 — and the override set must be exactly those gating tensors and
 /// nothing adjacent to them. The family table below pins which families share
-/// that policy. (The Flash-Next tensor-name cases were removed 2026-11-18 with
-/// that family's tests.)
+/// that policy.
 @Suite struct QuantBitPolicyTests {
 
     /// Qwen 3.6's real resident inventory, per layer, abbreviated to the
@@ -95,7 +94,6 @@ import Testing
     @Test("the MoE original-repo families share one policy; everyone else is uniform INT4")
     func bothOriginalRepoFamiliesShareOnePolicy() {
         #expect(QuantBitPolicy.originalRepo(family: .qwen36) == .moeRouterInt8)
-        #expect(QuantBitPolicy.originalRepo(family: .qwen38flashnext) == .moeRouterInt8)
         // MiniCPM5 also has an original-repo entry, and its answer is uniform
         // INT4 on purpose rather than by default: the vendor's own MLX
         // conversion carries no per-tensor overrides, and a dense llama has no
@@ -103,8 +101,7 @@ import Testing
         #expect(QuantBitPolicy.originalRepo(family: .minicpm5) == .uniformInt4)
         // Every family without an original-repo installer entry still has no
         // examined conversion, so none of them may carry a table.
-        for family in [RepackModelFamily.gemma4, .qwen38, .deepseekV4Flash,
-                       .inklingSmall, .maple] {
+        for family in [RepackModelFamily.qwen38, .maple] {
             #expect(QuantBitPolicy.originalRepo(family: family) == .uniformInt4,
                     "\(family.rawValue)")
         }
@@ -137,8 +134,7 @@ import Testing
         }
         #expect(throws: Never.self) {
             _ = try QuantBitPolicy.moeRouterInt8.validated(for: .qwen36)
-            _ = try QuantBitPolicy.moeRouterInt8.validated(for: .qwen38flashnext)
-            _ = try QuantBitPolicy.uniformInt4.validated(for: .qwen38flashnext)
+            _ = try QuantBitPolicy.uniformInt4.validated(for: .minicpm5)
         }
     }
 

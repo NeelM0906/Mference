@@ -74,10 +74,10 @@ Scripts/quantizer-weight-gate.py --cache /tmp/mference-quant-gate
 
 ### 2a. A side finding: the fused-expert axis order is now confirmed
 
-`FlashNextPlanner` split `mlp.experts.gate_up_proj` on an explicitly
-**unverified** assumption about its axis order, because checking it needed
-Flash-Next's 360 GB download. Qwen 3.6 — same vendor, same fused naming — settles
-it from a 2 KB shard header:
+The original-repo planner split `mlp.experts.gate_up_proj` on an explicitly
+**unverified** assumption about its axis order, because checking it needed a
+360 GB download. Qwen 3.6 — same vendor, same fused naming — settles it from a
+2 KB shard header:
 
 * `gate_up_proj` is `[256, 1024, 2048]` = `[E, 2·I, H]`,
 * `down_proj` is `[256, 2048, 512]` = `[E, H, I]`,
@@ -258,12 +258,11 @@ Its manifest records `quant.router.weightBits = 8`, and its own
 > the set from a rule rather than from a count.
 
 Our quantize-in-flight path had exactly one target. That was a deliberate W2
-scope cut — *"int4 group-64 only"* — and it is harmless for Flash-Next, whose
-runner drives the router through the generic INT4 matvec. On Qwen 3.6 it was
-fatal in two independent places:
+scope cut — *"int4 group-64 only"*. On Qwen 3.6 it was fatal in two
+independent places:
 
 1. **`ManifestReader.validateQuant`** admits `("router", quant.router, [8])` for
-   every non-Flash-Next family. Our install reported 4 and was refused at load
+   the Qwen 3.6 router. Our install reported 4 and was refused at load
    with `resident index is corrupt: unsupported quantization for router`.
 2. Even bypassed, the kernel could not decode it. `router_gemv_gemma4_body`
    (`Sources/Mference/Metal/MoE/moe.metal:109`) reads `W_row[idx]` as one
@@ -368,34 +367,6 @@ gate is supposed to be testing.
 not isotropic. Treat these as the right order of magnitude and the right
 ordering, not as exact rates.
 
-This tension was invisible until now because Flash-Next was the only
-original-repo family, and its runner happens to accept a uniform-INT4 router.
-
-> **Update, 2026-09-10 — Flash-Next takes the same policy.** "Its runner happens
-> to accept a uniform-INT4 router" turned out to be the wrong thing to take
-> comfort from. Measuring the shipped `qwen38flashnext.gturbo` install's own
-> routers against the vendor BF16 —
-> [docs/experiments/2026-09-10-flashnext-router-int4-check.md](experiments/2026-09-10-flashnext-router-int4-check.md)
-> — reproduced the table above on a different checkpoint at a different width:
-> relative weight error 0.113 against an INT8 control's 0.009, exact top-10
-> agreement with BF16 **0.132 vs 0.855**, 1.40 vs 0.146 experts swapped per
-> token. So `QuantBitPolicy.originalRepo(family:)` now returns `.moeRouterInt8`
-> for `.qwen38flashnext` as well, over its 48 text layers *and* its MTP draft
-> layer — 98 overrides. The mechanism needed no change at all, which is the
-> claim `QuantBitPolicy`'s own "why it is a general mechanism rather than a
-> Qwen 3.6 branch" note made, and this is the first test of it: adding the
-> family added rows, not branches. Two consumer-side changes were needed, both admitting a width rather
-> than assuming one — `ManifestReader.validateQuant` accepts 4 or 8 on the
-> Flash-Next router slot, and `FlashNextWeightMatrix` derives each tensor's
-> width from `sizeBytes * 8 / prod(shape)` instead of from the family, so the
-> uniform-INT4 install already on disk keeps loading. The runtime needed **no
-> new Metal**: the INT8 branch dispatches the shipped `router_gemv_gemma4_r4`,
-> which `RouterWideTopK10Tests` already gates against a CPU reference at
-> Flash-Next's production 512 x 2560 INT8 group-64 geometry. Status and the
-> install command:
-> [docs/families/QWEN38_FLASH_NEXT.md](families/QWEN38_FLASH_NEXT.md) port
-> status.
-
 ### Options, sized
 
 * **(A) Give the repacker an INT8 affine group-64 mode and a per-family
@@ -408,7 +379,7 @@ original-repo family, and its runner happens to accept a uniform-INT4 router.
   bit-parity gate before it can be trusted, and that gate is what this document
   is.
 * **(B) Leave the router BF16 for the original-repo path and dispatch the
-  existing `router_gemv_bf16_r4`** (already used by DeepSeek V4). Much smaller —
+  existing `router_gemv_bf16_r4`**. Much smaller —
   the kernel exists — but it still touches the shipped Qwen 3.6 runner's
   dispatch, and it makes our router *better* than the control's INT8 rather than
   equal, so the router term of the comparison stops being apples-to-apples.
@@ -445,16 +416,10 @@ intended — failed one step later with
 no IndexEntry named language_model.model.layers.0.mlp.shared_expert.gate_proj.weight
 ```
 
-**0 of 12** sampled runner-expected names were present. `FlashNextPlanner`
-now renames resident tensors to the family's own spelling at install time
-(`residentName(for:family:)`), which is what makes an original-repo install a
-drop-in replacement for a conversion of the same checkpoint. Flash-Next is
-deliberately identity: its `trunkPrefix` *is* `model.language_model.`, it has no
-runner to satisfy, and renaming would change every byte of an install that
-already ships.
-
-This was invisible for as long as Flash-Next was the only original-repo family,
-because Flash-Next had no runner to disagree with.
+**0 of 12** sampled runner-expected names were present. The original-repo
+planner now renames resident tensors to the family's own spelling at install
+time (`residentName(for:family:)`), which is what makes an original-repo install
+a drop-in replacement for a conversion of the same checkpoint.
 
 ### 7b. The RMSNorm 1 + w convention, found by the first run
 
@@ -496,7 +461,7 @@ The fold is exact and its scope was measured, not guessed:
 Computing `bf16(w + 1)` reproduces the control's stored bytes **bit-exactly on
 all 101** folded tensors, and all 30 `linear_attn.norm` tensors are already
 byte-identical unfolded. `RangeCopyTransform.addOneBF16` applies it in flight;
-`FlashNextPlanner.foldsNormBias` decides which tensors get it;
+the planner's `foldsNormBias` decides which tensors get it;
 `NormBiasFoldTests` locks the set. After the fix the tensor diff reports **0**
 tensors above 0.5 relative difference, median 0.127, max 0.177 — all pure
 quantization.
@@ -681,26 +646,3 @@ anchor a routing decision. The thresholds — drawn between a measured failure
 and a measured pass — still separate this healthy point from the §7b failure by
 a wide margin (0.718 vs 0.000 on top-1; 0.178 vs 13.5 on median KL). They stay
 where they are.
-
-### Flash-Next
-
-Closing W2.1b does **not** by itself lift `ManifestReader.familiesWithoutRunner`.
-That gate refuses Flash-Next for missing **axes**
-(`hyperConnectionsLowRank`, `attentionIndexer`, `pleNgramEmbedding`), not for
-quantizer quality. What W2.1b's closure does do is remove the *quality*
-objection: the quantizer nucleus Flash-Next shares is now validated at both the
-weight and model level. The remaining blockers to an eventual lift are the axes
-and a maintainer decision, not this gate.
-
-Two caveats are worth carrying into that decision. Flash-Next is uniform INT4
-by policy and folds no norm bias — both correct for it today, and both now
-*explicit* per-family choices rather than defaults nobody had examined. Neither
-has been checked against an independent conversion of Flash-Next, because none
-exists. §7 is the record of what that kind of unchecked assumption costs.
-
-**Update 2026-09-10:** the decision was taken and the gate lifted.
-`ManifestReader.familiesWithoutRunner` is now empty and Flash-Next loads through
-the ordinary funnel for the CLI and the loopback server. The two caveats above
-did not block the lift; they are carried forward as *under measurement* in
-[docs/families/QWEN38_FLASH_NEXT.md](families/QWEN38_FLASH_NEXT.md) and belong
-in any result published for this family.

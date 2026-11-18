@@ -1,5 +1,9 @@
 # Qwen 3.6 Residency Ladder Implementation Plan
 
+> Dated record. The retired families it names (DeepSeek-V4-Flash and
+> Inkling-Small) are no longer supported; see [Retired model
+> families](../../RETIRED_FAMILIES.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a full-residency expert-cache rung for Qwen 3.6 35B-A3B and drive its decode rate to meet or beat mlx-lm on the same 24 GB M5 host, without regressing the 16/32-slot low-memory rungs.

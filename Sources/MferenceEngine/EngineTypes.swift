@@ -249,8 +249,6 @@ public struct EngineModelTraits: Sendable {
     public var generationDefaults: GenerationConfig
     /// The context the model runs with.
     public var maxContext: Int
-    public var isGemmaQAT: Bool
-    public var usesSwiftQwenTemplate: Bool
     public var acceptsReasoningEffort: Bool
     public var supportsQwenReasoningEffort: Bool
     /// Whether a later request that extends an earlier one reuses its KV.
@@ -261,8 +259,6 @@ public struct EngineModelTraits: Sendable {
     public init(chatDialect: ChatDialect,
                 generationDefaults: GenerationConfig = .defaults,
                 maxContext: Int,
-                isGemmaQAT: Bool = false,
-                usesSwiftQwenTemplate: Bool = false,
                 acceptsReasoningEffort: Bool = false,
                 supportsQwenReasoningEffort: Bool = false,
                 reusesPromptPrefixes: Bool = false,
@@ -270,8 +266,6 @@ public struct EngineModelTraits: Sendable {
         self.chatDialect = chatDialect
         self.generationDefaults = generationDefaults
         self.maxContext = maxContext
-        self.isGemmaQAT = isGemmaQAT
-        self.usesSwiftQwenTemplate = usesSwiftQwenTemplate
         self.acceptsReasoningEffort = acceptsReasoningEffort
         self.supportsQwenReasoningEffort = supportsQwenReasoningEffort
         self.reusesPromptPrefixes = reusesPromptPrefixes

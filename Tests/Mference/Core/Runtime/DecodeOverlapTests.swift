@@ -200,8 +200,8 @@ import Metal
                           family: family, physicalMemoryBytes: memory * Self.gib)
     }
 
-    @Test func speculativePrefetchDefault_isShadowBudgetFourForQwen36AndGemmaOnTheMeasuredMemoryTier() {
-        for family in [ModelFamily.qwen36, .gemma4] {
+    @Test func speculativePrefetchDefault_isShadowBudgetFourForQwen36OnTheMeasuredMemoryTier() {
+        for family in [ModelFamily.qwen36] {
             #expect(prefetchPlan(family: family, gib: 16) == .init(mode: .shadow, shadowBudget: 4))
             #expect(prefetchPlan(family: family, gib: 18) == .init(mode: .shadow, shadowBudget: 4))
             #expect(prefetchPlan(family: family, gib: 24) == .init(mode: .shadow, shadowBudget: 8))
@@ -214,9 +214,9 @@ import Metal
 
     @Test func speculativePrefetchDefault_isShadowBudgetEightForQwen36OnlyAt32GiB() {
         #expect(prefetchPlan(family: .qwen36, gib: 32) == .init(mode: .shadow, shadowBudget: 8))
-        #expect(prefetchPlan(family: .gemma4, gib: 32).mode == .off)
+        #expect(prefetchPlan(family: .maple, gib: 32).mode == .off)
         #expect(prefetchPlan(family: .qwen36, gib: 28) == .init(mode: .shadow, shadowBudget: 8))
-        #expect(prefetchPlan(family: .gemma4, gib: 28).mode == .off)
+        #expect(prefetchPlan(family: .maple, gib: 28).mode == .off)
         #expect(PrefetchMode.plan(requestedShadowBudget: nil, environment: [:], family: .qwen36,
                                   physicalMemoryBytes: 24 * Self.gib - 1) == .init(mode: .shadow, shadowBudget: 4))
         #expect(prefetchPlan(budget: 2, family: .qwen36, gib: 32) == .init(mode: .shadow, shadowBudget: 2))
@@ -229,16 +229,15 @@ import Metal
     }
 
     @Test func speculativePrefetchDefault_keepsTheOtherFamiliesAsTheyWere() {
-        #expect(prefetchPlan(family: .deepseekV4Flash, gib: 16) == .init(mode: .shadow, shadowBudget: 2))
-        #expect(prefetchPlan(family: .deepseekV4Flash, gib: 128) == .init(mode: .shadow, shadowBudget: 2))
         #expect(prefetchPlan(family: .qwen38, gib: 16).mode == .off)
-        #expect(prefetchPlan(family: .inklingSmall, gib: 16).mode == .off)
+        #expect(prefetchPlan(family: .maple, gib: 16).mode == .off)
+        #expect(prefetchPlan(family: .minicpm5, gib: 128).mode == .off)
     }
 
     @Test func speculativePrefetchBudgetArgument_decidesModeAndBudgetOnEveryHost() {
         #expect(prefetchPlan(budget: 0, family: .qwen36, gib: 16).mode == .off)
-        #expect(prefetchPlan(budget: 0, family: .deepseekV4Flash, gib: 16).mode == .off)
-        #expect(prefetchPlan(budget: 3, family: .gemma4, gib: 24) == .init(mode: .shadow, shadowBudget: 3))
+        #expect(prefetchPlan(budget: 0, family: .maple, gib: 16).mode == .off)
+        #expect(prefetchPlan(budget: 3, family: .maple, gib: 24) == .init(mode: .shadow, shadowBudget: 3))
         #expect(prefetchPlan(budget: 6, family: .qwen38, gib: 8) == .init(mode: .shadow, shadowBudget: 6))
     }
 
@@ -246,9 +245,9 @@ import Metal
         #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "off"], family: .qwen36, gib: 16).mode == .off)
         #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "shadow"], family: .qwen38, gib: 16)
                 == .init(mode: .shadow, shadowBudget: 2))
-        #expect(prefetchPlan(environment: ["MFERENCE_SHADOW_BUDGET": "6"], family: .gemma4, gib: 16)
+        #expect(prefetchPlan(environment: ["MFERENCE_SHADOW_BUDGET": "6"], family: .qwen36, gib: 16)
                 == .init(mode: .shadow, shadowBudget: 6))
-        #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "nonsense"], family: .deepseekV4Flash, gib: 16).mode == .off)
+        #expect(prefetchPlan(environment: ["MFERENCE_SPEC_PREFETCH": "nonsense"], family: .maple, gib: 16).mode == .off)
     }
 
     @Test func speculativePrefetchBudgetArgument_beatsTheEnvironment() {

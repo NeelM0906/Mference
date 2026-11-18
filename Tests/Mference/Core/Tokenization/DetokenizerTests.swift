@@ -14,7 +14,7 @@ struct DetokenizerTests {
     let tok: MFTokenizer
 
     init() async throws {
-        self.tok = try await MFTokenizer.load()
+        self.tok = try await MFTokenizer.chatMLFixture()
     }
 
     // MARK: - Grapheme clusters split across token boundaries
@@ -92,55 +92,6 @@ struct DetokenizerTests {
         #expect(detok.emitted == "abc")
     }
 
-    // MARK: - Clean-up patterns
-
-    /// swift-transformers' `decode` applies `cleanUpTokenizationSpaces`, which
-    /// defaults to true when the key is absent — as it is for Gemma — and
-    /// rewrites " 's" to "'s" in text already streamed. The Gemma tokenizer
-    /// decodes through `GemmaDecoding` instead, so the stream is append-only and
-    /// reproduces the text exactly.
-    @Test("Clean-up patterns stream exactly on Gemma", arguments: [
-        "it 's ok",
-        "x = ' ' # a space",
-        "do n't stop",
-        "we 've seen",
-        "they 're here",
-        "I 'm sure",
-    ])
-    func cleanUpPatternsStreamExactly(_ target: String) {
-        let ids = tok.encode(target, addBOS: false)
-        var detok = MFDetokenizer(tokenizer: tok)
-        var assembled = ""
-        for id in ids {
-            assembled += detok.push(id)
-        }
-        assembled += detok.flush()
-        #expect(assembled == target, "stream '\(assembled)' vs text '\(target)'")
-        #expect(assembled == tok.decode(ids))
-    }
-
-    // MARK: - Byte-fallback flush
-
-    /// Gemma's SentencePiece splits an emoji into `<0xF0><0x9F><0xA6><0x99>`
-    /// byte-fallback tokens, which `push` holds back in full. A stream that ends
-    /// after a whole emoji plus part of the next one flushes one run of seven
-    /// bytes, and the reference decoder validates a run as a whole: invalid, so
-    /// one U+FFFD per byte, the complete emoji included.
-    @Test("Flush decodes a partly-invalid byte tail as one invalid run")
-    func flushDecodesPartlyInvalidTailAsOneRun() {
-        let ids = tok.encode("🦙🦙", addBOS: false)
-        #expect(ids.count == 8, "expected eight byte-fallback tokens, got \(ids.count)")
-        var detok = MFDetokenizer(tokenizer: tok)
-        var assembled = ""
-        // Truncate mid-way through the second emoji.
-        for id in ids.dropLast() {
-            assembled += detok.push(id)
-        }
-        assembled += detok.flush()
-        #expect(assembled == String(repeating: "\u{FFFD}", count: 7),
-                "byte-fallback tail mismatch: got '\(assembled)'")
-    }
-
     // MARK: - End-to-end streaming
 
     @Test("Streaming reassembles combining-mark scripts", arguments: [
@@ -167,10 +118,6 @@ struct DetokenizerTests {
     }
 }
 
-/// The Gemma suite above cannot reach the byte-level failure mode: SentencePiece
-/// pieces are whole scalars, and the bytes of a split codepoint arrive as
-/// `<0xNN>` byte-fallback tokens that `push` already holds back.
-///
 /// Qwen's GPT-2-style byte-level BPE has no byte-fallback tokens. One scalar's
 /// UTF-8 bytes simply span several ordinary tokens, and `ByteLevelDecoder`
 /// finishes with `String(decoding: utfCodepoints, as: UTF8.self)`, so a decode

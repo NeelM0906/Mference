@@ -11,8 +11,9 @@ import Foundation
                                                           "turboQuantKV": false,
                                                           "aneSharedExpert": false],
                                  archOverrides: [String: Any] = [:],
+                                 includesFamily: Bool = true,
                                  filesOverride: [String: [String: Any]]? = nil,
-                                 config: ArchConfig = .gemma4Toy()) throws
+                                 config: ArchConfig = .defaultsToy()) throws
                                  -> (URL, ArchConfig) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-manifest-test-\(UUID().uuidString)")
@@ -23,6 +24,7 @@ import Foundation
 
         let toy = config
         var archDict: [String: Any] = [
+            "family": toy.family.rawValue,
             "hiddenSize": toy.hiddenSize,
             "ffnIntermediate": toy.intermediateSize,
             "moeIntermediateSize": toy.moeIntermediateSize,
@@ -45,6 +47,9 @@ import Foundation
             "hiddenActivation": toy.hiddenActivation,
             "fullAttentionLayerMask": toy.fullAttentionLayerMask.map { Int($0) },
         ]
+        // `arch.family` comes from the config unless the caller writes it
+        // (or deliberately omits it) through `archOverrides`.
+        if !includesFamily { archDict.removeValue(forKey: "family") }
         for (k, v) in archOverrides { archDict[k] = v }
 
         var files: [String: [String: Any]]
@@ -101,42 +106,6 @@ import Foundation
         ]
     }
 
-    /// Manifest `arch` values for the DeepSeek-V4 toy baseline. The family
-    /// booleans are always written (a dsv4 manifest never relies on the
-    /// Gemma defaults); the ca*/hc*/hash/router extension fields can be
-    /// withheld to exercise the absent-fields-mean-zeroed-defaults path.
-    static func deepseekArchOverrides(includeExtensionFields: Bool = true) -> [String: Any] {
-        var overrides: [String: Any] = [
-            "family": "deepseekV4Flash",
-            "attnOutputGate": false,
-            "attentionScale": 0.125,
-            "embeddingScaledBySqrtHidden": false,
-            "routerScaled": false,
-            "ffnSandwichNorms": false,
-            "sharedExpertGated": false,
-            "ropeNeoxSubdim": false,
-        ]
-        if includeExtensionFields {
-            overrides["caQLoraRank"] = 64
-            overrides["caOLoraRank"] = 64
-            overrides["caOGroups"] = 2
-            overrides["caRopeHeadDim"] = 8
-            overrides["caIndexNHeads"] = 2
-            overrides["caIndexHeadDim"] = 64
-            overrides["caIndexTopK"] = 16
-            overrides["caCSACompressRate"] = 4
-            overrides["caHCACompressRate"] = 128
-            overrides["caCompressRopeTheta"] = 160_000.0
-            overrides["hcMult"] = 2
-            overrides["hcSinkhornIters"] = 4
-            overrides["hcEps"] = 1e-6
-            overrides["numHashRoutedLayers"] = 1
-            overrides["routerScoringFunc"] = "sqrtsoftplus"
-            overrides["routedScalingFactor"] = 1.5
-            overrides["swigluLimit"] = 10.0
-        }
-        return overrides
-    }
 
     @Test func loadsValidManifest() throws {
         let (dir, toy) = try Self.writeToyManifest()
@@ -153,7 +122,7 @@ import Foundation
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
-            _ = try ManifestReader.load(directoryURL: dir, expecting: .gemma4Toy())
+            _ = try ManifestReader.load(directoryURL: dir, expecting: .defaultsToy())
         } throws: { error in
             if case ModelError.partialInstall = error { return true }
             return false
@@ -223,7 +192,7 @@ import Foundation
     }
 
     @Test func productionManifestRequiresQuantMetadata() throws {
-        let (dir, config) = try Self.writeToyManifest(config: .gemma4_26B_A4B)
+        let (dir, config) = try Self.writeToyManifest(config: .productionShapedDefaults())
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
             _ = try ManifestReader.load(directoryURL: dir, expecting: config)
@@ -236,7 +205,7 @@ import Foundation
     @Test func productionManifestAcceptsInt4SharedExpert() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(sharedExpertBits: 4)],
-            config: .gemma4_26B_A4B)
+            config: .productionShapedDefaults())
         defer { try? FileManager.default.removeItem(at: dir) }
         let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
         #expect(manifest.quant?.sharedExpert.weightBits == 4)
@@ -245,18 +214,18 @@ import Foundation
     @Test func productionManifestAcceptsHistoricalInt8SharedExpert() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(sharedExpertBits: 8)],
-            config: .gemma4_26B_A4B)
+            config: .productionShapedDefaults())
         defer { try? FileManager.default.removeItem(at: dir) }
         let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
         #expect(manifest.quant?.sharedExpert.weightBits == 8)
     }
 
     @Test func productionManifestAcceptsInt2RoutedExpert() throws {
-        // The DeepSeek-V4-Flash dynamic-quant checkpoint ships Q2 routed
-        // experts under a Q4 core.
+        // The MoE runtime dispatches on the routed-expert width; Q2 under a
+        // Q4 core stays accepted.
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(routedExpertBits: 2)],
-            config: .gemma4_26B_A4B)
+            config: .productionShapedDefaults())
         defer { try? FileManager.default.removeItem(at: dir) }
         let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
         #expect(manifest.quant?.routedExpert.weightBits == 2)
@@ -265,7 +234,7 @@ import Foundation
     @Test func productionManifestRejectsInt3RoutedExpert() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(routedExpertBits: 3)],
-            config: .gemma4_26B_A4B)
+            config: .productionShapedDefaults())
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
             _ = try ManifestReader.load(directoryURL: dir, expecting: config)
@@ -275,41 +244,10 @@ import Foundation
         }
     }
 
-    @Test func deepseekArchExtensionFieldsValidate() throws {
-        let (dir, config) = try Self.writeToyManifest(
-            archOverrides: Self.deepseekArchOverrides(),
-            config: .deepseekV4FlashToy())
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
-        #expect(manifest.arch.family == "deepseekV4Flash")
-        #expect(manifest.arch.caQLoraRank == 64)
-        #expect(manifest.arch.caHCACompressRate == 128)
-        #expect(manifest.arch.hcMult == 2)
-        #expect(manifest.arch.numHashRoutedLayers == 1)
-        #expect(manifest.arch.routerScoringFunc == "sqrtsoftplus")
-        #expect(manifest.arch.routedScalingFactor == 1.5)
-        #expect(manifest.arch.swigluLimit == 10.0)
-    }
-
-    @Test func deepseekManifestMissingExtensionFieldsThrowsArchMismatch() throws {
-        // Absent extension fields decode as the zeroed defaults, which
-        // cannot match a family whose baseline carries real values.
-        let (dir, config) = try Self.writeToyManifest(
-            archOverrides: Self.deepseekArchOverrides(includeExtensionFields: false),
-            config: .deepseekV4FlashToy())
-        defer { try? FileManager.default.removeItem(at: dir) }
-        #expect {
-            _ = try ManifestReader.load(directoryURL: dir, expecting: config)
-        } throws: { error in
-            guard case let ModelError.archMismatch(field, _, _) = error else { return false }
-            return field == "caQLoraRank"
-        }
-    }
-
     @Test func productionManifestRejectsUnsupportedQuantMetadata() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(sharedExpertBits: 3, routerBits: 4)],
-            config: .gemma4_26B_A4B)
+            config: .productionShapedDefaults())
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
             _ = try ManifestReader.load(directoryURL: dir, expecting: config)
@@ -433,9 +371,41 @@ import Foundation
 }
 
 extension ArchConfig {
-    /// Tiny baseline used across the loader tests. 2 layers (both full), hidden 64,
-    /// vocab 1024, 8 experts. Numbers are intentionally toy.
-    static func gemma4Toy(topKExperts: Int = 2) -> ArchConfig {
+    /// `defaultsToy` axes at a production baseline's shape (Qwen 3.6's layer
+    /// count and width), so `ManifestReader` treats it as a production
+    /// architecture and requires quantization metadata.
+    static func productionShapedDefaults() -> ArchConfig {
+        let q = ArchConfig.qwen36_35B_A3B
+        return ArchConfig(
+            hiddenSize: q.hiddenSize,
+            intermediateSize: 256,
+            moeIntermediateSize: 128,
+            numHeads: 4,
+            numKVHeads: 2,
+            numFullKVHeads: 1,
+            headDim: 16,
+            fullHeadDim: 32,
+            vocabSize: 1024,
+            slidingWindow: 256,
+            finalLogitSoftcap: 30.0,
+            ropeTheta: 10_000.0,
+            fullRopeTheta: 1_000_000.0,
+            partialRotaryFactor: 0.25,
+            numLayers: q.numLayers,
+            numExperts: 8,
+            topKExperts: 2,
+            tieWordEmbeddings: true,
+            attentionKEqV: true,
+            fullAttentionLayerMask: [UInt8](repeating: 1, count: q.numLayers),
+            hiddenActivation: "gelu_pytorch_tanh"
+        )
+    }
+
+    /// Tiny baseline used across the loader tests, on the `ArchConfig.init`
+    /// defaults (the original install format's axes; family `.qwen36`).
+    /// 2 layers (sliding then full), hidden 64, vocab 1024, 8 experts.
+    /// Numbers are intentionally toy.
+    static func defaultsToy(topKExperts: Int = 2) -> ArchConfig {
         ArchConfig(
             hiddenSize: 64,
             intermediateSize: 256,
@@ -461,52 +431,4 @@ extension ArchConfig {
         )
     }
 
-    /// Tiny DeepSeek-V4-Flash baseline: 2 layers (CSA then HCA), hidden 128,
-    /// 8 experts (layer 0 hash-routed), shared-KV MQA with the low-rank
-    /// attention extensions and 2 mHC streams. Numbers are intentionally toy.
-    static func deepseekV4FlashToy() -> ArchConfig {
-        ArchConfig(
-            hiddenSize: 128,
-            intermediateSize: 64,
-            moeIntermediateSize: 64,
-            numHeads: 2,
-            numKVHeads: 1,
-            numFullKVHeads: 1,
-            headDim: 64,
-            fullHeadDim: 64,
-            vocabSize: 256,
-            slidingWindow: 32,
-            finalLogitSoftcap: 0.0,
-            ropeTheta: 10_000.0,
-            fullRopeTheta: 10_000.0,
-            partialRotaryFactor: 0.125,
-            numLayers: 2,
-            numExperts: 8,
-            topKExperts: 2,
-            tieWordEmbeddings: false,
-            attentionKEqV: true,
-            fullAttentionLayerMask: [3, 4],
-            hiddenActivation: "silu",
-            family: .deepseekV4Flash,
-            attnOutputGate: false,
-            attentionScale: 0.125,
-            embeddingScaledBySqrtHidden: false,
-            routerScaled: false,
-            ffnSandwichNorms: false,
-            sharedExpertGated: false,
-            ropeNeoxSubdim: false,
-            compressedAttention: CompressedAttentionConfig(
-                qLoraRank: 64, oLoraRank: 64, oGroups: 2,
-                ropeHeadDim: 8,
-                indexNHeads: 2, indexHeadDim: 64, indexTopK: 16,
-                csaCompressRate: 4, hcaCompressRate: 128,
-                compressRopeTheta: 160_000.0),
-            hyperConnections: HyperConnectionConfig(
-                mult: 2, sinkhornIters: 4, eps: 1e-6),
-            numHashRoutedLayers: 1,
-            routerScoringFunc: "sqrtsoftplus",
-            routedScalingFactor: 1.5,
-            swigluLimit: 10.0
-        )
-    }
 }

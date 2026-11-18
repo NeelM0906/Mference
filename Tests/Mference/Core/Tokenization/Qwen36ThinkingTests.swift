@@ -141,7 +141,7 @@ struct Qwen36ThinkingTests {
     }
 
     @Test func otherChatMLFamiliesStillRejectEffort() async throws {
-        for family in [ModelFamily.qwen38, .qwen38flashnext] {
+        for family in [ModelFamily.qwen38, .maple] {
             let tok = try await tokenizer(family: family)
             #expect(throws: MFTokenizerError.self) {
                 try tok.encodeChat(messages: single, reasoningEffort: .low)
