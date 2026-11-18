@@ -25,7 +25,7 @@ public enum ServerEngineCatalog {
     /// decoding. Deep is offered only with MTP (spec D1 and section 3), so
     /// until the backend has it Deep is declined with `deepNeedsMTP`. The PR
     /// that brings MTP to `LlamaBackend` flips this.
-    public static let llamaBackendRunsDeepWithMTP = false
+    public static let llamaBackendRunsDeepWithMTP = true
     static let deepNeedsMTP = "Deep is served only with MTP draft decoding, which this build's llama.cpp backend does not have yet"
 
     /// `catalog` restricted to the engines that have a backend.
