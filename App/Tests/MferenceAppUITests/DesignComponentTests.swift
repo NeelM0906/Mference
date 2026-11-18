@@ -8,7 +8,7 @@ import Testing
         let kinds: [MFBadge.Kind] = [.loaded, .ready, .preview, .later, .installed]
         #expect(kinds.map(\.title) == ["Loaded", "Ready", "Preview", "Later", "Installed"])
         #expect(MFBadge.Kind.loaded.tone == .success)
-        #expect(MFBadge.Kind.ready.tone == .accent)
+        #expect(MFBadge.Kind.ready.tone == .neutral)
         #expect(MFBadge.Kind.later.tone == .preview)
     }
 

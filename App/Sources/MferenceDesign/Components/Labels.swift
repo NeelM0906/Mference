@@ -5,11 +5,11 @@ import SwiftUI
 
 /// The color pair a chip or badge uses.
 public enum MFTone: Sendable, Hashable {
-    /// Grey fill, secondary text ("Built in", "Always").
+    /// Grey fill, secondary text ("Ready", "Built in", "Always").
     case neutral
     /// Green: "On this Mac", "Loaded", "Installed".
     case success
-    /// Blue: "Ready", downloading, "Web on".
+    /// Blue: downloading, "Web on".
     case accent
     /// Amber: "Preview", "Later".
     case preview
@@ -93,7 +93,7 @@ public struct MFBadge: View {
         public var tone: MFTone {
             switch self {
             case .loaded, .installed: .success
-            case .ready: .accent
+            case .ready: .neutral
             case .preview, .later: .preview
             case .custom(_, let tone): tone
             }
