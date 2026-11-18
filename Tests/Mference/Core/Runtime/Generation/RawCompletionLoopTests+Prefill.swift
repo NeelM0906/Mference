@@ -4,7 +4,7 @@ import Testing
 
 extension RawCompletionLoopTests {
     @Test func prefillProgressCoversEveryPromptToken() async throws {
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let tokenA = tokenizer.encode("a", addBOS: false).first!
         let promptIDs = tokenizer.encode("one two three", addBOS: true)
         let (collected, result) = try await runLoop(
@@ -21,7 +21,7 @@ extension RawCompletionLoopTests {
 
     @Test func disabledChunkedPrefillUsesScalarReplay() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let promptIDs = tokenizer.encode("one two three", addBOS: true)
         let producer = CountingProducer(
             vocabSize: tokenizer.vocabSize,
@@ -43,7 +43,7 @@ extension RawCompletionLoopTests {
 
     @Test func headlessSequentialPrefillSkipsOnlyNonfinalTokensAfterReset() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let prompt = tokenizer.encode("one two three", addBOS: true)
         let producer = HeadlessContinuationProducer(vocabSize: tokenizer.vocabSize,
                                                     terminalToken: tokenizer.eosID)
@@ -76,7 +76,7 @@ extension RawCompletionLoopTests {
 
     @Test func headlessSequentialPrefillResumesWithMultipleUncachedTokens() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let prompt = tokenizer.encode("one two three four", addBOS: true)
         let cached = prompt.count - 2
         let producer = HeadlessContinuationProducer(vocabSize: tokenizer.vocabSize,
@@ -111,7 +111,7 @@ extension RawCompletionLoopTests {
 
     @Test func headlessSequentialPrefillResumesOneUncachedTokenWithLogits() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let prompt = tokenizer.encode("one two three four", addBOS: true)
         let cached = prompt.count - 1
         let producer = HeadlessContinuationProducer(vocabSize: tokenizer.vocabSize,

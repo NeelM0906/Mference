@@ -24,10 +24,9 @@ import Foundation
 /// `Int4AffineStreamingParityTests` does for INT4 — the W2.1a-style bootstrap
 /// gate that has to pass before any of this is trusted to write an install.
 ///
-/// Only the component transform is provided. The row-pool transforms
-/// (`quantizeRowsInPlace`, `quantizeRowBlocksInPlace`) serve Flash-Next's PLE
-/// n-gram table, which is INT4 by policy and has no INT8 counterpart; adding
-/// unused INT8 variants would be untested surface.
+/// Only the component transform is provided. The INT4 quantizer's row-pool
+/// transforms (`quantizeRowsInPlace`, `quantizeRowBlocksInPlace`) have no INT8
+/// counterpart; adding unused INT8 variants would be untested surface.
 public enum StreamingInt8Quantizer {
 
     public static let groupSize = Int8AffineEncoder.groupSize          // 64

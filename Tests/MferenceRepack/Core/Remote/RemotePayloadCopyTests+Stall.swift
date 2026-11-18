@@ -21,7 +21,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap-stall-retry")
     let output = tmpPathForRemote("remote-stall-retry")
     defer { cleanUpRemote([snapshotDir, output]) }
-    let snap = try SyntheticSnapshot.build(at: snapshotDir, seed: 0x5741_4C4C_0001)
+    let snap = try SyntheticSnapshot.buildQwen(at: snapshotDir, seed: 0x5741_4C4C_0001)
 
     resetFakeHF()
     FakeHFURLProtocol.files = try remoteFiles(
@@ -53,7 +53,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap-stall-fail")
     let output = tmpPathForRemote("remote-stall-fail")
     defer { cleanUpRemote([snapshotDir, output, output + ".resume.json"]) }
-    let snap = try SyntheticSnapshot.build(at: snapshotDir, seed: 0x5741_4C4C_0002)
+    let snap = try SyntheticSnapshot.buildQwen(at: snapshotDir, seed: 0x5741_4C4C_0002)
 
     resetFakeHF()
     FakeHFURLProtocol.files = try remoteFiles(

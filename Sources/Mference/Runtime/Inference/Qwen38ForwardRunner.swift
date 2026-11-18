@@ -385,11 +385,9 @@ public final class Qwen38ForwardRunner: ContinuableLogitProducer, ContextWindowR
         self.fusedQKVGEMV = try FusedQKVGEMV(context: context)
         self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
         self.prefillRMS = try PrefillRMSNorm(context: context)
-        // Swift's installed numerical gate exposes error amplification across
-        // 64 layers with QMM arithmetic differing from decode. Preserve its
-        // affine factoring/reduction order while keeping a token-parallel
-        // dispatch. Base Qwen retains its existing qualified dispatch policy.
-        self.prefillUsesDecodeOrder = model.modelID == CheckpointIdentity.swiftQwen38
+        // The decode-order prefill QMM served a retired checkpoint; base Qwen
+        // 3.8 keeps its qualified dispatch policy.
+        self.prefillUsesDecodeOrder = false
         self.prefillQMM = try PrefillInt4QMM(context: context,
                                            decodeOrder: prefillUsesDecodeOrder)
         self.prefillMPPInt4 = MPPPrefillInt4QMM(context: context)

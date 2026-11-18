@@ -207,7 +207,7 @@ struct MiniCPM5RepackPlannerTests {
             + ["model.layers.1.self_attn.q_proj.weight", "model.norm.weight", "lm_head.weight"]
         let shuffled = all.reversed()
         let inFlight = shuffled.sorted {
-            FlashNextPlanner.residentOrdering($0, $1, family: .minicpm5)
+            OriginalRepoPlanner.residentOrdering($0, $1, family: .minicpm5)
         }
         #expect(inFlight == all)
         for (rank, name) in layer.enumerated() {
@@ -222,13 +222,13 @@ struct MiniCPM5RepackPlannerTests {
                      "model.layers.3.mlp.down_proj.weight"] {
             #expect(QuantBitPolicy.originalRepo(family: .minicpm5)
                 .bits(forTensorNamed: name) == 4, Comment(rawValue: name))
-            #expect(FlashNextPlanner.residentName(for: name, family: .minicpm5) == name)
+            #expect(OriginalRepoPlanner.residentName(for: name, family: .minicpm5) == name)
         }
         // LlamaRMSNorm is plain w * x_hat: no (1 + w) fold on any norm.
         for name in ["model.norm.weight",
                      "model.layers.0.input_layernorm.weight",
                      "model.layers.41.post_attention_layernorm.weight"] {
-            #expect(!FlashNextPlanner.foldsNormBias(name, family: .minicpm5), Comment(rawValue: name))
+            #expect(!OriginalRepoPlanner.foldsNormBias(name, family: .minicpm5), Comment(rawValue: name))
         }
     }
 

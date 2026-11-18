@@ -45,12 +45,10 @@ final class PrefillAttention {
     private let psoCausalTiled: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
     private var psoGQASimd: MTLComputePipelineState?
-    private let gemmaQAT: GemmaQATPrefillAttention?
 
     /// Whether the MPP tensor-ops full-attention kernel is usable here. False
-    /// with shader libraries below MSL 4.0, on GPUs where the pipeline does not
-    /// build, and for the exact QAT profile, which keeps its source-arithmetic
-    /// batched kernels.
+    /// with shader libraries below MSL 4.0 and on GPUs where the pipeline does
+    /// not build.
     var tensorOpsPipelineAvailable: Bool { psoFullTensorOps2DValidityV2 != nil }
 
     /// Whether `attention_prefill_gqa8_d256_simd` was requested and built. The
@@ -80,25 +78,18 @@ final class PrefillAttention {
         gqaTokensPerGroup = tokensPerGroup
     }
 
-    /// `gemmaQATFullAttentionTensorOps` lets the QAT profile's full-attention
-    /// layers use the tensor-ops kernel; its sliding-window layers and every
-    /// fallback keep the source arithmetic.
     /// `gqaSimdgroup` selects the GQA-shared simdgroup-matrix kernel for the
     /// shapes it covers (headDim 256, 8 query heads per KV head, no window clip,
     /// ring or sinks) in place of the tiled kernel. It changes output within
     /// FP32-reassociation tolerance, so only the caller's default may set it.
-    init(context: MetalContext, gemmaQATMaxContext: Int? = nil,
-         gemmaQATFullAttentionTensorOps: Bool = false,
+    init(context: MetalContext,
          gqaSimdgroup: Bool = false) throws {
         self.context = context
-        self.gemmaQAT = try gemmaQATMaxContext.map { try GemmaQATPrefillAttention(context: context, maxContext: $0) }
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
         // Selected by pipeline capability, not GPU family: the kernel also
         // builds on Apple8 (M2), where it measured 9x faster than tiled
         // attention. Below MSL 4.0 it is not in the library.
-        self.psoFullTensorOps2DValidityV2 = gemmaQATMaxContext == nil || gemmaQATFullAttentionTensorOps
-            ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
-            : nil
+        self.psoFullTensorOps2DValidityV2 = try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
         // The kernel is written for 8 simdgroups per threadgroup; a GPU that
         // allows fewer threads keeps the tiled kernel.
         let gqa = gqaSimdgroup ? try context.pipeline("attention_prefill_gqa8_d256_simd") : nil
@@ -141,14 +132,6 @@ final class PrefillAttention {
             && params.numKVHeads == 2
             && params.scale == 1.0
         let tensorOpsPipeline = tensorOpsShape ? psoFullTensorOps2DValidityV2 : nil
-
-        if let gemmaQAT, tensorOpsPipeline == nil {
-            gemmaQAT.encode(commandBuffer: commandBuffer,
-                q: q, qOffset: qOffset, k: k, kOffset: kOffset,
-                v: v, vOffset: vOffset, out: out, outOffset: outOffset,
-                params: params, ringCapacity: kvRingCapacity)
-            return false
-        }
 
         let useTensorOps = tensorOpsPipeline != nil
         let gqaSimdPipeline = useTensorOps ? nil : gqaSimdPipeline(for: params,

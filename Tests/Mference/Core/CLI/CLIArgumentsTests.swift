@@ -21,14 +21,14 @@ import Mference
     }
     @Test func emptyTruncationHasActionableNoticeWithoutChangingSuccessOutput() throws {
         let base = try #require(emptyResponseLimitNotice(reason: .maxTokens,
-            hasVisibleText: false, isSwiftQwen: false))
+            hasVisibleText: false))
         #expect(base.contains("--max-new"))
         #expect(base.contains("--max-context"))
         #expect(!base.contains("--reasoning-effort"))
         #expect(emptyResponseLimitNotice(reason: .maxTokens,
-            hasVisibleText: true, isSwiftQwen: false) == nil)
+            hasVisibleText: true) == nil)
         #expect(emptyResponseLimitNotice(reason: .endOfTurn,
-            hasVisibleText: false, isSwiftQwen: false) == nil)
+            hasVisibleText: false) == nil)
     }
     @Test func usageListsMaple() {
         #expect(Args.usage.contains("Maple"))

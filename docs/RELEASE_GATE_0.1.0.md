@@ -1,5 +1,9 @@
 # Source release 0.1.0: final gate
 
+> Dated record. The retired families it names (Gemma 4, Qwen3.8-Flash-Next,
+> and Swift-Qwen3.8) are no longer supported; see [Retired model
+> families](RETIRED_FAMILIES.md).
+
 Release target: `4ff63ff555c137d924f024cd3fad8e0b486959f2` (the merge of
 [PR #38](https://github.com/NeelM0906/Mference/pull/38)). This record is separate
 from the historical candidate records. It does not qualify the entire
@@ -88,7 +92,7 @@ python3 Scripts/tests/test_mference_ui.py
 python3 Scripts/tests/test_openwebui_mference.py
 python3 Scripts/tests/test_release_task_screen.py
 python3 Scripts/tests/test_release_screen_summary.py
-python3 Scripts/tests/test_qwen_efficiency_screen.py
+python3 Scripts/tests/test_qwen_efficiency_screen.py  # removed 2026-11-18 with the Swift-Qwen comparison
 python3 Scripts/tests/test_swift_qwen_task_screen.py  # removed 2026-11-18 with the Swift-Qwen tests
 python3 Scripts/tests/test_source_release.py
 python3 -O Scripts/tests/test_source_release.py

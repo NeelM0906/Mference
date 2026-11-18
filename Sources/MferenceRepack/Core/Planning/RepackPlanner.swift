@@ -88,7 +88,7 @@ struct PerExpertTensorSlice: Sendable {
     /// one contiguous slab per expert and per role.
     let sourceStridePerExpert: UInt64
     /// Byte offset of this slice inside the expert's source slab. Non-zero only
-    /// for fused tensors — Qwen3.8-Flash-Next stores gate and up as one
+    /// for fused tensors — a vendor original repo stores gate and up as one
     /// `mlp.experts.gate_up_proj`, so `up` starts half a slab in.
     let sourceSliceOffset: UInt64
     let sourceTensor: SourceTensor
@@ -177,17 +177,14 @@ struct RepackPlan: Sendable {
     let matchedModelID: String?
     let excludedMultimodalTensorNames: [String]
     let flashHead: IndexLoader.MapleFlashHeadMetadata?
-    /// Additive row-lookup pools (Flash-Next PLE n-gram tables). Empty for
-    /// every family that predates the pool kind, so their manifests and output
-    /// trees are unchanged.
-    let plePools: [PleRowPoolPlan]
     /// Optional tensor groups and the carry/skip decision made for each.
     let sidecarOutcomes: [SidecarGroupOutcome]
     /// Whether the source checkpoint was BF16 and quantized during the install
     /// rather than copied from a pre-quantized conversion.
     let quantizedAtInstall: Bool
-    /// Additive expert pools outside `packed_experts/` (the Flash-Next MTP
-    /// draft layer's own routed experts). Empty for every shipped family.
+    /// Additive expert pools outside `packed_experts/` (an original-repo
+    /// source's MTP draft layer with its own fused routed experts). Empty for
+    /// every pre-quantized install.
     let auxiliaryExpertPools: [AuxiliaryExpertPoolPlan]
 
     /// Every populated expert-blob layer the install writes, main pool first.
@@ -205,7 +202,6 @@ struct RepackPlan: Sendable {
          matchedModelID: String?,
          excludedMultimodalTensorNames: [String],
          flashHead: IndexLoader.MapleFlashHeadMetadata?,
-         plePools: [PleRowPoolPlan] = [],
          sidecarOutcomes: [SidecarGroupOutcome] = [],
          quantizedAtInstall: Bool = false,
          auxiliaryExpertPools: [AuxiliaryExpertPoolPlan] = []) {
@@ -219,7 +215,6 @@ struct RepackPlan: Sendable {
         self.matchedModelID = matchedModelID
         self.excludedMultimodalTensorNames = excludedMultimodalTensorNames
         self.flashHead = flashHead
-        self.plePools = plePools
         self.sidecarOutcomes = sidecarOutcomes
         self.quantizedAtInstall = quantizedAtInstall
     }
@@ -261,37 +256,21 @@ enum RepackPlanner {
         return .unknown
     }
 
-    /// The LM prefix is a family contract: Gemma and Qwen ship multimodal
-    /// checkpoints whose text tower lives under `language_model.`; DeepSeek
-    /// V4 is text-only with a plain `model.` prefix and a top-level
+    /// The LM prefix is a family contract: Qwen ships multimodal checkpoints
+    /// whose text tower lives under `language_model.`; Maple and the MiniCPM5
+    /// MLX control are text-only with a plain `model.` prefix and a top-level
     /// `lm_head.` (mlx-lm conversion naming).
     private static func hasResidentPrefix(_ name: String,
                                           family: RepackModelFamily) -> Bool {
         switch family {
-        case .gemma4, .qwen36, .qwen38:
+        case .qwen36, .qwen38:
             return name.hasPrefix("language_model.")
-        case .deepseekV4Flash, .maple, .flint:
+        case .maple:
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
-        case .inklingSmall:
-            // Inkling is multimodal but names its towers as siblings, so the
-            // text tower is exactly `model.llm.`; `model.visual.` and
-            // `model.audio.` fall through to the multimodal exclusion.
-            return name.hasPrefix("model.llm.")
-        case .qwen38flashnextudiq3xxs:
-            // Planned by FlashNextGGUFPlanner; never reached for it.
-            return false
-        case .qwen38flashnext:
-            // Planned by FlashNextPlanner; this path is never reached for it.
-            return name.hasPrefix(FlashNextPlanner.textPrefix)
-                || name == FlashNextPlanner.lmHeadName
         case .minicpm5:
             // The MLX control (pre-quantized path) uses the plain llama
-            // spelling; the BF16 source is planned by FlashNextPlanner.
+            // spelling; the BF16 source is planned by OriginalRepoPlanner.
             return name.hasPrefix("model.") || name.hasPrefix("lm_head.")
-        case .glm53Flash:
-            // PipeNetwork's mlx-vlm conversion: text trunk and head under
-            // `language_model.`; `vision_model.` is excluded below.
-            return name.hasPrefix("language_model.")
         }
     }
 
@@ -299,24 +278,12 @@ enum RepackPlanner {
                                          family: RepackModelFamily) -> String? {
         let routedContainer: String
         switch family {
-        case .gemma4:          routedContainer = ".experts.switch_glu."
         case .qwen36:          routedContainer = ".mlp.switch_mlp."
         // Dense family: every `.mlp.*_proj` is the layer's own FFN, resident.
         case .qwen38:          return nil
-        case .deepseekV4Flash: routedContainer = ".ffn.switch_mlp."
         case .maple:           routedContainer = ".mlp.switch_mlp."
-        case .flint:           routedContainer = ".mlp.switch_mlp."
-        // `.mlp.experts.` does not match the shared experts, which sit under
-        // `.mlp.shared_experts.`.
-        case .inklingSmall:    routedContainer = ".mlp.experts."
-        // Fused across experts and across the gate|up halves; split by
-        // FlashNextPlanner, which never consults this classifier.
-        case .qwen38flashnext, .qwen38flashnextudiq3xxs: return nil
         // Dense llama: every `.mlp.*_proj` is the layer's own FFN, resident.
         case .minicpm5:        return nil
-        // `.mlp.switch_mlp.` is the stacked routed triplet; `.mlp.shared_experts.`
-        // and the dense layers' bare `.mlp.*_proj` do not match it.
-        case .glm53Flash:      routedContainer = ".mlp.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -348,7 +315,6 @@ enum RepackPlanner {
         for h in shardHeaders {
             for t in h.tensors { registry[t.name] = t }
         }
-        try GemmaQATSource.validateInventory(arch: arch, metadata: meta, registry: registry)
 
         // Original-repo BF16 sources are planned by their own planner: the
         // tensor inventory, the fused-expert split and the row pool have no
@@ -363,11 +329,11 @@ enum RepackPlanner {
         // Qwen 3.6 arrives on both paths for precisely that reason (see
         // `SupportedModelSource.qwen36Original`).
         if meta.sourceIsUnquantized {
-            return try FlashNextPlanner.plan(meta: meta,
-                                             arch: arch,
-                                             registry: registry,
-                                             outputDir: outputDir,
-                                             sidecarPolicy: sidecarPolicy)
+            return try OriginalRepoPlanner.plan(meta: meta,
+                                                arch: arch,
+                                                registry: registry,
+                                                outputDir: outputDir,
+                                                sidecarPolicy: sidecarPolicy)
         }
 
         // Source allowlisting owns exact fingerprint validation. Preserve the
@@ -443,10 +409,9 @@ enum RepackPlanner {
 
         // The .gturbo format keeps one expertStride across every layer
         // (manifest root + runtime streamers assume it). Mixed per-tensor
-        // quant group sizes make raw blob sizes differ per layer — DeepSeek
-        // V4's group-64 gate_proj on the last layer packs 0.5 MiB tighter
-        // than the group-32 layers — so pad every layer to the widest
-        // stride. Sub-tensor offsets are blob-relative and unaffected.
+        // quant group sizes can make raw blob sizes differ per layer, so pad
+        // every layer to the widest stride. Sub-tensor offsets are
+        // blob-relative and unaffected.
         let maxStride = layerPlans.map(\.expertStride).max() ?? 0
         layerPlans = layerPlans.map { lp in
             guard lp.expertsPerLayer > 0, lp.expertStride != maxStride else { return lp }
@@ -477,16 +442,7 @@ enum RepackPlanner {
             name.hasPrefix("audio_tower.") ||
             name.hasPrefix("model.visual.") ||
             name.hasPrefix("model.audio.") ||
-            (family == .maple && isExcludedMapleFlashTensor(name)) ||
-            (family == .glm53Flash && isExcludedGlm53Tensor(name))
-    }
-
-    /// GLM-5.3-Flash drops the vision tower (`vision_model.*`) and any
-    /// multi-token-prediction draft layer (`language_model.model.layers.N`
-    /// with `N` at or past the decoder count is the MTP block; PipeNetwork's
-    /// conversion omits it, other conversions carry it under `mtp.`).
-    static func isExcludedGlm53Tensor(_ name: String) -> Bool {
-        name.hasPrefix("vision_model.") || name.hasPrefix("language_model.model.mtp.")
+            (family == .maple && isExcludedMapleFlashTensor(name))
     }
 
     private static func isMapleFlashResidentTensor(_ name: String) -> Bool {
@@ -860,10 +816,6 @@ enum RepackPlanner {
         case .fp32: 3
         case .i64: 4
         case .i32: 5
-        // Only FlashNextGGUFPlanner creates GGUF block tensors; reaching here
-        // is a planner bug, reported rather than crashed on (R10).
-        case .ggmlBlocks:
-            throw RepackError.dtypeMismatch(name: "", detail: "GGUF block bytes reached a safetensors planner")
         }
     }
 
@@ -1048,54 +1000,29 @@ enum RepackPlanner {
         -> (String, String) -> Bool {
         // Compute a sort key per name; we order by (group rank, layer, slot rank, name).
         // Group 2 holds top-level tensors between the layers and the final
-        // norm (DeepSeek V4's `model.hc_head.*` stream collapse lands there).
+        // norm.
         func key(_ n: String) -> (Int, Int, Int, String) {
             switch family {
-            case .gemma4, .qwen36, .qwen38:
+            case .qwen36, .qwen38:
                 if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
-            case .deepseekV4Flash:
-                if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
-                if n == "model.norm.weight"          { return (3, 0, 0, n) }
-                if n == "lm_head.weight"             { return (4, 0, 0, n) }
             case .maple:
                 if n == "model.word_embeddings.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"             { return (3, 0, 0, n) }
                 if n == "lm_head.weight"                { return (4, 0, 0, n) }
-            case .flint:
-                if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
-                if n == "model.norm.weight"          { return (3, 0, 0, n) }
-                if n == "lm_head.weight"             { return (4, 0, 0, n) }
-            case .inklingSmall:
-                if n == "model.llm.embed.weight"      { return (0, 0, 0, n) }
-                if n == "model.llm.embed_norm.weight" { return (0, 0, 1, n) }
-                if n == "model.llm.norm.weight"       { return (3, 0, 0, n) }
-                if n == "model.llm.unembed.weight"    { return (4, 0, 0, n) }
-            case .qwen38flashnext, .qwen38flashnextudiq3xxs:
-                break   // FlashNextPlanner / FlashNextGGUFPlanner own the ordering.
             case .minicpm5:
                 if n == "model.embed_tokens.weight" { return (0, 0, 0, n) }
                 if n == "model.norm.weight"          { return (3, 0, 0, n) }
                 if n == "lm_head.weight"             { return (4, 0, 0, n) }
-            case .glm53Flash:
-                if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
-                if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
-                if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
             }
             if let li = layerIndex(in: n) {
                 let slot: Int
                 switch family {
-                case .gemma4:          slot = slotRank(in: n)
                 case .qwen36:          slot = qwenSlotRank(in: n)
                 case .qwen38:          slot = qwen38SlotRank(in: n)
-                case .deepseekV4Flash: slot = deepseekV4SlotRank(in: n)
-                case .inklingSmall:    slot = inklingSlotRank(in: n)
                 case .maple:           slot = mapleSlotRank(in: n)
-                case .flint:           slot = flintSlotRank(in: n)
-                case .qwen38flashnext, .qwen38flashnextudiq3xxs: slot = 100
                 case .minicpm5:        slot = miniCPM5SlotRank(in: n)
-                case .glm53Flash:      slot = glm53SlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -1110,59 +1037,6 @@ enum RepackPlanner {
         }
     }
 
-    /// Within-layer slot order for GLM-5.3-Flash: the attention bundle (KDA
-    /// projections and gates, or the sparse low-rank path with its absorbed
-    /// per-head folds and the indexer), the two mHC sites, the two layer
-    /// norms, then the router, the shared expert, and the dense FFN of the
-    /// leading layers. Checked in order so `.mlp.gate.` cannot swallow
-    /// `.mlp.gate_proj.`.
-    static func glm53SlotRank(in n: String) -> Int {
-        if n.contains(".self_attn.q_proj.weight")                     { return 0 }
-        if n.contains(".self_attn.k_proj.weight")                     { return 1 }
-        if n.contains(".self_attn.v_proj.weight")                     { return 2 }
-        if n.contains(".self_attn.conv1d.weight")                     { return 3 }
-        if n.contains(".self_attn.forget_gate.f_a_proj.weight")       { return 4 }
-        if n.contains(".self_attn.forget_gate.f_b_proj.weight")       { return 5 }
-        if n.hasSuffix(".self_attn.forget_gate.A_log")                { return 6 }
-        if n.hasSuffix(".self_attn.forget_gate.dt_bias")              { return 7 }
-        if n.contains(".self_attn.g_a_proj.weight")                   { return 8 }
-        if n.contains(".self_attn.g_b_proj.weight")                   { return 9 }
-        if n.contains(".self_attn.b_proj.weight")                     { return 10 }
-        if n.contains(".self_attn.o_norm.weight")                     { return 11 }
-        if n.contains(".self_attn.q_a_proj.weight")                   { return 12 }
-        if n.contains(".self_attn.q_a_layernorm.weight")              { return 13 }
-        if n.contains(".self_attn.q_b_proj.weight")                   { return 14 }
-        if n.contains(".self_attn.kv_a_proj_with_mqa.weight")         { return 15 }
-        if n.contains(".self_attn.kv_a_layernorm.weight")             { return 16 }
-        if n.contains(".self_attn.embed_q.weight")                    { return 17 }
-        if n.contains(".self_attn.unembed_out.weight")                { return 18 }
-        if n.contains(".self_attn.indexer.wq_b.weight")               { return 19 }
-        if n.contains(".self_attn.indexer.wk.weight")                 { return 20 }
-        if n.contains(".self_attn.indexer.k_norm.weight")             { return 21 }
-        if n.contains(".self_attn.indexer.k_norm.bias")               { return 22 }
-        if n.contains(".self_attn.indexer.weights_proj.weight")       { return 23 }
-        if n.hasSuffix(".self_attn.indexer.index_kpool_compress_gate") { return 24 }
-        if n.hasSuffix(".self_attn.indexer.index_kpool_compress_ape")  { return 25 }
-        if n.contains(".self_attn.o_proj.weight")                     { return 26 }
-        if n.hasSuffix(".attn_hc.fn")                                 { return 27 }
-        if n.hasSuffix(".attn_hc.base")                               { return 28 }
-        if n.hasSuffix(".attn_hc.scale")                              { return 29 }
-        if n.hasSuffix(".ffn_hc.fn")                                  { return 30 }
-        if n.hasSuffix(".ffn_hc.base")                                { return 31 }
-        if n.hasSuffix(".ffn_hc.scale")                               { return 32 }
-        if n.hasSuffix(".input_layernorm.weight")                     { return 33 }
-        if n.hasSuffix(".post_attention_layernorm.weight")            { return 34 }
-        if n.contains(".mlp.gate.weight")                             { return 35 }
-        if n.hasSuffix(".mlp.gate.e_score_correction_bias")           { return 36 }
-        if n.contains(".mlp.shared_experts.gate_proj.weight")         { return 37 }
-        if n.contains(".mlp.shared_experts.up_proj.weight")           { return 38 }
-        if n.contains(".mlp.shared_experts.down_proj.weight")         { return 39 }
-        if n.contains(".mlp.gate_proj.weight")                        { return 40 }
-        if n.contains(".mlp.up_proj.weight")                          { return 41 }
-        if n.contains(".mlp.down_proj.weight")                        { return 42 }
-        return 99
-    }
-
     private static func mapleSlotRank(in n: String) -> Int {
         if n.contains(".self_attn.q_proj.weight") { return 0 }
         if n.contains(".self_attn.k_proj.weight") { return 1 }
@@ -1173,62 +1047,6 @@ enum RepackPlanner {
         if n.contains(".mlp.gate.weight") { return 6 }
         if n.hasSuffix(".input_layernorm.weight") { return 7 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 8 }
-        return 99
-    }
-
-    private static func flintSlotRank(in n: String) -> Int {
-        if n.contains(".self_attn.q_proj.weight")            { return 0 }
-        if n.contains(".self_attn.k_proj.weight")            { return 1 }
-        if n.contains(".self_attn.v_proj.weight")            { return 2 }
-        if n.contains(".self_attn.o_proj.weight")            { return 3 }
-        if n.contains(".self_attn.q_norm.weight")            { return 4 }
-        if n.contains(".self_attn.k_norm.weight")            { return 5 }
-        if n.hasSuffix(".self_attn.softmax_offset")          { return 6 }
-        if n.contains(".mlp.gate.weight")                    { return 7 }
-        if n.contains(".mlp.shared_expert.gate_proj.weight") { return 8 }
-        if n.contains(".mlp.shared_expert.up_proj.weight")   { return 9 }
-        if n.contains(".mlp.shared_expert.down_proj.weight") { return 10 }
-        if n.contains(".mlp.gate_proj.weight")               { return 11 }
-        if n.contains(".mlp.up_proj.weight")                 { return 12 }
-        if n.contains(".mlp.down_proj.weight")               { return 13 }
-        if n.hasSuffix(".input_layernorm.weight")            { return 14 }
-        if n.hasSuffix(".post_attention_layernorm.weight")   { return 15 }
-        return 100
-    }
-
-    /// Within-layer slot order for Inkling: the attention bundle (QKV/O, the
-    /// relative-position projection and its profile bank, the per-head norms,
-    /// and the K/V short convs), then the router, then the shared experts,
-    /// then the dense FFN carried by layers 0–1, then the block short convs
-    /// and the two layer norms.
-    ///
-    /// Ordered before `.mlp.gate_proj` so the dense-FFN checks cannot swallow
-    /// the shared-expert tensors, which share the `.mlp.` segment.
-    private static func inklingSlotRank(in n: String) -> Int {
-        if n.contains(".attn.wq_du.weight")                 { return 0 }
-        if n.contains(".attn.wk_dv.weight")                 { return 1 }
-        if n.contains(".attn.wv_dv.weight")                 { return 2 }
-        if n.contains(".attn.wo_ud.weight")                 { return 3 }
-        if n.contains(".attn.wr_du.weight")                 { return 4 }
-        if n.hasSuffix(".attn.rel_logits_proj.proj")        { return 5 }
-        if n.contains(".attn.q_norm.weight")                { return 6 }
-        if n.contains(".attn.k_norm.weight")                { return 7 }
-        if n.contains(".attn.k_sconv.weight")               { return 8 }
-        if n.contains(".attn.v_sconv.weight")               { return 9 }
-        if n.contains(".mlp.gate.weight")                   { return 10 }
-        if n.hasSuffix(".mlp.gate.bias")                    { return 11 }
-        if n.hasSuffix(".mlp.gate.global_scale")            { return 12 }
-        if n.contains(".mlp.shared_experts.gate_proj.weight") { return 13 }
-        if n.contains(".mlp.shared_experts.up_proj.weight")   { return 14 }
-        if n.contains(".mlp.shared_experts.down_proj.weight") { return 15 }
-        if n.contains(".mlp.gate_proj.weight")              { return 16 }
-        if n.contains(".mlp.up_proj.weight")                { return 17 }
-        if n.contains(".mlp.down_proj.weight")              { return 18 }
-        if n.hasSuffix(".mlp.global_scale")                 { return 19 }
-        if n.contains(".attn_sconv.weight")                 { return 20 }
-        if n.contains(".mlp_sconv.weight")                  { return 21 }
-        if n.hasSuffix(".attn_norm.weight")                 { return 22 }
-        if n.hasSuffix(".mlp_norm.weight")                  { return 23 }
         return 99
     }
 
@@ -1266,7 +1084,7 @@ enum RepackPlanner {
     /// SwiGLU MLP where the router/shared-expert bundle would sit, then the
     /// two layer norms.
     /// Plain-llama block order: the four attention projections, the SwiGLU
-    /// MLP, then the two layer norms. Shared with `FlashNextPlanner`'s
+    /// MLP, then the two layer norms. Shared with `OriginalRepoPlanner`'s
     /// original-repo ordering so both install paths lay the layer out alike.
     static func miniCPM5SlotRank(in n: String) -> Int {
         if n.contains(".self_attn.q_proj.weight")   { return 0 }
@@ -1302,82 +1120,6 @@ enum RepackPlanner {
         if n.contains(".mlp.down_proj.weight")           { return 17 }
         if n.hasSuffix(".input_layernorm.weight")        { return 18 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 19 }
-        return 100
-    }
-
-    /// Within-layer slot order for the DeepSeek-V4-Flash family: the low-rank
-    /// attention path in pipeline order, then the CSA/HCA compressor and its
-    /// indexer, then router (with hash table / correction bias), shared
-    /// expert, layer norms, and the two hyper-connection mix sites. Names
-    /// follow the mlx-community conversion (`attn.wq_a`, `attn.indexer.*`,
-    /// `ffn.gate`, `ffn.shared_experts`). Indexer patterns are matched
-    /// before the compressor's so the shared component names (`wkv`,
-    /// `wgate`, `norm`, `ape`) cannot cross-match. Unquantized tensors
-    /// (norms, sinks, position biases, hc mixes, e_score_correction_bias,
-    /// tid2eid) carry no `.scales`/`.biases` companions and flow through
-    /// the planner's non-U32/non-`.weight` branch.
-    private static func deepseekV4SlotRank(in n: String) -> Int {
-        if n.contains(".attn.wq_a.weight")                      { return 0 }
-        if n.contains(".attn.q_norm.weight")                    { return 1 }
-        if n.contains(".attn.wq_b.weight")                      { return 2 }
-        if n.contains(".attn.wkv.weight")                       { return 3 }
-        if n.contains(".attn.kv_norm.weight")                   { return 4 }
-        if n.hasSuffix(".attn.attn_sink")                       { return 5 }
-        if n.contains(".attn.wo_a.weight")                      { return 6 }
-        if n.contains(".attn.wo_b.weight")                      { return 7 }
-        if n.contains(".attn.indexer.compressor.wkv.weight")    { return 12 }
-        if n.contains(".attn.indexer.compressor.wgate.weight")  { return 13 }
-        if n.contains(".attn.indexer.compressor.norm.weight")   { return 14 }
-        if n.hasSuffix(".attn.indexer.compressor.ape")          { return 15 }
-        if n.contains(".attn.indexer.wq_b.weight")              { return 16 }
-        if n.contains(".attn.indexer.weights_proj.weight")      { return 17 }
-        if n.contains(".attn.compressor.wkv.weight")            { return 8 }
-        if n.contains(".attn.compressor.wgate.weight")          { return 9 }
-        if n.contains(".attn.compressor.norm.weight")           { return 10 }
-        if n.hasSuffix(".attn.compressor.ape")                  { return 11 }
-        if n.contains(".ffn.gate.weight")                       { return 18 }
-        if n.hasSuffix(".ffn.gate.e_score_correction_bias")     { return 19 }
-        // tid2eid is an I64 lookup table; it rides the resident file as raw
-        // I64 bytes (no `.weight` suffix, hence no quant companions) and the
-        // runtime's CPU-side hash lookup reads it dtype-aware.
-        if n.hasSuffix(".ffn.gate.tid2eid")                     { return 20 }
-        if n.contains(".ffn.shared_experts.gate_proj.weight")   { return 21 }
-        if n.contains(".ffn.shared_experts.up_proj.weight")     { return 22 }
-        if n.contains(".ffn.shared_experts.down_proj.weight")   { return 23 }
-        if n.hasSuffix(".attn_norm.weight")                     { return 24 }
-        if n.hasSuffix(".ffn_norm.weight")                      { return 25 }
-        if n.hasSuffix(".attn_hc.fn")                           { return 26 }
-        if n.hasSuffix(".attn_hc.base")                         { return 27 }
-        if n.hasSuffix(".attn_hc.scale")                        { return 28 }
-        if n.hasSuffix(".ffn_hc.fn")                            { return 29 }
-        if n.hasSuffix(".ffn_hc.base")                          { return 30 }
-        if n.hasSuffix(".ffn_hc.scale")                         { return 31 }
-        return 100
-    }
-
-    /// Within-layer slot order. Mirrors the per-layer description in the
-    /// architecture doc.
-    private static func slotRank(in n: String) -> Int {
-        if n.contains(".self_attn.q_proj.weight") { return 0 }
-        if n.contains(".self_attn.k_proj.weight") { return 1 }
-        if n.contains(".self_attn.v_proj.weight") { return 2 }
-        if n.contains(".self_attn.o_proj.weight") { return 3 }
-        if n.contains(".self_attn.q_norm.weight") { return 4 }
-        if n.contains(".self_attn.k_norm.weight") { return 5 }
-        if n.contains(".router.proj.weight")      { return 6 }
-        if n.contains(".router.scale")            { return 7 }
-        if n.contains(".router.per_expert_scale") { return 8 }
-        if n.contains(".mlp.gate_proj.weight")    { return 9 }
-        if n.contains(".mlp.up_proj.weight")      { return 10 }
-        if n.contains(".mlp.down_proj.weight")    { return 11 }
-        if n.hasSuffix(".input_layernorm.weight") { return 12 }
-        if n.hasSuffix(".post_attention_layernorm.weight") { return 13 }
-        if n.hasSuffix(".pre_feedforward_layernorm.weight") { return 14 }
-        if n.hasSuffix(".pre_feedforward_layernorm_2.weight") { return 15 }
-        if n.hasSuffix(".post_feedforward_layernorm.weight") { return 16 }
-        if n.hasSuffix(".post_feedforward_layernorm_1.weight") { return 17 }
-        if n.hasSuffix(".post_feedforward_layernorm_2.weight") { return 18 }
-        if n.hasSuffix(".layer_scalar")           { return 19 }
         return 100
     }
 }

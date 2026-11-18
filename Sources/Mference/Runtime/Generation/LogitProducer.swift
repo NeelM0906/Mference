@@ -96,16 +96,3 @@ public protocol PrefixStateSnapshotting: ContinuableLogitProducer {
                             position: Int,
                             recurrentState: PrefixSnapshotRegion) throws
 }
-
-/// Optional, server-only recovery. Implementations must reject other model
-/// families and unfinished GPU state; ordinary continuation stays exact.
-public enum GemmaPrefixRecoverySource: String, Sendable { case current, snapshot }
-
-public protocol GemmaPrefixRecovering: ContinuableLogitProducer {
-    var supportsGemmaPrefixRecovery: Bool { get }
-    var gemmaRecoveryBytes: UInt64 { get }
-    func gemmaRecoverablePrefix(upTo limit: Int) -> Int
-    func captureGemmaPrefix() throws -> Bool
-    func recoverGemmaPrefix(to position: Int) throws -> GemmaPrefixRecoverySource
-    func discardGemmaPrefix()
-}

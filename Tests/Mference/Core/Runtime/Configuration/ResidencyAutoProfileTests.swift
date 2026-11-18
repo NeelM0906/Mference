@@ -43,12 +43,12 @@ import Testing
     @Test("Non-Qwen families keep the slot default")
     func nonQwenFamiliesStayOnSlots() {
         let mode = RuntimeConfiguration.defaultExpertStreamingMode(
-            for: .gemma4,
+            for: .maple,
             physicalMemoryBytes: 128 * Self.gib,
             expertPoolBytes: UInt64(12_900_000_000),
             coreWeightsBytes: UInt64(1_360_000_000))
         guard case .pread(let slots) = mode, slots == 16 else {
-            Issue.record("expected 16-slot Gemma default, got \(mode)")
+            Issue.record("expected 16-slot Maple default, got \(mode)")
             return
         }
     }

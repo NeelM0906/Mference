@@ -110,7 +110,6 @@ jobs:
           python3 Scripts/tests/test_openwebui_mference.py
           python3 Scripts/tests/test_release_task_screen.py
           python3 Scripts/tests/test_release_screen_summary.py
-          python3 Scripts/tests/test_qwen_efficiency_screen.py
           python3 Scripts/tests/test_source_release.py
           python3 Scripts/tests/test_engine_validate.py
 

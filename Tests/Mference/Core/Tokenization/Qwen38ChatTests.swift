@@ -112,7 +112,6 @@ struct Qwen38ChatTests {
     /// Qwen 3.6 refuses one.
     @Test func qwen36RefusesAnEffortThatBaseQwen38Accepts() async throws {
         let base = try await tokenizer()
-        #expect(!base.isSwiftQwen)
         #expect(base.supportsQwenReasoningEffort)
         let other = try base.forCheckpoint("qwen3.6-35b-a3b")
         #expect(!other.supportsQwenReasoningEffort)

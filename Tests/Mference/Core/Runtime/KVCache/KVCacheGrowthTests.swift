@@ -8,7 +8,7 @@ import Testing
 /// same reserved pages, so rows stay in place and nothing is copied, and a new
 /// conversation starts again from one step.
 @Suite struct KVCacheGrowthTests {
-    private let gemma = ArchConfig.gemma4_26B_A4B
+    private let gemma = ArchConfig.retiredGemma4Shape
     private let qwen = ArchConfig.qwen36_35B_A3B
 
     private func make(_ config: ArchConfig, maxContext: Int, step: Int?) throws -> KVCacheManager {
@@ -146,20 +146,6 @@ import Testing
             }
         }
         return (rows, startingKV)
-    }
-
-    @Test func gemmaGrowingKVMatchesTheWholeReservation() async throws {
-        let config = ArchConfig.gemma4Toy(topKExperts: 8)
-        let directory = try ModelLoaderTests.writeToySynthetic(config: config, finiteNorms: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        func run(_ step: Int?) async throws -> (rows: [[UInt16]], startingKV: UInt64) {
-            try await rollout(directory: directory, config: config, step: step, maxContext: 768,
-                              chunk: 64, prompt: 200, decode: 60)
-        }
-        let whole = try await run(nil)
-        let growing = try await run(48)
-        #expect(growing.startingKV < whole.startingKV)
-        #expect(growing.rows == whole.rows)
     }
 
     @Test func qwenGrowingKVMatchesTheWholeReservation() async throws {

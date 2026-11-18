@@ -88,7 +88,7 @@ MODELS = {
 }
 PRODUCT_ORDER = ["quick", "deep", "qwen36", "minicpm5", "maple"]
 SWAP_CHAIN = ["quick", "deep", "qwen36", "minicpm5", "maple", "quick"]
-# Installed but never offered (spec D1): its id must not appear.
+# Retired families (docs/RETIRED_FAMILIES.md): their ids must never be offered.
 FORBIDDEN_IDS = {"qwen3.8-flash-next-int4g64", "unsloth-qwen3.8-flash-next-ud-iq3_xxs"}
 
 

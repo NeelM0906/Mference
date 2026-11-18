@@ -136,8 +136,8 @@ extension RemotePayloadCopyTests {
   }
 
   /// The free-space reserve refuses the install before anything is published:
-  /// no output directory and no resume checkpoint. Moved from the removed
-  /// Gemma 4 QAT install suite onto the Qwen synthetic snapshot.
+  /// no output directory and no resume checkpoint. Moved from a removed
+  /// family's install suite onto the Qwen synthetic snapshot.
   @Test func qwenSpaceFailureDoesNotPublishAnInstall() async throws {
     let snapshotDir = tmpDirForRemote("qwen-snap-space")
     let output = tmpPathForRemote("qwen-remote-space")
@@ -170,7 +170,7 @@ extension RemotePayloadCopyTests {
   /// End-to-end resume after cancellation: a resume whose plan changed (a
   /// different range chunk size) is refused without publishing, and a resume
   /// over saved destinations whose bytes were damaged re-downloads them rather
-  /// than trusting the checkpoint's digests. Moved from the removed Gemma 4 QAT
+  /// than trusting the checkpoint's digests. Moved from a removed family's
   /// install suite onto the Qwen synthetic snapshot.
   @Test func qwenResumeRejectsAChangedPlanAndRedownloadsDamagedRanges() async throws {
     let snapshotDir = tmpDirForRemote("qwen-snap-damaged")
@@ -243,8 +243,8 @@ extension RemotePayloadCopyTests {
 
     // Byte for byte, the resumed payload equals an uninterrupted install of
     // the same snapshot: no damaged byte survived the resume. (The original
-    // QAT suite compared against the source tensors with a QAT-layout parser;
-    // the uninterrupted install is the Qwen equivalent.)
+    // suite compared against the source tensors with a layout parser; the
+    // uninterrupted install is the Qwen equivalent.)
     let reference = tmpPathForRemote("qwen-remote-damaged-reference")
     defer { cleanUpRemote([reference]) }
     _ = try await RemoteStreamingRepacker(

@@ -1,5 +1,9 @@
 # Release qualification — September 20, 2026
 
+> Dated record. The retired families it names (Gemma 4, Inkling-Small,
+> GLM-5.3-Flash, Qwen3.8-Flash-Next, and Swift-Qwen3.8) are no longer
+> supported; see [Retired model families](RETIRED_FAMILIES.md).
+
 Continuation of [September 18](RELEASE_VALIDATION_2026-09-18.md).
 The previous head `4a100e8` passed macOS 15 / Swift 6.1, macOS 26, docs and
 security checks ([CI run](https://github.com/NeelM0906/Mference/actions/runs/35384943818)).
@@ -367,7 +371,7 @@ INT8 router/shared gate and INT4 FC projection. The auxiliary pool's SHA-256
 passes and its 512-expert, 2,768,896-byte-stride layout is validated. The test
 does not open all trunk experts, allocate a draft KV/cache, run a native draft
 or establish acceptance/performance. Full draft-runner/reference/verification
-gates remain in [MTP status](FLASHNEXT_MTP_STATUS.md).
+gates remain in MTP status.
 
 Before the subsequent alignment/target-state changes, code `49deb89` also
 passed the full serial suite: exit 0, build 1.41s, **1,271 tests in 228 suites
@@ -626,7 +630,7 @@ six tests are the portable synthetic prefill suite, not extra checkpoints.
 
 ## Further work
 
-The [five-seed source-policy comparison](QWEN_SOURCE_EFFICIENCY_V1.md) is
+The five-seed source-policy comparison is
 predeclared separately from the frozen low-budget/default-policy screen.
 Native Flash-Next MTP, matched release performance and remaining hardware
 coverage still require their own implementation/evidence; these checks do not
@@ -706,7 +710,7 @@ rebuilt debug dependencies when replacing the earlier manual compiler flags.
 
 ## Five-seed Swift-Qwen token/quality screen
 
-The [separate source-policy report](QWEN_SOURCE_EFFICIENCY_V1.md) records all
+The separate source-policy report records all
 600 completed requests, settings, failures and raw-evidence hash. Base passed
 297/300 and Swift 293/300; Swift used 14.992% fewer completion tokens. The
 fixed binary predates the boolean-parser correction. Do not rescore this run
@@ -781,7 +785,7 @@ Exit 0; complete footer: `Build complete! (58.02s)`.
 
 ## Default-policy screen and eight-slot installed regression
 
-The [default-policy screen](QWEN_SOURCE_EFFICIENCY_V1.md)
+The default-policy screen
 completed all 480 requests: Swift 180/180 measured passes, base 177/180, with
 20.088% fewer Swift completion tokens. Policies differ; all three base failures
 share one ambiguous punctuation item. Both model-server sessions were stopped
