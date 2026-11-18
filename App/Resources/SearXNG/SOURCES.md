@@ -23,6 +23,8 @@ launch.
 | What | Version | URL | SHA-256 |
 | --- | --- | --- | --- |
 | python-build-standalone (CPython, PSF licence) | 3.12.16, release 20261026, aarch64-apple-darwin install_only_stripped | https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz | `353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e` |
+| python-build-standalone full archive (licence texts only; nothing else from it ships) | same release 20261026, aarch64-apple-darwin pgo+lto-full | https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-pgo%2Blto-full.tar.zst | `016758f4881e5f71d63eddfbcdd53f25c5a9152435a863e4dc0770758eae32c3` |
+| python-build-standalone release checksums (used to verify both archives above) | release 20261026 | https://github.com/astral-sh/python-build-standalone/releases/download/20261026/SHA256SUMS | lists both digests above |
 | SearXNG source (AGPL-3.0-or-later) | commit `cccbc9e158b0ac3bb2158e9841a647a5bec57b57` (2026.11.2+cccbc9e15) | https://github.com/searxng/searxng/archive/cccbc9e158b0ac3bb2158e9841a647a5bec57b57.tar.gz | `fd685caeae4773d668c0fe8e8242986ca6a6e24ceb72449ff4fdf4abd8573a85` |
 
 ## Wheels (CPython 3.12, macOS arm64)
