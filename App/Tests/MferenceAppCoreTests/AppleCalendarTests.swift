@@ -105,6 +105,65 @@ enum CalendarFixtures {
         #expect(CalendarTimeFormat.dayRange(at(16, 11, 0), at(16, 11, 45), calendar: calendar) == "Wed 11:00 to 11:45")
     }
 
+    /// Every occurrence of a series shares EventKit's identifier: blocks,
+    /// moves and deletes must target one occurrence.
+    @Test @MainActor func repeatingEventsAreHandledPerOccurrence() async throws {
+        let monday = CalendarEvent(id: "standup", occurrenceDate: CalendarFixtures.date(14, 9, 30), title: "Standup",
+                                   start: CalendarFixtures.date(14, 9, 30), end: CalendarFixtures.date(14, 9, 45))
+        let tuesday = CalendarEvent(id: "standup", occurrenceDate: CalendarFixtures.date(15, 9, 30), title: "Standup",
+                                    start: CalendarFixtures.date(15, 9, 30), end: CalendarFixtures.date(15, 9, 45))
+        #expect(monday.id != tuesday.id)
+        let start = Self.layout.weekStart(containing: CalendarFixtures.now)
+        let move = ProposedEvent(title: "Standup", start: CalendarFixtures.date(15, 10), end: CalendarFixtures.date(15, 10, 15),
+                                 source: ItemSource(kind: .mail, label: "Team", reference: "<standup@example.com>"),
+                                 replacesEventID: "standup", replacesOccurrence: tuesday.occurrenceDate)
+        let blocks = Self.layout.blocks(weekStart: start, events: [monday, tuesday], proposals: [move])
+        #expect(Set(blocks.map(\.id)).count == blocks.count)
+        let moving = blocks.filter { if case .moving = $0.kind { true } else { false } }
+        #expect(moving.map(\.day) == [1])
+
+        let service = InMemoryCalendarService(events: [monday, tuesday])
+        let model = Self.model(service: service)
+        await model.load()
+        model.propose(move)
+        await model.add(move)
+        let stored = await service.storedEvents
+        #expect(stored.contains(monday))
+        #expect(!stored.contains(tuesday))
+        try await service.remove(monday.reference)
+        #expect(await service.storedEvents.map(\.title) == ["Standup"])  // the moved one stays
+    }
+
+    @Test @MainActor func remindersSyncKeepsEditsMadeInRemindersAndRespectsDeletes() async throws {
+        let defaults = UserDefaults(suiteName: "mference-tests-\(UUID().uuidString)")!
+        RemindersSyncSetting.setEnabled(true, defaults)
+        let service = InMemoryCalendarService(remindersAccess: .granted)
+        let model = Self.model(service: service, defaults: defaults)
+        let first = TodoItem(title: "Send copy decisions")
+        let second = TodoItem(title: "Book the dentist")
+        model.addTodo(first)
+        model.addTodo(second)
+        await model.syncReminders()
+        let firstID = try #require(model.todos.first { $0.id == first.id }?.reminderID)
+        let secondID = try #require(model.todos.first { $0.id == second.id }?.reminderID)
+
+        // In Reminders: the first is renamed, the second deleted.
+        await service.editReminder(firstID, title: "Send copy decisions to Priya")
+        await service.deleteReminder(secondID)
+        // In Mference: the first is marked done.
+        model.setDone(true, for: first.id)
+        await model.syncReminders()
+
+        let reminder = try #require(await service.reminders[firstID])
+        #expect(reminder.title == "Send copy decisions to Priya")  // Reminders' edit kept
+        #expect(reminder.isDone)                                  // Mference's change pushed
+        #expect(await service.reminders.count == 1)               // the deleted one is not recreated
+        let unlinked = try #require(model.todos.first { $0.id == second.id })
+        #expect(unlinked.reminderID == nil && unlinked.unlinkedFromReminders)
+        await model.syncReminders()
+        #expect(await service.reminders.count == 1)
+    }
+
     @Test func overlappingEventsShareTheColumn() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         let events = [

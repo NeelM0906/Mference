@@ -10,10 +10,15 @@ public actor EventKitService: CalendarServicing {
 
     private let broker: any PermissionBroker
     private var store: EKEventStore
+    /// Entity types that were already allowed when `store` was made.
+    private var storeHasAccess: [EKEntityType] = []
 
     public init(broker: any PermissionBroker) {
         self.broker = broker
         self.store = EKEventStore()
+        self.storeHasAccess = [.event, .reminder].filter {
+            Self.state(EKEventStore.authorizationStatus(for: $0)) == .granted
+        }
     }
 
     // MARK: Access
@@ -40,7 +45,12 @@ public actor EventKitService: CalendarServicing {
         _ = await broker.request(permission)
         let after = Self.state(EKEventStore.authorizationStatus(for: entity))
         // A store made before access was granted does not see the data.
-        if after == .granted { store = EKEventStore() }
+        if after == .granted, !storeHasAccess.contains(entity) {
+            store = EKEventStore()
+            storeHasAccess = [.event, .reminder].filter {
+                Self.state(EKEventStore.authorizationStatus(for: $0)) == .granted
+            }
+        }
         return after
     }
 
@@ -56,6 +66,14 @@ public actor EventKitService: CalendarServicing {
     private func requireAccess(_ entity: EKEntityType) throws {
         let state = Self.state(EKEventStore.authorizationStatus(for: entity))
         guard state == .granted else { throw CalendarServiceError.noAccess(state) }
+        // Access granted later (in System Settings, or by another part of
+        // the app): a store made before that does not see the data.
+        if !storeHasAccess.contains(entity) {
+            store = EKEventStore()
+            storeHasAccess = [.event, .reminder].filter {
+                Self.state(EKEventStore.authorizationStatus(for: $0)) == .granted
+            }
+        }
     }
 
     // MARK: Events
@@ -74,7 +92,8 @@ public actor EventKitService: CalendarServicing {
         event.title = proposal.title
         event.startDate = proposal.start
         event.endDate = proposal.end
-        if let replaced = proposal.replacesEventID.flatMap(store.calendarItem(withIdentifier:)) as? EKEvent {
+        let replaced = proposal.replaces.flatMap(resolve)
+        if let replaced {
             event.calendar = replaced.calendar
             event.location = replaced.location
         } else {
@@ -82,9 +101,7 @@ public actor EventKitService: CalendarServicing {
         }
         do {
             try store.save(event, span: .thisEvent, commit: false)
-            if let replaced = proposal.replacesEventID.flatMap(store.calendarItem(withIdentifier:)) as? EKEvent {
-                try store.remove(replaced, span: .thisEvent, commit: false)
-            }
+            if let replaced { try store.remove(replaced, span: .thisEvent, commit: false) }
             try store.commit()
         } catch {
             store.reset()
@@ -93,11 +110,9 @@ public actor EventKitService: CalendarServicing {
         return Self.event(event)
     }
 
-    public func update(eventID: String, title: String, start: Date, end: Date) async throws -> CalendarEvent {
+    public func update(_ reference: EventReference, title: String, start: Date, end: Date) async throws -> CalendarEvent {
         try requireAccess(.event)
-        guard let event = store.calendarItem(withIdentifier: eventID) as? EKEvent else {
-            throw CalendarServiceError.eventNotFound
-        }
+        guard let event = resolve(reference) else { throw CalendarServiceError.eventNotFound }
         event.title = title
         event.startDate = start
         event.endDate = end
@@ -108,26 +123,40 @@ public actor EventKitService: CalendarServicing {
         return Self.event(event)
     }
 
-    public func remove(eventID: String) async throws {
+    public func remove(_ reference: EventReference) async throws {
         try requireAccess(.event)
-        guard let event = store.calendarItem(withIdentifier: eventID) as? EKEvent else {
-            throw CalendarServiceError.eventNotFound
-        }
+        guard let event = resolve(reference) else { throw CalendarServiceError.eventNotFound }
         do { try store.remove(event, span: .thisEvent, commit: true) } catch {
             store.reset()
             throw CalendarServiceError.saveFailed(error.localizedDescription)
         }
     }
 
+    /// The exact occurrence: `calendarItem(withIdentifier:)` returns a
+    /// series' first occurrence, so a repeating event is found by its
+    /// occurrence date among that day's events.
+    private func resolve(_ reference: EventReference) -> EKEvent? {
+        guard let occurrence = reference.occurrenceDate else {
+            return store.calendarItem(withIdentifier: reference.eventID) as? EKEvent
+        }
+        let predicate = store.predicateForEvents(withStart: occurrence.addingTimeInterval(-86_400),
+                                                 end: occurrence.addingTimeInterval(86_400), calendars: nil)
+        return store.events(matching: predicate).first {
+            $0.calendarItemIdentifier == reference.eventID && $0.occurrenceDate == occurrence
+        }
+    }
+
     static func event(_ event: EKEvent) -> CalendarEvent {
-        CalendarEvent(id: event.calendarItemIdentifier,
-                      title: event.title ?? "Untitled",
-                      start: event.startDate,
-                      end: event.endDate,
-                      isAllDay: event.isAllDay,
-                      calendarName: event.calendar?.title ?? "Calendar",
-                      calendarColor: event.calendar?.color.flatMap(hex),
-                      location: event.location)
+        let repeats = event.hasRecurrenceRules || event.isDetached
+        return CalendarEvent(id: event.calendarItemIdentifier,
+                             occurrenceDate: repeats ? event.occurrenceDate : nil,
+                             title: event.title ?? "Untitled",
+                             start: event.startDate,
+                             end: event.endDate,
+                             isAllDay: event.isAllDay,
+                             calendarName: event.calendar?.title ?? "Calendar",
+                             calendarColor: event.calendar?.color.flatMap(hex),
+                             location: event.location)
     }
 
     static func hex(_ color: NSColor) -> UInt32? {
@@ -139,30 +168,51 @@ public actor EventKitService: CalendarServicing {
 
     // MARK: Reminders
 
-    public func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: String] {
+    public func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: ReminderSyncOutcome] {
         try requireAccess(.reminder)
-        let list = try remindersList()
-        var ids: [UUID: String] = [:]
+        var outcomes: [UUID: ReminderSyncOutcome] = [:]
         do {
-            for todo in todos {
-                let reminder = todo.reminderID.flatMap(store.calendarItem(withIdentifier:)) as? EKReminder
-                    ?? EKReminder(eventStore: store)
-                if reminder.calendar == nil { reminder.calendar = list }
-                reminder.title = todo.title
-                reminder.isCompleted = todo.isDone
-                reminder.dueDateComponents = todo.due.map {
-                    Calendar.current.dateComponents([.year, .month, .day], from: $0)
+            for todo in todos where !todo.unlinkedFromReminders {
+                if let id = todo.reminderID {
+                    guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else {
+                        // Deleted in Reminders: respect that, do not recreate.
+                        outcomes[todo.id] = .deletedInReminders
+                        continue
+                    }
+                    // Push only what changed in Mference since the last sync,
+                    // so edits made in Reminders survive; notes are left alone.
+                    let last = todo.lastSynced
+                    if last?.title != todo.title { reminder.title = todo.title }
+                    if last?.isDone != todo.isDone { reminder.isCompleted = todo.isDone }
+                    if last?.due != todo.due { reminder.dueDateComponents = Self.dueComponents(todo.due) }
+                    try store.save(reminder, commit: false)
+                    outcomes[todo.id] = .synced(reminderID: id, fields: Self.fields(reminder))
+                } else {
+                    let reminder = EKReminder(eventStore: store)
+                    reminder.calendar = try remindersList()
+                    reminder.title = todo.title
+                    reminder.isCompleted = todo.isDone
+                    reminder.dueDateComponents = Self.dueComponents(todo.due)
+                    reminder.notes = "From Mference · \(todo.source.kindLabel): \(todo.source.label)"
+                    try store.save(reminder, commit: false)
+                    outcomes[todo.id] = .synced(reminderID: reminder.calendarItemIdentifier, fields: Self.fields(reminder))
                 }
-                reminder.notes = "From Mference · \(todo.source.kindLabel): \(todo.source.label)"
-                try store.save(reminder, commit: false)
-                ids[todo.id] = reminder.calendarItemIdentifier
             }
             try store.commit()
         } catch {
             store.reset()
             throw CalendarServiceError.saveFailed(error.localizedDescription)
         }
-        return ids
+        return outcomes
+    }
+
+    static func dueComponents(_ due: Date?) -> DateComponents? {
+        due.map { Calendar.current.dateComponents([.year, .month, .day], from: $0) }
+    }
+
+    static func fields(_ reminder: EKReminder) -> TodoItem.ReminderFields {
+        TodoItem.ReminderFields(title: reminder.title ?? "", isDone: reminder.isCompleted,
+                                due: reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) })
     }
 
     private func remindersList() throws -> EKCalendar {
