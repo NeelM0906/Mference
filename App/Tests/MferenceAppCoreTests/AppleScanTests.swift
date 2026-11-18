@@ -299,6 +299,22 @@ struct GatedScanner: DocumentRecognizing {
         #expect(max(image.width, image.height) == VisionScanner.maximumPixelSize)
     }
 
+    @Test @MainActor func aPastedImageIsReadLikeAnOpenedFile() async throws {
+        let container = try AppModelContainer.inMemory()
+        let model = ScriptedAssistantTextModel(kind: .appleOnDevice, availability: .unavailable(reason: "off"),
+                                               answer: "unused")
+        let session = ScanSession(scanner: FixedScanner(lines: ["CORNER HARDWARE", "TOTAL 44.49"]),
+                                  assistant: AppleModelService(primary: model, fallback: nil),
+                                  context: container.mainContext, imageDirectory: URL.temporaryDirectory)
+        try session.openPasted(Data("png bytes".utf8))
+        await session.waitForReading()
+        let url = try #require(session.imageURL)
+        #expect(url.pathExtension == "png")
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(session.phase == .review)
+        #expect(session.fields.value(.total) == "44.49")
+    }
+
     @Test func acceptsImageAndPDFFiles() {
         #expect(ScanSession.accepts(URL(filePath: "/x/a.HEIC")))
         #expect(ScanSession.accepts(URL(filePath: "/x/a.pdf")))
