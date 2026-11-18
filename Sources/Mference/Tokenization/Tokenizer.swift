@@ -7,6 +7,9 @@ public enum MFTokenizerError: Error, CustomStringConvertible {
     case invalidChatTemplate(String)
     case missingToolTemplate
     case unsupportedForDialect(String)
+    /// No `tokenizer.json` was found: not in the install's `tokenizer/`
+    /// sidecar, nor in a folder `MFERENCE_TOKENIZER_DIR` names.
+    case missingTokenizerSidecar(String)
 
     public var description: String {
         switch self {
@@ -16,6 +19,9 @@ public enum MFTokenizerError: Error, CustomStringConvertible {
             return "installed tokenizer is missing chat_template.jinja; reinstall the model"
         case .unsupportedForDialect(let operation):
             return "operation is not supported for this tokenizer's chat dialect: \(operation)"
+        case .missingTokenizerSidecar(let path):
+            return "no tokenizer.json at \(path), nor in a folder MFERENCE_TOKENIZER_DIR names; "
+                + "the install is incomplete, reinstall the model"
         }
     }
 }
@@ -102,7 +108,8 @@ public struct MFTokenizer: @unchecked Sendable {
         let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
         let checkpointID = try ManifestReader.peekModelID(directoryURL: modelDirectory)
         guard let folder = tokenizerFolder(forModelDirectory: modelDirectory, environment: environment) else {
-            throw MFTokenizerError.missingToolTemplate
+            throw MFTokenizerError.missingTokenizerSidecar(
+                modelDirectory.appendingPathComponent("tokenizer", isDirectory: true).path)
         }
         let loaded = try await load(from: folder, family: family)
         return try loaded.forCheckpoint(checkpointID)

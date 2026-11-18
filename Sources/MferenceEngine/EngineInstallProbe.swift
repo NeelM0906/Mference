@@ -55,12 +55,8 @@ public enum EngineInstallProbe {
         guard fileManager.fileExists(atPath: manifestURL.path) else {
             return .notAModelDirectory
         }
-        if let raw = rawFamily(manifestURL: manifestURL),
-           ManifestReader.retiredFamilies.contains(raw) {
-            return .notRunnable(
-                family: raw,
-                detail: "\(raw) is a retired family (docs/RETIRED_FAMILIES.md); "
-                    + "the install is left on disk but not served")
+        if let retired = ManifestReader.retiredInstall(manifestURL: manifestURL) {
+            return .notRunnable(family: retired.identifier, detail: retired.detail)
         }
         if let raw = rawFamily(manifestURL: manifestURL),
            let missingAxes = gatedFamilies.map({ $0[raw] })
