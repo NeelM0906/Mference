@@ -160,15 +160,25 @@ public struct EngineServiceStatus: Sendable, Hashable {
     public var queuedRequests: Int
     /// User-facing message for the most recent failed load, if any.
     public var lastLoadFailure: String?
+    /// The model that most recent failed load was for (cleared with the
+    /// message by the next successful load), so a library row can offer Retry.
+    public var lastLoadFailureModel: AppModel?
+    /// Bumped whenever the catalog changes (a download finished, a refresh
+    /// found new installs). Subscribers that list models re-read `models()`
+    /// when it changes.
+    public var catalogRevision: Int
 
     public init(phase: Phase = .empty, residentModel: AppModel? = nil, targetModel: AppModel? = nil,
-                isGenerating: Bool = false, queuedRequests: Int = 0, lastLoadFailure: String? = nil) {
+                isGenerating: Bool = false, queuedRequests: Int = 0, lastLoadFailure: String? = nil,
+                lastLoadFailureModel: AppModel? = nil, catalogRevision: Int = 0) {
         self.phase = phase
         self.residentModel = residentModel
         self.targetModel = targetModel
         self.isGenerating = isGenerating
         self.queuedRequests = queuedRequests
         self.lastLoadFailure = lastLoadFailure
+        self.lastLoadFailureModel = lastLoadFailureModel
+        self.catalogRevision = catalogRevision
     }
 
     public static let empty = EngineServiceStatus()
