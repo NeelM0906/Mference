@@ -325,7 +325,12 @@ public struct SettingsView: View {
             parts.append("\(bytes) \(entry.state.isInstalled ? "on disk" : "download")")
         }
         if let licence = entry.licence { parts.append(licence) }
-        return parts.joined(separator: " · ")
+        var subtitle = parts.joined(separator: " · ")
+        // Why a load or download failed (the badge stays short).
+        if let reason = ModelTableRow.failureLine(entry.state) {
+            subtitle += "\n" + reason
+        }
+        return subtitle
     }
 
     // MARK: Memory

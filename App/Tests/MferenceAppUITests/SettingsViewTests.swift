@@ -73,6 +73,12 @@ import Testing
         #expect(SettingsView.connectionDisplay(nil) == .notConnected, "unwired reads Not connected, never Later")
     }
 
+    @Test func modelRowsSayWhyTheyFailed() throws {
+        let library = FixtureModelLibrary(deep: .downloadFailed("Not enough free space"))
+        let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
+        #expect(SettingsView.modelRowSubtitle(deep).hasSuffix("\nDownload failed: Not enough free space"))
+    }
+
     @Test func sizesStayOnOneLine() throws {
         let deep = try #require(FixtureModelLibrary().entries.first { $0.id == AppModel.deep.modelID })
         #expect(SettingsView.modelRowSubtitle(deep).contains("12.1\u{00A0}GB"))
