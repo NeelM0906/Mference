@@ -102,10 +102,10 @@ struct LlamaTokenIdentityTraceTests {
             try "{\"phys_footprint_bytes\": \(Self.footprint().current)}\n"
                 .write(to: directory.appendingPathComponent("memory.json"), atomically: true, encoding: .utf8)
 
-            // A tool loop's next prompt extends what the context holds, so it
-            // reuses that prefix. Record the reuse and whether the warm result
-            // equals a cold one (it may legitimately differ: a different prefill
-            // split can change the last bits of a logit).
+            // A tool loop's next prompt can extend what the context holds and
+            // reuse that prefix (Quick does). Record the reuse and whether the
+            // warm result equals a cold one (it may legitimately differ: a
+            // different prefill split can change the last bits of a logit).
             if let call = completion.toolCalls.first {
                 let followUp = EngineRequest(
                     messages: messages + [
@@ -134,7 +134,10 @@ struct LlamaTokenIdentityTraceTests {
                 ]
                 try JSONSerialization.data(withJSONObject: reuse, options: [.prettyPrinted, .sortedKeys])
                     .write(to: directory.appendingPathComponent("prefix-reuse.json"))
-                #expect(model.traits.usesDraftDecoding || (warm.usage.cachedPromptTokens ?? 0) > 0)
+                // Recorded, not required: a thinking turn re-renders its
+                // reasoning differently from how it was generated, and a
+                // recurrent state cannot roll back, so it re-prefills.
+                #expect(warm.usage.promptTokens == cold.usage.promptTokens)
             }
         }
         await model.unload()
