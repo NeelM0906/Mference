@@ -20,7 +20,7 @@ public struct MFCard<Content: View>: View {
             Group(subviews: content) { subviews in
                 ForEach(Array(subviews.enumerated()), id: \.element.id) { index, subview in
                     if index > 0 {
-                        Rectangle().fill(MFColor.hairlineFaint).frame(height: 1)
+                        Rectangle().fill(MFColor.hairlineFaint).frame(height: MFLayout.hairline)
                     }
                     subview
                 }
@@ -28,7 +28,7 @@ public struct MFCard<Content: View>: View {
         }
         .background(MFColor.surface)
         .clipShape(RoundedRectangle(cornerRadius: MFRadius.l))
-        .overlay(RoundedRectangle(cornerRadius: MFRadius.l).strokeBorder(MFColor.hairline))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.l).strokeBorder(MFColor.hairline, lineWidth: MFLayout.hairline))
     }
 }
 
@@ -48,7 +48,7 @@ public struct MFListRow<Trailing: View>: View {
     }
 
     public var body: some View {
-        HStack(alignment: .center, spacing: MFSpacing.m + 2) {
+        HStack(alignment: .center, spacing: MFSpacing.comfortable) {
             VStack(alignment: .leading, spacing: MFSpacing.xxs) {
                 Text(title)
                     .font(MFFont.rowTitle)
@@ -62,7 +62,7 @@ public struct MFListRow<Trailing: View>: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .combine)
-            HStack(spacing: MFSpacing.m - 2) {
+            HStack(spacing: MFSpacing.compact) {
                 trailing
             }
         }
@@ -98,15 +98,14 @@ public struct MFApprovalCard<Actions: View>: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: MFSpacing.m - 2) {
+        VStack(alignment: .leading, spacing: MFSpacing.compact) {
             Text(eyebrow.uppercased())
                 .font(MFFont.sectionHeader)
                 .tracking(0.7)
                 .foregroundStyle(MFColor.preview)
                 .accessibilityAddTraits(.isHeader)
             Text(title)
-                .font(MFFont.bodyEmphasis)
-                .fontWeight(.semibold)
+                .font(MFFont.bodySemibold)
                 .foregroundStyle(MFColor.ink)
             if let detail {
                 Text(detail)
@@ -118,11 +117,12 @@ public struct MFApprovalCard<Actions: View>: View {
                 actions
             }
         }
-        .padding(MFSpacing.m + 2)
+        .padding(MFSpacing.comfortable)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: MFRadius.l).fill(MFColor.previewFill.opacity(0.55)))
-        .overlay(RoundedRectangle(cornerRadius: MFRadius.l).strokeBorder(MFColor.preview.opacity(0.25)))
+        .background(RoundedRectangle(cornerRadius: MFRadius.l).fill(MFColor.approvalFill))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.l).strokeBorder(MFColor.approvalBorder, lineWidth: MFLayout.hairline))
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(eyebrow): \(title)")
     }
 }
 
@@ -141,7 +141,7 @@ public struct MFWindowBackground: View {
             Rectangle().fill(MFColor.wallpaper)
             Rectangle().fill(.regularMaterial)
             // The mockup window is white at 92% over the wallpaper.
-            Rectangle().fill(MFColor.surface.opacity(0.88))
+            Rectangle().fill(MFColor.surface.opacity(MFMetrics.windowTint))
         }
         .clipShape(RoundedRectangle(cornerRadius: clipped ? MFRadius.window : 0))
         .ignoresSafeArea()

@@ -18,13 +18,31 @@ import Testing
         #expect(MFProgressBadge.text(label: "Loading Deep", fraction: nil) == "Loading Deep")
     }
 
-    /// Light and dark renders of every component, at the mockup size.
-    @Test(arguments: [ColorScheme.light, .dark])
-    func galleryRenders(colorScheme: ColorScheme) throws {
-        let url = try Snapshot.render(MFComponentGallery(), name: "design-components", colorScheme: colorScheme)
-        let image = try #require(NSImage(contentsOf: url))
-        let rep = try #require(image.representations.first)
-        #expect(rep.pixelsWide == 2560 && rep.pixelsHigh == 1640)
+    /// Non-finite progress (a zero total, a bad division) is unknown, never a trap.
+    @Test(arguments: [Double.nan, .infinity, -.infinity])
+    func nonFiniteProgressIsUnknown(value: Double) throws {
+        #expect(MFProgress.fraction(value) == nil)
+        #expect(MFProgress.percent(value) == nil)
+        #expect(MFProgressBadge.text(label: "Downloading", fraction: value) == "Downloading")
+        let bar = MFProgressBar(value, label: "Downloading").frame(width: 200)
+        #expect(ImageRenderer(content: bar).cgImage != nil)
+    }
+
+    /// Light and dark renders of every component at the mockup size; the
+    /// window body really changes with the appearance.
+    @Test func galleryRendersInBothModes() throws {
+        var bodies: [ColorScheme: Double] = [:]
+        for scheme in [ColorScheme.light, .dark] {
+            let url = try Snapshot.render(MFComponentGallery(), name: "design-components", colorScheme: scheme)
+            let rep = try #require(NSImage(contentsOf: url)?.representations.first as? NSBitmapImageRep)
+            #expect(rep.pixelsWide == 2560 && rep.pixelsHigh == 1640)
+            // A point inside the window, below the gallery content.
+            let color = try #require(rep.colorAt(x: 2400, y: 1500)?.usingColorSpace(.sRGB))
+            bodies[scheme] = Double(color.redComponent + color.greenComponent + color.blueComponent) / 3
+        }
+        let light = try #require(bodies[.light]), dark = try #require(bodies[.dark])
+        #expect(light > 0.85, "light window body should be near white, got \(light)")
+        #expect(dark < 0.25, "dark window body should be near black, got \(dark)")
     }
 
     /// Ink text on the surfaces, and each tone on its fill, keep 4.5:1 (G-A7).
@@ -44,6 +62,15 @@ import Testing
         for (name, foreground, background) in pairs {
             let ratio = Contrast.ratio(foreground, background, appearance: appearance)
             #expect(ratio >= 4.5, "\(name) is \(ratio):1 in \(appearanceName.rawValue)")
+        }
+        // Non-text contrast (3:1): the edge of a switch, on and off.
+        let edges: [(String, Color, Color)] = [
+            ("toggle on/surface", MFColor.ink, MFColor.surface),
+            ("toggle off border/surface", MFColor.controlBorder, MFColor.surface),
+        ]
+        for (name, foreground, background) in edges {
+            let ratio = Contrast.ratio(foreground, background, appearance: appearance)
+            #expect(ratio >= 3, "\(name) is \(ratio):1 in \(appearanceName.rawValue)")
         }
     }
 }
