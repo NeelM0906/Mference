@@ -37,6 +37,12 @@ public enum ScanCSVExporter {
         return lines.joined(separator: "\r\n") + "\r\n"
     }
 
+    /// The file to save: UTF-8 with a byte order mark, so Excel reads accents
+    /// and currency signs correctly (Numbers ignores it).
+    public static func fileData(_ rows: [ScanExportRow]) -> Data {
+        Data([0xEF, 0xBB, 0xBF]) + Data(csv(rows).utf8)
+    }
+
     /// Quotes a cell when needed, and defuses text a spreadsheet would run as
     /// a formula (a leading `=`, `+`, `-`, `@`, tab or return).
     static func cell(_ value: String) -> String {
