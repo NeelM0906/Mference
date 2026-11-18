@@ -74,3 +74,32 @@ final class FixtureModelLibrary: ModelLibraryModel {
         change(&entries[index])
     }
 }
+
+@Observable
+final class FixtureMemory: MemoryListModel {
+    var memories: [MemoryEntry] = [
+        MemoryEntry(id: UUID(), text: "Prefers short, friendly replies at work", source: "Learned from 14 sent emails"),
+        MemoryEntry(id: UUID(), text: "Dentist is Northside Dental", source: "From Mail, Sep 14"),
+        MemoryEntry(id: UUID(), text: "Partner: Lena · planning Lisbon in October", source: "From chat, Sep 10"),
+    ] + (1...9).map { MemoryEntry(id: UUID(), text: "Fixture memory \($0)", source: "From chat") }
+
+    func add(_ text: String) { memories.insert(MemoryEntry(id: UUID(), text: text, source: "Added by you"), at: 0) }
+    func update(_ id: UUID, text: String) {
+        if let index = memories.firstIndex(where: { $0.id == id }) { memories[index].text = text }
+    }
+    func delete(_ id: UUID) { memories.removeAll { $0.id == id } }
+}
+
+@Observable
+final class FixtureSettings: AppSettingsModel {
+    var webSearchEnabled = false
+    var offlineMode = false
+    var blockRemoteMailContent = true
+    var remindersSyncEnabled = false
+    var useAppleModel = true
+    var states: [ConnectionKind: ConnectionState] = [.appleMail: .connected, .appleCalendar: .notConnected]
+    private(set) var connectRequests: [ConnectionKind] = []
+
+    func connectionState(_ kind: ConnectionKind) -> ConnectionState { states[kind] ?? .notConnected }
+    func connect(_ kind: ConnectionKind) { connectRequests.append(kind) }
+}

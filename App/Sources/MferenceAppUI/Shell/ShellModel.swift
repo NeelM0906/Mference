@@ -80,6 +80,19 @@ public final class ShellModel {
         defaults?.set(appearance.rawValue, forKey: Self.appearanceKey)
     }
 
+    /// Where Settings opens: the section to scroll to, and whether the model
+    /// library shows. Reset to Models whenever Settings opens another way.
+    public private(set) var settingsPane: SettingsView.Pane = .models
+    public private(set) var settingsShowsLibrary = false
+
+    /// Opens Settings at a section (chat's Memory "Review") or on the model
+    /// library (the picker's "Manage models").
+    public func openSettings(_ pane: SettingsView.Pane, showingLibrary: Bool = false) {
+        settingsPane = pane
+        settingsShowsLibrary = showingLibrary
+        show(.settings)
+    }
+
     /// The section to return to when Settings closes.
     public private(set) var sectionBeforeSettings: AppSection = .chat
 
@@ -94,6 +107,10 @@ public final class ShellModel {
     /// The Settings gear: opens Settings, or closes it back to the section
     /// that was showing before.
     public func toggleSettings() {
+        if selection != .settings {
+            settingsPane = .models
+            settingsShowsLibrary = false
+        }
         show(selection == .settings ? sectionBeforeSettings : .settings)
     }
 

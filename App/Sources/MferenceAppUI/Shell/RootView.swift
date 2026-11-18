@@ -103,6 +103,7 @@ public struct RootView: View {
 /// The screen for one section.
 struct SectionContent: View {
     let section: AppSection
+    @Environment(ScreenModels.self) private var screenModels: ScreenModels?
     @Environment(ShellModel.self) private var shell: ShellModel?
     /// The app's one chat model (U3), kept for the app's lifetime so switching
     /// pills does not drop a running answer. Absent in snapshots.
@@ -120,7 +121,10 @@ struct SectionContent: View {
             case .mail: MailView()
             case .calendar: CalendarView()
             case .scan: ScanView()
-            case .settings: SettingsView()
+            case .settings:
+                SettingsView(library: screenModels?.library, memory: screenModels?.memory,
+                             settings: screenModels?.settings, pane: shell?.settingsPane ?? .models,
+                             showsLibrary: shell?.settingsShowsLibrary ?? false)
             case .notes, .errands: ComingLaterView(section: section)
             }
         }
@@ -131,8 +135,8 @@ struct SectionContent: View {
     /// Where chat hands off: Settings (Memory, the model library) and other
     /// sections (suggestion chips such as "Scan a receipt").
     private var chatActions: ChatActions {
-        ChatActions(openMemorySettings: { shell?.show(.settings) },
-                    openModelLibrary: { shell?.show(.settings) },
+        ChatActions(openMemorySettings: { shell?.openSettings(.memory) },
+                    openModelLibrary: { shell?.openSettings(.models, showingLibrary: true) },
                     openSection: { shell?.show($0) })
     }
 }

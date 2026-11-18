@@ -153,9 +153,10 @@ import Testing
 
     @Test(arguments: [ColorScheme.light, .dark])
     func snapshot(colorScheme: ColorScheme) throws {
-        let library = FixtureModelLibrary()
-        let screenModels = ScreenModels(library: library)
-        try Snapshot.render(ShellBoard(selection: .settings, screenModels: screenModels) { ModelLibraryView(library: library) },
+        let screenModels = ScreenModels(library: FixtureModelLibrary(), memory: FixtureMemory(), settings: FixtureSettings())
+        let view = SettingsView(library: screenModels.library, memory: screenModels.memory, settings: screenModels.settings,
+                                showsLibrary: true)
+        try Snapshot.render(ShellBoard(selection: .settings, screenModels: screenModels) { view },
                             name: "08b-model-library", canvas: CGSize(width: 1280, height: 1000),
                             colorScheme: colorScheme)
     }
