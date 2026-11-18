@@ -36,10 +36,17 @@ struct mference_mtp_sampling {
 };
 
 struct mference_mtp_params mference_mtp_default_params(void);
+
+// Applies to `cparams` what MTP needs of the target context, as
+// common_context_params_to_llama does for draft-mtp.
+void mference_mtp_target_params(struct llama_context_params * cparams, struct mference_mtp_params params);
 struct mference_mtp_sampling mference_mtp_default_sampling(void);
 
 // Creates the MTP draft context against `ctx_tgt`, whose model was loaded with
-// `load_mtp`. NULL if the model has no MTP head or the context fails.
+// `load_mtp` and which was created as llama.cpp's tools create it for MTP:
+// n_rs_seq = n_draft_max (recurrent rollback) and outputs for 1 + n_draft_max
+// tokens per sequence (mference_mtp_target_params). NULL if the model has no
+// MTP head or the context fails.
 mference_mtp * mference_mtp_init(struct llama_model * model,
                                  struct llama_context * ctx_tgt,
                                  struct mference_mtp_params params);

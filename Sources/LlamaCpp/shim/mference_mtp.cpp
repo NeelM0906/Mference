@@ -51,6 +51,20 @@ extern "C" struct mference_mtp_params mference_mtp_default_params(void) {
     return params;
 }
 
+extern "C" void mference_mtp_target_params(struct llama_context_params * cparams,
+                                           struct mference_mtp_params params) {
+    if (cparams == nullptr) {
+        return;
+    }
+    common_params_speculative spec;
+    spec.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+    spec.draft.n_max = std::max(1, params.n_draft_max);
+    const auto limits = common_speculative_get_output_limits(params.n_batch, 1, spec.draft.n_max);
+    cparams->n_rs_seq = spec.need_n_rs_seq();
+    cparams->n_outputs_max = (uint32_t) limits.total;
+    cparams->n_outputs_max_per_seq = (uint32_t) limits.per_seq;
+}
+
 extern "C" struct mference_mtp_sampling mference_mtp_default_sampling(void) {
     common_params_sampling sampling;
     struct mference_mtp_sampling params;
@@ -88,6 +102,9 @@ extern "C" mference_mtp * mference_mtp_init(struct llama_model * model,
     cparams.n_threads = params.n_threads;
     cparams.n_threads_batch = params.n_threads_batch;
     cparams.no_perf = true;
+    const auto limits = common_speculative_get_output_limits(params.n_batch, 1, std::max(1, params.n_draft_max));
+    cparams.n_outputs_max = (uint32_t) limits.total;
+    cparams.n_outputs_max_per_seq = (uint32_t) limits.per_seq;
     cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
     cparams.n_rs_seq = 0;
     cparams.ctx_other = ctx_tgt;
@@ -133,6 +150,11 @@ extern "C" int32_t mference_mtp_begin(mference_mtp * mtp, const llama_token * pr
     llama_memory_clear(llama_get_memory(mtp->ctx_tgt), true);
     llama_memory_clear(llama_get_memory(mtp->ctx_dft.get()), true);
 
+    // Tear the previous generation's speculator down before building the next:
+    // its destructor detaches the draft context from the target's hidden
+    // states, which the new one has just attached.
+    mtp->smpl.reset();
+    mtp->spec.reset();
     mtp->spec.reset(common_speculative_init(mtp->params_spec, 1));
     mtp->smpl.reset(common_sampler_init(mtp->model, s));
     if (!mtp->spec || !mtp->smpl) {
@@ -200,19 +222,26 @@ extern "C" int32_t mference_mtp_step(mference_mtp * mtp, int32_t n_remaining,
             }
 
             // the max draft that fits the remaining context and generation budget
-            int n_draft_max = (int) llama_n_ctx(ctx_tgt) - mtp->n_past - 2;
-            n_draft_max = std::min(n_draft_max, n_remaining - 1);
+            const int ctx_room = (int) llama_n_ctx(ctx_tgt) - mtp->n_past - 2;
+            int n_draft_max = std::min(ctx_room, n_remaining - 1);
             n_draft_max = std::max(n_draft_max, 0);
 
-            common_speculative_get_draft_params(mtp->spec.get(), seq_id) = {
-                /* .drafting   = */ true,
-                /* .n_max      = */ n_draft_max,
-                /* .pos0       = */ mtp->n_past,
-                /* .id_last    = */ mtp->id_last,
-                /* .prompt     = */ &mtp->prompt_tgt,
-                /* .result     = */ &mtp->draft,
-            };
-            common_speculative_draft(mtp->spec.get());
+            // Asked for 0, draft-mtp drafts its own n_max, as upstream does at
+            // the end of the token budget (kept, so steps match
+            // llama-speculative-simple); near the end of the context that
+            // would not fit, so draft nothing and evaluate id_last alone.
+            const bool fits = n_draft_max > 0 || ctx_room >= mtp->params_spec.draft.n_max;
+            if (fits) {
+                common_speculative_get_draft_params(mtp->spec.get(), seq_id) = {
+                    /* .drafting   = */ true,
+                    /* .n_max      = */ n_draft_max,
+                    /* .pos0       = */ mtp->n_past,
+                    /* .id_last    = */ mtp->id_last,
+                    /* .prompt     = */ &mtp->prompt_tgt,
+                    /* .result     = */ &mtp->draft,
+                };
+                common_speculative_draft(mtp->spec.get());
+            }
             if (n_drafted) {
                 *n_drafted = (int32_t) mtp->draft.size();
             }

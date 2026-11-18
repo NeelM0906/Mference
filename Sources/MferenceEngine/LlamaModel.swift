@@ -243,8 +243,12 @@ actor LlamaModel: EngineModel {
                 if count == -2 || abortFlag.isSet { throw CancellationError() }
                 guard count > 0 else { throw LlamaBackendError.decodeFailed(count) }
                 proposed += Int(drafted)
-                accepted += Int(count) - 1
+                // Of the step's tokens, all but the target's last one are
+                // accepted drafts; count only those that reached the output.
+                var taken = 0
+                defer { accepted += min(taken, Int(count) - 1) }
                 for token in buffer.prefix(Int(count)) {
+                    taken += 1
                     guard try take(token) else { break stepping }
                 }
             }

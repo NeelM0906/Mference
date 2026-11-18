@@ -105,18 +105,24 @@ public struct LlamaBackend: EngineBackend {
         contextParams.n_ubatch = UInt32(Self.physicalBatch)
         contextParams.n_seq_max = 1
         contextParams.no_perf = true
+        let useDraft = wantsDraft && llama_model_n_layer_nextn(modelPointer) > 0
+        var draftParams = mference_mtp_default_params()
+        draftParams.n_draft_max = Int32(Self.draftLimit)
+        draftParams.n_batch = Int32(Self.logicalBatch)
+        draftParams.n_ubatch = Int32(Self.physicalBatch)
+        draftParams.n_threads = contextParams.n_threads
+        draftParams.n_threads_batch = contextParams.n_threads_batch
+        if useDraft {
+            // Recurrent rollback and per-step outputs, as llama.cpp's tools
+            // create the target context for draft-mtp.
+            mference_mtp_target_params(&contextParams, draftParams)
+        }
         guard let context = llama_init_from_model(modelPointer, contextParams) else {
             handle.free()
             throw LlamaBackendError.contextCreationFailed(descriptor.id)
         }
         var mtp: OpaquePointer?
-        if wantsDraft, llama_model_n_layer_nextn(modelPointer) > 0 {
-            var draftParams = mference_mtp_default_params()
-            draftParams.n_draft_max = Int32(Self.draftLimit)
-            draftParams.n_batch = Int32(Self.logicalBatch)
-            draftParams.n_ubatch = Int32(Self.physicalBatch)
-            draftParams.n_threads = contextParams.n_threads
-            draftParams.n_threads_batch = contextParams.n_threads_batch
+        if useDraft {
             mtp = mference_mtp_init(modelPointer, context, draftParams)
             guard mtp != nil else {
                 llama_free(context)
