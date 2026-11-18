@@ -34,7 +34,9 @@ public struct QuickTextModel: AssistantTextModel {
             for try await update in engine.generate(model: .quick, turns: turns, options: options) {
                 switch update {
                 case .content(let text): streamed += text
-                case .completed(let summary): return summary.content.isEmpty ? streamed : summary.content
+                case .completed(let summary):
+                    try Task.checkCancellation()
+                    return summary.content.isEmpty ? streamed : summary.content
                 case .prepared, .reasoning, .toolCall: break
                 }
             }
@@ -44,6 +46,9 @@ public struct QuickTextModel: AssistantTextModel {
             default: throw AssistantModelError.noModelAvailable(reason: error.userMessage)
             }
         }
-        return streamed
+        // A cancelled stream may end without throwing: never return the
+        // partial text as an answer.
+        try Task.checkCancellation()
+        throw AssistantModelError.unreadableAnswer
     }
 }
