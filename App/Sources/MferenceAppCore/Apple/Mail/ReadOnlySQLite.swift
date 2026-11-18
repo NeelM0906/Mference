@@ -29,12 +29,13 @@ final class ReadOnlySQLite {
 
     private var handle: OpaquePointer?
 
-    /// Opens `url` read-only. `AppleMailSource` only ever passes its private
-    /// copy of Mail's index here, never Mail's live file.
+    /// Opens `url` read-only and immutable (no locks, no -shm, no writes).
+    /// `AppleMailSource` only ever passes its private, checkpointed copy of
+    /// Mail's index here, never Mail's live file.
     init(url: URL) throws {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false) ?? URLComponents()
         components.scheme = "file"
-        components.queryItems = [URLQueryItem(name: "mode", value: "ro")]
+        components.queryItems = [URLQueryItem(name: "mode", value: "ro"), URLQueryItem(name: "immutable", value: "1")]
         let uri = components.string ?? "file:\(url.path)?mode=ro"
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
         let code = sqlite3_open_v2(uri, &handle, flags, nil)
@@ -49,6 +50,23 @@ final class ReadOnlySQLite {
 
     deinit {
         sqlite3_close(handle)
+    }
+
+    /// Folds a private copy's write-ahead log into the copy, so an immutable
+    /// read of it still sees the newest mail. Only ever called on the copy in
+    /// `AppleMailSource`'s private folder.
+    static func checkpointPrivateCopy(at url: URL) throws {
+        var connection: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
+        guard sqlite3_open_v2(url.path, &connection, flags, nil) == SQLITE_OK else {
+            let message = connection.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+            sqlite3_close(connection)
+            throw Failure(code: SQLITE_CANTOPEN, message: message)
+        }
+        defer { sqlite3_close(connection) }
+        sqlite3_busy_timeout(connection, 2_000)
+        // Not in WAL mode, or nothing to fold: both fine.
+        _ = sqlite3_exec(connection, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil)
     }
 
     /// Rows as column-name dictionaries. `parameters` bind to `?` in order.
