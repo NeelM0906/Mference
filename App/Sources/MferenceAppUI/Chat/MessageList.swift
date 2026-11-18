@@ -108,7 +108,7 @@ struct MessageView: View {
             Spacer(minLength: MFSpacing.xxl)
             Text(message.content)
                 .font(MFFont.body)
-                .lineSpacing(MFSpacing.xs)
+                .lineSpacing(MFLineSpacing.relaxed)
                 .foregroundStyle(MFColor.ink)
                 .textSelection(.enabled)
                 .padding(.horizontal, MFSpacing.m + MFSpacing.xxs)

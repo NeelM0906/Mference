@@ -399,6 +399,36 @@ func manager(_ sources: [DownloadSource], destination: URL, offline: Bool = fals
         }
     }
 
+    @Test @MainActor func turningOfflineOnPausesARunningDownload() async throws {
+        let body = fakeModelBytes(300_000)
+        let hold = FakeEngineLatch()
+        let server = try await LoopbackHTTPServer(routes: ["/q": .init(body: body, holdAfter: 120_000, hold: hold)])
+        let destination = temporaryDirectory()
+        defer {
+            hold.open()
+            try? FileManager.default.removeItem(at: destination)
+        }
+        let src = source(url: server.url("/q"), body: body)
+        let downloads = manager([src], destination: destination)
+        let settings = AppSettings(store: InMemorySettingsStore())
+        let services = AppServices(engine: AppServices.fakeEngine(), settings: settings,
+                                   permissions: FakePermissionBroker(),
+                                   modelContainer: try AppModelContainer.inMemory(), downloads: downloads)
+        let run = Task { try await downloads.download(DownloadApproval(confirming: src)) }
+        let part = destination.appending(path: "quick.gguf.part")
+        let deadline = ContinuousClock.now + .seconds(10)
+        while DownloadManager.fileSize(part) < 120_000, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        services.settings.offlineMode = true
+        await #expect(throws: CancellationError.self) { _ = try await run.value }
+        #expect(await downloads.state(of: .quick) == .paused(receivedBytes: 120_000, totalBytes: 300_000))
+        // Back online, nothing restarts on its own.
+        services.settings.offlineMode = false
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(server.requests.count == 1)
+    }
+
     // MARK: Refusals before any request
 
     @Test func refusalsHappenBeforeTheNetwork() async throws {

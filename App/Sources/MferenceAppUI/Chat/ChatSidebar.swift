@@ -42,9 +42,9 @@ struct ChatSidebar: View {
         } label: {
             HStack(spacing: MFSpacing.s) {
                 Text("New chat")
-                    .font(MFFont.bodyEmphasis)
+                    .font(MFFont.calloutEmphasis)
                 Text("⌘N")
-                    .font(MFFont.caption.monospaced())
+                    .font(MFFont.keycap)
                     .frame(minWidth: ChatMetrics.keycap, minHeight: ChatMetrics.keycap)
                     .padding(.horizontal, MFSpacing.xs)
                     .background(MFColor.onInk.opacity(0.12), in: RoundedRectangle(cornerRadius: MFRadius.xs))
@@ -66,7 +66,7 @@ struct ChatSidebar: View {
         VStack(alignment: .leading, spacing: MFSpacing.xxs) {
             Text(group.title.uppercased())
                 .font(MFFont.sectionHeader)
-                .tracking(ChatMetrics.sectionTracking)
+                .tracking(MFFont.sectionHeaderTracking)
                 .foregroundStyle(MFColor.tertiary)
                 .padding(.horizontal, MFSpacing.s)
                 .padding(.bottom, MFSpacing.xs)
@@ -84,7 +84,7 @@ struct ChatSidebar: View {
     private var memoryCard: some View {
         VStack(alignment: .leading, spacing: MFSpacing.xxs) {
             Text("Memory")
-                .font(MFFont.calloutEmphasis)
+                .font(MFFont.caption.weight(.semibold))
                 .foregroundStyle(MFColor.ink)
             Text(memoryLine)
                 .font(MFFont.caption)
@@ -92,7 +92,7 @@ struct ChatSidebar: View {
                 .fixedSize(horizontal: false, vertical: true)
             Button("Review") { actions.openMemorySettings() }
                 .buttonStyle(.plain)
-                .font(MFFont.calloutEmphasis)
+                .font(MFFont.caption.weight(.medium))
                 .foregroundStyle(MFColor.accent)
                 .padding(.top, MFSpacing.xxs)
                 .accessibilityLabel("Review memory in Settings")

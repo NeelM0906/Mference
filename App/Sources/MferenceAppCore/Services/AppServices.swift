@@ -44,6 +44,12 @@ public final class AppServices {
             idleUnload.setDelay(settings.idleUnloadDelay)
             settings.onIdleUnloadChange = { idleUnload.setDelay($0) }
         }
+        if let downloads {
+            // Offline mode stops downloads already running, not only new ones.
+            settings.onOfflineModeChange = { offline in
+                if offline { Task { await downloads.pauseAll() } }
+            }
+        }
     }
 
     /// The app: settings in `UserDefaults`, the store under Application

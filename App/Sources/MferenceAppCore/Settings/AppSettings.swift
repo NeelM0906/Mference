@@ -64,6 +64,9 @@ public final class AppSettings {
     /// Called with the new delay whenever `idleUnloadMinutes` changes; the
     /// composition root points it at the engine's `IdleUnloadControl`.
     @ObservationIgnored public var onIdleUnloadChange: ((Duration?) -> Void)?
+    /// Called with the new value whenever `offlineMode` changes; the
+    /// composition root pauses running downloads when it turns on.
+    @ObservationIgnored public var onOfflineModeChange: ((Bool) -> Void)?
 
     /// Minutes after the last token before the model is released; 0 never.
     public var idleUnloadMinutes: Int {
@@ -81,7 +84,10 @@ public final class AppSettings {
 
     /// Turns off web search, mail sync, errands and downloads.
     public var offlineMode: Bool {
-        didSet { store.set(offlineMode, forKey: Key.offlineMode) }
+        didSet {
+            store.set(offlineMode, forKey: Key.offlineMode)
+            if offlineMode != oldValue { onOfflineModeChange?(offlineMode) }
+        }
     }
 
     /// To-dos sync to Apple Reminders (L9: only after the person turns it on).
