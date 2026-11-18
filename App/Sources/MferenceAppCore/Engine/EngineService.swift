@@ -51,16 +51,18 @@ public actor EngineService: EngineServicing {
     }
 
     public func refreshCatalog() async {
-        // A new host only when nothing is resident or running; otherwise the
-        // next refresh picks the download up.
-        let current = host.status
-        guard current.phase == .empty, current.activeRequests == 0, current.queuedRequests == 0 else { return }
+        // Release the resident model first (after running and queued
+        // requests), so the old and new host never hold a model at once; then
+        // swap synchronously, so no request reaches the old host afterwards.
+        let old = host
+        try? await old.unload()
+        guard host === old else { return }  // another refresh won the race
         let broadcaster = self.broadcaster
         let fresh = makeHost(discover()) { broadcaster.publish(after: $0) }
-        await host.shutdown()
         host = fresh
         broadcaster.setHost(fresh)
         broadcaster.publish()
+        await old.shutdown()
     }
 
     static func options(catalog: EngineCatalog, status: EngineHostStatus) -> [ModelOption] {
@@ -146,7 +148,10 @@ public actor EngineService: EngineServicing {
         }
         broadcaster.publish()
         defer { broadcaster.publish() }
-        let completion = try await host.withModel(model.modelID, onQueued: { broadcaster.publish() }) { engineModel in
+        let completion = try await host.withModel(model.modelID, onQueued: {
+            // Fires before the host counts the waiter; publish after it has.
+            Task { await Task.yield(); broadcaster.publish() }
+        }) { engineModel in
             broadcaster.publish()
             var config = engineModel.traits.generationDefaults
             if let temperature = options.temperature { config.temperature = temperature }
@@ -158,7 +163,10 @@ public actor EngineService: EngineServicing {
             }
             let request = EngineRequest(messages: messages, tools: tools, generationConfig: config,
                                         maximumCompletionTokens: options.maximumCompletionTokens,
-                                        reasoningEffort: effort)
+                                        reasoningEffort: effort,
+                                        // Replay earlier turns' reasoning too (Qwen templates
+                                        // drop it before the last user turn otherwise).
+                                        preserveThinking: engineModel.traits.acceptsReasoningEffort)
             let prepared = try await engineModel.prepare(request)
             emit(.prepared(promptTokens: prepared.promptTokens.count))
             return try await engineModel.generate(prepared) { event in
@@ -238,7 +246,9 @@ public actor EngineService: EngineServicing {
         case .modelNotRunnable(let id, let reason):
             EngineServiceError.notInstalled(model: AppModel(modelID: id)?.name ?? id, reason: reason)
         case .backendUnavailable: EngineServiceError.engineUnavailable
-        case .invalidRequest(let message, _, _): EngineServiceError.requestTooLarge(message)
+        case .invalidRequest(let message, _, let code):
+            code == "context_length_exceeded" ? EngineServiceError.requestTooLarge(message)
+                : EngineServiceError.invalidRequest(message)
         case .queueFull: EngineServiceError.busy
         case .shuttingDown: EngineServiceError.shuttingDown
         case .modelUnloaded: EngineServiceError.modelUnloaded

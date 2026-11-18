@@ -351,6 +351,8 @@ public enum EngineServiceError: Error, Sendable, Hashable {
     case notInstalled(model: String, reason: String)
     case engineUnavailable
     case requestTooLarge(String)
+    /// The model cannot run this request (template or option not supported).
+    case invalidRequest(String)
     case busy
     case shuttingDown
     case modelUnloaded
@@ -363,6 +365,7 @@ public enum EngineServiceError: Error, Sendable, Hashable {
         case .notInstalled(let model, _): "\(model) is not installed on this Mac."
         case .engineUnavailable: "This model's engine is not included in this build."
         case .requestTooLarge(let message): "This conversation is too long for the model. \(message)"
+        case .invalidRequest(let message): "This model cannot answer that request: \(message)"
         case .busy: "Mference is busy with other requests. Try again in a moment."
         case .shuttingDown: "Mference is quitting."
         case .modelUnloaded: "The model was unloaded. Send the message again."

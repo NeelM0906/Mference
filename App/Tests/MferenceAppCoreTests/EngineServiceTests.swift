@@ -1,6 +1,7 @@
 import Foundation
+import Synchronization
 import Mference
-import MferenceAppCore
+@testable import MferenceAppCore
 import MferenceEngine
 import Testing
 
@@ -27,7 +28,8 @@ import Testing
         for model in AppModel.allCases {
             let slot = EngineProductSlot(modelID: model.modelID)
             #expect(slot != nil, "\(model) has no engine product slot")
-            #expect(slot?.engine.rawValue == model.engineLabel)
+            let expected: EngineKind = model.engineLabel == "llama.cpp" ? .llamaCpp : .mference
+            #expect(slot?.engine == expected)
         }
         #expect(AppModel.allCases.count == EngineProductSlot.allCases.count)
     }
@@ -78,10 +80,48 @@ import Testing
     @Test func toolJSONRoundTripsThroughTheEngine() {
         let value: ToolJSON = .object(["q": .string("desk"), "n": .integer(3), "x": .number(1.5),
                                        "ok": .bool(true), "list": .array([.null])])
-        // Mapping is internal; the public guarantee is Codable stability.
-        let data = try? JSONEncoder().encode(value)
-        let back = data.flatMap { try? JSONDecoder().decode(ToolJSON.self, from: $0) }
-        #expect(back == value)
+        #expect(EngineService.appJSON(EngineService.engineJSON(value)) == value)
+        #expect(EngineService.appJSON(.unsignedInteger(7)) == .integer(7))
+    }
+
+    @Test func historyKeepsReasoningAndToolCalls() {
+        let call = ToolCall(id: "c1", name: "web_search", arguments: .object(["query": .string("desk")]),
+                            argumentsJSON: #"{"query":"desk"}"#)
+        let message = EngineService.message(ChatTurn(role: .assistant, content: nil, reasoning: "plan",
+                                                     toolCalls: [call]))
+        #expect(message.role == .assistant)
+        #expect(message.reasoningContent == "plan")
+        #expect(message.toolCalls.first?.name == "web_search")
+        let result = EngineService.message(ChatTurn(role: .tool, content: "[]", toolCallID: "c1", toolName: "web_search"))
+        #expect(result.toolCallID == "c1")
+        #expect(result.name == "web_search")
+    }
+
+    @Test func contextOverflowAndOtherInvalidRequestsMapApart() {
+        let tooLong = EngineService.map(EngineError.invalidRequest(message: "m", param: nil, code: "context_length_exceeded"))
+        let other = EngineService.map(EngineError.invalidRequest(message: "m", param: nil, code: "invalid_chat_template"))
+        #expect(tooLong as? EngineServiceError == .requestTooLarge("m"))
+        #expect(other as? EngineServiceError == .invalidRequest("m"))
+    }
+
+    @Test func refreshPicksUpANewInstallWhileAModelIsLoaded() async throws {
+        let journal = FakeEngineJournal()
+        let backend = FakeEngineBackend(engine: .llamaCpp, journal: journal)
+        let installed = Mutex<[AppModel]>([.quick])
+        let service = EngineService(discover: {
+            EngineCatalog(models: installed.withLock { $0 }.map {
+                FakeEngineBackend.descriptor(id: $0.modelID, engine: .llamaCpp)
+            })
+        }) { catalog, observer in
+            EngineHost(catalog: catalog, backends: [backend], observer: observer)
+        }
+        try await service.load(.quick)
+        installed.withLock { $0.append(.deep) }
+        await service.refreshCatalog()
+        #expect(await service.models().first { $0.model == .deep }?.availability == .ready)
+        #expect(journal.maxLiveModels == 1)
+        try await service.load(.deep)
+        #expect(service.status.residentModel == .deep)
     }
 
     @Test func droppingTheIteratorCancelsAndFreesTheEngine() async throws {
