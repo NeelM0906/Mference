@@ -82,3 +82,28 @@ import Testing
         }
     }
 }
+
+/// Screens contribute top-bar actions through `shellToolbar`.
+@Suite struct ShellToolbarSlotTests {
+    final class Seen { var ids: [String] = [] }
+
+    @Test func itemsFromTheScreenReachTheShell() {
+        let seen = Seen()
+        let screen = VStack {
+            Text("Mail").shellToolbar(id: "mail.compose") { Button("Compose") {} }
+            Text("List").shellToolbar(id: "mail.refresh") { Button("Refresh") {} }
+        }
+        let view = screen.overlayPreferenceValue(ShellToolbarKey.self) { items in
+            let _ = (seen.ids = items.map(\.id))
+            Color.clear
+        }
+        #expect(ImageRenderer(content: view.frame(width: 300, height: 100)).cgImage != nil)
+        #expect(seen.ids == ["mail.compose", "mail.refresh"])
+    }
+
+    @Test func itemsAreEqualByID() {
+        let a = ShellToolbarItem(id: "x", view: AnyView(Text("1")))
+        let b = ShellToolbarItem(id: "x", view: AnyView(Text("2")))
+        #expect(a == b)
+    }
+}

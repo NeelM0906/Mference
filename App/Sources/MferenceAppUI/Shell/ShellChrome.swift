@@ -48,9 +48,12 @@ struct ShellPillBar: View {
 /// "On this Mac", search, appearance and Settings at the right of the chrome.
 struct ShellTrailingControls: View {
     @Bindable var model: ShellModel
+    /// Actions the visible screen contributes (`shellToolbar`).
+    var items: [ShellToolbarItem] = []
 
     var body: some View {
         HStack(spacing: MFSpacing.m) {
+            ShellToolbarItems(items: items)
             MFChip("On this Mac", systemImage: "lock", tone: .success)
                 .help("Runs on this Mac. Nothing leaves it except web searches you turn on and downloads you approve.")
 
@@ -101,6 +104,7 @@ struct ShellTrailingControls: View {
 /// render this; the app window puts the same pieces in its toolbar.
 struct ShellChromeBar: View {
     @Bindable var model: ShellModel
+    var items: [ShellToolbarItem] = []
     /// Leading room for the window buttons (traffic lights) in snapshots.
     var showsWindowButtons = true
 
@@ -112,10 +116,10 @@ struct ShellChromeBar: View {
             ShellBrand()
             ShellPillBar(model: model)
             Spacer(minLength: MFSpacing.l)
-            ShellTrailingControls(model: model)
+            ShellTrailingControls(model: model, items: items)
         }
         .padding(.horizontal, MFSpacing.comfortable)
-        .padding(.vertical, MFSpacing.compact)
+        .frame(height: ShellMetrics.chromeHeight)
         .overlay(alignment: .bottom) {
             Rectangle().fill(MFColor.chromeDivider).frame(height: MFLayout.hairline)
         }

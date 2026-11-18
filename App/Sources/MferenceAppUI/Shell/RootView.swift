@@ -22,6 +22,8 @@ public struct RootView: View {
     @Bindable var model: ShellModel
     let chrome: ChromePlacement
     @Environment(ScreenModels.self) private var screenModels: ScreenModels?
+    /// The visible screen's `shellToolbar` items, for the window toolbar.
+    @State private var toolbarItems: [ShellToolbarItem] = []
 
     public init(model: ShellModel, chrome: ChromePlacement = .toolbar) {
         self.model = model
@@ -47,14 +49,20 @@ public struct RootView: View {
     private var shell: some View {
         switch chrome {
         case .inline:
-            VStack(spacing: 0) {
-                ShellChromeBar(model: model)
-                SectionContent(section: model.selection)
-            }
+            // The chrome reads the screen's toolbar items in the same pass
+            // (works in ImageRenderer snapshots).
+            SectionContent(section: model.selection)
+                .padding(.top, ShellMetrics.chromeHeight)
+                .overlayPreferenceValue(ShellToolbarKey.self, alignment: .top) { items in
+                    ShellChromeBar(model: model, items: items)
+                }
             .mfWindowBackground()
             .preferredColorScheme(model.appearance.colorScheme)
         case .toolbar:
             SectionContent(section: model.selection)
+                .onPreferenceChange(ShellToolbarKey.self) { items in
+                    Task { @MainActor in toolbarItems = items }
+                }
                 // The mockup's border under the top bar; the shell draws it,
                 // not each screen.
                 .overlay(alignment: .top) {
@@ -71,7 +79,7 @@ public struct RootView: View {
                     .sharedBackgroundVisibility(.hidden)
                     ToolbarSpacer(.flexible)
                     ToolbarItem(placement: .primaryAction) {
-                        ShellTrailingControls(model: model)
+                        ShellTrailingControls(model: model, items: toolbarItems)
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(.trailing, MFSpacing.xs)
                     }

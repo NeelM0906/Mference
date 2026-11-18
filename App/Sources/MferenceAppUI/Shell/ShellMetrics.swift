@@ -6,6 +6,8 @@ enum ShellMetrics {
     /// The app mark square and its corner radius.
     static let markSide: CGFloat = 24
     static let markRadius: CGFloat = 7
+    /// The inline chrome bar (snapshots): 10 + 36 + 10, plus its hairline.
+    static let chromeHeight: CGFloat = 57
     /// Padding inside the grey pill track.
     static let pillTrackPadding: CGFloat = 3
     /// Snapshot stand-in for the traffic lights.
