@@ -69,8 +69,9 @@ public enum ReceiptValueParser {
                 digits = digits.replacingOccurrences(of: ",", with: "")
             }
         } else if let comma = digits.lastIndex(of: ",") {
+            // "44,5" and "44,49" are decimal commas; "1,234" groups thousands.
             let decimals = digits.distance(from: comma, to: digits.endIndex) - 1
-            digits = decimals == 2
+            digits = decimals == 1 || decimals == 2
                 ? digits.replacingOccurrences(of: ",", with: ".")
                 : digits.replacingOccurrences(of: ",", with: "")
         }
