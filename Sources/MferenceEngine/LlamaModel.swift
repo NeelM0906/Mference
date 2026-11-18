@@ -143,6 +143,9 @@ actor LlamaModel: EngineModel {
             try decode(Array(prompt[position..<end]), context: context)
             position = end
         }
+        // llama_decode only queues GPU work; wait for it so the prefill time
+        // is the prefill's, not the first sampled token's.
+        llama_synchronize(context)
         let prefillSeconds = (clock.now - prefillStart).seconds
 
         let config = request.generationConfig
