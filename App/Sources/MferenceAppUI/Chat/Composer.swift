@@ -77,7 +77,7 @@ struct Composer: View {
                 Image(systemName: "globe").imageScale(.small)
                 Text(model.webEnabled ? "Web on" : "Web off")
             }
-            .font(MFFont.calloutEmphasis)
+            .font(MFFont.chip)
             .foregroundStyle(model.webEnabled ? MFColor.accent : MFColor.secondary)
             .padding(.horizontal, MFSpacing.s + 1)
             .frame(height: ChatMetrics.controlHeight)
@@ -98,7 +98,7 @@ struct Composer: View {
                 Text(model.model.shortName)
                 Image(systemName: "chevron.down").imageScale(.small)
             }
-            .font(MFFont.calloutEmphasis)
+            .font(MFFont.chip)
             .foregroundStyle(MFColor.ink)
             .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
             .frame(height: ChatMetrics.controlHeight)
@@ -164,7 +164,7 @@ struct SuggestionChips: View {
     private func chip(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(MFFont.calloutEmphasis)
+                .font(MFFont.chip)
                 .foregroundStyle(MFColor.secondary)
                 .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
                 .frame(height: ChatMetrics.controlHeight)
