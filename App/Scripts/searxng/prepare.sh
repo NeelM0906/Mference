@@ -120,8 +120,19 @@ if [[ "$FORCE" != 1 && -f "$OUT/MANIFEST" && -x "$OUT/python/bin/python3" ]] \
     exit 0
 fi
 
-echo "==> assembling $OUT"
-rm -rf "$OUT"
+# Build next to the destination, swap it in only when complete. A directory
+# is replaced only if it carries this script's marker.
+MARKER=".mference-searxng-runtime"
+FINAL="$OUT"
+if [[ -e "$FINAL" && ! -f "$FINAL/$MARKER" ]]; then
+    echo "error: $FINAL exists but was not made by prepare.sh (no $MARKER); not replacing it." >&2
+    exit 64
+fi
+mkdir -p "$(dirname "$FINAL")"
+OUT="$(mktemp -d "$(dirname "$FINAL")/.runtime-build.XXXXXX")"
+TEMP_DIRS+=("$OUT")
+
+echo "==> assembling $FINAL"
 mkdir -p "$OUT/source" "$OUT/licenses"
 tar -xzf "$CACHE/$PYTHON_FILE" -C "$OUT"          # -> $OUT/python
 PY="$OUT/python/bin/python3"
@@ -185,5 +196,15 @@ SEARXNG_SETTINGS_PATH="$OUT/settings.yml" SEARXNG_SECRET=prepare-check \
 
 # Written last: a runtime with a MANIFEST is complete and passed the smoke.
 printf '%s\n' "$EXPECTED_MANIFEST" > "$OUT/MANIFEST"
+touch "$OUT/$MARKER"
+
+# Swap the finished runtime into place.
+if [[ -e "$FINAL" ]]; then
+    OLD="$(mktemp -d "$(dirname "$FINAL")/.runtime-old.XXXXXX")"
+    TEMP_DIRS+=("$OLD")
+    mv "$FINAL" "$OLD/previous"
+fi
+mv "$OUT" "$FINAL"
+OUT="$FINAL"
 
 echo "==> done: $OUT ($(du -sh "$OUT" | awk '{print $1}'))"

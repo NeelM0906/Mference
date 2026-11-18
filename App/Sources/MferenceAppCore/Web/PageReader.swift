@@ -89,7 +89,7 @@ public struct PageReader: Sendable {
         let (data, response) = try await http.get(url, accept: "text/html,application/xhtml+xml,text/plain;q=0.8")
         let type = (response.value(forHTTPHeaderField: "Content-Type") ?? "text/html").lowercased()
         guard type.contains("html") || type.contains("text/plain") || type.contains("xml") else {
-            throw WebError.unsupportedContent(type.split(separator: ";").first.map(String.init) ?? type)
+            throw WebError.unsupportedContent
         }
         let html = Self.decode(data, contentType: type)
         if type.contains("text/plain") {
@@ -154,6 +154,7 @@ public enum HTMLText {
         var mainEnd: Int?
         var mainDepth = 0
         var i = 0
+        var nextCheck = 0
 
         func lower(_ byte: UInt8) -> UInt8 { (byte >= 65 && byte <= 90) ? byte + 32 : byte }
         func isNameByte(_ byte: UInt8) -> Bool {
@@ -161,8 +162,13 @@ public enum HTMLText {
         }
         func append(_ text: String) { output.append(contentsOf: text.utf8) }
 
+        // Every branch below advances `i` past what it examined, so the scan
+        // is linear; cancellation is checked every 64 KB of progress.
         while i < count {
-            if checkCancellation, i & 0xFFFF == 0 { try Task.checkCancellation() }
+            if checkCancellation, i >= nextCheck {
+                try Task.checkCancellation()
+                nextCheck = i + 0x10000
+            }
             let byte = bytes[i]
             guard byte == 60 /* < */ else {
                 if inTitle { title.append(byte) } else { output.append(byte) }
@@ -176,6 +182,20 @@ public enum HTMLText {
                 i = min(j + 3, count)
                 continue
             }
+            // CDATA: skip to "]]>".
+            if i + 8 < count, Array(bytes[(i + 1)...(i + 8)]) == Array("![CDATA[".utf8) {
+                var j = i + 9
+                while j + 2 < count, !(bytes[j] == 93 && bytes[j + 1] == 93 && bytes[j + 2] == 62) { j += 1 }
+                i = min(j + 3, count)
+                continue
+            }
+            // <!DOCTYPE ...>, other declarations and <?...?>: skip to ">".
+            if i + 1 < count, bytes[i + 1] == 33 || bytes[i + 1] == 63 {
+                var j = i + 2
+                while j < count, bytes[j] != 62 { j += 1 }
+                i = min(j + 1, count)
+                continue
+            }
             var j = i + 1
             let closing = j < count && bytes[j] == 47 /* / */
             if closing { j += 1 }
@@ -183,6 +203,13 @@ public enum HTMLText {
             while j < count, isNameByte(bytes[j]), name.count < 16 {
                 name.append(lower(bytes[j]))
                 j += 1
+            }
+            guard !name.isEmpty else {
+                // A bare "<" in text ("a < b"): keep it and move on, without
+                // looking for a ">" (that made "<<<<..." quadratic).
+                if inTitle { title.append(byte) } else { output.append(byte) }
+                i += 1
+                continue
             }
             // Find the end of the tag, skipping quoted attribute values.
             var quote: UInt8 = 0
@@ -194,12 +221,6 @@ public enum HTMLText {
                 j += 1
             }
             let tagEnd = min(j + 1, count)
-            guard !name.isEmpty else {
-                // A bare "<" in text.
-                output.append(byte)
-                i += 1
-                continue
-            }
             let tag = String(decoding: name, as: UTF8.self)
             if !closing, skipped.contains(tag) {
                 // Skip to the matching close tag (no nesting needed for these).

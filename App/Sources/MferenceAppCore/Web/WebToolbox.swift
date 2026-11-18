@@ -74,9 +74,13 @@ public final class WebToolbox: ChatToolbox {
     public static let maxPages = 4
     /// Longest query sent to SearXNG.
     public static let maxQueryLength = 200
-    /// Markers around everything taken from the web (prompt v2: untrusted).
-    static let contentStart = "<<<WEB CONTENT>>>"
-    static let contentEnd = "<<<END WEB CONTENT>>>"
+    /// Markers around everything taken from the web (prompt v2: untrusted),
+    /// with a random code per tool call so a page cannot guess the closing
+    /// marker. Web text inside is also neutralized (no "<<<" or ">>>").
+    static func markers() -> (start: String, end: String) {
+        let code = (0..<4).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
+        return ("<<<WEB CONTENT \(code)>>>", "<<<END WEB CONTENT \(code)>>>")
+    }
 
     private struct State {
         var numbers: [String: Int] = [:]
@@ -130,7 +134,8 @@ public final class WebToolbox: ChatToolbox {
             guard !results.isEmpty else {
                 return ToolOutcome(content: "No results for “\(query)”.", steps: [.search(query, results: 0)])
             }
-            var lines = ["Results for “\(query)”:", Self.contentStart]
+            let markers = Self.markers()
+            var lines = ["Results for “\(query)”:", markers.start]
             var cited: [ChatCitation] = []
             for result in results {
                 http.allowlist.allowPage(result.url)
@@ -141,7 +146,7 @@ public final class WebToolbox: ChatToolbox {
                 lines.append(result.url.absoluteString)
                 if let snippet = result.content { lines.append(Self.neutralize(String(snippet.prefix(300)))) }
             }
-            lines.append(Self.contentEnd)
+            lines.append(markers.end)
             return ToolOutcome(content: lines.joined(separator: "\n"),
                                steps: [.search(query, results: results.count)], citations: cited)
         } catch {
@@ -162,8 +167,9 @@ public final class WebToolbox: ChatToolbox {
         do {
             let page = try await reader.read(url)
             let citation = register(url, title: page.title, snippet: nil)
-            var content = "Page [\(citation.number)]: \(url.absoluteString)\n\(Self.contentStart)\n"
-            content += "\(page.title ?? citation.title)\n\n\(Self.neutralize(page.text))\n\(Self.contentEnd)"
+            let markers = Self.markers()
+            var content = "Page [\(citation.number)]: \(url.absoluteString)\n\(markers.start)\n"
+            content += "\(Self.neutralize(page.title ?? citation.title))\n\n\(Self.neutralize(page.text))\n\(markers.end)"
             if page.isTruncated { content += "\n(The page continues; this is the first part.)" }
             return ToolOutcome(content: content, steps: [.readPage(url, title: page.title)], citations: [citation])
         } catch {

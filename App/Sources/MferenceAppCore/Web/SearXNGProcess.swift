@@ -62,8 +62,10 @@ public actor SearXNGProcess {
     private var process: Process?
     private var launchSettings: URL?
     private var starting: Task<URL, any Error>?
-    /// Whether SearXNG should be running; `stop()` clears it.
-    private var wanted = false
+    /// Set by `stop()` (web turned off), cleared by `warmUp()` (web turned
+    /// on): while set, nothing starts SearXNG, not even a tool call that was
+    /// already running when web was turned off.
+    private var stoppedByPerson = false
     private var failures = 0
     private var retryAfter: ContinuousClock.Instant?
     /// The child's pid, readable synchronously for `terminateNow()`.
@@ -76,17 +78,24 @@ public actor SearXNGProcess {
         self.pidFile = pidFile
         self.startTimeout = startTimeout
         // A SearXNG left by a crashed app is cleaned up as soon as the app
-        // starts, not only when web is next used.
+        // starts, not only when web is next used, and so are settings files
+        // a crash left in the temporary directory.
         Self.killStale(pidFile: pidFile, python: runtime.python)
+        Self.removeStaleLaunchSettings()
     }
 
     /// The base URL of a healthy SearXNG, starting or restarting it if needed.
     public func ensureRunning() async throws -> URL {
-        wanted = true
+        guard !stoppedByPerson else { throw Self.webOff }
         if case .running(let url) = state, process?.isRunning == true, await Self.isHealthy(url) {
             return url
         }
-        if let starting { return try await starting.value }
+        if let starting {
+            do { return try await starting.value } catch is CancellationError where !Task.isCancelled {
+                // The start this call joined was stopped (web turned off).
+                throw Self.webOff
+            }
+        }
         if let retryAfter, ContinuousClock.now < retryAfter {
             throw WebError.searchUnavailable("SearXNG failed to start; trying again shortly.")
         }
@@ -98,6 +107,8 @@ public actor SearXNGProcess {
             failures = 0
             retryAfter = nil
             return url
+        } catch is CancellationError where !Task.isCancelled {
+            throw Self.webOff
         } catch {
             if !(error is CancellationError) {
                 failures += 1
@@ -108,17 +119,19 @@ public actor SearXNGProcess {
         }
     }
 
+    static let webOff = WebError.searchUnavailable("web search is off for now.")
+
     /// Starts in the background (web turned on), ignoring failures; the next
     /// search reports them.
     public func warmUp() {
-        wanted = true
+        stoppedByPerson = false
         Task { _ = try? await self.ensureRunning() }
     }
 
     /// Stops the process (web turned off, quit). Wins over a launch in
     /// progress, and clears the failure pause.
     public func stop() async {
-        wanted = false
+        stoppedByPerson = true
         failures = 0
         retryAfter = nil
         starting?.cancel()
@@ -185,7 +198,7 @@ public actor SearXNGProcess {
             let deadline = ContinuousClock.now + startTimeout
             while true {
                 try Task.checkCancellation()
-                guard wanted else { throw CancellationError() }
+                guard !stoppedByPerson else { throw CancellationError() }
                 guard process.isRunning else {
                     throw WebError.searchUnavailable("SearXNG exited while starting (status \(process.terminationStatus)).")
                 }
@@ -196,7 +209,7 @@ public actor SearXNGProcess {
                 try await Task.sleep(for: .milliseconds(150))
             }
             // A stop may have arrived while the last health check ran.
-            guard wanted, !Task.isCancelled else { throw CancellationError() }
+            guard !stoppedByPerson, !Task.isCancelled else { throw CancellationError() }
         } catch {
             if self.process === process { self.process = nil }
             await terminate(process)
@@ -223,8 +236,10 @@ public actor SearXNGProcess {
         }
         guard process.isRunning else { return }
         process.terminate()
+        // Up to 2 s of grace after SIGTERM, even when the caller was
+        // cancelled (Task.sleep would return at once), then SIGKILL.
         for _ in 0..<20 where process.isRunning {
-            try? await Task.sleep(for: .milliseconds(100))
+            await Self.pause(milliseconds: 100)
         }
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     }
@@ -233,9 +248,13 @@ public actor SearXNGProcess {
     private func writeLaunchSettings(token: String) throws -> URL {
         cleanUpLaunchFiles()
         var text = try String(contentsOf: runtime.settings, encoding: .utf8)
-        text = text.replacingOccurrences(of: "instance_name: \"Mference web search\"",
-                                         with: "instance_name: \"mference-\(token)\"")
-        let url = FileManager.default.temporaryDirectory.appending(path: "mference-searxng-\(UUID().uuidString).yml")
+        let line = "instance_name: \"Mference web search\""
+        guard text.contains(line) else {
+            throw WebError.searchUnavailable("settings.yml has no instance_name line to mark this launch.")
+        }
+        text = text.replacingOccurrences(of: line, with: "instance_name: \"mference-\(token)\"")
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "\(Self.launchSettingsPrefix)\(UUID().uuidString).yml")
         try text.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         launchSettings = url
@@ -248,6 +267,30 @@ public actor SearXNGProcess {
     }
 
     // MARK: Helpers
+
+    static let launchSettingsPrefix = "mference-searxng-"
+
+    /// Deletes launch settings older than a minute (a running SearXNG has
+    /// read its own long before then).
+    static func removeStaleLaunchSettings() {
+        let directory = FileManager.default.temporaryDirectory
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        let cutoff = Date.now.addingTimeInterval(-60)
+        for name in names where name.hasPrefix(launchSettingsPrefix) && name.hasSuffix(".yml") {
+            let url = directory.appending(path: name)
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let modified, modified < cutoff { try? FileManager.default.removeItem(at: url) }
+        }
+    }
+
+    /// Sleeps without being cut short by cancellation.
+    static func pause(milliseconds: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(milliseconds)) {
+                continuation.resume()
+            }
+        }
+    }
 
     static func isHealthy(_ base: URL) async -> Bool {
         await fetch(base.appending(path: "healthz")) != nil

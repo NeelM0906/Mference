@@ -89,7 +89,9 @@ public enum WebError: Error, Sendable, Hashable {
     case notAllowed(URL)
     case badStatus(Int)
     case tooLarge
-    case unsupportedContent(String)
+    /// Not a web page (the server's own type text is not passed on: it would
+    /// reach the model outside the untrusted-content markers).
+    case unsupportedContent
     case searchUnavailable(String)
     case transport(String)
 
@@ -99,7 +101,7 @@ public enum WebError: Error, Sendable, Hashable {
         case .notAllowed(let url): "Not opened: \(url.host() ?? url.absoluteString) was not in the search results."
         case .badStatus(let code): "The page answered with HTTP \(code)."
         case .tooLarge: "The page is too large to read."
-        case .unsupportedContent(let type): "The page is \(type), not a web page."
+        case .unsupportedContent: "The page is not a web page (a file or other content type)."
         case .searchUnavailable(let reason): "Web search is not available: \(reason)"
         case .transport(let reason): "The page could not be loaded: \(reason)"
         }
@@ -117,14 +119,20 @@ public final class WebHTTP: Sendable {
     /// Largest body read, in bytes.
     public let maxBytes: Int
     let resolver: HostPolicy.Resolver
+    /// Refuse a page whose connected address cannot be confirmed public.
+    let requiresConnectedAddress: Bool
     private let session: URLSession
 
     /// `protocolClasses` and `resolver` let tests stub the transport and DNS
-    /// (G-A8 test); the defaults are the system's.
+    /// (G-A8 test); the defaults are the system's. A stub transport reports no
+    /// connected address, so tests over one pass
+    /// `requiresConnectedAddress: false`; the app never does.
     public init(allowlist: WebAllowlist, maxBytes: Int = 2_000_000, timeout: TimeInterval = 12,
-                protocolClasses: [AnyClass]? = nil, resolver: HostPolicy.Resolver? = nil) {
+                protocolClasses: [AnyClass]? = nil, resolver: HostPolicy.Resolver? = nil,
+                requiresConnectedAddress: Bool = true) {
         self.allowlist = allowlist
         self.maxBytes = maxBytes
+        self.requiresConnectedAddress = requiresConnectedAddress
         let resolver = resolver ?? HostPolicy.systemResolver
         self.resolver = resolver
         let configuration = URLSessionConfiguration.ephemeral
@@ -165,19 +173,41 @@ public final class WebHTTP: Sendable {
         } catch let error as URLError {
             throw WebError.transport(error.localizedDescription)
         }
-        guard let http = response as? HTTPURLResponse else { throw WebError.transport("not HTTP") }
-        guard (200..<300).contains(http.statusCode) else { throw WebError.badStatus(http.statusCode) }
-        if http.expectedContentLength > Int64(maxBytes) * 4 { throw WebError.tooLarge }
+        // Read the body (or decide not to), then confirm where we connected
+        // before any outcome, including an error status, reaches the model.
+        var failure: (any Error)?
         var data = Data()
-        data.reserveCapacity(min(Int(max(http.expectedContentLength, 0)), maxBytes))
-        for try await byte in bytes {
-            data.append(byte)
-            if data.count >= maxBytes { break }
+        if let http = response as? HTTPURLResponse {
+            if !(200..<300).contains(http.statusCode) {
+                failure = WebError.badStatus(http.statusCode)
+            } else if http.expectedContentLength > Int64(maxBytes) * 4 {
+                failure = WebError.tooLarge
+            } else {
+                data.reserveCapacity(min(Int(max(http.expectedContentLength, 0)), maxBytes))
+                do {
+                    for try await byte in bytes {
+                        data.append(byte)
+                        if data.count >= maxBytes { break }
+                    }
+                } catch let error as URLError {
+                    failure = WebError.transport(error.localizedDescription)
+                } catch {
+                    failure = error
+                }
+            }
+        } else {
+            failure = WebError.transport("not HTTP")
         }
-        if data.count >= maxBytes { bytes.task.cancel() }
-        if !isSearch, let remote = await probe.remoteAddress(), let address = IPAddress(remote), !address.isPublic {
-            throw WebError.notAllowed(url)
+        if failure != nil || data.count >= maxBytes { bytes.task.cancel() }
+        if !isSearch {
+            let remote = await probe.remoteAddress()
+            let confirmed = remote.flatMap(IPAddress.init)?.isPublic
+            if confirmed == false || (confirmed == nil && requiresConnectedAddress) {
+                throw WebError.notAllowed(url)
+            }
         }
+        if let failure { throw failure }
+        guard let http = response as? HTTPURLResponse else { throw WebError.transport("not HTTP") }
         return (data, http)
     }
 
@@ -219,6 +249,7 @@ final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
 final class ConnectionProbe: NSObject, URLSessionTaskDelegate, Sendable {
     private struct State {
         var address: String??
+        var timedOut = false
         var waiters: [CheckedContinuation<String?, Never>] = []
     }
 
@@ -242,6 +273,8 @@ final class ConnectionProbe: NSObject, URLSessionTaskDelegate, Sendable {
                 await withCheckedContinuation { continuation in
                     let ready = self.state.withLock { state -> String?? in
                         if let address = state.address { return .some(address) }
+                        // Registering after the timeout: answer at once.
+                        if state.timedOut { return .some(nil) }
                         state.waiters.append(continuation)
                         return nil
                     }
@@ -262,6 +295,7 @@ final class ConnectionProbe: NSObject, URLSessionTaskDelegate, Sendable {
     /// Resumes anyone still waiting (after a timeout).
     private func flush() {
         let waiters = state.withLock { state -> [CheckedContinuation<String?, Never>] in
+            state.timedOut = true
             defer { state.waiters.removeAll() }
             return state.waiters
         }

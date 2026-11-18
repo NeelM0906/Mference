@@ -1,3 +1,6 @@
 # Built by App/Scripts/searxng/prepare.sh from pinned, checksummed downloads
 # (see SOURCES.md); bundle.sh copies it into the app.
 /runtime/
+# prepare.sh work directories (removed when it exits).
+/.runtime-build.*/
+/.runtime-old.*/
