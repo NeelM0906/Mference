@@ -1,4 +1,5 @@
 import Foundation
+import MferenceAppCore
 @testable import MferenceAppUI
 import Observation
 
@@ -8,36 +9,37 @@ import Observation
 final class FixtureModelLibrary: ModelLibraryModel {
     var machine: MachineSummary
     var entries: [ModelEntry]
-    var defaultModelID = OnboardingView.quickID
+    var defaultModelID = AppModel.quick.modelID
     var idleUnloadMinutes = 10
     private(set) var downloads: [String] = []
     private(set) var paused: [String] = []
 
     static let gigabyte: Int64 = 1_000_000_000
 
-    init(memoryGB: UInt64 = 32, quick: ModelEntryState = .loaded, deep: ModelEntryState = .downloading(
+    init(memoryGB: UInt64 = 32, freeDiskGB: Int64 = 582, quick: ModelEntryState = .loaded, deep: ModelEntryState = .downloading(
         TransferProgress(completedBytes: 4_600_000_000, totalBytes: 12_100_000_000))) {
         machine = MachineSummary(chipName: "Apple M1 Max", physicalMemoryBytes: memoryGB * 1_073_741_824,
-                                 freeDiskBytes: 582 * Self.gigabyte)
+                                 freeDiskBytes: freeDiskGB * Self.gigabyte)
         let deepFit: MemoryFitVerdict = memoryGB > 16 ? .offerWithApproval : .tooLarge("Needs more than 16 GB")
         entries = [
-            ModelEntry(id: "qwen3.5-4b", productName: "Quick", variantName: "Qwen3.5 4B",
+            ModelEntry(id: AppModel.quick.modelID, productName: "Quick", variantName: "Qwen3.5 4B",
                        summary: "Default for everyday work. Unsloth UD-Q4_K_XL.", engineName: "llama.cpp",
                        formatDetail: "Unsloth UD-Q4_K_XL GGUF", licence: "Apache 2.0",
                        sizeBytes: 2_900_000_000, location: "~/llm-models/qwen3.5-4b", isRecommended: true,
                        state: quick, fit: .fits),
-            ModelEntry(id: "qwen3.8-27b", productName: "Deep", variantName: "Qwen3.8 27B",
-                       summary: "Hard tasks. ISTA IQ3_S, near-lossless on AIME25, GPQA and LiveCodeBench. MTP drafts for speed.",
-                       engineName: "llama.cpp", formatDetail: "ISTA GSQ-RCO IQ3_S with MTP",
+            ModelEntry(id: AppModel.deep.modelID, productName: "Deep", variantName: "Qwen3.8 27B",
+                       summary: "Hard tasks and long documents. Slower than Quick; drafts several words at once.",
+                       engineName: "llama.cpp",
+                       formatDetail: "ISTA GSQ-RCO IQ3_S with MTP, near-lossless on AIME25, GPQA and LiveCodeBench",
                        sizeBytes: 12_100_000_000, isRecommended: true, state: deep, fit: deepFit),
-            ModelEntry(id: "qwen3.6-35b-a3b", productName: "Qwen 3.6", variantName: "35B-A3B",
+            ModelEntry(id: AppModel.qwen36.modelID, productName: "Qwen 3.6", variantName: "35B-A3B",
                        summary: "Mixture-of-experts; experts stream from the SSD.", engineName: "Mference",
                        formatDetail: "gturbo int4", sizeBytes: 18 * Self.gigabyte, isRecommended: false,
                        state: .ready, fit: .fits),
-            ModelEntry(id: "minicpm5-2b-int4g64", productName: "MiniCPM5", variantName: "2B",
+            ModelEntry(id: AppModel.minicpm5.modelID, productName: "MiniCPM5", variantName: "2B",
                        summary: "Very small and quick.", engineName: "Mference", formatDetail: "gturbo int4 g64",
                        sizeBytes: 1_300_000_000, isRecommended: false, state: .ready, fit: .fits),
-            ModelEntry(id: "maple-preview-2bit-mlx", productName: "Maple", variantName: "",
+            ModelEntry(id: AppModel.maple.modelID, productName: "Maple", variantName: "",
                        summary: "Experimental.", engineName: "Mference", formatDetail: "2-bit MLX",
                        sizeBytes: 6_100_000_000, isRecommended: false, state: .ready, fit: .fits),
         ]
@@ -60,6 +62,9 @@ final class FixtureModelLibrary: ModelLibraryModel {
     func cancelDownload(_ id: String) {
         update(id) { $0.state = .notInstalled }
     }
+
+    private(set) var addedFiles: [URL] = []
+    func addModelFile(at url: URL) async throws { addedFiles.append(url) }
 
     private func update(_ id: String, _ change: (inout ModelEntry) -> Void) {
         guard let index = entries.firstIndex(where: { $0.id == id }) else { return }

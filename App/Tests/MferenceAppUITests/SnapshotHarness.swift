@@ -11,9 +11,9 @@ import Testing
 ///
 /// - by default into a fresh temporary directory (the suite writes nothing
 ///   else), so the render path is exercised on every test run;
-/// - into `$MFERENCE_SNAPSHOT_DIR` when that variable is set, for example
-///   `MFERENCE_SNAPSHOT_DIR=/Users/zidanemitra/Desktop/Mference/scratch/app-program/results/visual`,
-///   to produce the G-A3 pairs next to the mockup names.
+/// - into `$MFERENCE_SNAPSHOT_DIR` when that variable is set (the program's
+///   `results/visual` folder), to produce the G-A3 pairs next to the mockup
+///   names.
 ///
 /// `framing: .mockup` draws the view as the mockup boards do: the pastel
 /// wallpaper filling the board and a window inset 40/36 points (1200 x 748 on
@@ -95,14 +95,14 @@ enum Snapshot {
             Rectangle().fill(MFColor.wallpaper)
             // The shadow sits on a shape behind the window: on the content it
             // would be drawn under every child view.
-            RoundedRectangle(cornerRadius: MFRadius.l)
+            RoundedRectangle(cornerRadius: MFRadius.window)
                 .fill(MFColor.surface)
                 .frame(width: size.width, height: size.height)
                 .shadow(color: MFColor.ink.opacity(0.18), radius: 40, y: 30)
             view
                 .frame(width: size.width, height: size.height)
-                .clipShape(RoundedRectangle(cornerRadius: MFRadius.l))
-                .overlay(RoundedRectangle(cornerRadius: MFRadius.l).strokeBorder(MFColor.surface.opacity(0.8)))
+                .clipShape(RoundedRectangle(cornerRadius: MFRadius.window))
+                .overlay(RoundedRectangle(cornerRadius: MFRadius.window).strokeBorder(MFColor.surface.opacity(0.8), lineWidth: MFLayout.hairline))
         }
         .frame(width: canvas.width, height: canvas.height)
     }

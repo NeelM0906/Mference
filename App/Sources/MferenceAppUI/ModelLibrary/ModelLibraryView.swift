@@ -1,22 +1,29 @@
+import MferenceAppCore
 import MferenceDesign
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Settings > Models: the model library (`08b-model-library.png`). Installed
-/// and downloading models, the active download, and model behaviour (default
-/// model, MTP, idle unload). A download starts only after the person approves
-/// it here (L4).
+/// and downloading models, the active downloads, adding a model file, and
+/// model behaviour (default model, MTP, idle unload). A download other than
+/// Quick's starts only after the person approves it here (L4).
 public struct ModelLibraryView: View {
     let library: any ModelLibraryModel
-    @State private var details: ModelEntry?
+    /// False in offline mode: downloads are off and say why.
+    let downloadsAllowed: Bool
+    @State private var detailsID: String?
     @State private var pendingDownload: ModelEntry?
+    @State private var importing = false
+    @State private var importError: String?
 
-    public init(library: any ModelLibraryModel) {
+    public init(library: any ModelLibraryModel, downloadsAllowed: Bool = true) {
         self.library = library
+        self.downloadsAllowed = downloadsAllowed
     }
 
     public var body: some View {
         MFScroll {
-            VStack(alignment: .leading, spacing: LibraryMetrics.sectionSpacing) {
+            VStack(alignment: .leading, spacing: MFSpacing.roomy) {
                 header
                 ForEach(library.entries.filter { $0.state.transfer != nil }) { entry in
                     DownloadBanner(entry: entry, library: library)
@@ -28,24 +35,55 @@ public struct ModelLibraryView: View {
             .padding(.vertical, LibraryMetrics.pagePadding.height)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .sheet(item: $details) { entry in
-            ModelDetailsSheet(entry: entry)
+        .sheet(item: Binding(get: { detailsID.map(DetailsTarget.init) },
+                             set: { detailsID = $0?.id })) { target in
+            ModelDetailsSheet(library: library, id: target.id)
         }
         .confirmationDialog(
             pendingDownload.map { "Download \($0.title)?" } ?? "",
             isPresented: Binding(get: { pendingDownload != nil }, set: { if !$0 { pendingDownload = nil } }),
             presenting: pendingDownload
         ) { entry in
-            Button("Download") { library.download(entry.id) }
+            Button("Download") { Self.approveDownload(entry, in: library) }
             Button("Not now", role: .cancel) {}
         } message: { entry in
             Text(Self.approvalMessage(for: entry))
         }
+        .fileImporter(isPresented: $importing, allowedContentTypes: Self.modelFileTypes) { result in
+            guard case .success(let url) = result else { return }
+            Task {
+                do { try await library.addModelFile(at: url) } catch { importError = error.localizedDescription }
+            }
+        }
+        .alert("The model file was not added", isPresented: Binding(get: { importError != nil },
+                                                                     set: { if !$0 { importError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importError ?? "")
+        }
+    }
+
+    static let modelFileTypes: [UTType] = [UTType(filenameExtension: "gguf") ?? .data]
+
+    /// The approval dialog's "Download": the only way a download that needs
+    /// approval starts from this screen.
+    static func approveDownload(_ entry: ModelEntry, in library: any ModelLibraryModel) {
+        library.download(entry.id)
     }
 
     static func approvalMessage(for entry: ModelEntry) -> String {
         let size = entry.sizeBytes.map { " (\(ModelFormat.bytes($0)))" } ?? ""
         return "\(entry.productName) downloads\(size) to this Mac and runs here. Nothing else is sent."
+    }
+
+    /// Models not installed that may be offered on this Mac (L4 via `isOffered`).
+    static func downloadable(_ entries: [ModelEntry], on machine: MachineSummary) -> [ModelEntry] {
+        entries.filter { entry in
+            switch entry.state {
+            case .notInstalled, .downloadFailed: entry.isOffered(on: machine)
+            default: false
+            }
+        }
     }
 
     private var header: some View {
@@ -62,30 +100,30 @@ public struct ModelLibraryView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if !downloadable.isEmpty {
-                Menu {
-                    ForEach(downloadable) { entry in
-                        Button("\(entry.title)\(entry.sizeBytes.map { " · " + ModelFormat.bytes($0) } ?? "")") {
-                            pendingDownload = entry
-                        }
-                    }
-                } label: {
-                    Text("Browse models")
-                }
-                .menuStyle(.button)
-                .buttonStyle(.mfPrimary)
-                .fixedSize()
-            }
+            Button("Add a model file") { importing = true }
+                .buttonStyle(.mfSecondary)
+                .help("Add a GGUF model file from this Mac.")
+            browseMenu
         }
     }
 
-    /// Models that are not installed and may be offered on this Mac.
-    private var downloadable: [ModelEntry] {
-        library.entries.filter { entry in
-            guard case .notInstalled = entry.state else { return false }
-            if case .tooLarge = entry.fit { return false }
-            return true
+    private var browseMenu: some View {
+        let offered = Self.downloadable(library.entries, on: library.machine)
+        return Menu {
+            ForEach(offered) { entry in
+                Button("\(entry.title)\(entry.sizeBytes.map { " · " + ModelFormat.bytes($0) } ?? "")") {
+                    pendingDownload = entry
+                }
+            }
+        } label: {
+            Text("Browse models")
         }
+        .menuStyle(.button)
+        .buttonStyle(.mfPrimary)
+        .fixedSize()
+        .disabled(offered.isEmpty || !downloadsAllowed)
+        .help(!downloadsAllowed ? "Offline mode is on." :
+              offered.isEmpty ? "Every model offered for this Mac is installed." : "Download another model.")
     }
 
     private var modelTable: some View {
@@ -94,37 +132,42 @@ public struct ModelLibraryView: View {
                 MFSectionHeader("Model").frame(maxWidth: .infinity, alignment: .leading)
                 MFSectionHeader("On disk").frame(width: LibraryMetrics.sizeColumn, alignment: .leading)
                 MFSectionHeader("Status").frame(width: LibraryMetrics.statusColumn, alignment: .leading)
-                Color.clear.frame(width: LibraryMetrics.actionColumn, height: 1)
+                Color.clear.frame(width: LibraryMetrics.actionColumn, height: MFLayout.hairline)
             }
             .padding(.horizontal, MFSpacing.l)
-            .padding(.vertical, MFSpacing.s + 1)
+            .padding(.vertical, MFSpacing.s)
             .background(MFColor.canvas)
-            ForEach(library.entries.filter { $0.state != .notInstalled || $0.state.transfer != nil }) { entry in
-                ModelTableRow(entry: entry,
-                              onDetails: { details = entry },
-                              onDownload: { pendingDownload = entry })
+            ForEach(library.entries.filter { $0.state != .notInstalled }) { entry in
+                ModelTableRow(entry: entry, downloadsAllowed: downloadsAllowed,
+                              onDetails: { detailsID = entry.id },
+                              onRetry: { library.download(entry.id) })
             }
         }
     }
 
     private var behaviour: some View {
-        MFCard {
+        let defaultTitle = library.entries.first { $0.id == library.defaultModelID }?.title ?? "None"
+        let deepInstalled = library.entries.contains { $0.id == AppModel.deep.modelID && $0.state.isInstalled }
+        return MFCard {
             MFListRow("Default model", subtitle: "Used for new chats, mail drafts and scanning.") {
                 Menu {
                     ForEach(library.entries.filter(\.state.isInstalled)) { entry in
                         Button(entry.title) { library.defaultModelID = entry.id }
                     }
                 } label: {
-                    Text(library.entries.first { $0.id == library.defaultModelID }?.title ?? "Choose")
+                    Text(defaultTitle)
                 }
                 .menuStyle(.button)
                 .buttonStyle(.mfSecondary)
                 .fixedSize()
                 .accessibilityLabel("Default model")
+                .accessibilityValue(defaultTitle)
             }
-            MFListRow("Faster answers from Deep (MTP)",
-                      subtitle: "Drafts several tokens per step and checks them. Same quality, less waiting.") {
-                MFBadge(.custom("On", .success))
+            if deepInstalled {
+                MFListRow("Faster answers from Deep (MTP)",
+                          subtitle: "Drafts several tokens per step and checks them. Same quality, less waiting.") {
+                    MFBadge(.custom("On", .success))
+                }
             }
             MFListRow("Unload when idle",
                       subtitle: "Frees memory after \(Self.idleText(library.idleUnloadMinutes)) without use.") {
@@ -139,13 +182,16 @@ public struct ModelLibraryView: View {
                 .buttonStyle(.mfQuiet)
                 .fixedSize()
                 .accessibilityLabel("Unload when idle")
+                .accessibilityValue(Self.idleText(library.idleUnloadMinutes))
             }
         }
     }
 
     static func idleText(_ minutes: Int) -> String {
-        minutes == 1 ? "1 minute" : minutes % 60 == 0 && minutes >= 60
-            ? (minutes == 60 ? "1 hour" : "\(minutes / 60) hours") : "\(minutes) minutes"
+        if minutes == 1 { return "1 minute" }
+        if minutes == 60 { return "1 hour" }
+        if minutes > 60, minutes % 60 == 0 { return "\(minutes / 60) hours" }
+        return "\(minutes) minutes"
     }
 
     static func idleShort(_ minutes: Int) -> String {
@@ -153,9 +199,13 @@ public struct ModelLibraryView: View {
     }
 }
 
+/// `sheet(item:)` needs an Identifiable; Details looks the entry up live.
+struct DetailsTarget: Identifiable {
+    let id: String
+}
+
 enum LibraryMetrics {
     static let pagePadding = CGSize(width: 30, height: 22)
-    static let sectionSpacing: CGFloat = 20
     static let sizeColumn: CGFloat = 170
     static let statusColumn: CGFloat = 200
     static let actionColumn: CGFloat = 96
@@ -163,18 +213,18 @@ enum LibraryMetrics {
     static let idleChoices = [5, 10, 30, 60]
 }
 
-/// One installed or downloading model.
+/// One installed, downloading or failed model.
 struct ModelTableRow: View {
     let entry: ModelEntry
+    let downloadsAllowed: Bool
     let onDetails: () -> Void
-    let onDownload: () -> Void
+    let onRetry: () -> Void
 
     var body: some View {
         HStack(spacing: MFSpacing.m) {
             VStack(alignment: .leading, spacing: MFSpacing.xxs) {
                 Text(entry.title)
-                    .font(MFFont.calloutEmphasis)
-                    .fontWeight(.semibold)
+                    .font(MFFont.calloutSemibold)
                     .foregroundStyle(MFColor.ink)
                 Text(entry.summary)
                     .font(MFFont.caption)
@@ -185,16 +235,22 @@ struct ModelTableRow: View {
             Text(entry.sizeBytes.map(ModelFormat.bytes) ?? "—")
                 .font(MFFont.callout)
                 .foregroundStyle(MFColor.ink)
+                .lineLimit(1)
                 .frame(width: LibraryMetrics.sizeColumn, alignment: .leading)
             HStack {
                 ModelStatusBadge(state: entry.state)
             }
             .frame(width: LibraryMetrics.statusColumn, alignment: .leading)
             Group {
-                if case .failed = entry.state, !entry.state.isInstalled {
-                    Button("Retry", action: onDownload).buttonStyle(.mfSecondary)
+                if case .downloadFailed = entry.state {
+                    Button("Retry", action: onRetry)
+                        .buttonStyle(.mfSecondary)
+                        .disabled(!downloadsAllowed)
+                        .accessibilityLabel("Retry downloading \(entry.title)")
                 } else {
-                    Button("Details", action: onDetails).buttonStyle(.mfSecondary)
+                    Button("Details", action: onDetails)
+                        .buttonStyle(.mfSecondary)
+                        .accessibilityLabel("Details for \(entry.title)")
                 }
             }
             .frame(width: LibraryMetrics.actionColumn, alignment: .trailing)
@@ -222,12 +278,13 @@ struct ModelStatusBadge: View {
         case .downloading: .custom("Downloading", .accent)
         case .paused: .custom("Paused", .neutral)
         case .notInstalled: .custom("Not installed", .neutral)
-        case .failed: .custom("Needs attention", .preview)
+        case .loadFailed: .custom("Didn't load", .preview)
+        case .downloadFailed: .custom("Download failed", .preview)
         }
     }
 }
 
-/// The active download, with pause/resume and cancel.
+/// An active download, with pause/resume and cancel.
 struct DownloadBanner: View {
     let entry: ModelEntry
     let library: any ModelLibraryModel
@@ -237,65 +294,81 @@ struct DownloadBanner: View {
         return false
     }
 
+    /// "ISTA ... · 12.1 GB · approved by you"; Quick says it installs on every Mac.
+    var detail: String {
+        [entry.formatDetail, entry.sizeBytes.map(ModelFormat.bytes),
+         entry.installsWithoutApproval ? "installs on every Mac" : "approved by you"]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     var body: some View {
-        let progress = entry.state.transfer ?? TransferProgress(completedBytes: 0, totalBytes: nil)
-        HStack(spacing: MFSpacing.m + 2) {
+        let progress = entry.state.transfer
+        HStack(spacing: MFSpacing.comfortable) {
             VStack(alignment: .leading, spacing: MFSpacing.xxs) {
                 Text("\(paused ? "Paused" : "Downloading") \(entry.title)")
-                    .font(MFFont.bodyEmphasis)
-                    .fontWeight(.semibold)
+                    .font(MFFont.bodySemibold)
                     .foregroundStyle(MFColor.ink)
-                Text([entry.formatDetail, entry.sizeBytes.map(ModelFormat.bytes), "approved by you"]
-                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                Text(detail)
                     .font(MFFont.callout)
                     .foregroundStyle(MFColor.secondary)
-                MFProgressBar(progress.fraction ?? 0)
+                MFProgressBar(progress?.fraction, label: "Downloading \(entry.title)")
                     .padding(.top, MFSpacing.xs)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Text(ModelFormat.transfer(progress))
-                .font(MFFont.caption)
-                .foregroundStyle(MFColor.secondary)
+            if let progress {
+                Text(ModelFormat.transfer(progress))
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.secondary)
+            }
             Button(paused ? "Resume" : "Pause") {
                 if paused { library.resume(entry.id) } else { library.pause(entry.id) }
             }
             .buttonStyle(.mfSecondary)
+            .accessibilityLabel("\(paused ? "Resume" : "Pause") downloading \(entry.title)")
             Button("Cancel") { library.cancelDownload(entry.id) }
                 .buttonStyle(.mfQuiet)
+                .accessibilityLabel("Cancel downloading \(entry.title)")
         }
         .padding(.horizontal, MFSpacing.l)
-        .padding(.vertical, MFSpacing.m + 2)
+        .padding(.vertical, MFSpacing.comfortable)
         .background(RoundedRectangle(cornerRadius: MFRadius.l).fill(MFColor.accentFillFaint))
-        .overlay(RoundedRectangle(cornerRadius: MFRadius.l).strokeBorder(MFColor.accentFill))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.l).strokeBorder(MFColor.accentFill, lineWidth: MFLayout.hairline))
         .accessibilityElement(children: .contain)
     }
 }
 
 /// Details: the engine and files behind a model (the only place, with the
-/// picker, where engine names show; L2).
+/// picker, where engine names show; L2). Reads the entry live by id.
 struct ModelDetailsSheet: View {
-    let entry: ModelEntry
+    let library: any ModelLibraryModel
+    let id: String
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.l) {
-            Text(entry.title)
-                .font(MFFont.headline)
-                .foregroundStyle(MFColor.ink)
-            Text(entry.summary)
-                .font(MFFont.callout)
-                .foregroundStyle(MFColor.secondary)
-            MFCard {
-                MFListRow("Engine") { value(entry.engineName) }
-                MFListRow("Format") { value(entry.formatDetail) }
-                if let licence = entry.licence {
-                    MFListRow("Licence") { value(licence) }
+            if let entry = library.entries.first(where: { $0.id == id }) {
+                Text(entry.title)
+                    .font(MFFont.headline)
+                    .foregroundStyle(MFColor.ink)
+                Text(entry.summary)
+                    .font(MFFont.callout)
+                    .foregroundStyle(MFColor.secondary)
+                MFCard {
+                    MFListRow("Engine") { value(entry.engineName) }
+                    MFListRow("Format") { value(entry.formatDetail) }
+                    if let licence = entry.licence {
+                        MFListRow("Licence") { value(licence) }
+                    }
+                    MFListRow("Size") { value(entry.sizeBytes.map(ModelFormat.bytes) ?? "Unknown") }
+                    MFListRow("Status", subtitle: Self.failure(entry.state)) { ModelStatusBadge(state: entry.state) }
+                    if let location = entry.location {
+                        MFListRow("Location", subtitle: location)
+                    }
                 }
-                MFListRow("Size") { value(entry.sizeBytes.map(ModelFormat.bytes) ?? "Unknown") }
-                MFListRow("Status") { ModelStatusBadge(state: entry.state) }
-                if let location = entry.location {
-                    MFListRow("Location", subtitle: location)
-                }
+            } else {
+                Text("This model is no longer in the library.")
+                    .font(MFFont.callout)
+                    .foregroundStyle(MFColor.secondary)
             }
             HStack {
                 Spacer()
@@ -306,6 +379,13 @@ struct ModelDetailsSheet: View {
         }
         .padding(MFSpacing.xl)
         .frame(width: LibraryMetrics.detailsWidth)
+    }
+
+    static func failure(_ state: ModelEntryState) -> String? {
+        switch state {
+        case .loadFailed(let message), .downloadFailed(let message): message
+        default: nil
+        }
     }
 
     private func value(_ text: String) -> some View {

@@ -16,9 +16,52 @@ import Testing
                 == "4.6 GB of 12.1 GB")
     }
 
-    @Test func deepIsOfferedOnlyAbove16GB() {
-        #expect(MachineSummary(chipName: "", physicalMemoryBytes: 16 * 1_073_741_824, freeDiskBytes: nil).canOfferDeep == false)
-        #expect(MachineSummary(chipName: "", physicalMemoryBytes: 18 * 1_073_741_824, freeDiskBytes: nil).canOfferDeep)
+    /// L4 in one predicate: Deep only above 16 GB; Quick everywhere; never a too-large model.
+    @Test(arguments: [UInt64(16), 32])
+    func offeredModelsFollowL4(memoryGB: UInt64) throws {
+        let library = FixtureModelLibrary(memoryGB: memoryGB, quick: .notInstalled, deep: .notInstalled)
+        let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
+        let quick = try #require(library.entries.first { $0.id == AppModel.quick.modelID })
+        #expect(deep.isOffered(on: library.machine) == (memoryGB > 16))
+        #expect(quick.isOffered(on: library.machine))
+        var huge = quick
+        huge.fit = .tooLarge("Needs more memory")
+        #expect(!huge.isOffered(on: library.machine))
+        let offered = ModelLibraryView.downloadable(library.entries + [huge], on: library.machine).map(\.id)
+        #expect(offered.contains(AppModel.deep.modelID) == (memoryGB > 16))
+        #expect(offered.filter { $0 == quick.id }.count == 1, "the too-large copy is left out")
+    }
+
+    @Test func diskRoomKeepsAMargin() {
+        let machine = MachineSummary(chipName: "", physicalMemoryBytes: 1, freeDiskBytes: 4_000_000_000)
+        #expect(machine.hasRoom(for: 1_900_000_000))
+        #expect(!machine.hasRoom(for: 2_900_000_000))
+        #expect(MachineSummary(chipName: "", physicalMemoryBytes: 1, freeDiskBytes: nil).hasRoom(for: 9_999_999_999))
+    }
+
+    @Test func loadFailureStaysInstalledAndDownloadFailureDoesNot() {
+        #expect(ModelEntryState.loadFailed("Metal error").isInstalled)
+        #expect(!ModelEntryState.downloadFailed("Network").isInstalled)
+        #expect(ModelLibraryView.downloadable(
+            FixtureModelLibrary(deep: .downloadFailed("Network")).entries,
+            on: FixtureModelLibrary().machine).map(\.id) == [AppModel.deep.modelID])
+    }
+
+    @Test func approvalIsTheDownloadPath() throws {
+        let library = FixtureModelLibrary(deep: .notInstalled)
+        let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
+        try Snapshot.render(ModelLibraryView(library: library), name: "library-check")
+        #expect(library.downloads.isEmpty, "rendering the library starts nothing")
+        ModelLibraryView.approveDownload(deep, in: library)
+        #expect(library.downloads == [AppModel.deep.modelID])
+    }
+
+    @Test func bannerSaysApprovedOnlyForApprovedDownloads() throws {
+        let library = FixtureModelLibrary(quick: .downloading(TransferProgress(completedBytes: 0, totalBytes: 1)))
+        let quick = try #require(library.entries.first { $0.id == AppModel.quick.modelID })
+        let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
+        #expect(!DownloadBanner(entry: quick, library: library).detail.contains("approved"))
+        #expect(DownloadBanner(entry: deep, library: library).detail.contains("approved by you"))
     }
 
     @Test func statusBadges() {
@@ -26,6 +69,8 @@ import Testing
         #expect(ModelStatusBadge.kind(for: .ready) == .ready)
         #expect(ModelStatusBadge.kind(for: .downloading(TransferProgress(completedBytes: 1, totalBytes: 2))).title == "Downloading")
         #expect(ModelStatusBadge.kind(for: .notInstalled).title == "Not installed")
+        #expect(ModelStatusBadge.kind(for: .loadFailed("x")).title == "Didn't load")
+        #expect(ModelStatusBadge.kind(for: .downloadFailed("x")).title == "Download failed")
     }
 
     @Test func idleText() {
@@ -35,7 +80,7 @@ import Testing
     }
 
     @Test func approvalNamesTheSize() throws {
-        let deep = try #require(FixtureModelLibrary().entries.first { $0.id == OnboardingView.deepID })
+        let deep = try #require(FixtureModelLibrary().entries.first { $0.id == AppModel.deep.modelID })
         #expect(ModelLibraryView.approvalMessage(for: deep).contains("12.1 GB"))
     }
 

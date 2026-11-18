@@ -62,6 +62,12 @@ public final class ShellModel {
         hasCompletedOnboarding = defaults?.bool(forKey: Self.onboardingKey) ?? false
     }
 
+    /// First run shows until it is completed, and only once a model library
+    /// is wired (it has nothing to install without one).
+    public func needsOnboarding(hasLibrary: Bool) -> Bool {
+        hasLibrary && !hasCompletedOnboarding
+    }
+
     /// Marks first run as done and remembers it.
     public func completeOnboarding() {
         hasCompletedOnboarding = true
@@ -74,9 +80,21 @@ public final class ShellModel {
         defaults?.set(appearance.rawValue, forKey: Self.appearanceKey)
     }
 
+    /// The section to return to when Settings closes.
+    public private(set) var sectionBeforeSettings: AppSection = .chat
+
     public func show(_ section: AppSection) {
+        if section == .settings, selection != .settings {
+            sectionBeforeSettings = selection
+        }
         selection = section
         isSearchPresented = false
+    }
+
+    /// The Settings gear: opens Settings, or closes it back to the section
+    /// that was showing before.
+    public func toggleSettings() {
+        show(selection == .settings ? sectionBeforeSettings : .settings)
     }
 
     /// The keyboard shortcut for a section: ⌘1-⌘6 for the pills, ⌘, for Settings.

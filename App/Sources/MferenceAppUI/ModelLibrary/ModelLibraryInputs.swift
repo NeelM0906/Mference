@@ -1,4 +1,5 @@
 import Foundation
+import MferenceAppCore
 import Observation
 
 // The values U1's Model library, Onboarding and Settings > Models views
@@ -22,6 +23,16 @@ public struct MachineSummary: Sendable, Hashable {
 
     /// More than 16 GB of memory: Deep may be offered, after approval (L4).
     public var canOfferDeep: Bool { physicalMemoryBytes > 16 * 1_073_741_824 }
+
+    /// Head room kept free beyond a download's size.
+    public static let diskMarginBytes: Int64 = 2_000_000_000
+
+    /// Whether a download of `bytes` fits with the margin. Unknown free space
+    /// or an unknown size does not block (the download reports its own error).
+    public func hasRoom(for bytes: Int64?) -> Bool {
+        guard let free = freeDiskBytes, let bytes else { return true }
+        return free >= bytes + Self.diskMarginBytes
+    }
 }
 
 /// Progress of a download, in bytes.
@@ -51,13 +62,15 @@ public enum ModelEntryState: Sendable, Hashable {
     case downloading(TransferProgress)
     case paused(TransferProgress)
     case notInstalled
-    /// A load or download failed; the message is shown as is.
-    case failed(String)
+    /// Installed, but the last load failed; the message is shown as is.
+    case loadFailed(String)
+    /// The download failed; the message is shown as is. Not installed.
+    case downloadFailed(String)
 
     public var isInstalled: Bool {
         switch self {
-        case .loaded, .ready, .loading: true
-        case .downloading, .paused, .notInstalled, .failed: false
+        case .loaded, .ready, .loading, .loadFailed: true
+        case .downloading, .paused, .notInstalled, .downloadFailed: false
         }
     }
 
@@ -124,6 +137,19 @@ public struct ModelEntry: Sendable, Hashable, Identifiable {
     public var title: String {
         variantName.isEmpty ? productName : "\(productName) · \(variantName)"
     }
+
+    /// Quick installs on every Mac without asking (L4); every other download
+    /// needs the person's approval first.
+    public var installsWithoutApproval: Bool { id == AppModel.quick.modelID }
+
+    /// L4 in one place: whether this model may be offered for download on
+    /// `machine`. Deep only on Macs with more than 16 GB; nothing MemoryFit
+    /// rules out.
+    public func isOffered(on machine: MachineSummary) -> Bool {
+        if case .tooLarge = fit { return false }
+        if id == AppModel.deep.modelID { return machine.canOfferDeep }
+        return true
+    }
 }
 
 /// The model library as the views see it. U2 provides the live one.
@@ -135,11 +161,14 @@ public protocol ModelLibraryModel: AnyObject, Observable {
     var defaultModelID: String { get set }
     /// Idle unload after this many minutes (L13: 10).
     var idleUnloadMinutes: Int { get set }
-    /// Starts a download. Called only after the person approved it in the UI.
+    /// Starts a download: Quick on first run, or any model after the person
+    /// approved it in the UI.
     func download(_ id: String)
     func pause(_ id: String)
     func resume(_ id: String)
     func cancelDownload(_ id: String)
+    /// Adds a model file the person picked (a GGUF on this Mac).
+    func addModelFile(at url: URL) async throws
 }
 
 enum ModelFormat {

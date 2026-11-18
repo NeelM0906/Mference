@@ -51,7 +51,7 @@ struct ShellSearchPanel: View {
                     .font(MFFont.body)
                     .foregroundStyle(MFColor.ink)
                     .padding(.horizontal, MFSpacing.s)
-                    .padding(.vertical, MFSpacing.xs + 2)
+                    .padding(.vertical, MFSpacing.snug)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

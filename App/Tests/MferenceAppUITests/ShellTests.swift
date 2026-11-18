@@ -20,6 +20,19 @@ import Testing
         #expect(!model.isSearchPresented)
     }
 
+    @Test func settingsGearReturnsToThePreviousSection() {
+        let model = ShellModel(selection: .mail, defaults: nil)
+        model.toggleSettings()
+        #expect(model.selection == .settings)
+        model.toggleSettings()
+        #expect(model.selection == .mail)
+        model.show(.scan)
+        model.show(.settings)
+        model.show(.settings)
+        model.toggleSettings()
+        #expect(model.selection == .scan, "opening Settings twice keeps the section to return to")
+    }
+
     @Test func appearanceCyclesAndPersists() throws {
         let suite = "ShellTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
