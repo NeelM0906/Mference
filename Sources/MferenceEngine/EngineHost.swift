@@ -536,15 +536,24 @@ public struct EngineGenerationStream: AsyncSequence, Sendable {
     public struct Iterator: AsyncIteratorProtocol {
         var base: AsyncThrowingStream<Element, Error>.Iterator
         let request: RequestHandle
+        var completed = false
 
+        /// Ends with `.completed`, or throws: a request that stops because
+        /// the iterating task was cancelled throws `CancellationError` rather
+        /// than ending quietly without a completion.
         public mutating func next() async throws -> Element? {
-            try await base.next()
+            let element = try await base.next()
+            if case .completed? = element { completed = true }
+            if element == nil, !completed {
+                try Task.checkCancellation()
+            }
+            return element
         }
     }
 
     /// Cancels the request when the last iterator copy goes away. Cancelling
     /// a request that already finished does nothing.
-    public final class RequestHandle: Sendable {
+    final class RequestHandle: Sendable {
         let task: Task<Void, Never>
 
         init(task: Task<Void, Never>) { self.task = task }
