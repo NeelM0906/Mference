@@ -105,7 +105,7 @@ let package = Package(
         ),
         .target(
             name: "MferenceEngine",
-            dependencies: ["Mference"],
+            dependencies: ["Mference", "LlamaCpp", .product(name: "Jinja", package: "swift-jinja")],
             path: "Sources/MferenceEngine"
         ),
         .target(

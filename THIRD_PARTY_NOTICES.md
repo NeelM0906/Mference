@@ -199,6 +199,17 @@ checked against the Hugging Face LFS object ids (SHA-256) on 2026-11-18:
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.
 
+## Qwen3.5 GGUF chat template test fixture
+
+`Tests/MferenceEngine/LlamaChatTemplateFixtures.swift` embeds the chat
+template stored in the `tokenizer.chat_template` metadata of
+`Qwen3.5-4B-UD-Q4_K_XL.gguf`, revision
+`e87f176479d0855a907a41277aca2f8ee7a09523` of
+[`unsloth/Qwen3.5-4B-GGUF`](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF),
+whose model card declares `license: apache-2.0`, together with that template's
+renders by llama.cpp at commit `b1b770d90d94cad9e9ea5b993bdbc383a522fb28`.
+Model weights are not bundled with Mference.
+
 ## Swift-Qwen template test fixture
 
 `Tests/Mference/Core/Tokenization/Fixtures/SwiftQwenTemplate/chat_template.jinja`
