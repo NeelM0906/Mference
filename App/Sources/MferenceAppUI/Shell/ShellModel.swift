@@ -64,9 +64,21 @@ public final class ShellModel {
         defaults?.set(appearance.rawValue, forKey: Self.appearanceKey)
     }
 
+    /// The section to return to when Settings closes.
+    public private(set) var sectionBeforeSettings: AppSection = .chat
+
     public func show(_ section: AppSection) {
+        if section == .settings, selection != .settings {
+            sectionBeforeSettings = selection
+        }
         selection = section
         isSearchPresented = false
+    }
+
+    /// The Settings gear: opens Settings, or closes it back to the section
+    /// that was showing before.
+    public func toggleSettings() {
+        show(selection == .settings ? sectionBeforeSettings : .settings)
     }
 
     /// The keyboard shortcut for a section: ⌘1-⌘6 for the pills, ⌘, for Settings.

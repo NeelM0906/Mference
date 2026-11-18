@@ -38,7 +38,12 @@ public struct RootView: View {
             .preferredColorScheme(model.appearance.colorScheme)
         case .toolbar:
             SectionContent(section: model.selection)
-                .frame(minWidth: ShellMetrics.minimumWindow.width, minHeight: ShellMetrics.minimumWindow.height)
+                // The mockup's border under the top bar; the shell draws it,
+                // not each screen.
+                .overlay(alignment: .top) {
+                    Rectangle().fill(MFColor.chromeDivider).frame(height: MFLayout.hairline)
+                }
+                .frame(minWidth: MFLayout.minimumWindow.width, minHeight: MFLayout.minimumWindow.height)
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
                         HStack(spacing: MFSpacing.m) {
