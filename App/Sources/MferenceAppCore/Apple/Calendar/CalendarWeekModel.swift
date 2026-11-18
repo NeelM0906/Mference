@@ -49,6 +49,14 @@ public final class CalendarWeekModel {
         layout.blocks(weekStart: weekStart, events: events, proposals: proposalsThisWeek)
     }
 
+    /// All-day and off-hours events by day (0 = first day shown).
+    public var outsideGrid: [Int: [CalendarEvent]] {
+        layout.outsideGrid(weekStart: weekStart, events: events)
+    }
+
+    /// Proposals being added right now: a second click does nothing.
+    public private(set) var addingProposals: Set<UUID> = []
+
     public var proposalsThisWeek: [ProposedEvent] {
         let interval = layout.interval(from: weekStart)
         return proposals.filter { interval.contains($0.start) }.sorted { $0.start < $1.start }
@@ -133,6 +141,9 @@ public final class CalendarWeekModel {
 
     /// One click: the event goes into Calendar.
     public func add(_ proposal: ProposedEvent) async {
+        guard !addingProposals.contains(proposal.id), proposals.contains(where: { $0.id == proposal.id }) else { return }
+        addingProposals.insert(proposal.id)
+        defer { addingProposals.remove(proposal.id) }
         if access != .granted { await requestAccess() }
         guard access == .granted else { return }
         do {

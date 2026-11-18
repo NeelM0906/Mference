@@ -66,6 +66,34 @@ enum CalendarFixtures {
         #expect(Self.layout.allDayEvents(weekStart: start, events: CalendarFixtures.events)[3]?.map(\.title) == ["Offsite"])
     }
 
+    @Test func eventsOutsideTheGridAreListedNotHidden() {
+        let start = Self.layout.weekStart(containing: CalendarFixtures.now)
+        let events = CalendarFixtures.events + [
+            CalendarEvent(id: "gym", title: "Gym", start: CalendarFixtures.date(15, 7), end: CalendarFixtures.date(15, 8)),
+            CalendarEvent(id: "dinner", title: "Dinner", start: CalendarFixtures.date(16, 19), end: CalendarFixtures.date(16, 21)),
+        ]
+        let outside = Self.layout.outsideGrid(weekStart: start, events: events)
+        #expect(outside[1]?.map(\.title) == ["Gym"])
+        #expect(outside[2]?.map(\.title) == ["Dinner"])
+        #expect(outside[3]?.map(\.title) == ["Offsite"])
+        #expect(outside[0] == nil)
+        #expect(!Self.layout.blocks(weekStart: start, events: events, proposals: []).contains { $0.title == "Gym" })
+    }
+
+    @Test @MainActor func aDoubleClickOnAddCreatesOneEvent() async {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let model = Self.model(service: service)
+        await model.load()
+        model.propose(CalendarFixtures.moveProposal)
+        async let first: Void = model.add(CalendarFixtures.moveProposal)
+        async let second: Void = model.add(CalendarFixtures.moveProposal)
+        _ = await (first, second)
+        #expect(await service.storedEvents.filter { $0.title == "Design review" }.count == 1)
+        #expect(model.addingProposals.isEmpty)
+        await model.add(CalendarFixtures.moveProposal)  // already added: nothing happens
+        #expect(await service.storedEvents.filter { $0.title == "Design review" }.count == 1)
+    }
+
     @Test func overlappingEventsShareTheColumn() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         let events = [
