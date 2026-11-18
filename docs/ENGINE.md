@@ -36,7 +36,7 @@ The product offers five models, and the catalog lists only these by default.
 
 Deep is meant to decode with its MTP head. That is planned and not yet
 built: `LlamaBackend` does not use MTP, and MTP arrives with the llama.cpp
-backend's MTP change. Until then the server is to decline Deep with an
+backend's MTP change. Until then the server will decline Deep with an
 explicit reason rather than serve it without MTP. The catalog already
 requires the file's MTP tensors.
 
@@ -203,7 +203,7 @@ product models are listed:
 - Everything else found is skipped with "not in the product model list". A
   request for its ID gets that reason rather than "unknown model".
 
-The developer scope `.all` (planned as the server's `--catalog all`) also lists every
+The developer scope `.all` (the server's `--catalog all`) also lists every
 other runnable model. Native installs keep the server's identifier rules:
 the family ID, or `<id>@<directory basename>` when the ID is shared or
 already taken by a product model, then `#n`. A GGUF that is not a product
