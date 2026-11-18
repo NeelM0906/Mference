@@ -46,43 +46,43 @@ _bench = importlib.util.module_from_spec(_bench_spec)
 _bench_spec.loader.exec_module(_bench)
 parse_sse_lines = _bench.parse_sse_lines
 
-# The five product models (spec D1/D2). `id` is the API id the engine catalog
-# assigns; override any field with ENGINE_VALIDATE_<KEY>_<FIELD> (for example
+# The five product models (spec D1/D2), installed under ~/llm-models. `id` is
+# the API id the engine catalog assigns; override any field with ENGINE_VALIDATE_<KEY>_<FIELD> (for example
 # ENGINE_VALIDATE_DEEP_ID) if the merged catalog spells one differently.
 MODELS = {
     "quick": {
         "id": "qwen3.5-4b",
         "engine": "llama.cpp",
         "kind": "gguf",
-        "path": "/Users/zidanemitra/llm-models/gguf/Qwen3.5-4B-UD-Q4_K_XL.gguf",
+        "path": "~/llm-models/gguf/Qwen3.5-4B-UD-Q4_K_XL.gguf",
         "bytes": 2912109728,
     },
     "deep": {
         "id": "qwen3.8-27b",
         "engine": "llama.cpp",
         "kind": "gguf",
-        "path": "/Users/zidanemitra/llm-models/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+        "path": "~/llm-models/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
         "bytes": 12120016960,
     },
     "qwen36": {
         "id": "qwen3.6-35b-a3b",
         "engine": "mference",
         "kind": "gturbo",
-        "path": "/Users/zidanemitra/llm-models/qwen36.gturbo",
+        "path": "~/llm-models/qwen36.gturbo",
         "bytes": None,
     },
     "minicpm5": {
         "id": "minicpm5-2b-int4g64",
         "engine": "mference",
         "kind": "gturbo",
-        "path": "/Users/zidanemitra/llm-models/minicpm5.gturbo",
+        "path": "~/llm-models/minicpm5.gturbo",
         "bytes": None,
     },
     "maple": {
         "id": "maple-preview-2bit-mlx",
         "engine": "mference",
         "kind": "gturbo",
-        "path": "/Users/zidanemitra/llm-models/maple.gturbo",
+        "path": "~/llm-models/maple.gturbo",
         "bytes": None,
     },
 }
@@ -100,6 +100,8 @@ def model(key, environ=os.environ):
         override = environ.get(f"ENGINE_VALIDATE_{key.upper()}_{field.upper()}")
         if override is not None:
             entry[field] = int(override) if field == "bytes" else override
+    if isinstance(entry.get("path"), str):
+        entry["path"] = os.path.expanduser(entry["path"])
     entry["key"] = key
     return entry
 
@@ -254,12 +256,19 @@ IDENTITY_FIELDS = ("content", "reasoning_content", "tool_calls", "finish_reason"
 
 
 def digest(result):
-    """md5 over the fields that must be byte-identical between two runs."""
+    """md5 over the fields that must be byte-identical between two runs. The
+    HTTP status is part of it, and an error result never counts as an output
+    (`comparable`), so two identical rejections are not identity."""
     material = {k: result.get(k) for k in IDENTITY_FIELDS}
+    material["http_status"] = result.get("http_status")
     if "error" in result:
-        material = {"error": result["error"]}
+        material = {"error": result["error"], "http_status": result.get("http_status")}
     blob = json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.md5(blob).hexdigest()
+
+
+def comparable(result):
+    return "error" not in result and result.get("http_status", 200) == 200
 
 
 def disagreements(a, b):
@@ -435,7 +444,11 @@ def cmd_prompts(args):
             if name == "json-answer":
                 record["json_valid"] = json_answer_ok(nonstream.get("content", ""))
             if name == "tool-roundtrip" and index == 1:
+                # A round-trip that never calls the tool exercised nothing.
                 record["tool_call_emitted"] = bool(nonstream.get("tool_calls"))
+                if not record["tool_call_emitted"]:
+                    record["agree"] = False
+                    record["differs_in"] = diff + ["no tool call"]
             ok = ok and record["agree"]
             turns.append(record)
             previous = {"nonstream": nonstream, "stream": stream}
@@ -453,28 +466,39 @@ def cmd_prompts(args):
 
 
 def load_digests(directory):
-    report = json.loads((Path(directory) / "prompts.json").read_text(encoding="utf-8"))
+    """{case: md5 or None}; None marks an output that cannot count as identical
+    (skipped turn, HTTP error, error chunk). Missing prompts.json -> None."""
+    path = Path(directory) / "prompts.json"
+    if not path.exists():
+        return None
+    report = json.loads(path.read_text(encoding="utf-8"))
     digests = {}
     for name, turns in report["cases"].items():
         for turn in turns:
+            key = f"{name}.turn{turn['turn']}"
             if "skipped" in turn:
-                digests[f"{name}.turn{turn['turn']}"] = "skipped"
+                digests[key] = None
                 continue
-            digests[f"{name}.turn{turn['turn']}"] = turn["md5_nonstream"]
-            digests[f"{name}.turn{turn['turn']}.stream"] = turn["md5_stream"]
+            digests[key] = turn["md5_nonstream"] if comparable(turn["nonstream"]) else None
+            digests[key + ".stream"] = turn["md5_stream"] if comparable(turn["stream"]) else None
     return digests
 
 
 def compare_digests(a, b):
+    if a is None or b is None:
+        return {"identical": False, "rows": [],
+                "missing": [side for side, d in (("a", a), ("b", b)) if d is None]}
     keys = sorted(set(a) | set(b))
-    rows = [{"case": k, "a": a.get(k), "b": b.get(k), "equal": a.get(k) == b.get(k)}
-            for k in keys]
-    return {"identical": all(r["equal"] for r in rows), "rows": rows}
+    rows = [{"case": k, "a": a.get(k), "b": b.get(k),
+             "equal": a.get(k) is not None and a.get(k) == b.get(k)} for k in keys]
+    return {"identical": bool(rows) and all(r["equal"] for r in rows), "rows": rows}
 
 
 def cmd_compare(args):
     result = compare_digests(load_digests(args.a), load_digests(args.b))
     result.update({"a": str(args.a), "b": str(args.b), "label": args.label})
+    for side in result.get("missing", []):
+        print(f"MISSING {side}: no prompts.json in {getattr(args, side)}", file=sys.stderr)
     _write(Path(args.out), json.dumps(result, indent=2, sort_keys=True))
     for row in result["rows"]:
         mark = "ok  " if row["equal"] else "DIFF"
@@ -767,14 +791,39 @@ def verify_swap(events, previous, target, require_release=True):
     if finish is None:
         problems.append(f"no 'swap finished model={target}'")
     if previous is not None and require_release:
+        # The server logs `swap started`, then `model released` for the old
+        # model once its memory is gone, then loads and logs `swap finished`.
         released = next((i for i, (k, f) in enumerate(events)
                          if k == "released" and f.get("model") == previous), None)
         if released is None:
             problems.append(f"no 'model released model={previous}'")
+        elif released < start:
+            problems.append("'model released' logged before 'swap started'")
         elif finish is not None and released > finish:
             problems.append("old model released after the new one finished loading")
     return {"ok": not problems, "problems": problems,
             "load_s": events[finish][1].get("seconds") if finish is not None else None}
+
+
+RSS_MARGIN = 0.10
+
+
+def max_single_rss_mib(results):
+    """Largest peak RSS of any per-model engine run under `results`, in MiB."""
+    peaks = []
+    for run in Path(results).glob("*/engine*/run.json"):
+        value = (_load(run) or {}).get("max_rss_bytes")
+        if value:
+            peaks.append(value / 1048576)
+    return max(peaks) if peaks else None
+
+
+def cmd_maxrss(args):
+    value = max_single_rss_mib(args.results)
+    if value is None:
+        return 1
+    print(f"{value:.1f}")
+    return 0
 
 
 def cmd_swap(args):
@@ -798,6 +847,19 @@ def cmd_swap(args):
         if status != 200:
             verdict["ok"] = False
             verdict["problems"].append(f"HTTP {status}: {raw[:200]}")
+        # Two models resident at once would show as a step peak well above the
+        # largest single-model peak measured in the per-model runs.
+        if args.max_single_rss_mib and previous is not None:
+            bound = args.max_single_rss_mib * (1 + RSS_MARGIN)
+            peak = sampler.report()["peak_rss_mib"]
+            verdict["rss_bound_mib"] = round(bound, 1)
+            if peak is None:
+                verdict["ok"] = False
+                verdict["problems"].append("no RSS samples for the bound")
+            elif peak > bound:
+                verdict["ok"] = False
+                verdict["problems"].append(
+                    f"peak RSS {peak} MiB above one model's bound {bound:.1f} MiB")
         record = {"step": step, "from": previous, "to": entry["id"], "http_status": status,
                   "request_s": seconds, **verdict, **sampler.report(), "log": new_text}
         results["steps"].append(record)
@@ -815,6 +877,116 @@ def cmd_swap(args):
     if tripped:
         return SWAP_TRIP
     return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
+# Speed bar (section 8 item 4): engine no more than 5% slower than reference
+
+
+SPEED_TOLERANCE = 0.05
+
+
+def speed_rows(engine, reference):
+    rows = []
+    for target in sorted({r["target_tokens"] for r in engine + reference}):
+        for field in ("prefill_tok_s", "decode_tok_s"):
+            e = _median([r.get(field) for r in engine if r["target_tokens"] == target])
+            ref = _median([r.get(field) for r in reference if r["target_tokens"] == target])
+            ratio = e / ref if e and ref else None
+            rows.append({"target_tokens": target, "metric": field, "engine": e,
+                         "reference": ref, "ratio": ratio,
+                         "ok": ratio is not None and ratio >= 1 - SPEED_TOLERANCE})
+    return rows
+
+
+def cmd_speed(args):
+    a = (_load(Path(args.a) / "readings.json") or {}).get("readings")
+    b = (_load(Path(args.b) / "readings.json") or {}).get("readings")
+    if not a or not b:
+        result = {"label": args.label, "ok": False, "rows": [],
+                  "missing": [side for side, r in (("a", a), ("b", b)) if not r]}
+    else:
+        rows = speed_rows(a, b)
+        result = {"label": args.label, "ok": bool(rows) and all(r["ok"] for r in rows),
+                  "rows": rows}
+    result.update({"a": str(args.a), "b": str(args.b), "tolerance": SPEED_TOLERANCE})
+    _write(Path(args.out), json.dumps(result, indent=2, sort_keys=True))
+    for row in result["rows"]:
+        print(f"{'ok  ' if row['ok'] else 'SLOW'} {row['target_tokens']} {row['metric']}: "
+              f"engine={row['engine']} reference={row['reference']} ratio={row['ratio']}",
+              file=sys.stderr)
+    return 0 if result["ok"] else 1
+
+
+# ---------------------------------------------------------------------------
+# Run records (written by the shell's exit handler)
+
+
+def _num(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def run_record(run_dir, key, variant, started, ready_at, swap_before, swap_after, status):
+    log_path = Path(run_dir) / "server.log"
+    log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    loads = [float(x) for x in re.findall(r"swap finished model=\S+ in ([0-9.]+)s", log)]
+    load = loads[0] if loads else None
+    if load is None and variant.startswith("upstream") and _num(ready_at) and _num(started):
+        load = _num(ready_at) - _num(started)
+    before, after = _num(swap_before), _num(swap_after)
+    return {"key": key, "variant": variant, "status": int(status or 0), "load_s": load,
+            "swap_before_mib": before, "swap_after_mib": after,
+            "swap_delta_mib": after - before if before is not None and after is not None else None,
+            **parse_time_l(log)}
+
+
+def cmd_runrecord(args):
+    record = run_record(args.run_dir, args.key, args.variant, args.started, args.ready_at,
+                        args.swap_before, args.swap_after, args.status)
+    _write(Path(args.run_dir) / "run.json", json.dumps(record, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_swapgrew(args):
+    """Exit 0 when the run recorded any swap growth (or could not measure it)."""
+    record = _load(args.run_json) or {}
+    if record.get("swap_before_mib") is None or record.get("swap_after_mib") is None:
+        return 0
+    return 0 if record["swap_delta_mib"] > 0 else 1
+
+
+def cmd_meta(args):
+    def sh(*cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as error:
+            return f"unavailable: {error}"
+
+    def stamp(path):
+        if not path or not os.path.exists(path):
+            return None
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(path)))
+
+    swift = sh("swift", "--version")
+    meta = {
+        "commit": sh("git", "-C", args.repo, "rev-parse", "HEAD"),
+        "branch": sh("git", "-C", args.repo, "rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": bool(sh("git", "-C", args.repo, "status", "--porcelain")),
+        "hardware": sh("sysctl", "-n", "machdep.cpu.brand_string"),
+        "memory_bytes": sh("sysctl", "-n", "hw.memsize"),
+        "macos": sh("sw_vers", "-productVersion") + " " + sh("sw_vers", "-buildVersion"),
+        "swift": swift.splitlines()[0] if swift else None,
+        "server": args.server, "server_mtime": stamp(args.server),
+        "baseline_server": args.baseline or None, "baseline_mtime": stamp(args.baseline),
+        "upstream_llama_server": args.upstream or None,
+        "argv": args.argv, "phases": args.phases,
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _write(Path(args.out), json.dumps(meta, indent=2, sort_keys=True))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -891,6 +1063,20 @@ def summarize(root):
         ]) + " |")
     lines.append("")
 
+    speeds = sorted(root.glob("speed-*.json"))
+    if speeds:
+        lines += ["## Speed bar (engine >= 95% of reference)", "",
+                  "| Comparison | Pass | Rows below the bar |", "| --- | --- | --- |"]
+        for path in speeds:
+            c = _load(path) or {}
+            slow = [f"{r['target_tokens']} {r['metric']} {r['ratio']:.3f}" if r.get("ratio")
+                    else f"{r['target_tokens']} {r['metric']} n/a"
+                    for r in c.get("rows", []) if not r.get("ok")]
+            slow += [f"missing {m}" for m in c.get("missing", [])]
+            lines.append(f"| {c.get('label') or path.stem} | {_fmt(bool(c.get('ok')))} | "
+                         f"{', '.join(slow) or '-'} |")
+        lines.append("")
+
     comparisons = sorted(root.glob("identity-*.json"))
     if comparisons:
         lines += ["## Identity", "", "| Comparison | Identical | Differing cases |",
@@ -898,7 +1084,8 @@ def summarize(root):
         for path in comparisons:
             c = _load(path) or {}
             bad = [r["case"] for r in c.get("rows", []) if not r.get("equal")]
-            lines.append(f"| {c.get('label') or path.stem} | {_fmt(c.get('identical'))} | "
+            bad += [f"missing {m}" for m in c.get("missing", [])]
+            lines.append(f"| {c.get('label') or path.stem} | {_fmt(bool(c.get('identical')))} | "
                          f"{', '.join(bad) or '-'} |")
         lines.append("")
 
@@ -927,6 +1114,9 @@ def cmd_summary(args):
 def cmd_registry(args):
     if args.key == "all":
         print(",".join(PRODUCT_ORDER))
+        return 0
+    if args.key == "chain":
+        print(" ".join(dict.fromkeys(SWAP_CHAIN)))
         return 0
     try:
         value = model(args.key)[args.field]
@@ -983,15 +1173,46 @@ def main(argv=None):
     sp.add_argument("--pid", type=int, default=0)
     sp.add_argument("--no-release-line", action="store_true",
                     help="do not require a 'model released' log line per swap")
+    sp.add_argument("--max-single-rss-mib", type=float, default=None,
+                    help="largest single-model peak RSS; a step above it +10%% fails")
     sp.add_argument("--out", required=True)
     sp.set_defaults(func=cmd_swap)
 
-    sp = sub.add_parser("compare")
-    sp.add_argument("a")
-    sp.add_argument("b")
+    for name in ("compare", "identity"):
+        sp = sub.add_parser(name)
+        sp.add_argument("a")
+        sp.add_argument("b")
+        sp.add_argument("--label")
+        sp.add_argument("--out", required=True)
+        sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("speed")
+    sp.add_argument("a", help="engine run directory")
+    sp.add_argument("b", help="reference run directory")
     sp.add_argument("--label")
     sp.add_argument("--out", required=True)
-    sp.set_defaults(func=cmd_compare)
+    sp.set_defaults(func=cmd_speed)
+
+    sp = sub.add_parser("maxrss")
+    sp.add_argument("results")
+    sp.set_defaults(func=cmd_maxrss)
+
+    sp = sub.add_parser("runrecord")
+    sp.add_argument("run_dir")
+    for flag in ("--key", "--variant", "--started", "--ready-at", "--swap-before",
+                 "--swap-after", "--status"):
+        sp.add_argument(flag, default="")
+    sp.set_defaults(func=cmd_runrecord)
+
+    sp = sub.add_parser("swapgrew")
+    sp.add_argument("run_json")
+    sp.set_defaults(func=cmd_swapgrew)
+
+    sp = sub.add_parser("meta")
+    sp.add_argument("out")
+    for flag in ("--repo", "--server", "--baseline", "--upstream", "--argv", "--phases"):
+        sp.add_argument(flag, default="")
+    sp.set_defaults(func=cmd_meta)
 
     sp = sub.add_parser("probe")
     server(sp)

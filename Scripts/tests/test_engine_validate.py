@@ -264,7 +264,96 @@ class EndToEndTests(unittest.TestCase):
             self.assertLess(abs(reading["prompt_tokens"] - 512), 64)
 
 
+class GateTests(unittest.TestCase):
+    def write_prompts(self, directory, md5, status=200):
+        turn = {"turn": 1, "md5_nonstream": md5, "md5_stream": md5,
+                "nonstream": {"http_status": status}, "stream": {"http_status": status}}
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        (Path(directory) / "prompts.json").write_text(json.dumps({"cases": {"c": [turn]}}))
+
+    def test_missing_side_is_not_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_prompts(Path(tmp) / "a", "x")
+            out = Path(tmp) / "id.json"
+            rc = ev.main(["identity", str(Path(tmp) / "a"), str(Path(tmp) / "b"),
+                          "--label", "l", "--out", str(out)])
+            self.assertEqual(rc, 1)
+            self.assertEqual(json.loads(out.read_text())["missing"], ["b"])
+
+    def test_identical_errors_are_not_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_prompts(Path(tmp) / "a", "x", status=400)
+            self.write_prompts(Path(tmp) / "b", "x", status=400)
+            rc = ev.main(["identity", str(Path(tmp) / "a"), str(Path(tmp) / "b"),
+                          "--out", str(Path(tmp) / "id.json")])
+            self.assertEqual(rc, 1)
+
+    def test_speed_bar(self):
+        engine = [{"target_tokens": 512, "prefill_tok_s": 96.0, "decode_tok_s": 40.0}]
+        ref = [{"target_tokens": 512, "prefill_tok_s": 100.0, "decode_tok_s": 43.0}]
+        rows = {r["metric"]: r for r in ev.speed_rows(engine, ref)}
+        self.assertTrue(rows["prefill_tok_s"]["ok"])    # 0.96
+        self.assertFalse(rows["decode_tok_s"]["ok"])    # 0.93
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = ev.main(["speed", tmp, tmp, "--out", str(Path(tmp) / "s.json")])
+            self.assertEqual(rc, 1)  # no readings on either side
+
+    def test_run_record_and_swap_growth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "server.log").write_text(
+                "[t] swap finished model=m in 4.0s\n  52428800  maximum resident set size\n")
+            for after, grew in (("10.00", 1), ("10.25", 0)):
+                ev.main(["runrecord", tmp, "--key", "quick", "--variant", "engine",
+                         "--swap-before", "10.00", "--swap-after", after, "--status", "0"])
+                record = json.loads((Path(tmp) / "run.json").read_text())
+                self.assertEqual(record["load_s"], 4.0)
+                self.assertEqual(record["max_rss_bytes"], 52428800)
+                self.assertEqual(ev.main(["swapgrew", str(Path(tmp) / "run.json")]), grew)
+            ev.main(["runrecord", tmp, "--swap-before", "", "--swap-after", "1"])
+            self.assertEqual(ev.main(["swapgrew", str(Path(tmp) / "run.json")]), 0)
+
+    def test_maxrss_reads_engine_runs_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for run, value in (("quick/engine", 2 << 30), ("deep/engine", 3 << 30),
+                               ("deep/upstream", 9 << 30)):
+                (Path(tmp) / run).mkdir(parents=True)
+                (Path(tmp) / run / "run.json").write_text(json.dumps({"max_rss_bytes": value}))
+            self.assertEqual(ev.max_single_rss_mib(tmp), 3072.0)
+
+    def test_tool_round_trip_without_a_tool_call_fails(self):
+        class NoTools(FakeServer):
+            def reply(self, body):
+                body = dict(body, tools=None)
+                return FakeServer.reply(self, body)
+        with tempfile.TemporaryDirectory() as tmp, NoTools() as server:
+            rc = ev.main(["prompts", "--port", str(server.port), "--model", "m", "--out", tmp])
+            self.assertEqual(rc, 1)
+            report = json.loads((Path(tmp) / "prompts.json").read_text())
+            tool = report["cases"]["tool-roundtrip"]
+            self.assertIn("no tool call", tool[0]["differs_in"])
+            self.assertIn("skipped", tool[1])
+
+    def test_swap_rss_bound(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "server.log"
+            log.write_text("")
+            with FakeServer(log_path=log) as server:
+                rc = ev.main(["swap", "--port", str(server.port), "--log", str(log),
+                              "--pid", str(os.getpid()), "--chain", "quick,deep",
+                              "--max-single-rss-mib", "1", "--out", str(Path(tmp) / "s.json")])
+            self.assertEqual(rc, 1)
+            step = json.loads((Path(tmp) / "s.json").read_text())["steps"][1]
+            self.assertTrue(any("above one model's bound" in p for p in step["problems"]))
+
+
 class SwapLogTests(unittest.TestCase):
+    def test_release_before_start_fails(self):
+        events = ev.swap_events(
+            "[t] model released model=a\n[t] swap started from=a to=b\n"
+            "[t] swap finished model=b in 1.0s\n")
+        self.assertFalse(ev.verify_swap(events, "a", "b")["ok"])
+
     def test_release_after_finish_fails(self):
         events = ev.swap_events(
             "[t] swap started from=a to=b\n[t] swap finished model=b in 1.0s\n"
@@ -314,12 +403,41 @@ class ShellTests(unittest.TestCase):
                  "--mtp-off-env", "X=0"],
                 check=True, capture_output=True, text=True).stdout
             self.assertEqual(list(Path(tmp).iterdir()), [])
-        runs = [line for line in out.splitlines() if " run --wait 3600 ws3 " in line]
+        runs = [line for line in out.splitlines() if " run --quiet --wait 3600 ws3 " in line]
         self.assertEqual(len(runs), 13)
         self.assertTrue(all("_run" in line for line in runs))
         self.assertIn("deep engine-nomtp", out.replace("\\ ", " "))
         self.assertIn("qwen36 main", out.replace("\\ ", " "))
         self.assertNotIn("quick upstream-nomtp", out.replace("\\ ", " "))
+
+    def run_script(self, *args, env=None):
+        import os
+        return subprocess.run(["bash", str(self.SCRIPT), *args], capture_output=True, text=True,
+                              env=dict(os.environ, **(env or {})))
+
+    def test_identity_without_references_refuses_to_start(self):
+        result = self.run_script("--dry-run", "--models", "quick,qwen36")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--baseline-server (for qwen36)", result.stderr)
+        self.assertIn("--upstream-llama-server (for quick)", result.stderr)
+        ok = self.run_script("--dry-run", "--models", "quick,qwen36", "prompts")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_passthrough_cannot_leave_loopback(self):
+        for flag, value in (("--server-args", "--bind tailnet"),
+                            ("--upstream-args", "-c 4096 --host 0.0.0.0")):
+            result = self.run_script("--dry-run", "prompts", flag, value)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("may not set --bind/--host", result.stderr)
+
+    def test_existing_results_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"ENGINE_VALIDATE_LOCK": "/usr/bin/true"}
+            first = self.run_script("--results-root", tmp, "summary", env=env)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            second = self.run_script("--results-root", tmp, "summary", env=env)
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("already exists", second.stderr)
 
     def test_unknown_model_is_rejected(self):
         result = subprocess.run(["bash", str(self.SCRIPT), "--dry-run", "--models", "flashnext"],
