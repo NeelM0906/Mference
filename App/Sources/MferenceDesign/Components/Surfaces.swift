@@ -140,7 +140,8 @@ public struct MFWindowBackground: View {
         ZStack {
             Rectangle().fill(MFColor.wallpaper)
             Rectangle().fill(.regularMaterial)
-            Rectangle().fill(MFColor.canvas.opacity(0.6))
+            // The mockup window is white at 92% over the wallpaper.
+            Rectangle().fill(MFColor.surface.opacity(0.88))
         }
         .clipShape(RoundedRectangle(cornerRadius: clipped ? MFRadius.window : 0))
         .ignoresSafeArea()
@@ -152,5 +153,33 @@ extension View {
     /// Puts the frosted window background behind this view.
     public func mfWindowBackground(clipped: Bool = false) -> some View {
         background(MFWindowBackground(clipped: clipped))
+    }
+}
+
+// MARK: - Scrolling
+
+extension EnvironmentValues {
+    /// True while a view is rendered off screen (snapshots): `MFScroll` then
+    /// lays its content out in full instead of in a `ScrollView`, which
+    /// `ImageRenderer` does not draw.
+    @Entry public var mfRendersStatically = false
+}
+
+/// A vertical scroll view that snapshots can render (see `mfRendersStatically`).
+public struct MFScroll<Content: View>: View {
+    @Environment(\.mfRendersStatically) private var rendersStatically
+    let content: Content
+
+    public init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    public var body: some View {
+        if rendersStatically {
+            content
+                .frame(maxHeight: .infinity, alignment: .top)
+        } else {
+            ScrollView { content }
+        }
     }
 }
