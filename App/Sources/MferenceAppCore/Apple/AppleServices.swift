@@ -25,12 +25,12 @@ public final class AppleServices {
     /// The app's: Vision, EventKit and this Mac's Apple Mail, one calendar
     /// service and one mail source shared by the screens and Connections.
     /// Nothing is read or asked until a screen or Settings needs it.
-    public static func live(engine: any EngineServicing, broker: any PermissionBroker,
-                            container: ModelContainer) -> AppleServices {
+    public static func live(engine: any EngineServicing, broker: any PermissionBroker, container: ModelContainer,
+                            plannerStore: PlannerStore = .live()) -> AppleServices {
         let assistant = AppleModelService.live(engine: engine)
         let calendarService = EventKitService(broker: broker)
         let mailSource = AppleMailSource()
-        let calendar = CalendarWeekModel(service: calendarService, store: PlannerStore.live())
+        let calendar = CalendarWeekModel(service: calendarService, store: plannerStore)
         let mail = MailInboxModel(source: mailSource, context: container.mainContext, assistant: assistant,
                                   drafter: MailReplyDrafter(engine: engine), sender: AppleMailSender(broker: broker),
                                   broker: broker,
