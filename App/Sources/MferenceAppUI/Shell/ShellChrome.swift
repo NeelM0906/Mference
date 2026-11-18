@@ -130,9 +130,9 @@ struct ShellChromeBar: View {
 struct ShellWindowButtonsPlaceholder: View {
     var body: some View {
         HStack(spacing: ShellMetrics.windowButtonSpacing) {
-            Circle().fill(MFColor.danger.opacity(0.75))
-            Circle().fill(MFColor.preview.opacity(0.45))
-            Circle().fill(MFColor.success.opacity(0.6))
+            Circle().fill(Color(nsColor: .systemRed))
+            Circle().fill(Color(nsColor: .systemYellow))
+            Circle().fill(Color(nsColor: .systemGreen))
         }
         .frame(width: ShellMetrics.windowButtonsSize.width, height: ShellMetrics.windowButtonsSize.height)
         .padding(.trailing, MFSpacing.xs + 2)
