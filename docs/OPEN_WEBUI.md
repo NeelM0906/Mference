@@ -188,8 +188,7 @@ qwen3.6-35b-a3b         mference  19551395114  /Users/you/llm-models/qwen36.gtur
 ```
 
 `ENGINE` is what runs the model (`mference` or `llama.cpp`), and `BYTES` is the
-installed size the verified-install receipt records, or `-` when the receipt
-carries no sizes. Nothing is loaded and no port is bound. With
+model's size on disk: every file of the install, or the GGUF file. Nothing is loaded and no port is bound. With
 nothing installed the output is the single line `no models installed`, and the
 launcher adds the command that fixes that. Directories discovery declined —
 partial, locked, or gated installs — are reported on stderr with the reason.
@@ -353,19 +352,24 @@ family's identifier —
 `deepseek-v4-flash-2bit-dq`, `inkling-small-4bit`, `maple-preview-2bit-mlx`,
 `qwen3.8-flash-next-int4g64`, `minicpm5-2b-int4g64`.
 
-When two installs share a family, **both** are suffixed with their directory
-basename minus `.gturbo`, and neither keeps the bare identifier. So
+A product model keeps its stable identifier under `--catalog all` too, and is
+served from the install chosen as described above (`--model`, then the
+earliest root, then the install named after the model). Every other install of
+the same family is suffixed with its directory basename minus `.gturbo`. So
 `qwen36.gturbo` and `qwen36-ourquant.gturbo` under the same root become:
 
 ```text
-qwen3.6-35b-a3b@qwen36
+qwen3.6-35b-a3b
 qwen3.6-35b-a3b@qwen36-ourquant
 ```
 
-If two installs of one family also share a basename (the same directory name
-under two roots), the second and later get a `#2`, `#3`, … suffix in path order.
-Assignment depends only on the set of installs found, not on the order the roots
-were given, so reordering `--library` does not rename anything.
+When two installs of a family that is not a product model are found, **both**
+are suffixed with their basename and neither keeps the bare identifier. If two
+installs of one family also share a basename (the same directory name under
+two roots), the second and later get a `#2`, `#3`, … suffix in path order.
+Because the served install of a product model follows root order, reordering
+`--library` can change which install answers to the stable identifier; the
+suffixed identifiers depend only on the set of installs found.
 
 `--model-id` is refused in library mode: one override cannot name several
 models.

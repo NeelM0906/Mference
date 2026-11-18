@@ -8,9 +8,10 @@ import MferenceEngine
 /// (`EngineCatalogDiscovery`): the product models by default, every runnable
 /// install with `--catalog all`. Two server-side adjustments follow:
 ///
-/// - A model whose engine has no backend in this build (the GGUF product
-///   models until the llama.cpp backend is linked) is declined rather than
-///   listed, so `/v1/models` never offers a model every request would fail on.
+/// - A model whose engine has no backend in this build (the GGUF models until
+///   the llama.cpp backend is linked) is declined rather than listed, so
+///   `/v1/models` never offers a model every request would fail on; every
+///   GGUF then says so, whatever else discovery said about it.
 /// - A declined install's reason names the server's switch, `--catalog all`,
 ///   where the engine says "the developer catalog scope".
 public enum ServerEngineCatalog {
@@ -24,10 +25,18 @@ public enum ServerEngineCatalog {
     public static func servable(_ catalog: EngineCatalog,
                                 engines: Set<EngineKind>) -> EngineCatalog {
         var models: [EngineModelDescriptor] = []
-        var skipped = catalog.skipped.map {
-            EngineCatalogSkip(location: $0.location,
-                              reason: $0.reason.replacingOccurrences(of: engineScopeHint, with: allScopeHint),
-                              modelID: $0.modelID)
+        var skipped = catalog.skipped.map { skip -> EngineCatalogSkip in
+            // A GGUF the product catalog declined would be declined again by
+            // --catalog all without a llama.cpp backend: say what is missing.
+            if !engines.contains(.llamaCpp), skip.location.pathExtension.lowercased() == "gguf" {
+                return EngineCatalogSkip(location: skip.location,
+                                         reason: "no llama.cpp backend in this build",
+                                         modelID: skip.modelID)
+            }
+            return EngineCatalogSkip(location: skip.location,
+                                     reason: skip.reason.replacingOccurrences(of: engineScopeHint,
+                                                                              with: allScopeHint),
+                                     modelID: skip.modelID)
         }
         for model in catalog.models {
             if engines.contains(model.engine) {

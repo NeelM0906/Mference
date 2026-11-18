@@ -103,7 +103,8 @@ private let libraryInstalls: [String: ModelFamily] = [
     "/models/gemma4.gturbo": .gemma4,
 ]
 private let libraryGGUFs = ["/models/gguf": ["Qwen3.5-4B-UD-Q4_K_XL.gguf",
-                                             "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"]]
+                                             "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+                                             "Some-Other-Model.Q4_K_M.gguf"]]
 
 private func servingLibrary(_ arguments: [String],
                             installs: [String: ModelFamily] = libraryInstalls,
@@ -128,6 +129,8 @@ struct ServerEngineCatalogTests {
         // The GGUF product models wait for a llama.cpp backend, and say so.
         #expect(catalog.unavailableReason(for: "qwen3.5-4b") == "no llama.cpp backend in this build")
         #expect(catalog.unavailableReason(for: "qwen3.8-27b") == "no llama.cpp backend in this build")
+        // So does a non-product GGUF: --catalog all would not help without it.
+        #expect(catalog.unavailableReason(for: "some-other-model.q4_k_m") == "no llama.cpp backend in this build")
         // Installs the product does not offer name the server's switch.
         let flashNext = try #require(catalog.unavailableReason(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs"))
         #expect(flashNext.hasSuffix("--catalog all lists it"))
@@ -147,6 +150,23 @@ struct ServerEngineCatalogTests {
         // GGUF context defaults to 32768, native to --max-context.
         #expect(library.snapshot.modelList.data.map(\.maxModelLen)
                 == [16_384, 16_384, 32_768, 16_384, 32_768])
+    }
+
+    /// The server's flags reach the engine host, and the default backend is
+    /// the engine's own `NativeBackend` (nothing is loaded here).
+    @Test func servingPassesTheFlagsAndDefaultsToTheNativeBackend() throws {
+        let arguments = try ServerArguments.parse(["--library", "--max-context", "8192",
+                                                    "--prompt-cache-mode", "off"])
+        let library = ServerModelLibrary.serving(
+            roots: [URL(fileURLWithPath: "/models", isDirectory: true)],
+            arguments: arguments,
+            ggufDirectories: [URL(fileURLWithPath: "/models/gguf", isDirectory: true)],
+            fileSystem: fakeFileSystem(installs: libraryInstalls, ggufs: libraryGGUFs))
+        #expect(library.host.loadOptions == arguments.engineLoadOptions)
+        #expect(library.snapshot.catalog.models.map(\.id)
+                == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.6-35b-a3b"])
+        #expect(library.snapshot.modelList.data.allSatisfy { $0.maxModelLen == 8_192 })
+        #expect(library.snapshot.unavailableReason(for: "qwen3.5-4b") == "no llama.cpp backend in this build")
     }
 
     @Test func allScopeListsEveryRunnableInstall() throws {
@@ -196,8 +216,8 @@ struct ServerEngineCatalogTests {
         #expect(lines.dropFirst().allSatisfy { $0.contains("mference") && $0.contains("42") })
         #expect(ServerLibraryListing.text(for: .empty) == ServerLibraryListing.emptyListing)
         let onlyOthers = try servingLibrary(["--library"], installs: ["/models/gemma4.gturbo": .gemma4])
-        // The two GGUF files without a backend are not counted: --catalog all
-        // would not list them either.
+        // The GGUF files (two product, one other) are not counted: without a
+        // llama.cpp backend --catalog all would not list them either.
         #expect(onlyOthers.listing == "no product models installed (1 other install; --catalog all lists them)")
     }
 
