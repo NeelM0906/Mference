@@ -94,6 +94,40 @@ struct LlamaTokenIdentityTraceTests {
             #expect(!tokens.isEmpty)
             try "{\"phys_footprint_bytes\": \(Self.footprint().current)}\n"
                 .write(to: directory.appendingPathComponent("memory.json"), atomically: true, encoding: .utf8)
+
+            // A tool loop's next prompt extends what the context holds, so it
+            // reuses that prefix. Record the reuse and whether the warm result
+            // equals a cold one (it may legitimately differ: a different prefill
+            // split can change the last bits of a logit).
+            if let call = completion.toolCalls.first {
+                let followUp = EngineRequest(
+                    messages: messages + [
+                        MFTokenizer.Message(role: .assistant, content: completion.content,
+                                            toolCalls: [MFTokenizer.HistoricalToolCall(
+                                                id: call.id, name: call.name, arguments: call.arguments)]),
+                        MFTokenizer.Message(role: .tool, content: #"{"temperature": 18, "condition": "cloudy"}"#,
+                                            toolCallID: call.id),
+                    ],
+                    tools: tools, generationConfig: GenerationConfig(temperature: 0),
+                    maximumCompletionTokens: maxTokens, reasoningEffort: thinking ? .xhigh : nil)
+                let warm = try await model.generate(try await model.prepare(followUp)) { _ in }
+                let warmTokens = await model.lastSampledTokens
+                await model.discardCachedPrompt()
+                let cold = try await model.generate(try await model.prepare(followUp)) { _ in }
+                let coldTokens = await model.lastSampledTokens
+                let reuse: [String: Any] = [
+                    "prompt_tokens": warm.usage.promptTokens,
+                    "warm_cached_prompt_tokens": warm.usage.cachedPromptTokens ?? 0,
+                    "cold_cached_prompt_tokens": cold.usage.cachedPromptTokens ?? 0,
+                    "warm_prefill_seconds": warm.timings.prefillSeconds ?? 0,
+                    "cold_prefill_seconds": cold.timings.prefillSeconds ?? 0,
+                    "warm_equals_cold_tokens": warmTokens == coldTokens,
+                    "warm_content": warm.content,
+                ]
+                try JSONSerialization.data(withJSONObject: reuse, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: directory.appendingPathComponent("prefix-reuse.json"))
+                #expect((warm.usage.cachedPromptTokens ?? 0) > 0)
+            }
         }
         await model.unload()
         let footprint = Self.footprint()
