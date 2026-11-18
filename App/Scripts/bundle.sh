@@ -104,11 +104,18 @@ done
 # here: a missing or mismatched cache exits non-zero with the fix
 # (`App/Scripts/searxng/prepare.sh --fetch`), and bundle.sh stops.
 SEARXNG_PREPARE="$APP_DIR/Scripts/searxng/prepare.sh"
+# The call is exactly U3's (notes/chat.md "bundle.sh and SearXNG"): offline,
+# also the script's default, spelled out.
 if [[ -x "$SEARXNG_PREPARE" ]]; then
     if ! "$SEARXNG_PREPARE" --offline; then
         echo "bundle.sh: SearXNG is not prepared; see the line above (run its --fetch once), then bundle again." >&2
         exit 1
     fi
+else
+    echo "bundle.sh: App/Scripts/searxng/prepare.sh is not in this checkout: Mference.app ships without web search." >&2
+fi
+if [[ ! -x "$RESOURCES_SRC/SearXNG/runtime/python/bin/python3" ]]; then
+    echo "bundle.sh: no SearXNG runtime under App/Resources/SearXNG/runtime: Mference.app ships without web search." >&2
 fi
 
 STAGING="$OUT_DIR/Mference.app.staging"
