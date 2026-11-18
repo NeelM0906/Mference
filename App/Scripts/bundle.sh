@@ -43,7 +43,7 @@ build=1
 for arg in "$@"; do
     case "$arg" in
         --no-build) build=0 ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
         *) echo "bundle.sh: unknown argument: $arg" >&2; exit 64 ;;
     esac
 done
@@ -74,7 +74,7 @@ if [[ "$build" == 1 ]]; then
     fi
 fi
 
-BIN_DIR="$(swift build -c release --package-path "$APP_DIR" --show-bin-path)"
+BIN_DIR="$(swift build -c release --package-path "$APP_DIR" --disable-automatic-resolution --show-bin-path)"
 EXECUTABLE="$BIN_DIR/MferenceMac"
 [[ -x "$EXECUTABLE" ]] || { echo "bundle.sh: $EXECUTABLE not found; build first" >&2; exit 1; }
 for required in Mference_Mference Mference_LlamaCpp; do
@@ -94,24 +94,26 @@ for resource_bundle in "$BIN_DIR"/*.bundle; do
     case "$(basename "$resource_bundle")" in
         *Tests*.bundle|*Test.bundle) continue ;;
     esac
-    ditto "$resource_bundle" "$STAGING/Contents/Resources/$(basename "$resource_bundle")"
+    ditto --norsrc --noextattr "$resource_bundle" "$STAGING/Contents/Resources/$(basename "$resource_bundle")"
 done
 shopt -u nullglob
 
 if [[ -d "$RESOURCES_SRC/Fonts" ]]; then
-    ditto "$RESOURCES_SRC/Fonts" "$STAGING/Contents/Resources/Fonts"
+    ditto --norsrc --noextattr "$RESOURCES_SRC/Fonts" "$STAGING/Contents/Resources/Fonts"
 fi
 
 # SearXNG hook (U3), see the header.
 if [[ -d "$RESOURCES_SRC/SearXNG" ]]; then
-    ditto "$RESOURCES_SRC/SearXNG" "$STAGING/Contents/Resources/SearXNG"
+    ditto --norsrc --noextattr "$RESOURCES_SRC/SearXNG" "$STAGING/Contents/Resources/SearXNG"
     while IFS= read -r -d '' candidate; do
-        if file -b "$candidate" | grep -q 'Mach-O'; then
+        if [[ "$(file -b "$candidate")" == *Mach-O* ]]; then
             codesign --force --sign - --timestamp=none "$candidate"
         fi
     done < <(find "$STAGING/Contents/Resources/SearXNG" -type f -print0)
 fi
 
+# Extended attributes (quarantine, Finder info) break the seal.
+xattr -cr "$STAGING"
 codesign --force --sign - --timestamp=none \
     --entitlements "$RESOURCES_SRC/Mference.entitlements" \
     "$STAGING"

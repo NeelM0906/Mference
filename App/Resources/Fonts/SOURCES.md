@@ -21,5 +21,5 @@ App Program spec decision P6.
 
 `Scripts/bundle.sh` copies this directory to `Mference.app/Contents/Resources/Fonts`;
 `MFFontRegistry.registerBundledFonts()` registers the four faces for the
-process at launch so `MFFont` resolves to Geist. `GeistFontTests` checks the
-hashes above against the files.
+process at launch so `MFFont` resolves to Geist. `DesignFontTests` checks each
+file's hash against its row above.

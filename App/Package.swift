@@ -65,7 +65,7 @@ let package = Package(
             swiftSettings: appSwiftSettings),
         .testTarget(
             name: "MferenceAppUITests",
-            dependencies: ["MferenceAppUI", "MferenceAppCore", "MferenceDesign"],
+            dependencies: ["MferenceAppUI", "MferenceAppCore", "MferenceDesign", "MferenceMac"],
             swiftSettings: uiSwiftSettings),
     ]
 )
