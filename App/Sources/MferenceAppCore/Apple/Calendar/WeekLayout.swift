@@ -95,6 +95,21 @@ public struct WeekLayout: Sendable {
         return result
     }
 
+    /// Events the hour grid cannot show, by day: all-day ones and timed
+    /// ones entirely before or after the hours shown. The view lists them
+    /// above the grid so the week never looks freer than it is.
+    public func outsideGrid(weekStart: Date, events: [CalendarEvent]) -> [Int: [CalendarEvent]] {
+        var result = allDayEvents(weekStart: weekStart, events: events)
+        for event in events where !event.isAllDay {
+            let block = place(.event(event), start: event.start, end: event.end, weekStart: weekStart)
+            guard block == nil else { continue }
+            let day = calendar.dateComponents([.day], from: calendar.startOfDay(for: weekStart),
+                                              to: calendar.startOfDay(for: event.start)).day ?? -1
+            if (0..<days).contains(day) { result[day, default: []].append(event) }
+        }
+        return result.mapValues { $0.sorted { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) } }
+    }
+
     private func place(_ kind: WeekBlock.Kind, start: Date, end: Date, weekStart: Date) -> WeekBlock? {
         let day = calendar.dateComponents([.day], from: calendar.startOfDay(for: weekStart),
                                           to: calendar.startOfDay(for: start)).day ?? -1
