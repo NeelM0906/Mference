@@ -112,8 +112,10 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         let services = AppServices.preview()
         let context = services.modelContainer.mainContext
         let memory = LiveMemoryListModel(store: MemoryStore(context: context))
-        _ = try MemoryStore(context: context).learn("Partner: Lena",
-                                                   from: .chat(id: UUID(), title: "Lisbon", isPrivate: false))
+        let chat = Conversation(title: "Lisbon")
+        context.insert(chat)
+        try context.save()
+        _ = try MemoryStore(context: context).learn("Partner: Lena", from: .chat(id: chat.id))
         #expect(await eventually { memory.memories.map(\.text) == ["Partner: Lena"] })
     }
 
