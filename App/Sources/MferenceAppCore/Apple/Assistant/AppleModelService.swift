@@ -30,8 +30,9 @@ public protocol AppleModelServicing: Sendable {
     /// Receipt fields read from recognized text; the person confirms them.
     func fillReceipt(from recognizedText: String) async throws -> AssistantResult<ReceiptDraft>
     /// A meeting the mail asks for, if any (for the event card in Mail).
-    func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone) async throws
-        -> AssistantResult<MailEventSuggestion?>
+    /// `allowFallback` false asks Apple's model only (automatic, on open).
+    func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone, allowFallback: Bool)
+        async throws -> AssistantResult<MailEventSuggestion?>
 }
 
 /// Apple's on-device model first; Quick through the engine when Apple
@@ -137,12 +138,12 @@ public struct AppleModelService: AppleModelServicing {
         }
     }
 
-    public func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone) async throws
-        -> AssistantResult<MailEventSuggestion?> {
+    public func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone,
+                             allowFallback: Bool) async throws -> AssistantResult<MailEventSuggestion?> {
         let prompt = AssistantPrompts.eventPrompt(subject: subject, body: body, received: received, timeZone: timeZone)
         let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.mailEvent),
                                        prompt: prompt, maximumTokens: 120)
-        return try await run(request) { answer -> MailEventSuggestion?? in
+        return try await run(request, models: allowFallback ? candidates : [primary]) { answer -> MailEventSuggestion?? in
             guard let object = AssistantAnswerParser.jsonObject(in: answer) else { return nil }
             // Only an explicit "no meeting" (no title) is a valid empty
             // answer; a meeting whose times do not parse is unreadable, so
@@ -199,6 +200,12 @@ public struct AppleModelService: AppleModelServicing {
 }
 
 extension AppleModelServicing {
+    /// Asks any available model (Apple's, else Quick).
+    public func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone) async throws
+        -> AssistantResult<MailEventSuggestion?> {
+        try await suggestEvent(subject: subject, body: body, received: received, timeZone: timeZone, allowFallback: true)
+    }
+
     /// Sorts with any available model (Apple's, else Quick).
     public func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket]) async throws
         -> AssistantResult<[String: String]> {
