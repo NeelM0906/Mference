@@ -245,8 +245,10 @@ public final class MailInboxModel {
     }
 
     private func suggestEvent(for message: MailMessageSummary, body: MailBody) async {
+        // Automatic: Apple's model only, never Quick over the chat model.
         guard let result = try? await assistant.suggestEvent(subject: message.subject, body: body.text,
-                                                              received: message.date, timeZone: timeZone),
+                                                              received: message.date, timeZone: timeZone,
+                                                              allowFallback: false),
               let suggestion = result.value, selected?.messageID == message.messageID else { return }
         let name = message.senderName.split(separator: " ").first.map(String.init) ?? message.senderAddress
         eventCard = ProposedEvent(title: suggestion.title, start: suggestion.start, end: suggestion.end,
