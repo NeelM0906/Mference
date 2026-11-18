@@ -62,6 +62,12 @@ public final class ShellModel {
         hasCompletedOnboarding = defaults?.bool(forKey: Self.onboardingKey) ?? false
     }
 
+    /// First run shows until it is completed, and only once a model library
+    /// is wired (it has nothing to install without one).
+    public func needsOnboarding(hasLibrary: Bool) -> Bool {
+        hasLibrary && !hasCompletedOnboarding
+    }
+
     /// Marks first run as done and remembers it.
     public func completeOnboarding() {
         hasCompletedOnboarding = true

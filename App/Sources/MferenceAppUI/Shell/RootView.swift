@@ -30,7 +30,7 @@ public struct RootView: View {
 
     /// First run shows until it is completed, once a model library is wired.
     private var showsOnboarding: Bool {
-        !model.hasCompletedOnboarding && screenModels?.library != nil
+        model.needsOnboarding(hasLibrary: screenModels?.library != nil)
     }
 
     public var body: some View {
