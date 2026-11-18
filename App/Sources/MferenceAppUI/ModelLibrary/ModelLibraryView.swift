@@ -306,7 +306,7 @@ struct DownloadBanner: View {
         HStack(spacing: MFSpacing.comfortable) {
             VStack(alignment: .leading, spacing: MFSpacing.xxs) {
                 Text("\(paused ? "Paused" : "Downloading") \(entry.title)")
-                    .font(MFFont.bodySemibold)
+                    .font(MFFont.headline)
                     .foregroundStyle(MFColor.ink)
                 Text(detail)
                     .font(MFFont.callout)
