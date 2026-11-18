@@ -36,7 +36,7 @@ public struct RootView: View {
     public var body: some View {
         if showsOnboarding, let library = screenModels?.library {
             OnboardingView(library: library) { model.completeOnboarding() }
-                .frame(minWidth: ShellMetrics.minimumWindow.width, minHeight: ShellMetrics.minimumWindow.height)
+                .frame(minWidth: MFLayout.minimumWindow.width, minHeight: MFLayout.minimumWindow.height)
                 .preferredColorScheme(model.appearance.colorScheme)
         } else {
             shell
