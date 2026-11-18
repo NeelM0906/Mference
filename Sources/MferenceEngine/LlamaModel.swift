@@ -26,11 +26,8 @@ actor LlamaModel: EngineModel {
     private let batchSize: Int
     private let abortFlag = LlamaAbortFlag()
 
-    /// The tokens the context's memory holds, in order, when
-    /// `cacheIsTrusted`. A request that fails or is cancelled leaves it
-    /// untrusted, and the next one starts from an empty memory.
-    private var cachedTokens: [Int32] = []
-    private var cacheIsTrusted = true
+    /// What the context's memory holds, for prompt-prefix reuse.
+    private var promptCache = LlamaPromptCache()
     /// Every token the last generation sampled, the end-of-generation token
     /// included. Kept for the token-identity checks against upstream tools.
     private(set) var lastSampledTokens: [Int32] = []
@@ -137,7 +134,7 @@ actor LlamaModel: EngineModel {
     /// prefills from scratch (used by the token-identity checks, which compare
     /// cold runs with the upstream tools).
     func discardCachedPrompt() {
-        cacheIsTrusted = false
+        promptCache.invalidate()
     }
 
     func unload() async {
@@ -145,7 +142,7 @@ actor LlamaModel: EngineModel {
         context = nil
         drafter?.free()
         contextOwner.free()
-        cachedTokens = []
+        promptCache.invalidate()
         handle.free()
     }
 
@@ -215,9 +212,8 @@ actor LlamaModel: EngineModel {
             // MTP: llama.cpp's speculative loop owns both memories and starts
             // from empty ones (no prefix reuse).
             reused = 0
-            cachedTokens = []
             // From here until a clean return, the memory may hold anything.
-            cacheIsTrusted = false
+            promptCache.invalidate()
             let prefillStart = clock.now
             let status = prompt.withUnsafeBufferPointer { buffer in
                 mference_mtp_begin(mtp, buffer.baseAddress, Int32(buffer.count),
@@ -255,10 +251,13 @@ actor LlamaModel: EngineModel {
             draftProposed = proposed
             draftAccepted = accepted
         } else {
-            // The reusable prefix is read while the cache is still trusted;
-            // from here until a clean return, the memory may hold anything.
-            reused = reusablePrefix(of: prompt, context: context)
-            cacheIsTrusted = false
+            // Decides what to reuse, trims or clears the memory to match, and
+            // leaves the cache untrusted until a clean return.
+            let memory = llama_get_memory(context)
+            reused = promptCache.begin(
+                prompt: prompt,
+                trim: { llama_memory_seq_rm(memory, 0, llama_pos($0), -1) },
+                clear: { llama_memory_clear(memory, true) })
             let prefillStart = clock.now
             var position = reused
             while position < prompt.count {
@@ -296,9 +295,9 @@ actor LlamaModel: EngineModel {
         let finishReason: EngineFinishReason =
             !assembler.toolCalls.isEmpty ? .toolCalls : (hitLimit && !assembler.isStopped ? .length : .stop)
         let counts = decoder.payloadTokenCounts
-        // The plain path's memory now holds exactly `cachedTokens`; the MTP
-        // loop's is not tracked, so the next request starts from empty.
-        cacheIsTrusted = drafter == nil
+        // The plain path's memory now holds exactly what the cache recorded;
+        // the MTP loop's is not tracked, so the next request starts from empty.
+        if drafter == nil { promptCache.commit() }
         return EngineCompletion(
             content: assembler.content,
             reasoningContent: reasoning.isEmpty ? nil : reasoning,
@@ -314,29 +313,6 @@ actor LlamaModel: EngineModel {
                                    draftTokensAccepted: draftAccepted))
     }
 
-    /// How many leading prompt tokens the memory already holds, after trimming
-    /// whatever follows them. The memory is cleared when it is untrusted or
-    /// cannot be trimmed (a recurrent state cannot roll back). At least one
-    /// prompt token is always left to decode, for its logits.
-    private func reusablePrefix(of prompt: [Int32], context: OpaquePointer) -> Int {
-        let memory = llama_get_memory(context)
-        var common = 0
-        if cacheIsTrusted {
-            let limit = min(cachedTokens.count, prompt.count - 1)
-            while common < limit, cachedTokens[common] == prompt[common] { common += 1 }
-        }
-        if cacheIsTrusted, common == cachedTokens.count {
-            return common
-        }
-        if cacheIsTrusted, common > 0, llama_memory_seq_rm(memory, 0, llama_pos(common), -1) {
-            cachedTokens.removeLast(cachedTokens.count - common)
-            return common
-        }
-        llama_memory_clear(memory, true)
-        cachedTokens = []
-        return 0
-    }
-
     private func decode(_ tokens: [Int32], context: OpaquePointer) throws {
         var tokens = tokens
         let status = tokens.withUnsafeMutableBufferPointer { buffer in
@@ -344,7 +320,57 @@ actor LlamaModel: EngineModel {
         }
         if status == 2 || abortFlag.isSet { throw CancellationError() }
         guard status == 0 else { throw LlamaBackendError.decodeFailed(status) }
-        cachedTokens += tokens
+        promptCache.append(tokens)
+    }
+}
+
+/// The tokens a llama.cpp context's memory holds, for prompt-prefix reuse.
+///
+/// A request calls `begin` once: it decides how much of the new prompt the
+/// memory already holds (while the record is still trusted), trims or clears
+/// the memory to match, and only then marks the record untrusted. Decoded
+/// tokens are `append`ed, and `commit` trusts the record again after a clean
+/// finish; a request that fails or is cancelled never commits, so the next one
+/// starts from an empty memory. At least one prompt token is always left to
+/// decode, for its logits.
+struct LlamaPromptCache {
+    private(set) var tokens: [Int32] = []
+    private(set) var isTrusted = true
+
+    /// Returns how many leading prompt tokens are reused. `trim(n)` drops
+    /// everything from position `n` on and reports whether the memory could
+    /// (a recurrent state cannot roll back); `clear()` empties it.
+    mutating func begin(prompt: [Int32], trim: (Int) -> Bool, clear: () -> Void) -> Int {
+        defer { isTrusted = false }
+        var common = 0
+        if isTrusted {
+            let limit = min(tokens.count, prompt.count - 1)
+            while common < limit, tokens[common] == prompt[common] { common += 1 }
+            if common == tokens.count {
+                return common
+            }
+            if common > 0, trim(common) {
+                tokens.removeLast(tokens.count - common)
+                return common
+            }
+        }
+        clear()
+        tokens = []
+        return 0
+    }
+
+    mutating func append(_ decoded: [Int32]) {
+        tokens += decoded
+    }
+
+    mutating func commit() {
+        isTrusted = true
+    }
+
+    /// Forgets the record; the next `begin` clears the memory.
+    mutating func invalidate() {
+        isTrusted = false
+        tokens = []
     }
 }
 

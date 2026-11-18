@@ -153,6 +153,74 @@ struct LlamaBackendTests {
         #expect(events.all == [.toolCall(call)])
     }
 
+    // MARK: Prompt-prefix reuse
+
+    /// A committed record is reused when the next prompt extends it: `begin`
+    /// must read the record before it marks it untrusted.
+    @Test func promptCacheReusesAnExtendedPrompt() {
+        var cache = LlamaPromptCache()
+        var cleared = 0
+        #expect(cache.begin(prompt: [1, 2, 3], trim: { _ in true }, clear: { cleared += 1 }) == 0)
+        cache.append([1, 2, 3, 7, 8])
+        cache.commit()
+        let reused = cache.begin(prompt: [1, 2, 3, 7, 8, 9, 10],
+                                 trim: { _ in Issue.record("no trim for an extension"); return false },
+                                 clear: { cleared += 1 })
+        #expect(reused == 5)
+        // an empty record over an empty memory needs no clear either
+        #expect(cleared == 0)
+        #expect(!cache.isTrusted)
+    }
+
+    @Test func promptCacheClearsAfterAnUncommittedRequest() {
+        var cache = LlamaPromptCache()
+        _ = cache.begin(prompt: [1, 2], trim: { _ in true }, clear: {})
+        cache.append([1, 2, 5])
+        // no commit: the request failed or was cancelled
+        var cleared = false
+        #expect(cache.begin(prompt: [1, 2, 5, 6], trim: { _ in true }, clear: { cleared = true }) == 0)
+        #expect(cleared)
+        #expect(cache.tokens.isEmpty)
+    }
+
+    @Test func promptCacheTrimsOrClearsADivergentPrompt() {
+        var cache = LlamaPromptCache()
+        _ = cache.begin(prompt: [1], trim: { _ in true }, clear: {})
+        cache.append([1, 2, 3, 4])
+        cache.commit()
+        var trimmedAt: Int?
+        #expect(cache.begin(prompt: [1, 2, 9, 9], trim: { trimmedAt = $0; return true }, clear: {}) == 2)
+        #expect(trimmedAt == 2)
+        #expect(cache.tokens == [1, 2])
+
+        cache.commit()
+        var cleared = false
+        // a recurrent state that cannot roll back
+        #expect(cache.begin(prompt: [1, 7], trim: { _ in false }, clear: { cleared = true }) == 0)
+        #expect(cleared)
+    }
+
+    @Test func promptCacheLeavesOneTokenToDecode() {
+        var cache = LlamaPromptCache()
+        _ = cache.begin(prompt: [1], trim: { _ in true }, clear: {})
+        cache.append([1, 2, 3])
+        cache.commit()
+        var trimmedAt: Int?
+        #expect(cache.begin(prompt: [1, 2, 3], trim: { trimmedAt = $0; return true }, clear: {}) == 2)
+        #expect(trimmedAt == 2)
+    }
+
+    @Test func promptCacheInvalidateForgetsTheRecord() {
+        var cache = LlamaPromptCache()
+        _ = cache.begin(prompt: [1], trim: { _ in true }, clear: {})
+        cache.append([1, 2])
+        cache.commit()
+        cache.invalidate()
+        var cleared = false
+        #expect(cache.begin(prompt: [1, 2, 3], trim: { _ in true }, clear: { cleared = true }) == 0)
+        #expect(cleared)
+    }
+
     // MARK: Sampling
 
     /// Request values beyond Int32 (validated as any nonnegative Int) must
