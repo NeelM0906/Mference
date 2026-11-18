@@ -53,6 +53,19 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("(incremental)", result.stdout)
         self.assertNotIn("if missing", result.stdout)
 
+    def test_no_browser_and_no_build(self):
+        result = self.run_launcher("--dry-run")
+        self.assertIn("would open:", result.stdout)
+        self.assertIn("would build:", result.stdout)
+        result = self.run_launcher("--no-browser", "--no-build", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("would open:", result.stdout)
+        self.assertNotIn("would build:", result.stdout)
+        self.assertIn("(--no-browser)", result.stdout)
+        self.assertIn("as built (--no-build)", result.stdout)
+        result = self.run_launcher("models", "--no-build", "--dry-run")
+        self.assertNotIn("would build:", result.stdout)
+
     def test_catalog_is_passed_to_the_server_and_the_listing(self):
         result = self.run_launcher("--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -427,6 +427,79 @@ class TraceParityTests(unittest.TestCase):
             self.assertEqual(report["rows"][0]["differs_in"], ["content"])
 
 
+class FakeOpenWebUI:
+    """Open WebUI's no-auth sign-in, model list, and chat endpoint."""
+
+    def __init__(self, models, fail_model=None):
+        outer = self
+        self.models, self.fail_model, self.chats = models, fail_model, []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _json(self, status, body):
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.headers.get("Authorization") != "Bearer t0k":
+                    return self._json(401, {"detail": "no"})
+                self._json(200, {"data": [{"id": m} for m in outer.models]})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == "/api/v1/auths/signin":
+                    return self._json(200, {"token": "t0k", "role": "admin"})
+                outer.chats.append(body["model"])
+                if body["model"] == outer.fail_model:
+                    return self._json(500, {"detail": "boom"})
+                self._json(200, {"choices": [{"message": {"content": "Paris."}}]})
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class UITests(unittest.TestCase):
+    ALL = [ev.model(k)["id"] for k in ev.PRODUCT_ORDER]
+
+    def test_one_chat_per_model(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL) as ui:
+            rc = ev.main(["ui", "--port", str(ui.port), "--out", tmp])
+            self.assertEqual(rc, 0)
+            self.assertEqual(ui.chats, self.ALL)
+            report = json.loads((Path(tmp) / "ui.json").read_text())
+            self.assertTrue(all(c["ok"] for c in report["chats"]))
+            (Path(tmp) / "meta.json").write_text("{}")
+            (Path(tmp) / "ui").mkdir()
+            (Path(tmp) / "ui" / "ui.json").write_text(json.dumps(report))
+            self.assertIn("## Open WebUI", ev.summarize(tmp))
+
+    def test_missing_model_or_failed_chat_fails(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL[:-1]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, fail_model=self.ALL[0]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+
+    def test_rss_tree(self):
+        table = [(1, 0, 10), (2, 1, 20), (3, 2, 30), (4, 9, 99)]
+        self.assertEqual(ev.rss_tree_kb(1, table), 60)
+        self.assertIsNone(ev.rss_tree_kb(7, table))
+
+
 class SwapLogTests(unittest.TestCase):
     def test_release_before_start_fails(self):
         events = ev.swap_events(
@@ -564,6 +637,12 @@ class ShellTests(unittest.TestCase):
             (Path(tmp) / "cases.tsv").write_text("")
             result = self.run_script(*base, "--models", "quick", "--trace", f"quick={tmp}/trace")
             self.assertIn("has no cases", result.stderr)
+
+    def test_ui_phase_is_one_hold(self):
+        result = self.run_script("--dry-run", "ui", "--port", "8095")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runs = [l for l in result.stdout.splitlines() if "_run quick ui" in l]
+        self.assertEqual(len(runs), 1)
 
     def test_unknown_model_is_rejected(self):
         result = subprocess.run(["bash", str(self.SCRIPT), "--dry-run", "--models", "flashnext"],

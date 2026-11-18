@@ -28,6 +28,10 @@
 #              cold server, must equal the trace (content, reasoning, tool
 #              calls, finish reason, token count); then one warm pass over all
 #              cases on one server, reported but not gated
+#   ui         ./mference-ui.sh --no-browser --no-build as one model hold:
+#              Open WebUI lists the five models and completes one chat per
+#              model through its own API; the RSS of the whole UI stack
+#              (launcher, MferenceServer, Open WebUI) is sampled
 #   summary    rebuild summary.md from what is on disk
 #
 # Not covered here: G5 through MferenceCLI (the CLI does not use the engine),
@@ -46,9 +50,14 @@
 #                                (default: -c 32768 -ngl 99 -np 1 --jinja)
 #   --upstream-mtp-args "<args>" added for the Deep MTP-on upstream run
 #   --mtp-off-args "<args>"      MferenceServer arguments that turn Deep MTP off
-#   --mtp-off-env "<K=V ...>"    environment that turns Deep MTP off
+#   --mtp-off-env "<K=V ...>"    environment that turns Deep MTP off; for
+#                                MferenceServer that is the diagnostic toggle
+#                                MFERENCE_DRAFT_DECODING=off (not a supported
+#                                control; unset, MTP stays on for Deep)
 #   --extra '<json>'             merged into every request body
 #   --port <n>                   loopback port (default 8091)
+#   --ui-port <n>                Open WebUI port for the ui phase (default
+#                                port + 1000)
 #   --runs <n>                   readings per prompt size (default 2)
 #   --results-root <dir>         default $PROGRAM/results; an existing
 #                                <date>-<sha> directory is refused
@@ -212,7 +221,7 @@ run_one() {
   # Preflight, inside the lock: general checks, then every model this run loads.
   "$LOCK" preflight >"$RUN_DIR/preflight.txt" 2>&1 \
     || { cat "$RUN_DIR/preflight.txt" >&2; refuse "preflight failed"; }
-  if [ "$variant" = swap ]; then
+  if [ "$variant" = swap ] || [ "$variant" = ui ]; then
     local chain_key
     local chain_keys
     if [ -n "$SWAP_CHAIN" ]; then chain_keys=${SWAP_CHAIN//,/ }
@@ -256,6 +265,15 @@ $others"
       # Last, so nothing passed through can override the loopback binding.
       args+=(--host 127.0.0.1 --port "$PORT")
       ;;
+    ui)
+      # The launcher is the hold's one command; it starts MferenceServer and
+      # Open WebUI and stops both on TERM. It must not build (--no-build).
+      binary="$repo_root/mference-ui.sh"
+      args=(--no-browser --no-build --build-path "${SERVER%/release/MferenceServer}"
+            --data-dir "$RUN_DIR/webui-data" --server-port "$PORT" --webui-port "$UI_PORT")
+      [ -x "$SERVER" ] || fail "server binary not found: $SERVER"
+      if lsof -nP -iTCP:"$UI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then refuse "port $UI_PORT is already in use"; fi
+      ;;
     *) fail "unknown variant $variant" ;;
   esac
 
@@ -283,7 +301,8 @@ $others"
   local ready=0
   for i in $(seq 1 3600); do
     kill -0 "$SERVER_PID" 2>/dev/null || break
-    if curl --silent --fail --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    if [ "$variant" = ui ]; then ready_url="http://127.0.0.1:$UI_PORT/"; else ready_url="http://127.0.0.1:$PORT/health"; fi
+    if curl --silent --fail --max-time 2 "$ready_url" >/dev/null 2>&1; then
       ready=1; break
     fi
     sleep 0.5
@@ -292,7 +311,10 @@ $others"
   READY_AT=$(python3 -c 'import time; print(time.time())')
 
   local rc=0
-  if [ "${variant#trace-}" != "$variant" ]; then
+  if [ "$variant" = ui ]; then
+    "${checker[@]}" ui --port "$UI_PORT" --pid "$SERVER_PID" --out "$RUN_DIR" || rc=$?
+    RUN_STATUS=$rc
+  elif [ "${variant#trace-}" != "$variant" ]; then
     # No probe: the case's own request must be the first this server sees.
     local trace_dir; trace_dir=$(trace_dir_for "$key")
     [ -n "$trace_dir" ] || fail "no --trace for $key"
@@ -371,6 +393,7 @@ SWAP_CHAIN=""
 TRACE_CASES=""
 TRACES=""
 TRACE_MAX_TOKENS=256
+UI_PORT=""
 
 if [ "${1:-}" = _run ]; then
   shift
@@ -386,6 +409,7 @@ if [ "${1:-}" = _run ]; then
   SWAP_CHAIN=${ENGINE_VALIDATE_SWAP_CHAIN:-}
   TRACE_CASES=${ENGINE_VALIDATE_TRACE_CASES:-} TRACES=${ENGINE_VALIDATE_TRACES:-}
   TRACE_MAX_TOKENS=${ENGINE_VALIDATE_TRACE_MAX_TOKENS:-256}
+  UI_PORT=${ENGINE_VALIDATE_UI_PORT:-}
   run_one "$@"
 fi
 
@@ -413,9 +437,10 @@ while [ $# -gt 0 ]; do
     --trace-cases) TRACE_CASES=$2; shift 2 ;;
     --trace) TRACES="${TRACES:+$TRACES }$2"; shift 2 ;;
     --trace-max-tokens) TRACE_MAX_TOKENS=$2; shift 2 ;;
+    --ui-port) UI_PORT=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    models|prompts|readings|identity|swap|trace|summary) PHASES+=("$1"); shift ;;
+    -h|--help) sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    models|prompts|readings|identity|swap|trace|ui|summary) PHASES+=("$1"); shift ;;
     *) fail "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -430,6 +455,8 @@ if [ -n "$SWAP_CHAIN" ]; then
   for key in "${chain_check[@]}"; do "${checker[@]}" registry "$key" id >/dev/null || exit 2; done
 fi
 case "$PORT" in ''|*[!0-9]*) fail "--port must be a number" ;; esac
+[ -n "$UI_PORT" ] || UI_PORT=$((PORT + 1000))
+case "$UI_PORT" in ''|*[!0-9]*) fail "--ui-port must be a number" ;; esac
 for passthrough in "$SERVER_ARGS" "$UPSTREAM_ARGS" "$UPSTREAM_MTP_ARGS" "$MTP_OFF_ARGS"; do
   check_loopback_args "$passthrough"
 done
@@ -521,6 +548,9 @@ if [ "$DRY_RUN" = 1 ]; then
   if want swap; then
     lock_cmd "eng validate swap chain" "$script_dir/engine-validate.sh" _run quick swap "$RESULTS/swap"
   fi
+  if want ui; then
+    lock_cmd "eng validate ui" "$script_dir/engine-validate.sh" _run quick ui "$RESULTS/ui"
+  fi
   if want trace; then
     for key in "${MODEL_KEYS[@]}"; do
       [ -n "$(trace_dir_for "$key")" ] || continue
@@ -549,7 +579,7 @@ if [ "$BUILD" = 1 ]; then
     || fail "build failed or the quiet flag is set; stop and wait"
 fi
 needs_server=0
-for p in models prompts readings identity swap trace; do if want "$p"; then needs_server=1; fi; done
+for p in models prompts readings identity swap trace ui; do if want "$p"; then needs_server=1; fi; done
 if [ "$needs_server" = 1 ]; then
   [ -x "$SERVER" ] || fail "server binary not found: $SERVER (build it, or pass --build)"
 fi
@@ -570,7 +600,7 @@ export ENGINE_VALIDATE_EXTRA="$EXTRA" ENGINE_VALIDATE_PORT="$PORT" ENGINE_VALIDA
 export ENGINE_VALIDATE_RESULTS="$RESULTS" ENGINE_VALIDATE_NO_RELEASE_LINE="$NO_RELEASE_LINE"
 export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN"
 export ENGINE_VALIDATE_TRACE_CASES="$TRACE_CASES" ENGINE_VALIDATE_TRACES="$TRACES"
-export ENGINE_VALIDATE_TRACE_MAX_TOKENS="$TRACE_MAX_TOKENS"
+export ENGINE_VALIDATE_TRACE_MAX_TOKENS="$TRACE_MAX_TOKENS" ENGINE_VALIDATE_UI_PORT="$UI_PORT"
 
 abort() {
   "${checker[@]}" summary "$RESULTS" >/dev/null 2>&1 || true
@@ -603,6 +633,10 @@ fi
 
 if want swap; then
   locked_run "eng validate swap chain" quick swap "$RESULTS/swap"
+fi
+
+if want ui; then
+  locked_run "eng validate ui" quick ui "$RESULTS/ui"
 fi
 
 if want trace; then

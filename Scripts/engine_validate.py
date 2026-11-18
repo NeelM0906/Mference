@@ -571,6 +571,32 @@ def rss_kb(pid):
         return None
 
 
+def rss_tree_kb(root_pid, table=None):
+    """RSS of a process and all its descendants, in KiB: the whole UI stack
+    (launcher, MferenceServer, Open WebUI) counts toward memory."""
+    if table is None:
+        try:
+            out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss="], capture_output=True,
+                                 text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        table = [tuple(int(x) for x in line.split()) for line in out.splitlines()
+                 if len(line.split()) == 3]
+    children = {}
+    rss = {}
+    for pid, ppid, kb in table:
+        children.setdefault(ppid, []).append(pid)
+        rss[pid] = kb
+    if root_pid not in rss:
+        return None
+    total, stack = 0, [root_pid]
+    while stack:
+        pid = stack.pop()
+        total += rss.get(pid, 0)
+        stack.extend(children.get(pid, []))
+    return total
+
+
 def parse_swapusage(text):
     """`used` from `sysctl -n vm.swapusage`, in MiB."""
     m = re.search(r"used\s*=\s*([0-9.]+)([MG])", text or "")
@@ -592,8 +618,9 @@ def swap_used_mib():
 class Sampler:
     """Samples the server's RSS and system swap while a block runs."""
 
-    def __init__(self, pid, interval=0.25):
+    def __init__(self, pid, interval=0.25, tree=False):
         self.pid = pid
+        self.tree = tree
         self.interval = interval
         self.peak_rss_kb = 0
         self.swap_start = None
@@ -612,7 +639,7 @@ class Sampler:
         ticks = 0
         while not self._stop.is_set():
             if self.pid:
-                value = rss_kb(self.pid)
+                value = rss_tree_kb(self.pid) if self.tree else rss_kb(self.pid)
                 if value:
                     self.peak_rss_kb = max(self.peak_rss_kb, value)
             if ticks % 8 == 0:
@@ -1006,6 +1033,80 @@ def cmd_traceparity(args):
 
 
 # ---------------------------------------------------------------------------
+# Open WebUI (section 8 item 6): one chat per model through the UI's own API
+
+
+UI_QUESTION = "In one short sentence: what is the capital of France?"
+
+
+def ui_request(host, port, method, path, token=None, payload=None, timeout=3600.0):
+    _check_host(host)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        conn.request(method, path, body=json.dumps(payload).encode() if payload is not None else None,
+                     headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", "replace")
+    finally:
+        conn.close()
+    try:
+        return resp.status, json.loads(raw), raw
+    except ValueError:
+        return resp.status, None, raw
+
+
+def cmd_ui(args):
+    """Signs in through Open WebUI's no-auth session (what its frontend does
+    with WEBUI_AUTH off), checks the model list, and completes one chat per
+    model through Open WebUI, which forwards each to MferenceServer."""
+    out = Path(args.out)
+    expected = [model(k) for k in args.expect.split(",") if k]
+    report = {"chats": [], "problems": []}
+    status, body, raw = ui_request(args.host, args.port, "POST", "/api/v1/auths/signin",
+                                   payload={"email": "", "password": ""})
+    token = (body or {}).get("token") if status == 200 else None
+    if not token:
+        report["problems"].append(f"sign-in failed: HTTP {status}: {raw[:200]}")
+    else:
+        status, body, raw = ui_request(args.host, args.port, "GET", "/api/models", token)
+        listed = sorted(m.get("id") for m in (body or {}).get("data", []) if isinstance(m, dict))
+        report["listed"] = listed
+        missing = [m["id"] for m in expected if m["id"] not in listed]
+        if status != 200 or missing:
+            report["problems"].append(f"/api/models HTTP {status}, missing {missing}")
+        for entry in expected:
+            started = time.perf_counter()
+            with Sampler(args.pid, tree=True) as sampler:
+                status, body, raw = ui_request(args.host, args.port, "POST", "/api/chat/completions", token,
+                                               {"model": entry["id"], "stream": False,
+                                                "messages": [{"role": "user", "content": UI_QUESTION}]},
+                                               timeout=args.timeout)
+            message = (((body or {}).get("choices") or [{}])[0].get("message") or {})
+            answer = message.get("content") or ""
+            reasoning = message.get("reasoning_content") or ""
+            chat = {"model": entry["id"], "http_status": status, "seconds": time.perf_counter() - started,
+                    "content": answer, "reasoning_chars": len(reasoning), **sampler.report(),
+                    "ok": status == 200 and bool(answer.strip() or reasoning.strip())}
+            if not chat["ok"]:
+                chat["raw"] = raw[:2000]
+            report["chats"].append(chat)
+            print(f"[ui] {entry['id']}: HTTP {status} {chat['seconds']:.1f}s "
+                  f"peak_rss={chat['peak_rss_mib']}MiB {answer[:80]!r}", file=sys.stderr, flush=True)
+            if sampler.swap_grew:
+                report["swap_trip"] = True
+                break
+    report["ok"] = not report["problems"] and bool(report["chats"]) and \
+        all(c["ok"] for c in report["chats"]) and len(report["chats"]) == len(expected)
+    _write(out / "ui.json", json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False))
+    if report.get("swap_trip"):
+        return SWAP_TRIP
+    return 0 if report["ok"] else 1
+
+
+# ---------------------------------------------------------------------------
 # Speed bar (section 8 item 4): engine no more than 5% slower than reference
 
 
@@ -1235,6 +1336,19 @@ def summarize(root):
                              f"{', '.join(row.get('differs_in') or []) or '-'} |")
         lines.append("")
 
+    ui = _load(root / "ui" / "ui.json")
+    if ui:
+        lines += ["## Open WebUI (one chat per model)", "",
+                  "| Model | HTTP | OK | Seconds | Peak RSS of the UI stack MiB | Answer |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for chat in ui.get("chats", []):
+            answer = (chat.get("content") or "").replace("|", "/").replace("\n", " ")[:80]
+            lines.append(f"| {chat['model']} | {chat['http_status']} | {_fmt(bool(chat['ok']))} | "
+                         f"{_fmt(chat.get('seconds'))} | {_fmt(chat.get('peak_rss_mib'))} | {answer or '-'} |")
+        for problem in ui.get("problems", []):
+            lines.append(f"\nUI problem: {problem}")
+        lines.append("")
+
     swap = _load(root / "swap" / "swap.json")
     if swap:
         lines += ["## Swap chain", "", "| From | To | OK | Load s | Peak RSS MiB | Swap grew | Problems |",
@@ -1331,6 +1445,13 @@ def main(argv=None):
         sp.add_argument("--label")
         sp.add_argument("--out", required=True)
         sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("ui")
+    server(sp)
+    sp.add_argument("--pid", type=int, default=0, help="launcher PID; its whole process tree is sampled")
+    sp.add_argument("--expect", default=",".join(PRODUCT_ORDER))
+    sp.add_argument("--out", required=True)
+    sp.set_defaults(func=cmd_ui)
 
     sp = sub.add_parser("tracecases")
     sp.add_argument("cases")
