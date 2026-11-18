@@ -12,6 +12,7 @@ let package = Package(
     ],
     products: [
         .library(name: "Mference", targets: ["Mference"]),
+        .library(name: "MferenceEngine", targets: ["MferenceEngine"]),
         .executable(name: "MferenceRepack", targets: ["MferenceRepack"]),
         .executable(name: "MferenceCLI", targets: ["MferenceCLI"]),
         .executable(name: "MferenceServer", targets: ["MferenceServer"]),
@@ -59,6 +60,7 @@ let package = Package(
             name: "MferenceServerCore",
             dependencies: [
                 "Mference",
+                "MferenceEngine",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -69,6 +71,11 @@ let package = Package(
             name: "MferenceServer",
             dependencies: ["MferenceServerCore"],
             path: "Sources/MferenceServer/Command"
+        ),
+        .target(
+            name: "MferenceEngine",
+            dependencies: ["Mference"],
+            path: "Sources/MferenceEngine"
         ),
         .target(
             name: "MferenceValidationSupport",
@@ -96,10 +103,16 @@ let package = Package(
             name: "MferenceServerTests",
             dependencies: [
                 "MferenceServerCore",
+                "MferenceEngine",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             path: "Tests/MferenceServer",
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "MferenceEngineTests",
+            dependencies: ["MferenceEngine", "Mference"],
+            path: "Tests/MferenceEngine"
         ),
     ]
 )
