@@ -52,6 +52,7 @@ public struct RootView: View {
             // The chrome reads the screen's toolbar items in the same pass
             // (works in ImageRenderer snapshots).
             SectionContent(section: model.selection)
+                .environment(model)
                 .padding(.top, ShellMetrics.chromeHeight)
                 .overlayPreferenceValue(ShellToolbarKey.self, alignment: .top) { items in
                     ShellChromeBar(model: model, items: items)
@@ -60,6 +61,7 @@ public struct RootView: View {
             .preferredColorScheme(model.appearance.colorScheme)
         case .toolbar:
             SectionContent(section: model.selection)
+                .environment(model)
                 .onPreferenceChange(ShellToolbarKey.self) { items in
                     Task { @MainActor in toolbarItems = items }
                 }
@@ -96,11 +98,20 @@ public struct RootView: View {
 /// The screen for one section.
 struct SectionContent: View {
     let section: AppSection
+    @Environment(ShellModel.self) private var shell: ShellModel?
+    /// The app's one chat model (U3), kept for the app's lifetime so switching
+    /// pills does not drop a running answer. Absent in snapshots.
+    @Environment(ChatViewModel.self) private var chat: ChatViewModel?
 
     var body: some View {
         Group {
             switch section {
-            case .chat: ChatView()
+            case .chat:
+                if let chat {
+                    ChatView(model: chat, actions: chatActions)
+                } else {
+                    SectionPlaceholderView(section: .chat)
+                }
             case .mail: MailView()
             case .calendar: CalendarView()
             case .scan: ScanView()
@@ -110,6 +121,14 @@ struct SectionContent: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .id(section)
+    }
+
+    /// Where chat hands off: Settings (Memory, the model library) and other
+    /// sections (suggestion chips such as "Scan a receipt").
+    private var chatActions: ChatActions {
+        ChatActions(openMemorySettings: { shell?.show(.settings) },
+                    openModelLibrary: { shell?.show(.settings) },
+                    openSection: { shell?.show($0) })
     }
 }
 
