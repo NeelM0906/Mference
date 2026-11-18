@@ -3,11 +3,11 @@ import MferenceDesign
 import SwiftUI
 
 /// Settings (`08-settings.png`): Models, Memory, Privacy, Connections on one
-/// scrolling page with a section sidebar; the model library (`08b`) opens
-/// from Models. Phase C and D rows (dictation, errands, payments, other mail
-/// providers, iPhone) are shown as "Later".
+/// scrolling page with a section sidebar that follows the scroll; the model
+/// library (`08b`) opens from Models. Phase C and D rows (dictation, errands,
+/// payments, other mail providers, iPhone) are shown as "Later".
 public struct SettingsView: View {
-    public enum Pane: String, CaseIterable, Identifiable, Sendable {
+    public enum Pane: String, CaseIterable, Identifiable, Hashable, Sendable {
         case models, memory, privacy, connections, dictation, shortcuts, iPhone
 
         public var id: String { rawValue }
@@ -29,28 +29,34 @@ public struct SettingsView: View {
     let memory: (any MemoryListModel)?
     let settings: (any AppSettingsModel)?
 
-    @State var pane: Pane
     @State var showsLibrary: Bool
-    @State private var details: ModelEntry?
+    @State private var position: ScrollPosition
+    @State private var detailsID: String?
     @State private var pendingDownload: ModelEntry?
     @State private var editing: MemoryEditTarget?
+    @State private var pendingDelete: MemoryEntry?
     @State private var showsAllMemories = false
+    @Environment(\.mfRendersStatically) private var rendersStatically
 
-    /// The live models come from the app environment (U2, U4); a nil input
-    /// shows that section's honest empty state.
+    /// A nil input shows that section's honest "not available yet" state.
     public init(library: (any ModelLibraryModel)? = nil, memory: (any MemoryListModel)? = nil,
                 settings: (any AppSettingsModel)? = nil, pane: Pane = .models, showsLibrary: Bool = false) {
         self.library = library
         self.memory = memory
         self.settings = settings
-        _pane = State(initialValue: pane)
+        _position = State(initialValue: ScrollPosition(id: pane, anchor: .top))
         _showsLibrary = State(initialValue: showsLibrary)
     }
+
+    /// The section at the top of the page (the sidebar's selection).
+    private var currentPane: Pane { position.viewID(type: Pane.self) ?? .models }
+
+    private var offline: Bool { settings?.offlineMode ?? false }
 
     public var body: some View {
         HStack(spacing: 0) {
             sidebar
-            Rectangle().fill(MFColor.hairline).frame(width: 1)
+            Rectangle().fill(MFColor.hairline).frame(width: MFLayout.hairline)
             if showsLibrary, let library {
                 VStack(alignment: .leading, spacing: 0) {
                     Button {
@@ -59,22 +65,21 @@ public struct SettingsView: View {
                         Label("Settings", systemImage: "chevron.left")
                     }
                     .buttonStyle(MFPillButtonStyle())
-                    .padding(.horizontal, SettingsMetrics.pagePadding.width - MFSpacing.m)
+                    .accessibilityLabel("Back to Settings")
+                    .padding(.horizontal, SettingsMetrics.backButtonInset)
                     .padding(.top, MFSpacing.m)
-                    ModelLibraryView(library: library)
+                    ModelLibraryView(library: library, downloadsAllowed: !offline)
                 }
             } else {
                 page
             }
         }
-        .sheet(item: $details) { ModelDetailsSheet(entry: $0) }
+        .sheet(item: Binding(get: { detailsID.map(DetailsTarget.init) }, set: { detailsID = $0?.id })) { target in
+            if let library { ModelDetailsSheet(library: library, id: target.id) }
+        }
         .sheet(item: $editing) { target in
             MemoryEditor(target: target) { text in
-                guard let memory else { return }
-                switch target {
-                case .new: memory.add(text)
-                case .existing(let entry): memory.update(entry.id, text: text)
-                }
+                if let memory { Self.save(target, text: text, in: memory) }
             }
         }
         .confirmationDialog(
@@ -82,10 +87,30 @@ public struct SettingsView: View {
             isPresented: Binding(get: { pendingDownload != nil }, set: { if !$0 { pendingDownload = nil } }),
             presenting: pendingDownload
         ) { entry in
-            Button("Download") { library?.download(entry.id) }
+            Button("Download") { if let library { ModelLibraryView.approveDownload(entry, in: library) } }
             Button("Not now", role: .cancel) {}
         } message: { entry in
             Text(ModelLibraryView.approvalMessage(for: entry))
+        }
+        .confirmationDialog(
+            pendingDelete.map { "Delete “\($0.text)”?" } ?? "",
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            presenting: pendingDelete
+        ) { entry in
+            Button("Delete", role: .destructive) { memory?.delete(entry.id) }
+            Button("Keep", role: .cancel) {}
+        } message: { _ in
+            Text("Mference forgets it on this Mac. This can't be undone.")
+        }
+    }
+
+    /// Saves the memory editor's text: a new item or an edit.
+    static func save(_ target: MemoryEditTarget, text: String, in memory: any MemoryListModel) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        switch target {
+        case .new: memory.add(text)
+        case .existing(let entry): memory.update(entry.id, text: text)
         }
     }
 
@@ -95,53 +120,58 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: MFSpacing.xxs) {
             ForEach(Pane.allCases) { item in
                 Button {
-                    pane = item
                     showsLibrary = false
+                    withAnimation { position.scrollTo(id: item, anchor: .top) }
                 } label: {
                     Text(item.title)
-                        .font(item == pane ? MFFont.callout.weight(.medium) : MFFont.callout)
+                        .font(item == currentPane ? MFFont.bodySmallEmphasis : MFFont.bodySmall)
                         .foregroundStyle(MFColor.ink)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, MFSpacing.m - 2)
-                        .padding(.vertical, MFSpacing.s - 1)
-                        .background(RoundedRectangle(cornerRadius: MFRadius.s).fill(item == pane ? MFColor.fill : .clear))
+                        .padding(.horizontal, MFSpacing.compact)
+                        .padding(.vertical, SettingsMetrics.sidebarRowPadding)
+                        .background(RoundedRectangle(cornerRadius: MFRadius.s)
+                            .fill(item == currentPane ? MFColor.sidebarSelected : .clear))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(item == pane ? .isSelected : [])
+                .accessibilityAddTraits(item == currentPane ? .isSelected : [])
             }
             Spacer()
         }
-        .padding(.horizontal, MFSpacing.m - 2)
-        .padding(.vertical, MFSpacing.m + 2)
+        .padding(.horizontal, MFSpacing.compact)
+        .padding(.vertical, MFSpacing.comfortable)
         .frame(width: SettingsMetrics.sidebarWidth)
         .frame(maxHeight: .infinity)
-        .background(MFColor.canvas.opacity(0.6))
+        .background(MFColor.sidebar)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Settings sections")
     }
 
     // MARK: Page
 
+    private var sections: some View {
+        VStack(alignment: .leading, spacing: SettingsMetrics.sectionSpacing) {
+            modelsSection.id(Pane.models)
+            memorySection.id(Pane.memory)
+            privacySection.id(Pane.privacy)
+            connectionsSection.id(Pane.connections)
+            dictationSection.id(Pane.dictation)
+            shortcutsSection.id(Pane.shortcuts)
+            iPhoneSection.id(Pane.iPhone)
+        }
+        .scrollTargetLayout()
+        .padding(.horizontal, SettingsMetrics.pagePadding.width)
+        .padding(.vertical, SettingsMetrics.pagePadding.height)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
     private var page: some View {
-        ScrollViewReader { proxy in
-            MFScroll {
-                VStack(alignment: .leading, spacing: SettingsMetrics.sectionSpacing) {
-                    modelsSection.id(Pane.models)
-                    memorySection.id(Pane.memory)
-                    privacySection.id(Pane.privacy)
-                    connectionsSection.id(Pane.connections)
-                    dictationSection.id(Pane.dictation)
-                    shortcutsSection.id(Pane.shortcuts)
-                    iPhoneSection.id(Pane.iPhone)
-                }
-                .padding(.horizontal, SettingsMetrics.pagePadding.width)
-                .padding(.vertical, SettingsMetrics.pagePadding.height)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .onChange(of: pane, initial: true) { _, pane in
-                withAnimation { proxy.scrollTo(pane, anchor: .top) }
-            }
+        if rendersStatically {
+            MFScroll { sections }
+        } else {
+            ScrollView { sections }
+                .scrollPosition($position)
         }
     }
 
@@ -150,7 +180,7 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: MFSpacing.m) {
             VStack(alignment: .leading, spacing: MFSpacing.xs) {
                 Text(title)
-                    .font(MFFont.headline)
+                    .font(MFFont.sectionTitle)
                     .foregroundStyle(MFColor.ink)
                     .accessibilityAddTraits(.isHeader)
                 Text(subtitle)
@@ -164,14 +194,13 @@ public struct SettingsView: View {
 
     // MARK: Models
 
-    static let quickID = OnboardingView.quickID
-    static let deepID = OnboardingView.deepID
-
     private var modelsSection: some View {
         section("Models", modelsSubtitle) {
             MFCard {
                 if let library {
-                    ForEach(library.entries.filter { $0.id == Self.quickID || $0.id == Self.deepID }) { entry in
+                    ForEach(library.entries.filter {
+                        $0.id == AppModel.quick.modelID || ($0.id == AppModel.deep.modelID && ($0.state.isInstalled || $0.isOffered(on: library.machine)))
+                    }) { entry in
                         modelRow(entry, isDefault: entry.id == library.defaultModelID)
                     }
                     MFListRow("All models", subtitle: "\(library.entries.filter(\.state.isInstalled).count) on this Mac. Default model, unload when idle (\(ModelLibraryView.idleText(library.idleUnloadMinutes))), details.") {
@@ -179,7 +208,7 @@ public struct SettingsView: View {
                             .buttonStyle(.mfSecondary)
                     }
                 } else {
-                    MFListRow("Models", subtitle: "Looking for models on this Mac…")
+                    MFListRow("Models", subtitle: "Not available in this build yet.")
                 }
                 MFListRow("Choose the model for me",
                           subtitle: "Coming later. For now you choose the model for each chat yourself.") {
@@ -211,32 +240,45 @@ public struct SettingsView: View {
     }
 
     private func modelRow(_ entry: ModelEntry, isDefault: Bool) -> some View {
-        MFListRow(entry.title, subtitle: modelRowSubtitle(entry)) {
+        MFListRow(entry.title, subtitle: Self.modelRowSubtitle(entry)) {
             switch entry.state {
             case .downloading(let progress):
                 MFProgressBadge("Downloading", fraction: progress.fraction)
-                Button("Pause") { library?.pause(entry.id) }.buttonStyle(.mfSecondary)
+                Button("Pause") { library?.pause(entry.id) }
+                    .buttonStyle(.mfSecondary)
+                    .accessibilityLabel("Pause downloading \(entry.title)")
             case .paused(let progress):
                 MFProgressBadge("Paused", fraction: progress.fraction)
-                Button("Resume") { library?.resume(entry.id) }.buttonStyle(.mfSecondary)
-            case .notInstalled, .failed:
-                if case .tooLarge(let reason) = entry.fit {
-                    MFBadge(.custom(reason, .neutral))
-                } else {
+                Button("Resume") { library?.resume(entry.id) }
+                    .buttonStyle(.mfSecondary)
+                    .disabled(offline)
+                    .accessibilityLabel("Resume downloading \(entry.title)")
+            case .notInstalled, .downloadFailed:
+                ModelStatusBadge(state: entry.state)
+                Button("Download…") { pendingDownload = entry }
+                    .buttonStyle(.mfSecondary)
+                    .disabled(offline)
+                    .help(offline ? "Offline mode is on." : "Download \(entry.title)")
+                    .accessibilityLabel("Download \(entry.title)")
+            case .loaded, .ready, .loading, .loadFailed:
+                if case .loadFailed = entry.state {
                     ModelStatusBadge(state: entry.state)
-                    Button("Download…") { pendingDownload = entry }.buttonStyle(.mfSecondary)
+                } else {
+                    MFBadge(.custom(isDefault ? "Installed · default" : "Installed", .success))
                 }
-            case .loaded, .ready, .loading:
-                MFBadge(.custom(isDefault ? "Installed · default" : "Installed", .success))
-                Button("Details") { details = entry }.buttonStyle(.mfSecondary)
+                Button("Details") { detailsID = entry.id }
+                    .buttonStyle(.mfSecondary)
+                    .accessibilityLabel("Details for \(entry.title)")
             }
         }
     }
 
-    private func modelRowSubtitle(_ entry: ModelEntry) -> String {
+    /// One line; sizes never break inside ("12.1 GB" stays together).
+    static func modelRowSubtitle(_ entry: ModelEntry) -> String {
         var parts = [entry.summary.hasSuffix(".") ? String(entry.summary.dropLast()) : entry.summary]
         if let size = entry.sizeBytes {
-            parts.append("\(ModelFormat.bytes(size)) \(entry.state.isInstalled ? "on disk" : "download")")
+            let bytes = ModelFormat.bytes(size).replacingOccurrences(of: " ", with: "\u{00A0}")
+            parts.append("\(bytes) \(entry.state.isInstalled ? "on disk" : "download")")
         }
         if let licence = entry.licence { parts.append(licence) }
         return parts.joined(separator: " · ")
@@ -256,27 +298,31 @@ public struct SettingsView: View {
                     }
                     ForEach(shown) { entry in
                         MFListRow(entry.text, subtitle: entry.source) {
-                            Button("Edit") { editing = .existing(entry) }.buttonStyle(.mfSecondary)
-                            Button("Delete") { memory.delete(entry.id) }
+                            Button("Edit") { editing = .existing(entry) }
+                                .buttonStyle(.mfSecondary)
+                                .accessibilityLabel("Edit “\(entry.text)”")
+                            Button("Delete") { pendingDelete = entry }
                                 .buttonStyle(.mfSecondary)
                                 .accessibilityLabel("Delete “\(entry.text)”")
                         }
                     }
                     HStack(spacing: MFSpacing.m) {
                         Text(all.count > shown.count ? "\(all.count - shown.count) more" : "\(all.count) remembered")
-                            .font(MFFont.caption)
+                            .font(MFFont.rowSubtitle)
                             .foregroundStyle(MFColor.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         if all.count > SettingsMetrics.memoryPreview {
                             Button(showsAllMemories ? "Show fewer" : "Show all") { showsAllMemories.toggle() }
                                 .buttonStyle(.mfSecondary)
                         }
-                        Button("Add") { editing = .new }.buttonStyle(.mfSecondary)
+                        Button("Add") { editing = .new }
+                            .buttonStyle(.mfSecondary)
+                            .accessibilityLabel("Add a memory")
                     }
                     .padding(.horizontal, MFSpacing.l)
                     .padding(.vertical, MFSpacing.m)
                 } else {
-                    MFListRow("Memory is loading", subtitle: "Your remembered items appear here.")
+                    MFListRow("Memory", subtitle: "Not available in this build yet.")
                 }
             }
         }
@@ -288,11 +334,13 @@ public struct SettingsView: View {
         section("Privacy", "No account and no usage reporting. There is nothing to opt out of.") {
             MFCard {
                 MFListRow("Web search through SearXNG",
-                          subtitle: "Off until you turn it on. Only your search queries leave this Mac. Runs as a bundled SearXNG on this Mac.") {
+                          subtitle: offline
+                            ? "Off while offline mode is on."
+                            : "Off until you turn it on. Only your search queries leave this Mac. Runs as a bundled SearXNG on this Mac.") {
                     settingToggle("Web search through SearXNG", .webSearchEnabled)
                 }
                 MFListRow("Offline mode",
-                          subtitle: "Turns off web search and mail sync. Chat and scanning keep working.") {
+                          subtitle: "Turns off web search, model downloads and mail sync. Chat and scanning keep working.") {
                     settingToggle("Offline mode", .offlineMode)
                 }
                 MFListRow("Block remote images and trackers in mail",
@@ -332,17 +380,37 @@ public struct SettingsView: View {
         }
     }
 
+    /// What a connection row shows on the right.
+    enum ConnectionDisplay: Equatable {
+        case connected, connectButton, openSystemSettings, notConnected
+    }
+
+    /// Without a wired settings model the row says "Not connected" (honest:
+    /// nothing is connected), never "Later": Mail and Calendar are Phase B.
+    static func connectionDisplay(_ state: ConnectionState?) -> ConnectionDisplay {
+        switch state {
+        case .connected: .connected
+        case .notConnected: .connectButton
+        case .needsSystemSettings: .openSystemSettings
+        case nil: .notConnected
+        }
+    }
+
     private func connectionRow(_ kind: ConnectionKind, title: String, subtitle: String) -> some View {
         MFListRow(title, subtitle: subtitle) {
-            switch settings?.connectionState(kind) ?? .later {
+            switch Self.connectionDisplay(settings?.connectionState(kind)) {
             case .connected:
                 MFBadge(.custom("Connected", .success))
+            case .connectButton:
+                Button("Connect") { settings?.connect(kind) }
+                    .buttonStyle(.mfPrimary)
+                    .accessibilityLabel("Connect \(title)")
+            case .openSystemSettings:
+                Button("Open System Settings") { settings?.connect(kind) }
+                    .buttonStyle(.mfSecondary)
+                    .accessibilityLabel("Open System Settings for \(title)")
             case .notConnected:
-                Button("Connect") { settings?.connect(kind) }.buttonStyle(.mfPrimary)
-            case .needsSystemSettings:
-                Button("Open System Settings") { settings?.connect(kind) }.buttonStyle(.mfSecondary)
-            case .later:
-                MFBadge(.later)
+                MFBadge(.custom("Not connected", .neutral))
             }
         }
     }
@@ -385,11 +453,12 @@ public struct SettingsView: View {
     // MARK: Helpers
 
     private func settingToggle(_ label: String, _ setting: SettingSwitch) -> some View {
-        Toggle(label, isOn: Binding(
-            get: { settings.map(setting.get) ?? false },
+        let blocked = setting == .webSearchEnabled && offline
+        return Toggle(label, isOn: Binding(
+            get: { blocked ? false : settings.map(setting.get) ?? false },
             set: { value in if let settings { setting.set(settings, value) } }))
             .toggleStyle(.mf)
-            .disabled(settings == nil)
+            .disabled(settings == nil || blocked)
     }
 }
 
@@ -419,8 +488,10 @@ enum SettingSwitch {
 }
 
 enum SettingsMetrics {
-    static let sidebarWidth: CGFloat = 220
+    static let sidebarWidth: CGFloat = 200
+    static let sidebarRowPadding: CGFloat = 7
     static let pagePadding = CGSize(width: 30, height: 22)
+    static let backButtonInset: CGFloat = 18
     static let sectionSpacing: CGFloat = 26
     static let memoryPreview = 3
     static let editorSize = CGSize(width: 440, height: 120)
@@ -458,7 +529,7 @@ struct MemoryEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.m) {
             Text(target == .new ? "Remember something" : "Edit memory")
-                .font(MFFont.headline)
+                .font(MFFont.sectionTitle)
                 .foregroundStyle(MFColor.ink)
             if case .existing(let entry) = target {
                 Text(entry.source)
@@ -470,7 +541,7 @@ struct MemoryEditor: View {
                 .frame(width: SettingsMetrics.editorSize.width, height: SettingsMetrics.editorSize.height)
                 .padding(MFSpacing.xs)
                 .background(RoundedRectangle(cornerRadius: MFRadius.m).fill(MFColor.surface))
-                .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairlineStrong))
+                .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairlineStrong, lineWidth: MFLayout.hairline))
                 .accessibilityLabel("Memory text")
             HStack {
                 Spacer()
@@ -478,7 +549,7 @@ struct MemoryEditor: View {
                     .buttonStyle(.mfSecondary)
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
-                    onSave(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    onSave(text)
                     dismiss()
                 }
                 .buttonStyle(.mfPrimary)

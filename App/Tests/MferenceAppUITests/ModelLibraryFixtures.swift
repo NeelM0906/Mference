@@ -93,10 +93,10 @@ final class FixtureSettings: AppSettingsModel {
     var offlineMode = false
     var blockRemoteMailContent = true
     var remindersSyncEnabled = false
-    var useAppleModel = false
+    var useAppleModel = true
     var states: [ConnectionKind: ConnectionState] = [.appleMail: .connected, .appleCalendar: .notConnected]
     private(set) var connectRequests: [ConnectionKind] = []
 
-    func connectionState(_ kind: ConnectionKind) -> ConnectionState { states[kind] ?? .later }
+    func connectionState(_ kind: ConnectionKind) -> ConnectionState { states[kind] ?? .notConnected }
     func connect(_ kind: ConnectionKind) { connectRequests.append(kind) }
 }

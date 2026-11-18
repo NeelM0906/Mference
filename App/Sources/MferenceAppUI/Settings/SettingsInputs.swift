@@ -33,8 +33,6 @@ public enum ConnectionState: Sendable, Hashable {
     case connected
     /// Access was denied or needs Full Disk Access: open System Settings.
     case needsSystemSettings
-    /// Not built yet in this version.
-    case later
 }
 
 public enum ConnectionKind: String, Sendable, Hashable, CaseIterable {

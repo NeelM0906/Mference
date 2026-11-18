@@ -5,18 +5,50 @@ import SwiftUI
 import Testing
 
 @Suite struct SettingsViewTests {
+    /// Each switch reads and writes its own setting. (The shipped defaults
+    /// belong to U2's AppSettings and are tested there.)
     @Test func switchesReadAndWriteTheirSetting() {
         let settings = FixtureSettings()
-        #expect(SettingSwitch.webSearchEnabled.get(settings) == false, "web search is off by default (L7)")
-        #expect(SettingSwitch.remindersSyncEnabled.get(settings) == false, "Reminders sync is off by default (L9)")
-        SettingSwitch.webSearchEnabled.set(settings, true)
-        SettingSwitch.offlineMode.set(settings, true)
-        #expect(settings.webSearchEnabled && settings.offlineMode)
+        let all: [SettingSwitch] = [.webSearchEnabled, .offlineMode, .blockRemoteMailContent,
+                                    .remindersSyncEnabled, .useAppleModel]
+        for setting in all {
+            let before = setting.get(settings)
+            setting.set(settings, !before)
+            #expect(setting.get(settings) == !before)
+        }
+        #expect(settings.webSearchEnabled && settings.offlineMode && settings.remindersSyncEnabled)
     }
 
     @Test func paneTitlesFollowTheMockup() {
         #expect(SettingsView.Pane.allCases.map(\.title)
                 == ["Models", "Memory", "Privacy", "Connections", "Dictation", "Shortcuts", "iPhone"])
+    }
+
+    @Test func memoryAddEditDelete() throws {
+        let memory = FixtureMemory()
+        let count = memory.memories.count
+        SettingsView.save(.new, text: "  Likes window seats  ", in: memory)
+        #expect(memory.memories.count == count + 1)
+        #expect(memory.memories.first?.text == "Likes window seats")
+        SettingsView.save(.new, text: "   ", in: memory)
+        #expect(memory.memories.count == count + 1, "blank text adds nothing")
+        let first = try #require(memory.memories.first)
+        SettingsView.save(.existing(first), text: "Likes aisle seats", in: memory)
+        #expect(memory.memories.first?.text == "Likes aisle seats")
+        memory.delete(first.id)
+        #expect(memory.memories.count == count)
+    }
+
+    @Test func connectionStatesRender() {
+        #expect(SettingsView.connectionDisplay(.connected) == .connected)
+        #expect(SettingsView.connectionDisplay(.notConnected) == .connectButton)
+        #expect(SettingsView.connectionDisplay(.needsSystemSettings) == .openSystemSettings)
+        #expect(SettingsView.connectionDisplay(nil) == .notConnected, "unwired reads Not connected, never Later")
+    }
+
+    @Test func sizesStayOnOneLine() throws {
+        let deep = try #require(FixtureModelLibrary().entries.first { $0.id == AppModel.deep.modelID })
+        #expect(SettingsView.modelRowSubtitle(deep).contains("12.1\u{00A0}GB"))
     }
 
     @Test(arguments: [ColorScheme.light, .dark])
