@@ -228,8 +228,15 @@ public actor AppleMailSource: MailSource {
         let idColumn = features.globalData ? "g.message_id_header AS message_id_header" : "NULL AS message_id_header"
         let idJoin = features.globalData ? "LEFT JOIN message_global_data g ON g.ROWID = m.global_message_id" : ""
         let prefixColumn = features.subjectPrefix ? "m.subject_prefix AS subject_prefix" : "NULL AS subject_prefix"
-        // Mailbox kinds come from URLs, so filter in Swift over a bounded,
-        // newest-first window.
+        // Mailbox kinds come from URLs: pick the matching mailboxes first,
+        // then let SQL filter and limit, so a quiet mailbox (Sent) is never
+        // crowded out by newer mail elsewhere.
+        let mailboxIDs = try database.query("SELECT ROWID AS id, url FROM mailboxes").compactMap { row -> Int64? in
+            guard let id = row["id"]?.int, kinds.contains(MailboxRef(url: row["url"]?.string ?? "").kind) else { return nil }
+            return id
+        }
+        guard !mailboxIDs.isEmpty else { return [] }
+        let placeholders = Array(repeating: "?", count: mailboxIDs.count).joined(separator: ", ")
         let sql = """
             SELECT m.ROWID AS rowid, m.date_received AS date_received, m.read AS read,
                    a.address AS address, a.comment AS comment, s.subject AS subject, mb.url AS url,
@@ -239,15 +246,15 @@ public actor AppleMailSource: MailSource {
             LEFT JOIN subjects s ON s.ROWID = m.subject
             LEFT JOIN mailboxes mb ON mb.ROWID = m.mailbox
             \(summaryJoin) \(idJoin)
-            WHERE m.deleted = 0
+            WHERE m.deleted = 0 AND m.mailbox IN (\(placeholders))
             ORDER BY m.date_received DESC
             LIMIT ?
             """
-        let rows = try database.query(sql, [.integer(Int64(max(limit, 1) * 4))])
+        let rows = try database.query(sql, mailboxIDs.map { .integer($0) } + [.integer(Int64(max(limit, 1)))])
         var result: [MailMessageSummary] = []
         for row in rows {
             let mailbox = MailboxRef(url: row["url"]?.string ?? "")
-            guard kinds.contains(mailbox.kind), let rowID = row["rowid"]?.int else { continue }
+            guard let rowID = row["rowid"]?.int else { continue }
             let subject = (row["subject_prefix"]?.string ?? "") + (row["subject"]?.string ?? "")
             let header = row["message_id_header"]?.string.flatMap { $0.isEmpty ? nil : $0 }
             result.append(MailMessageSummary(
