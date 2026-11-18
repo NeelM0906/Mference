@@ -133,6 +133,13 @@ import Testing
         #expect(ModelStatusBadge.kind(for: .downloadFailed("x")).title == "Download failed")
     }
 
+    @Test func failureReasonsAreShown() {
+        #expect(ModelTableRow.failureLine(.downloadFailed("Not enough free space")) == "Download failed: Not enough free space")
+        #expect(ModelTableRow.failureLine(.loadFailed("Metal error")) == "Didn't load: Metal error")
+        #expect(ModelTableRow.failureLine(.ready) == nil)
+        #expect(ModelDetailsSheet.failure(.loadFailed("Metal error")) == "Metal error")
+    }
+
     @Test func idleText() {
         #expect(ModelLibraryView.idleText(10) == "10 minutes")
         #expect(ModelLibraryView.idleText(60) == "1 hour")
