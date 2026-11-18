@@ -15,6 +15,39 @@ struct FixedScanner: DocumentRecognizing {
     func recognize(image: CGImage) async throws -> ScanReading { reading }
 }
 
+/// Opens once; waiting ignores cancellation, like a slow Vision request.
+actor ScanTestLatch {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        waiters.forEach { $0.resume() }
+        waiters = []
+    }
+}
+
+/// Fails "slow-failing" files once `release` opens; reads the rest at once.
+struct GatedScanner: DocumentRecognizing {
+    var release: ScanTestLatch
+    var lines: [String]
+
+    func recognize(imageAt url: URL) async throws -> ScanReading {
+        if url.lastPathComponent.hasPrefix("slow-failing") {
+            await release.wait()
+            throw ScanError.noTextFound
+        }
+        return ScanReading(lines: lines.map { ScanLine(text: $0, confidence: 0.95, box: .zero) })
+    }
+
+    func recognize(image: CGImage) async throws -> ScanReading { throw ScanError.unreadableImage }
+}
+
 @Suite struct AppleScanTests {
     static func reading(_ fixture: ReceiptFixture) -> ScanReading {
         ScanReading(lines: fixture.lines.filter { !$0.isEmpty }.map { ScanLine(text: $0, confidence: 0.95, box: .zero) })
@@ -38,6 +71,16 @@ struct FixedScanner: DocumentRecognizing {
         #expect(draft.tax == Decimal(string: "3.53"))
         #expect(ReceiptHeuristics.lastAmount(in: "Qty 2 1234.50") == Decimal(string: "1234.50"))
         #expect(ReceiptHeuristics.lastAmount(in: "Item 12") == nil)
+    }
+
+    @Test func refundsKeepTheirSign() {
+        let lines = ["REFUND", "Subtotal -40.96", "Tax -$3.53", "TOTAL (44.49)"]
+        let draft = ReceiptHeuristics.read(ScanReading(lines: lines.map { ScanLine(text: $0, confidence: 1, box: .zero) }))
+        #expect(draft.total == Decimal(string: "-44.49"))
+        #expect(draft.tax == Decimal(string: "-3.53"))
+        #expect(ReceiptHeuristics.lastAmount(in: "Return 12.50-") == Decimal(string: "-12.50"))
+        #expect(ReceiptHeuristics.lastAmount(in: "Total $-6.00") == Decimal(string: "-6.00"))
+        #expect(ReceiptHeuristics.lastAmount(in: "Drill bits 1/8 - 12.50") == Decimal(string: "12.50"))
     }
 
     @Test func rowsJoinLabelsAndAmountsVisionReturnsApart() {
@@ -180,6 +223,26 @@ struct FixedScanner: DocumentRecognizing {
         #expect(session.phase == .review)
         #expect(session.fields.value(.total) == "44.49")
         #expect(session.fields.filledBy == nil)
+    }
+
+    /// The first file fails only after the second was read: the second's
+    /// fields stay on screen.
+    @Test @MainActor func aReplacedScanCannotOverwriteTheNewOne() async throws {
+        let container = try AppModelContainer.inMemory()
+        let gate = ScanTestLatch()
+        let scanner = GatedScanner(release: gate, lines: ["CORNER HARDWARE", "TOTAL 44.49"])
+        let model = ScriptedAssistantTextModel(kind: .appleOnDevice, availability: .unavailable(reason: "off"),
+                                               answer: "unused")
+        let session = ScanSession(scanner: scanner, assistant: AppleModelService(primary: model, fallback: nil),
+                                  context: container.mainContext, imageDirectory: URL.temporaryDirectory)
+        session.open(URL(filePath: "/fixtures/slow-failing.png"))
+        session.open(URL(filePath: "/fixtures/receipt.png"))
+        for _ in 0..<1_000 where session.phase != .review { await Task.yield() }
+        #expect(session.phase == .review)
+        await gate.open()
+        await session.waitForReading()
+        #expect(session.phase == .review)
+        #expect(session.fields.value(.total) == "44.49")
     }
 
     @Test func acceptsImageAndPDFFiles() {

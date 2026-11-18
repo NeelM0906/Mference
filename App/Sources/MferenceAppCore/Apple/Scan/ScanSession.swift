@@ -33,6 +33,9 @@ public final class ScanSession {
     private let context: ModelContext
     private let imageDirectory: URL
     private var readTask: Task<Void, Never>?
+    /// Every read started and not yet awaited, so tests can wait for a
+    /// replaced read to finish too.
+    @ObservationIgnored private var pendingReads: [Task<Void, Never>] = []
 
     /// `imageDirectory` keeps copies of scanned images (default: the app's
     /// Application Support folder, `Scans/`).
@@ -70,12 +73,16 @@ public final class ScanSession {
         savedRecordID = nil
         fields = ScanFields(fields: [])
         phase = .reading
-        readTask = Task { await read(url) }
+        let task = Task { await read(url) }
+        readTask = task
+        pendingReads.append(task)
     }
 
-    /// Waits for the current read (tests).
+    /// Waits for every read started so far, replaced ones included (tests).
     public func waitForReading() async {
-        await readTask?.value
+        while !pendingReads.isEmpty {
+            await pendingReads.removeFirst().value
+        }
     }
 
     private func read(_ url: URL) async {
@@ -93,12 +100,12 @@ public final class ScanSession {
             self.reading = reading
             fields = ReceiptFieldMerger.merge(model: model, text: printed, reading: reading, filledBy: filledBy)
             phase = .review
-        } catch is CancellationError {
-            return
-        } catch let error as ScanError {
-            phase = .failed(message: error.userMessage)
         } catch {
-            phase = .failed(message: ScanError.recognitionFailed(error.localizedDescription).userMessage)
+            // A replaced read may still fail after the new one finished:
+            // only the current read may change the screen.
+            guard !Task.isCancelled, !(error is CancellationError) else { return }
+            let scanError = error as? ScanError ?? .recognitionFailed(error.localizedDescription)
+            phase = .failed(message: scanError.userMessage)
         }
     }
 
