@@ -83,6 +83,10 @@ struct ScanContent: View {
                     Button("Open file", action: openFile)
                         .buttonStyle(.applePrimary)
                         .keyboardShortcut("o", modifiers: .command)
+                    Text("or paste an image with ⌘V")
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.tertiary)
+                    captureLater
                 }
                 .padding(MFSpacing.xl)
             }
@@ -93,6 +97,7 @@ struct ScanContent: View {
                     .accessibilityHidden(true)
             }
         }
+        .onPasteCommand(of: [.fileURL, .png, .tiff, .image]) { providers in paste(providers) }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
@@ -105,6 +110,43 @@ struct ScanContent: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Drop area for receipts and documents")
+    }
+
+    /// "Capture screen area" needs Screen Recording access, which Scan does
+    /// not ask for in this version (spec 4.6): shown, off, marked Later.
+    private var captureLater: some View {
+        HStack(spacing: MFSpacing.s) {
+            Button("Capture screen area") {}
+                .buttonStyle(.appleSecondary)
+                .disabled(true)
+            AppleChip(text: "Later", tone: .preview)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Capture screen area, coming later")
+    }
+
+    /// ⌘V: an image file's URL, or image data, from the clipboard.
+    private func paste(_ providers: [NSItemProvider]) {
+        guard let provider = providers.first else { return }
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in if ScanSession.accepts(url) { session.open(url) } }
+            }
+            return
+        }
+        for type in [UTType.png, .tiff, .image] where provider.hasItemConformingToTypeIdentifier(type.identifier) {
+            provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+                guard let data else { return }
+                let fileExtension = type == .tiff ? "tiff" : "png"
+                Task { @MainActor in
+                    do { try session.openPasted(data, fileExtension: fileExtension) } catch {
+                        exportMessage = "The pasted image could not be read: \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
     }
 
     /// Outlines the fields that were read on the image (mockup 07).

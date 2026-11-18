@@ -36,6 +36,7 @@ public final class ScanSession {
     /// Every read started and not yet awaited, so tests can wait for a
     /// replaced read to finish too.
     @ObservationIgnored private var pendingReads: [Task<Void, Never>] = []
+    @ObservationIgnored private var pastedDirectory: URL?
 
     /// `imageDirectory` keeps copies of scanned images (default: the app's
     /// Application Support folder, `Scans/`).
@@ -82,6 +83,19 @@ public final class ScanSession {
         let task = Task { await read(url) }
         readTask = task
         pendingReads.append(task)
+    }
+
+    /// An image pasted from the clipboard (PNG or TIFF data): kept as a file
+    /// in a private temporary folder, then read like an opened file.
+    public func openPasted(_ data: Data, fileExtension: String = "png") throws {
+        let directory = pastedDirectory ?? URL.temporaryDirectory.appending(path: "mference-pasted-\(UUID().uuidString)",
+                                                                            directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        pastedDirectory = directory
+        let url = directory.appending(path: "Pasted image \(UUID().uuidString.prefix(8)).\(fileExtension)")
+        try data.write(to: url, options: .atomic)
+        open(url)
     }
 
     /// Waits for every read started so far, replaced ones included (tests).
