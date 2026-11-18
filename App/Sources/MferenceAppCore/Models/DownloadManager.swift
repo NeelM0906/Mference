@@ -88,7 +88,7 @@ public actor DownloadManager {
         }
     }
 
-    public let destination: URL
+    public nonisolated let destination: URL
     private let sources: [AppModel: DownloadSource]
     private let allowedHosts: [String]
     private let policy: Policy
