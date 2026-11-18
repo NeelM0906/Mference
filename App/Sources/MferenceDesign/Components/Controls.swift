@@ -12,6 +12,10 @@ enum MFMetrics {
     static let pillPadding: CGFloat = 12
     /// `.btn` horizontal padding.
     static let buttonPadding: CGFloat = 13
+    /// First-run buttons: 34 and 38 high, the large one padded 18.
+    static let mediumControlHeight: CGFloat = 34
+    static let largeControlHeight: CGFloat = 38
+    static let largeButtonPadding: CGFloat = 18
     /// `.sw` track and knob.
     static let toggleSize = CGSize(width: 40, height: 24)
     static let toggleKnob: CGFloat = 18
@@ -110,25 +114,54 @@ public struct MFPillButtonStyle: ButtonStyle {
 public struct MFButtonStyle: ButtonStyle {
     public enum Kind: Sendable { case secondary, primary, quiet }
 
-    let kind: Kind
+    /// `.regular` is the app's `.btn` (30 high, 13pt); `.medium` (34, 13pt)
+    /// and `.large` (38, 14pt) are the first-run buttons.
+    public enum Size: Sendable {
+        case regular, medium, large
 
-    public init(_ kind: Kind = .secondary) { self.kind = kind }
+        var height: CGFloat {
+            switch self {
+            case .regular: MFMetrics.controlHeight
+            case .medium: MFMetrics.mediumControlHeight
+            case .large: MFMetrics.largeControlHeight
+            }
+        }
+
+        var padding: CGFloat {
+            switch self {
+            case .regular: MFMetrics.buttonPadding
+            case .medium: MFSpacing.l
+            case .large: MFMetrics.largeButtonPadding
+            }
+        }
+
+        var font: Font { self == .large ? MFFont.buttonLarge : MFFont.calloutEmphasis }
+    }
+
+    let kind: Kind
+    let size: Size
+
+    public init(_ kind: Kind = .secondary, size: Size = .regular) {
+        self.kind = kind
+        self.size = size
+    }
 
     public func makeBody(configuration: Configuration) -> some View {
-        ButtonBody(configuration: configuration, kind: kind)
+        ButtonBody(configuration: configuration, kind: kind, size: size)
     }
 
     private struct ButtonBody: View {
         let configuration: Configuration
         let kind: Kind
+        let size: Size
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
             configuration.label
-                .font(MFFont.calloutEmphasis)
+                .font(size.font)
                 .foregroundStyle(kind == .primary ? MFColor.onInk : MFColor.ink)
-                .padding(.horizontal, MFMetrics.buttonPadding)
-                .frame(minHeight: MFMetrics.controlHeight)
+                .padding(.horizontal, size.padding)
+                .frame(minHeight: size.height)
                 .background(Capsule().fill(fill))
                 .overlay(Capsule().strokeBorder(kind == .secondary ? MFColor.hairlineStrong : .clear,
                                                 lineWidth: MFLayout.hairline))
