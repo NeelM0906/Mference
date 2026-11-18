@@ -19,7 +19,10 @@ enum MFMetrics {
     /// `.sw` track and knob.
     static let toggleSize = CGSize(width: 40, height: 24)
     static let toggleKnob: CGFloat = 18
+    /// The knob's drop shadow: opacity, blur radius and offset.
     static let toggleKnobShadow: Double = 0.25
+    static let toggleKnobShadowRadius: CGFloat = 1.5
+    static let toggleKnobShadowOffset: CGFloat = 1
     /// `.kbd` minimum side and horizontal padding.
     static let keycap: CGFloat = 20
     static let keycapPadding: CGFloat = 5
@@ -214,7 +217,8 @@ public struct MFToggleStyle: ToggleStyle {
                     Circle()
                         .fill(MFColor.surface)
                         .frame(width: MFMetrics.toggleKnob, height: MFMetrics.toggleKnob)
-                        .shadow(color: .black.opacity(MFMetrics.toggleKnobShadow), radius: 1.5, y: 1)
+                        .shadow(color: .black.opacity(MFMetrics.toggleKnobShadow), radius: MFMetrics.toggleKnobShadowRadius,
+                                y: MFMetrics.toggleKnobShadowOffset)
                         .padding(.horizontal, (MFMetrics.toggleSize.height - MFMetrics.toggleKnob) / 2)
                 }
                 .frame(width: MFMetrics.toggleSize.width, height: MFMetrics.toggleSize.height)

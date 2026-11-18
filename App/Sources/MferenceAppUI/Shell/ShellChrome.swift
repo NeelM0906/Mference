@@ -55,7 +55,7 @@ struct ShellTrailingControls: View {
         HStack(spacing: MFSpacing.m) {
             ShellToolbarItems(items: items)
             MFChip("On this Mac", systemImage: "lock", tone: .success)
-                .help("Runs on this Mac. Nothing leaves it except web searches you turn on and downloads you approve.")
+                .help("Runs on this Mac. Nothing leaves it except web searches you turn on and model downloads.")
 
             Button {
                 model.isSearchPresented.toggle()
