@@ -144,20 +144,24 @@ struct ServerEngineCatalogTests {
                                          backends: [FakeEngineBackend(), FakeEngineBackend(engine: .llamaCpp)])
         let models = library.snapshot.catalog.models
         #expect(models.map(\.id) == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.5-4b",
-                                     "qwen3.6-35b-a3b"])
+                                     "qwen3.6-35b-a3b", "qwen3.8-27b"])
         #expect(library.snapshot.modelList.data.map(\.engine)
-                == ["mference", "mference", "llama.cpp", "mference"])
+                == ["mference", "mference", "llama.cpp", "mference", "llama.cpp"])
         // GGUF context defaults to 32768, native to --max-context.
-        #expect(library.snapshot.modelList.data.map(\.maxModelLen) == [16_384, 16_384, 32_768, 16_384])
-        // Deep waits for MTP draft decoding in the llama.cpp backend.
-        #expect(library.snapshot.unavailableReason(for: "qwen3.8-27b") == ServerEngineCatalog.deepNeedsMTP)
-        let withMTP = ServerEngineCatalog.servable(
+        #expect(library.snapshot.modelList.data.map(\.maxModelLen)
+                == [16_384, 16_384, 32_768, 16_384, 32_768])
+        // The llama.cpp backend runs Deep with MTP draft decoding.
+        #expect(ServerEngineCatalog.llamaBackendRunsDeepWithMTP)
+        #expect(library.snapshot.unavailableReason(for: "qwen3.8-27b") == nil)
+        // A backend without MTP would decline Deep rather than serve it plainly.
+        let withoutMTP = ServerEngineCatalog.servable(
             EngineCatalogDiscovery.discover(
                 roots: [URL(fileURLWithPath: "/models", isDirectory: true)],
                 ggufDirectories: [URL(fileURLWithPath: "/models/gguf", isDirectory: true)],
                 fileSystem: fakeFileSystem(installs: libraryInstalls, ggufs: libraryGGUFs)),
-            engines: [.mference, .llamaCpp], deepWithMTP: true)
-        #expect(withMTP.descriptor(for: "qwen3.8-27b")?.engine == .llamaCpp)
+            engines: [.mference, .llamaCpp], deepWithMTP: false)
+        #expect(withoutMTP.descriptor(for: "qwen3.8-27b") == nil)
+        #expect(withoutMTP.unavailableReason(for: "qwen3.8-27b") == ServerEngineCatalog.deepNeedsMTP)
     }
 
     /// The server's flags reach the engine host, and the default backends are
@@ -174,11 +178,10 @@ struct ServerEngineCatalogTests {
         #expect(library.host.loadOptions == arguments.engineLoadOptions)
         let list = library.snapshot.modelList.data
         #expect(list.map(\.id) == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.5-4b",
-                                   "qwen3.6-35b-a3b"])
+                                   "qwen3.6-35b-a3b", "qwen3.8-27b"])
         // --max-context sets native models; GGUF models keep 32768.
-        #expect(list.map(\.maxModelLen) == [8_192, 8_192, 32_768, 8_192])
-        #expect(list.map(\.engine) == ["mference", "mference", "llama.cpp", "mference"])
-        #expect(library.snapshot.unavailableReason(for: "qwen3.8-27b") == ServerEngineCatalog.deepNeedsMTP)
+        #expect(list.map(\.maxModelLen) == [8_192, 8_192, 32_768, 8_192, 32_768])
+        #expect(list.map(\.engine) == ["mference", "mference", "llama.cpp", "mference", "llama.cpp"])
         // A non-product GGUF is declined with the switch that lists it.
         #expect(library.snapshot.unavailableReason(for: "some-other-model.q4_k_m")?
             .hasSuffix("--catalog all lists it") == true)

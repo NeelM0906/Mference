@@ -22,10 +22,10 @@ public enum ServerEngineCatalog {
     static let engineScopeHint = "the developer catalog scope lists it"
 
     /// Whether this build's llama.cpp backend runs Deep with MTP draft
-    /// decoding. Deep is offered only with MTP (spec D1 and section 3), so
-    /// until the backend has it Deep is declined with `deepNeedsMTP`. The PR
-    /// that brings MTP to `LlamaBackend` flips this.
-    public static let llamaBackendRunsDeepWithMTP = false
+    /// decoding (`LlamaBackend` does, through llama.cpp's draft-mtp). Deep is
+    /// offered only with MTP (spec D1 and section 3), so a build whose backend
+    /// lacks it declines Deep with `deepNeedsMTP`.
+    public static let llamaBackendRunsDeepWithMTP = true
     static let deepNeedsMTP = "Deep is served only with MTP draft decoding, which this build's llama.cpp backend does not have yet"
 
     /// `catalog` restricted to the engines that have a backend.
