@@ -16,6 +16,8 @@ public final class AppServices {
     public let settings: AppSettings
     public let permissions: any PermissionBroker
     public let modelContainer: ModelContainer
+    /// GGUF product model downloads (Quick, Deep); nil where none are offered.
+    public let downloads: DownloadManager?
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -28,9 +30,11 @@ public final class AppServices {
                 settings: AppSettings,
                 permissions: any PermissionBroker,
                 modelContainer: ModelContainer,
+                downloads: DownloadManager? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
         self.engine = engine
+        self.downloads = downloads
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -59,10 +63,15 @@ public final class AppServices {
             // In-memory creation only fails on a schema bug, which the tests catch.
             container = try! AppModelContainer.inMemory()
         }
-        return AppServices(engine: EngineService.live(idleUnload: idleUnload),
+        let engine = EngineService.live(idleUnload: idleUnload)
+        let downloads = DownloadManager(
+            policy: DownloadManager.Policy(isOffline: { await MainActor.run { settings.offlineMode } }),
+            onInstalled: { _ in await engine.refreshCatalog() })
+        return AppServices(engine: engine,
                            settings: settings,
                            permissions: LivePermissionBroker(presentReason: presentPermissionReason),
                            modelContainer: container,
+                           downloads: downloads,
                            storeError: storeError,
                            idleUnload: idleUnload)
     }
@@ -78,10 +87,15 @@ public final class AppServices {
                                idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil)) -> AppServices {
         let settings = settings ?? AppSettings(store: InMemorySettingsStore())
         let engine = fakeEngine(installed: installed, scripts: scripts, journal: journal, idleUnload: idleUnload)
+        // Downloads that can never reach the network: no host is allowed.
+        let downloads = DownloadManager(
+            destination: FileManager.default.temporaryDirectory.appending(path: "mference-preview-downloads"),
+            allowedHosts: [])
         return AppServices(engine: engine,
                            settings: settings,
                            permissions: permissions,
                            modelContainer: try! AppModelContainer.inMemory(),
+                           downloads: downloads,
                            idleUnload: idleUnload)
     }
 
