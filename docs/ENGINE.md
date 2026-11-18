@@ -15,7 +15,7 @@ MferenceServer (OpenAI API)   ·   app (later)
    EngineHost      one resident model, one request at a time
    EngineModel     prepare (render) → generate (stream) → completion
      ├─ NativeBackend   Model + ForwardRunnerFactory + runRawCompletion
-     └─ LlamaBackend    libllama (+ MTP for Deep)
+     └─ LlamaBackend    libllama (MTP for Deep: planned)
 ```
 
 This page covers the public API, the identifiers, and the lifecycle. Server
@@ -29,10 +29,16 @@ The product offers five models, and the catalog lists only these by default.
 | Slot | ID | Engine | On disk |
 | --- | --- | --- | --- |
 | Quick | `qwen3.5-4b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.5-4B-UD-Q4_K_XL.gguf` |
-| Deep | `qwen3.8-27b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` (MTP) |
+| Deep | `qwen3.8-27b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` (carries MTP tensors) |
 | Qwen 3.6 | `qwen3.6-35b-a3b` | `mference` | `qwen36.gturbo` |
 | MiniCPM5 | `minicpm5-2b-int4g64` | `mference` | `minicpm5.gturbo` |
 | Maple | `maple-preview-2bit-mlx` | `mference` | `maple.gturbo` |
+
+Deep is meant to decode with its MTP head. That is planned and not yet
+built: `LlamaBackend` does not use MTP, and MTP arrives with the llama.cpp
+backend's MTP change. Until then the server is to decline Deep with an
+explicit reason rather than serve it without MTP. The catalog already
+requires the file's MTP tensors.
 
 `EngineProductSlot` holds this table in code. The IDs are stable: a client
 stores them, and the native ones are the IDs `MferenceServer` already used for
@@ -143,7 +149,9 @@ backend per kind and calls `load` only with no other model resident.
 - `EngineModelDescriptor.resolvedContext(options:)` gives the value before
   loading, for `/v1/models`. A backend may run with less where memory
   requires, and reports the effective value in `traits.maxContext`.
-- `draftDecoding`: MTP stays on for Deep unless this is `.off`.
+- `draftDecoding`: the intended contract is that MTP is on for Deep unless
+  this is `.off`. No backend implements draft decoding yet: `LlamaBackend`
+  ignores this field, and Deep's MTP is planned (see Models and identifiers).
 - The native runtime controls already documented in
   [RUNTIME_CONTROLS.md](RUNTIME_CONTROLS.md): prompt-cache mode and bytes,
   integrity policy, shadow-prefetch budget, prefill chunk, reserved KV.
