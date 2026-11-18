@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Mference</string>
+	<key>CFBundleExecutable</key>
+	<string>Mference</string>
+	<key>CFBundleIdentifier</key>
+	<string>ai.mference.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Mference</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+	<!-- Usage strings: the same one-line reasons as AppPermission.reason
+	     (MferenceAppCore/Permissions/PermissionBroker.swift). ShellBundleTests
+	     fails if the two drift. Full Disk Access has no usage string; the
+	     broker sends the person to System Settings for it. -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>To show your events and add the ones you approve.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>To show your events and add the ones you approve.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>To sync your to-dos with Reminders, only because you turned it on.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>To sync your to-dos with Reminders, only because you turned it on.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>To scan a receipt or document with the camera.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>To send a reply through Mail when you click Send.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>To take dictation on this Mac.</string>
+</dict>
+</plist>
