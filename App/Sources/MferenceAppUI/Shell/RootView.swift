@@ -21,6 +21,7 @@ public struct RootView: View {
 
     @Bindable var model: ShellModel
     let chrome: ChromePlacement
+    @Environment(ScreenModels.self) private var screenModels: ScreenModels?
     /// The visible screen's `shellToolbar` items, for the window toolbar.
     @State private var toolbarItems: [ShellToolbarItem] = []
 
@@ -29,7 +30,28 @@ public struct RootView: View {
         self.chrome = chrome
     }
 
+    /// First run shows until it is completed, once a model library is wired.
+    private var showsOnboarding: Bool {
+        model.needsOnboarding(hasLibrary: screenModels?.library != nil)
+    }
+
     public var body: some View {
+        if showsOnboarding, let library = screenModels?.library {
+            // The first-run window keeps its close and minimise buttons; the
+            // left panel runs under them, as in the mockup.
+            OnboardingView(library: library) { model.completeOnboarding() }
+                .ignoresSafeArea(edges: .top)
+                .frame(minWidth: MFLayout.minimumWindow.width, minHeight: MFLayout.minimumWindow.height)
+                .toolbar(removing: .title)
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+                .preferredColorScheme(model.appearance.colorScheme)
+        } else {
+            shell
+        }
+    }
+
+    @ViewBuilder
+    private var shell: some View {
         switch chrome {
         case .inline:
             // The chrome reads the screen's toolbar items in the same pass

@@ -47,15 +47,31 @@ public final class ShellModel {
     public var selection: AppSection
     public var isSearchPresented = false
     public private(set) var appearance: Appearance
+    /// First run finished (or skipped because no model library is wired yet).
+    public private(set) var hasCompletedOnboarding: Bool
 
     @ObservationIgnored private let defaults: UserDefaults?
     static let appearanceKey = "shell.appearance"
+    static let onboardingKey = "shell.onboardingCompleted"
 
     /// - Parameter defaults: where the appearance choice persists; nil keeps it in memory (tests).
     public init(selection: AppSection = .chat, defaults: UserDefaults? = .standard) {
         self.selection = selection
         self.defaults = defaults
         appearance = defaults?.string(forKey: Self.appearanceKey).flatMap(Appearance.init(rawValue:)) ?? .system
+        hasCompletedOnboarding = defaults?.bool(forKey: Self.onboardingKey) ?? false
+    }
+
+    /// First run shows until it is completed, and only once a model library
+    /// is wired (it has nothing to install without one).
+    public func needsOnboarding(hasLibrary: Bool) -> Bool {
+        hasLibrary && !hasCompletedOnboarding
+    }
+
+    /// Marks first run as done and remembers it.
+    public func completeOnboarding() {
+        hasCompletedOnboarding = true
+        defaults?.set(true, forKey: Self.onboardingKey)
     }
 
     /// Sets and remembers the appearance.
