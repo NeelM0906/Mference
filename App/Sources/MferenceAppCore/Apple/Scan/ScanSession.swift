@@ -114,7 +114,8 @@ public final class ScanSession {
         fields[key] = ScanField(key: key, value: value, confidence: .sure)
     }
 
-    /// Saves the confirmed scan with a copy of its image.
+    /// Saves the confirmed scan with a copy of its image. Throws, saving
+    /// nothing, when the image can no longer be copied (moved or deleted).
     @discardableResult
     public func confirm() throws -> ScanRecord {
         guard phase == .review, let reading else { throw ScanSessionError.nothingToConfirm }
@@ -122,7 +123,7 @@ public final class ScanSession {
         record.fieldsJSON = try fields.encoded()
         record.isConfirmed = true
         if let imageURL {
-            record.imageRelativePath = try? copyImage(imageURL, id: record.id)
+            record.imageRelativePath = try copyImage(imageURL, id: record.id)
         }
         context.insert(record)
         try context.save()
