@@ -153,6 +153,21 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         #expect(await eventually { broker.calls.contains(.request(.reminders)) })
     }
 
+    @Test func connectionsAreReReadWhenTheAppBecomesActive() async {
+        let broker = FakePermissionBroker()
+        let services = AppServices.preview(permissions: broker)
+        let connections = BrokerConnections(broker: broker)
+        let activation = Notification.Name("test-activation-\(UUID().uuidString)")
+        let settings = LiveAppSettingsModel(settings: services.settings, connections: connections,
+                                            refreshOn: activation)
+        #expect(await eventually { settings.connectionState(.appleMail) == .notConnected })
+        // Full Disk Access granted in System Settings while the app was away.
+        broker.setState(.granted, for: .fullDiskAccess)
+        NotificationCenter.default.post(name: activation, object: nil)
+        #expect(await eventually { settings.connectionState(.appleMail) == .connected })
+        #expect(!broker.calls.contains { if case .request = $0 { true } else { false } })
+    }
+
     @Test func nothingIsRequestedUntilAsked() async {
         let broker = FakePermissionBroker()
         let connections = BrokerConnections(broker: broker)

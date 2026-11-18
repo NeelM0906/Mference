@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import MferenceAppCore
 import Observation
@@ -6,6 +7,8 @@ import Observation
 /// `AppleConnections` replaces `BrokerConnections` once it lands; the
 /// adapter only needs these three calls.
 public protocol AppleConnectionsProviding: AnyObject {
+    /// Re-reads every state; never prompts.
+    func refresh() async
     func connectionState(_ kind: ConnectionKind) -> ConnectionState
     /// Asks for access (reason first, then the system prompt or pane).
     func connect(_ kind: ConnectionKind)
@@ -74,14 +77,33 @@ public final class BrokerConnections: AppleConnectionsProviding {
 }
 
 /// `AppSettingsModel` over U2's `AppSettings` and an Apple connections source.
+/// Connection states are re-read (never prompting) when it is built and each
+/// time the app becomes active, so a grant or revocation made in System
+/// Settings (Full Disk Access above all) shows without another click.
 @Observable
 public final class LiveAppSettingsModel: AppSettingsModel {
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let connections: any AppleConnectionsProviding
+    @ObservationIgnored private var activation: (any NSObjectProtocol)?
 
-    public init(settings: AppSettings, connections: any AppleConnectionsProviding) {
+    public init(settings: AppSettings, connections: any AppleConnectionsProviding,
+                refreshOn activationNotification: Notification.Name? = NSApplication.didBecomeActiveNotification) {
         self.settings = settings
         self.connections = connections
+        Task { await connections.refresh() }
+        if let activationNotification {
+            activation = NotificationCenter.default.addObserver(
+                forName: activationNotification, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let connections = self?.connections else { return }
+                        Task { await connections.refresh() }
+                    }
+                }
+        }
+    }
+
+    isolated deinit {
+        if let activation { NotificationCenter.default.removeObserver(activation) }
     }
 
     public var webSearchEnabled: Bool {
@@ -130,7 +152,6 @@ extension ScreenModels {
                                    settings: services.settings)
         Task { await library.run() }
         let connections = BrokerConnections(broker: services.permissions)
-        Task { await connections.refresh() }
         return ScreenModels(
             library: LiveModelLibraryModel(library: library, settings: services.settings,
                                            downloads: services.downloads),
