@@ -373,7 +373,9 @@ def prompt_cases():
                           "Return only a JSON object with the keys \"city\" (string) and "
                           "\"population_millions\" (number) for the most populous city in "
                           "Japan. No prose, no code fence."}],
-            "max_tokens": 256}]},
+            # Room for a model that reasons before answering (MiniCPM5 spends
+            # 256 tokens thinking and returns no answer).
+            "max_tokens": 1024}]},
     ]
 
 

@@ -1,5 +1,6 @@
 import Foundation
 import Mference
+import MferenceEngine
 
 public struct ServerArguments: Equatable, Sendable {
     /// Model directory. Required in single-model mode; optional in library
@@ -32,6 +33,9 @@ public struct ServerArguments: Equatable, Sendable {
     /// `--list-models`: run discovery, print what library mode would serve, and
     /// exit without binding a port or loading a model.
     public let listModels: Bool
+    /// `--catalog`: library mode lists only the product models (`product`,
+    /// the default) or every runnable install (`all`, a developer switch).
+    public let catalogScope: EngineCatalogScope
 
     /// `--max-context` when it is not given.
     public static let defaultMaxContext = 16_384
@@ -51,17 +55,24 @@ public struct ServerArguments: Equatable, Sendable {
                              ~/Library/Application Support/Mference.
                              Starting with nothing installed is fine: the
                              model list is then empty.
-                             GET /v1/models lists them all; a request naming a
-                             model that is not resident unloads the current one
-                             and loads it in place. One model is loaded at a
-                             time and no second process is ever started.
-                             Gemma QAT has its own model ID, installed chat
-                             template and sampling defaults.
-      --list-models          With --library: print the installs discovery found
-                             — identifier, family, installed bytes, and path —
-                             then exit 0 without binding a port or loading a
-                             model. This is what `./mference-ui.sh models`
-                             reports.
+                             GET /v1/models lists the product models found
+                             (see --catalog), each with its engine; a request
+                             naming a model that is not resident unloads the
+                             current one and loads it in place. One model is
+                             loaded at a time and no second process is ever
+                             started.
+      --catalog <product|all>
+                             With --library: list only the product models
+                             (default: qwen3.6-35b-a3b, minicpm5-2b-int4g64,
+                             maple-preview-2bit-mlx) or every runnable install
+                             (all, a developer switch). A request for an
+                             install the product catalog declines gets 400
+                             model_not_runnable naming --catalog all.
+      --list-models          With --library: print the models the catalog
+                             serves — identifier, engine, installed bytes, and
+                             path — then exit 0 without binding a port or
+                             loading a model. This is what
+                             `./mference-ui.sh models` reports.
       --port <1...65535>     Listening port (default 8080).
       --bind <mode>          loopback or tailnet (default loopback). tailnet
                              binds only the machine's Tailscale IPv4 address
@@ -143,6 +154,7 @@ public struct ServerArguments: Equatable, Sendable {
         var wantsDefaultLibraryRoots = false
         var listModels = false
         var reserveFullKV = false
+        var catalogScope: EngineCatalogScope?
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -246,6 +258,11 @@ public struct ServerArguments: Equatable, Sendable {
                     }
                     prefillChunk = parsed
                 }
+            case "--catalog":
+                guard let parsed = EngineCatalogScope(rawValue: value) else {
+                    throw ServerArgumentError.invalid("--catalog must be product or all")
+                }
+                catalogScope = parsed
             case "--verify":
                 guard let parsed = ModelIntegrityPolicy(verifyFlag: value) else {
                     throw ServerArgumentError.invalid(
@@ -270,6 +287,9 @@ public struct ServerArguments: Equatable, Sendable {
             guard !listModels else {
                 throw ServerArgumentError.invalid("--list-models requires --library")
             }
+            guard catalogScope == nil else {
+                throw ServerArgumentError.invalid("--catalog requires --library")
+            }
             guard model != nil else {
                 throw ServerArgumentError.invalid("--model is required")
             }
@@ -291,7 +311,8 @@ public struct ServerArguments: Equatable, Sendable {
                                prefillChunk: prefillChunk,
                                reserveFullKV: reserveFullKV,
                                library: library,
-                               listModels: listModels)
+                               listModels: listModels,
+                               catalogScope: catalogScope ?? .product)
     }
 }
 

@@ -22,7 +22,7 @@ class LauncherTests(unittest.TestCase):
     def test_missing_values_are_actionable(self):
         for flag in ("--library", "--model", "--server-port", "--webui-port",
                      "--max-context", "--prompt-cache-mode", "--prompt-cache-bytes",
-                     "--prefill-chunk", "--build-path",
+                     "--prefill-chunk", "--catalog", "--build-path",
                      "--data-dir"):
             for suffix in ([], ["--dry-run"]):
                 with self.subTest(flag=flag, suffix=suffix):
@@ -38,6 +38,7 @@ class LauncherTests(unittest.TestCase):
                      ("--prompt-cache-mode", "unknown"),
                      ("--prompt-cache-bytes", "-1"), ("--prompt-cache-bytes", "lots"),
                      ("--prefill-chunk", "1000"), ("--prefill-chunk", "big"),
+                     ("--catalog", "everything"),
                      ("--server-port", "3000")]:
             with self.subTest(args=args):
                 result = self.run_launcher(*args, "--dry-run")
@@ -51,6 +52,15 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("build with spaces/release/MferenceServer", result.stdout)
         self.assertIn("(incremental)", result.stdout)
         self.assertNotIn("if missing", result.stdout)
+
+    def test_catalog_is_passed_to_the_server_and_the_listing(self):
+        result = self.run_launcher("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--catalog product", result.stdout)
+        result = self.run_launcher("--catalog", "all", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--catalog all", result.stdout)
+        self.assertNotIn("--catalog product", result.stdout)
 
     def test_prompt_cache_controls_are_passed_to_the_server(self):
         result = self.run_launcher("--dry-run")

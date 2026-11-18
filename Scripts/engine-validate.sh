@@ -52,6 +52,9 @@
 #   --build                      build the server first (under the lock)
 #   --yield                      pass --yield to lock.sh (runs over ~15 min
 #                                that are not on the priority list)
+#   --swap-chain <k,k,...>       swap chain to run instead of the section 8
+#                                one (for example qwen36,minicpm5,maple,qwen36
+#                                while only the native backend is in the build)
 #   --no-release-line            accept swaps without a 'model released' log
 #                                line, on the peak-RSS bound alone
 #   --dry-run                    print the plan; run, build and lock nothing
@@ -194,7 +197,10 @@ run_one() {
     || { cat "$RUN_DIR/preflight.txt" >&2; refuse "preflight failed"; }
   if [ "$variant" = swap ]; then
     local chain_key
-    for chain_key in $("${checker[@]}" registry chain); do
+    local chain_keys
+    if [ -n "$SWAP_CHAIN" ]; then chain_keys=${SWAP_CHAIN//,/ }
+    else chain_keys=$("${checker[@]}" registry chain); fi
+    for chain_key in $chain_keys; do
       preflight_model "$chain_key" "$RUN_DIR/preflight.txt"
     done
   else
@@ -277,6 +283,7 @@ $others"
       [ -n "$single" ] || fail "--no-release-line needs the per-model engine runs (their peak RSS) first"
       bound+=(--no-release-line)
     fi
+    if [ -n "$SWAP_CHAIN" ]; then bound+=(--chain "$SWAP_CHAIN"); fi
     "${checker[@]}" swap --port "$PORT" --log "$log" --pid "$SERVER_PID" \
       --out "$RUN_DIR/swap.json" ${bound[@]+"${bound[@]}"} || rc=$?
     RUN_STATUS=$rc
@@ -328,6 +335,7 @@ BUILD=0
 DRY_RUN=0
 YIELD=""
 NO_RELEASE_LINE=""
+SWAP_CHAIN=""
 
 if [ "${1:-}" = _run ]; then
   shift
@@ -340,6 +348,7 @@ if [ "${1:-}" = _run ]; then
   MTP_OFF_ARGS=$ENGINE_VALIDATE_MTP_OFF_ARGS MTP_OFF_ENV=$ENGINE_VALIDATE_MTP_OFF_ENV
   EXTRA=$ENGINE_VALIDATE_EXTRA PORT=$ENGINE_VALIDATE_PORT RUNS=$ENGINE_VALIDATE_RUNS
   RESULTS=$ENGINE_VALIDATE_RESULTS NO_RELEASE_LINE=$ENGINE_VALIDATE_NO_RELEASE_LINE
+  SWAP_CHAIN=${ENGINE_VALIDATE_SWAP_CHAIN:-}
   run_one "$@"
 fi
 
@@ -363,8 +372,9 @@ while [ $# -gt 0 ]; do
     --build) BUILD=1; shift ;;
     --yield) YIELD=--yield; shift ;;
     --no-release-line) NO_RELEASE_LINE=--no-release-line; shift ;;
+    --swap-chain) SWAP_CHAIN=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,69p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     models|prompts|readings|identity|swap|summary) PHASES+=("$1"); shift ;;
     *) fail "unknown argument: $1 (see --help)" ;;
   esac
@@ -375,6 +385,10 @@ want() { case "$PHASES_STR" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 [ -n "$MODELS" ] || MODELS=$("${checker[@]}" registry all)
 IFS=, read -r -a MODEL_KEYS <<<"$MODELS"
 for key in "${MODEL_KEYS[@]}"; do "${checker[@]}" registry "$key" id >/dev/null || exit 2; done
+if [ -n "$SWAP_CHAIN" ]; then
+  IFS=, read -r -a chain_check <<<"$SWAP_CHAIN"
+  for key in "${chain_check[@]}"; do "${checker[@]}" registry "$key" id >/dev/null || exit 2; done
+fi
 case "$PORT" in ''|*[!0-9]*) fail "--port must be a number" ;; esac
 for passthrough in "$SERVER_ARGS" "$UPSTREAM_ARGS" "$UPSTREAM_MTP_ARGS" "$MTP_OFF_ARGS"; do
   check_loopback_args "$passthrough"
@@ -480,6 +494,7 @@ export ENGINE_VALIDATE_UPSTREAM_MTP_ARGS="$UPSTREAM_MTP_ARGS"
 export ENGINE_VALIDATE_MTP_OFF_ARGS="$MTP_OFF_ARGS" ENGINE_VALIDATE_MTP_OFF_ENV="$MTP_OFF_ENV"
 export ENGINE_VALIDATE_EXTRA="$EXTRA" ENGINE_VALIDATE_PORT="$PORT" ENGINE_VALIDATE_RUNS="$RUNS"
 export ENGINE_VALIDATE_RESULTS="$RESULTS" ENGINE_VALIDATE_NO_RELEASE_LINE="$NO_RELEASE_LINE"
+export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN"
 
 abort() {
   "${checker[@]}" summary "$RESULTS" >/dev/null 2>&1 || true
