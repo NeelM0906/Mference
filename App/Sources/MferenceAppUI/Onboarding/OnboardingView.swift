@@ -110,7 +110,7 @@ public struct OnboardingView: View {
             VStack(alignment: .leading, spacing: MFSpacing.s) {
                 pageTitle("Choose your models")
                 Text("We checked this Mac: \(Text(Self.machineFacts(library.machine)).fontWeight(.semibold).foregroundStyle(MFColor.ink)). \(modelsIntro)")
-                    .font(MFFont.buttonLarge.weight(.regular))
+                    .font(MFFont.body)
                     .foregroundStyle(MFColor.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -135,7 +135,7 @@ public struct OnboardingView: View {
             Text(library.machine.canOfferDeep
                  ? "Macs with 16 GB or less get Quick only. You can add or remove models any time in Settings."
                  : "This Mac has \(ModelFormat.memory(library.machine.physicalMemoryBytes)) of memory, so Mference uses Quick. You can add or remove models any time in Settings.")
-                .font(MFFont.rowSubtitle)
+                .font(MFFont.preview)
                 .foregroundStyle(MFColor.secondary)
         }
     }
@@ -273,14 +273,14 @@ public struct OnboardingView: View {
 
     private func pageTitle(_ text: String) -> some View {
         Text(text)
-            .font(MFFont.display)
+            .font(MFFont.largeTitle)
             .foregroundStyle(MFColor.ink)
             .accessibilityAddTraits(.isHeader)
     }
 
     private func pageText(_ text: String) -> some View {
         Text(text)
-            .font(MFFont.buttonLarge.weight(.regular))
+            .font(MFFont.body)
             .foregroundStyle(MFColor.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -371,7 +371,7 @@ struct OnboardingSidebar: View {
                     .font(MFFont.largeTitle)
                     .foregroundStyle(MFColor.ink)
                 Text("Mail, calendar, scanning and web answers, run by a model on your computer.")
-                    .font(MFFont.buttonLarge.weight(.regular))
+                    .font(MFFont.body)
                     .foregroundStyle(MFColor.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -386,7 +386,7 @@ struct OnboardingSidebar: View {
                     .foregroundStyle(MFColor.success)
                     .accessibilityHidden(true)
                 Text("\(Text("No account.").fontWeight(.semibold).foregroundStyle(MFColor.ink)) Nothing to sign up for, and no usage data sent anywhere.")
-                    .font(MFFont.rowSubtitle)
+                    .font(MFFont.preview)
                     .foregroundStyle(MFColor.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

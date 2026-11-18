@@ -186,7 +186,7 @@ public struct MFCitationMark: View {
 
     public var body: some View {
         Text("\(number)")
-            .font(MFFont.citation)
+            .font(MFFont.micro)
             .foregroundStyle(MFColor.accent)
             .frame(width: MFMetrics.citation, height: MFMetrics.citation)
             .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(MFColor.accentFill))
@@ -239,7 +239,7 @@ public struct MFSectionHeader: View {
     public var body: some View {
         Text(title.uppercased())
             .font(MFFont.sectionHeader)
-            .tracking(0.7)
+            .tracking(MFFont.sectionHeaderTracking)
             .foregroundStyle(MFColor.tertiary)
             .accessibilityAddTraits(.isHeader)
     }

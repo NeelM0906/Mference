@@ -55,7 +55,7 @@ public struct MFListRow<Trailing: View>: View {
                     .foregroundStyle(MFColor.ink)
                 if let subtitle {
                     Text(subtitle)
-                        .font(MFFont.rowSubtitle)
+                        .font(MFFont.preview)
                         .foregroundStyle(MFColor.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -101,11 +101,11 @@ public struct MFApprovalCard<Actions: View>: View {
         VStack(alignment: .leading, spacing: MFSpacing.compact) {
             Text(eyebrow.uppercased())
                 .font(MFFont.sectionHeader)
-                .tracking(0.7)
+                .tracking(MFFont.sectionHeaderTracking)
                 .foregroundStyle(MFColor.preview)
                 .accessibilityAddTraits(.isHeader)
             Text(title)
-                .font(MFFont.bodySemibold)
+                .font(MFFont.headline)
                 .foregroundStyle(MFColor.ink)
             if let detail {
                 Text(detail)
