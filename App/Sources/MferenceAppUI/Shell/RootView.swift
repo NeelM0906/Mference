@@ -21,6 +21,7 @@ public struct RootView: View {
 
     @Bindable var model: ShellModel
     let chrome: ChromePlacement
+    @Environment(ScreenModels.self) private var screenModels: ScreenModels?
     /// The visible screen's `shellToolbar` items, for the window toolbar.
     @State private var toolbarItems: [ShellToolbarItem] = []
 
@@ -29,7 +30,28 @@ public struct RootView: View {
         self.chrome = chrome
     }
 
+    /// First run shows until it is completed, once a model library is wired.
+    private var showsOnboarding: Bool {
+        model.needsOnboarding(hasLibrary: screenModels?.library != nil)
+    }
+
     public var body: some View {
+        if showsOnboarding, let library = screenModels?.library {
+            // The first-run window keeps its close and minimise buttons; the
+            // left panel runs under them, as in the mockup.
+            OnboardingView(library: library) { model.completeOnboarding() }
+                .ignoresSafeArea(edges: .top)
+                .frame(minWidth: MFLayout.minimumWindow.width, minHeight: MFLayout.minimumWindow.height)
+                .toolbar(removing: .title)
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+                .preferredColorScheme(model.appearance.colorScheme)
+        } else {
+            shell
+        }
+    }
+
+    @ViewBuilder
+    private var shell: some View {
         switch chrome {
         case .inline:
             // The chrome reads the screen's toolbar items in the same pass
@@ -81,6 +103,7 @@ public struct RootView: View {
 /// The screen for one section.
 struct SectionContent: View {
     let section: AppSection
+    @Environment(ScreenModels.self) private var screenModels: ScreenModels?
     @Environment(ShellModel.self) private var shell: ShellModel?
     /// The app's one chat model (U3), kept for the app's lifetime so switching
     /// pills does not drop a running answer. Absent in snapshots.
@@ -98,7 +121,10 @@ struct SectionContent: View {
             case .mail: MailView()
             case .calendar: CalendarView()
             case .scan: ScanView()
-            case .settings: SettingsView()
+            case .settings:
+                SettingsView(library: screenModels?.library, memory: screenModels?.memory,
+                             settings: screenModels?.settings, pane: shell?.settingsPane ?? .models,
+                             showsLibrary: shell?.settingsShowsLibrary ?? false)
             case .notes, .errands: ComingLaterView(section: section)
             }
         }
@@ -109,8 +135,8 @@ struct SectionContent: View {
     /// Where chat hands off: Settings (Memory, the model library) and other
     /// sections (suggestion chips such as "Scan a receipt").
     private var chatActions: ChatActions {
-        ChatActions(openMemorySettings: { shell?.show(.settings) },
-                    openModelLibrary: { shell?.show(.settings) },
+        ChatActions(openMemorySettings: { shell?.openSettings(.memory) },
+                    openModelLibrary: { shell?.openSettings(.models, showingLibrary: true) },
                     openSection: { shell?.show($0) })
     }
 }

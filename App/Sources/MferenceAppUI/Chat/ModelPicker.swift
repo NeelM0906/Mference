@@ -34,7 +34,7 @@ struct ModelPicker: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(MFColor.accent)
-                    .font(MFFont.calloutEmphasis)
+                    .font(MFFont.caption.weight(.medium))
                 }
                 .font(MFFont.caption)
                 .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
@@ -58,7 +58,7 @@ struct ModelPicker: View {
     private func header(_ title: String) -> some View {
         Text(title.uppercased())
             .font(MFFont.sectionHeader)
-            .tracking(ChatMetrics.sectionTracking)
+            .tracking(MFFont.sectionHeaderTracking)
             .foregroundStyle(MFColor.tertiary)
             .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
             .padding(.top, MFSpacing.s + MFSpacing.xxs)
@@ -102,10 +102,10 @@ struct ModelRow: View {
                 VStack(alignment: .leading, spacing: MFSpacing.xxs) {
                     HStack(alignment: .firstTextBaseline, spacing: MFSpacing.xs) {
                         Text(model.name)
-                            .font(MFFont.bodyEmphasis)
+                            .font(MFFont.rowTitle)
                             .foregroundStyle(MFColor.ink)
                         Text(model.detail)
-                            .font(MFFont.caption)
+                            .font(MFFont.chip)
                             .foregroundStyle(model.isPreview ? MFColor.preview : MFColor.tertiary)
                     }
                     Text(model.summary)
@@ -116,10 +116,10 @@ struct ModelRow: View {
                 Spacer(minLength: MFSpacing.s)
                 VStack(alignment: .trailing, spacing: MFSpacing.xxs + 1) {
                     Text(statusText)
-                        .font(MFFont.caption.weight(.medium))
+                        .font(MFFont.chip)
                         .foregroundStyle(availability == .loaded ? MFColor.success : MFColor.tertiary)
                     Text(model.engineLabel)
-                        .font(MFFont.caption)
+                        .font(MFFont.micro.weight(.regular))
                         .foregroundStyle(MFColor.tertiary)
                 }
                 .padding(.top, MFSpacing.xxs)
@@ -169,10 +169,10 @@ struct AutoRow: View {
             VStack(alignment: .leading, spacing: MFSpacing.xxs) {
                 HStack(alignment: .firstTextBaseline, spacing: MFSpacing.xs) {
                     Text("Auto")
-                        .font(MFFont.bodyEmphasis)
+                        .font(MFFont.rowTitle)
                         .foregroundStyle(MFColor.ink)
                     Text("Preview")
-                        .font(MFFont.caption)
+                        .font(MFFont.chip)
                         .foregroundStyle(MFColor.preview)
                 }
                 Text("Coming later. For now you choose the model yourself.")

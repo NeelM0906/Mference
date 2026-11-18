@@ -152,7 +152,7 @@ struct ChatChip: View {
             }
             Text(title)
         }
-        .font(MFFont.calloutEmphasis)
+        .font(MFFont.chip)
         .foregroundStyle(foreground)
         .padding(.horizontal, MFSpacing.s)
         .padding(.vertical, MFSpacing.xs)

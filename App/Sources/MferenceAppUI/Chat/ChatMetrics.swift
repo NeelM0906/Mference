@@ -28,8 +28,6 @@ enum ChatMetrics {
     static let composerLines = 2...8
     /// The hover card on a source chip.
     static let hoverCardWidth: CGFloat = 300
-    /// Section headers: `letter-spacing: .06em` at 11 px.
-    static let sectionTracking: CGFloat = 0.66
     /// Reasoning shown inside the steps disclosure before it scrolls.
     static let reasoningMaxHeight: CGFloat = 220
 }
