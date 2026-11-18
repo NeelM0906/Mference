@@ -23,13 +23,13 @@ and a top-16 path selector. Embedding and LM head are the target's own.
 - `Qwen38DFlash2Drafter` + `Metal/DFlash2/dflash2.metal`: BF16 multi-x GEMV,
   block attention over [sliding ctx | bidirectional block], dynamic conv
   (prepare/finish), top-16, tap gather. FP32 residual stream (the o/down
-  projections overflow FP16 on outlier channels — the Inkling lesson).
+  projections overflow FP16 on outlier channels, as an earlier port found).
   CPU-side greedy path selector over the codebooks.
 - **INT4 at load**: projections quantize into the production multi-x INT4
   group-64 format (`DFlash2Int4Slab`, disk-cached beside the checkpoint as
   `int4-slab.cache`). The BF16 checkpoint is 3.85 GB — it thrashed the
   24 GB host against the 15 GB target and, as a file-backed GPU buffer,
-  reproduced the DSV4 copy-free wiring collapse (~20x). With the slab the
+  reproduced the copy-free wiring collapse an earlier streaming port hit (~20x). With the slab the
   drafter is ~1.05 GB wired and a draft round is 32 ms (was 2.13 s).
   `MFERENCE_DFLASH2_BF16=1` runs unquantized (parity/reference only).
   Known limit: `DFlash2Int4Slab` still uses the `posix_memalign` + `free`

@@ -1,9 +1,18 @@
 # System design
 
-Mference is a Swift and Metal runtime for pinned MoE checkpoints on Apple
-Silicon; Gemma 4 26B-A4B is the founding family and this document's running
-example. Its text-only installation is about 14.3 GB, but the target machine
-has 8 GB of memory. The runtime keeps the common weights and working state
+Mference is a Swift and Metal runtime for pinned checkpoints, mostly MoE, on
+Apple Silicon. Its supported families are Qwen 3.6 35B-A3B, Qwen 3.8 27B (dense),
+Maple Preview and MiniCPM5-2B.
+
+Gemma 4 26B-A4B was the founding family and remains this document's running
+example, but it has been [retired](RETIRED_FAMILIES.md) and this runtime no
+longer loads it. Its shapes, sizes, source revision, tensor names and template
+details below describe that example only; the mechanisms they illustrate
+(bounded repack, the `.gturbo` layout, the resident/streamed split, the KV
+layouts, prefill and decode) are the ones the supported families use.
+
+Gemma 4's text-only installation was about 14.3 GB, but the target machine
+had 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
 the experts chosen for the current token or prefill chunk.
 
@@ -111,20 +120,6 @@ gemma4.gturbo/
 routers, shared experts, norms, and scalar parameters. Each `layer_XX.bin`
 contains 128 fixed-stride routed-expert blobs for one layer. `layout.json`
 describes the packed subregions within each blob.
-
-The separate `gemma4qat` installation uses the same text architecture and
-directory layout, with INT4 affine groups of 32 and BF16 routers without
-quantization companions. Its source `chat_template.jinja` and
-`generation_config.json` are required alongside config/tokenizer files.
-Install integrity is validated independently of entry-point readiness. CLI and
-server paths use the native group-32/BF16 profile and verified local generation
-settings. QAT chat uses its installed source template, with a separate cache
-identity and exact source-prefix recovery. Its launcher destination
-is `~/llm-models/gemma4qat.gturbo`. The qualified QAT FP16 path preserves the
-source affine reduction and activation rounding in batched prefill and decode.
-QAT's batched resident projections use SIMD affine reductions; other profiles
-retain their existing tensor-operation dispatch. Prompt batching and streamed
-experts remain enabled.
 
 The expert stride is page aligned, and each sub-tensor has its own offset.
 Metal kernels bind subregions of an existing buffer instead of creating one
@@ -254,8 +249,8 @@ flowchart LR
 
 ## Instruction framing
 
-Gemma 4 CLI chat/message modes and the loopback server use the same canonical
-Google Jinja template, bundled with the app at revision
+In the running example, Gemma 4 CLI chat/message modes and the loopback server
+used the same canonical Google Jinja template, bundled with the app at revision
 `35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122`. The installed tokenizer vocabulary
 and model receipt remain unchanged; cache identity hashes the effective app
 resource. Assistant messages render with Gemma's `model` role. The template
@@ -271,10 +266,10 @@ template do not introduce extra prompt spaces. Independent Python fixtures
 check the resulting bytes and token IDs; upstream Jinja tests and existing
 Qwen template regressions also run through the package test wrapper.
 
-The runtime stops generation on `<eos>` (token 1), `<turn|>` (token 106), or
-`<|tool_response>` (token 50). The app and CLI treat the third token as a
-defensive boundary. The server instead parses complete native
-`<|tool_call>` blocks before returning OpenAI function calls and fails closed
+For Gemma 4, the runtime stopped generation on `<eos>` (token 1), `<turn|>`
+(token 106), or `<|tool_response>` (token 50). The app and CLI treated the
+third token as a defensive boundary. The server instead parsed complete native
+`<|tool_call>` blocks before returning OpenAI function calls and failed closed
 on malformed output. CLI `--prompt` bypasses chat framing for raw completion
 and reproducible comparisons.
 
@@ -382,9 +377,9 @@ step with `ModelError.eagerExpertFillFailed` rather than emitting corrupt
 output. Shadow speculative prefetch issues a bounded number of non-blocking
 reads per layer from a router-lookahead prediction (`MFERENCE_SPEC_PREFETCH`
 selects the mode, `--shadow-budget` or `MFERENCE_SHADOW_BUDGET` caps the
-reads). It is on by default for DeepSeek-V4-Flash (budget 2), for Qwen 3.6 on
-16–32 GiB hosts and for Gemma 4 on 16–24 GiB hosts (budget 4 below 24 GiB, 8
-from 24 GiB), and off for other families and host sizes. All three are
+reads). It is on by default for Qwen 3.6 on hosts from 16 GiB up to 32 GiB
+(budget 4 below 24 GiB, 8 from 24 GiB), and off for other families and host
+sizes. All three are
 byte-identical to their disabled paths.
 
 After layer 30, the tied 4-bit head has two output modes. A pure-greedy
@@ -431,7 +426,7 @@ These files are the main entry points for the design described above. Their
 references lead to the supporting code and tests.
 
 - **Model contract and runtime path.** [`ArchConfig`](../Sources/Mference/Infrastructure/ModelIO/ModelTypes.swift)
-  defines the fixed Gemma 4 shape; [`RuntimeConfiguration`](../Sources/Mference/Runtime/Configuration/RuntimeConfiguration.swift)
+  defines each family's compiled shape; [`RuntimeConfiguration`](../Sources/Mference/Runtime/Configuration/RuntimeConfiguration.swift)
   defines the production configuration.
 - **Remote install and `.gturbo` layout.** Start with
   [`SupportedModelSource`](../Sources/MferenceRepack/Core/Remote/SupportedModelSource.swift),
@@ -485,18 +480,18 @@ references lead to the supporting code and tests.
 
 ## Scope and limitations
 
-The runtime supports text-only generation from five pinned checkpoints: Gemma
-4 26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, Inkling-Small
-276B-A12B, and Maple Preview. Mference omits vision towers and multimodal input.
+The runtime supports text-only generation from four pinned checkpoints: Qwen
+3.6 35B-A3B, Qwen 3.8 27B, Maple Preview, and MiniCPM5-2B. Mference omits
+vision towers and multimodal input.
 
 Qwen 3.6 is selected from `manifest.json -> arch.family`. It is a hybrid of 30
 gated-DeltaNet linear-attention layers and 10 gated full-attention layers, with
 256 routed experts per layer and a gated shared expert. It holds the same
-bounded-memory contract as Gemma 4 and in fact uses less: a measured 1,448 MiB
-peak process footprint at 4K context against Gemma's ~2,126 MiB, because its
-experts are half the size and only a quarter of its layers keep a KV cache.
-That was verified with the working set constrained to about 8 GB. Its install
-needs about 19.6 GB of disk against Gemma's 14.3 GB. Acceptance evidence covers
+bounded-memory contract as the running example and in fact uses less: a
+measured 1,448 MiB peak process footprint at 4K context against Gemma 4's
+~2,126 MiB, because its experts are half the size and only a quarter of its
+layers keep a KV cache. That was verified with the working set constrained to
+about 8 GB. Its install needs about 19.6 GB of disk. Acceptance evidence covers
 4K context. See [Qwen 3.6 performance notes](QWEN36_PERFORMANCE.md) and
 [Benchmarks](BENCHMARKS.md#qwen-36-35b-a3b-measured-decode).
 
@@ -504,21 +499,11 @@ The CLI and server offer 4K, 8K, 16K, 32K, 64K, and 128K context lengths.
 Maple's runtime, CLI, and server accept up to 128,000 tokens, but no final acceptance
 run establishes that boundary. Vision input, training, fine-tuning, server
 batching, and generic model discovery are outside the current scope. Each of
-the five architectures is explicitly enumerated with its own pinned checkpoint,
+the four architectures is explicitly enumerated with its own pinned checkpoint,
 compile-time baseline, and manifest contract; a new family merges only after
 passing the [family acceptance gate](FAMILY_GATE.md). The optional HTTP server owns one
 warm model, serializes generation, and retains one verified conversational KV
-prefix by default. Gemma additionally retains one server-only SWA recovery
-image at the active user turn's pre-thought boundary, derived from the pinned
-template. New-user thought stripping resumes from the longest valid current
-prefix or that image, replaying only the remaining canonical suffix. Recovery
-validates physical ring rows, restores K and V separately, and commits the cursor
-after all copies complete. Full-attention rows stay in place. The image has at
-most `2 * 25 * 4096 * 1023 = 209510400` payload bytes for the pinned model:
-the next query supplies its own row of the 1,024-token window. It is provisional
-until the request succeeds and is released on reset/failure/model replacement.
-Tool rounds retain it; new user turns replace it. Other families and CLI
-reset behavior do not use this capability. The server binds to loopback unless the user explicitly selects the
+prefix by default. The server binds to loopback unless the user explicitly selects the
 machine's exact Tailnet address. See the [local server guide](OPENAI_SERVER.md).
 
 Mference is a research system. The CLI and server expose a small set of typed

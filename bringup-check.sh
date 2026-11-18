@@ -92,9 +92,7 @@ Runs the family bring-up conformance stages in order and prints a verdict.
 Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
-  <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple
-                qwen38flashnext qwen38flashnextudiq3xxs minicpm5 glm53flash
-                flint
+  <family>      one of: qwen36 qwen38 maple minicpm5
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
@@ -121,11 +119,6 @@ done
 [ -n "${family}" ] || { usage >&2; exit 1; }
 
 # Per-family toy/parity suite filter. Empty means "none registered".
-#
-# Only the product families (qwen36, qwen38, maple, minicpm5) keep toy and
-# parity suites. The other families' behaviour suites were removed (their
-# runtime, installer and contract tests stay), so stage 1 is SKIPPED for them;
-# stages 2-3 (install verify, ladder smoke) still run against an install.
 case "${family}" in
   qwen36)          suite_filter='Qwen(Runner|ResidentParity|SlotMapParity|RepackPlanner|ToolCallParser|Install)' ;;
   qwen38)          suite_filter='Qwen38' ;;
@@ -133,8 +126,6 @@ case "${family}" in
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).
   minicpm5)        suite_filter='[Mm]iniCPM5' ;;
-  gemma4|deepseekv4flash|inklingsmall|flint|qwen38flashnext|qwen38flashnextudiq3xxs|glm53flash)
-                   suite_filter="" ;;
   *) usage >&2; fail "unknown family: ${family}" ;;
 esac
 

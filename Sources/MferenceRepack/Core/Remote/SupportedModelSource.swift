@@ -15,11 +15,6 @@ public struct SupportedModelSource: Sendable, Equatable {
         /// affine group-64 in flight (Workstream 2). Pinning and SHA discipline
         /// are identical — only the byte transform differs.
         case originalRepoQuantize
-        /// A third-party GGUF quant (WS4), pinned per shard by `ggufPin`.
-        /// Nothing is quantized at install: tensors keep their ggml format,
-        /// except Q6_K and Q8_0 resident matrices, which are expanded to
-        /// INT8-2L (`GGUFInt8TwoLevelExpander`).
-        case gguf
     }
 
     /// CLI selector value (`--model <name>`).
@@ -37,8 +32,6 @@ public struct SupportedModelSource: Sendable, Equatable {
     public let approximateDownloadBytes: UInt64
     public let installedBytes: UInt64
     public let reserveBytes: UInt64
-    /// Per-shard pin for a `.gguf` source; nil for safetensors sources.
-    public let ggufPin: GGUFSourcePin?
 
     public init(name: String,
                 displayName: String,
@@ -49,8 +42,7 @@ public struct SupportedModelSource: Sendable, Equatable {
                 approximateDownloadBytes: UInt64,
                 installedBytes: UInt64,
                 reserveBytes: UInt64,
-                kind: Kind = .preQuantized,
-                ggufPin: GGUFSourcePin? = nil) {
+                kind: Kind = .preQuantized) {
         self.name = name
         self.displayName = displayName
         self.repoID = repoID
@@ -61,7 +53,6 @@ public struct SupportedModelSource: Sendable, Equatable {
         self.approximateDownloadBytes = approximateDownloadBytes
         self.installedBytes = installedBytes
         self.reserveBytes = reserveBytes
-        self.ggufPin = ggufPin
     }
 
     /// Both pins recorded; unpinned sources install trust-on-first-use.
@@ -75,7 +66,7 @@ public struct SupportedModelSource: Sendable, Equatable {
                                dryRunSpaceCheck: Bool = false,
                                sidecarPolicy: SidecarPolicy = .default)
         -> RemoteStreamingRepackOptions {
-        var options: RemoteStreamingRepackOptions
+        let options: RemoteStreamingRepackOptions
         if let baseURL {
             options = RemoteStreamingRepackOptions(
                 repoID: repoID,
@@ -102,34 +93,8 @@ public struct SupportedModelSource: Sendable, Equatable {
             dryRunSpaceCheck: dryRunSpaceCheck,
             sidecarPolicy: sidecarPolicy)
         }
-        options.ggufPin = ggufPin
         return options
     }
-
-    public static let gemma4 = SupportedModelSource(
-        name: "gemma4",
-        displayName: "Gemma 4 26B-A4B IT 4-bit",
-        repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
-        sourceIndexSHA256:
-            "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13",
-        modelID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        approximateDownloadBytes: 14_620_479_420,
-        installedBytes: 14_291_921_884,
-        reserveBytes: 1_073_741_824)
-
-    /// Native QAT-aligned MLX bytes: INT4/group-32 with BF16 routers.
-    /// Conservative byte budgets include source and installation metadata.
-    public static let gemma4QAT = SupportedModelSource(
-        name: "gemma4qat",
-        displayName: "Gemma 4 26B-A4B IT QAT Q4_0 aligned",
-        repoID: "mlx-community/gemma-4-26B-A4B-it-qat-q4_0-mlx-aligned",
-        revision: "745a97a754ed4b7713163c7d0e9c11da41809e0c",
-        sourceIndexSHA256: "7dbbeef0345505798abcf0ac54434116a48c2f1e7aad828071c17a7a871adfe7",
-        modelID: "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned",
-        approximateDownloadBytes: 15_840_000_000,
-        installedBytes: 15_850_000_000,
-        reserveBytes: 1_073_741_824)
 
     /// Download estimate covers the `language_model.*` tensors plus tokenizer
     /// and metadata sidecars; the vision tower is never fetched. Installed
@@ -200,56 +165,6 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 15_400_000_000,
         reserveBytes: 1_073_741_824)
 
-    /// Reasoning-efficient fine-tune, kept distinct from the base Qwen control.
-    /// Text and MTP are quantized in flight; vision is not installed.
-    /// Qualification status and license provenance: docs/families/SWIFT_QWEN38.md.
-    public static let swiftQwen38 = SupportedModelSource(
-        name: "swiftqwen38",
-        displayName: "Swift-Qwen3.8 27B (qualification candidate)",
-        repoID: "ukisai/Swift-Qwen3.8-27b",
-        revision: "1b30aaaf753fe5c1cb51ada2ea0367a53445359c",
-        sourceIndexSHA256:
-            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
-        modelID: "swift-qwen3.8-27b-int4g64",
-        approximateDownloadBytes: 55_562_855_904,
-        installedBytes: 16_000_000_000,
-        reserveBytes: 2_147_483_648,
-        kind: .originalRepoQuantize)
-
-    /// Revision and index hash are not yet pinned (the upload has not been
-    /// fingerprinted); the installer resolves HEAD and prints the computed
-    /// index SHA-256 to record here. Byte estimates follow
-    /// docs/DEEPSEEK_V4_FLASH.md (~91 GB installed) with headroom for the
-    /// resident file and page rounding.
-    public static let deepseekV4Flash = SupportedModelSource(
-        name: "deepseekv4flash",
-        displayName: "DeepSeek-V4-Flash 284B-A13B 2-bit DQ",
-        repoID: "mlx-community/DeepSeek-V4-Flash-2bit-DQ",
-        revision: "722bf559b7de93575b2320973cf2002e05bfe6c9",
-        sourceIndexSHA256:
-            "d1c2d929ab0a35be32cf18026bb31d6f99dad58d6c93a5a2abbe43791f9d6c30",
-        modelID: "deepseek-v4-flash-2bit-dq",
-        approximateDownloadBytes: 97_000_000_000,
-        installedBytes: 97_500_000_000,
-        reserveBytes: 2_147_483_648)
-
-    /// Revision and index digest verified against the published repo. The
-    /// download estimate is the repo's own total (148.4 GB); the vision and
-    /// audio towers are excluded by the planner but they are only 18 tensors,
-    /// so the saving is immaterial. Installed bytes carry headroom for the
-    /// resident index and per-expert page rounding. See docs/INKLING_SMALL.md.
-    public static let inklingSmall = SupportedModelSource(
-        name: "inklingsmall",
-        displayName: "Inkling-Small 276B-A12B 4-bit",
-        repoID: "pipenetwork/Inkling-Small-MLX-4bit",
-        revision: "9d6e4720ab7002af25d6129c88ccea6cd9f19372",
-        sourceIndexSHA256:
-            "fe16aec3cef12438f1d0ff657f7e785781b61271528a66b3b7160fcf1aaca30c",
-        modelID: "inkling-small-4bit",
-        approximateDownloadBytes: 148_441_426_867,
-        installedBytes: 149_000_000_000,
-        reserveBytes: 2_147_483_648)
-
     public static let maple = SupportedModelSource(
         name: "maple",
         displayName: "Maple Preview 2-bit MLX",
@@ -261,102 +176,6 @@ public struct SupportedModelSource: Sendable, Equatable {
         approximateDownloadBytes: 5_330_000_000,
         installedBytes: 6_650_000_000,
         reserveBytes: 1_073_741_824)
-
-    /// Flint 40B-A2.5B JANG_4M. The upload is already MLX affine quantized:
-    /// INT8/group-64 resident core and shared expert, INT4/group-64 routed
-    /// experts, and BF16 routers/norms/sinks.
-    public static let flint = SupportedModelSource(
-        name: "flint",
-        displayName: "Flint 40B-A2.5B JANG_4M",
-        repoID: "OsaurusAI/Flint-40B-A2.5B-JANG_4M",
-        revision: "2cc33f8d9d211217febf00e1cbf503c3eac7b16e",
-        sourceIndexSHA256:
-            "df25783e939be39f41a68a4ae8fd0ad95ab19245363e599d4235f9be897d4dcb",
-        modelID: "flint-40b-a2.5b-jang-4m",
-        approximateDownloadBytes: 23_370_683_168,
-        installedBytes: 23_600_000_000,
-        reserveBytes: 1_073_741_824)
-
-    /// The first `originalRepoQuantize` entry: no faithful pre-quantized MLX
-    /// conversion of Qwen3.8-Flash-Next exists (checked 2026-08-31, see
-    /// docs/families/QWEN38_FLASH_NEXT.md), so the installer reads the vendor's
-    /// 131 BF16 shards and quantizes to INT4 group-64 in flight — except the
-    /// two MoE gating tensors per layer, which `QuantBitPolicy.moeRouterInt8`
-    /// keeps at INT8 group-64 (98 tensors: 48 text layers plus the MTP draft
-    /// layer, `.mlp.gate.weight` and `.mlp.shared_expert_gate.weight` each).
-    ///
-    /// That mixture postdates the install currently on disk, which is uniform
-    /// INT4 and records `bitWidthOverridesHonored: 0`. `modelID` is unchanged
-    /// because it names the *base* width, exactly as `qwen36original`'s
-    /// `qwen3.6-35b-a3b-int4g64` does while installing 80 INT8 tensors; the two
-    /// Flash-Next installs are told apart by `bitWidthOverridesHonored` (0 vs
-    /// 98) and `quant.router.weightBits` (4 vs 8). A second entry for the same
-    /// repo and revision is not an option: `SourceFingerprint.knownFingerprints`
-    /// is searched by index hash, so two entries sharing one would resolve
-    /// nondeterministically.
-    ///
-    /// Both pins recorded. Download bytes are the index's declared total
-    /// (360.0 GB). Installed bytes are ~175 GB: routed experts ~68 GB (INT4
-    /// g64), the PLE n-gram table ~102.8 GB (**BF16** — its rows are 160 wide,
-    /// which the group size does not divide, so they cannot be quantized), the
-    /// resident core ~2.5 GB, the MTP draft pool ~1.4 GB, plus page rounding
-    /// and the PLE pool's 0.4% per-block slack. The Day-0 dossier's ~101 GB
-    /// figure assumed an INT4 n-gram table and is superseded. The INT8 routers
-    /// add 32,175,360 bytes on top, which the headroom already covers.
-    ///
-    /// `FlashNextForwardRunner` executes this family and its capability gate
-    /// was lifted on 2026-09-10, so an install made here loads through the
-    /// ordinary `ManifestReader.peekFamily` funnel. It is a quantize-in-flight
-    /// repack driven from `MferenceRepack --model qwen38flashnext` (or
-    /// `./mference-ui.sh install qwen38flashnext`).
-    public static let qwen38FlashNext = SupportedModelSource(
-        name: "qwen38flashnext",
-        displayName: "Qwen3.8-Flash-Next 180B-A3.5B (quantized at install)",
-        repoID: "Qwen/Qwen3.8-Flash-Next",
-        revision: "de4b8e4d43b917e7706784d8bb445c9af86a3540",
-        sourceIndexSHA256:
-            "99e815241ef03325536b0aaa4441deea45174c17fae31e10f0bb456410c590de",
-        modelID: "qwen3.8-flash-next-int4g64",
-        approximateDownloadBytes: 359_999_963_128,
-        installedBytes: 180_000_000_000,
-        reserveBytes: 8_589_934_592,
-        kind: .originalRepoQuantize)
-
-    /// Unsloth's UD-IQ3_XXS GGUF quant of Qwen3.8-Flash-Next (WS4): a
-    /// third-party quant whose task-benchmark figures are Unsloth's own. The
-    /// install keeps every tensor in its GGUF format except the INT8-2L
-    /// resident matrices (docs/families/QWEN38_FLASH_NEXT_UNSLOTH.md).
-    /// `sourceIndexSHA256` is the pin
-    /// fingerprint (`GGUFSourcePin.fingerprint`), not an index hash.
-    /// The runtime runs this label on `FlashNextForwardRunner`.
-    public static let qwen38FlashNextUnslothUDIQ3XXS = SupportedModelSource(
-        name: "qwen38flashnextudiq3xxs",
-        displayName: "Qwen3.8-Flash-Next 180B-A3.5B, Unsloth UD-IQ3_XXS GGUF (third-party quant)",
-        repoID: "unsloth/Qwen3.8-Flash-Next-GGUF",
-        revision: "3f3ba9cb826b49c665510ce1702fd513a393ce39",
-        sourceIndexSHA256:
-            "5cb4ea60ec38794a952d2310f81f94cd39c699ae1d21bd2dbeaa26ec13e73049",
-        modelID: "unsloth-qwen3.8-flash-next-ud-iq3_xxs",
-        approximateDownloadBytes: 83_626_438_426,
-        installedBytes: 84_000_000_000,
-        reserveBytes: 8_589_934_592,
-        kind: .gguf,
-        ggufPin: GGUFSourcePin(
-            commit: "3f3ba9cb826b49c665510ce1702fd513a393ce39",
-            shards: [
-                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf",
-                      sha256: "9d5644b371ffac921427c8021cc7242dab8e3ba37d7b48d1e79fe3770fbf9915",
-                      size: 10_946_618),
-                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00002-of-00004.gguf",
-                      sha256: "aacaff3bdb9032c2c3be428167930809735f65d3cfb204eba07d85e421e7ddf4",
-                      size: 49_946_027_488),
-                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00003-of-00004.gguf",
-                      sha256: "ef8f14e790ab471b363f146d5e8664eefbaf03e5776f317a1fb96a2bc7707b07",
-                      size: 4_869_325_888),
-                .init(path: "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00004-of-00004.gguf",
-                      sha256: "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36",
-                      size: 28_800_138_432),
-            ]))
 
     /// MiniCPM5-2B from the vendor's own BF16 upload, quantized to INT4
     /// affine group-64 in flight — the project's first plain-llama family and
@@ -401,43 +220,13 @@ public struct SupportedModelSource: Sendable, Equatable {
         reserveBytes: 1_073_741_824)
 
     /// Default source when no `--model` selector is given.
-    public static let `default` = gemma4
-
-    /// GLM-5.3-Flash 320B-A18B from PipeNetwork's mixed 4/8-bit MLX
-    /// conversion: 42 layers x 288 routed experts at INT4 group-64 (~164 GB
-    /// of page-aligned expert blobs), everything else INT8 group-64 with the
-    /// router gates BF16 and the mHC / KDA decay parameters FP32 (~10.6 GB
-    /// resident), the vision tower dropped. The download is the 18 shards
-    /// (181.9 GB) plus sidecars. See docs/families/GLM53_FLASH.md.
-    ///
-    /// `ManifestReader.familiesWithoutRunner` gates the family until its
-    /// runner lands, so an install made here is refused by axis name at load.
-    public static let glm53Flash = SupportedModelSource(
-        name: "glm53flash",
-        displayName: "GLM-5.3-Flash 320B-A18B MLX mixed 4/8-bit",
-        repoID: "pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit",
-        revision: "d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3",
-        sourceIndexSHA256:
-            "5e0a3768db6fb795c4846bed713785a17d336f4cc4494b4f6b28f75082314383",
-        modelID: "glm-5.3-flash-mlx-mixed-4-8bit",
-        approximateDownloadBytes: 181_944_533_258,
-        installedBytes: 182_000_000_000,
-        reserveBytes: 2_147_483_648)
+    public static let `default` = qwen36
 
     public static let all: [SupportedModelSource] = [
-        gemma4, gemma4QAT, qwen36, qwen36Original, qwen38, swiftQwen38, deepseekV4Flash, inklingSmall,
-        maple, flint, qwen38FlashNext, minicpm5, minicpm5MLX, glm53Flash,
+        qwen36, qwen36Original, qwen38, maple, minicpm5, minicpm5MLX,
     ]
 
-    /// Installable by name but not advertised (R9): kept out of `all`, and so
-    /// out of the usage alternation `mference-ui.sh install` reads. The
-    /// fingerprint table and `named` include them.
-    public static let unlisted: [SupportedModelSource] = [qwen38FlashNextUnslothUDIQ3XXS]
-
-    /// `all` plus `unlisted`: every source the installer can resolve.
-    public static var allIncludingUnlisted: [SupportedModelSource] { all + unlisted }
-
     public static func named(_ name: String) -> SupportedModelSource? {
-        allIncludingUnlisted.first { $0.name == name }
+        all.first { $0.name == name }
     }
 }

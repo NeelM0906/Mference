@@ -8,7 +8,7 @@ struct OpenAIValidationTests {
     @Test func samplingDefaultsAreSharedAcrossModelFamilies() throws {
         let data = Data(#"{"model":"custom-alias","messages":[{"role":"user","content":"Hi"}]}"#.utf8)
         let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        for dialect: ChatDialect in [.gemma, .chatml, .deepseek, .inkling, .glm5, .minicpm] {
+        for dialect: ChatDialect in [.chatml, .minicpm] {
             let request = try OpenAIRequestValidator.validate(decoded, modelID: "custom-alias", dialect: dialect)
             let c = request.generationConfig
             #expect(c.temperature == 0.8 && c.topK == 40 && c.topP == 0.95 && c.minP == 0.05)
@@ -134,7 +134,7 @@ struct OpenAIValidationTests {
     @Test func capturedOpenCodeInitialRequestValidates() throws {
         let request = try fixture("opencode-1.15.11-initial.json")
         let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "gemma-4-26b-a4b-it")
+            request, modelID: request.model)
         #expect(validated.stream)
         #expect(validated.includeUsage)
         #expect(validated.tools.count == 1)
@@ -144,20 +144,24 @@ struct OpenAIValidationTests {
     @Test func capturedOpenCodeToolResultValidates() throws {
         let request = try fixture("opencode-1.15.11-tool-result.json")
         let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "gemma-4-26b-a4b-it")
+            request, modelID: request.model)
         #expect(validated.messages.count == 4)
         #expect(validated.messages[2].toolCalls.count == 1)
         #expect(validated.messages[3].toolCallID == "call_0123456789abcdef01234567")
     }
 
-    @Test func capturedOpenCodePromptFits16KWith4096Completion() async throws {
+    /// The captured tool-result turn renders through the ChatML template:
+    /// the historical call and its result reach the prompt as tool-call and
+    /// tool-response blocks.
+    @Test func capturedOpenCodeToolResultRendersThroughChatML() async throws {
         let request = try fixture("opencode-1.15.11-tool-result.json")
         let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "gemma-4-26b-a4b-it")
-        let tokenizer = try await MFTokenizer.load()
+            request, modelID: request.model)
+        let tokenizer = try await ChatMLTokenizerFixture.load()
         let ids = try tokenizer.encodeToolChat(
             messages: validated.messages, tools: validated.tools)
-        #expect(ids.count <= 16_384 - 4_096)
+        #expect(ids.contains(tokenizer.toolCallStartID))
+        #expect(ids.contains(tokenizer.toolResponseID))
     }
 
     @Test func requiredToolChoiceIsRejected() throws {
@@ -170,36 +174,10 @@ struct OpenAIValidationTests {
         }
     }
 
-    @Test func acceptsLeadingSystemAndDeveloperGuidance() throws {
-        let data = Data(#"""
-        {"model":"m","messages":[
-          {"role":"system","content":"system"},
-          {"role":"developer","content":"developer"},
-          {"role":"user","content":"hello"}
-        ]}
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
-        #expect(validated.messages.map(\.role) == [.system, .developer, .user])
-    }
-
-    @Test func rejectsLateDeveloperGuidance() throws {
-        let data = Data(#"""
-        {"model":"m","messages":[
-          {"role":"user","content":"hello"},
-          {"role":"developer","content":"late"}
-        ]}
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
-        }
-    }
-
     @Test func wideIntegerToolArgumentsRoundTripExactly() async throws {
         let expected = "9007199254740993"
         // Wide integers at the 64-bit edges survive JSONValue encode and decode
-        // exactly (formerly reached through the Gemma tool-call parser).
+        // exactly, and render into the ChatML tool-call block unchanged.
         let signedMinimum = String(Int64.min)
         let signedMaximum = String(Int64.max)
         let unsignedMaximum = String(UInt64.max)
@@ -237,7 +215,7 @@ struct OpenAIValidationTests {
         let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
         let call = try #require(validated.messages[1].toolCalls.first)
         #expect(try call.arguments.encoded().contains(#""id":\#(expected)"#))
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await ChatMLTokenizerFixture.load()
         let rendered = tokenizer.decode(
             try tokenizer.encodeToolChat(
                 messages: validated.messages,
@@ -296,7 +274,7 @@ struct OpenAIValidationTests {
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await ChatMLTokenizerFixture.load()
         _ = try tokenizer.encodeToolChat(
             messages: validated.messages,
             tools: validated.tools)
@@ -305,7 +283,7 @@ struct OpenAIValidationTests {
     @Test func unionAndTypelessToolSchemasRenderWithoutThrowing() async throws {
         // pi's `mcp` tool (anyOf string|object), a kagi-style nullable integer
         // (anyOf integer|null), a github-style anyOf string|array, and a bare
-        // enum with no `type` — every shape that used to abort Gemma rendering.
+        // enum with no `type` — union and typeless shapes real clients send.
         let data = Data(#"""
         {
           "model":"m",
@@ -337,7 +315,7 @@ struct OpenAIValidationTests {
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await ChatMLTokenizerFixture.load()
         let rendered = tokenizer.decode(
             try tokenizer.encodeToolChat(
                 messages: validated.messages, tools: validated.tools),
@@ -359,21 +337,6 @@ struct OpenAIValidationTests {
         #expect(throws: DecodingError.self) {
             try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         }
-    }
-
-    @Test func consecutiveSystemMessagesCoalesceButKeepDeveloperDistinct() throws {
-        let data = Data(#"""
-        {"model":"m","messages":[
-          {"role":"system","content":"first"},
-          {"role":"system","content":"second"},
-          {"role":"developer","content":"dev"},
-          {"role":"user","content":"hello"}
-        ]}
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
-        #expect(validated.messages.map(\.role) == [.system, .developer, .user])
-        #expect(validated.messages.first?.content == "first\n\nsecond")
     }
 
     @Test func consecutiveSystemMessagesCoalesceForChatML() throws {
@@ -484,7 +447,7 @@ struct OpenAIValidationTests {
 
     @Test func chatMLDialectKeepsUnionBranchesInTheToolSchema() throws {
         // ChatML renders `tool | tojson`, so the union must survive validation
-        // untouched; only the Gemma render path flattens it.
+        // untouched.
         let data = Data(#"""
         {
           "model":"m",
@@ -537,32 +500,6 @@ struct OpenAIValidationTests {
         #expect(validated.tools.count == 1)
     }
 
-    @Test func ambiguousParameterKeysFailValidation() throws {
-        let data = Data(#"""
-        {
-          "model":"m",
-          "messages":[{"role":"user","content":"lookup"}],
-          "tools":[{
-            "type":"function",
-            "function":{
-              "name":"lookup",
-              "parameters":{
-                "type":"object",
-                "allOf":[{
-                  "type":"object",
-                  "properties":{"bad:key":{"type":"string"}}
-                }]
-              }
-            }
-          }]
-        }
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
-        }
-    }
-
     private func fixture(_ name: String) throws -> OpenAIChatRequest {
         let url = try #require(Bundle.module.url(
             forResource: name, withExtension: nil, subdirectory: "Fixtures"))
@@ -591,13 +528,9 @@ struct StreamingStopMatcherTests {
 struct ServerArgumentTests {
     @Test func usageListsInstalledModelFamilies() {
         for modelID in [
-            "gemma-4-26b-a4b-it",
             "qwen3.6-35b-a3b",
             "qwen3.8-27b-4bit",
-            "deepseek-v4-flash-2bit-dq",
-            "inkling-small-4bit",
             "maple-preview-2bit-mlx",
-            "qwen3.8-flash-next-int4g64",
             "minicpm5-2b-int4g64",
         ] {
             #expect(ServerArguments.usage.contains(modelID))
@@ -624,7 +557,7 @@ struct ServerArgumentTests {
 
     /// Any length up to the largest native context; each model then enforces
     /// its own limit when it loads.
-    @Test(arguments: [1, 100_000, 262_144, 1_048_576])
+    @Test(arguments: [1, 100_000, 131_072, 262_144])
     func parsesAnyContextUpToTheLargestNativeLimit(tokens: Int) throws {
         let arguments = try ServerArguments.parse([
             "--model", "model.gturbo",
@@ -634,18 +567,19 @@ struct ServerArgumentTests {
     }
 
     /// `max` gives every model its own native context, so one library can
-    /// serve Maple at 128,000 and Gemma at 262,144.
+    /// serve Maple at 128,000 and Qwen 3.6 at 262,144.
     @Test func maxLeavesTheContextToEachModel() throws {
         let arguments = try ServerArguments.parse(["--library", "--max-context", "max"])
         #expect(arguments.maxContext == nil)
         #expect(ServerArguments.usage.contains("max"))
-        #expect(ServerModelSession.resolvedMaxContext(nil, family: .gemma4) == 262_144)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .qwen36) == 262_144)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .qwen38) == 262_144)
         #expect(ServerModelSession.resolvedMaxContext(nil, family: .maple) == 128_000)
-        #expect(ServerModelSession.resolvedMaxContext(nil, family: .deepseekV4Flash) == 1_048_576)
-        #expect(ServerModelSession.resolvedMaxContext(32_768, family: .gemma4) == 32_768)
+        #expect(ServerModelSession.resolvedMaxContext(nil, family: .minicpm5) == 131_072)
+        #expect(ServerModelSession.resolvedMaxContext(32_768, family: .qwen36) == 32_768)
     }
 
-    @Test(arguments: ["0", "-1", "1048577", "16k", "", "MAX"])
+    @Test(arguments: ["0", "-1", "262145", "1048576", "16k", "", "MAX"])
     func rejectsContextsNoModelCanUse(value: String) {
         #expect(throws: ServerArgumentError.self) {
             try ServerArguments.parse(["--model", "model.gturbo", "--max-context", value])

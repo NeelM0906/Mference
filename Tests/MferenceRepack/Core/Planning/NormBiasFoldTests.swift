@@ -46,11 +46,11 @@ import Testing
     func qwen36FoldsTheRightSet() {
         let (folded, bare) = Self.normInventory()
         for name in folded {
-            #expect(FlashNextPlanner.foldsNormBias(name, family: .qwen36),
+            #expect(OriginalRepoPlanner.foldsNormBias(name, family: .qwen36),
                     "\(name) should be folded")
         }
         for name in bare {
-            #expect(!FlashNextPlanner.foldsNormBias(name, family: .qwen36),
+            #expect(!OriginalRepoPlanner.foldsNormBias(name, family: .qwen36),
                     "\(name) must stay bare")
         }
     }
@@ -78,10 +78,10 @@ import Testing
                        "linear_attn.conv1d.weight", "linear_attn.A_log",
                        "embed_tokens.weight"] {
             let name = "\(Self.prefix)layers.5." + suffix
-            #expect(!FlashNextPlanner.foldsNormBias(name, family: .qwen36),
+            #expect(!OriginalRepoPlanner.foldsNormBias(name, family: .qwen36),
                     "\(name)")
         }
-        #expect(!FlashNextPlanner.foldsNormBias("lm_head.weight", family: .qwen36))
+        #expect(!OriginalRepoPlanner.foldsNormBias("lm_head.weight", family: .qwen36))
     }
 
     /// The transform itself: `bf16(w + 1)`, width-preserving, and the operation

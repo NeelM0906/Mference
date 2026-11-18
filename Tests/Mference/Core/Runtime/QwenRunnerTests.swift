@@ -189,21 +189,20 @@ import Metal
         #expect(qwen.qElements == 32 * 256)
         #expect(qwen.attentionOutputElements == 32 * 4 * 32)
 
-        let gemma = PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 128)
-        #expect(gemma.qProjElementsPerToken == gemma.maxQElementsPerToken)
-        #expect(gemma.attnGateElementsPerToken == 0)
-        #expect(gemma.gdnQKVDim == 0)
-        #expect(gemma.gdnValueDim == 0)
-        #expect(gemma.sharedScalarGateElements == 0)
-        #expect(gemma.qElements == 128 * gemma.maxQElementsPerToken)
+        let plain = PrefillChunkScratchLayout(config: .defaultsToy(topKExperts: 8), chunkTokens: 128)
+        #expect(plain.qProjElementsPerToken == plain.maxQElementsPerToken)
+        #expect(plain.attnGateElementsPerToken == 0)
+        #expect(plain.gdnQKVDim == 0)
+        #expect(plain.gdnValueDim == 0)
+        #expect(plain.sharedScalarGateElements == 0)
+        #expect(plain.qElements == 128 * plain.maxQElementsPerToken)
     }
 }
 
-/// Moved from the removed Gemma prefix-recovery suite: Qwen's recurrent
-/// (gated-DeltaNet) state cannot be rewound, so the runner must never opt a
-/// Qwen model into the Gemma prefix-recovery path.
+/// After a chunked prefill the runner continues from exactly the prefilled
+/// position (its gated-DeltaNet state cannot be rewound, only continued).
 extension QwenRunnerTests {
-    @Test func qwenRecurrentStateNeverOptsIntoGemmaRewind() async throws {
+    @Test func qwenRunnerContinuesFromThePrefilledPosition() async throws {
         let directory = try QwenToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: directory) }
         let context = try MetalContext()
@@ -216,11 +215,6 @@ extension QwenRunnerTests {
         let tokens = (0..<33).map { Int32(4 + ($0 * 37) % (config.vocabSize - 4)) }
         _ = try await runner.prefillChunked(tokens: tokens[...], startPosition: 0,
             outputMode: .logits, config: .production(chunkTokens: 64), into: output, onProgress: { _ in })
-        #expect(!runner.supportsGemmaPrefixRecovery)
-        #expect(try runner.captureGemmaPrefix() == false)
-        #expect(runner.gemmaRecoveryBytes == 0)
-        #expect(runner.gemmaRecoverablePrefix(upTo: 16) == 0)
-        #expect(throws: (any Error).self) { try runner.recoverGemmaPrefix(to: 16) }
         try runner.prepareForContinuation(expectedPosition: 33)
         #expect(runner.continuationPosition == 33)
     }

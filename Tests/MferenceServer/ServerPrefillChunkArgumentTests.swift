@@ -24,17 +24,17 @@ import Mference
 
     @Test func theFlagWinsOverTheEnvironmentAndTheFamilyDefault() {
         let flagged = ServerModelSession.runtimeConfiguration(
-            family: .gemma4, expertCacheSlots: 16, prefillChunkTokens: 1024,
+            family: .qwen36, expertCacheSlots: 16, prefillChunkTokens: 1024,
             physicalMemoryBytes: Self.sixteenGiB,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "512"])
         #expect(flagged.prefillChunkTokens == 1024)
         let environment = ServerModelSession.runtimeConfiguration(
-            family: .gemma4, expertCacheSlots: 16,
+            family: .qwen36, expertCacheSlots: 16,
             physicalMemoryBytes: Self.sixteenGiB,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "512"])
         #expect(environment.prefillChunkTokens == 512)
         let automatic = ServerModelSession.runtimeConfiguration(
-            family: .gemma4, expertCacheSlots: 16,
+            family: .qwen36, expertCacheSlots: 16,
             physicalMemoryBytes: Self.sixteenGiB, environment: [:])
         #expect(automatic.prefillChunkTokens == 2048)
     }

@@ -9,7 +9,7 @@ struct TokenizerLoadCoordinatorTests {
         let tokenizers = try await withThrowingTaskGroup(of: MFTokenizer.self) { group in
             for _ in 0..<8 {
                 group.addTask {
-                    try await MFTokenizer.load()
+                    try await MFTokenizer.chatMLFixture()
                 }
             }
 
@@ -35,8 +35,8 @@ struct TokenizerLoadCoordinatorTests {
 
     @Test("Consecutive loads reuse the completed process cache")
     func consecutiveLoadsReuseCompletedTask() async throws {
-        let first = try await MFTokenizer.load()
-        let second = try await MFTokenizer.load()
+        let first = try await MFTokenizer.chatMLFixture()
+        let second = try await MFTokenizer.chatMLFixture()
 
         #expect(second.bosID == first.bosID)
         #expect(second.eosID == first.eosID)

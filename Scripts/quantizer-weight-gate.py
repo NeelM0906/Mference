@@ -15,19 +15,19 @@ why it can be re-run for any family before committing to an install.
     # A family with its own built-in sample plan:
     Scripts/quantizer-weight-gate.py --cache <dir> --family minicpm5
 
-    # Any other family, any tensors: sample every tensor whose vendor name
-    # matches PATTERN (a regex), full rows unless --rows caps them.
-    Scripts/quantizer-weight-gate.py --cache <dir> --family qwen38flashnext \
-        --tensors 'layers\\.(3|19|40)\\.mlp\\.(gate|shared_expert_gate)\\.weight'
+    # Any tensors: sample every tensor whose vendor name matches PATTERN
+    # (a regex), full rows unless --rows caps them.
+    Scripts/quantizer-weight-gate.py --cache <dir> --family qwen36 \
+        --tensors 'layers\\.(3|19)\\.mlp\\.shared_expert\\.down_proj\\.weight'
 
     # Or name the repos yourself (REPO[@REV]; REV defaults to main):
-    Scripts/quantizer-weight-gate.py --orig Qwen/Qwen3.8-Flash-Next@de4b8e4d \
-        --control mlx-community/Qwen3.8-Flash-Next-4bit --tensors '...'
+    Scripts/quantizer-weight-gate.py --orig OWNER/REPO@REV \
+        --control OWNER/REPO-4bit --tensors '...'
 
 `--family` selects a pinned (vendor repo, control repo, name mapping) triple
 from FAMILIES; `--orig` / `--control` override either resolve URL for an
-unpinned rehearsal. Two families carry a built-in sample plan, the rest are
-driven by `--tensors`:
+unpinned rehearsal. Both pinned families carry a built-in sample plan, and
+`--tensors` replaces it with a pattern:
 
   qwen36    `Qwen/Qwen3.6-35B-A3B` rev 995ad96e vs mlx-community's conversion
             rev 38740b84 — the first control, and the plan behind
@@ -42,7 +42,7 @@ The encoder here is a transcription of
 `Int4AffineEncoderConventionTests` locks the Swift original to the same
 properties this script relies on. See docs/QUANTIZER_QUALITY.md.
 
-The module is importable (see Scripts/flashnext-router-int4-check.py): `Repo`
+The module is importable: `Repo`
 does the safetensors-header-parse + byte-range fetch, and the `bf16_*`,
 `encode_ours`, `unpack`, `dequant` helpers are the decoders.
 """
@@ -57,13 +57,6 @@ FAMILIES = {
     "qwen36": dict(
         orig="Qwen/Qwen3.6-35B-A3B@995ad96eacd98c81ed38be0c5b274b04031597b0",
         control="mlx-community/Qwen3.6-35B-A3B-4bit@38740b847e4cb78f352aba30aa41c76e08e6eb46",
-        prefixes=("model.language_model.", "language_model.model.")),
-    "qwen38flashnext": dict(
-        # Vendor BF16 at the revision the install's manifest was built from;
-        # the control landed 2026-09-02 (INT4 g32 base, INT8 g64 on the 96
-        # `mlp.gate` / `mlp.shared_expert_gate` tensors).
-        orig="Qwen/Qwen3.8-Flash-Next@de4b8e4d",
-        control="mlx-community/Qwen3.8-Flash-Next-4bit@main",
         prefixes=("model.language_model.", "language_model.model.")),
     "minicpm5": dict(
         # The first control that is not a community conversion: the vendor's

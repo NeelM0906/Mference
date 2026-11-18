@@ -2,34 +2,33 @@ import Foundation
 import Testing
 @testable import Mference
 
-/// First run downloads the Gemma 4 IT tokenizer (~32 MB) from Hugging Face
-/// Hub to `~/.cache/huggingface/`. Subsequent runs are offline.
+/// Encode, decode and streaming detokenization on the committed ChatML
+/// (Qwen 3.6) tokenizer fixture; no network or Hub cache.
 @Suite("Tokenizer")
 struct TokenizerTests {
     let tok: MFTokenizer
 
     init() async throws {
-        self.tok = try await MFTokenizer.load()
+        self.tok = try await MFTokenizer.chatMLFixture()
     }
 
     // MARK: - Special tokens
 
-    @Test("Special token IDs are distinct and within vocab")
-    func specialTokensDistinct() {
+    @Test("Special token IDs are within vocab")
+    func specialTokensWithinVocab() {
         let ids: [Int32] = [tok.bosID, tok.eosID, tok.padID, tok.endOfTurnID]
-        #expect(Set(ids).count == 4, "expected 4 distinct special token IDs, got \(ids)")
+        #expect(tok.eosID != tok.endOfTurnID)
         for id in ids {
             #expect(id >= 0)
             #expect(id < Int32(tok.vocabSize))
         }
     }
 
-    @Test("Stop-token set covers EOS, end-of-turn, and tool response")
+    @Test("Stop-token set covers EOS and end-of-turn")
     func stopTokens() {
         #expect(tok.stopTokenIDs.contains(tok.eosID))
         #expect(tok.stopTokenIDs.contains(tok.endOfTurnID))
-        #expect(tok.stopTokenIDs.contains(tok.toolResponseID))
-        #expect(tok.stopTokenIDs.count == 3)
+        #expect(tok.stopTokenIDs.count == 2)
     }
 
     // MARK: - Encode / decode
@@ -57,28 +56,15 @@ struct TokenizerTests {
         #expect(tok.decode(ids) == text)
     }
 
-    @Test("BOS is added when requested and absent otherwise")
-    func bosPrepend() {
-        let withBOS = tok.encode("x", addBOS: true)
-        let without = tok.encode("x", addBOS: false)
-        #expect(withBOS.first == tok.bosID)
-        #expect(without.first != tok.bosID)
-        #expect(withBOS.count == without.count + 1)
-        #expect(Array(withBOS.dropFirst()) == without)
-    }
-
-    @Test("Empty string encodes to BOS-only or empty")
-    func encodeEmpty() {
-        let none = tok.encode("", addBOS: false)
-        #expect(none.isEmpty)
-        let bos = tok.encode("", addBOS: true)
-        #expect(bos == [tok.bosID])
+    @Test("ChatML never prepends a BOS")
+    func addBOSIsANoOp() {
+        #expect(tok.encode("x", addBOS: true) == tok.encode("x", addBOS: false))
+        #expect(tok.encode("", addBOS: true).isEmpty)
     }
 
     @Test("Decoding strips special tokens when requested")
     func decodeStripsSpecial() {
-        let ids = tok.encode("hi", addBOS: true)
-        #expect(ids.first == tok.bosID)
+        let ids = [tok.endOfTurnID] + tok.encode("hi", addBOS: false)
         let withoutSpecial = tok.decode(ids, skipSpecialTokens: true)
         #expect(withoutSpecial == "hi")
     }
@@ -139,7 +125,12 @@ struct TokenizerTests {
         }
         assembled += detok.flush()
         #expect(assembled == tok.decode(prefix))
-        #expect(!assembled.unicodeScalars.contains("\u{FFFD}"))
+        // A byte-level vocab can cut a scalar at the 256-token boundary; the
+        // flushed tail then ends in U+FFFD, exactly as `decode` renders it.
+        // No replacement character may appear before that tail.
+        let interior = String(String.UnicodeScalarView(
+            assembled.unicodeScalars.reversed().drop(while: { $0 == "\u{FFFD}" }).reversed()))
+        #expect(!interior.unicodeScalars.contains("\u{FFFD}"))
     }
 
     @Test("Flush with no tokens yields empty string")

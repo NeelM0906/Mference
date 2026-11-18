@@ -1,11 +1,15 @@
 # Source release validation — September 18, 2026
 
+> Dated record. The retired families it names (Gemma 4, Inkling-Small,
+> GLM-5.3-Flash, Qwen3.8-Flash-Next, and Swift-Qwen3.8) are no longer
+> supported; see [Retired model families](RETIRED_FAMILIES.md).
+
 Work in PR #37, based on merged `main` revision `c67e857`. This is a running
 evidence record, **not a published-release or all-roadmap-complete claim**.
 The user's requested deliverable is a tested source release, not a signed
 prebuilt app. No model weights are redistributed.
 
-The subsequent [Swift-Qwen investigation](families/SWIFT_QWEN38_INVESTIGATION.md)
+The subsequent Swift-Qwen investigation
 records a controlled token-cap diagnosis, upstream card/discussion review,
 tool-argument and reasoning-channel fixes, and their verification. Its
 background-download diagnostic timings are not performance results.
@@ -32,7 +36,7 @@ to test the real UI launcher, then resumed with those ranges preserved.
 ## Correctness and builds
 
 Swift-Qwen's formerly failed mean-logit gate passes on `d2b84f1` with unchanged
-tolerances. See [the complete numerical record](families/SWIFT_QWEN38_QUALIFICATION.md).
+tolerances. See the complete numerical record.
 
 On `01bdb3d`:
 
@@ -481,12 +485,12 @@ provenance, all footers and limitations are in
 
 - GLM install and current installed resident/16-slot cutover/continuation/recovery
   gate are complete (49 receipt files, 180,843,651,789 bytes; test exit 0,
-  417.250s). [Exact commands and assertions](families/GLM53_FLASH.md#installed-streamed-prefill-qualification-september-18-2026)
+  417.250s). Exact commands and assertions
   do not establish new throughput or smaller-hardware claims.
 - Qualify and measure optimizations on matched release builds before speed claims.
 - The separately frozen [60-case screen](benchmark-prompts/release-screen-v1/README.md)
   is complete for matched-low base/Swift: 59/60 versus 54/60 cases, with Swift
-  using 6.77% fewer completion tokens. See [commands, outcomes and limits](families/QWEN_MATCHED_QUALIFICATION_2026-09-18.md).
+  using 6.77% fewer completion tokens. See commands, outcomes and limits.
   Default-effort/multi-seed and other release-profile screens remain open.
 - Complete final serial regression and both CI platform legs after all changes.
 - Record the final support limits and tagged source-release version.

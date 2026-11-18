@@ -1,43 +1,22 @@
 # Implementation references
 
 Mference builds on work by other developers and researchers. These are
-the sources that materially shaped its Gemma 4 and Maple implementations,
-Metal kernels, out-of-core runtime, and experiments under the 8 GB memory
-constraint.
+the sources that materially shaped its Maple implementation, Metal kernels,
+out-of-core runtime, and experiments under the 8 GB memory constraint. The
+kernels and runtime began as a port of a family since retired (see
+[Retired model families](RETIRED_FAMILIES.md)); that family's model references
+are in git history.
 
 Upstream code references whose exact behavior mattered are pinned to the
-commits checked when each reference was adopted (the original Gemma 4 set on
+commits checked when each reference was adopted (the original set on
 2026-07-16). Project home pages remain branch-level when they are
 included for broader design context rather than a line-level claim.
 
 ## Model and weights
 
-- The official [Gemma 4 model card](https://ai.google.dev/gemma/docs/core/model_card_4)
-  defines the model family, the 26B A4B mixture-of-experts shape, hybrid
-  attention, and intended capabilities.
-- Hugging Face Transformers provides executable decoder cross-checks for
-  [Gemma 4 math](https://github.com/huggingface/transformers/blob/a8609bed2ad1593e7d756006525a10053d4d5bc6/src/transformers/models/gemma4/modular_gemma4.py),
-  [configuration](https://github.com/huggingface/transformers/blob/a8609bed2ad1593e7d756006525a10053d4d5bc6/src/transformers/models/gemma4/configuration_gemma4.py),
-  and [RoPE utilities](https://github.com/huggingface/transformers/blob/a8609bed2ad1593e7d756006525a10053d4d5bc6/src/transformers/modeling_rope_utils.py).
-  Mference used them to verify normalization, K/V derivation, routing,
-  MoE combination, layer scaling, and final logits.
-- [MLX-LM Gemma 4](https://github.com/ml-explore/mlx-lm/blob/15b522f593b7ca5fbc0cac6f7572d40859d2d8fe/mlx_lm/models/gemma4_text.py)
-  and [MLX-VLM Gemma 4](https://github.com/Blaizzy/mlx-vlm/blob/84f43753380355c0455a2bafb291d4b7cbcf81d1/mlx_vlm/models/gemma4/language.py)
-  supplied independent implementation checks. MLX-LM also served as the
-  bounded logit and quality reference.
-- [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit),
-  pinned at
-  [`0d77464e`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit/tree/0d77464eeb233a2da68ebf9d7dc4edaac7db956d),
-  is the source of the weights, configuration, tokenizer, and chat-template
-  sidecars. The repacker preserves its group-64 MLX affine values rather than
-  requantizing them.
 - [Hugging Face swift-transformers](https://github.com/huggingface/swift-transformers)
   is the direct tokenizer dependency. Mference adds bounded streaming
-  detokenization around it. For Gemma 4 it runs the decoder sequence that
-  `tokenizer.json` declares and stops there, without the library's
-  `clean_up_tokenization_spaces` pass: Gemma's tokenizer config omits that key,
-  which leaves the pass on, and it rewrites generated text ("Bonjour !" became
-  "Bonjour!"). Decode and streaming then reproduce the model's text exactly.
+  detokenization around it.
 - [`deepgrove/maple-preview-2bit-mlx`](https://huggingface.co/deepgrove/maple-preview-2bit-mlx),
   pinned at `361db5da5e74ff6fcdd852d478e1f266ce11013a` with source-index SHA-256
   `56000110535c5023b43209a5c142035e12c1cde7b1118759cc9f86335d46ef95`, is the
@@ -50,26 +29,6 @@ included for broader design context rather than a line-level claim.
   [`maple.py` FlashHead path](https://github.com/deepgrove-ai/mlx-lm-deepgrove/blob/eba96c16158f032821b0bf374ea1421cfddef0a9/mlx_lm/models/maple.py#L853)
   is the reference for the explicit approximate singleton-decode candidate
   head; the default complete-head path keeps it disabled.
-
-- [`pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit`](https://huggingface.co/pipenetwork/GLM-5.3-Flash-MLX-mixed-4_8bit),
-  pinned at `d43ea8b407ce4e9c25e6ac9baec3feab70d9f5f3` with source-index
-  SHA-256 `5e0a3768db6fb795c4846bed713785a17d336f4cc4494b4f6b28f75082314383`,
-  is the GLM-5.3-Flash checkpoint. Its `text_config` and the 18 shard headers
-  define the `glm53Flash` architecture contract.
-- [`PipeNetwork/glm53-flash-mlx`](https://github.com/PipeNetwork/glm53-flash-mlx/tree/a61a7c7d2fbdf3d218a9909365a24bd794f3a247)
-  at `a61a7c7d` is the executable GLM-5.3-Flash reference: its `language.py`
-  (Kimi Delta Attention, NoPE latent attention, the pooled indexer, the clamped
-  MoE) reproduces `transformers` 5.16 at 1e-6 and is what the family's toy
-  goldens are generated from. Its `docs/upstream-notes.md` records the four
-  upstream mlx-vlm defects the port must not inherit.
-- [`IngeniousIdiocy/ds4`](https://github.com/IngeniousIdiocy/ds4/tree/90d71e0de89de5eebbd3e9a4b0302116f92bee6d),
-  branch `glm53-m3ultra` at `90d71e0d`: an MIT-licensed C/Metal engine that runs
-  GLM-5.3-Flash Q4_K at 38–41 tok/s on a 512 GB M3 Ultra. Read as a design
-  reference: its `metal/glm53_kda.metal` informed the shape of the KDA decode
-  kernel (which Mference wrote from the reference arithmetic rather than
-  porting), and its `CHANGES-GLM53.md` (decode ledger, epilogue fusions,
-  router fold, radix top-k, layer-major expert bank) is the perf backlog the
-  runner is judged against.
 
 ## Metal and kernels
 

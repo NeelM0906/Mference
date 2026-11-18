@@ -56,20 +56,14 @@ struct PackedExpertsLayout: Sendable {
     let layers: [LayerLayout]
     /// How experts are stored when the file omits bytes the kernels read.
     let storage: ExpertStorage?
-    /// Native GGUF blocks expanded to LUT4 slots (WS4); per-layer strides.
-    /// Mutually exclusive with `storage`.
-    let gguf: GGUFExpertLayout?
 
     init(expertStride: UInt64, numLayers: Int, expertsPerLayer: Int,
-         layers: [LayerLayout], storage: ExpertStorage? = nil,
-         gguf: GGUFExpertLayout? = nil) {
-        precondition(storage == nil || gguf == nil)
+         layers: [LayerLayout], storage: ExpertStorage? = nil) {
         self.expertStride = expertStride
         self.numLayers = numLayers
         self.expertsPerLayer = expertsPerLayer
         self.layers = layers
         self.storage = storage
-        self.gguf = gguf
     }
 
     /// Bytes of one expert in its layer file; expert offsets and sizes in the
@@ -184,25 +178,17 @@ enum PackedExpertsLayoutReader {
         }
 
         var storage: ExpertStorage?
-        var gguf: GGUFExpertLayout?
         if let storageObj = root["expertStorage"] {
             guard let storageObj = storageObj as? [String: Any] else {
                 throw ModelError.indexCorrupt(detail: "layout.json: malformed expertStorage")
             }
-            if storageObj["format"] as? String == GGUFExpertLayout.format {
-                gguf = try GGUFExpertLayout.parse(storageObj, numLayers: numLayers,
-                                                  expertsPerLayer: expertsPerLayer,
-                                                  layers: layers)
-            } else {
-                storage = try parseStorage(storageObj, expertStride: expertStride, layers: layers)
-            }
+            storage = try parseStorage(storageObj, expertStride: expertStride, layers: layers)
         }
         return PackedExpertsLayout(expertStride: expertStride,
                                    numLayers: numLayers,
                                    expertsPerLayer: expertsPerLayer,
                                    layers: layers,
-                                   storage: storage,
-                                   gguf: gguf)
+                                   storage: storage)
     }
 
     /// Parses `expertStorage` and proves it reconstructs every byte the
