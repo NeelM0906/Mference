@@ -33,6 +33,10 @@ public protocol ChatToolbox: Sendable {
 public protocol ChatToolboxProvider: Sendable {
     /// Nil when the tools are unavailable (web off).
     @MainActor func makeToolbox(webEnabled: Bool) -> (any ChatToolbox)?
-    /// Called when the chat stops needing the tools (web turned off, quit).
+    /// Called when a chat turns web on or off (start or stop SearXNG).
     @MainActor func webUsageChanged(enabled: Bool)
+    /// Web search is opt-in (L7): true until the person has agreed once.
+    @MainActor var needsWebConsent: Bool { get }
+    /// Records the person's agreement (Settings > Privacy shows it).
+    @MainActor func grantWebConsent()
 }

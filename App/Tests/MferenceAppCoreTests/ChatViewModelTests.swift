@@ -22,6 +22,17 @@ struct StubToolbox: ChatToolbox, ChatToolboxProvider {
 
     func makeToolbox(webEnabled: Bool) -> (any ChatToolbox)? { webEnabled ? self : nil }
     func webUsageChanged(enabled: Bool) {}
+    var needsWebConsent: Bool { false }
+    func grantWebConsent() {}
+}
+
+/// Needs consent until granted.
+@MainActor final class ConsentTools: ChatToolboxProvider {
+    var granted = false
+    func makeToolbox(webEnabled: Bool) -> (any ChatToolbox)? { nil }
+    func webUsageChanged(enabled: Bool) {}
+    var needsWebConsent: Bool { !granted }
+    func grantWebConsent() { granted = true }
 }
 
 /// A toolbox whose tool runs until it is cancelled.
@@ -39,6 +50,8 @@ struct HangingToolbox: ChatToolbox, ChatToolboxProvider {
 
     func makeToolbox(webEnabled: Bool) -> (any ChatToolbox)? { self }
     func webUsageChanged(enabled: Bool) {}
+    var needsWebConsent: Bool { false }
+    func grantWebConsent() {}
 }
 
 @MainActor
@@ -263,6 +276,63 @@ struct HangingToolbox: ChatToolbox, ChatToolboxProvider {
         #expect(stored[3].toolCallID == "b")
         #expect(stored[3].content == "Stopped.")
         #expect(chat.errorMessage == nil)
+    }
+
+    @Test func webAsksForConsentOnce() throws {
+        let tools = ConsentTools()
+        let (chat, _) = try Self.viewModel(ScriptedEngineService(), tools: tools)
+        chat.setWebEnabled(true)
+        #expect(chat.webConsentRequested)
+        #expect(!chat.webEnabled)
+        chat.declineWebConsent()
+        #expect(!chat.webConsentRequested)
+        #expect(!chat.webEnabled)
+        chat.setWebEnabled(true)
+        chat.confirmWebConsent()
+        #expect(tools.granted)
+        #expect(chat.webEnabled)
+        chat.setWebEnabled(false)
+        chat.setWebEnabled(true)
+        #expect(!chat.webConsentRequested)
+        #expect(chat.webEnabled)
+    }
+
+    @Test func aNewChatStartsWithWebOff() async throws {
+        let service = ScriptedEngineService(replies: [.init(content: "One"), .init(content: "Two")])
+        let (chat, _) = try Self.viewModel(service, tools: StubToolbox())
+        chat.setWebEnabled(true)
+        chat.draft = "First"
+        chat.send()
+        await chat.waitUntilIdle()
+        let first = try #require(chat.selectedID)
+
+        for isPrivate in [false, true] {
+            chat.newChat(isPrivate: isPrivate)
+            #expect(!chat.webEnabled)
+        }
+        chat.draft = "Second, private"
+        chat.send()
+        await chat.waitUntilIdle()
+        #expect(service.requests.last?.options.tools.isEmpty == true)
+        #expect(chat.selectedConversation?.webEnabled == false)
+
+        chat.select(first)
+        #expect(chat.webEnabled)
+    }
+
+    @Test func answersKeepOnlyTheSourcesTheyCite() async throws {
+        let call = ToolCall(id: "c", name: "web_search", arguments: .object([:]), argumentsJSON: "{}")
+        let service = ScriptedEngineService(replies: [
+            .init(content: "", toolCalls: [call]),
+            .init(content: "No sources cited here."),
+        ])
+        let (chat, _) = try Self.viewModel(service, tools: StubToolbox())
+        chat.setWebEnabled(true)
+        chat.draft = "Q"
+        chat.send()
+        await chat.waitUntilIdle()
+        #expect(chat.messages.last?.citations.isEmpty == true)
+        #expect(chat.messages.last?.steps.count == 1)
     }
 
     @Test func toolsAreWithheldWhenWebIsOff() async throws {
