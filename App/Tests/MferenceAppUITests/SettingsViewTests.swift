@@ -19,6 +19,19 @@ import Testing
         #expect(settings.webSearchEnabled && settings.offlineMode && settings.remindersSyncEnabled)
     }
 
+    @Test func chatOpensSettingsWhereItPoints() {
+        let shell = ShellModel(selection: .chat, defaults: nil)
+        shell.openSettings(.memory)
+        #expect(shell.selection == .settings && shell.settingsPane == .memory && !shell.settingsShowsLibrary)
+        shell.toggleSettings()
+        #expect(shell.selection == .chat)
+        shell.openSettings(.models, showingLibrary: true)
+        #expect(shell.settingsShowsLibrary)
+        shell.toggleSettings()
+        shell.toggleSettings()
+        #expect(shell.settingsPane == .models && !shell.settingsShowsLibrary, "the gear opens Settings at the top")
+    }
+
     @Test func paneTitlesFollowTheMockup() {
         #expect(SettingsView.Pane.allCases.map(\.title)
                 == ["Models", "Memory", "Privacy", "Connections", "Dictation", "Shortcuts", "iPhone"])
