@@ -6,9 +6,9 @@
 # 1. Builds `MferenceMac` in release with -j 4 (skipped with --no-build). On
 #    the shared Mac it follows the app build rule (TEAM_RULES update
 #    2026-11-18): `lock.sh build -- swift build ...`, not wrapped in
-#    `lock.sh run`, and it refuses while `lock.sh status` shows a Deep, Quick
-#    or ws2 hold. `lock.sh build` itself refuses (exit 3) while the quiet flag
-#    is set. Without a lock.sh it builds directly.
+#    `lock.sh run`, and only while `lock.sh status` shows a free lock or a
+#    build hold (exit 75 otherwise). `lock.sh build` itself refuses (exit 3)
+#    while the quiet flag is set. Without a lock.sh it builds directly.
 # 2. Lays out the bundle:
 #      Contents/MacOS/Mference                 the MferenceMac executable
 #      Contents/Info.plist, PkgInfo            from App/Resources/Info.plist
@@ -60,8 +60,11 @@ if [[ "$build" == 1 ]]; then
     build_cmd=(swift build -c release -j 4 --package-path "$APP_DIR" --product MferenceMac)
     if [[ -n "${MFERENCE_LOCK:-}" ]]; then
         lock_status="$("$MFERENCE_LOCK" status)"
-        if grep -qiE '^ *workstream=ws2$|^ *purpose=.*(deep|quick)' <<<"$lock_status"; then
-            echo "bundle.sh: the machine holds a Deep, Quick or ws2 run; not building now:" >&2
+        # App builds share the machine only with a free lock or a build hold
+        # (TEAM_RULES update 2026-11-18 ~21:00Z).
+        if ! grep -q '^machine lock: free' <<<"$lock_status" \
+            && ! grep -qiE '^ *purpose=.*\bbuild\b' <<<"$lock_status"; then
+            echo "bundle.sh: the machine lock is held by a run, not a build; not building now:" >&2
             echo "$lock_status" >&2
             exit 75
         fi
