@@ -52,11 +52,13 @@ public struct OnboardingView: View {
         return true
     }
 
-    /// The "Download Deep" button: the only path that starts Deep here.
+    /// The "Download Deep" button (also "Download Deep again" after a
+    /// failure): the person's explicit approval, the only path that starts
+    /// Deep here. Checks the disk margin.
     func approveDeep() {
         guard let deep, offersDeep else { return }
         declinedDeep = false
-        library.download(deep.id)
+        ModelLibraryView.approveDownload(deep, in: library)
     }
 
     public var body: some View {
@@ -163,8 +165,8 @@ public struct OnboardingView: View {
                             ? " Deep also fits, and only downloads if you say yes." : "")
     }
 
-    /// Retry after a failed download; checks the disk margin again. Deep was
-    /// approved when its download first started. Returns whether it restarted.
+    /// Retry Quick's failed download (no approval needed); checks the disk
+    /// margin again. Returns whether it restarted.
     @discardableResult
     func retryDownload(_ entry: ModelEntry) -> Bool {
         ModelLibraryView.retryDownload(entry, in: library)
@@ -220,8 +222,9 @@ public struct OnboardingView: View {
                 library.resume(deep.id)
             }
         case .downloadFailed(let message):
-            retryLine("Deep didn't download: \(message)", label: "Retry", accessibility: "Retry downloading Deep") {
-                retryDownload(deep)
+            retryLine("Deep didn't download: \(message)", label: "Download Deep again",
+                      accessibility: "Download Deep again") {
+                approveDeep()
             }
         case .notInstalled:
             if declinedDeep {

@@ -40,21 +40,31 @@ import Testing
         #expect(!deep.isOffered(on: library.machine))
     }
 
-    /// A Deep download that failed was approved when it started: Retry
-    /// restarts it without a second dialog, after checking the disk again.
-    @Test func retryAfterAnApprovedDownloadNeedsNoSecondApproval() throws {
+    /// L4: no library path downloads Deep without the approval dialog.
+    /// Retry without a dialog is Quick's only; Deep's Retry re-asks.
+    @Test func deepNeverDownloadsWithoutApproval() throws {
         let library = FixtureModelLibrary(deep: .downloadFailed("Network"))
         let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
-        #expect(ModelLibraryView.retryDownload(deep, in: library))
+        try Snapshot.render(ModelLibraryView(library: library), name: "library-deep-failed-check")
+        #expect(!ModelLibraryView.retryDownload(deep, in: library), "no dialog-free retry for Deep")
+        #expect(library.downloads.isEmpty, "rendering and retry never download Deep")
+        #expect(ModelLibraryView.approveDownload(deep, in: library), "the dialog's Download restarts it")
         #expect(library.downloads == [AppModel.deep.modelID])
 
         let full = FixtureModelLibrary(freeDiskGB: 5, deep: .downloadFailed("Network"))
         let fullDeep = try #require(full.entries.first { $0.id == AppModel.deep.modelID })
-        #expect(!ModelLibraryView.retryDownload(fullDeep, in: full), "12.1 GB does not fit in 5 GB")
+        #expect(!ModelLibraryView.approveDownload(fullDeep, in: full), "12.1 GB does not fit in 5 GB")
         #expect(full.downloads.isEmpty)
+    }
 
-        let ready = try #require(FixtureModelLibrary().entries.first { $0.id == AppModel.quick.modelID })
-        #expect(!ModelLibraryView.retryDownload(ready, in: library), "only failed downloads retry")
+    @Test func quickRetriesWithoutADialogWhenItFits() throws {
+        let library = FixtureModelLibrary(quick: .downloadFailed("Network"))
+        let quick = try #require(library.entries.first { $0.id == AppModel.quick.modelID })
+        #expect(ModelLibraryView.retryDownload(quick, in: library))
+        #expect(library.downloads == [AppModel.quick.modelID])
+        let full = FixtureModelLibrary(freeDiskGB: 3, quick: .downloadFailed("Network"))
+        let fullQuick = try #require(full.entries.first { $0.id == AppModel.quick.modelID })
+        #expect(!ModelLibraryView.retryDownload(fullQuick, in: full))
     }
 
     @Test func diskRoomKeepsAMargin() {

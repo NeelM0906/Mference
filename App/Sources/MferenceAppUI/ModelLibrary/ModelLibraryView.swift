@@ -13,6 +13,9 @@ public struct ModelLibraryView: View {
     /// False in offline mode: downloads are off and say why.
     let downloadsAllowed: Bool
     @State private var detailsID: String?
+    /// A download waiting for the person's approval (the one dialog every
+    /// Deep download goes through, L4).
+    @State private var pendingDownload: ModelEntry?
     @State private var importing = false
     @State private var importFailure: ImportFailure?
 
@@ -39,6 +42,16 @@ public struct ModelLibraryView: View {
                              set: { detailsID = $0?.id })) { target in
             ModelDetailsSheet(library: library, id: target.id)
         }
+        .confirmationDialog(
+            pendingDownload.map { "Download \($0.title)?" } ?? "",
+            isPresented: Binding(get: { pendingDownload != nil }, set: { if !$0 { pendingDownload = nil } }),
+            presenting: pendingDownload
+        ) { entry in
+            Button("Download") { Self.approveDownload(entry, in: library) }
+            Button("Not now", role: .cancel) {}
+        } message: { entry in
+            Text(Self.approvalMessage(for: entry))
+        }
         .fileImporter(isPresented: $importing, allowedContentTypes: Self.modelFileTypes) { result in
             guard case .success(let url) = result else { return }
             Task {
@@ -59,18 +72,28 @@ public struct ModelLibraryView: View {
 
     static let modelFileTypes: [UTType] = [UTType(filenameExtension: "gguf") ?? .data]
 
-    /// The approval dialog's "Download" (Settings > Models): the only way a
-    /// download that needs approval starts.
-    static func approveDownload(_ entry: ModelEntry, in library: any ModelLibraryModel) {
+    /// The approval dialog's "Download" (here and in Settings > Models): the
+    /// only way a download that needs approval starts or restarts. Checks the
+    /// disk margin. Returns whether it started.
+    @discardableResult
+    static func approveDownload(_ entry: ModelEntry, in library: any ModelLibraryModel) -> Bool {
+        switch entry.state {
+        case .notInstalled, .downloadFailed: break
+        default: return false
+        }
+        guard library.machine.hasRoom(for: entry.sizeBytes) else { return false }
         library.download(entry.id)
+        return true
     }
 
-    /// Retry after a failed download. A model that needed approval was
-    /// approved when its download first started, so no second dialog; the
-    /// disk margin is checked again. Returns whether it restarted.
+    /// Retry after a failed download without a dialog: only for Quick, which
+    /// installs without approval. Every other model (Deep) returns false here
+    /// and goes through the approval dialog (`approveDownload`) again.
+    /// Checks the disk margin. Returns whether it restarted.
     @discardableResult
     static func retryDownload(_ entry: ModelEntry, in library: any ModelLibraryModel) -> Bool {
-        guard case .downloadFailed = entry.state, library.machine.hasRoom(for: entry.sizeBytes) else { return false }
+        guard entry.installsWithoutApproval, case .downloadFailed = entry.state,
+              library.machine.hasRoom(for: entry.sizeBytes) else { return false }
         library.download(entry.id)
         return true
     }
@@ -140,7 +163,13 @@ public struct ModelLibraryView: View {
                 ModelTableRow(entry: entry,
                               canRetry: downloadsAllowed && library.machine.hasRoom(for: entry.sizeBytes),
                               onDetails: { detailsID = entry.id },
-                              onRetry: { Self.retryDownload(entry, in: library) })
+                              onRetry: {
+                                  if entry.installsWithoutApproval {
+                                      Self.retryDownload(entry, in: library)
+                                  } else {
+                                      pendingDownload = entry
+                                  }
+                              })
             }
         }
     }
