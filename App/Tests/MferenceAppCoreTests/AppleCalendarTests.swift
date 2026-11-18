@@ -94,6 +94,17 @@ enum CalendarFixtures {
         #expect(await service.storedEvents.filter { $0.title == "Design review" }.count == 1)
     }
 
+    @Test func shortTimesReadLikeTheMockup() {
+        let calendar = CalendarFixtures.calendar
+        let at = CalendarFixtures.date
+        #expect(CalendarTimeFormat.range(at(18, 9, 0), at(18, 11, 0), calendar: calendar) == "9 to 11 AM")
+        #expect(CalendarTimeFormat.range(at(14, 13, 0), at(14, 15, 0), calendar: calendar) == "1 to 3 PM")
+        #expect(CalendarTimeFormat.range(at(15, 9, 30), at(15, 10, 0), calendar: calendar) == "9:30 to 10 AM")
+        #expect(CalendarTimeFormat.range(at(17, 11, 0), at(17, 12, 0), calendar: calendar) == "11 AM to 12 PM")
+        #expect(CalendarTimeFormat.time(at(16, 11, 0), calendar: calendar) == "11:00")
+        #expect(CalendarTimeFormat.dayRange(at(16, 11, 0), at(16, 11, 45), calendar: calendar) == "Wed 11:00 to 11:45")
+    }
+
     @Test func overlappingEventsShareTheColumn() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         let events = [

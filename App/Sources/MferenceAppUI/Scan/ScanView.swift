@@ -54,6 +54,7 @@ struct ScanContent: View {
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
+                    .overlay { highlightBoxes }
                     .shadow(color: MFColor.ink.opacity(0.12), radius: MFSpacing.m, y: MFSpacing.xs)
                     .padding(MFSpacing.xxl)
                     .accessibilityLabel("Scanned image")
@@ -96,6 +97,24 @@ struct ScanContent: View {
         .accessibilityLabel("Drop area for receipts and documents")
     }
 
+    /// Outlines the fields that were read on the image (mockup 07).
+    private var highlightBoxes: some View {
+        let boxes = session.highlights
+        return GeometryReader { proxy in
+            ForEach(ScanHighlights.keys.filter { boxes[$0] != nil }, id: \.self) { key in
+                let box = boxes[key] ?? .zero
+                let inset = MFSpacing.xxs
+                RoundedRectangle(cornerRadius: MFRadius.xs)
+                    .fill(MFColor.accent.opacity(0.12))
+                    .overlay(RoundedRectangle(cornerRadius: MFRadius.xs).strokeBorder(MFColor.accent, lineWidth: 1.5))
+                    .frame(width: box.width * proxy.size.width + inset * 2,
+                           height: box.height * proxy.size.height + inset * 2)
+                    .offset(x: box.minX * proxy.size.width - inset, y: box.minY * proxy.size.height - inset)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
     // MARK: Fields
 
     @ViewBuilder
@@ -131,6 +150,11 @@ struct ScanContent: View {
                     .foregroundStyle(MFColor.ink)
                     .accessibilityAddTraits(.isHeader)
                 AppleChip(text: "Read on this Mac", tone: .success)
+                Spacer(minLength: MFSpacing.m)
+                Button("Open file", action: openFile)
+                    .buttonStyle(.appleSecondary)
+                    .keyboardShortcut("o", modifiers: .command)
+                    .help("Read another receipt or document")
             }
             Text(explanation)
                 .font(MFFont.body)

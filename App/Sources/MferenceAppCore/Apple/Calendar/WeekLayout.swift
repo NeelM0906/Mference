@@ -157,3 +157,48 @@ public struct WeekLayout: Sendable {
         return result
     }
 }
+
+/// The mockup's short times: "9 to 11 AM", "1 to 3 PM", "11:00", "Wed 11:00
+/// to 11:45".
+public enum CalendarTimeFormat {
+    /// "11:00", "9:30": hour and minutes, no AM/PM (the column says when).
+    public static func time(_ date: Date, calendar: Calendar = .current) -> String {
+        let (hour, minute, _) = parts(date, calendar: calendar)
+        return String(format: "%d:%02d", hour, minute)
+    }
+
+    /// "9 to 11 AM", "9:30 to 10 AM", "11 AM to 12 PM": minutes only when not
+    /// on the hour, the AM/PM once when both ends share it.
+    public static func range(_ start: Date, _ end: Date, calendar: Calendar = .current) -> String {
+        let (startHour, startMinute, startPM) = parts(start, calendar: calendar)
+        let (endHour, endMinute, endPM) = parts(end, calendar: calendar)
+        let short = { (hour: Int, minute: Int) in minute == 0 ? "\(hour)" : String(format: "%d:%02d", hour, minute) }
+        let suffix = { (pm: Bool) in pm ? "PM" : "AM" }
+        if startPM == endPM {
+            return "\(short(startHour, startMinute)) to \(short(endHour, endMinute)) \(suffix(endPM))"
+        }
+        return "\(short(startHour, startMinute)) \(suffix(startPM)) to \(short(endHour, endMinute)) \(suffix(endPM))"
+    }
+
+    /// "Wed 11:00 to 11:45" for event cards.
+    public static func dayRange(_ start: Date, _ end: Date, calendar: Calendar = .current) -> String {
+        "\(dayTime(start, calendar: calendar)) to \(time(end, calendar: calendar))"
+    }
+
+    /// "Wed 11:00".
+    public static func dayTime(_ date: Date, calendar: Calendar = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "EEE"
+        return "\(formatter.string(from: date)) \(time(date, calendar: calendar))"
+    }
+
+    static func parts(_ date: Date, calendar: Calendar) -> (hour: Int, minute: Int, pm: Bool) {
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let hour24 = components.hour ?? 0
+        let hour12 = hour24 % 12 == 0 ? 12 : hour24 % 12
+        return (hour12, components.minute ?? 0, hour24 >= 12)
+    }
+}
