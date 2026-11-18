@@ -375,15 +375,20 @@ Omitted effort retains Swift's source-default xhigh and base Qwen's legacy
 behavior; the latter does not stream hidden reasoning. Do not treat those two
 omitted-effort policies as a matched fine-tune comparison.
 
-The GGUF models (Quick, `qwen3.5-4b`, and Deep, `qwen3.8-27b`, in library mode)
-take their thinking switch from the chat template in the GGUF file. With
-`reasoning_effort` and `chat_template_kwargs.enable_thinking` omitted, the
-template's own default applies (Quick: no thinking; Deep's template thinks
-unless told otherwise). `none` (or
-`enable_thinking: false`) renders with `enable_thinking=false`; `low`, `medium`
-and `xhigh` (or `enable_thinking: true`) render with `enable_thinking=true`.
-They are not Qwen 3.8 source-template models in the sense above: `developer`
-messages are accepted and treated as `system` guidance.
+The GGUF models in library mode take their thinking controls from the chat
+template in the GGUF file:
+
+- Quick (`qwen3.5-4b`) reads only `enable_thinking`. With `reasoning_effort` and
+  `chat_template_kwargs.enable_thinking` omitted, its template default applies
+  (no thinking). `none` (or `enable_thinking: false`) renders with
+  `enable_thinking=false`; `low`, `medium` and `xhigh` (or
+  `enable_thinking: true`) render with `enable_thinking=true`. `developer`
+  messages are accepted and treated as `system` guidance.
+- Deep (`qwen3.8-27b`) carries Qwen 3.8's source template, so the Qwen 3.8 rules
+  above apply: it reads `reasoning_effort` (`xhigh`, `medium`, `low`, `none`;
+  omitted is `xhigh` with thinking on), and a request with an explicit effort
+  rejects `developer` messages. Deep is served once the llama.cpp backend runs
+  it with MTP draft decoding.
 
 Qwen 3.6 opts into its source thinking template with
 `chat_template_kwargs: {"enable_thinking": true}` or an explicit
