@@ -35,8 +35,8 @@ The product offers five models, and the catalog lists only these by default.
 | Maple | `maple-preview-2bit-mlx` | `mference` | `maple.gturbo` |
 
 Deep decodes with its MTP head: `LlamaBackend` loads the GGUF's nextn
-layer and drafts with llama.cpp's own `draft-mtp` (`common_speculative`,
-three tokens per step, verified by the target). Greedy output is
+layer and drafts with llama.cpp's own `draft-mtp` (`common_speculative`, up
+to three drafted tokens per step, verified by the target). Greedy output is
 token-identical with MTP on and off. The catalog requires the file's MTP
 tensors, and the server serves Deep only with MTP. While MTP is on, each
 request starts from an empty context (no prompt-prefix reuse).

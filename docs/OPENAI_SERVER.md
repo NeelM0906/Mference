@@ -151,6 +151,9 @@ usage.prompt_tokens_details.cached_tokens
 | `single-prefix` | The last finished turn. A different or incompatible history replaces it. |
 | `off` | Nothing; every request prefills its whole prompt. |
 
+Deep (`qwen3.8-27b`) is the exception: with MTP draft decoding on, every request
+prefills its whole prompt, and `cached_tokens` is 0.
+
 With `multi-prefix`, Qwen 3.6 keeps a copy of its recurrent state (about
 61 MiB) at the end of each finished turn. While one conversation continues,
 its attention KV stays in the runner and nothing else is copied. Before a
@@ -389,7 +392,7 @@ template in the GGUF file:
   omitted is `xhigh` with thinking on), and a request with an explicit effort
   rejects `developer` messages. Deep is served with MTP draft decoding
   (llama.cpp's `draft-mtp`), which keeps greedy output identical to decoding
-  without it.
+  without it; while MTP is on, Deep reuses no prompt prefix (see Prompt reuse).
 
 Qwen 3.6 opts into its source thinking template with
 `chat_template_kwargs: {"enable_thinking": true}` or an explicit
