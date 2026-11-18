@@ -254,8 +254,10 @@ run_one() {
     || { cat "$RUN_DIR/preflight.txt" >&2; refuse "preflight failed"; }
   if [ "$variant" = swap ] || [ "$variant" = ui ]; then
     local chain_key
+    # The swap run loads its chain; the ui run loads the --models models.
     local chain_keys
-    if [ -n "$SWAP_CHAIN" ]; then chain_keys=${SWAP_CHAIN//,/ }
+    if [ "$variant" = ui ]; then chain_keys="${MODEL_KEYS[*]}"
+    elif [ -n "$SWAP_CHAIN" ]; then chain_keys=${SWAP_CHAIN//,/ }
     else chain_keys=$("${checker[@]}" registry chain); fi
     for chain_key in $chain_keys; do
       preflight_model "$chain_key" "$RUN_DIR/preflight.txt"

@@ -1134,8 +1134,12 @@ def cmd_ui(args):
         status, body, raw = ui_request(args.host, args.port, "GET",
                                        f"/api/v1/models/model?id={entry['id']}", token, timeout=60)
         tools = (((body or {}).get("meta") or {}).get("capabilities") or {}).get("builtin_tools")
-        if status == 200 and tools is True:
-            report["problems"].append(f"{entry['id']}: builtin tools are on (launcher configuration failed)")
+        # Unconfigured models default to builtin tools on, and the launcher
+        # treats a configuration failure as a warning: only an explicit
+        # `false` from a successful lookup counts.
+        if status != 200 or tools is not False:
+            report["problems"].append(f"{entry['id']}: builtin tools not confirmed off "
+                                      f"(HTTP {status}, builtin_tools={tools!r})")
 
     for entry in expected:
         started = time.perf_counter()

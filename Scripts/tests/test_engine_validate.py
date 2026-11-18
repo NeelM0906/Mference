@@ -430,11 +430,13 @@ class TraceParityTests(unittest.TestCase):
 class FakeOpenWebUI:
     """Open WebUI's no-auth sign-in, model list, and chat endpoint."""
 
-    def __init__(self, models, fail_model=None, truncate_model=None, tools_on=False, signin_failures=0):
+    def __init__(self, models, fail_model=None, truncate_model=None, tools_on=False, signin_failures=0,
+                 unconfigured=False):
         outer = self
         self.models, self.fail_model, self.chats = models, fail_model, []
         self.truncate_model, self.tools_on = truncate_model, tools_on
         self.signins, self.signin_failures = 0, signin_failures
+        self.unconfigured = unconfigured
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -452,6 +454,8 @@ class FakeOpenWebUI:
                 if self.headers.get("Authorization") != "Bearer t0k":
                     return self._json(401, {"detail": "no"})
                 if self.path.startswith("/api/v1/models/model"):
+                    if outer.unconfigured:
+                        return self._json(404, {"detail": "not found"})
                     tools = outer.tools_on
                     return self._json(200, {"meta": {"capabilities": {"builtin_tools": tools}}})
                 self._json(200, {"data": [{"id": m} for m in outer.models]})
@@ -514,6 +518,11 @@ class UITests(unittest.TestCase):
             self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
         with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, tools_on=True) as ui:
             self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+        # An unconfigured model (lookup 404) is not confirmed off either.
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, unconfigured=True) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+            report = json.loads((Path(tmp) / "ui.json").read_text())
+            self.assertTrue(any("not confirmed off" in p for p in report["problems"]))
         with tempfile.TemporaryDirectory() as tmp, \
                 FakeOpenWebUI(self.ALL + ["qwen3.8-flash-next-int4g64"]) as ui:
             self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
