@@ -1,12 +1,16 @@
 # Family Bring-Up Kit — Phase A design
 
+> Dated record. The retired families it names (Gemma 4, DeepSeek-V4-Flash, and
+> Qwen3.8-Flash-Next) are no longer supported; see [Retired model
+> families](../../RETIRED_FAMILIES.md).
+
 **Date:** 2026-08-08
 **Status:** Phase A in progress (2026-08-31): W1.1 (FAMILY_CONTRACT.md +
 rot-check test), W3.3 (`bringup-check.sh`, PASS on qwen36 end-to-end), and
 W3.4 (`docs/families/TEMPLATE.md`) landed. W4's rehearsal target changed
 from LFM2.5-8B-A1B to **Qwen3.8-Flash-Next** by owner decision — a real
 flagship drop four days old, which also forces W2 (no faithful community
-conversion exists). Day-0 dossier: [docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
+conversion exists). Day-0 dossier: docs/families/QWEN38_FLASH_NEXT.md.
 W2 deliverables 1-4 landed for `qwen38flashnext` (quantize-in-flight core,
 original-repo source kind, sharded BF16 reading, fused-expert split, PLE
 row-lookup pool, sidecar policy) with W2.1a bit parity enforced. **W2.1b split
@@ -24,7 +28,7 @@ margin below the median inter-install logit difference. Clearing the blocker
 also surfaced **two defects nothing else in the kit could see** — resident
 tensor naming, and a missing RMSNorm `1 + w` fold that made every norm wrong by
 one in an install that still verified, validated and loaded. See also
-[docs/families/QWEN38_FLASH_NEXT.md](../../families/QWEN38_FLASH_NEXT.md).
+docs/families/QWEN38_FLASH_NEXT.md.
 **The `qwen38flashnext` gate was lifted on 2026-09-10** by owner decision, on
 the strength of the closed W2.1b plus the real-model measurements: the runner
 `FlashNextForwardRunner` ships, and the rehearsal family now loads through the

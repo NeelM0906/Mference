@@ -63,7 +63,6 @@ let package = Package(
             path: "Sources/Mference",
             resources: [
                 .copy("Metal"),
-                .copy("Tokenization/Resources/Gemma4"),
             ]
         ),
         .target(

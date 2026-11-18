@@ -129,7 +129,7 @@ struct RangeCopyPlannerTests {
             try? FileManager.default.removeItem(atPath: firstOutput)
             try? FileManager.default.removeItem(atPath: secondOutput)
         }
-        let snapshot = try SyntheticSnapshot.build(
+        let snapshot = try SyntheticSnapshot.buildQwen(
             at: snapshotDirectory,
             seed: 0x1020_3040)
         let metadata = try IndexLoader.load(snapshotDir: snapshotDirectory)

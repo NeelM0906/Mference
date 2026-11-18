@@ -2,7 +2,7 @@
 # The Mference UI: Open WebUI in the browser, MferenceServer behind it.
 #
 #   ./mference-ui.sh                 start both on loopback and open the browser
-#   ./mference-ui.sh install gemma4  install a model with MferenceRepack
+#   ./mference-ui.sh install qwen36  install a model with MferenceRepack
 #   ./mference-ui.sh models          list what the UI's model picker would show
 #
 # Both halves stay on 127.0.0.1 and Open WebUI's authentication is disabled, so
@@ -73,17 +73,16 @@ usage: ./mference-ui.sh [options]                      start the UI
                          through to MferenceServer (default auto).
   --prefill-chunk <n|auto>
                          Prompt tokens per prefill chunk, passed through to
-                         MferenceServer: auto (default; 2048 for Gemma 4, QAT
-                         and Qwen 3.6 on 16 GiB+ Macs) or 32 ... 4096. 1024
-                         saves Gemma about 350 MB at slower long prompts.
+                         MferenceServer: auto (default; 2048 for Qwen 3.6 on
+                         16 GiB+ Macs) or 32 ... 4096.
   --catalog <product|all>
                          Which installs MferenceServer serves (default
                          product: the product models only; all lists every
                          runnable install, a developer switch).
   --kv-reserve           Reserve full-attention KV for the whole context
                          up front, passed through to MferenceServer. By
-                         default Gemma 4, Qwen 3.6 and Inkling grow it with
-                         the conversation from 16384 tokens.
+                         default Qwen 3.6 grows it with the conversation
+                         from 16384 tokens.
   --no-browser           Do not open the browser; print the UI address only.
   --no-build             Use the MferenceServer already built under
                          --build-path instead of an incremental build (for
@@ -93,7 +92,7 @@ usage: ./mference-ui.sh [options]                      start the UI
   --help                 Show this message.
 
 install passes any extra arguments through to MferenceRepack, so a cancelled
-download continues with:  ./mference-ui.sh install gemma4 --resume
+download continues with:  ./mference-ui.sh install qwen36 --resume
 USAGE
 }
 
@@ -106,7 +105,7 @@ while [[ $# -gt 0 ]]; do
     install)
       command_name=install
       shift
-      [[ $# -gt 0 ]] || fail "install needs a model family, for example: install gemma4"
+      [[ $# -gt 0 ]] || fail "install needs a model family, for example: install qwen36"
       install_family="$1"
       shift
       # Everything left belongs to MferenceRepack, except --dry-run, which
@@ -337,7 +336,7 @@ ensure_open_webui() {
   local installed
   installed="$(open_webui_version "$binary")"
   if [[ -n "$installed" && "$installed" != "$OPEN_WEBUI_VERSION" ]]; then
-    fail "open-webui $installed is installed; reasoning-history compatibility requires $OPEN_WEBUI_VERSION (not reinstalling)."
+    fail "open-webui $installed is installed; the launcher requires $OPEN_WEBUI_VERSION (not reinstalling)."
   fi
   printf '%s' "$binary"
 }
@@ -400,10 +399,6 @@ cmd_doctor() {
 cmd_install() {
   local output="scratch/$install_family.gturbo"
   local destination="$repository_root/$output"
-  if [[ "$install_family" == "gemma4qat" ]]; then
-    output="$HOME/llm-models/gemma4qat.gturbo"
-    destination="$output"
-  fi
   # bash 3.2 is what /usr/bin/env bash is on macOS, and there `"${empty[@]}"`
   # is an unbound-variable error under `set -u`, so every pass-through
   # expansion is guarded by its own count.
@@ -428,11 +423,7 @@ cmd_install() {
   else
     swift run -c release --scratch-path "$build_path" MferenceRepack --model "$install_family" --output "$output"
   fi
-  if [[ "$install_family" == "gemma4qat" ]]; then
-    note "QAT installation complete; select gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned in the model picker."
-  else
-    note "installed; start the UI with ./mference-ui.sh"
-  fi
+  note "installed; start the UI with ./mference-ui.sh"
 }
 
 cmd_models() {

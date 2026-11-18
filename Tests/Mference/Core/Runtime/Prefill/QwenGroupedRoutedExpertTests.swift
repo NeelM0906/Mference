@@ -13,21 +13,13 @@ private let qwenGroupedGEMMAvailable: Bool = {
 /// Grouped-GEMM routed experts for Qwen 3.6 prefill (`MPPGroupedRoutedMoE`
 /// behind `RealForwardRunner.usesGroupedRoutedExpertGEMM`).
 @Suite struct QwenGroupedRoutedExpertTests {
-    @Test func selectionIsQwenOffApple10AndGemmaPolicyOnly() {
+    @Test func selectionIsQwenOffApple10Only() {
         for family in ModelFamily.allCases {
-            for batched in [false, true] {
-                for apple10 in [false, true] {
-                    let selected = RealForwardRunner.usesGroupedRoutedExpertGEMM(
-                        family: family, gemmaBatchedExperts: batched,
-                        supportsApple10TensorOps: apple10)
-                    let expected: Bool
-                    switch family {
-                    case .gemma4: expected = batched
-                    case .qwen36: expected = !apple10
-                    default: expected = false
-                    }
-                    #expect(selected == expected, "\(family) batched=\(batched) apple10=\(apple10)")
-                }
+            for apple10 in [false, true] {
+                let selected = RealForwardRunner.usesGroupedRoutedExpertGEMM(
+                    family: family, supportsApple10TensorOps: apple10)
+                let expected = family == .qwen36 && !apple10
+                #expect(selected == expected, "\(family) apple10=\(apple10)")
             }
         }
     }

@@ -108,7 +108,7 @@ extension RawCompletionLoopTests {
     @Test(arguments: [false, true])
     func resumedChunkedPrefillUsesNonzeroStart(reportsExecution: Bool) async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let prompt = tokenizer.encode("one two three four", addBOS: true)
         let cached = prompt.count - 1
         let producer = ContinuationProducer(
@@ -159,7 +159,7 @@ extension RawCompletionLoopTests {
 
     @Test func resumeRejectsInvalidCachedCountsBeforeMutatingProducer() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let prompt = tokenizer.encode("one two", addBOS: true)
         let producer = ContinuationProducer(
             vocabSize: tokenizer.vocabSize,

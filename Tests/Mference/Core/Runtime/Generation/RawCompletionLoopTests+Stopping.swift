@@ -6,7 +6,7 @@ import Testing
 
 extension RawCompletionLoopTests {
   @Test func stopsOnEOS() async throws {
-    let tok = try await MFTokenizer.load()
+    let tok = try await MFTokenizer.chatMLFixture()
     let idA = tok.encode("a", addBOS: false).first!
     let idB = tok.encode("b", addBOS: false).first!
     let (collected, result) = try await runLoop(
@@ -18,7 +18,7 @@ extension RawCompletionLoopTests {
   }
 
   @Test func stopsOnEndOfTurn() async throws {
-    let tok = try await MFTokenizer.load()
+    let tok = try await MFTokenizer.chatMLFixture()
     let idA = tok.encode("a", addBOS: false).first!
     let (_, result) = try await runLoop(
       seq: [idA], end: tok.endOfTurnID,
@@ -27,7 +27,7 @@ extension RawCompletionLoopTests {
   }
 
   @Test func stopsOnMaxTokensAndCountsExactly() async throws {
-    let tok = try await MFTokenizer.load()
+    let tok = try await MFTokenizer.chatMLFixture()
     let idA = tok.encode("a", addBOS: false).first!
     let (collected, result) = try await runLoop(
       seq: [idA, idA], end: idA,
@@ -39,7 +39,7 @@ extension RawCompletionLoopTests {
   }
 
   @Test func stopsOnStopString() async throws {
-    let tok = try await MFTokenizer.load()
+    let tok = try await MFTokenizer.chatMLFixture()
     let idA = tok.encode("a", addBOS: false).first!
     let textA = tok.decode([idA], skipSpecialTokens: true)
     let (_, result) = try await runLoop(

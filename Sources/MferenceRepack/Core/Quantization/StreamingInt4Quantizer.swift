@@ -151,7 +151,11 @@ public enum StreamingInt4Quantizer {
         return outputCount
     }
 
-    // MARK: - Row transforms (the PLE n-gram row pool)
+    // MARK: - Row transforms (row-lookup pools)
+    //
+    // No installer path plans a row-lookup pool any more. The transforms stay
+    // because the runtime test target's `Int4AffineStreamingParityTests`
+    // still exercises them against the encoder.
 
     /// Rewrite a dense run of BF16 rows into a dense run of self-contained
     /// quantized row records.
@@ -255,9 +259,8 @@ public enum StreamingInt4Quantizer {
     /// verbatim and each block is zero-padded out to `blockStride`.
     ///
     /// This is the row-pool path for a table whose width the group size does
-    /// not divide — Qwen3.8-Flash-Next's 160-wide n-gram table — where the only
-    /// transformation the pool applies is the page-block padding that keeps a
-    /// row from straddling a page.
+    /// not divide, where the only transformation the pool applies is the
+    /// page-block padding that keeps a row from straddling a page.
     ///
     /// A padded block writes more than it reads, so the pass walks blocks
     /// backwards; `memmove` covers the within-block overlap.

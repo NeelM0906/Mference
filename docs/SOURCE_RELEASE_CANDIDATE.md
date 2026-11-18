@@ -1,5 +1,9 @@
 # Source candidate: review and publication boundary
 
+> Dated record. The retired families it names (Gemma 4, Qwen3.8-Flash-Next,
+> and Swift-Qwen3.8) are no longer supported; see [Retired model
+> families](RETIRED_FAMILIES.md).
+
 Historical candidate handoff. PR #38 has since merged as `4ff63ff`; see the
 [0.1.0 final release gate](RELEASE_GATE_0.1.0.md) and
 [release listing](https://github.com/NeelM0906/Mference/releases) for subsequent

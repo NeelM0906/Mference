@@ -164,7 +164,7 @@ enum IndexLoader {
                     let g    = (entry["group_size"] as? Int) ?? baseGroup
                     // Resident-tensor kernels assume the base group size;
                     // only 2-bit streamed routed experts support a deviating
-                    // group (DeepSeek V4 ships gate_proj at group 32).
+                    // group.
                     guard g == baseGroup || (bits == 2 && (g == 32 || g == 64)) else {
                         throw RepackError.configJsonInvalid(
                             path: configPath,

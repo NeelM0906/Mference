@@ -251,16 +251,6 @@ public func runRawCompletion(producer: any LogitProducer,
             break
         }
 
-        if tokenizer.dialect == .gemma,
-           tokenID == tokenizer.channelStartID || tokenID == tokenizer.channelEndID
-            || tokenID == tokenizer.toolCallStartID || tokenID == tokenizer.toolCallEndID {
-            // Special tokens are removed before byte-fallback decoding. Flush
-            // pending bytes in the old channel before delivering its boundary,
-            // then start a fresh segment so they cannot reappear in the next.
-            let tail = stopMatcher.push(detok.flush())
-            if !tail.isEmpty { onProgress(.tail(tail)) }
-            detok = MFDetokenizer(tokenizer: tokenizer)
-        }
         let delta = detok.push(tokenID)
         let visible = stopMatcher.push(delta)
         onProgress(.token(index: generated - 1, id: tokenID, delta: visible))

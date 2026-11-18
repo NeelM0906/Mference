@@ -1,5 +1,8 @@
 # S4 encode-ahead: the ordering hazard, made precise
 
+> Dated record. The retired family it names (DeepSeek-V4-Flash) is no longer
+> supported; see [Retired model families](../../RETIRED_FAMILIES.md).
+
 Status: analysis only — no implementation. Written so the next attempt does
 not rediscover the constraint the hard way.
 

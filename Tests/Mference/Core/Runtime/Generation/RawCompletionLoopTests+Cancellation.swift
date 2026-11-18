@@ -8,7 +8,7 @@ import MferenceValidationSupport
 extension RawCompletionLoopTests {
   @Test func cancellationPropagatesMidDecode() async throws {
     let ctx = try MetalContext()
-    let tok = try await MFTokenizer.load()
+    let tok = try await MFTokenizer.chatMLFixture()
     let idA = tok.encode("a", addBOS: false).first!
     let producer = ScriptedLogitProducer(
       vocabSize: tok.vocabSize,
