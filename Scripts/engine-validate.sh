@@ -466,8 +466,12 @@ if [ "$needs_server" = 1 ]; then
   [ -x "$SERVER" ] || fail "server binary not found: $SERVER (build it, or pass --build)"
 fi
 
-"${checker[@]}" meta "$RESULTS/meta.json" --repo "$server_repo" --server "$SERVER" \
-  --baseline "$BASELINE_SERVER" --upstream "$UPSTREAM" --argv "$ORIG_ARGS" --phases "${PHASES[*]}"
+# meta.json describes the run that produced the measurements: a summary-only
+# rebuild keeps it as it is.
+if [ "$needs_server" = 1 ] || [ ! -f "$RESULTS/meta.json" ]; then
+  "${checker[@]}" meta "$RESULTS/meta.json" --repo "$server_repo" --server "$SERVER" \
+    --baseline "$BASELINE_SERVER" --upstream "$UPSTREAM" --argv "$ORIG_ARGS" --phases "${PHASES[*]}"
+fi
 
 export ENGINE_VALIDATE_PHASES="$PHASES_STR" ENGINE_VALIDATE_SERVER="$SERVER"
 export ENGINE_VALIDATE_SERVER_ARGS="$SERVER_ARGS" ENGINE_VALIDATE_BASELINE="$BASELINE_SERVER"

@@ -389,7 +389,12 @@ def _write(path, text):
 
 
 def json_answer_ok(content):
+    """The answer parses as the requested object. A Markdown code fence around
+    it is tolerated: the case checks structured output, not instruction-following."""
     text = content.strip()
+    fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.S)
+    if fence:
+        text = fence.group(1)
     try:
         value = json.loads(text)
     except ValueError:
@@ -442,7 +447,11 @@ def cmd_prompts(args):
                 "differs_in": diff,
             }
             if name == "json-answer":
+                # Agreement on output that is not the requested JSON exercised nothing.
                 record["json_valid"] = json_answer_ok(nonstream.get("content", ""))
+                if not record["json_valid"]:
+                    record["agree"] = False
+                    record["differs_in"] = diff + ["invalid JSON answer"]
             if name == "tool-roundtrip" and index == 1:
                 # A round-trip that never calls the tool exercised nothing.
                 record["tool_call_emitted"] = bool(nonstream.get("tool_calls"))
@@ -743,7 +752,10 @@ def cmd_readings(args):
             break
     results["swap_trip"] = tripped
     _write(Path(args.out), json.dumps(results, indent=2, sort_keys=True))
-    return SWAP_TRIP if tripped else 0
+    if tripped:
+        return SWAP_TRIP
+    # A reading the prefix cache served is not a cold measurement.
+    return 1 if any(r["cold_violation"] for r in results["readings"]) else 0
 
 
 # ---------------------------------------------------------------------------
@@ -887,15 +899,21 @@ SPEED_TOLERANCE = 0.05
 
 
 def speed_rows(engine, reference):
+    """Median rates per prompt size. Cache-served (`cold_violation`) readings
+    never count; a size with any of them fails rather than passing on the rest."""
     rows = []
     for target in sorted({r["target_tokens"] for r in engine + reference}):
+        mine = [r for r in engine if r["target_tokens"] == target]
+        theirs = [r for r in reference if r["target_tokens"] == target]
+        contaminated = any(r.get("cold_violation") for r in mine + theirs)
         for field in ("prefill_tok_s", "decode_tok_s"):
-            e = _median([r.get(field) for r in engine if r["target_tokens"] == target])
-            ref = _median([r.get(field) for r in reference if r["target_tokens"] == target])
+            e = _median([r.get(field) for r in mine if not r.get("cold_violation")])
+            ref = _median([r.get(field) for r in theirs if not r.get("cold_violation")])
             ratio = e / ref if e and ref else None
             rows.append({"target_tokens": target, "metric": field, "engine": e,
-                         "reference": ref, "ratio": ratio,
-                         "ok": ratio is not None and ratio >= 1 - SPEED_TOLERANCE})
+                         "reference": ref, "ratio": ratio, "cold_violation": contaminated,
+                         "ok": (not contaminated and ratio is not None
+                                and ratio >= 1 - SPEED_TOLERANCE)})
     return rows
 
 

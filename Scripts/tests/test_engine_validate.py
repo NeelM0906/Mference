@@ -197,7 +197,9 @@ class PromptSetTests(unittest.TestCase):
 
     def test_json_answer_check(self):
         self.assertTrue(ev.json_answer_ok('{"city": "Tokyo", "population_millions": 37}'))
+        self.assertTrue(ev.json_answer_ok('```json\n{"city": "Tokyo", "population_millions": 37}\n```'))
         self.assertFalse(ev.json_answer_ok('```json\n{"city": "Tokyo"}\n```'))
+        self.assertFalse(ev.json_answer_ok("not JSON"))
 
 
 class EndToEndTests(unittest.TestCase):
@@ -320,6 +322,29 @@ class GateTests(unittest.TestCase):
                 (Path(tmp) / run / "run.json").write_text(json.dumps({"max_rss_bytes": value}))
             self.assertEqual(ev.max_single_rss_mib(tmp), 3072.0)
 
+    def test_invalid_json_answer_fails_even_when_modes_agree(self):
+        class Prose(FakeServer):
+            def reply(self, body):
+                reply = FakeServer.reply(self, body)
+                if "JSON object" in body["messages"][-1].get("content", ""):
+                    reply["choices"][0]["message"]["content"] = "not JSON"
+                return reply
+        with tempfile.TemporaryDirectory() as tmp, Prose() as server:
+            rc = ev.main(["prompts", "--port", str(server.port), "--model", "m", "--out", tmp])
+            self.assertEqual(rc, 1)
+            case = json.loads((Path(tmp) / "prompts.json").read_text())["cases"]["json-answer"][0]
+            self.assertEqual(case["differs_in"], ["invalid JSON answer"])
+
+    def test_cache_served_readings_fail_the_speed_bar(self):
+        engine = [{"target_tokens": 512, "prefill_tok_s": 900.0, "decode_tok_s": 50.0,
+                   "cold_violation": True},
+                  {"target_tokens": 512, "prefill_tok_s": 100.0, "decode_tok_s": 40.0,
+                   "cold_violation": False}]
+        ref = [{"target_tokens": 512, "prefill_tok_s": 100.0, "decode_tok_s": 40.0}]
+        rows = ev.speed_rows(engine, ref)
+        self.assertTrue(all(not r["ok"] and r["cold_violation"] for r in rows))
+        self.assertEqual(rows[0]["engine"], 100.0)
+
     def test_tool_round_trip_without_a_tool_call_fails(self):
         class NoTools(FakeServer):
             def reply(self, body):
@@ -429,6 +454,15 @@ class ShellTests(unittest.TestCase):
             result = self.run_script("--dry-run", "prompts", flag, value)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("may not set --bind/--host", result.stderr)
+
+    def test_summary_only_rebuild_keeps_meta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "meta.json").write_text(json.dumps({"commit": "original"}))
+            result = self.run_script("--out", tmp, "summary",
+                                     env={"ENGINE_VALIDATE_LOCK": "/usr/bin/true"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads((Path(tmp) / "meta.json").read_text()),
+                             {"commit": "original"})
 
     def test_existing_results_directory_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
