@@ -27,6 +27,26 @@ final class LlamaModelHandle: @unchecked Sendable {
     deinit { free() }
 }
 
+/// Owns a `llama_context`. It holds the model it was created from, so the
+/// context is always freed first, whether by `free()` (`unload`) or when the
+/// last reference goes.
+final class LlamaContextHandle: @unchecked Sendable {
+    private(set) var pointer: OpaquePointer?
+    private let model: LlamaModelHandle
+
+    init(_ pointer: OpaquePointer, model: LlamaModelHandle) {
+        self.pointer = pointer
+        self.model = model
+    }
+
+    func free() {
+        if let pointer { llama_free(pointer) }
+        pointer = nil
+    }
+
+    deinit { free() }
+}
+
 /// A GGUF vocabulary as a swift-transformers `Tokenizer`.
 ///
 /// `encode` parses special-token text (`<|im_start|>` and the like) into its
@@ -97,6 +117,18 @@ final class LlamaVocabulary: Tokenizer, @unchecked Sendable {
         }
         guard count > 0 else { return [] }
         return buffer.prefix(Int(count)).map { UInt8(bitPattern: $0) }
+    }
+
+    /// Whether tokenization prepends BOS / appends EOS (`add_bos_token`,
+    /// `add_eos_token` in the GGUF).
+    var addsBOS: Bool { llama_vocab_get_add_bos(vocab) }
+    var addsEOS: Bool { llama_vocab_get_add_eos(vocab) }
+
+    /// Tokens the GGUF says never to sample (`tokenizer.ggml.suppress_tokens`).
+    var suppressedTokens: [Int32] {
+        var count: Int32 = 0
+        guard let tokens = llama_vocab_get_suppress_tokens(vocab, &count), count > 0 else { return [] }
+        return Array(UnsafeBufferPointer(start: tokens, count: Int(count)))
     }
 
     /// End-of-generation per llama.cpp (`<|im_end|>`, `<|endoftext|>`, ...).

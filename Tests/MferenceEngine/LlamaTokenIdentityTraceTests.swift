@@ -104,7 +104,8 @@ struct LlamaTokenIdentityTraceTests {
                     messages: messages + [
                         MFTokenizer.Message(role: .assistant, content: completion.content,
                                             toolCalls: [MFTokenizer.HistoricalToolCall(
-                                                id: call.id, name: call.name, arguments: call.arguments)]),
+                                                id: call.id, name: call.name, arguments: call.arguments)],
+                                            reasoningContent: completion.reasoningContent),
                         MFTokenizer.Message(role: .tool, content: #"{"temperature": 18, "condition": "cloudy"}"#,
                                             toolCallID: call.id),
                     ],

@@ -62,6 +62,24 @@ struct LlamaBackendTests {
         #expect(thinking.hasSuffix("<|im_start|>assistant\n<think>\n"))
     }
 
+    /// Like llama.cpp's renderer, a BOS/EOS the template prints is dropped when
+    /// tokenization adds that token itself, so it is never doubled.
+    @Test func implicitSpecialTokensAreNotDoubled() throws {
+        let template = try LlamaChatTemplate(
+            source: "{{ bos_token }}{% for m in messages %}{{ m['content'] }}{% endfor %}{{ eos_token }}",
+            bosToken: "<s>", eosToken: "</s>")
+        let rendered = try template.render(messages: [MFTokenizer.Message(role: .user, content: "hi")],
+                                           tools: [])
+        #expect(rendered == "<s>hi</s>")
+        #expect(template.strippingImplicitSpecialTokens(rendered, addsBOS: true, addsEOS: false) == "hi</s>")
+        #expect(template.strippingImplicitSpecialTokens(rendered, addsBOS: false, addsEOS: true) == "<s>hi")
+        #expect(template.strippingImplicitSpecialTokens(rendered, addsBOS: false, addsEOS: false) == rendered)
+        let quick = try LlamaChatTemplate(source: LlamaChatTemplateFixtures.quickTemplate,
+                                          bosToken: nil, eosToken: "<|im_end|>")
+        let prompt = try quick.render(messages: [MFTokenizer.Message(role: .user, content: "hi")], tools: [])
+        #expect(quick.strippingImplicitSpecialTokens(prompt, addsBOS: false, addsEOS: false) == prompt)
+    }
+
     @Test func malformedTemplateIsALoadError() {
         #expect(throws: LlamaBackendError.self) {
             _ = try LlamaChatTemplate(source: "{% if %}", bosToken: nil, eosToken: nil)

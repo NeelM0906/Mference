@@ -28,6 +28,21 @@ struct LlamaChatTemplate: Sendable {
         self.eosToken = eosToken
     }
 
+    /// Removes a leading BOS / trailing EOS the template printed when
+    /// tokenization adds that token itself, as llama.cpp's
+    /// `common_chat_templates_apply` does, so the prompt never carries it
+    /// twice.
+    func strippingImplicitSpecialTokens(_ rendered: String, addsBOS: Bool, addsEOS: Bool) -> String {
+        var text = Substring(rendered)
+        if addsBOS, let bosToken, !bosToken.isEmpty, text.hasPrefix(bosToken) {
+            text = text.dropFirst(bosToken.count)
+        }
+        if addsEOS, let eosToken, !eosToken.isEmpty, text.hasSuffix(eosToken) {
+            text = text.dropLast(eosToken.count)
+        }
+        return String(text)
+    }
+
     /// Whether the template reads `enable_thinking`, the Qwen thinking switch.
     var readsEnableThinking: Bool { source.contains("enable_thinking") }
 

@@ -15,6 +15,7 @@ actor LlamaModel: EngineModel {
     nonisolated let traits: EngineModelTraits
 
     private let handle: LlamaModelHandle
+    private let contextOwner: LlamaContextHandle
     private var context: OpaquePointer?
     private let vocabulary: LlamaVocabulary
     private let tokenizer: MFTokenizer
@@ -34,13 +35,15 @@ actor LlamaModel: EngineModel {
     /// The prompt text `prepare` tokenizes: the GGUF's template rendered for
     /// `request`.
     func renderedPrompt(_ request: EngineRequest) throws -> String {
-        try template.render(
+        let rendered = try template.render(
             messages: request.messages,
             tools: request.tools,
             keywordArguments: LlamaChatTemplate.keywordArguments(
                 reasoningEffort: request.reasoningEffort,
                 preserveThinking: request.preserveThinking,
                 readsEnableThinking: template.readsEnableThinking))
+        return template.strippingImplicitSpecialTokens(rendered, addsBOS: vocabulary.addsBOS,
+                                                       addsEOS: vocabulary.addsEOS)
     }
 
     init(descriptor: EngineModelDescriptor,
@@ -52,6 +55,7 @@ actor LlamaModel: EngineModel {
          batchSize: Int) {
         self.descriptor = descriptor
         self.handle = handle
+        self.contextOwner = LlamaContextHandle(context, model: handle)
         self.context = context
         self.vocabulary = vocabulary
         self.tokenizer = tokenizer
@@ -78,6 +82,7 @@ actor LlamaModel: EngineModel {
                                              param: "reasoning_effort", code: "unsupported_value")
         }
         let tokens = vocabulary.tokenIDs(try renderedPrompt(request), addSpecial: true)
+        // (`renderedPrompt` already dropped any BOS/EOS tokenization adds.)
         guard !tokens.isEmpty else {
             throw EngineError.invalidRequest(message: "the rendered prompt is empty",
                                              param: "messages", code: "invalid_chat_template")
@@ -110,8 +115,8 @@ actor LlamaModel: EngineModel {
 
     func unload() async {
         abortFlag.set()
-        if let context { llama_free(context) }
         context = nil
+        contextOwner.free()
         cachedTokens = []
         handle.free()
     }
@@ -150,7 +155,8 @@ actor LlamaModel: EngineModel {
 
         let config = request.generationConfig
         let sampler = LlamaSampler(config: config, vocabularySize: Int32(vocabulary.tokenCount),
-                                   contextSize: Int32(maxContext))
+                                   contextSize: Int32(maxContext),
+                                   suppressedTokens: vocabulary.suppressedTokens)
         for token in prompt { sampler.accept(token) }
         let maxNewTokens = min(request.maximumCompletionTokens, maxContext - prompt.count)
 
@@ -199,6 +205,7 @@ actor LlamaModel: EngineModel {
         try assembler.take(decoder.finish())
         assembler.finish()
         let decodeSeconds = (clock.now - decodeStart).seconds
+        try Task.checkCancellation()
 
         let finishReason: EngineFinishReason =
             !assembler.toolCalls.isEmpty ? .toolCalls : (hitLimit && !assembler.isStopped ? .length : .stop)

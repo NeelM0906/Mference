@@ -22,10 +22,18 @@ final class LlamaSampler: @unchecked Sendable {
 
     /// `contextSize` stands in for a `repeatLastN` of -1 ("all history"),
     /// as llama.cpp's own argument parsing maps `--repeat-last-n -1`.
-    init(config: GenerationConfig, vocabularySize: Int32, contextSize: Int32) {
+    /// `suppressedTokens` are masked out first, as `common_sampler` does with
+    /// the GGUF's suppress list.
+    init(config: GenerationConfig, vocabularySize: Int32, contextSize: Int32,
+         suppressedTokens: [Int32] = []) {
         var params = llama_sampler_chain_default_params()
         params.no_perf = true
         let chain = llama_sampler_chain_init(params)!
+        if !suppressedTokens.isEmpty {
+            let biases = suppressedTokens.map { llama_logit_bias(token: $0, bias: -Float.infinity) }
+            llama_sampler_chain_add(chain, llama_sampler_init_logit_bias(
+                vocabularySize, Int32(biases.count), biases))
+        }
         let penalised = config.repeatLastN != 0
             && (config.repetitionPenalty != 1 || config.presencePenalty != 0 || config.frequencyPenalty != 0)
         if penalised {
