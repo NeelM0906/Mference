@@ -34,16 +34,6 @@ import Testing
             for: .inklingSmall, physicalMemoryBytes: twentyFourGiB) == 16)
     }
 
-    @Test func serverPrefillChunkGrowsForGemmaOnSixteenGiBHosts() {
-        let gib = UInt64(1) << 30
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib, environment: [:]) == 2048)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 24 * gib, environment: [:]) == 2048)
-        #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 8 * gib, environment: [:]) == 128)
-    }
-
     @Test func serverPrefillChunkGrowsForQwen36OnSixteenGiBHosts() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
@@ -57,57 +47,21 @@ import Testing
     @Test func serverPrefillChunkStaysEstablishedForUnmeasuredFamilies() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .inklingSmall, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
+            for: .maple, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .qwen38flashnext, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
-    }
-
-    /// The Unsloth GGUF Flash-Next install's server chunk follows RAM: 4,096
-    /// at 32 GiB and up, 1,024 from 16 GiB, 128 below; vendor Flash-Next is
-    /// unmeasured and keeps 128; the env override still wins.
-    @Test func serverPrefillChunkForUnslothFlashNextFollowsRAM() {
-        let gib = UInt64(1) << 30
-        func chunk(_ family: ModelFamily, _ ram: UInt64, _ env: [String: String] = [:]) -> Int {
-            RuntimeConfiguration.defaultServerPrefillChunkTokens(for: family, physicalMemoryBytes: ram, environment: env)
-        }
-        #expect(chunk(.qwen38flashnextudiq3xxs, 64 * gib) == 4096)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 32 * gib) == 4096)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 32 * gib - 1) == 1024)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 24 * gib) == 1024)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 16 * gib) == 1024)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 16 * gib - 1) == 128)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 8 * gib) == 128)
-        #expect(chunk(.qwen38flashnext, 32 * gib) == 128)
-        #expect(chunk(.qwen38flashnext, 64 * gib) == 128)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 32 * gib, ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
-        #expect(chunk(.qwen38flashnextudiq3xxs, 24 * gib, ["MFERENCE_SERVER_PREFILL_CHUNK": "2048"]) == 2048)
-    }
-
-    /// An override that is not an allowed size is ignored, so the Unsloth
-    /// install falls back to its RAM tier rather than to 128.
-    @Test func serverPrefillChunkInvalidOverrideFallsBackToUnslothTiers() {
-        let gib = UInt64(1) << 30
-        func chunk(_ ram: UInt64, _ value: String) -> Int {
-            RuntimeConfiguration.defaultServerPrefillChunkTokens(
-                for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: ram,
-                environment: ["MFERENCE_SERVER_PREFILL_CHUNK": value])
-        }
-        #expect(chunk(32 * gib, "1000") == 4096)
-        #expect(chunk(32 * gib, "abc") == 4096)
-        #expect(chunk(24 * gib, "1000") == 1024)
-        #expect(chunk(8 * gib, "8192") == 128)
+            for: .minicpm5, physicalMemoryBytes: 24 * gib, environment: [:]) == 128)
     }
 
     @Test func serverPrefillChunkOverrideAcceptsOnlyAllowedSizes() {
         let gib = UInt64(1) << 30
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            for: .qwen36, physicalMemoryBytes: 16 * gib,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "128"]) == 128)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
             for: .qwen36, physicalMemoryBytes: 16 * gib,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "512"]) == 512)
         #expect(RuntimeConfiguration.defaultServerPrefillChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib,
+            for: .qwen36, physicalMemoryBytes: 16 * gib,
             environment: ["MFERENCE_SERVER_PREFILL_CHUNK": "1000"]) == 2048)
     }
 

@@ -134,4 +134,134 @@ extension RemotePayloadCopyTests {
     let arch = manifest["arch"] as! [String: Any]
     #expect(arch["family"] as? String == "qwen36")
   }
+
+  /// The free-space reserve refuses the install before anything is published:
+  /// no output directory and no resume checkpoint. Moved from the removed
+  /// Gemma 4 QAT install suite onto the Qwen synthetic snapshot.
+  @Test func qwenSpaceFailureDoesNotPublishAnInstall() async throws {
+    let snapshotDir = tmpDirForRemote("qwen-snap-space")
+    let output = tmpPathForRemote("qwen-remote-space")
+    defer { cleanUpRemote([snapshotDir, output]) }
+    let snapshot = try SyntheticSnapshot.buildQwen(
+      at: snapshotDir,
+      seed: 0x5ACE_0001)
+
+    resetFakeHF()
+    FakeHFURLProtocol.files = try remoteFiles(
+      snapshotDir: snapshotDir,
+      snap: snapshot,
+      includeRequiredTokenizer: true,
+      includeOptionalTokenizer: true)
+    await #expect(throws: (any Error).self) {
+      _ = try await RemoteStreamingRepacker(
+        options: .init(
+          repoID: "owner/model",
+          revision: "main",
+          outputDir: output,
+          minFreeReserveBytes: 1 << 60,
+          downloadSession: fakeHFSession(),
+          baseURL: URL(string: "https://hf.test")!)
+      ).run()
+    }
+    #expect(!FileManager.default.fileExists(atPath: output))
+    #expect(!FileManager.default.fileExists(atPath: output + ".resume.json"))
+  }
+
+  /// End-to-end resume after cancellation: a resume whose plan changed (a
+  /// different range chunk size) is refused without publishing, and a resume
+  /// over saved destinations whose bytes were damaged re-downloads them rather
+  /// than trusting the checkpoint's digests. Moved from the removed Gemma 4 QAT
+  /// install suite onto the Qwen synthetic snapshot.
+  @Test func qwenResumeRejectsAChangedPlanAndRedownloadsDamagedRanges() async throws {
+    let snapshotDir = tmpDirForRemote("qwen-snap-damaged")
+    let output = tmpPathForRemote("qwen-remote-damaged")
+    defer { cleanUpRemote([snapshotDir, output]) }
+    let snapshot = try SyntheticSnapshot.buildQwen(
+      at: snapshotDir,
+      seed: 0x5ACE_0002)
+
+    resetFakeHF()
+    FakeHFURLProtocol.files = try remoteFiles(
+      snapshotDir: snapshotDir,
+      snap: snapshot,
+      includeRequiredTokenizer: true,
+      includeOptionalTokenizer: true)
+    let seen = Mutex<[UInt64: Int]>([:])
+    let task = Task {
+      try await RemoteStreamingRepacker(
+        options: remoteOptions(outputDir: output, session: fakeHFSession())
+      ).run { progress in
+        guard case .copyingPayload(_, let downloaded, _) = progress,
+              downloaded > 0 else { return }
+        let count = seen.withLock {
+          $0[downloaded, default: 0] += 1
+          return $0[downloaded] ?? 0
+        }
+        if count == 3 {
+          withUnsafeCurrentTask { $0?.cancel() }
+        }
+      }
+    }
+    await #expect(throws: CancellationError.self) {
+      _ = try await task.value
+    }
+    let checkpoint = try RemoteInstallCheckpoint.load(from: output + ".resume.json")
+    #expect(!checkpoint.completedRanges.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: output))
+
+    // A changed plan must not resume onto the saved ranges.
+    await #expect(throws: (any Error).self) {
+      _ = try await RemoteStreamingRepacker(
+        options: remoteOptions(
+          outputDir: output,
+          session: fakeHFSession(),
+          resume: true,
+          rangeChunkBytes: 8192)
+      ).run()
+    }
+    #expect(!FileManager.default.fileExists(atPath: output))
+
+    // Corrupt every saved destination while retaining file lengths. Resume
+    // must re-download the damaged ranges instead of trusting the saved digest.
+    let partial = output + ".partial"
+    for name in try FileManager.default.subpathsOfDirectory(atPath: partial)
+      where name.hasSuffix(".bin") {
+      let url = URL(fileURLWithPath: partial + "/" + name)
+      let data = try Data(contentsOf: url)
+      try Data(repeating: 0xee, count: data.count).write(to: url)
+    }
+    let result = try await RemoteStreamingRepacker(
+      options: remoteOptions(
+        outputDir: output,
+        session: fakeHFSession(),
+        resume: true)
+    ).run()
+    #expect(result.reusedBytes == 0)
+    let verify = try VerifiedInstallTool.run(
+      options: VerifyInstallOptions(inputGTurbo: output))
+    #expect(verify.unexpectedEntries.isEmpty)
+
+    // Byte for byte, the resumed payload equals an uninterrupted install of
+    // the same snapshot: no damaged byte survived the resume. (The original
+    // QAT suite compared against the source tensors with a QAT-layout parser;
+    // the uninterrupted install is the Qwen equivalent.)
+    let reference = tmpPathForRemote("qwen-remote-damaged-reference")
+    defer { cleanUpRemote([reference]) }
+    _ = try await RemoteStreamingRepacker(
+      options: remoteOptions(outputDir: reference, session: fakeHFSession())
+    ).run()
+    func payloadFiles(_ root: String) throws -> [String] {
+      try FileManager.default.subpathsOfDirectory(atPath: root)
+        .filter { $0.hasSuffix(".bin") || $0 == "packed_experts/layout.json" }
+        .sorted()
+    }
+    let files = try payloadFiles(output)
+    #expect(files.contains("model_weights.bin"))
+    #expect(files == (try payloadFiles(reference)))
+    for name in files {
+      let resumed = try Data(contentsOf: URL(fileURLWithPath: output + "/" + name))
+      let uninterrupted = try Data(contentsOf: URL(fileURLWithPath: reference + "/" + name))
+      #expect(resumed == uninterrupted, "\(name)")
+    }
+  }
 }

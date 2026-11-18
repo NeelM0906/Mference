@@ -198,36 +198,20 @@ struct OpenAIValidationTests {
 
     @Test func wideIntegerToolArgumentsRoundTripExactly() async throws {
         let expected = "9007199254740993"
-        let parsed = try GemmaToolCallParser().parse(
-            "call:lookup{id:\(expected)}",
-            allowedTools: ["lookup"],
-            id: "call_0123456789abcdef01234567")
-        #expect(parsed.argumentsJSON.contains(#""id":\#(expected)"#))
+        // Wide integers at the 64-bit edges survive JSONValue encode and decode
+        // exactly (formerly reached through the Gemma tool-call parser).
         let signedMinimum = String(Int64.min)
         let signedMaximum = String(Int64.max)
         let unsignedMaximum = String(UInt64.max)
-        let edges = try GemmaToolCallParser().parse(
-            "call:lookup{minimum:\(signedMinimum),maximum:\(signedMaximum),unsigned:\(unsignedMaximum)}",
-            allowedTools: ["lookup"],
-            id: "call_0123456789abcdef01234568")
-        #expect(edges.arguments.objectValue?["minimum"] == .integer(.min))
-        #expect(edges.arguments.objectValue?["maximum"] == .integer(.max))
-        #expect(edges.arguments.objectValue?["unsigned"] == .unsignedInteger(.max))
-        let encodedEdges = try edges.arguments.encoded()
+        let edges: JSONValue = .object(["minimum": .integer(.min), "maximum": .integer(.max),
+                                        "unsigned": .unsignedInteger(.max)])
+        let encodedEdges = try edges.encoded()
         #expect(encodedEdges.contains(signedMinimum))
         #expect(encodedEdges.contains(signedMaximum))
         #expect(encodedEdges.contains(unsignedMaximum))
         #expect(try JSONDecoder().decode(
             JSONValue.self,
-            from: Data(encodedEdges.utf8)) == edges.arguments)
-        for malformed in ["+1", "01", "1.", ".1", "1e", "--1"] {
-            #expect(throws: GemmaToolCallParserError.self) {
-                try GemmaToolCallParser().parse(
-                    "call:lookup{id:\(malformed)}",
-                    allowedTools: ["lookup"],
-                    id: "call_0123456789abcdef01234570")
-            }
-        }
+            from: Data(encodedEdges.utf8)) == edges)
 
         let data = Data(#"""
         {
@@ -316,12 +300,6 @@ struct OpenAIValidationTests {
         _ = try tokenizer.encodeToolChat(
             messages: validated.messages,
             tools: validated.tools)
-        let parsed = try GemmaToolCallParser().parse(
-            #"call:lookup{$id:<|"|>item<|"|>,file-path:<|"|>/tmp/x<|"|>,nested:{child-key:7}}"#,
-            allowedTools: ["lookup"],
-            id: "call_0123456789abcdef01234567")
-        #expect(parsed.arguments.objectValue?["$id"] == .string("item"))
-        #expect(parsed.arguments.objectValue?["file-path"] == .string("/tmp/x"))
     }
 
     @Test func unionAndTypelessToolSchemasRenderWithoutThrowing() async throws {
@@ -366,100 +344,6 @@ struct OpenAIValidationTests {
             skipSpecialTokens: false)
         #expect(rendered.contains("mcp"))
         #expect(rendered.contains("args"))
-    }
-
-    @Test func unionSchemaCollapsesToFirstConcreteBranch() throws {
-        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"description":"d","anyOf":[{"type":"string"},{"type":"object"}]}
-        """#.utf8))
-        let normalized = schema.gemmaSchemaNormalized().objectValue
-        #expect(normalized?["type"] == .string("string"))
-        #expect(normalized?["description"] == .string("d"))
-        #expect(normalized?["anyOf"] == nil)
-    }
-
-    @Test func nullableTypeArrayCollapsesToConcreteType() throws {
-        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"type":["null","integer"]}
-        """#.utf8))
-        #expect(schema.gemmaSchemaNormalized().objectValue?["type"] == .string("integer"))
-    }
-
-    @Test func typelessSchemaDefaultsByShape() throws {
-        let object = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"properties":{"a":{"type":"string"}}}
-        """#.utf8))
-        #expect(object.gemmaSchemaNormalized().objectValue?["type"] == .string("object"))
-        let scalar = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"title":"x"}"#.utf8))
-        #expect(scalar.gemmaSchemaNormalized().objectValue?["type"] == .string("string"))
-    }
-
-    @Test func nullableUnionPrefersTheConcreteBranch() throws {
-        // A NULL-typed parameter tells the model the argument must be `null`,
-        // so a `{"type":"null"}` branch may never win over a real type.
-        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"anyOf":[{"type":"null"},{"type":"integer"}]}
-        """#.utf8))
-        #expect(schema.gemmaSchemaNormalized().objectValue?["type"] == .string("integer"))
-    }
-
-    @Test func unionOfNullAloneKeepsTheNullBranch() throws {
-        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"anyOf":[{"type":"null"}]}
-        """#.utf8))
-        #expect(schema.gemmaSchemaNormalized().objectValue?["type"] == .string("null"))
-    }
-
-    @Test func unionCollapseNormalizesKeysMergedFromTheParent() throws {
-        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"allOf":[{"type":"object"}],"properties":{"x":{"anyOf":[{"type":"string"}]}}}
-        """#.utf8))
-        let normalized = schema.gemmaSchemaNormalized().objectValue
-        #expect(normalized?["type"] == .string("object"))
-        let property = normalized?["properties"]?.objectValue?["x"]?.objectValue
-        #expect(property?["type"] == .string("string"))
-        #expect(property?["anyOf"] == nil)
-    }
-
-    @Test func unresolvableUnionFallsBackToTheShapeDefault() throws {
-        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"oneOf":[],"properties":{"x":{"anyOf":[{"type":"string"}]}}}
-        """#.utf8))
-        let normalized = schema.gemmaSchemaNormalized().objectValue
-        #expect(normalized?["type"] == .string("object"))
-        #expect(normalized?["properties"]?.objectValue?["x"]?.objectValue?["type"]
-                == .string("string"))
-    }
-
-    @Test func intersectionMergesPropertiesFromEveryBranch() throws {
-        let schema = try JSONDecoder().decode(JSONValue.self, from: Data(#"""
-        {"allOf":[
-          {"type":"object","properties":{"a":{"type":"string"}}},
-          {"type":"object","properties":{"b":{"type":"integer"}},"description":"d"}
-        ]}
-        """#.utf8))
-        let normalized = schema.gemmaSchemaNormalized().objectValue
-        #expect(normalized?["type"] == .string("object"))
-        let properties = normalized?["properties"]?.objectValue
-        #expect(properties?["a"]?.objectValue?["type"] == .string("string"))
-        #expect(properties?["b"]?.objectValue?["type"] == .string("integer"))
-        #expect(normalized?["description"] == .string("d"))
-        #expect(normalized?["allOf"] == nil)
-    }
-
-    @Test func normalizationIsIdempotent() throws {
-        let schemas = [
-            #"{"anyOf":[{"type":"null"},{"type":"integer"}]}"#,
-            #"{"allOf":[{"type":"object"}],"properties":{"x":{"anyOf":[{"type":"string"}]}}}"#,
-            #"{"oneOf":[],"properties":{"x":{"anyOf":[{"type":"string"}]}}}"#,
-            #"{"allOf":[{"properties":{"a":{"type":"string"}}},{"properties":{"b":{}}}]}"#,
-            #"{"type":["string","null"],"items":{"anyOf":[{"type":"integer"}]}}"#,
-        ]
-        for text in schemas {
-            let schema = try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
-            let once = schema.gemmaSchemaNormalized()
-            #expect(once.gemmaSchemaNormalized() == once, "not idempotent: \(text)")
-        }
     }
 
     @Test func deeplyNestedToolSchemaIsRejectedBeforeItRecurses() throws {
@@ -585,21 +469,6 @@ struct OpenAIValidationTests {
         #expect(parsed.arguments.objectValue?["file-path"] == .string("/tmp/x"))
     }
 
-    @Test func developerGuidanceBecomesSystemForDeepseek() throws {
-        let data = Data(#"""
-        {"model":"m","messages":[
-          {"role":"system","content":"system"},
-          {"role":"developer","content":"developer"},
-          {"role":"user","content":"hello"}
-        ]}
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "m", dialect: .deepseek)
-        #expect(validated.messages.map(\.role) == [.system, .user])
-        #expect(validated.messages.first?.content == "system\n\ndeveloper")
-    }
-
     @Test func rejectsLateDeveloperGuidanceForChatML() throws {
         let data = Data(#"""
         {"model":"m","messages":[
@@ -642,35 +511,6 @@ struct OpenAIValidationTests {
         #expect(properties?["args"]?.objectValue?["anyOf"] != nil)
     }
 
-    @Test func deepseekDialectKeepsUnionBranchesInTheToolSchema() throws {
-        // DeepSeek serializes the whole schema to JSON in its native tools
-        // section, so the union must survive validation untouched too.
-        let data = Data(#"""
-        {
-          "model":"m",
-          "messages":[{"role":"user","content":"hi"}],
-          "tools":[{
-            "type":"function",
-            "function":{
-              "name":"mcp",
-              "parameters":{
-                "type":"object",
-                "properties":{
-                  "args":{"anyOf":[{"type":"string"},{"type":"object"}]}
-                }
-              }
-            }
-          }]
-        }
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "m", dialect: .deepseek)
-        let properties = validated.tools[0].parameters
-            .objectValue?["properties"]?.objectValue
-        #expect(properties?["args"]?.objectValue?["anyOf"] != nil)
-    }
-
     @Test func ambiguousParameterKeysPassValidationForChatML() throws {
         let data = Data(#"""
         {
@@ -694,32 +534,6 @@ struct OpenAIValidationTests {
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         let validated = try OpenAIRequestValidator.validate(
             request, modelID: "m", dialect: .chatml)
-        #expect(validated.tools.count == 1)
-    }
-
-    @Test func ambiguousParameterKeysPassValidationForDeepseek() throws {
-        let data = Data(#"""
-        {
-          "model":"m",
-          "messages":[{"role":"user","content":"lookup"}],
-          "tools":[{
-            "type":"function",
-            "function":{
-              "name":"lookup",
-              "parameters":{
-                "type":"object",
-                "allOf":[{
-                  "type":"object",
-                  "properties":{"bad:key":{"type":"string"}}
-                }]
-              }
-            }
-          }]
-        }
-        """#.utf8)
-        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "m", dialect: .deepseek)
         #expect(validated.tools.count == 1)
     }
 
@@ -753,50 +567,6 @@ struct OpenAIValidationTests {
         let url = try #require(Bundle.module.url(
             forResource: name, withExtension: nil, subdirectory: "Fixtures"))
         return try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(contentsOf: url))
-    }
-}
-
-@Suite("Gemma tool calls")
-struct GemmaToolCallTests {
-    @Test func parsesNestedArgumentsAndGemmaQuotes() throws {
-        let parsed = try GemmaToolCallParser().parse(
-            #"call:read{path:<|"|>/tmp/ü"<|"|>,options:{lines:[1,2],exact:true}}"#,
-            allowedTools: ["read"],
-            id: "call_0123456789abcdef01234567")
-        #expect(parsed.name == "read")
-        #expect(parsed.argumentsJSON.contains(#""path":"/tmp/ü\"""#))
-        #expect(parsed.argumentsJSON.contains(#""exact":true"#))
-    }
-
-    @Test func unknownToolFailsClosed() {
-        #expect(throws: GemmaToolCallParserError.unknownTool("write")) {
-            try GemmaToolCallParser().parse(
-                "call:write{path:<|\"|>/tmp/x<|\"|>}",
-                allowedTools: ["read"],
-                id: "call_0123456789abcdef01234567")
-        }
-    }
-
-    @Test func parsesJSONUnicodeEscapesAndSurrogatePairs() throws {
-        let parsed = try GemmaToolCallParser().parse(
-            #"call:read{path:"\u00fc-\ud83c\udf33",note:"a\b\f"}"#,
-            allowedTools: ["read"],
-            id: "call_0123456789abcdef01234567")
-        #expect(parsed.argumentsJSON.contains(#""path":"ü-🌳""#))
-        #expect(parsed.argumentsJSON.contains(#""note":"a\b\f""#))
-    }
-
-    @Test func suppressesThoughtBlockAndExposesTextAfterChannelClose() async throws {
-        let tokenizer = try await MFTokenizer.load()
-        let decoder = StructuredAssistantDecoder(tokenizer: tokenizer, allowedTools: [])
-        #expect(try decoder.consume(tokenID: tokenizer.channelStartID, delta: "").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "thought").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "\n").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "private").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.channelEndID, delta: "").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "visible") == [
-            .content("visible"),
-        ])
     }
 }
 

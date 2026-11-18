@@ -34,42 +34,6 @@ struct GroupedAttentionIdentityTests {
         try compare(seqLen: 257, pattern: "random", seed: seed, headDim: headDim)
     }
 
-    /// QAT keeps MLX's three-pass arithmetic; its grouped kernels only move the
-    /// eight heads of a K/V head into one threadgroup. 32 keys and fewer keep
-    /// the source's column-group scores, so the boundary is covered on both sides.
-    @Test(arguments: [1, 5, 32, 33, 64, 257, 4_097, 16_384, 65_536])
-    func qatGroupedKernelsMatchTheSourceMapping(seqLen: Int) throws {
-        let ctx = try MetalContext()
-        let attention = try Attention(context: ctx, gemmaQATMaxContext: 65_536)
-        func buffer(_ count: Int) throws -> MTLBuffer {
-            try #require(ctx.device.makeBuffer(length: count * 2, options: .storageModeShared))
-        }
-        let q = try buffer(8192), k = try buffer(seqLen * 1024), v = try buffer(seqLen * 1024)
-        var state: UInt64 = 0x51A7 &+ UInt64(seqLen)
-        for target in [q, k, v] {
-            let count = target.length / 2
-            let values = target.contents().bindMemory(to: Float16.self, capacity: count)
-            for i in 0..<count {
-                state = state &* 6364136223846793005 &+ 1442695040888963407
-                let unit: Float = Float(Int32(truncatingIfNeeded: state >> 32)) / Float(Int32.max)
-                values[i] = Float16(unit * 0.5)
-            }
-        }
-        let outputs = try [buffer(8192), buffer(8192)]
-        for index in 0..<2 {
-            let cb = try #require(ctx.queue.makeCommandBuffer())
-            attention.encodeFull(commandBuffer: cb, q: q, k: k, v: v, out: outputs[index],
-                                 headDim: 512, numQHeads: 16, numKVHeads: 2,
-                                 seqLen: UInt32(seqLen), scale: 1, useGroupedVector: index == 1)
-            cb.commit()
-            cb.waitUntilCompleted()
-            if let error = cb.error { throw error }
-            try #require(cb.status == .completed)
-        }
-        #expect(memcmp(outputs[0].contents(), outputs[1].contents(), outputs[0].length) == 0,
-                "QAT grouped attention differs at length=\(seqLen)")
-    }
-
     @Test func geometrySelectsTheGroupedKernelOnlyForGemmaAndQwen36FullAttention() {
         let gemma = Attention.splitGeometry(headDim: 512, numQHeads: 16, numKVHeads: 2, seqLen: 4096,
                                             kvStart: 0, preferGQASWA: false, forceGroupedVector: true)

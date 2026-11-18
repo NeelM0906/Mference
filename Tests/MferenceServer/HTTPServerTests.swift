@@ -451,10 +451,12 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
-    @Test(arguments: [false, true], [false, true])
-    func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool, base: Bool) async throws {
+    /// Base Qwen 3.8 with `reasoning_effort` (the Swift-Qwen arm of this test
+    /// was removed with that checkpoint's tests).
+    @Test(arguments: [false, true])
+    func qwen38ReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool) async throws {
         let server = MferenceHTTPServer(modelID: "custom-alias", queueLimit: 1,
-                                        backend: ScriptedServerBackend(includeReasoning: true, baseQwen: base))
+                                        backend: ScriptedServerBackend(includeReasoning: true, baseQwen: true))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)

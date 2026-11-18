@@ -9,9 +9,10 @@ import Foundation
 /// Mirrors `ModelLoaderTests.writeToySynthetic` for the Gemma toy.
 enum QwenToySynthetic {
 
-    /// Build the toy directory in a temp dir and return its URL.
-    static func write() throws -> URL {
-        let toy = ArchConfig.qwen36Toy()
+    /// Build the toy directory in a temp dir and return its URL. `toy` must be
+    /// `ArchConfig.qwen36Toy()` or a variant of it with a different expert
+    /// count (for suites that need the expert cache to evict).
+    static func write(_ toy: ArchConfig = .qwen36Toy()) throws -> URL {
         let la = toy.linearAttention
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-qwen-toy-\(UUID().uuidString)")
@@ -382,8 +383,9 @@ extension ArchConfig {
     /// decode kernels' fixed top-k), gated shared expert, untied lm_head,
     /// no sandwich norms. Numbers are intentionally toy but respect every
     /// kernel divisibility constraint (D % 64, keyHeadDim % 32, even
-    /// rotaryDim).
-    static func qwen36Toy() -> ArchConfig {
+    /// rotaryDim). `numExperts` widens the routed pool (still top-8) so a
+    /// small expert cache has to evict; the default is the runnable baseline.
+    static func qwen36Toy(numExperts: Int = 8) -> ArchConfig {
         ArchConfig(
             hiddenSize: 64,
             intermediateSize: 128,
@@ -400,7 +402,7 @@ extension ArchConfig {
             fullRopeTheta: 10_000_000.0,
             partialRotaryFactor: 0.25,
             numLayers: 4,
-            numExperts: 8,
+            numExperts: numExperts,
             topKExperts: 8,
             tieWordEmbeddings: false,
             attentionKEqV: false,

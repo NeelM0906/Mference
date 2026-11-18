@@ -29,7 +29,9 @@ bash -n mference-ui.sh && python3 Scripts/tests/test_mference_ui.py
   Extra arguments pass straight through to `swift test`.
 - Every test uses Swift Testing (`@Suite` / `@Test`), not XCTest. `--filter` is
   a regex over `Suite/test`; `bringup-check.sh` holds the per-family suite
-  regexes (`Qwen38`, `FlashNext`, `Glm53`, `Inkling`, ...).
+  regexes (`Qwen38`, `Maple`, `[Mm]iniCPM5`, ...). Only the product families
+  (Qwen 3.6, Qwen 3.8 27B, Maple, MiniCPM5) keep behaviour suites; the other
+  families keep their contract tests (baselines, manifest validation).
 - The build, the Swift suite, the link check, and `Scripts/tests/test_*.py`
   (stdlib `unittest`, no dependencies) never download or load a model. CI runs
   the suite, the Python checks and the link check on `macos-26` (the MSL 4.0

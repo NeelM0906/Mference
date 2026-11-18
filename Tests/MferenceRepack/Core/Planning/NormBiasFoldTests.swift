@@ -84,17 +84,6 @@ import Testing
         #expect(!FlashNextPlanner.foldsNormBias("lm_head.weight", family: .qwen36))
     }
 
-    /// Flash-Next ships and its first-light run produced coherent output with
-    /// the bare weights. Folding would change every byte of that install.
-    @Test("Flash-Next folds nothing")
-    func flashNextFoldsNothing() {
-        let (folded, bare) = Self.normInventory()
-        for name in folded + bare {
-            #expect(!FlashNextPlanner.foldsNormBias(name, family: .qwen38flashnext),
-                    "\(name)")
-        }
-    }
-
     /// The transform itself: `bf16(w + 1)`, width-preserving, and the operation
     /// that was verified bit-exact against the control's stored bytes.
     @Test("add-one-bf16 preserves width and rounds through BF16")

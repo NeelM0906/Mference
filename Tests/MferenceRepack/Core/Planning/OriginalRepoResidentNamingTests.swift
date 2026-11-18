@@ -81,20 +81,6 @@ import Testing
         }
     }
 
-    /// Flash-Next ships. Renaming it would change every byte of its install,
-    /// and it has no runner whose spelling would justify that.
-    @Test("Flash-Next names are untouched")
-    func flashNextIsIdentity() {
-        for name in Self.vendorNames + [
-            "model.language_model.layers.1.ple.key_proj.weight",
-            "model.language_model.hyper_connection_mixer.weight",
-        ] {
-            #expect(FlashNextPlanner.residentName(for: name,
-                                                  family: .qwen38flashnext) == name,
-                    "\(name)")
-        }
-    }
-
     /// A name the mapping does not recognise passes through rather than being
     /// mangled, so an unexpected tensor fails loudly at load instead of landing
     /// under a plausible-looking wrong name.

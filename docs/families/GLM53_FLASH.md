@@ -166,7 +166,8 @@ The KDA state is 34 × (64 × 128 × 128 fp32 + 3 × 24,576 fp16 conv tail).
       three `generation_config` EOS ids (`<|endoftext|>`, `<|user|>`,
       `<|observation|>`) in `stopTokenIDs`, `<|user|>` as the end-of-turn
       bridge; 22 HF renders byte-identical (`Glm5TemplateTests`, fixtures from
-      `Scripts/parity/glm5_make_template_fixtures.py`); the decoder starts in
+      `Scripts/parity/glm5_make_template_fixtures.py`; both removed 2026-11-18
+      with this family's tests); the decoder starts in
       thought because the generation prompt opens `<think>`. See "Tokenizer
       dialect" below for the two recorded deviations.
 - [x] **Ladder** — 16 / 32 / auto expert-cache slots produce byte-identical
@@ -202,7 +203,8 @@ tests in 208 suites, three passes of 241 / 239 / 240 s, all green.
    capability gate, tensor accessors, the repacker's `glm5_next` loader and
    planner classification, the pinned source, tests and this page.
 2. **Reference-parity goldens** (done 2026-09-11) from PipeNetwork's runtime
-   at the toy geometry (`Scripts/parity/glm53_make_goldens.py`): per-token
+   at the toy geometry (`Scripts/parity/glm53_make_goldens.py`, removed
+   2026-11-18 with this family's tests): per-token
    captures of the KDA recurrence, the pooled indexer's selections, the latent
    attention, the routed selections and the mHC coefficients, plus an fp32
    Swift oracle that reproduces them (see "Toy parity" below).

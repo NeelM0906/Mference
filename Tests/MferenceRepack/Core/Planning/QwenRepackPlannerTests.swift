@@ -262,6 +262,48 @@ struct QwenRepackPlannerTests {
         }
     }
 
+    /// Moved from the removed DeepSeek-V4 planner suite: shared `GTurboJSON`
+    /// manifest emission writes none of the DeepSeek-V4 extension fields for a
+    /// Qwen install.
+    @Test func qwenManifestOmitsDeepseekExtensionFields() throws {
+        let snapshotDir = temporaryRoot("qwen-manifest-no-dsv4")
+        let outputDir = temporaryRoot("qwen-manifest-no-dsv4-out")
+        defer {
+            try? FileManager.default.removeItem(atPath: snapshotDir)
+            try? FileManager.default.removeItem(atPath: outputDir)
+        }
+        let snapshot = try SyntheticSnapshot.buildQwen(at: snapshotDir)
+        let metadata = try IndexLoader.load(snapshotDir: snapshotDir)
+        let arch = try ArchInfo.load(
+            configPath: (snapshotDir as NSString).appendingPathComponent("config.json"))
+        let header = try parseHeader(path: snapshot.shardPath)
+        let plan = try RepackPlanner.plan(
+            meta: metadata, arch: arch, shardHeaders: [header], outputDir: outputDir)
+
+        let data = try GTurboJSON.encodeManifest(
+            plan: plan,
+            modelID: "qwen3.6-35b-a3b-4bit",
+            sourceSnapshotHash: "sha256:0",
+            files: [],
+            expertsPerLayer: 2,
+            numLayers: arch.numLayers,
+            expertStride: 16_384,
+            bitWidths: GTurboJSON.QuantBitWidths(
+                embedding: 4, attention: 4, router: 8,
+                sharedExpert: 4, routedExpert: 4))
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let archDict = obj["arch"] as! [String: Any]
+        #expect(archDict["family"] as? String == "qwen36")
+        for key in ["caQLoraRank", "caOLoraRank", "caOGroups", "caRopeHeadDim",
+                    "caIndexNHeads", "caIndexHeadDim", "caIndexTopK",
+                    "caCSACompressRate", "caHCACompressRate",
+                    "caCompressRopeTheta", "hcMult", "hcSinkhornIters", "hcEps",
+                    "numHashRoutedLayers", "routerScoringFunc",
+                    "routedScalingFactor", "swigluLimit"] {
+            #expect(archDict[key] == nil, "qwen manifest must omit \(key)")
+        }
+    }
+
     // MARK: - Helpers
 
     private func writeProductionConfig(

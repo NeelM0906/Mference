@@ -139,29 +139,6 @@ import MferenceValidationSupport
             return
         }
 
-        if sourceFP16, let directory = ProcessInfo.processInfo.environment["MFERENCE_GEMMA_QAT_ROTARY_DIAGNOSTIC"] {
-            let qNorm = try #require(ctx.device.makeBuffer(bytes: q, length: Self.bytes(qCount), options: .storageModeShared))
-            let qZero = try #require(ctx.device.makeBuffer(bytes: q, length: Self.bytes(qCount), options: .storageModeShared))
-            let kZero = try #require(ctx.device.makeBuffer(bytes: k, length: Self.bytes(kvCount), options: .storageModeShared))
-            let vZero = try #require(ctx.device.makeBuffer(bytes: v, length: Self.bytes(kvCount), options: .storageModeShared))
-            let diagnostic = try #require(ctx.queue.makeCommandBuffer())
-            rms.encodeBF16WPerHead(commandBuffer: diagnostic, x: qNorm, weight: qW, out: qNorm,
-                headDim: UInt32(headDim), numHeads: numQHeads, eps: 1e-6)
-            fused.encode(commandBuffer: diagnostic, q: qZero, k: kZero, v: vZero, qWeight: qW,
-                kWeight: kW, headDim: UInt32(headDim), numQHeads: UInt32(numQHeads),
-                numKVHeads: UInt32(numKVHeads), position: 0, theta: theta, rotatedPairs: rotatedPairs, eps: 1e-6)
-            diagnostic.commit()
-            diagnostic.waitUntilCompleted()
-            try #require(diagnostic.status == .completed)
-            let root = URL(fileURLWithPath: directory)
-            for (name, buffer) in [("normalized", qNorm), ("zero-position", qZero), ("legacy", qLegacy), ("fused", qFused)] {
-                try Data(bytes: buffer.contents(), count: Self.bytes(qCount)).write(to: root.appendingPathComponent("rotary-\(headDim)-\(name).f16"))
-            }
-            let a = qNorm.contents().assumingMemoryBound(to: UInt16.self)
-            let b = qZero.contents().assumingMemoryBound(to: UInt16.self)
-            print("[qat-rotary-isolation] head=\(headDim) normalizedDifferences=\((0..<qCount).filter { a[$0] != b[$0] }.count)")
-        }
-
         #expect(Self.bufferBytes(qLegacy, count: qCount) == Self.bufferBytes(qFused, count: qCount),
                 "Q mismatch for headDim=\(headDim) kvHeads=\(numKVHeads)")
         #expect(Self.bufferBytes(kLegacy, count: kvCount) == Self.bufferBytes(kFused, count: kvCount),

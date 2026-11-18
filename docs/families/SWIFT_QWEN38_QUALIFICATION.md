@@ -166,7 +166,7 @@ were enabled; explicit MTP was used only for correctness qualification.
 
 ```bash
 python3 Scripts/tests/test_openwebui_mference.py
-python3 Scripts/tests/test_swift_qwen_task_screen.py
+python3 Scripts/tests/test_swift_qwen_task_screen.py  # removed 2026-11-18 with the Swift-Qwen tests
 bash -n mference-ui.sh
 env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build -c release --scratch-path /tmp/mference-phase1-build.sXnNTs
 env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer Scripts/test.sh --scratch-path /tmp/mference-phase1-build.sXnNTs --filter 'SwiftQwenChatTests|QwenToolCall|MapleTokenization|MapleToolCall|ChatMLTemplate'

@@ -86,7 +86,7 @@ If a check fails, inform the user and stop; do not terminate apps or delete or
 reinstall a model.
 
 Run package tests through `Scripts/test.sh`. Real-model regression suites are
-env-gated (for example `MFERENCE_INKLING_GTURBO`) and skip without the gate.
+env-gated (for example `MFERENCE_QWEN36_GTURBO`) and skip without the gate.
 Run only one server, CLI, or model-using test at a time.
 
 For performance results, build release once and follow the [community

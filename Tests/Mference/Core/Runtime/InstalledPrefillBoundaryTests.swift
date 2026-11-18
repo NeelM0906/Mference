@@ -15,21 +15,12 @@ import Testing
 
         static func named(_ name: String) -> Profile {
             switch name {
-            case "gemma4":
-                return Profile(gate: "MFERENCE_GEMMA4_GTURBO", family: .gemma4,
-                    boundaries: [33, 1023, 1027, 1059], chunk: 128, slots: 8)
             case "qwen36":
                 return Profile(gate: "MFERENCE_QWEN36_GTURBO", family: .qwen36,
                     boundaries: [33, 127, 131, 163], chunk: 64, slots: 8)
-            case "maple":
+            default:
                 return Profile(gate: "MFERENCE_MAPLE_GTURBO", family: .maple,
                     boundaries: [33, 511, 515, 547], chunk: 64, slots: 8)
-            case "inkling":
-                return Profile(gate: "MFERENCE_INKLING_GTURBO", family: .inklingSmall,
-                    boundaries: [33, 511, 515, 547], chunk: 128, slots: 16)
-            default:
-                return Profile(gate: "MFERENCE_FLASHNEXT_GTURBO", family: .qwen38flashnext,
-                    boundaries: [33, 2047, 2051, 2083], chunk: 1024, slots: 16)
             }
         }
     }
@@ -53,8 +44,6 @@ import Testing
             runner.prefillWillEncodeLayer = hook
         } else if let runner = producer as? RealForwardRunner {
             runner.prefillWillEncodeLayer = hook
-        } else if let runner = producer as? FlashNextForwardRunner {
-            runner.prefillDidCompleteLayer = hook
         } else {
             throw CocoaError(.featureUnsupported)
         }
@@ -102,55 +91,8 @@ import Testing
             for i in 1..<validVocab where values[i] > values[best] { best = i }
             return Int32(best)
         }
-        func targetHidden(_ flash: FlashNextForwardRunner) throws -> [UInt16] {
-            let hidden = try flash.captureTargetHiddenBundle()
-            #expect(hidden.processedTokenCount == flash.continuationPosition)
-            #expect(hidden.buffer.length == model.config.residualStreamWidth * 2)
-            let readback = try #require(context.device.makeBuffer(length: hidden.buffer.length,
-                                                                 options: .storageModeShared))
-            let command = try #require(context.queue.makeCommandBuffer())
-            let blit = try #require(command.makeBlitCommandEncoder())
-            blit.copy(from: hidden.buffer, sourceOffset: 0, to: readback,
-                      destinationOffset: 0, size: readback.length)
-            blit.endEncoding()
-            command.commit()
-            command.waitUntilCompleted()
-            #expect(command.error == nil)
-            let bits = Array(UnsafeBufferPointer(start: readback.contents().assumingMemoryBound(to: UInt16.self),
-                                                count: readback.length / 2))
-            #expect(bits.allSatisfy { Float16(bitPattern: $0).isFinite })
-            #expect(bits.contains { Float16(bitPattern: $0) != 0 })
-            return bits
-        }
         func append(_ start: Int, _ end: Int) async throws {
             if start > 0 { try producer.prepareForContinuation(expectedPosition: start) }
-            let flash = producer as? FlashNextForwardRunner
-            var captured = 0
-            var lastCapturedRow: [UInt16]?
-            flash?.consumeTargetHiddenRows = { batch in
-                #expect(batch.startPosition == start + captured)
-                let upper = batch.startPosition + batch.tokens.count
-                try #require(batch.startPosition >= start && upper <= end)
-                #expect(batch.tokens == Array(tokens[batch.startPosition..<upper]))
-                let width = model.config.residualStreamWidth
-                #expect(batch.buffer.length == batch.tokens.count * width * 2)
-                let copy = try #require(context.device.makeBuffer(length: batch.buffer.length, options: .storageModeShared))
-                let command = try #require(context.queue.makeCommandBuffer())
-                let blit = try #require(command.makeBlitCommandEncoder())
-                blit.copy(from: batch.buffer, sourceOffset: 0, to: copy, destinationOffset: 0, size: copy.length)
-                blit.endEncoding()
-                command.commit()
-                command.waitUntilCompleted()
-                try #require(command.error == nil)
-                let bits = Array(UnsafeBufferPointer(start: copy.contents().assumingMemoryBound(to: UInt16.self), count: copy.length / 2))
-                #expect(bits.allSatisfy { Float16(bitPattern: $0).isFinite })
-                for row in batch.tokens.indices {
-                    #expect(bits[(row * width)..<((row + 1) * width)].contains { Float16(bitPattern: $0) != 0 })
-                }
-                lastCapturedRow = Array(bits.suffix(width))
-                captured += batch.tokens.count
-            }
-            defer { flash?.consumeTargetHiddenRows = nil }
             let result = try await runner.prefillChunked(tokens: tokens[start..<end],
                 startPosition: start, outputMode: .logits, config: runtime.prefillConfig,
                 into: output, onProgress: { _ in })
@@ -158,10 +100,6 @@ import Testing
             #expect(result.execution?.replayedTokens == 0)
             #expect(result.execution?.batchedChunkSizes.reduce(0, +) == end - start)
             #expect(result.newPosition == end)
-            if let flash {
-                #expect(captured == end - start)
-                #expect(lastCapturedRow == (try targetHidden(flash)))
-            }
             log("\(profile.family) append=\(start)..<\(end) chunks=\(result.execution?.batchedChunkSizes ?? [])")
         }
         let modeLabel = profile.family == .maple && resident ? "slots=16"
@@ -176,40 +114,13 @@ import Testing
             log("\(label) position=\(end) replay=0")
             start = end
         }
-        if let flash = producer as? FlashNextForwardRunner {
-            #expect((flash.deviceGroupedPrefillLayers > 0) == resident)
-            #expect((flash.tensorOpsPrefillEncodings > 0) == flash.tensorOpsPrefillAvailable)
-            log("\(label) TensorOps available=\(flash.tensorOpsPrefillAvailable) encodings=\(flash.tensorOpsPrefillEncodings)")
-        }
         var continuation: [Int32] = []
         var tail: [[UInt16]] = []
-        let flash = producer as? FlashNextForwardRunner
-        let committedHidden = try flash.map { try targetHidden($0) }
-        let checkpoint = try flash?.captureDecodeCheckpoint()
         for step in 0..<8 {
             let token = greedy()
             continuation.append(token)
             try await producer.produce(token: token, position: count + step, into: output)
             tail.append(snapshot())
-        }
-        if let flash, let checkpoint {
-            try flash.restoreDecodeCheckpoint(checkpoint)
-            #expect(try targetHidden(flash) == committedHidden)
-            let clean = try flash.captureDecodeCheckpoint()
-            // A rejected draft includes EOS and crosses a pooled-indexer block
-            // boundary above the sparse cutover. Its rows must become invisible.
-            let wrong = [Int32(model.config.flashNext.pleEosTokenID), 7, 11, 19]
-            for (step, token) in wrong.enumerated() {
-                try await flash.produce(token: token, position: count + step, into: output)
-            }
-            try flash.restoreDecodeCheckpoint(clean)
-            #expect(try targetHidden(flash) == committedHidden)
-            try flash.prepareForContinuation(expectedPosition: count)
-            for (step, token) in continuation.enumerated() {
-                try await flash.produce(token: token, position: count + step, into: output)
-                #expect(snapshot() == tail[step], "installed rollback full logits, step \(step)")
-            }
-            log("\(label) rejected-draft rollback: full HC bundle and eight full logit rows exact")
         }
         producer.reset()
         try await append(0, 33)
@@ -234,7 +145,7 @@ import Testing
         return Result(heads: heads, tail: tail, continuation: continuation)
     }
 
-    @Test(arguments: ["gemma4", "qwen36", "maple", "inkling", "flashnext"])
+    @Test(arguments: ["qwen36", "maple"])
     func memoryProfilesMatchAcrossBoundaries(name: String) async throws {
         let profile = Profile.named(name)
         guard let path = ProcessInfo.processInfo.environment[profile.gate] else { return }

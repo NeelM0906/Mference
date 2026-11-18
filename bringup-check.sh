@@ -120,30 +120,21 @@ for arg in "$@"; do
 done
 [ -n "${family}" ] || { usage >&2; exit 1; }
 
-# Per-family toy/parity suite filter. Empty means "none registered yet".
+# Per-family toy/parity suite filter. Empty means "none registered".
+#
+# Only the product families (qwen36, qwen38, maple, minicpm5) keep toy and
+# parity suites. The other families' behaviour suites were removed (their
+# runtime, installer and contract tests stay), so stage 1 is SKIPPED for them;
+# stages 2-3 (install verify, ladder smoke) still run against an install.
 case "${family}" in
-  # Gemma 4 has no family-named toy or parity suite: its coverage currently
-  # lives inside shared kernel suites (attention scale 1.0, router k8, tied
-  # INT4 embedding, INT8 shared expert), which no family filter can isolate.
-  gemma4)          suite_filter="" ;;
   qwen36)          suite_filter='Qwen(Runner|ResidentParity|SlotMapParity|RepackPlanner|ToolCallParser|Install)' ;;
   qwen38)          suite_filter='Qwen38' ;;
-  deepseekv4flash) suite_filter='(DSV4|Deepseek)' ;;
-  inklingsmall)    suite_filter='Inkling' ;;
   maple)           suite_filter='Maple' ;;
-  flint)           suite_filter='Flint' ;;
-  qwen38flashnext) suite_filter='FlashNext' ;;
-  # Unsloth UD-IQ3_XXS GGUF install: GGUF quant tables, LUT4 expansion and MoE,
-  # INT8-2L, the family/manifest and installer suites, the lower-case gguf*
-  # install tests in RemotePayloadCopyTests, the IQ4_NL PLE rows, the raw
-  # streamer path and the forced-routes parser. Its real-install suites are
-  # env-gated (MFERENCE_UNSLOTH_GTURBO) and skip here.
-  qwen38flashnextudiq3xxs) suite_filter='GGUF|gguf|PleRowPoolIQ4NL|PreadExpertStreamerRaw|FlashNextForcedRoutes' ;;
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).
   minicpm5)        suite_filter='[Mm]iniCPM5' ;;
-  # Day-0 contract suites (baseline, gate, manifest validation, planner).
-  glm53flash)      suite_filter='Glm53' ;;
+  gemma4|deepseekv4flash|inklingsmall|flint|qwen38flashnext|qwen38flashnextudiq3xxs|glm53flash)
+                   suite_filter="" ;;
   *) usage >&2; fail "unknown family: ${family}" ;;
 esac
 

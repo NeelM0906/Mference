@@ -174,21 +174,4 @@ import Testing
         #expect(growing.startingKV < whole.startingKV)
         #expect(growing.rows == whole.rows)
     }
-
-    /// Inkling's global layers grow; its local layers keep their rings.
-    @Test func inklingGrowingKVMatchesTheWholeReservation() async throws {
-        let directory = try InklingToySynthetic.write()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let tokens: [Int32] = (0..<400).map { (index: Int) -> Int32 in
-            Int32(4 + (index * 17) % 239)
-        }
-        func run(_ step: Int?) async throws -> (rows: [[UInt16]], startingKV: UInt64) {
-            try await rollout(directory: directory, config: InklingToySynthetic.config, step: step,
-                              maxContext: 256, chunk: 32, prompt: 70, decode: 60, tokens: tokens)
-        }
-        let whole = try await run(nil)
-        let growing = try await run(16)
-        #expect(growing.startingKV < whole.startingKV)
-        #expect(growing.rows == whole.rows)
-    }
 }

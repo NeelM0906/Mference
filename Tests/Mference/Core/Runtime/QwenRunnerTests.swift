@@ -198,3 +198,30 @@ import Metal
         #expect(gemma.qElements == 128 * gemma.maxQElementsPerToken)
     }
 }
+
+/// Moved from the removed Gemma prefix-recovery suite: Qwen's recurrent
+/// (gated-DeltaNet) state cannot be rewound, so the runner must never opt a
+/// Qwen model into the Gemma prefix-recovery path.
+extension QwenRunnerTests {
+    @Test func qwenRecurrentStateNeverOptsIntoGemmaRewind() async throws {
+        let directory = try QwenToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let context = try MetalContext()
+        let config = ArchConfig.qwen36Toy()
+        let model = try Model.load(directoryURL: directory, device: context.device,
+            expecting: config, streamingMode: .pread(slotCount: 8))
+        let runner = try RealForwardRunner(model: model, context: context, maxContext: 128,
+            runtimeConfiguration: .init(expertCacheSlots: 8, prefillChunkTokens: 64, forceLogitsHead: true))
+        let output = try #require(context.device.makeBuffer(length: config.vocabSize * 2, options: .storageModeShared))
+        let tokens = (0..<33).map { Int32(4 + ($0 * 37) % (config.vocabSize - 4)) }
+        _ = try await runner.prefillChunked(tokens: tokens[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 64), into: output, onProgress: { _ in })
+        #expect(!runner.supportsGemmaPrefixRecovery)
+        #expect(try runner.captureGemmaPrefix() == false)
+        #expect(runner.gemmaRecoveryBytes == 0)
+        #expect(runner.gemmaRecoverablePrefix(upTo: 16) == 0)
+        #expect(throws: (any Error).self) { try runner.recoverGemmaPrefix(to: 16) }
+        try runner.prepareForContinuation(expectedPosition: 33)
+        #expect(runner.continuationPosition == 33)
+    }
+}
