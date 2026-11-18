@@ -18,7 +18,8 @@ import Testing
     /// be here or the fixture reports corruption instead of the family.
     /// `peekFamily` validates nothing beyond decodability; the values are a
     /// 48-layer hybrid shape and nothing checks them.
-    private static func writeManifest(family: String?) throws -> URL {
+    private static func writeManifest(family: String?,
+                                      modelID: String = "gate-fixture") throws -> URL {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("mference-gate-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory,
@@ -32,7 +33,7 @@ import Testing
             "flags": ["streamingPresent": true,
                       "turboQuantKV": false,
                       "aneSharedExpert": false],
-            "modelID": "gate-fixture",
+            "modelID": modelID,
             "sourceSnapshotHash": "sha256:0",
             "arch": [
                 "hiddenSize": 2_560,
@@ -93,6 +94,66 @@ import Testing
         }
         #expect(ModelError.retiredFamily(family: "flint").description
             .contains("RETIRED_FAMILIES.md"))
+    }
+
+    /// Swift-Qwen3.8 carries the kept `qwen38` family, so `peekFamily` must
+    /// refuse it by checkpoint ID; otherwise it loads as base Qwen 3.8.
+    @Test func retiredCheckpointOnAKeptFamilyIsRefusedById() throws {
+        let swiftQwen = try Self.writeManifest(family: "qwen38", modelID: "swift-qwen3.8-27b-int4g64")
+        defer { try? FileManager.default.removeItem(at: swiftQwen) }
+        #expect(throws: ModelError.retiredCheckpoint(modelID: "swift-qwen3.8-27b-int4g64")) {
+            _ = try ManifestReader.peekFamily(directoryURL: swiftQwen)
+        }
+        #expect(ModelError.retiredCheckpoint(modelID: "swift-qwen3.8-27b-int4g64").description
+            .contains("Swift-Qwen3.8"))
+        // The base checkpoint on the same family still resolves.
+        let base = try Self.writeManifest(family: "qwen38", modelID: "qwen3.8-27b-4bit")
+        defer { try? FileManager.default.removeItem(at: base) }
+        #expect(try ManifestReader.peekFamily(directoryURL: base) == .qwen38)
+    }
+
+    /// The library classifier: retired checkpoint by ID, a family-less manifest
+    /// under its modelID, a retired family by name, and nil for a kept install.
+    @Test func retiredInstallClassification() throws {
+        func classify(_ family: String?, _ modelID: String) throws -> ManifestReader.RetiredInstall? {
+            let directory = try Self.writeManifest(family: family, modelID: modelID)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            return ManifestReader.retiredInstall(
+                manifestURL: directory.appendingPathComponent("manifest.json"))
+        }
+        #expect(try classify("qwen38", "swift-qwen3.8-27b-int4g64")?.identifier
+                == "swift-qwen3.8-27b-int4g64")
+        let legacy = try #require(try classify(nil, "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned"))
+        #expect(legacy.identifier == "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned")
+        #expect(legacy.detail.contains("no arch.family"))
+        #expect(try classify("flint", "flint-40b")?.identifier == "flint")
+        #expect(try classify("qwen36", "qwen3.6-35b-a3b") == nil)
+        #expect(try classify("qwen38", "qwen3.8-27b-4bit") == nil)
+        // A family-less manifest without a modelID is not an install of any
+        // family: left to the caller's incomplete-install path.
+        let bare = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gate-bare-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: bare) }
+        try Data(#"{"arch":{}}"#.utf8).write(to: bare)
+        #expect(ManifestReader.retiredInstall(manifestURL: bare) == nil)
+    }
+
+    /// An install without its tokenizer sidecar names what is missing rather
+    /// than reporting a missing chat template.
+    @Test func missingTokenizerSidecarIsNamed() async throws {
+        let directory = try Self.writeManifest(family: "qwen36", modelID: "qwen3.6-35b-a3b")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            _ = try await MFTokenizer.load(forModelDirectory: directory, environment: [:])
+            Issue.record("loading without a tokenizer sidecar must throw")
+        } catch let error as MFTokenizerError {
+            guard case .missingTokenizerSidecar(let path) = error else {
+                Issue.record("expected missingTokenizerSidecar, got \(error)")
+                return
+            }
+            #expect(path.hasSuffix("/tokenizer"))
+            #expect(error.description.contains("tokenizer.json"))
+        }
     }
 
     /// The gate mechanism, exercised against an injected table because the

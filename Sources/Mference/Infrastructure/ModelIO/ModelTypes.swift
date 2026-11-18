@@ -961,6 +961,9 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case familyRunnerNotImplemented(family: String, missingAxes: [String])
     /// The install's `arch.family` is one of `ManifestReader.retiredFamilies`.
     case retiredFamily(family: String)
+    /// The install's `modelID` is one of `ManifestReader.retiredCheckpoints`:
+    /// a retired checkpoint on a kept architecture.
+    case retiredCheckpoint(modelID: String)
 
     public var description: String {
         switch self {
@@ -999,6 +1002,10 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
         case .familyRunnerNotImplemented(let family, let missingAxes):
             return "family \(family) is installed but its runner is not implemented; "
                 + "missing axes: \(missingAxes.joined(separator: ", "))"
+        case .retiredCheckpoint(let modelID):
+            let name = ManifestReader.retiredCheckpoints[modelID] ?? "a retired"
+            return "checkpoint \(modelID) (\(name)) was retired on 2026-11-18 and this runtime no longer loads it "
+                + "(see docs/RETIRED_FAMILIES.md); the install on disk is untouched"
         case .retiredFamily(let family):
             return "family \(family) was retired on 2026-11-18 and this runtime no longer loads it "
                 + "(see docs/RETIRED_FAMILIES.md); the install on disk is untouched"

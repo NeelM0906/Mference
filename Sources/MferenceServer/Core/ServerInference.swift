@@ -257,7 +257,8 @@ public actor ServerModelSession: ServerLoadedModel {
         let maxContext = resolvedMaxContext(requestedMaxContext, family: family)
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
-            throw MFTokenizerError.missingToolTemplate
+            throw MFTokenizerError.missingTokenizerSidecar(
+                modelDirectory.appendingPathComponent("tokenizer", isDirectory: true).path)
         }
         let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelDirectory)
