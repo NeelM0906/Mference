@@ -1,0 +1,154 @@
+# MferenceEngine
+
+`MferenceEngine` is the library between the runtime and its clients. It lists
+the models the product offers, keeps exactly one of them loaded, and runs
+chat requests on it, whatever runs the model underneath: Mference's own
+runtime for `.gturbo` installs, or llama.cpp linked in-process for `.gguf`
+files. `MferenceServer`'s library mode is moving onto it, and the SwiftUI app
+will later use the same API.
+
+```
+MferenceServer (OpenAI API)   ·   app (later)
+        │                          │
+        └────────── MferenceEngine ┘
+   EngineCatalog   which models exist, by stable ID
+   EngineHost      one resident model, one request at a time
+   EngineModel     prepare (render) → generate (stream) → completion
+     ├─ NativeBackend   Model + ForwardRunnerFactory + runRawCompletion
+     └─ LlamaBackend    libllama (+ MTP for Deep)
+```
+
+This page covers the public API, the identifiers, and the lifecycle. Server
+behaviour is in [OPENAI_SERVER.md](OPENAI_SERVER.md), and the runtime itself
+is in [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md).
+
+## Models and identifiers
+
+The product offers five models, and the catalog lists only these by default.
+
+| Slot | ID | Engine | On disk |
+| --- | --- | --- | --- |
+| Quick | `qwen3.5-4b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.5-4B-UD-Q4_K_XL.gguf` |
+| Deep | `qwen3.8-27b` | `llama.cpp` | `~/llm-models/gguf/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` (MTP) |
+| Qwen 3.6 | `qwen3.6-35b-a3b` | `mference` | `qwen36.gturbo` |
+| MiniCPM5 | `minicpm5-2b-int4g64` | `mference` | `minicpm5.gturbo` |
+| Maple | `maple-preview-2bit-mlx` | `mference` | `maple.gturbo` |
+
+`EngineProductSlot` holds this table in code. The IDs are stable: a client
+stores them, and the native ones are the IDs `MferenceServer` already used for
+those families. Flash-Next and the other installed families are not offered.
+
+The engine name (`mference` or `llama.cpp`, `EngineKind`) is metadata. The UI
+shows it only in the model picker, and the API carries it as a plain field.
+
+An `EngineModelDescriptor` is everything known before loading: ID, display
+name, engine, format (a `.gturbo` family or GGUF header facts), location, size
+on disk, native context, and product slot. `EngineCatalog` is a sorted,
+duplicate-free set of descriptors, plus the models it found but declined
+(`EngineCatalogSkip`, with a reason). A request for a declined model fails
+with that reason instead of "unknown model".
+
+## Requests
+
+A request is the runtime's own chat types (`MFTokenizer.Message`,
+`MFTokenizer.FunctionDefinition`, `GenerationConfig`, `QwenReasoningEffort`)
+wrapped in `EngineRequest`, so the server's validated request maps onto it
+field by field. A loaded model handles it in two steps:
+
+1. `prepare(_:)` renders the prompt with the model's chat template and checks
+   it against the context. Anything that can reject a request happens here,
+   as `EngineError.invalidRequest` with the server's error codes. Nothing has
+   been streamed yet, so a client can still answer with a 400.
+2. `generate(_:onEvent:)` streams `EngineEvent`s (`content`, `reasoning`,
+   `toolCall`) in order and returns an `EngineCompletion`: the same text and
+   calls, the finish reason (`stop`, `length`, `tool_calls`), usage, and
+   timings. Cancelling the calling task stops generation at the next token
+   with `CancellationError`, and the model stays usable.
+
+`EngineModelTraits` says what the loaded model supports: chat dialect,
+sampling defaults, effective context, reasoning-effort support, prefix reuse,
+and whether draft (MTP) decoding is active. The dialect comes from the loaded
+tokenizer, which is why a request is validated after its model is resident.
+
+## The host
+
+`EngineHost` is an actor that owns the single model slot.
+
+- **One model at a time across all backends.** A request for another model
+  first releases the resident one: the host calls its `unload()`, waits for
+  it, and drops its reference. Only then does it start the next load, so peak
+  memory is one model. The release finishes before the load starts, and the
+  observer events show it in that order.
+- **One request at a time, first come first served.** Requests, explicit
+  loads and unloads, and idle unloads all pass through one FIFO gate, so a
+  swap never happens under a running request. `withModel(_:onQueued:_:)` holds the gate
+  for its whole body. A client validates against `traits`, prepares, commits
+  its response, and generates inside one body. `generate(modelID:...)` and
+  `stream(modelID:request:)` are built on it. `maxQueuedRequests` bounds the
+  line, and one request more gets `EngineError.queueFull`.
+- **Cancellation.** Cancelling the calling task, or `cancelActiveRequest()`,
+  stops the running request at the next token. A request cancelled while its
+  model loads stops before its body runs. The load itself is never
+  interrupted: the old model is already released, and abandoning the new one
+  halfway would leave the host empty for nothing. A cancelled waiter leaves
+  the line without running.
+- **Load failure** leaves the host empty, with the failure in
+  `status.lastLoadFailure`, and rethrows the backend's own error. The previous
+  model was already released before the failed load started.
+- **Idle unload.** With `idleUnloadAfter` set, the resident model is released
+  once nothing has used it for that long. Any request or load re-arms the
+  timer, and nothing is armed while the host is empty.
+- **Shutdown** fails waiting requests with `EngineError.shuttingDown`, cancels
+  the running one, releases the model, and refuses new work. It completes
+  even if its caller is cancelled, and a second call waits for the first.
+
+### Status and events
+
+`host.status` can be read synchronously from any thread, such as a NIO
+channel callback or a SwiftUI view, while a load runs. It holds:
+
+| Phase | Meaning | `health` |
+| --- | --- | --- |
+| `empty` | nothing resident | `ok`, no model |
+| `loading` | loading, or swapping in, `targetModelID` | `loading`, target |
+| `ready` | `residentModelID` is usable | `ok`, resident |
+| `unloading` | releasing `targetModelID` (idle, requested, shutdown) | `ok`, no model |
+
+It also counts active and queued requests (a request is active from the moment
+it holds the model slot, including a load it triggers), keeps the last load
+failure, and says whether shutdown has begun.
+`health` is the server's existing `/health` shape.
+
+The `observer` receives `EngineHostEvent`s in order. A swap from A to B is
+`unloadStarted(A, .swap(to: B))`, `unloadFinished(A)`,
+`loadStarted(B, replacing: A)`, then `loadFinished(B, seconds)` or
+`loadFailed(B, message)`. A client logs these lines (the server keeps its
+`swap started`, `swap finished` and `swap failed` lines this way), and memory
+validation checks them for release before load.
+
+## Backends
+
+An `EngineBackend` loads models of one `EngineKind`. The host keeps one
+backend per kind and calls `load` only with no other model resident.
+`EngineLoadOptions` carries one set of options for every backend:
+
+- `nativeMaxContext`: the context of `.gturbo` models. It defaults to the
+  server's `--max-context` default of 16,384, and nil means each model's
+  native maximum (`--max-context max`).
+- `ggufMaxContext`: the context of GGUF models. Nil means 32,768 tokens, and
+  a GGUF never runs past its native context.
+- `EngineModelDescriptor.resolvedContext(options:)` gives the value before
+  loading, for `/v1/models`. A backend may run with less where memory
+  requires, and reports the effective value in `traits.maxContext`.
+- `draftDecoding`: MTP stays on for Deep unless this is `.off`.
+- The native runtime controls already documented in
+  [RUNTIME_CONTROLS.md](RUNTIME_CONTROLS.md): prompt-cache mode and bytes,
+  integrity policy, shadow-prefetch budget, prefill chunk, reserved KV.
+
+A backend ignores the options that do not apply to it.
+
+`FakeEngineBackend` is a scripted backend shipped in the library for tests of
+the engine and of its clients. It loads nothing. A model is a list of events,
+with latches to hold a load or a generation at a known point. Its journal
+records load, unload, deinit, and generation order, and counts the most
+models live and the most generations running at once.
