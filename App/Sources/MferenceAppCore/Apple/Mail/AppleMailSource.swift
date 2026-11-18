@@ -202,14 +202,16 @@ public actor AppleMailSource: MailSource {
             throw MailSourceError.unavailable(.notFound)
         }
         // Copy the index, its write-ahead log and shared memory into a
-        // private 0700 folder and read the copy: SQLite never opens, locks or
-        // writes Mail's live files. On APFS the copy is a clone (no data
+        // private 0700 folder, fold the log into the copy and read the copy
+        // immutable: SQLite never opens, locks or writes Mail's live files. On APFS the copy is a clone (no data
         // copied). macOS privacy protection refuses the copy without Full
         // Disk Access, whatever the file mode says.
         let snapshot = try Self.snapshot(index)
         let connection: ReadOnlySQLite
         do {
-            connection = try Self.connect(snapshot.appending(path: index.lastPathComponent))
+            let copy = snapshot.appending(path: index.lastPathComponent)
+            try ReadOnlySQLite.checkpointPrivateCopy(at: copy)
+            connection = try Self.connect(copy)
         } catch let failure as ReadOnlySQLite.Failure {
             try? FileManager.default.removeItem(at: snapshot)
             throw MailSourceError.unavailable(.unsupported(detail: failure.description))
@@ -253,8 +255,9 @@ public actor AppleMailSource: MailSource {
         return directory
     }
 
-    /// Opens the private copy read-only. Not `immutable`: that would skip
-    /// the copied write-ahead log and with it the newest mail.
+    /// Opens the private copy `mode=ro&immutable=1`, after its write-ahead
+    /// log was folded into it (`checkpointPrivateCopy`), so the newest mail
+    /// is there.
     private static func connect(_ index: URL) throws -> ReadOnlySQLite {
         let connection = try ReadOnlySQLite(url: index)
         _ = try connection.query("SELECT count(*) FROM sqlite_master")
