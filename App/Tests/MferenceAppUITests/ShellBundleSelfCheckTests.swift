@@ -28,7 +28,7 @@ import Testing
     @Test func completeBundlesPass() throws {
         let root = try Self.tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        try Self.makeBundle("Mference_Mference", files: ["Metal/core/a.metal", "Gemma4/chat_template.jinja"], in: root)
+        try Self.makeBundle("Mference_Mference", files: ["Metal/core/a.metal"], in: root)
         try Self.makeBundle("Mference_LlamaCpp", files: ["kernels/add.metal", "ggml-metal-impl.h", "ggml-common.h"], in: root)
         #expect(BundleSelfCheck.run(resourceURL: root).isEmpty)
     }
@@ -36,11 +36,12 @@ import Testing
     @Test func missingPiecesAreReported() throws {
         let root = try Self.tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        // No Gemma4, a kernels folder without .metal files, no LlamaCpp headers.
-        try Self.makeBundle("Mference_Mference", files: ["Metal/core/a.metal"], in: root)
+        // A Metal folder without .metal files, a kernels folder without them,
+        // no LlamaCpp headers.
+        try Self.makeBundle("Mference_Mference", files: ["Metal/README"], in: root)
         try Self.makeBundle("Mference_LlamaCpp", files: ["kernels/README"], in: root)
         let failures = BundleSelfCheck.run(resourceURL: root)
-        #expect(failures.contains { $0.contains("Mference_Mference.bundle is missing Gemma4") })
+        #expect(failures.contains { $0.contains("no .metal file under Metal") })
         #expect(failures.contains { $0.contains("no .metal file under kernels") })
         #expect(failures.contains { $0.contains("missing ggml-metal-impl.h") })
     }

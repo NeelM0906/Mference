@@ -16,7 +16,9 @@ enum BundleSelfCheck {
     }
 
     static let requirements: [Requirement] = [
-        Requirement(bundleName: "Mference_Mference", paths: ["Metal", "Gemma4"],
+        // The engine's only resource folder since the retired families
+        // (Gemma 4 included) were removed in 5655b3d0.
+        Requirement(bundleName: "Mference_Mference", paths: ["Metal"],
                     nonEmpty: [("Metal", "metal")]),
         Requirement(bundleName: "Mference_LlamaCpp",
                     paths: ["kernels", "ggml-metal-impl.h", "ggml-common.h"],
