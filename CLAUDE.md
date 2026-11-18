@@ -169,11 +169,11 @@ injected loaders.
   large tensor in Swift heap memory. Weights are mapped and wrapped with
   `makeBuffer(bytesNoCopy:)`; installer copies go through bounded scratch.
 - **macOS 26 / Swift 6.2 floor** (`Package.swift`: tools 6.2, `.macOS(.v26)`,
-  `.iOS(.v26)`). Metal 4 tensor-ops code stays behind `__HAVE_TENSOR__` in
-  shaders with a working fallback, since not every GPU builds the tensor
-  pipelines. The older-OS code (`#available(macOS 26)` branches, the
-  `MetalSDKCompatibility.swift` shims, MSL-version selection) is dead and is
-  being removed in a separate, byte-identity-gated change; do not add to it.
+  `.iOS(.v26)`). Shaders always compile at MSL 4.0
+  (`MetalContext.shaderLanguageVersion`). Metal 4 tensor-ops code stays behind
+  `__HAVE_TENSOR__` in shaders with a working fallback, since not every GPU
+  builds the tensor pipelines; Swift asks `supportsApple10TensorOps` at run
+  time. Do not reintroduce older-OS availability branches or SDK shims.
 - **Exact vs approximate.** An exact optimization must keep output
   byte-identical to its control. Approximate features (Maple FlashHead, the
   DFlash2 drafter) are opt-in flags and never change a default path.

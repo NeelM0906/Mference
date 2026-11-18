@@ -33,10 +33,7 @@ let llamaCppCXXSettings: [CXXSetting] =
     + [.define("NDEBUG", .when(configuration: .release)), .unsafeFlags(["-w"])]
 
 // macOS 26 / iOS 26 is the floor (maintainer decision, 2026-11-18); macOS 26
-// runs on every Apple Silicon Mac. The older-OS compatibility code under
-// Sources/ (`#available(macOS 26, *)` branches, the
-// `MetalSDKCompatibility.swift` shims, MSL-version selection) is now dead and
-// is removed in a separate, byte-identity-gated change.
+// runs on every Apple Silicon Mac. Shaders always compile at MSL 4.0.
 let package = Package(
     name: "Mference",
     platforms: [
