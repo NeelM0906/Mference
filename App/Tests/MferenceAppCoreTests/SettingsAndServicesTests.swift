@@ -63,6 +63,16 @@ import Testing
         #expect(settings.webSearchEnabled)
     }
 
+    @Test @MainActor func offlineChangesAreReportedOnce() {
+        let settings = AppSettings(store: InMemorySettingsStore())
+        var seen: [Bool] = []
+        settings.onOfflineModeChange = { seen.append($0) }
+        settings.offlineMode = true
+        settings.offlineMode = true
+        settings.offlineMode = false
+        #expect(seen == [true, false])
+    }
+
     @Test @MainActor func neverMeansNoIdleDelay() {
         let settings = AppSettings(store: InMemorySettingsStore())
         settings.idleUnloadMinutes = 0

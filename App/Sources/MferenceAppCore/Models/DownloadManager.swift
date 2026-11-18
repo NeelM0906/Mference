@@ -214,6 +214,13 @@ public actor DownloadManager {
         active[model]?.cancel()
     }
 
+    /// Pauses every running download, keeping the bytes so far: offline
+    /// mode was turned on. Each shows as paused and continues from where it
+    /// stopped once the person starts it again.
+    public func pauseAll() {
+        for task in active.values { task.cancel() }
+    }
+
     /// Stops the download and removes the partial file.
     public func discard(_ model: AppModel) async {
         if let task = active[model] {
