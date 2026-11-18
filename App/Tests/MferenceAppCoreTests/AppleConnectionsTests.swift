@@ -73,4 +73,16 @@ import Testing
         await connections.remindersSyncChanged(true)
         #expect(await calendar.requests == [.reminders])
     }
+
+    @Test func liveServicesBuildWithoutReadingOrAsking() throws {
+        let container = try AppModelContainer.inMemory()
+        let broker = RecordingPermissionBroker()
+        let engine = GatedEngine(gate: ScanTestLatch(), answer: "")
+        let services = AppleServices.live(engine: engine, broker: broker, container: container)
+        #expect(services.scan.phase == .empty)
+        #expect(services.calendar.access == .notAsked)
+        #expect(services.mail.status == nil)
+        #expect(services.connections.status == .unknown)
+        #expect(broker.requests.isEmpty)
+    }
 }

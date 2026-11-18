@@ -70,9 +70,11 @@ public final class AppleConnections {
         AppleConnections(calendar: EventKitService(broker: broker), mail: AppleMailSource(), broker: broker)
     }
 
-    /// Reads every state without prompting.
+    /// Reads every state without prompting (and takes a fresh look at the
+    /// Mail store, so a Full Disk Access grant shows at once).
     public func refresh() async {
         let calendar = self.calendar, mail = self.mail
+        await mail.reload()
         async let calendarState = calendar.calendarAccess()
         async let remindersState = calendar.remindersAccess()
         async let mailStatus = mail.status()
