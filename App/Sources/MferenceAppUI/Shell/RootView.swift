@@ -21,7 +21,7 @@ public struct RootView: View {
 
     @Bindable var model: ShellModel
     let chrome: ChromePlacement
-    @Environment(AppServices.self) private var services: AppServices?
+    @Environment(ScreenModels.self) private var screenModels: ScreenModels?
 
     public init(model: ShellModel, chrome: ChromePlacement = .toolbar) {
         self.model = model
@@ -30,11 +30,11 @@ public struct RootView: View {
 
     /// First run shows until it is completed, once a model library is wired.
     private var showsOnboarding: Bool {
-        !model.hasCompletedOnboarding && services?.library != nil
+        !model.hasCompletedOnboarding && screenModels?.library != nil
     }
 
     public var body: some View {
-        if showsOnboarding, let library = services?.library {
+        if showsOnboarding, let library = screenModels?.library {
             OnboardingView(library: library) { model.completeOnboarding() }
                 .frame(minWidth: ShellMetrics.minimumWindow.width, minHeight: ShellMetrics.minimumWindow.height)
                 .preferredColorScheme(model.appearance.colorScheme)

@@ -42,8 +42,8 @@ import Testing
     @Test(arguments: [ColorScheme.light, .dark])
     func snapshot(colorScheme: ColorScheme) throws {
         let library = FixtureModelLibrary()
-        let services = AppServices(library: library)
-        try Snapshot.render(ShellBoard(selection: .settings, services: services) { ModelLibraryView(library: library) },
+        let screenModels = ScreenModels(library: library)
+        try Snapshot.render(ShellBoard(selection: .settings, screenModels: screenModels) { ModelLibraryView(library: library) },
                             name: "08b-model-library", canvas: CGSize(width: 1280, height: 1000),
                             colorScheme: colorScheme)
     }
@@ -52,12 +52,12 @@ import Testing
 /// The chrome bar over a screen, for boards whose screen needs inputs.
 struct ShellBoard<Content: View>: View {
     let model: ShellModel
-    let services: AppServices
+    let screenModels: ScreenModels
     let content: Content
 
-    init(selection: AppSection, services: AppServices, @ViewBuilder content: () -> Content) {
+    init(selection: AppSection, screenModels: ScreenModels, @ViewBuilder content: () -> Content) {
         model = ShellModel(selection: selection, defaults: nil)
-        self.services = services
+        self.screenModels = screenModels
         self.content = content()
     }
 
@@ -67,6 +67,6 @@ struct ShellBoard<Content: View>: View {
             content.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .mfWindowBackground()
-        .environment(services)
+        .environment(screenModels)
     }
 }
