@@ -25,6 +25,13 @@ actor LlamaModel: EngineModel {
     private let template: LlamaChatTemplate
     private let batchSize: Int
     private let abortFlag = LlamaAbortFlag()
+    /// The model's own thread: every llama.cpp call runs on it, at a fixed
+    /// QoS (see `LlamaThreadExecutor`).
+    private let executor: LlamaThreadExecutor
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
 
     /// What the context's memory holds, for prompt-prefix reuse.
     private var promptCache = LlamaPromptCache()
@@ -55,10 +62,12 @@ actor LlamaModel: EngineModel {
          template: LlamaChatTemplate,
          batchSize: Int,
          mtp: OpaquePointer? = nil,
-         draftLimit: Int = LlamaBackend.draftLimit) {
+         draftLimit: Int = LlamaBackend.draftLimit,
+         threadpool: OpaquePointer? = nil) {
         self.descriptor = descriptor
         self.handle = handle
-        let contextOwner = LlamaContextHandle(context, model: handle)
+        executor = LlamaThreadExecutor(name: "mference.llama.\(descriptor.id)")
+        let contextOwner = LlamaContextHandle(context, model: handle, threadpool: threadpool)
         self.contextOwner = contextOwner
         let drafter = mtp.map { LlamaDrafter($0, draftLimit: draftLimit, context: contextOwner) }
         self.drafter = drafter
@@ -87,6 +96,10 @@ actor LlamaModel: EngineModel {
                 return Unmanaged<LlamaAbortFlag>.fromOpaque(data).takeUnretainedValue().isSet
             }, Unmanaged.passUnretained(abortFlag).toOpaque())
         }
+    }
+
+    deinit {
+        executor.shutdown()
     }
 
     // MARK: EngineModel

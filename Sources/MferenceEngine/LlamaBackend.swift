@@ -121,18 +121,35 @@ public struct LlamaBackend: EngineBackend {
             handle.free()
             throw LlamaBackendError.contextCreationFailed(descriptor.id)
         }
+        let threadpool = Self.attachThreadpool(to: context, threads: contextParams.n_threads)
         var mtp: OpaquePointer?
         if useDraft {
             mtp = mference_mtp_init(modelPointer, context, draftParams)
             guard mtp != nil else {
                 llama_free(context)
+                if let threadpool { ggml_threadpool_free(threadpool) }
                 handle.free()
                 throw LlamaBackendError.draftContextFailed(descriptor.id)
             }
         }
         return LlamaModel(descriptor: descriptor, handle: handle, context: context,
                           vocabulary: vocabulary, tokenizer: tokenizer, template: template,
-                          batchSize: Self.logicalBatch, mtp: mtp, draftLimit: Self.draftLimit)
+                          batchSize: Self.logicalBatch, mtp: mtp, draftLimit: Self.draftLimit,
+                          threadpool: threadpool)
+    }
+
+    /// Attaches a ggml CPU threadpool to `context`, as llama.cpp's tools do
+    /// (`common_init`, default polling level 50), so the CPU side of each
+    /// graph reuses live threads instead of starting new ones. Nil, and the
+    /// context computes without one, when `MFERENCE_LLAMA_THREADPOOL=off` (a
+    /// diagnostic override, not a supported control) or creation fails.
+    static func attachThreadpool(to context: OpaquePointer, threads: Int32) -> OpaquePointer? {
+        guard ProcessInfo.processInfo.environment["MFERENCE_LLAMA_THREADPOOL"] != "off" else { return nil }
+        var params = ggml_threadpool_params_default(threads)
+        params.poll = 50
+        guard let threadpool = ggml_threadpool_new(&params) else { return nil }
+        llama_attach_threadpool(context, threadpool, nil)
+        return threadpool
     }
 }
 

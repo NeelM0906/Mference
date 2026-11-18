@@ -33,15 +33,20 @@ final class LlamaModelHandle: @unchecked Sendable {
 final class LlamaContextHandle: @unchecked Sendable {
     private(set) var pointer: OpaquePointer?
     private let model: LlamaModelHandle
+    /// The ggml CPU threadpool attached to the context, freed after it.
+    private var threadpool: OpaquePointer?
 
-    init(_ pointer: OpaquePointer, model: LlamaModelHandle) {
+    init(_ pointer: OpaquePointer, model: LlamaModelHandle, threadpool: OpaquePointer? = nil) {
         self.pointer = pointer
         self.model = model
+        self.threadpool = threadpool
     }
 
     func free() {
         if let pointer { llama_free(pointer) }
         pointer = nil
+        if let threadpool { ggml_threadpool_free(threadpool) }
+        threadpool = nil
     }
 
     deinit { free() }
