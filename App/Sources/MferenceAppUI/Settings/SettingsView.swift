@@ -308,7 +308,7 @@ public struct SettingsView: View {
                     }
                     HStack(spacing: MFSpacing.m) {
                         Text(all.count > shown.count ? "\(all.count - shown.count) more" : "\(all.count) remembered")
-                            .font(MFFont.rowSubtitle)
+                            .font(MFFont.preview)
                             .foregroundStyle(MFColor.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         if all.count > SettingsMetrics.memoryPreview {
