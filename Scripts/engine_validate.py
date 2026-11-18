@@ -894,6 +894,118 @@ def cmd_swap(args):
 
 
 # ---------------------------------------------------------------------------
+# Trace parity (G6 through the server): one engine trace case at a time
+
+
+def trace_cases(cases_dir):
+    """Rows of an engine trace `cases.tsv`: name, messages file, tools file or
+    `-`, and `true`/`false` thinking (T2's `LlamaTokenIdentityTrace` format)."""
+    cases_dir = Path(cases_dir)
+    rows = []
+    for line in (cases_dir / "cases.tsv").read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        name, messages, tools, thinking = line.split("\t")[:4]
+        rows.append({
+            "name": name,
+            "messages": json.loads((cases_dir / messages).read_text(encoding="utf-8")),
+            "tools": None if tools == "-" else json.loads((cases_dir / tools).read_text(encoding="utf-8")),
+            "thinking": thinking == "true",
+        })
+    return rows
+
+
+def trace_case_names(cases_dir):
+    """Case names from `cases.tsv` alone, without reading the case files."""
+    text = (Path(cases_dir) / "cases.tsv").read_text(encoding="utf-8")
+    return [line.split("\t")[0] for line in text.splitlines() if line.strip()]
+
+
+def trace_request(model_id, case, max_tokens):
+    """The request matching the trace's `EngineRequest`: temperature 0 and
+    nothing else set, `.xhigh` effort (enable_thinking) for thinking cases."""
+    body = {"model": model_id, "messages": case["messages"], "temperature": 0,
+            "max_tokens": max_tokens}
+    if case["tools"]:
+        body["tools"] = case["tools"]
+    if case["thinking"]:
+        body["chat_template_kwargs"] = {"enable_thinking": True}
+    return body
+
+
+def trace_expectation(trace_dir, name):
+    completion = json.loads((Path(trace_dir) / name / "completion.json").read_text(encoding="utf-8"))
+    return {
+        "content": completion.get("content") or "",
+        "reasoning_content": completion.get("reasoning") or "",
+        "tool_calls": [{"name": c.get("name"), "arguments": c.get("arguments")}
+                       for c in completion.get("tool_calls") or []],
+        "finish_reason": completion.get("finish_reason"),
+        "completion_tokens": completion.get("completion_tokens"),
+        "prompt_tokens": completion.get("prompt_tokens"),
+    }
+
+
+# The prompt token count is compared too: equal answers to a differently
+# rendered prompt would not show the server renders what the trace rendered.
+TRACE_FIELDS = IDENTITY_FIELDS + ("prompt_tokens",)
+
+
+def trace_provenance(trace_dir):
+    """The trace's own verdict against upstream, when it sits next to one:
+    T2's layout keeps `compare.txt` beside the `engine/` trace. "pass",
+    "fail", or "unknown" (no compare.txt)."""
+    compare = Path(trace_dir).parent / "compare.txt"
+    if not compare.exists():
+        return "unknown"
+    rows = [line.split() for line in compare.read_text(encoding="utf-8").splitlines()[1:] if line.strip()]
+    return "pass" if rows and all(len(r) > 4 and r[4] == "True" for r in rows) else "fail"
+
+
+def cmd_traceparity(args):
+    """Each selected case through the server, compared with the trace."""
+    out = Path(args.out)
+    cases = [c for c in trace_cases(args.cases) if not args.case or c["name"] in args.case.split(",")]
+    modes = args.modes.split(",")
+    provenance = trace_provenance(args.trace)
+    report = {"model": args.model, "rows": [], "trace": str(Path(args.trace).resolve()),
+              "trace_vs_upstream": provenance, "max_tokens": args.max_tokens}
+    if provenance == "fail":
+        print(f"refusing a trace whose own upstream comparison failed: {args.trace}", file=sys.stderr)
+        report["all_equal"] = False
+        _write(out / "traceparity.json", json.dumps(report, indent=2, sort_keys=True))
+        return 1
+    ok = bool(cases)
+    for case in cases:
+        expected = trace_expectation(args.trace, case["name"])
+        body = trace_request(args.model, case, args.max_tokens)
+        for mode in modes:
+            stem = f"{case['name']}.{mode}"
+            if mode == "stream":
+                status, chunks, raw, _, seconds = post_chat_stream(args.host, args.port, body, args.timeout)
+                result = canonical_from_chunks(chunks) if status == 200 else {"error": raw}
+                _write(out / f"{stem}.raw.sse", raw)
+            else:
+                status, parsed, raw, seconds = post_chat(args.host, args.port, body, args.timeout)
+                result = canonical_from_message(parsed)
+                _write(out / f"{stem}.raw.json", raw)
+            result["http_status"] = status
+            diff = [] if status == 200 else ["http_status"]
+            diff += [k for k in TRACE_FIELDS if result.get(k) != expected.get(k)]
+            row = {"case": case["name"], "mode": mode, "equal": not diff, "differs_in": diff,
+                   "cached_prompt_tokens": None, "seconds": seconds}
+            if mode != "stream" and isinstance(parsed, dict):
+                row["cached_prompt_tokens"] = ((parsed.get("usage") or {})
+                                               .get("prompt_tokens_details") or {}).get("cached_tokens")
+            report["rows"].append(row)
+            ok = ok and row["equal"]
+            print(f"{'ok  ' if row['equal'] else 'DIFF'} {stem} {diff}", file=sys.stderr, flush=True)
+    report["all_equal"] = ok
+    _write(out / "traceparity.json", json.dumps(report, indent=2, sort_keys=True))
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------------------
 # Speed bar (section 8 item 4): engine no more than 5% slower than reference
 
 
@@ -1109,6 +1221,20 @@ def summarize(root):
                          f"{', '.join(bad) or '-'} |")
         lines.append("")
 
+    traces = sorted(root.glob("*/trace-*/traceparity.json"))
+    if traces:
+        lines += ["## Trace parity (server vs engine trace)", "",
+                  "| Model | Run | Case | Mode | Equal | Cached prompt tokens | Differs in |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for path in traces:
+            report = _load(path) or {}
+            for row in report.get("rows", []):
+                lines.append(f"| {path.parent.parent.name} | {path.parent.name} | {row['case']} | "
+                             f"{row['mode']} | {_fmt(bool(row['equal']))} | "
+                             f"{_fmt(row.get('cached_prompt_tokens'))} | "
+                             f"{', '.join(row.get('differs_in') or []) or '-'} |")
+        lines.append("")
+
     swap = _load(root / "swap" / "swap.json")
     if swap:
         lines += ["## Swap chain", "", "| From | To | OK | Load s | Peak RSS MiB | Swap grew | Problems |",
@@ -1205,6 +1331,21 @@ def main(argv=None):
         sp.add_argument("--label")
         sp.add_argument("--out", required=True)
         sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("tracecases")
+    sp.add_argument("cases")
+    sp.set_defaults(func=lambda args: print("\n".join(trace_case_names(args.cases))) or 0)
+
+    sp = sub.add_parser("traceparity")
+    server(sp)
+    sp.add_argument("--model", required=True)
+    sp.add_argument("--cases", required=True, help="directory with cases.tsv")
+    sp.add_argument("--trace", required=True, help="engine trace directory (<case>/completion.json)")
+    sp.add_argument("--case", help="comma-separated case names (default: all)")
+    sp.add_argument("--modes", default="nonstream,stream")
+    sp.add_argument("--max-tokens", type=int, default=256)
+    sp.add_argument("--out", required=True)
+    sp.set_defaults(func=cmd_traceparity)
 
     sp = sub.add_parser("speed")
     sp.add_argument("a", help="engine run directory")

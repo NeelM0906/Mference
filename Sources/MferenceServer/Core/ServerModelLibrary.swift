@@ -96,7 +96,7 @@ public final class ServerModelLibrary: Sendable {
     public convenience init(index: ServerLibraryIndex,
                             maxContext: Int? = ServerArguments.defaultMaxContext,
                             loader: @escaping Loader) {
-        self.init(catalog: ServerEngineCatalog.catalog(for: index, scope: .all),
+        self.init(catalog: ServerEngineCatalog.catalog(for: index),
                   backends: [ServerLoaderBackend(loader: loader)],
                   loadOptions: EngineLoadOptions(nativeMaxContext: maxContext))
     }
@@ -123,38 +123,37 @@ public final class ServerModelLibrary: Sendable {
         }
     }
 
-    /// Library mode as `MferenceServer --library` runs it: the catalog
-    /// `--catalog` selects from `index`, and native installs loaded through
-    /// `ServerModelSession` with the server's runtime flags, behind the
-    /// engine's backend protocol — exactly the code single-model mode runs.
-    public static func serving(_ index: ServerLibraryIndex,
-                               roots: [URL] = [],
-                               arguments: ServerArguments) -> ServerModelLibrary {
-        let catalog = ServerEngineCatalog.catalog(
-            for: index,
+    /// Library mode as `MferenceServer --library` runs it: the engine's own
+    /// discovery over `roots` (and the GGUF directories), the scope
+    /// `--catalog` selects, and the engine's backends (`NativeBackend` for
+    /// `.gturbo`, `LlamaBackend` for `.gguf`) with the server's runtime flags
+    /// as load options. Only engines with a backend in this
+    /// build are served; see `ServerEngineCatalog.servable`.
+    ///
+    /// `explicitModel` is `--model` alongside `--library`: discovery considers
+    /// it first, so it is the install served for its product model.
+    public static func serving(
+        roots: [URL],
+        explicitModel: URL? = nil,
+        arguments: ServerArguments,
+        ggufDirectories: [URL]? = nil,
+        fileSystem: EngineCatalogDiscovery.FileSystem = .live,
+        backends: [any EngineBackend]? = nil
+    ) -> ServerModelLibrary {
+        // Production: the engine's native backend (its notices in the server
+        // log) and llama.cpp for GGUF models. Tests pass scripted backends.
+        let backends = backends ?? [NativeBackend(onNotice: { ServerLog.nativeBackendNotice($0) }),
+                                    LlamaBackend()]
+        let discovered = EngineCatalogDiscovery.discover(
+            roots: roots,
+            ggufDirectories: ggufDirectories ?? EngineCatalogDiscovery.defaultGGUFDirectories(roots: roots),
             scope: arguments.catalogScope,
-            preferredDirectory: arguments.model.map { URL(fileURLWithPath: $0) },
-            rootOrder: roots)
-        let maxContext = arguments.maxContext
-        let promptCacheMode = arguments.promptCacheMode
-        let promptCacheBytes = arguments.promptCacheBytes
-        let verification = arguments.verification
-        let shadowBudget = arguments.shadowBudget
-        let prefillChunk = arguments.prefillChunk
-        let reserveFullKV = arguments.reserveFullKV
-        let native = ServerLoaderBackend { directory in
-            try await ServerModelSession.load(modelDirectory: directory,
-                                              maxContext: maxContext,
-                                              promptCacheMode: promptCacheMode,
-                                              promptCacheBytes: promptCacheBytes,
-                                              integrityPolicy: verification,
-                                              shadowPrefetchBudget: shadowBudget,
-                                              prefillChunkTokens: prefillChunk,
-                                              reserveFullKV: reserveFullKV)
-        }
+            explicitModel: explicitModel,
+            fileSystem: fileSystem)
+        let catalog = ServerEngineCatalog.servable(discovered, engines: Set(backends.map(\.engine)))
         return ServerModelLibrary(catalog: catalog,
-                                  backends: [native],
-                                  loadOptions: EngineLoadOptions(nativeMaxContext: maxContext),
+                                  backends: backends,
+                                  loadOptions: arguments.engineLoadOptions,
                                   catalogScope: arguments.catalogScope)
     }
 
