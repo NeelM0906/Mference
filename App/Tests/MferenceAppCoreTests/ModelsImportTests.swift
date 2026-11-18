@@ -126,6 +126,59 @@ import Testing
         #expect(Self.visibleFiles(destination) == [source.fileName], "no staging file is left")
     }
 
+    struct LoadBoom: Error, CustomStringConvertible { var description: String { "out of memory" } }
+
+    @Test @MainActor func failedLoadShowsAndRetryLoadsAgain() async throws {
+        let backend = FakeEngineBackend(engine: .mference,
+                                        scripts: [AppModel.maple.modelID: FakeEngineScript(loadError: LoadBoom())])
+        let engine = EngineService(discover: { AppServices.fakeCatalog([.maple, .deep]) }, makeHost: { catalog, observer in
+            EngineHost(catalog: catalog, backends: [backend, FakeEngineBackend(engine: .llamaCpp)], observer: observer)
+        }, physicalMemory: 16 << 30)
+        let library = ModelLibrary(engine: engine, downloads: nil, settings: AppSettings(store: InMemorySettingsStore()),
+                                   memoryFit: MemoryFit(physicalMemory: 16 << 30), chipName: nil)
+        try? await engine.load(.maple)
+        await library.refresh()
+        #expect(library.row(for: .maple)?.loadFailure == "out of memory")
+        // The cause is gone; Retry loads it.
+        backend.setScript(FakeEngineScript(), for: AppModel.maple.modelID)
+        library.retryLoad(.maple)
+        await waitUntil { library.row(for: .maple)?.availability == .loaded }
+        #expect(library.row(for: .maple)?.loadFailure == nil)
+        // Deep on 16 GB: Retry does nothing.
+        library.retryLoad(.deep)
+        for _ in 0..<50 { await Task.yield() }
+        #expect(engine.status.residentModel == .maple)
+    }
+
+    @Test @MainActor func retryNeverReachesTheDownloadManager() async throws {
+        // A Deep download that failed on the server.
+        let server = try await LoopbackHTTPServer(routes: ["/d": .init(body: Data(), status: 503)])
+        let destination = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let deep = DownloadSource(model: .deep, repository: "test/test", revision: "abc",
+                                  fileName: DownloadSource.deep.fileName, sizeBytes: 1_000,
+                                  sha256: String(repeating: "0", count: 64), licence: "Apache 2.0",
+                                  url: server.url("/d"))
+        let downloads = DownloadManager(destination: destination, sources: [.deep: deep], allowedHosts: ["127.0.0.1"],
+                                        policy: .init(memoryFit: bigMac), availableBytes: { _ in 1 << 40 })
+        let library = ModelLibrary(engine: AppServices.fakeEngine(installed: [.quick]), downloads: downloads,
+                                   settings: AppSettings(store: InMemorySettingsStore()), memoryFit: bigMac, chipName: nil)
+        let follow = Task { await library.run() }
+        defer { follow.cancel() }
+        await library.refresh()
+        library.startDownload(DownloadApproval(confirming: deep))
+        await waitUntil { if case .failed = library.row(for: .deep)?.state { true } else { false } }
+        #expect(server.requests.count == 1)
+
+        library.retryLoad(.deep)
+        for _ in 0..<100 { await Task.yield() }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(server.requests.count == 1, "Retry must not fetch Deep")
+        guard case .failed = library.row(for: .deep)?.state else {
+            Issue.record("the row stays failed"); return
+        }
+    }
+
     @Test @MainActor func libraryShowsAnImportedModelInstalled() async throws {
         let (data, source) = Self.fixture()
         let picked = temporaryDirectory()

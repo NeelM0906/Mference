@@ -68,6 +68,12 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         download(id)
     }
 
+    /// Retry after a load failure. Never starts or continues a download.
+    public func retryLoad(_ id: String) {
+        guard let model = AppModel(modelID: id) else { return }
+        library.retryLoad(model)
+    }
+
     public func cancelDownload(_ id: String) {
         guard let model = AppModel(modelID: id) else { return }
         library.discardDownload(model)
@@ -105,7 +111,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
             switch row.availability {
             case .loaded?: .loaded
             case .loading?: .loading
-            default: .ready
+            default: row.loadFailure.map(ModelEntryState.failed) ?? .ready
             }
         case .downloading(_, let received, let total):
             .downloading(TransferProgress(completedBytes: Int64(clamping: received), totalBytes: Int64(clamping: total)))

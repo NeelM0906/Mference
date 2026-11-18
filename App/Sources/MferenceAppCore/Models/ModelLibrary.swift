@@ -31,6 +31,9 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
     public var availability: ModelAvailability?
     /// Install location; nil when not installed.
     public var location: URL?
+    /// The engine's message when the last load of this installed model
+    /// failed; cleared by the next successful load.
+    public var loadFailure: String?
 
     public var id: String { model.modelID }
 
@@ -88,6 +91,7 @@ public final class ModelLibrary {
     @ObservationIgnored private let downloads: DownloadManager?
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private var options: [ModelOption] = []
+    @ObservationIgnored private var engineStatus = EngineServiceStatus.empty
     @ObservationIgnored private var downloadStates: [AppModel: DownloadState] = [:]
 
     public init(engine: any EngineServicing, downloads: DownloadManager?, settings: AppSettings,
@@ -146,6 +150,7 @@ public final class ModelLibrary {
 
     private func refreshOptions() async {
         options = await engine.models()
+        engineStatus = engine.status
         rebuild()
     }
 
@@ -167,12 +172,16 @@ public final class ModelLibrary {
             } else {
                 state = .notInstalled(reason: "Not installed on this Mac.")
             }
-            return ModelLibraryRow(model: model, state: state, sizeBytes: size,
+            var row = ModelLibraryRow(model: model, state: state, sizeBytes: size,
                                    isDefault: settings.defaultModel == model,
                                    fit: memoryFit.verdict(for: model, sizeBytes: size),
                                    licence: source?.licence,
                                    availability: isInstalled ? option?.availability : nil,
                                    location: isInstalled ? option?.location : nil)
+            if isInstalled, engineStatus.lastLoadFailureModel == model, option?.availability == .ready {
+                row.loadFailure = engineStatus.lastLoadFailure
+            }
+            return row
         }
     }
 
@@ -217,6 +226,21 @@ public final class ModelLibrary {
         await engine.refreshCatalog()
         await refreshOptions()
         return model
+    }
+
+    /// Retry after a failed load: loads an installed model again (the Deep
+    /// gate still applies; a local load needs no network, so offline mode
+    /// does not block it). It never starts or continues a download: those
+    /// go only through the approval paths (`startDownload`), so this is not a
+    /// second way to fetch Deep (L4). For anything not installed it does
+    /// nothing.
+    public func retryLoad(_ model: AppModel) {
+        guard memoryFit.isOffered(model), row(for: model)?.state == .installed else { return }
+        let engine = self.engine
+        Task {
+            try? await engine.load(model)
+            await refreshOptions()
+        }
     }
 
     public func pauseDownload(_ model: AppModel) {

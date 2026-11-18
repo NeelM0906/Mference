@@ -52,6 +52,15 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         #expect(model.entries.first { $0.id == AppModel.quick.modelID }?.state == .loaded)
     }
 
+    @Test func loadFailureShowsAsFailedUntilLoaded() {
+        var row = ModelLibraryRow(model: .quick, state: .installed, sizeBytes: 1, isDefault: true, fit: .fits,
+                                  availability: .ready)
+        row.loadFailure = "The model could not be loaded: out of memory"
+        #expect(LiveModelLibraryModel.state(row) == .failed("The model could not be loaded: out of memory"))
+        row.availability = .loading
+        #expect(LiveModelLibraryModel.state(row) == .loading)
+    }
+
     @Test func deepIsTooLargeOnSixteenGigabytes() async throws {
         let services = AppServices.preview(installed: [.quick])
         let library = Self.library(services, memory: 16 << 30)
