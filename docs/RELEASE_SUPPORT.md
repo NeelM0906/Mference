@@ -37,7 +37,8 @@ On Apple7 GPUs (M1), the Maple Q/K norm and RoPE kernel test
 (`MapleQKNormRoPETests.swift:74`) measures a maximum absolute difference of
 0.0234 against its CPU reference at position 127,999, above the 2^-7
 (0.0078) bound the test applies to Apple7 and newer devices. CI's
-paravirtualized GPU measures the same value. Maple's generated output is
+paravirtualized GPU measures the same value but reports an older GPU family,
+so the test's wider 2^-5 bound applies there and CI passes. Maple's generated output is
 byte-identical to `main` on these machines; only this kernel tolerance check
 fails. The likely cause is lower-precision GPU `sin`/`cos` at very large
 positions. It is not fixed: the test and its bound are unchanged, and the
