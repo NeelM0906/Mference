@@ -31,6 +31,9 @@ build 0) and are marked `generated` in the manifest.
 Files that are ours, not upstream's:
 
 - `include/module.modulemap`: exports the C headers to Swift as `LlamaCpp`.
+- `include/mference_mtp.h`, `shim/mference_mtp.cpp`: a C API over llama.cpp's
+  own `common_speculative` (`draft-mtp`) for MTP speculative decoding, whose
+  step follows upstream's `examples/speculative-simple` at the pin.
 - `vendoring/`: this note, `vendor.sh`, the manifest, and copies of the
   llama.cpp (MIT, identical to the repository's `LICENSE-GGML`) and
   nlohmann/json (MIT) licences.

@@ -17,6 +17,8 @@ public enum LlamaBackendError: Error, Equatable, Sendable, CustomStringConvertib
     case unsupportedTokenizer(String)
     /// `llama_decode` failed with this status.
     case decodeFailed(Int32)
+    /// llama.cpp could not create the MTP draft context.
+    case draftContextFailed(String)
 
     public var description: String {
         switch self {
@@ -28,6 +30,7 @@ public enum LlamaBackendError: Error, Equatable, Sendable, CustomStringConvertib
         case .invalidChatTemplate(let reason): "the GGUF chat template does not parse: \(reason)"
         case .unsupportedTokenizer(let reason): "unsupported GGUF tokenizer: \(reason)"
         case .decodeFailed(let status): "llama_decode failed with status \(status)"
+        case .draftContextFailed(let id): "llama.cpp could not create the MTP draft context for \(id)"
         }
     }
 }
@@ -48,20 +51,27 @@ public struct LlamaBackend: EngineBackend {
     /// the upstream tools do, so their logits match.
     public static let logicalBatch = 2048
     public static let physicalBatch = 512
+    /// Tokens the MTP head drafts per step: llama.cpp's default
+    /// (`--spec-draft-n-max`).
+    public static let draftLimit = 3
 
     public init() {}
 
     public func load(_ descriptor: EngineModelDescriptor,
                      options: EngineLoadOptions) async throws -> any EngineModel {
-        guard case .gguf = descriptor.format else {
+        guard case .gguf(let metadata) = descriptor.format else {
             throw LlamaBackendError.notGGUF(descriptor.id)
         }
         LlamaRuntime.initialize()
+        // MTP (Deep): load the nextn head too, then decode speculatively with
+        // llama.cpp's draft-mtp unless draft decoding is off.
+        let wantsDraft = metadata.hasMTP && options.draftDecoding != .off
 
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = -1
         // Map the file, never read it into process memory; no mlock.
         modelParams.load_mode = LLAMA_LOAD_MODE_MMAP
+        modelParams.load_mtp = wantsDraft
         guard let modelPointer = llama_model_load_from_file(descriptor.location.path, modelParams) else {
             throw LlamaBackendError.modelLoadFailed(descriptor.location.path)
         }
@@ -95,13 +105,34 @@ public struct LlamaBackend: EngineBackend {
         contextParams.n_ubatch = UInt32(Self.physicalBatch)
         contextParams.n_seq_max = 1
         contextParams.no_perf = true
+        let useDraft = wantsDraft && llama_model_n_layer_nextn(modelPointer) > 0
+        var draftParams = mference_mtp_default_params()
+        draftParams.n_draft_max = Int32(Self.draftLimit)
+        draftParams.n_batch = Int32(Self.logicalBatch)
+        draftParams.n_ubatch = Int32(Self.physicalBatch)
+        draftParams.n_threads = contextParams.n_threads
+        draftParams.n_threads_batch = contextParams.n_threads_batch
+        if useDraft {
+            // Recurrent rollback and per-step outputs, as llama.cpp's tools
+            // create the target context for draft-mtp.
+            mference_mtp_target_params(&contextParams, draftParams)
+        }
         guard let context = llama_init_from_model(modelPointer, contextParams) else {
             handle.free()
             throw LlamaBackendError.contextCreationFailed(descriptor.id)
         }
+        var mtp: OpaquePointer?
+        if useDraft {
+            mtp = mference_mtp_init(modelPointer, context, draftParams)
+            guard mtp != nil else {
+                llama_free(context)
+                handle.free()
+                throw LlamaBackendError.draftContextFailed(descriptor.id)
+            }
+        }
         return LlamaModel(descriptor: descriptor, handle: handle, context: context,
                           vocabulary: vocabulary, tokenizer: tokenizer, template: template,
-                          batchSize: Self.logicalBatch)
+                          batchSize: Self.logicalBatch, mtp: mtp, draftLimit: Self.draftLimit)
     }
 }
 

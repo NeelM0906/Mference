@@ -46,15 +46,24 @@ struct LlamaChatTemplate: Sendable {
     /// Whether the template reads `enable_thinking`, the Qwen thinking switch.
     var readsEnableThinking: Bool { source.contains("enable_thinking") }
 
-    /// The template kwargs for a request: Qwen's `enable_thinking` switch is
-    /// set only when the request chose an effort, so an omitted effort keeps
-    /// the template's own default.
+    /// Whether the template reads `reasoning_effort` (Qwen 3.8's source
+    /// template: `xhigh`, `medium`, `low`).
+    var readsReasoningEffort: Bool { source.contains("reasoning_effort") }
+
+    /// The template kwargs for a request, as llama-server passes them: an
+    /// omitted effort sets nothing, so the template's own default holds;
+    /// `none` turns thinking off; any other effort turns it on and, for a
+    /// template that reads it, names the level.
     static func keywordArguments(reasoningEffort: QwenReasoningEffort?,
                                  preserveThinking: Bool,
-                                 readsEnableThinking: Bool) -> [String: any Sendable] {
+                                 readsEnableThinking: Bool,
+                                 readsReasoningEffort: Bool = false) -> [String: any Sendable] {
         var kwargs: [String: any Sendable] = [:]
         if readsEnableThinking, let reasoningEffort {
             kwargs["enable_thinking"] = reasoningEffort != .off
+        }
+        if readsReasoningEffort, let reasoningEffort, reasoningEffort != .off {
+            kwargs["reasoning_effort"] = reasoningEffort.rawValue
         }
         if preserveThinking { kwargs["preserve_thinking"] = true }
         return kwargs
