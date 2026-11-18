@@ -318,26 +318,28 @@ is reported once on stderr, with the reason:
 
 ### The product catalog
 
-By default (`--catalog product`) library mode lists only the models the product
-offers, under their stable identifiers: `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64`
-and `maple-preview-2bit-mlx` among the native installs, and the GGUF models
-`qwen3.5-4b` (Quick) and `qwen3.8-27b` (Deep) once the llama.cpp backend is in
-the build. Every other runnable install — Flash-Next, Gemma 4, a second install
-of a product model — is declined: the skip line says so, and a request naming
-it gets HTTP 400 `model_not_runnable` with a message that points to
-`--catalog all`. When two installs of one product model exist, the one served
-is the `--model` install if it is one of them, else the one whose directory is
-named after the model (`qwen36.gturbo`), else the one under the earliest
-library root. The other is declined, and a request using the served one's
-discovery identifier (`qwen3.6-35b-a3b@qwen36`) gets a 400 naming the stable
-identifier to use instead. `--model` naming an install the catalog declines
-stops the server at startup with that reason. With nothing but declined
-installs, `./mference-ui.sh models` prints `no product models installed` and
-how many `--catalog all` would list.
+The catalog comes from the [engine's discovery](ENGINE.md): `.gturbo` installs
+under the library roots, and `.gguf` files in each root and in
+`~/llm-models/gguf`. By default (`--catalog product`) library mode lists only
+the models the product offers, under their stable identifiers:
+`qwen3.6-35b-a3b`, `minicpm5-2b-int4g64` and `maple-preview-2bit-mlx` among the
+native installs, and the GGUF models `qwen3.5-4b` (Quick) and `qwen3.8-27b`
+(Deep). A GGUF model is listed only when the build has the llama.cpp backend;
+until then it is declined with `no llama.cpp backend in this build`. Every
+other runnable install — Flash-Next, Gemma 4 — is declined: the skip line says
+so, and a request naming it gets HTTP 400 `model_not_runnable` with a message
+that points to `--catalog all`. When a product model has several installs, the
+one served is the `--model` install if it is one of them, else the one under the
+earliest library root, else the one whose directory is named after the model
+(`qwen36.gturbo`); the others are reported as skipped. `--model` naming an
+install the catalog declines stops the server at startup with that reason. With
+nothing but declined installs, `./mference-ui.sh models` prints `no product
+models installed` and how many `--catalog all` would list.
 
-`--catalog all` is a developer switch: it lists every runnable install under
-its discovery identifier, as described below. `./mference-ui.sh` passes
-`--catalog` through to the server and to its listing.
+`--catalog all` is a developer switch: it lists every runnable install, product
+models under their stable identifiers and the rest under the discovery
+identifiers described below. `./mference-ui.sh` passes `--catalog` through to
+the server and to its listing.
 
 The library is fixed at startup, and an empty one is not an error: the server
 starts, `/v1/models` is an empty list, and installing a model takes effect the

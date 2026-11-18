@@ -316,6 +316,31 @@ public struct ServerArguments: Equatable, Sendable {
     }
 }
 
+extension ServerArguments {
+    /// The runtime flags as engine load options. `--max-context` applies to
+    /// native models; GGUF models keep the engine's default context (32,768,
+    /// capped at the file's own).
+    public var engineLoadOptions: EngineLoadOptions {
+        let mode: EnginePromptCacheMode = switch promptCacheMode {
+        case .off: .off
+        case .singlePrefix: .singlePrefix
+        case .multiPrefix: .multiPrefix
+        }
+        let bytes: EnginePromptCacheBytes = switch promptCacheBytes {
+        case .auto: .auto
+        case .bytes(let value): .bytes(value)
+        }
+        return EngineLoadOptions(
+            nativeMaxContext: maxContext,
+            promptCacheMode: mode,
+            promptCacheBytes: bytes,
+            integrityPolicy: verification,
+            shadowPrefetchBudget: shadowBudget,
+            prefillChunkTokens: prefillChunk,
+            reserveFullKV: reserveFullKV)
+    }
+}
+
 /// How `--library` was requested. Explicit roots and the default roots
 /// combine: `--library a --library` scans `a` and the defaults.
 public struct ServerLibraryOption: Equatable, Sendable {

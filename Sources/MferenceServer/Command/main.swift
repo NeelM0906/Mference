@@ -24,10 +24,9 @@ do {
 
     if let libraryOption = arguments.library {
         let roots = libraryOption.resolvedRoots()
-        let index = ServerLibraryDiscovery.discover(
-            roots: roots,
-            explicitModelDirectory: explicitModelURL)
-        let library = ServerModelLibrary.serving(index, roots: roots, arguments: arguments)
+        let library = ServerModelLibrary.serving(roots: roots,
+                                                 explicitModel: explicitModelURL,
+                                                 arguments: arguments)
         library.logDiscovery()
         if arguments.listModels {
             // Discovery is the whole job: nothing is loaded, no port is bound,

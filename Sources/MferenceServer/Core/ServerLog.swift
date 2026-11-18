@@ -110,6 +110,17 @@ enum ServerLog {
         write(notice)
     }
 
+    /// The engine's native backend reports what the server's own session
+    /// used to log itself, in the same lines.
+    static func nativeBackendNotice(_ notice: NativeBackendNotice) {
+        switch notice {
+        case .verifyAutoFallback(let text):
+            verifyAutoFallback(text)
+        case .promptCacheShed(let reason, let releasedBytes):
+            promptCacheShed(reason: reason, releasedBytes: releasedBytes)
+        }
+    }
+
     private static func format(_ duration: Duration) -> String {
         let seconds = Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18

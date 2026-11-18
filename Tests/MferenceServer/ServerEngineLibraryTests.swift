@@ -74,103 +74,131 @@ private func bridgedLibrary(_ ids: [String], events: Events) -> ServerModelLibra
 
 // MARK: - Catalog
 
+/// A library on disk, for `EngineCatalogDiscovery`: install directories by
+/// family, and GGUF files by directory. Nothing is read from disk.
+private func fakeFileSystem(installs: [String: ModelFamily],
+                            ggufs: [String: [String]] = [:]) -> EngineCatalogDiscovery.FileSystem {
+    EngineCatalogDiscovery.FileSystem(
+        childDirectories: { root in
+            installs.keys.filter { ($0 as NSString).deletingLastPathComponent == root.path }
+                .sorted().map { URL(fileURLWithPath: $0, isDirectory: true) }
+        },
+        ggufFiles: { directory in
+            (ggufs[directory.path] ?? []).map { directory.appendingPathComponent($0) }
+        },
+        probe: { url in installs[url.standardizedFileURL.path].map { .complete(family: $0) } ?? .notAModelDirectory },
+        checkpointID: { _ in nil },
+        readGGUF: { url in
+            EngineGGUFMetadata(architecture: "qwen35", contextLength: 262_144, tensorCount: 10,
+                               nextNTensorCount: url.lastPathComponent.contains("-mtp") ? 4 : 0)
+        },
+        size: { _ in 42 })
+}
+
+private let libraryInstalls: [String: ModelFamily] = [
+    "/models/qwen36.gturbo": .qwen36,
+    "/models/minicpm5.gturbo": .minicpm5,
+    "/models/maple.gturbo": .maple,
+    "/models/qwen38flashnextudiq3xxs.gturbo": .qwen38flashnextudiq3xxs,
+    "/models/gemma4.gturbo": .gemma4,
+]
+private let libraryGGUFs = ["/models/gguf": ["Qwen3.5-4B-UD-Q4_K_XL.gguf",
+                                             "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"]]
+
+private func servingLibrary(_ arguments: [String],
+                            installs: [String: ModelFamily] = libraryInstalls,
+                            explicitModel: URL? = nil,
+                            backends: [any EngineBackend] = [FakeEngineBackend()]) throws -> ServerModelLibrary {
+    ServerModelLibrary.serving(roots: [URL(fileURLWithPath: "/models", isDirectory: true)],
+                               explicitModel: explicitModel,
+                               arguments: try ServerArguments.parse(arguments),
+                               ggufDirectories: [URL(fileURLWithPath: "/models/gguf", isDirectory: true)],
+                               fileSystem: fakeFileSystem(installs: installs, ggufs: libraryGGUFs),
+                               backends: backends)
+}
+
 @Suite("Engine catalog for library mode")
 struct ServerEngineCatalogTests {
-    private static let index = ServerLibraryIndex(
-        entries: [
-            entry("qwen3.6-35b-a3b@qwen36", family: .qwen36, basename: "qwen36",
-                  familyID: "qwen3.6-35b-a3b"),
-            entry("qwen3.6-35b-a3b@a-quant", family: .qwen36, basename: "a-quant",
-                  familyID: "qwen3.6-35b-a3b"),
-            entry("minicpm5-2b-int4g64", family: .minicpm5, basename: "minicpm5"),
-            entry("maple-preview-2bit-mlx", family: .maple, basename: "maple"),
-            entry("unsloth-qwen3.8-flash-next-ud-iq3_xxs", family: .qwen38flashnextudiq3xxs,
-                  basename: "qwen38flashnextudiq3xxs"),
-        ],
-        skipped: [ServerLibrarySkip(directory: URL(fileURLWithPath: "/models/partial.gturbo"),
-                                    reason: "incomplete install: x")])
-
-    @Test func productScopeListsOnlyTheProductModelsUnderTheirSlotIdentifiers() throws {
-        let catalog = ServerEngineCatalog.catalog(for: Self.index, scope: .product,
-                                                  installedBytes: { _ in 42 })
-        #expect(catalog.models.map(\.id) == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64",
-                                             "qwen3.6-35b-a3b"])
-        #expect(catalog.models.allSatisfy { $0.engine == .mference && $0.sizeBytes == 42 })
-        #expect(catalog.models.map(\.product) == [.maple, .minicpm5, .qwen36])
-        // The install named after the slot wins over another of the same checkpoint.
-        let qwen = try #require(catalog.descriptor(for: "qwen3.6-35b-a3b"))
-        #expect(qwen.location.lastPathComponent == "qwen36.gturbo")
-        #expect(qwen.displayName == EngineProductSlot.qwen36.displayName)
-    }
-
-    @Test func productScopeDeclinesEverythingElseWithAReason() throws {
-        let catalog = ServerEngineCatalog.catalog(for: Self.index, scope: .product)
+    @Test func productScopeServesTheNativeProductModelsWithANativeBackend() throws {
+        let library = try servingLibrary(["--library"])
+        let catalog = library.snapshot.catalog
+        #expect(catalog.models.map(\.id) == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.6-35b-a3b"])
+        #expect(catalog.models.allSatisfy { $0.engine == .mference && $0.product != nil })
+        #expect(library.readyDetail == "catalog=product models=3")
+        // The GGUF product models wait for a llama.cpp backend, and say so.
+        #expect(catalog.unavailableReason(for: "qwen3.5-4b") == "no llama.cpp backend in this build")
+        #expect(catalog.unavailableReason(for: "qwen3.8-27b") == "no llama.cpp backend in this build")
+        // Installs the product does not offer name the server's switch.
         let flashNext = try #require(catalog.unavailableReason(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs"))
-        #expect(flashNext.contains("--catalog all"))
-        #expect(catalog.unavailableReason(for: "qwen3.6-35b-a3b@a-quant")?
-            .contains("another install") == true)
-        // The served install's discovery identifier explains the stable one.
-        #expect(catalog.unavailableReason(for: "qwen3.6-35b-a3b@qwen36")?
-            .contains("served as qwen3.6-35b-a3b") == true)
-        #expect(catalog.skipped.contains { $0.reason == "incomplete install: x" })
-        #expect(throws: EngineError.self) { _ = try catalog.resolve("unsloth-qwen3.8-flash-next-ud-iq3_xxs") }
-        #expect(catalog.descriptor(for: "qwen3.6-35b-a3b@qwen36") == nil)
+        #expect(flashNext.hasSuffix("--catalog all lists it"))
+        #expect(catalog.unavailableReason(for: "gemma-4-26b-a4b-it")?.hasSuffix("--catalog all lists it") == true)
+        #expect(!catalog.skipped.contains { $0.reason.contains("developer catalog scope") })
+        #expect(library.snapshot.health.model == nil)
     }
 
-    @Test func allScopeListsEveryRunnableInstallUnderItsDiscoveryIdentifier() {
-        let catalog = ServerEngineCatalog.catalog(for: Self.index, scope: .all)
-        #expect(catalog.models.map(\.id) == Self.index.entries.map(\.modelID).sorted())
-        #expect(catalog.descriptor(for: "minicpm5-2b-int4g64")?.product == .minicpm5)
-        #expect(catalog.descriptor(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs")?.product == nil)
+    @Test func aLlamaBackendBringsTheGGUFProductModelsIn() throws {
+        let library = try servingLibrary(["--library"],
+                                         backends: [FakeEngineBackend(), FakeEngineBackend(engine: .llamaCpp)])
+        let models = library.snapshot.catalog.models
+        #expect(models.map(\.id) == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.5-4b",
+                                     "qwen3.6-35b-a3b", "qwen3.8-27b"])
+        #expect(library.snapshot.modelList.data.map(\.engine)
+                == ["mference", "mference", "llama.cpp", "mference", "llama.cpp"])
+        // GGUF context defaults to 32768, native to --max-context.
+        #expect(library.snapshot.modelList.data.map(\.maxModelLen)
+                == [16_384, 16_384, 32_768, 16_384, 32_768])
     }
 
-    @Test func explicitModelDirectoryWinsItsProductSlot() throws {
-        let catalog = ServerEngineCatalog.catalog(
-            for: Self.index, scope: .product,
-            preferredDirectory: URL(fileURLWithPath: "/models/a-quant.gturbo"))
-        #expect(try #require(catalog.descriptor(for: "qwen3.6-35b-a3b")).location.lastPathComponent
-                == "a-quant.gturbo")
-        #expect(catalog.unavailableReason(for: "qwen3.6-35b-a3b@qwen36")?
-            .contains("another install") == true)
+    @Test func allScopeListsEveryRunnableInstall() throws {
+        let library = try servingLibrary(["--library", "--catalog", "all"])
+        #expect(library.snapshot.catalog.models.count == 5)
+        #expect(library.snapshot.descriptor(for: "gemma-4-26b-a4b-it") != nil)
+        #expect(library.readyDetail == "catalog=all models=5")
     }
 
-    @Test func earlierRootWinsBetweenInstallsWithTheSameName() throws {
-        func install(_ root: String) -> ServerLibraryEntry {
-            ServerLibraryEntry(modelID: "minicpm5-2b-int4g64@minicpm5", familyModelID: "minicpm5-2b-int4g64",
-                               basename: "minicpm5",
-                               directory: URL(fileURLWithPath: "\(root)/minicpm5.gturbo", isDirectory: true),
-                               family: .minicpm5)
-        }
-        let index = ServerLibraryIndex(entries: [install("/a-scratch"), install("/z-models")])
-        let catalog = ServerEngineCatalog.catalog(
-            for: index, scope: .product,
-            rootOrder: [URL(fileURLWithPath: "/z-models"), URL(fileURLWithPath: "/a-scratch")])
-        #expect(try #require(catalog.descriptor(for: "minicpm5-2b-int4g64")).location.path
-                == "/z-models/minicpm5.gturbo")
+    @Test func explicitModelIsTheInstallServedForItsProductModel() throws {
+        var installs = libraryInstalls
+        installs["/models/qwen36-ourquant.gturbo"] = .qwen36
+        let preferred = URL(fileURLWithPath: "/models/qwen36-ourquant.gturbo", isDirectory: true)
+        let library = try servingLibrary(["--library"], installs: installs, explicitModel: preferred)
+        #expect(library.snapshot.descriptor(for: "qwen3.6-35b-a3b")?.location.standardizedFileURL.path
+                == preferred.path)
+        let plain = try servingLibrary(["--library"], installs: installs)
+        #expect(plain.snapshot.descriptor(for: "qwen3.6-35b-a3b")?.location.lastPathComponent
+                == "qwen36.gturbo")
     }
 
-    @Test func contextIsTheConfiguredLengthOrTheFamilyMaximum() throws {
-        let catalog = ServerEngineCatalog.catalog(for: Self.index, scope: .product)
-        let maple = try #require(catalog.descriptor(for: "maple-preview-2bit-mlx"))
-        #expect(maple.resolvedContext(options: EngineLoadOptions(nativeMaxContext: 8_192)) == 8_192)
-        #expect(maple.resolvedContext(options: EngineLoadOptions(nativeMaxContext: nil))
-                == ModelFamily.maple.maximumContext)
+    @Test func runtimeFlagsBecomeEngineLoadOptions() throws {
+        let options = try ServerArguments.parse([
+            "--library", "--max-context", "8192", "--prompt-cache-mode", "single-prefix",
+            "--prompt-cache-bytes", "1024", "--verify", "full-sha256", "--shadow-budget", "2",
+            "--prefill-chunk", "512", "--kv-reserve",
+        ]).engineLoadOptions
+        #expect(options == EngineLoadOptions(nativeMaxContext: 8_192,
+                                             promptCacheMode: .singlePrefix,
+                                             promptCacheBytes: .bytes(1_024),
+                                             integrityPolicy: try #require(ModelIntegrityPolicy(verifyFlag: "full-sha256")),
+                                             shadowPrefetchBudget: 2,
+                                             prefillChunkTokens: 512,
+                                             reserveFullKV: true))
+        let defaults = try ServerArguments.parse(["--library"]).engineLoadOptions
+        #expect(defaults == EngineLoadOptions())
+        #expect(try ServerArguments.parse(["--library", "--max-context", "max"]).engineLoadOptions
+                .nativeMaxContext == nil)
     }
 
-    @Test func listingShowsTheEngineColumn() {
-        let catalog = ServerEngineCatalog.catalog(for: Self.index, scope: .product,
-                                                  installedBytes: { _ in 1_000 })
-        let lines = ServerLibraryListing.text(for: catalog).split(separator: "\n").map(String.init)
+    @Test func listingShowsTheEngineColumn() throws {
+        let library = try servingLibrary(["--library"])
+        let lines = library.listing.split(separator: "\n").map(String.init)
         #expect(lines.first?.hasPrefix("MODEL") == true)
         #expect(lines.first?.contains("ENGINE") == true)
         #expect(lines.count == 4)
-        #expect(lines.dropFirst().allSatisfy { $0.contains("mference") && $0.contains("1000") })
+        #expect(lines.dropFirst().allSatisfy { $0.contains("mference") && $0.contains("42") })
         #expect(ServerLibraryListing.text(for: .empty) == ServerLibraryListing.emptyListing)
-        let onlyOthers = ServerEngineCatalog.catalog(
-            for: ServerLibraryIndex(entries: [entry("gemma-4-26b-a4b-it", family: .gemma4, basename: "gemma4")]),
-            scope: .product)
-        #expect(ServerLibraryListing.text(for: onlyOthers)
-                == "no product models installed (1 other install; --catalog all lists them)")
+        let onlyOthers = try servingLibrary(["--library"], installs: ["/models/gemma4.gturbo": .gemma4])
+        // The two GGUF files without a backend are not counted: --catalog all
+        // would not list them either.
+        #expect(onlyOthers.listing == "no product models installed (1 other install; --catalog all lists them)")
     }
 
     @Test func catalogArgument() throws {
@@ -185,23 +213,13 @@ struct ServerEngineCatalogTests {
         #expect(ServerArguments.usage.contains("--catalog <product|all>"))
     }
 
-    /// `serving` is the production wiring: the default product catalog, the
-    /// explicit `--model` preference and root order, and nothing loaded.
-    @Test func servingUsesTheProductCatalogByDefault() throws {
-        let product = ServerModelLibrary.serving(Self.index, arguments: try ServerArguments.parse(["--library"]))
-        #expect(product.snapshot.catalog.models.map(\.id)
-                == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.6-35b-a3b"])
-        #expect(product.readyDetail == "catalog=product models=3")
-        #expect(product.snapshot.health.model == nil)
-        let preferred = ServerModelLibrary.serving(
-            Self.index,
-            arguments: try ServerArguments.parse(["--library", "--model", "/models/a-quant.gturbo"]))
-        #expect(preferred.snapshot.descriptor(for: "qwen3.6-35b-a3b")?.location.lastPathComponent
-                == "a-quant.gturbo")
-        let all = ServerModelLibrary.serving(Self.index,
-                                             arguments: try ServerArguments.parse(["--library", "--catalog", "all"]))
-        #expect(all.snapshot.catalog.models.count == Self.index.entries.count)
-        #expect(all.readyDetail == "catalog=all models=5")
+    /// The engine's wording for `--catalog all`; if it changes, the server's
+    /// rewrite (and its 400 messages) must change with it.
+    @Test func engineScopeWordingIsTheOneTheServerRewrites() {
+        let catalog = EngineCatalogDiscovery.discover(
+            roots: [URL(fileURLWithPath: "/models", isDirectory: true)], ggufDirectories: [],
+            fileSystem: fakeFileSystem(installs: ["/models/gemma4.gturbo": .gemma4]))
+        #expect(catalog.skipped.first?.reason.hasSuffix(ServerEngineCatalog.engineScopeHint) == true)
     }
 }
 
@@ -232,8 +250,7 @@ struct ServerHostLogTests {
         let host = EngineHost(
             catalog: ServerEngineCatalog.catalog(
                 for: ServerLibraryIndex(entries: [entry("a", family: .qwen36, basename: "a"),
-                                                  entry("b", family: .qwen36, basename: "b")]),
-                scope: .all),
+                                                  entry("b", family: .qwen36, basename: "b")])),
             backends: [ServerLoaderBackend { directory in
                 let id = directory.deletingPathExtension().lastPathComponent
                 events.append("load \(id)")
@@ -386,36 +403,26 @@ struct ServerEngineLibraryTests {
     /// `--library --model` naming an install the product catalog declines
     /// fails with the catalog's reason, which names `--catalog all`.
     @Test func preloadOfADeclinedInstallSaysWhy() async throws {
-        let index = ServerLibraryIndex(entries: [entry("gemma-4-26b-a4b-it", family: .gemma4, basename: "gemma4")])
-        let library = ServerModelLibrary(
-            catalog: ServerEngineCatalog.catalog(for: index, scope: .product),
-            backends: [ServerLoaderBackend { _ in BridgedModel(Events(), "x") }],
-            loadOptions: EngineLoadOptions())
+        let gemma = URL(fileURLWithPath: "/models/gemma4.gturbo", isDirectory: true)
+        let library = try servingLibrary(["--library"], explicitModel: gemma)
         do {
-            try await library.preload(directory: URL(fileURLWithPath: "/models/gemma4.gturbo"))
+            try await library.preload(directory: gemma)
             Issue.record("preload of a declined install succeeded")
         } catch let error as ServerArgumentError {
             #expect(String(describing: error).contains("--catalog all"))
         }
     }
 
-    /// The default product catalog over discovery, through HTTP: a product
-    /// model is served by the bridged session, anything else is a 400 that
-    /// says why, and the listing names only the product model.
+    /// Production library mode end to end over HTTP, with a scripted engine
+    /// backend in the native slot: a product model is served through the
+    /// engine adapter, a declined install is a 400 that says why, and the
+    /// listing names only product models.
     @Test func productCatalogOverDiscoveryServesAndDeclines() async throws {
-        let events = Events()
-        let index = ServerLibraryIndex(entries: [
-            entry("qwen3.6-35b-a3b", family: .qwen36, basename: "qwen36"),
-            entry("gemma-4-26b-a4b-it", family: .gemma4, basename: "gemma4"),
-        ])
-        let library = ServerModelLibrary(
-            catalog: ServerEngineCatalog.catalog(for: index, scope: .product),
-            backends: [ServerLoaderBackend { directory in
-                let id = directory.deletingPathExtension().lastPathComponent
-                events.append("load \(id)")
-                return BridgedModel(events, id)
-            }],
-            loadOptions: EngineLoadOptions())
+        let journal = FakeEngineJournal()
+        let library = try servingLibrary(
+            ["--library"],
+            backends: [FakeEngineBackend(journal: journal,
+                                         defaultScript: FakeEngineScript(events: [.content("native")]))])
         let server = MferenceHTTPServer(library: library, queueLimit: 1)
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
@@ -427,22 +434,24 @@ struct ServerEngineLibraryTests {
             let (data, response) = try await URLSession.shared.data(for: request)
             return ((response as? HTTPURLResponse)?.statusCode ?? 0, String(decoding: data, as: UTF8.self))
         }
-        let listing = try await URLSession.shared.data(
-            from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0
-        #expect(String(decoding: listing, as: UTF8.self).contains(#""id":"qwen3.6-35b-a3b""#))
-        #expect(!String(decoding: listing, as: UTF8.self).contains("gemma"))
+        let listing = String(decoding: try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/v1/models")!).0, as: UTF8.self)
+        #expect(listing.contains(#""id":"qwen3.6-35b-a3b""#))
+        #expect(!listing.contains("gemma") && !listing.contains("qwen3.5-4b"))
 
-        let (declinedStatus, declinedBody) = try await post("gemma-4-26b-a4b-it")
-        #expect(declinedStatus == 400)
-        #expect(declinedBody.contains("model_not_runnable") && declinedBody.contains("--catalog all"))
-        #expect(events.all.isEmpty)
+        for declined in ["gemma-4-26b-a4b-it", "qwen3.5-4b"] {
+            let (status, body) = try await post(declined)
+            #expect(status == 400, "\(declined): \(body)")
+            #expect(body.contains("model_not_runnable"))
+        }
+        #expect(journal.entries.isEmpty)
 
         let (servedStatus, servedBody) = try await post("qwen3.6-35b-a3b")
         #expect(servedStatus == 200, "\(servedBody)")
-        #expect(servedBody.contains(#""content":"qwen36""#))
-        #expect(events.all == ["load qwen36"])
+        #expect(servedBody.contains(#""content":"native""#))
         try await server.shutdown()
-        #expect(events.all == ["load qwen36", "release qwen36"])
+        #expect(journal.maxLiveModels == 1)
+        #expect(journal.entries.contains(.unloaded("qwen3.6-35b-a3b")))
     }
 
     @Test func modelsCarryTheEngineAndAnEngineModelServesChat() async throws {
