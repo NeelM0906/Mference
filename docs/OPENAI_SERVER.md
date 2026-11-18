@@ -387,8 +387,9 @@ template in the GGUF file:
 - Deep (`qwen3.8-27b`) carries Qwen 3.8's source template, so the Qwen 3.8 rules
   above apply: it reads `reasoning_effort` (`xhigh`, `medium`, `low`, `none`;
   omitted is `xhigh` with thinking on), and a request with an explicit effort
-  rejects `developer` messages. Deep is served once the llama.cpp backend runs
-  it with MTP draft decoding.
+  rejects `developer` messages. Deep is served with MTP draft decoding
+  (llama.cpp's `draft-mtp`), which keeps greedy output identical to decoding
+  without it.
 
 Qwen 3.6 opts into its source thinking template with
 `chat_template_kwargs: {"enable_thinking": true}` or an explicit
