@@ -152,9 +152,10 @@ struct ServerEngineCatalogTests {
                 == [16_384, 16_384, 32_768, 16_384, 32_768])
     }
 
-    /// The server's flags reach the engine host, and the default backend is
-    /// the engine's own `NativeBackend` (nothing is loaded here).
-    @Test func servingPassesTheFlagsAndDefaultsToTheNativeBackend() throws {
+    /// The server's flags reach the engine host, and the default backends are
+    /// the engine's own: `NativeBackend` and `LlamaBackend`, so the GGUF
+    /// product models are served too (nothing is loaded here).
+    @Test func servingPassesTheFlagsAndDefaultsToTheEngineBackends() throws {
         let arguments = try ServerArguments.parse(["--library", "--max-context", "8192",
                                                     "--prompt-cache-mode", "off"])
         let library = ServerModelLibrary.serving(
@@ -163,10 +164,15 @@ struct ServerEngineCatalogTests {
             ggufDirectories: [URL(fileURLWithPath: "/models/gguf", isDirectory: true)],
             fileSystem: fakeFileSystem(installs: libraryInstalls, ggufs: libraryGGUFs))
         #expect(library.host.loadOptions == arguments.engineLoadOptions)
-        #expect(library.snapshot.catalog.models.map(\.id)
-                == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.6-35b-a3b"])
-        #expect(library.snapshot.modelList.data.allSatisfy { $0.maxModelLen == 8_192 })
-        #expect(library.snapshot.unavailableReason(for: "qwen3.5-4b") == "no llama.cpp backend in this build")
+        let list = library.snapshot.modelList.data
+        #expect(list.map(\.id) == ["maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "qwen3.5-4b",
+                                   "qwen3.6-35b-a3b", "qwen3.8-27b"])
+        // --max-context sets native models; GGUF models keep 32768.
+        #expect(list.map(\.maxModelLen) == [8_192, 8_192, 32_768, 8_192, 32_768])
+        #expect(list.map(\.engine) == ["mference", "mference", "llama.cpp", "mference", "llama.cpp"])
+        // A non-product GGUF is declined with the switch that lists it.
+        #expect(library.snapshot.unavailableReason(for: "some-other-model.q4_k_m")?
+            .hasSuffix("--catalog all lists it") == true)
     }
 
     @Test func allScopeListsEveryRunnableInstall() throws {

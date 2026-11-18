@@ -372,6 +372,41 @@ class GateTests(unittest.TestCase):
             self.assertTrue(any("above one model's bound" in p for p in step["problems"]))
 
 
+class TraceParityTests(unittest.TestCase):
+    def test_cases_requests_and_comparison(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeServer() as server:
+            root = Path(tmp)
+            cases, trace = root / "cases", root / "trace"
+            cases.mkdir()
+            (cases / "m.json").write_text(json.dumps([{"role": "user", "content": "hi"}]))
+            (cases / "tools.json").write_text(json.dumps([ev.WEATHER_TOOL]))
+            (cases / "cases.tsv").write_text("chat\tm.json\t-\ttrue\ntool\tm.json\ttools.json\tfalse\n")
+            rows = ev.trace_cases(cases)
+            body = ev.trace_request("q", rows[0], 64)
+            self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": True})
+            self.assertNotIn("top_k", body)
+            self.assertNotIn("tools", body)
+            for name, completion in (
+                    ("chat", {"content": "A hash table maps keys to values.", "reasoning": None,
+                              "tool_calls": [], "finish_reason": "stop", "completion_tokens": 7}),
+                    ("tool", {"content": "", "reasoning": None, "finish_reason": "tool_calls",
+                              "completion_tokens": 7,
+                              "tool_calls": [{"name": "get_weather",
+                                              "arguments": "{\"city\": \"Lisbon\"}"}]})):
+                (trace / name).mkdir(parents=True)
+                (trace / name / "completion.json").write_text(json.dumps(completion))
+            rc = ev.main(["traceparity", "--port", str(server.port), "--model", "q",
+                          "--cases", str(cases), "--trace", str(trace), "--out", str(root / "out")])
+            self.assertEqual(rc, 0)
+            (trace / "chat" / "completion.json").write_text(json.dumps(
+                {"content": "different", "finish_reason": "stop", "completion_tokens": 7}))
+            rc = ev.main(["traceparity", "--port", str(server.port), "--model", "q", "--case", "chat",
+                          "--cases", str(cases), "--trace", str(trace), "--out", str(root / "out2")])
+            self.assertEqual(rc, 1)
+            report = json.loads((root / "out2" / "traceparity.json").read_text())
+            self.assertEqual(report["rows"][0]["differs_in"], ["content"])
+
+
 class SwapLogTests(unittest.TestCase):
     def test_release_before_start_fails(self):
         events = ev.swap_events(
@@ -479,6 +514,19 @@ class ShellTests(unittest.TestCase):
         self.assertIn("swap\\ chain", ok.stdout)
         bad = self.run_script("--dry-run", "swap", "--swap-chain", "qwen36,flashnext")
         self.assertNotEqual(bad.returncode, 0)
+
+    def test_trace_phase_plans_one_cold_server_per_case_and_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cases = Path(tmp)
+            (cases / "cases.tsv").write_text("a\tm.json\t-\tfalse\nb-c\tm.json\t-\ttrue\n")
+            result = self.run_script("--dry-run", "--models", "quick", "--trace-cases", tmp,
+                                     "--trace", f"quick={tmp}/trace", "trace")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            runs = [l for l in result.stdout.splitlines() if "_run quick trace-" in l]
+            self.assertEqual(len(runs), 5)
+            self.assertTrue(any("trace-b-c-stream" in l for l in runs))
+            self.assertTrue(runs[-1].rstrip().endswith("trace-warm"))
+        self.assertNotEqual(self.run_script("--dry-run", "trace").returncode, 0)
 
     def test_unknown_model_is_rejected(self):
         result = subprocess.run(["bash", str(self.SCRIPT), "--dry-run", "--models", "flashnext"],

@@ -5,7 +5,11 @@ Swift and Metal inference for pinned checkpoints on Apple Silicon: Gemma 4
 276B-A12B, Maple Preview, Qwen 3.8 27B, Qwen3.8-Flash-Next 180B-A3.5B (also
 as Unsloth's UD-IQ3_XXS GGUF quantization), and MiniCPM5-2B. The shared core and KV cache stay resident; routed experts stream
 from SSD per token. Qwen 3.8 27B and MiniCPM5-2B are dense and fully
-resident.
+resident. Through the `MferenceEngine` library, `MferenceServer --library`
+also runs two GGUF models with llama.cpp linked in-process: Qwen3.5-4B
+(Unsloth UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
+GSQ-RCO IQ3_S with MTP, Deep). The product offers five models: Quick, Deep,
+Qwen 3.6, MiniCPM5 and Maple; see [the engine](docs/ENGINE.md).
 
 ## Scope
 
@@ -50,8 +54,9 @@ Install directories take the family's own label (`gemma4.gturbo`,
 manifest, not its name. `MferenceServer --library`
 scans the library roots — the `Mference.libraryRoot` default if set,
 `~/llm-models`, the package checkout's `scratch/`, and
-`~/Library/Application Support/Mference` —
-and serves every runnable model it finds there to the UI. The CLI and a non-library
+`~/Library/Application Support/Mference` — plus `~/llm-models/gguf` for GGUF
+files, and serves the product models it finds there to the UI (every runnable
+install with `--catalog all`). The CLI and a non-library
 server take an explicit `--model` path; that selection also persists via
 `defaults write Mference model qwen36` (or `MFERENCE_MODEL` in the
 environment). By default the CLI and the server check the expert pool against

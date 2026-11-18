@@ -323,8 +323,10 @@ under the library roots, and `.gguf` files in each root and in
 the models the product offers, under their stable identifiers:
 `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64` and `maple-preview-2bit-mlx` among the
 native installs, and the GGUF models `qwen3.5-4b` (Quick) and `qwen3.8-27b`
-(Deep). A GGUF model is listed only when the build has the llama.cpp backend;
-until then it is declined with `no llama.cpp backend in this build`. Every
+(Deep). GGUF models run through llama.cpp linked into the server process, so a
+swap between a GGUF and a native model is still one process releasing one
+model before it loads the next. (A build without the llama.cpp backend declines
+them with `no llama.cpp backend in this build`.) Every
 other runnable install — Flash-Next, Gemma 4 — is declined: the skip line says
 so, and a request naming it gets HTTP 400 `model_not_runnable` with a message
 that points to `--catalog all`. When a product model has several installs, the

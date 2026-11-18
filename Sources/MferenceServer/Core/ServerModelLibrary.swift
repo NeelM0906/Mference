@@ -125,8 +125,9 @@ public final class ServerModelLibrary: Sendable {
 
     /// Library mode as `MferenceServer --library` runs it: the engine's own
     /// discovery over `roots` (and the GGUF directories), the scope
-    /// `--catalog` selects, and the engine's backends with the server's
-    /// runtime flags as load options. Only engines with a backend in this
+    /// `--catalog` selects, and the engine's backends (`NativeBackend` for
+    /// `.gturbo`, `LlamaBackend` for `.gguf`) with the server's runtime flags
+    /// as load options. Only engines with a backend in this
     /// build are served; see `ServerEngineCatalog.servable`.
     ///
     /// `explicitModel` is `--model` alongside `--library`: discovery considers
@@ -139,9 +140,10 @@ public final class ServerModelLibrary: Sendable {
         fileSystem: EngineCatalogDiscovery.FileSystem = .live,
         backends: [any EngineBackend]? = nil
     ) -> ServerModelLibrary {
-        // Production: the engine's native backend, its notices in the
-        // server log. Tests pass scripted backends.
-        let backends = backends ?? [NativeBackend(onNotice: { ServerLog.nativeBackendNotice($0) })]
+        // Production: the engine's native backend (its notices in the server
+        // log) and llama.cpp for GGUF models. Tests pass scripted backends.
+        let backends = backends ?? [NativeBackend(onNotice: { ServerLog.nativeBackendNotice($0) }),
+                                    LlamaBackend()]
         let discovered = EngineCatalogDiscovery.discover(
             roots: roots,
             ggufDirectories: ggufDirectories ?? EngineCatalogDiscovery.defaultGGUFDirectories(roots: roots),

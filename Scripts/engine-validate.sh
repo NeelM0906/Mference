@@ -23,6 +23,11 @@
 #   swap       Quick -> Deep -> Qwen 3.6 -> MiniCPM5 -> Maple -> Quick through
 #              one server: the old model's release logged before the new one
 #              loads, peak RSS per step below one model's peak
+#   trace      G6 through the server: every case of an engine trace
+#              (--trace-cases, --trace <key>=<dir>), each request on a fresh,
+#              cold server, must equal the trace (content, reasoning, tool
+#              calls, finish reason, token count); then one warm pass over all
+#              cases on one server, reported but not gated
 #   summary    rebuild summary.md from what is on disk
 #
 # Not covered here: G5 through MferenceCLI (the CLI does not use the engine),
@@ -52,6 +57,9 @@
 #   --build                      build the server first (under the lock)
 #   --yield                      pass --yield to lock.sh (runs over ~15 min
 #                                that are not on the priority list)
+#   --trace-cases <dir>          engine trace case set (cases.tsv and files)
+#   --trace <key>=<dir>          that model's engine trace, repeatable
+#                                (for example quick=$PROGRAM/results/t2/...)
 #   --swap-chain <k,k,...>       swap chain to run instead of the section 8
 #                                one (for example qwen36,minicpm5,maple,qwen36
 #                                while only the native backend is in the build)
@@ -165,6 +173,14 @@ finish_run() {
   exit "$RUN_STATUS"
 }
 
+# The trace directory given for a model key with --trace <key>=<dir>.
+trace_dir_for() {
+  local item
+  for item in $TRACES; do
+    if [ "${item%%=*}" = "$1" ]; then printf '%s\n' "${item#*=}"; return; fi
+  done
+}
+
 preflight_model() {
   local key=$1 out=$2 path kind
   path=$("${checker[@]}" registry "$key" path)
@@ -215,7 +231,7 @@ $others"
   fi
 
   case "$variant" in
-    engine|engine-nomtp|swap)
+    engine|engine-nomtp|swap|trace-*)
       binary=$SERVER
       args=(--library --port "$PORT")
       if [ -n "$SERVER_ARGS" ]; then read -r -a extra_args <<<"$SERVER_ARGS"; args+=("${extra_args[@]}"); fi
@@ -275,7 +291,21 @@ $others"
   READY_AT=$(python3 -c 'import time; print(time.time())')
 
   local rc=0
-  if [ "$variant" = swap ]; then
+  if [ "${variant#trace-}" != "$variant" ]; then
+    # No probe: the case's own request must be the first this server sees.
+    local trace_dir; trace_dir=$(trace_dir_for "$key")
+    [ -n "$trace_dir" ] || fail "no --trace for $key"
+    local selection=()
+    if [ "$variant" != trace-warm ]; then
+      local spec=${variant#trace-} mode=${variant##*-}
+      selection=(--case "${spec%-*}" --modes "$mode")
+    fi
+    "${checker[@]}" traceparity --port "$PORT" --model "$model_id" --cases "$TRACE_CASES" \
+      --trace "$trace_dir" --out "$RUN_DIR" ${selection[@]+"${selection[@]}"} || rc=$?
+    # The warm pass is information, not a gate: prefix reuse may change
+    # the last bits of a logit (see the engine trace's warm/cold note).
+    if [ "$variant" != trace-warm ]; then RUN_STATUS=$rc; fi
+  elif [ "$variant" = swap ]; then
     local bound=()
     local single; single=$("${checker[@]}" maxrss "$RESULTS" 2>/dev/null || true)
     if [ -n "$single" ]; then bound+=(--max-single-rss-mib "$single"); fi
@@ -336,6 +366,8 @@ DRY_RUN=0
 YIELD=""
 NO_RELEASE_LINE=""
 SWAP_CHAIN=""
+TRACE_CASES=""
+TRACES=""
 
 if [ "${1:-}" = _run ]; then
   shift
@@ -349,6 +381,7 @@ if [ "${1:-}" = _run ]; then
   EXTRA=$ENGINE_VALIDATE_EXTRA PORT=$ENGINE_VALIDATE_PORT RUNS=$ENGINE_VALIDATE_RUNS
   RESULTS=$ENGINE_VALIDATE_RESULTS NO_RELEASE_LINE=$ENGINE_VALIDATE_NO_RELEASE_LINE
   SWAP_CHAIN=${ENGINE_VALIDATE_SWAP_CHAIN:-}
+  TRACE_CASES=${ENGINE_VALIDATE_TRACE_CASES:-} TRACES=${ENGINE_VALIDATE_TRACES:-}
   run_one "$@"
 fi
 
@@ -373,9 +406,11 @@ while [ $# -gt 0 ]; do
     --yield) YIELD=--yield; shift ;;
     --no-release-line) NO_RELEASE_LINE=--no-release-line; shift ;;
     --swap-chain) SWAP_CHAIN=$2; shift 2 ;;
+    --trace-cases) TRACE_CASES=$2; shift 2 ;;
+    --trace) TRACES="${TRACES:+$TRACES }$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,69p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    models|prompts|readings|identity|swap|summary) PHASES+=("$1"); shift ;;
+    -h|--help) sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    models|prompts|readings|identity|swap|trace|summary) PHASES+=("$1"); shift ;;
     *) fail "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -393,6 +428,11 @@ case "$PORT" in ''|*[!0-9]*) fail "--port must be a number" ;; esac
 for passthrough in "$SERVER_ARGS" "$UPSTREAM_ARGS" "$UPSTREAM_MTP_ARGS" "$MTP_OFF_ARGS"; do
   check_loopback_args "$passthrough"
 done
+
+if want trace; then
+  [ -n "$TRACE_CASES" ] && [ -f "$TRACE_CASES/cases.tsv" ] || fail "the trace phase needs --trace-cases <dir with cases.tsv>"
+  [ -n "$TRACES" ] || fail "the trace phase needs --trace <key>=<engine trace dir>"
+fi
 
 # Identity is only meaningful with every reference it compares against.
 if want identity; then
@@ -460,6 +500,19 @@ if [ "$DRY_RUN" = 1 ]; then
   if want swap; then
     lock_cmd "eng validate swap chain" "$script_dir/engine-validate.sh" _run quick swap "$RESULTS/swap"
   fi
+  if want trace; then
+    for key in "${MODEL_KEYS[@]}"; do
+      [ -n "$(trace_dir_for "$key")" ] || continue
+      for name in $("${checker[@]}" tracecases "$TRACE_CASES"); do
+        for mode in nonstream stream; do
+          lock_cmd "eng validate $key trace $name $mode" "$script_dir/engine-validate.sh" _run "$key" \
+            "trace-$name-$mode" "$RESULTS/$key/trace-$name-$mode"
+        done
+      done
+      lock_cmd "eng validate $key trace warm" "$script_dir/engine-validate.sh" _run "$key" trace-warm \
+        "$RESULTS/$key/trace-warm"
+    done
+  fi
   if want identity; then echo "identity: engine vs main (native), engine vs upstream (GGUF), Deep MTP on vs off"; fi
   if want readings; then echo "speed bar: engine within 5% of main (native) and upstream (GGUF)"; fi
   if want summary; then echo "summary: $RESULTS/summary.md"; fi
@@ -475,7 +528,7 @@ if [ "$BUILD" = 1 ]; then
     || fail "build failed or the quiet flag is set; stop and wait"
 fi
 needs_server=0
-for p in models prompts readings identity swap; do if want "$p"; then needs_server=1; fi; done
+for p in models prompts readings identity swap trace; do if want "$p"; then needs_server=1; fi; done
 if [ "$needs_server" = 1 ]; then
   [ -x "$SERVER" ] || fail "server binary not found: $SERVER (build it, or pass --build)"
 fi
@@ -495,6 +548,7 @@ export ENGINE_VALIDATE_MTP_OFF_ARGS="$MTP_OFF_ARGS" ENGINE_VALIDATE_MTP_OFF_ENV=
 export ENGINE_VALIDATE_EXTRA="$EXTRA" ENGINE_VALIDATE_PORT="$PORT" ENGINE_VALIDATE_RUNS="$RUNS"
 export ENGINE_VALIDATE_RESULTS="$RESULTS" ENGINE_VALIDATE_NO_RELEASE_LINE="$NO_RELEASE_LINE"
 export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN"
+export ENGINE_VALIDATE_TRACE_CASES="$TRACE_CASES" ENGINE_VALIDATE_TRACES="$TRACES"
 
 abort() {
   "${checker[@]}" summary "$RESULTS" >/dev/null 2>&1 || true
@@ -527,6 +581,19 @@ fi
 
 if want swap; then
   locked_run "eng validate swap chain" quick swap "$RESULTS/swap"
+fi
+
+if want trace; then
+  for key in "${MODEL_KEYS[@]}"; do
+    [ -n "$(trace_dir_for "$key")" ] || continue
+    for name in $("${checker[@]}" tracecases "$TRACE_CASES"); do
+      for mode in nonstream stream; do
+        locked_run "eng validate $key trace $name $mode" "$key" "trace-$name-$mode" \
+          "$RESULTS/$key/trace-$name-$mode"
+      done
+    done
+    locked_run "eng validate $key trace warm" "$key" trace-warm "$RESULTS/$key/trace-warm"
+  done
 fi
 
 # Pairwise checks. A missing side is recorded as a failure, never skipped.
