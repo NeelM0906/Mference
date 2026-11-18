@@ -5,7 +5,8 @@ import Testing
 
 @Suite struct RootViewTests {
     @Test func rootViewRenders() {
-        let renderer = ImageRenderer(content: RootView().frame(width: 960, height: 640))
+        let root = RootView(model: ShellModel(defaults: nil), chrome: .inline)
+        let renderer = ImageRenderer(content: root.frame(width: 960, height: 640))
         #expect(renderer.nsImage != nil)
     }
 

@@ -1,0 +1,34 @@
+# Mference's settings for its bundled SearXNG (App Program spec 4.5, L7).
+# SearXNG itself ships unmodified; this file only overrides its defaults.
+# The app starts SearXNG on 127.0.0.1 with a random port (SEARXNG_PORT) and
+# a random secret per launch (SEARXNG_SECRET), and only while web is on.
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Mference web search"
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  # JSON is what the app reads; HTML stays for debugging in a browser.
+  formats:
+    - html
+    - json
+
+server:
+  bind_address: "127.0.0.1"
+  # The only client is the app on this Mac: no bot limiter (it would throttle
+  # the model's searches), no public-instance features, no image proxy.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+valkey:
+  url: false
+
+outgoing:
+  request_timeout: 3.0
+  max_request_timeout: 8.0
