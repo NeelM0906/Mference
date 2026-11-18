@@ -915,6 +915,12 @@ def trace_cases(cases_dir):
     return rows
 
 
+def trace_case_names(cases_dir):
+    """Case names from `cases.tsv` alone, without reading the case files."""
+    text = (Path(cases_dir) / "cases.tsv").read_text(encoding="utf-8")
+    return [line.split("\t")[0] for line in text.splitlines() if line.strip()]
+
+
 def trace_request(model_id, case, max_tokens):
     """The request matching the trace's `EngineRequest`: temperature 0 and
     nothing else set, `.xhigh` effort (enable_thinking) for thinking cases."""
@@ -1304,7 +1310,7 @@ def main(argv=None):
 
     sp = sub.add_parser("tracecases")
     sp.add_argument("cases")
-    sp.set_defaults(func=lambda args: print("\n".join(c["name"] for c in trace_cases(args.cases))) or 0)
+    sp.set_defaults(func=lambda args: print("\n".join(trace_case_names(args.cases))) or 0)
 
     sp = sub.add_parser("traceparity")
     server(sp)
