@@ -48,8 +48,22 @@ import Testing
         let first = try #require(memory.memories.first)
         SettingsView.save(.existing(first), text: "Likes aisle seats", in: memory)
         #expect(memory.memories.first?.text == "Likes aisle seats")
-        memory.delete(first.id)
+        // Delete goes through the confirmation dialog's action.
+        SettingsView.confirmDelete(first, in: memory)
         #expect(memory.memories.count == count)
+        #expect(!memory.memories.contains { $0.id == first.id })
+    }
+
+    @Test func offlineModeTurnsWebSearchAndDownloadsOff() {
+        let settings = FixtureSettings()
+        settings.webSearchEnabled = true
+        #expect(SettingsView.webSearchShown(settings))
+        #expect(SettingsView.downloadsAllowed(settings))
+        settings.offlineMode = true
+        #expect(!SettingsView.webSearchShown(settings), "shown off while offline")
+        #expect(!SettingsView.downloadsAllowed(settings))
+        #expect(settings.webSearchEnabled, "the stored choice comes back after offline mode")
+        #expect(!SettingsView.webSearchShown(nil) && SettingsView.downloadsAllowed(nil))
     }
 
     @Test func connectionStatesRender() {

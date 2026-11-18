@@ -49,9 +49,14 @@ public struct SettingsView: View {
     }
 
     /// The section at the top of the page (the sidebar's selection).
-    private var currentPane: Pane { position.viewID(type: Pane.self) ?? .models }
+    /// The section the person clicked; it stays selected until they scroll
+    /// (a short last section such as iPhone may never reach the top).
+    @State private var clickedPane: Pane?
 
-    private var offline: Bool { settings?.offlineMode ?? false }
+    /// The sidebar's selection: the clicked section, else the one at the top.
+    private var currentPane: Pane { clickedPane ?? position.viewID(type: Pane.self) ?? .models }
+
+    private var offline: Bool { !Self.downloadsAllowed(settings) }
 
     public var body: some View {
         HStack(spacing: 0) {
@@ -97,11 +102,27 @@ public struct SettingsView: View {
             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
             presenting: pendingDelete
         ) { entry in
-            Button("Delete", role: .destructive) { memory?.delete(entry.id) }
+            Button("Delete", role: .destructive) { if let memory { Self.confirmDelete(entry, in: memory) } }
             Button("Keep", role: .cancel) {}
         } message: { _ in
             Text("Mference forgets it on this Mac. This can't be undone.")
         }
+    }
+
+    /// The confirmation dialog's "Delete": the only path that deletes a memory.
+    static func confirmDelete(_ entry: MemoryEntry, in memory: any MemoryListModel) {
+        memory.delete(entry.id)
+    }
+
+    /// Offline mode turns web search off (shown off and disabled) and model
+    /// downloads off, whatever the stored switch says.
+    static func webSearchShown(_ settings: (any AppSettingsModel)?) -> Bool {
+        guard let settings else { return false }
+        return settings.webSearchEnabled && !settings.offlineMode
+    }
+
+    static func downloadsAllowed(_ settings: (any AppSettingsModel)?) -> Bool {
+        !(settings?.offlineMode ?? false)
     }
 
     /// Saves the memory editor's text: a new item or an edit.
@@ -121,6 +142,7 @@ public struct SettingsView: View {
             ForEach(Pane.allCases) { item in
                 Button {
                     showsLibrary = false
+                    clickedPane = item
                     withAnimation { position.scrollTo(id: item, anchor: .top) }
                 } label: {
                     Text(item.title)
@@ -172,6 +194,10 @@ public struct SettingsView: View {
         } else {
             ScrollView { sections }
                 .scrollPosition($position)
+                .onScrollPhaseChange { _, phase in
+                    // The person scrolls: follow the scroll again.
+                    if phase == .interacting { clickedPane = nil }
+                }
         }
     }
 
@@ -256,7 +282,15 @@ public struct SettingsView: View {
                     .buttonStyle(.mfSecondary)
                     .disabled(offline)
                     .accessibilityLabel("Resume downloading \(entry.title)")
-            case .notInstalled, .downloadFailed:
+            case .downloadFailed:
+                ModelStatusBadge(state: entry.state)
+                // Approved when the download first started: no second dialog.
+                Button("Retry") { if let library { ModelLibraryView.retryDownload(entry, in: library) } }
+                    .buttonStyle(.mfSecondary)
+                    .disabled(offline || !(library?.machine.hasRoom(for: entry.sizeBytes) ?? false))
+                    .help(offline ? "Offline mode is on." : "Download \(entry.title) again")
+                    .accessibilityLabel("Retry downloading \(entry.title)")
+            case .notInstalled:
                 ModelStatusBadge(state: entry.state)
                 Button("Download…") { pendingDownload = entry }
                     .buttonStyle(.mfSecondary)
@@ -334,7 +368,7 @@ public struct SettingsView: View {
     // MARK: Privacy
 
     private var privacySection: some View {
-        section("Privacy", "No account and no usage reporting. There is nothing to opt out of.") {
+        section("Privacy", "No account and no usage reporting. Runs on this Mac. Nothing leaves it except web searches you turn on and model downloads.") {
             MFCard {
                 MFListRow("Web search through SearXNG",
                           subtitle: offline
@@ -458,7 +492,7 @@ public struct SettingsView: View {
     private func settingToggle(_ label: String, _ setting: SettingSwitch) -> some View {
         let blocked = setting == .webSearchEnabled && offline
         return Toggle(label, isOn: Binding(
-            get: { blocked ? false : settings.map(setting.get) ?? false },
+            get: { setting == .webSearchEnabled ? Self.webSearchShown(settings) : settings.map(setting.get) ?? false },
             set: { value in if let settings { setting.set(settings, value) } }))
             .toggleStyle(.mf)
             .disabled(settings == nil || blocked)
