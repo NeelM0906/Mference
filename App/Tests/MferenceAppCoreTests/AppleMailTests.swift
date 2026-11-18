@@ -82,8 +82,8 @@ struct GatedSorter: AppleModelServicing {
     func fillReceipt(from recognizedText: String) async throws -> AssistantResult<ReceiptDraft> {
         throw AssistantModelError.unreadableAnswer
     }
-    func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone) async throws
-        -> AssistantResult<MailEventSuggestion?> { .init(value: nil, model: .appleOnDevice) }
+    func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone, allowFallback: Bool)
+        async throws -> AssistantResult<MailEventSuggestion?> { .init(value: nil, model: .appleOnDevice) }
 }
 
 @Suite struct AppleMailTests {
