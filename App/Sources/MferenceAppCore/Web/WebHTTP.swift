@@ -33,7 +33,7 @@ public final class WebAllowlist: Sendable {
 
     /// Whether a request to `url` may be sent at all.
     public func permits(_ url: URL) -> Bool {
-        if let base = state.withLock({ $0.searchBase }), Self.sameOrigin(url, base) { return true }
+        if isSearchBase(url) { return true }
         return isAllowedPage(url)
     }
 
@@ -46,10 +46,20 @@ public final class WebAllowlist: Sendable {
         return true
     }
 
+    /// http(s), no credentials, a usual web port, and a host that passes
+    /// `HostPolicy` (no LAN, loopback, link-local or local names).
     static func isWebURL(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
-              let host = url.host(), !host.isEmpty else { return false }
+              let host = url.host(), !host.isEmpty, url.user() == nil, url.password() == nil,
+              HostPolicy.isAllowedHost(host) else { return false }
+        if let port = url.port, ![80, 443, 8080, 8443].contains(port) { return false }
         return true
+    }
+
+    /// Whether `url` is the running SearXNG (the one loopback destination).
+    func isSearchBase(_ url: URL) -> Bool {
+        guard let base = state.withLock({ $0.searchBase }) else { return false }
+        return Self.sameOrigin(url, base)
     }
 
     /// Pages are matched without fragment; scheme and host case-folded.
@@ -98,18 +108,25 @@ public enum WebError: Error, Sendable, Hashable {
 
 /// The app's HTTP client for web answers: an ephemeral session (no cookies,
 /// no cache, no credentials), a fixed user agent, bounded bodies, and the
-/// allowlist checked before every request and every redirect.
+/// allowlist checked before every request and every redirect. A page's host
+/// is resolved first and every address must be public; after the fetch, the
+/// address actually connected to is checked again (DNS rebinding), and the
+/// body is discarded if it was not public.
 public final class WebHTTP: Sendable {
     public let allowlist: WebAllowlist
     /// Largest body read, in bytes.
     public let maxBytes: Int
+    let resolver: HostPolicy.Resolver
     private let session: URLSession
 
-    /// `protocolClasses` lets tests stub the transport (G-A8 test).
+    /// `protocolClasses` and `resolver` let tests stub the transport and DNS
+    /// (G-A8 test); the defaults are the system's.
     public init(allowlist: WebAllowlist, maxBytes: Int = 2_000_000, timeout: TimeInterval = 12,
-                protocolClasses: [AnyClass]? = nil) {
+                protocolClasses: [AnyClass]? = nil, resolver: HostPolicy.Resolver? = nil) {
         self.allowlist = allowlist
         self.maxBytes = maxBytes
+        let resolver = resolver ?? HostPolicy.systemResolver
+        self.resolver = resolver
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpShouldSetCookies = false
@@ -118,12 +135,14 @@ public final class WebHTTP: Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout * 2
+        configuration.connectionProxyDictionary = [:]
         configuration.httpAdditionalHeaders = [
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
             "Accept-Language": "en",
         ]
         if let protocolClasses { configuration.protocolClasses = protocolClasses }
-        session = URLSession(configuration: configuration, delegate: RedirectGuard(allowlist: allowlist),
+        session = URLSession(configuration: configuration,
+                             delegate: RedirectGuard(allowlist: allowlist, resolver: resolver),
                              delegateQueue: nil)
     }
 
@@ -134,12 +153,15 @@ public final class WebHTTP: Sendable {
     /// GETs `url` if the allowlist permits it; returns at most `maxBytes`.
     public func get(_ url: URL, accept: String = "*/*") async throws -> (data: Data, response: HTTPURLResponse) {
         guard allowlist.permits(url) else { throw WebError.notAllowed(url) }
+        let isSearch = allowlist.isSearchBase(url)
+        if !isSearch { try await Self.requirePublic(url, resolver: resolver) }
         var request = URLRequest(url: url)
         request.setValue(accept, forHTTPHeaderField: "Accept")
+        let probe = ConnectionProbe()
         let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
-            (bytes, response) = try await session.bytes(for: request)
+            (bytes, response) = try await session.bytes(for: request, delegate: probe)
         } catch let error as URLError {
             throw WebError.transport(error.localizedDescription)
         }
@@ -152,22 +174,97 @@ public final class WebHTTP: Sendable {
             data.append(byte)
             if data.count >= maxBytes { break }
         }
+        if data.count >= maxBytes { bytes.task.cancel() }
+        if !isSearch, let remote = await probe.remoteAddress(), let address = IPAddress(remote), !address.isPublic {
+            throw WebError.notAllowed(url)
+        }
         return (data, http)
+    }
+
+    static func requirePublic(_ url: URL, resolver: HostPolicy.Resolver) async throws {
+        guard let host = url.host() else { throw WebError.notAllowed(url) }
+        if let literal = IPAddress(host) {
+            guard literal.isPublic else { throw WebError.notAllowed(url) }
+            return
+        }
+        let addresses = try await resolver(host)
+        guard !addresses.isEmpty, addresses.allSatisfy(\.isPublic) else { throw WebError.notAllowed(url) }
     }
 }
 
-/// Follows a redirect only when the allowlist permits it.
+/// Follows a redirect only when the allowlist permits it and the new host
+/// resolves to public addresses only.
 final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
     let allowlist: WebAllowlist
+    let resolver: HostPolicy.Resolver
 
-    init(allowlist: WebAllowlist) {
+    init(allowlist: WebAllowlist, resolver: @escaping HostPolicy.Resolver) {
         self.allowlist = allowlist
+        self.resolver = resolver
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest) async -> URLRequest? {
         guard let from = task.originalRequest?.url, let to = request.url else { return nil }
-        if allowlist.permits(to), WebAllowlist.sameOrigin(from, to) { return request }
-        return allowlist.permitsRedirect(from: from, to: to) ? request : nil
+        if allowlist.isSearchBase(from) {
+            return allowlist.isSearchBase(to) ? request : nil
+        }
+        guard allowlist.permitsRedirect(from: from, to: to) else { return nil }
+        guard (try? await WebHTTP.requirePublic(to, resolver: resolver)) != nil else { return nil }
+        return request
+    }
+}
+
+/// Records the remote address a task connected to (from its metrics).
+final class ConnectionProbe: NSObject, URLSessionTaskDelegate, Sendable {
+    private struct State {
+        var address: String??
+        var waiters: [CheckedContinuation<String?, Never>] = []
+    }
+
+    private let state = Mutex(State())
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        let address = metrics.transactionMetrics.last(where: { $0.remoteAddress != nil })?.remoteAddress
+        let waiters = state.withLock { state -> [CheckedContinuation<String?, Never>] in
+            state.address = .some(address)
+            defer { state.waiters.removeAll() }
+            return state.waiters
+        }
+        for waiter in waiters { waiter.resume(returning: address) }
+    }
+
+    /// The connected address, waiting briefly for the metrics; nil when the
+    /// transport reports none (a stub) or they do not arrive in time.
+    func remoteAddress(timeout: Duration = .seconds(2)) async -> String? {
+        await withTaskGroup(of: String?.self) { group in
+            group.addTask {
+                await withCheckedContinuation { continuation in
+                    let ready = self.state.withLock { state -> String?? in
+                        if let address = state.address { return .some(address) }
+                        state.waiters.append(continuation)
+                        return nil
+                    }
+                    if let ready { continuation.resume(returning: ready) }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            self.flush()
+            return first
+        }
+    }
+
+    /// Resumes anyone still waiting (after a timeout).
+    private func flush() {
+        let waiters = state.withLock { state -> [CheckedContinuation<String?, Never>] in
+            defer { state.waiters.removeAll() }
+            return state.waiters
+        }
+        for waiter in waiters { waiter.resume(returning: nil) }
     }
 }

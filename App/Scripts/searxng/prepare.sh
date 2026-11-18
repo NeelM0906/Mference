@@ -29,6 +29,19 @@ done
 
 # shellcheck source=pins.env
 source "$HERE/pins.env"
+PY_MINOR="${PYTHON_VERSION%.*}"                 # 3.12
+
+# Refuse to delete anything but a SearXNG output directory.
+case "$OUT" in
+    */SearXNG) ;;
+    *) echo "--out must end in /SearXNG (got: $OUT)" >&2; exit 64 ;;
+esac
+[[ "$OUT" != "/SearXNG" ]] || { echo "refusing --out /SearXNG" >&2; exit 64; }
+
+# Temporary directories are removed however the script ends.
+TEMP_DIRS=()
+cleanup() { for dir in "${TEMP_DIRS[@]+"${TEMP_DIRS[@]}"}"; do rm -rf "$dir"; done; }
+trap cleanup EXIT
 
 sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
 
@@ -43,6 +56,7 @@ fetch() {
     rm -f "$target"
     local staging file
     staging="$(mktemp -d "$CACHE/.download.XXXXXX")"
+    TEMP_DIRS+=("$staging")
     file="$staging/$(basename "$name")"
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
         --output "$file" "$url"
@@ -89,7 +103,7 @@ done < "$HERE/wheels.lock"
 # SearXNG's package, unmodified, plus the version file its own `freeze`
 # command would write (the app has no git checkout to ask).
 EXTRACT="$(mktemp -d)"
-trap 'rm -rf "$EXTRACT"' EXIT
+TEMP_DIRS+=("$EXTRACT")
 tar -xzf "$CACHE/$SEARXNG_FILE" -C "$EXTRACT"
 SRC="$EXTRACT/searxng-$SEARXNG_COMMIT"
 cp -R "$SRC/searx" "$SITE/searx"
@@ -106,16 +120,28 @@ EOF
 # The corresponding source, shipped alongside (AGPL-3.0-or-later).
 cp "$CACHE/$SEARXNG_FILE" "$OUT/source/$SEARXNG_FILE"
 cp "$SRC/LICENSE" "$OUT/licenses/SearXNG-AGPL-3.0.txt"
-cp "$OUT/python/lib/python3.12/LICENSE.txt" "$OUT/licenses/Python-PSF.txt" 2>/dev/null || true
+cp "$OUT/python/lib/python$PY_MINOR/LICENSE.txt" "$OUT/licenses/Python-PSF.txt"
+cp "$APP_DIR/Resources/SearXNG/THIRD_PARTY_NOTICES.md" "$OUT/licenses/THIRD_PARTY_NOTICES.md"
+# Every wheel's own licence files, gathered in one place.
+for dist in "$SITE"/*.dist-info; do
+    name="$(basename "$dist" .dist-info)"
+    while IFS= read -r -d '' file; do
+        mkdir -p "$OUT/licenses/wheels/$name"
+        cp "$file" "$OUT/licenses/wheels/$name/"
+    done < <(find "$dist" -type f \( -iname 'LICEN*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -path '*/licenses/*' \) -print0)
+done
 cp "$APP_DIR/Resources/SearXNG/settings.yml" "$OUT/settings.yml"
 cp "$APP_DIR/Resources/SearXNG/SOURCES.md" "$OUT/SOURCES.md"
 
-# Drop what the runtime never uses (pip, tests, idle, tkinter) to keep the bundle small.
+# Drop what the runtime never uses (pip, tests, IDLE, Tcl/Tk) to keep the bundle small.
+STDLIB="$OUT/python/lib/python$PY_MINOR"
 rm -rf "$SITE"/pip "$SITE"/pip-*.dist-info \
-       "$OUT/python/lib/python3.12/test" "$OUT/python/lib/python3.12/idlelib" \
-       "$OUT/python/lib/python3.12/tkinter" "$OUT/python/lib/python3.12/turtledemo" \
+       "$STDLIB/test" "$STDLIB/idlelib" "$STDLIB/tkinter" "$STDLIB/turtledemo" "$STDLIB/turtle.py" \
+       "$STDLIB"/lib-dynload/_tkinter.* \
+       "$OUT"/python/lib/libtcl* "$OUT"/python/lib/tcl* "$OUT"/python/lib/tk* \
+       "$OUT"/python/lib/itcl* "$OUT"/python/lib/thread* \
        "$OUT/python/share"
-"$PY" -I -m compileall -q -j 0 "$SITE" "$OUT/python/lib/python3.12" >/dev/null || true
+"$PY" -I -m compileall -q -j 0 -x 'lib2to3/tests' "$SITE" "$STDLIB" >/dev/null
 
 cat > "$OUT/MANIFEST" <<EOF
 python=$PYTHON_VERSION+$PYTHON_RELEASE sha256=$PYTHON_SHA256

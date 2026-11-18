@@ -5,7 +5,7 @@ import Synchronization
 /// (`Web/Resources/web-answers.v<N>.json`, spec 4.5.3), so the evaluation
 /// program can load exactly what the app sends.
 public struct WebAnswersSpec: Sendable {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public let version: Int
     public let systemPromptTemplate: String
@@ -72,6 +72,11 @@ public final class WebToolbox: ChatToolbox {
     private let state = Mutex(State())
     /// Pages read per answer.
     public static let maxPages = 4
+    /// Longest query sent to SearXNG.
+    public static let maxQueryLength = 200
+    /// Markers around everything taken from the web (prompt v2: untrusted).
+    static let contentStart = "<<<WEB CONTENT>>>"
+    static let contentEnd = "<<<END WEB CONTENT>>>"
 
     private struct State {
         var numbers: [String: Int] = [:]
@@ -96,10 +101,11 @@ public final class WebToolbox: ChatToolbox {
     public func run(_ call: ToolCall) async -> ToolOutcome {
         switch call.name {
         case "web_search":
-            guard let query = call.arguments[string: "query"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !query.isEmpty else {
+            guard let raw = call.arguments[string: "query"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else {
                 return failure("web_search needs a non-empty \"query\".")
             }
+            let query = String(raw.split(whereSeparator: \.isNewline).joined(separator: " ").prefix(Self.maxQueryLength))
             return await search(query)
         case "open_page":
             guard let string = call.arguments[string: "url"], let url = URL(string: string) else {
@@ -124,17 +130,18 @@ public final class WebToolbox: ChatToolbox {
             guard !results.isEmpty else {
                 return ToolOutcome(content: "No results for “\(query)”.", steps: [.search(query, results: 0)])
             }
-            var lines = ["Results for “\(query)”:"]
+            var lines = ["Results for “\(query)”:", Self.contentStart]
             var cited: [ChatCitation] = []
             for result in results {
                 http.allowlist.allowPage(result.url)
                 let citation = register(result.url, title: result.title, snippet: result.content)
                 cited.append(citation)
                 lines.append("")
-                lines.append("[\(citation.number)] \(result.title)")
+                lines.append("[\(citation.number)] \(Self.neutralize(result.title))")
                 lines.append(result.url.absoluteString)
-                if let snippet = result.content { lines.append(String(snippet.prefix(300))) }
+                if let snippet = result.content { lines.append(Self.neutralize(String(snippet.prefix(300)))) }
             }
+            lines.append(Self.contentEnd)
             return ToolOutcome(content: lines.joined(separator: "\n"),
                                steps: [.search(query, results: results.count)], citations: cited)
         } catch {
@@ -155,8 +162,9 @@ public final class WebToolbox: ChatToolbox {
         do {
             let page = try await reader.read(url)
             let citation = register(url, title: page.title, snippet: nil)
-            var content = "[\(citation.number)] \(page.title ?? citation.title)\n\(url.absoluteString)\n\n\(page.text)"
-            if page.isTruncated { content += "\n\n(The page continues; this is the first part.)" }
+            var content = "Page [\(citation.number)]: \(url.absoluteString)\n\(Self.contentStart)\n"
+            content += "\(page.title ?? citation.title)\n\n\(Self.neutralize(page.text))\n\(Self.contentEnd)"
+            if page.isTruncated { content += "\n(The page continues; this is the first part.)" }
             return ToolOutcome(content: content, steps: [.readPage(url, title: page.title)], citations: [citation])
         } catch {
             return failure(Self.message(error))
@@ -181,6 +189,11 @@ public final class WebToolbox: ChatToolbox {
             state.citations[number] = citation
             return citation
         }
+    }
+
+    /// Page text cannot close the untrusted-content block early.
+    public static func neutralize(_ text: String) -> String {
+        text.replacingOccurrences(of: "<<<", with: "‹‹‹").replacingOccurrences(of: ">>>", with: "›››")
     }
 
     private func failure(_ message: String) -> ToolOutcome {
@@ -222,13 +235,25 @@ public final class WebAnswers: ChatToolboxProvider {
     private let spec: WebAnswersSpec?
     private let protocolClasses: [AnyClass]?
 
+    /// Lives as long as the app (one `WebAnswers` per app).
+    private var terminationObserver: (any NSObjectProtocol)?
+
     public init(settings: WebSearchSettings = WebSearchSettings(),
                 runtime: SearXNGRuntime? = SearXNGRuntime.locate(),
                 protocolClasses: [AnyClass]? = nil) {
         self.settings = settings
-        self.process = runtime.map { SearXNGProcess(runtime: $0) }
+        let process = runtime.map { SearXNGProcess(runtime: $0) }
+        self.process = process
         self.spec = try? WebAnswersSpec.load()
         self.protocolClasses = protocolClasses
+        // Belt and braces for quit: the shell awaits `shutdown()`; if the app
+        // terminates without it, SearXNG still gets SIGTERM synchronously.
+        // (`NSApplication.willTerminateNotification`, by name: Core does not
+        // import AppKit.)
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name("NSApplicationWillTerminateNotification"), object: nil, queue: nil) { _ in
+            process?.terminateNow()
+        }
     }
 
     public var needsWebConsent: Bool { !settings.isEnabled }

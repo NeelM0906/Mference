@@ -40,7 +40,7 @@ struct Composer: View {
             Button("Turn on web search") { model.confirmWebConsent() }
             Button("Not now", role: .cancel) { model.declineWebConsent() }
         } message: {
-            Text("Mference searches through SearXNG, running on this Mac. Only your search queries leave it; the pages it finds are read here. You can turn this off in Settings > Privacy.")
+            Text("Searches go to search engines through SearXNG, running on this Mac, and the pages the model reads are fetched from this Mac. The model and your conversation stay here. You can turn this off in Settings > Privacy.")
         }
         .onKeyPress(.escape) {
             guard pickerOpen else { return .ignored }

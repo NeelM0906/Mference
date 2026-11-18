@@ -96,7 +96,7 @@ public struct PageReader: Sendable {
             return Self.bound(ReadablePage(url: url, title: nil, text: Self.collapse(html), isTruncated: false),
                               to: maxCharacters)
         }
-        let extracted = HTMLText.extract(html)
+        let extracted = try HTMLText.extract(html, checkCancellation: true)
         return Self.bound(ReadablePage(url: url, title: extracted.title, text: extracted.text, isTruncated: false),
                           to: maxCharacters)
     }
@@ -124,45 +124,136 @@ public struct PageReader: Sendable {
     }
 }
 
-/// A small, forgiving HTML-to-text pass: drops scripts, styles and page
-/// chrome (nav, header, footer, aside, forms), keeps block structure as
-/// line breaks, decodes entities.
+/// A small, forgiving HTML-to-text pass in one linear scan over the bytes:
+/// drops scripts, styles and page chrome (nav, header, footer, aside, forms),
+/// keeps block structure as line breaks, decodes entities, and prefers the
+/// page's <main> or <article> when it has a substantial one. Input is capped
+/// (`maxInputBytes`) and the scan checks for cancellation as it goes.
 public enum HTMLText {
+    /// HTML bytes examined per page (review finding 6).
+    public static let maxInputBytes = 512 * 1024
+
+    static let skipped: Set<String> = ["script", "style", "noscript", "svg", "nav", "header", "footer", "aside",
+                                       "form", "template", "iframe", "select", "button"]
+    static let blocks: Set<String> = ["br", "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "section",
+                                      "article", "blockquote", "pre", "table", "hr", "ul", "ol", "dl", "dd", "dt",
+                                      "main", "figure", "figcaption"]
+
     public static func extract(_ html: String) -> (title: String?, text: String) {
-        var source = html
-        let title = firstMatch(#"<title[^>]*>(.*?)</title>"#, in: source).map { decodeEntities(stripTags($0)) }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        // Prefer <main> or <article> when the page has one.
-        if let main = firstMatch(#"<main[^>]*>(.*?)</main>"#, in: source)
-            ?? firstMatch(#"<article[^>]*>(.*?)</article>"#, in: source),
-           main.count > 500 {
-            source = main
-        }
-        for tag in ["script", "style", "noscript", "svg", "nav", "header", "footer", "aside", "form", "template", "iframe"] {
-            source = source.replacingOccurrences(of: "(?s)<\(tag)\\b[^>]*>.*?</\(tag)>", with: " ",
-                                                 options: [.regularExpression, .caseInsensitive])
-        }
-        source = source.replacingOccurrences(of: "(?s)<!--.*?-->", with: " ", options: .regularExpression)
-        source = source.replacingOccurrences(
-            of: #"<(br|/p|/div|/li|/h[1-6]|/tr|/section|/article|/blockquote|/pre|/table|hr)\b[^>]*>"#,
-            with: "\n", options: [.regularExpression, .caseInsensitive])
-        source = source.replacingOccurrences(of: #"<li\b[^>]*>"#, with: "\n• ",
-                                             options: [.regularExpression, .caseInsensitive])
-        source = source.replacingOccurrences(of: #"</t[dh]>"#, with: " | ",
-                                             options: [.regularExpression, .caseInsensitive])
-        let text = PageReader.collapse(decodeEntities(stripTags(source)))
-        return (title?.isEmpty == true ? nil : title, text)
+        (try? extract(html, checkCancellation: false)) ?? (nil, "")
     }
 
-    static func firstMatch(_ pattern: String, in text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              match.numberOfRanges > 1, let range = Range(match.range(at: 1), in: text) else { return nil }
-        return String(text[range])
-    }
+    public static func extract(_ html: String, checkCancellation: Bool) throws -> (title: String?, text: String) {
+        let bytes = Array(html.utf8.prefix(maxInputBytes))
+        let count = bytes.count
+        var output: [UInt8] = []
+        output.reserveCapacity(min(count, 256 * 1024))
+        var title: [UInt8] = []
+        var inTitle = false
+        var mainStart: Int?
+        var mainEnd: Int?
+        var mainDepth = 0
+        var i = 0
 
-    static func stripTags(_ text: String) -> String {
-        text.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        func lower(_ byte: UInt8) -> UInt8 { (byte >= 65 && byte <= 90) ? byte + 32 : byte }
+        func isNameByte(_ byte: UInt8) -> Bool {
+            (byte >= 97 && byte <= 122) || (byte >= 65 && byte <= 90) || (byte >= 48 && byte <= 57) || byte == 45
+        }
+        func append(_ text: String) { output.append(contentsOf: text.utf8) }
+
+        while i < count {
+            if checkCancellation, i & 0xFFFF == 0 { try Task.checkCancellation() }
+            let byte = bytes[i]
+            guard byte == 60 /* < */ else {
+                if inTitle { title.append(byte) } else { output.append(byte) }
+                i += 1
+                continue
+            }
+            // Comment: skip to "-->".
+            if i + 3 < count, bytes[i + 1] == 33, bytes[i + 2] == 45, bytes[i + 3] == 45 {
+                var j = i + 4
+                while j + 2 < count, !(bytes[j] == 45 && bytes[j + 1] == 45 && bytes[j + 2] == 62) { j += 1 }
+                i = min(j + 3, count)
+                continue
+            }
+            var j = i + 1
+            let closing = j < count && bytes[j] == 47 /* / */
+            if closing { j += 1 }
+            var name: [UInt8] = []
+            while j < count, isNameByte(bytes[j]), name.count < 16 {
+                name.append(lower(bytes[j]))
+                j += 1
+            }
+            // Find the end of the tag, skipping quoted attribute values.
+            var quote: UInt8 = 0
+            while j < count {
+                let c = bytes[j]
+                if quote != 0 { if c == quote { quote = 0 } }
+                else if c == 34 || c == 39 { quote = c }
+                else if c == 62 /* > */ { break }
+                j += 1
+            }
+            let tagEnd = min(j + 1, count)
+            guard !name.isEmpty else {
+                // A bare "<" in text.
+                output.append(byte)
+                i += 1
+                continue
+            }
+            let tag = String(decoding: name, as: UTF8.self)
+            if !closing, skipped.contains(tag) {
+                // Skip to the matching close tag (no nesting needed for these).
+                let close = Array("</\(tag)".utf8)
+                var k = tagEnd
+                var found = count
+                while k + close.count <= count {
+                    if bytes[k] == 60 {
+                        var matches = true
+                        for (offset, expected) in close.enumerated() where lower(bytes[k + offset]) != expected {
+                            matches = false
+                            break
+                        }
+                        if matches { found = k; break }
+                    }
+                    k += 1
+                }
+                var after = found
+                while after < count, bytes[after] != 62 { after += 1 }
+                i = min(after + 1, count)
+                output.append(32)
+                continue
+            }
+            switch tag {
+            case "title":
+                inTitle = !closing
+            case "main", "article":
+                if !closing {
+                    if mainStart == nil, mainDepth == 0 { mainStart = output.count }
+                    mainDepth += 1
+                } else if mainDepth > 0 {
+                    mainDepth -= 1
+                    if mainDepth == 0, mainEnd == nil { mainEnd = output.count }
+                }
+                append("\n")
+            case "li":
+                append(closing ? "\n" : "\n• ")
+            case "td", "th":
+                if closing { append(" | ") }
+            default:
+                if blocks.contains(tag) { append("\n") } else { output.append(32) }
+            }
+            i = tagEnd
+        }
+
+        var body = output
+        if let start = mainStart {
+            let end = mainEnd ?? output.count
+            if end - start > 500 { body = Array(output[start..<end]) }
+        }
+        let text = PageReader.collapse(decodeEntities(String(decoding: body, as: UTF8.self)))
+        let titleText = decodeEntities(String(decoding: title, as: UTF8.self))
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return (titleText.isEmpty ? nil : titleText, text)
     }
 
     static let entities: [String: String] = [

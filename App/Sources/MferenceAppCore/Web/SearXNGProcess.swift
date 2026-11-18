@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 
 /// Where the bundled SearXNG runtime lives (built by
 /// `App/Scripts/searxng/prepare.sh`, copied by `bundle.sh`).
@@ -39,8 +40,12 @@ public struct SearXNGRuntime: Sendable, Hashable {
 
 /// Runs the bundled SearXNG as its own process on `127.0.0.1:<random port>`
 /// (spec 4.5): JSON output on, limiter off, a new secret per launch. Started
-/// only while web search is on, health-checked, restarted when it dies, and
-/// stopped on quit. A pid file lets the next launch clean up after a crash.
+/// only while web search is on, health-checked, restarted when it dies (with
+/// a growing pause after failures), stopped when web is turned off and on
+/// quit. A stop always wins over a launch still in progress. Each launch gets
+/// its own settings file naming a one-time instance token, which is checked
+/// through `/config` so the app never talks to some other server that took
+/// the port. A pid file lets the next launch clean up after a crash.
 public actor SearXNGProcess {
     public enum State: Sendable, Hashable {
         case stopped
@@ -54,10 +59,14 @@ public actor SearXNGProcess {
     private let pidFile: URL
     private let startTimeout: Duration
     private var process: Process?
+    private var launchSettings: URL?
     private var starting: Task<URL, any Error>?
-    private var restarts = 0
-    /// Launch attempts in a row before giving up until the next request.
-    public static let maxRestarts = 3
+    /// Whether SearXNG should be running; `stop()` clears it.
+    private var wanted = false
+    private var failures = 0
+    private var retryAfter: ContinuousClock.Instant?
+    /// The child's pid, readable synchronously for `terminateNow()`.
+    private nonisolated let livePID = Mutex<pid_t?>(nil)
 
     public init(runtime: SearXNGRuntime,
                 pidFile: URL = AppStorageLocation.applicationSupport.appending(path: "searxng.pid"),
@@ -65,24 +74,35 @@ public actor SearXNGProcess {
         self.runtime = runtime
         self.pidFile = pidFile
         self.startTimeout = startTimeout
+        // A SearXNG left by a crashed app is cleaned up as soon as the app
+        // starts, not only when web is next used.
+        Self.killStale(pidFile: pidFile, python: runtime.python)
     }
 
     /// The base URL of a healthy SearXNG, starting or restarting it if needed.
     public func ensureRunning() async throws -> URL {
+        wanted = true
         if case .running(let url) = state, process?.isRunning == true, await Self.isHealthy(url) {
             return url
         }
         if let starting { return try await starting.value }
+        if let retryAfter, ContinuousClock.now < retryAfter {
+            throw WebError.searchUnavailable("SearXNG failed to start; trying again shortly.")
+        }
         let task = Task { try await self.launch() }
         starting = task
         defer { starting = nil }
         do {
             let url = try await task.value
-            restarts = 0
+            failures = 0
+            retryAfter = nil
             return url
         } catch {
-            restarts += 1
-            state = .failed(Self.describe(error))
+            if !(error is CancellationError) {
+                failures += 1
+                retryAfter = ContinuousClock.now + .seconds(min(60, 2 << min(failures, 5)))
+                state = .failed(Self.describe(error))
+            }
             throw error
         }
     }
@@ -90,36 +110,45 @@ public actor SearXNGProcess {
     /// Starts in the background (web turned on), ignoring failures; the next
     /// search reports them.
     public func warmUp() {
+        wanted = true
         Task { _ = try? await self.ensureRunning() }
     }
 
-    /// Stops the process (web turned off, quit).
+    /// Stops the process (web turned off, quit). Wins over a launch in
+    /// progress, and clears the failure pause.
     public func stop() async {
+        wanted = false
+        failures = 0
+        retryAfter = nil
         starting?.cancel()
-        guard let process else {
-            state = .stopped
-            return
+        if let process {
+            self.process = nil
+            await terminate(process)
         }
-        self.process = nil
+        cleanUpLaunchFiles()
         state = .stopped
-        await terminate(process)
-        try? FileManager.default.removeItem(at: pidFile)
+    }
+
+    /// Synchronous last resort for app termination, where nothing can be
+    /// awaited: sends SIGTERM to the running SearXNG, if any.
+    public nonisolated func terminateNow() {
+        guard let pid = livePID.withLock({ $0 }) else { return }
+        kill(pid, SIGTERM)
     }
 
     // MARK: Launch
 
     private func launch() async throws -> URL {
-        guard restarts < Self.maxRestarts else {
-            throw WebError.searchUnavailable("SearXNG did not start after \(Self.maxRestarts) tries.")
-        }
         if let process {
             self.process = nil
             await terminate(process)
         }
-        Self.killStale(pidFile: pidFile, python: runtime.python)
+        try Task.checkCancellation()
         state = .starting
         let port = try Self.freeLoopbackPort()
         let base = URL(string: "http://127.0.0.1:\(port)")!
+        let token = Self.randomSecret()
+        let settings = try writeLaunchSettings(token: token)
         let process = Process()
         process.executableURL = runtime.python
         // -I: isolated (no user site, no PYTHON* env, no cwd on the path);
@@ -127,7 +156,7 @@ public actor SearXNGProcess {
         process.arguments = ["-I", "-B", "-m", "searx.webapp"]
         process.currentDirectoryURL = runtime.root
         process.environment = [
-            "SEARXNG_SETTINGS_PATH": runtime.settings.path,
+            "SEARXNG_SETTINGS_PATH": settings.path,
             "SEARXNG_PORT": String(port),
             "SEARXNG_BIND_ADDRESS": "127.0.0.1",
             "SEARXNG_SECRET": Self.randomSecret(),
@@ -147,53 +176,100 @@ public actor SearXNGProcess {
             Task { await self?.processEnded(pid: pid) }
         }
         self.process = process
+        livePID.withLock { $0 = pid }
         try? FileManager.default.createDirectory(at: pidFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? String(process.processIdentifier).write(to: pidFile, atomically: true, encoding: .utf8)
+        try? String(pid).write(to: pidFile, atomically: true, encoding: .utf8)
 
-        let deadline = ContinuousClock.now + startTimeout
-        while ContinuousClock.now < deadline {
-            try Task.checkCancellation()
-            guard process.isRunning else {
-                throw WebError.searchUnavailable("SearXNG exited while starting (status \(process.terminationStatus)).")
+        do {
+            let deadline = ContinuousClock.now + startTimeout
+            while true {
+                try Task.checkCancellation()
+                guard wanted else { throw CancellationError() }
+                guard process.isRunning else {
+                    throw WebError.searchUnavailable("SearXNG exited while starting (status \(process.terminationStatus)).")
+                }
+                if await Self.isOurs(base, token: token) { break }
+                guard ContinuousClock.now < deadline else {
+                    throw WebError.searchUnavailable("SearXNG did not answer within \(startTimeout).")
+                }
+                try await Task.sleep(for: .milliseconds(150))
             }
-            if await Self.isHealthy(base) {
-                state = .running(base)
-                return base
-            }
-            try await Task.sleep(for: .milliseconds(150))
+            // A stop may have arrived while the last health check ran.
+            guard wanted, !Task.isCancelled else { throw CancellationError() }
+        } catch {
+            if self.process === process { self.process = nil }
+            await terminate(process)
+            cleanUpLaunchFiles()
+            state = .stopped
+            throw error
         }
-        await terminate(process)
-        self.process = nil
-        throw WebError.searchUnavailable("SearXNG did not answer within \(startTimeout).")
+        state = .running(base)
+        return base
     }
 
     private func processEnded(pid: pid_t) {
+        livePID.withLock { if $0 == pid { $0 = nil } }
         guard process?.processIdentifier == pid else { return }
         process = nil
         state = .stopped
         try? FileManager.default.removeItem(at: pidFile)
     }
 
-    // MARK: Helpers
-
-    static func isHealthy(_ base: URL) async -> Bool {
-        var request = URLRequest(url: base.appending(path: "healthz"))
-        request.timeoutInterval = 1
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.connectionProxyDictionary = [:]
-        let session = URLSession(configuration: configuration)
-        defer { session.finishTasksAndInvalidate() }
-        guard let (_, response) = try? await session.data(for: request) else { return false }
-        return (response as? HTTPURLResponse)?.statusCode == 200
-    }
-
     private func terminate(_ process: Process) async {
+        defer {
+            livePID.withLock { if $0 == process.processIdentifier { $0 = nil } }
+            try? FileManager.default.removeItem(at: pidFile)
+        }
         guard process.isRunning else { return }
         process.terminate()
         for _ in 0..<20 where process.isRunning {
             try? await Task.sleep(for: .milliseconds(100))
         }
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
+
+    /// Our settings plus this launch's token as the instance name.
+    private func writeLaunchSettings(token: String) throws -> URL {
+        cleanUpLaunchFiles()
+        var text = try String(contentsOf: runtime.settings, encoding: .utf8)
+        text = text.replacingOccurrences(of: "instance_name: \"Mference web search\"",
+                                         with: "instance_name: \"mference-\(token)\"")
+        let url = FileManager.default.temporaryDirectory.appending(path: "mference-searxng-\(UUID().uuidString).yml")
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        launchSettings = url
+        return url
+    }
+
+    private func cleanUpLaunchFiles() {
+        if let launchSettings { try? FileManager.default.removeItem(at: launchSettings) }
+        launchSettings = nil
+    }
+
+    // MARK: Helpers
+
+    static func isHealthy(_ base: URL) async -> Bool {
+        await fetch(base.appending(path: "healthz")) != nil
+    }
+
+    /// Healthy, and `/config` names this launch's token: the server on the
+    /// port is the one this launch started.
+    static func isOurs(_ base: URL, token: String) async -> Bool {
+        guard await isHealthy(base), let data = await fetch(base.appending(path: "config")),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return (object["instance_name"] as? String) == "mference-\(token)"
+    }
+
+    static func fetch(_ url: URL) async -> Data? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
     }
 
     /// Kills a SearXNG left running by a crashed app, only if the pid still
@@ -235,7 +311,7 @@ public actor SearXNGProcess {
     }
 
     static func randomSecret() -> String {
-        (0..<32).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
+        (0..<16).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max)) }.joined()
     }
 
     static func describe(_ error: any Error) -> String {
