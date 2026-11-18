@@ -140,8 +140,8 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
 }
 
 /// Thinking switches as generic chat clients send them. `preserve_thinking`
-/// is accepted for compatibility; Gemma normalizes it to its source history
-/// policy, while Qwen's source template always preserves reasoning history.
+/// is accepted for compatibility; Qwen's source template always preserves
+/// reasoning history.
 public struct OpenAIChatTemplateKwargs: Codable, Equatable, Sendable {
     public let enableThinking: Bool?
     public let preserveThinking: Bool?
@@ -322,15 +322,13 @@ public struct ValidatedChatRequest: Sendable {
 public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
-                                dialect: ChatDialect = .gemma,
-                                swiftQwen: Bool? = nil,
+                                dialect: ChatDialect = .chatml,
                                 acceptsReasoningEffort: Bool? = nil,
                                 qwenReasoning: Bool? = nil,
                                 generationDefaults: GenerationConfig = .defaults) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
-        let isSwiftQwen = swiftQwen ?? (modelID.split(separator: "@").first == Substring(CheckpointIdentity.swiftQwen38))
-        let supportsQwenEffort = qwenReasoning ?? (isSwiftQwen ||
-            modelID.split(separator: "@").first == Substring(CheckpointIdentity.baseQwen38))
+        let supportsQwenEffort = qwenReasoning
+            ?? (modelID.split(separator: "@").first == Substring(CheckpointIdentity.baseQwen38))
         let thinkingSwitch = request.chatTemplateKwargs?.enableThinking
         if !(acceptsReasoningEffort ?? supportsQwenEffort) {
             if request.reasoningEffort != nil {
@@ -350,7 +348,7 @@ public enum OpenAIRequestValidator {
         // `enable_thinking: true` is the source template's default effort.
         let effort = explicitEffort
             ?? thinkingSwitch.map { $0 ? QwenReasoningEffort.xhigh : .off }
-        if (isSwiftQwen || (supportsQwenEffort && effort != nil)),
+        if supportsQwenEffort && effort != nil,
            request.messages.contains(where: { $0.role == "developer" }) {
             throw invalid("Qwen 3.8 source-template requests require leading system guidance; developer messages are not supported",
                           "messages", "unsupported_role")
@@ -419,7 +417,7 @@ public enum OpenAIRequestValidator {
         // 32,768-token output budget in thinking mode.
         let thinkingRequested = effort != nil && effort != .off
         let maximum = request.maxCompletionTokens ?? request.maxTokens
-            ?? (thinkingRequested && dialect != .gemma ? 32_768 : 4096)
+            ?? (thinkingRequested ? 32_768 : 4096)
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
@@ -455,10 +453,7 @@ public enum OpenAIRequestValidator {
                                       minP: minP,
                                       seed: request.seed,
                                       stopStrings: request.stop?.values ?? [])
-        // Gemma HTTP clients share one history policy: retain current-turn
-        // tool reasoning, then let the selected source template strip it after
-        // a new user message. Normalize before rendering AND cache matching.
-        let preserveThinking = dialect == .gemma ? false : request.chatTemplateKwargs?.preserveThinking ?? false
+        let preserveThinking = request.chatTemplateKwargs?.preserveThinking ?? false
         return ValidatedChatRequest(reasoningEffort: effort,
                                     preserveThinking: preserveThinking,
                                     messages: messages,
@@ -503,17 +498,9 @@ public enum OpenAIRequestValidator {
                         throw invalid("tool schema properties must be an object",
                                       "tools", "invalid_tool_schema")
                     }
-                    for (key, definition) in definitions {
-                        // Gemma's tool-call DSL cannot round-trip arbitrary
-                        // parameter names; ChatML and DeepSeek tool calls are
-                        // free-form.
-                        guard dialect != .gemma
-                                || GemmaToolCallParser.isRepresentableObjectKey(key) else {
-                            throw invalid(
-                                "tool parameter names may contain only letters, numbers, _, -, ., and $",
-                                "tools",
-                                "invalid_tool_schema")
-                        }
+                    for (_, definition) in definitions {
+                        // ChatML and MiniCPM tool calls take free-form
+                        // parameter names.
                         try validateSchemaKeys(definition, dialect: dialect)
                     }
                 } else {
@@ -546,12 +533,9 @@ public enum OpenAIRequestValidator {
             // 'Unexpected message role.' for anything outside
             // system/user/assistant/tool. `developer` is OpenAI's newer name
             // for the same author-supplied guidance, so fold it into `system`
-            // here instead of letting the render fail. DeepSeek's native
-            // render frames `developer` like a user turn, which is not what
-            // guidance means, so it folds too. Gemma's template names
-            // `developer` explicitly, so it stays distinct there.
+            // here instead of letting the render fail.
             let role: MFTokenizer.Role =
-                (dialect != .gemma && declared == .developer) ? .system : declared
+                declared == .developer ? .system : declared
             if role == .system || role == .developer {
                 guard !sawConversationMessage else {
                     throw invalid("system or developer guidance must precede the conversation",
@@ -576,9 +560,7 @@ public enum OpenAIRequestValidator {
                     throw invalid("historical tool arguments must be a JSON object",
                                   "messages", "invalid_tool_arguments")
                 }
-                guard dialect != .gemma
-                        || (try? arguments.gemmaToolArgumentBody()) != nil,
-                      (try? arguments.jinjaSendableValue()) != nil else {
+                guard (try? arguments.jinjaSendableValue()) != nil else {
                     throw invalid(
                         "historical tool arguments cannot be represented exactly",
                         "messages",

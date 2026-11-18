@@ -39,7 +39,7 @@ import Testing
                             breakdown: PrefillStageBreakdown?) async throws
         -> (prefill: [UInt16], decode: [UInt16]) {
         let gemma = family == "gemma"
-        let config: ArchConfig = gemma ? .gemma4Toy(topKExperts: 8) : .qwen36Toy()
+        let config: ArchConfig = gemma ? .defaultsToy(topKExperts: 8) : .qwen36Toy()
         let directory = try (gemma
             ? ModelLoaderTests.writeToySynthetic(config: config, finiteNorms: true)
             : QwenToySynthetic.write())

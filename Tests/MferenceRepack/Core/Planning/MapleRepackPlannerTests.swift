@@ -147,7 +147,7 @@ struct MapleRepackPlannerTests {
             "lm_head_flash.head.weight", numLayers: 24, family: .maple,
             includeMapleFlashHead: true) == .excludedMultimodal)
         #expect(RepackPlanner.classify(
-            "lm_head_flash.token_map", numLayers: 24, family: .deepseekV4Flash) == .unknown)
+            "lm_head_flash.token_map", numLayers: 24, family: .minicpm5) == .unknown)
     }
 
     @Test func mapleTernaryFixturePlansResidentWideningAndRoutedSlices() throws {

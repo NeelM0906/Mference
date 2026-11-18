@@ -9,7 +9,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap-retry-url")
     let remoteOutput = tmpPathForRemote("remote-retry-url")
     defer { cleanUpRemote([snapshotDir, remoteOutput]) }
-    let snap = try SyntheticSnapshot.build(at: snapshotDir, seed: 0x8877_6655_4433)
+    let snap = try SyntheticSnapshot.buildQwen(at: snapshotDir, seed: 0x8877_6655_4433)
 
     resetFakeHF()
     FakeHFURLProtocol.files = try remoteFiles(
@@ -44,7 +44,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap-retry-500")
     let remoteOutput = tmpPathForRemote("remote-retry-500")
     defer { cleanUpRemote([snapshotDir, remoteOutput]) }
-    let snap = try SyntheticSnapshot.build(at: snapshotDir, seed: 0x9988_7766_5544)
+    let snap = try SyntheticSnapshot.buildQwen(at: snapshotDir, seed: 0x9988_7766_5544)
 
     resetFakeHF()
     FakeHFURLProtocol.files = try remoteFiles(
@@ -78,7 +78,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap-retry-404")
     let remoteOutput = tmpPathForRemote("remote-retry-404")
     defer { cleanUpRemote([snapshotDir, remoteOutput]) }
-    let snap = try SyntheticSnapshot.build(at: snapshotDir, seed: 0xAA99_8877_6655)
+    let snap = try SyntheticSnapshot.buildQwen(at: snapshotDir, seed: 0xAA99_8877_6655)
 
     resetFakeHF()
     FakeHFURLProtocol.files = try remoteFiles(
@@ -105,7 +105,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap-retry-truncated")
     let remoteOutput = tmpPathForRemote("remote-retry-truncated")
     defer { cleanUpRemote([snapshotDir, remoteOutput]) }
-    let snap = try SyntheticSnapshot.build(at: snapshotDir, seed: 0xBBAA_9988_7766)
+    let snap = try SyntheticSnapshot.buildQwen(at: snapshotDir, seed: 0xBBAA_9988_7766)
 
     resetFakeHF()
     FakeHFURLProtocol.files = try remoteFiles(

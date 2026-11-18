@@ -18,35 +18,41 @@ breaks the suite; the failure names the undocumented fields.
 
 The enumeration is of axes, not of behavior. What a kernel does with an
 axis lives in the family's own page —
-[Gemma 4](../README.md), [DeepSeek-V4-Flash](DEEPSEEK_V4_FLASH.md),
-[Inkling-Small](INKLING_SMALL.md), [Qwen 3.8](QWEN38_LONG_CONTEXT.md),
-    [Flint-40B-A2.5B](families/FLINT.md),
-[MiniCPM5](families/MINICPM5.md),
-[GLM-5.3-Flash](families/GLM53_FLASH.md) —
+[Qwen 3.6](QWEN36_PERFORMANCE.md), [Qwen 3.8](QWEN38_LONG_CONTEXT.md),
+[MiniCPM5](families/MINICPM5.md) —
 and in [System design](SYSTEM_DESIGN.md).
+
+**Retired families.** Gemma 4 (with its QAT install), DeepSeek-V4-Flash,
+Inkling-Small, Flint, Qwen3.8-Flash-Next (base and Unsloth GGUF) and GLM-5.3-Flash
+were retired on 2026-11-18 ([Retired families](RETIRED_FAMILIES.md)): their
+baselines, `ModelFamily` cases and runners are gone. Their axes stay in the
+manifest schema, so the tables below keep their columns (G4, DSV4, INK, FLT,
+FNX, FNU, G53) as the values those baselines had at `mference-app` 8ff588c.
+The G4 column still matters: it is the `ArchConfig.init` default an absent
+manifest key validates against.
 
 ## Reading the tables
 
-Gemma 4 is the baseline. Its values are the `ArchConfig.init` defaults for
-every axis that has one, so a legacy manifest that omits the family
-extensions still validates as Gemma 4. Each table gives the Gemma 4 value
-and then only the families that differ from it. Values are the compiled
+The `ArchConfig.init` defaults are the original install format's values,
+Gemma 4's (G4), for every axis that has one, so a manifest that omits a
+family-extension key validates against that value. Each table gives the G4
+value and then only the families that differ from it. Values are the compiled
 baselines, not a supported range: an axis with one observed value is
 documented as what has been exercised, not as what is permitted.
 
 | Tag | Family | `arch.family` | Baseline constant |
 | --- | --- | --- | --- |
-| G4 | Gemma 4 26B-A4B | `gemma4` (absent in legacy manifests) | `ArchConfig.gemma4_26B_A4B` |
 | Q36 | Qwen 3.6 35B-A3B | `qwen36` | `ArchConfig.qwen36_35B_A3B` |
 | Q38 | Qwen 3.8 27B | `qwen38` | `ArchConfig.qwen38_27B` |
-| DSV4 | DeepSeek-V4-Flash 284B-A13B | `deepseekV4Flash` | `ArchConfig.deepseekV4Flash_284B_A13B` |
-| INK | Inkling-Small 276B-A12B | `inklingSmall` | `ArchConfig.inklingSmall_276B_A12B` |
 | MPL | Maple Preview | `maple` | `ArchConfig.maplePreview` |
-| FLT | Flint-40B-A2.5B | `flint` | `ArchConfig.flint40B_A2_5B_JANG_4M` |
-| FNX | Qwen3.8-Flash-Next 180B-A3.5B | `qwen38flashnext` | `ArchConfig.qwen38FlashNext_180B_A3_5B` |
-| FNU | Qwen3.8-Flash-Next, Unsloth UD-IQ3_XXS GGUF (third-party quant) | `qwen38flashnextudiq3xxs` | `ArchConfig.qwen38FlashNextUnslothUDIQ3XXS` |
 | MC5 | MiniCPM5-2B | `minicpm5` | `ArchConfig.miniCPM5_2B` |
-| G53 | GLM-5.3-Flash 320B-A18B | `glm53Flash` | `ArchConfig.glm53Flash_320B_A18B` |
+
+Retired (values only, no baseline): G4 Gemma 4 26B-A4B (`gemma4`, also any
+manifest without `arch.family`), DSV4 DeepSeek-V4-Flash (`deepseekV4Flash`),
+INK Inkling-Small (`inklingSmall`), FLT Flint-40B-A2.5B (`flint`), FNX
+Qwen3.8-Flash-Next (`qwen38flashnext`), FNU its Unsloth UD-IQ3_XXS GGUF
+(`qwen38flashnextudiq3xxs`), G53 GLM-5.3-Flash (`glm53Flash`). Loading one
+fails with `ModelError.retiredFamily` (`ManifestReader.retiredFamilies`).
 
 `ArchConfig.knownArchitectures` maps `arch.family` to the baseline used for
 auto-detection at load.
@@ -56,14 +62,7 @@ runtime can run it. `ManifestReader.familiesWithoutRunner` is the separate,
 authoritative capability gate, and `peekFamily` consults it before any of this
 machinery is reached.
 
-That table is **empty today**. Earlier entries were FNU, added 2026-11-15
-with its GGUF install path and lifted once `FlashNextForwardRunner` ran it
-(resident expert mode and native MTP, which it does not run, are refused by
-name in `Model.ggufExpertModeRefusal` and `FlashNextMTPWeights`); G53, added
-2026-09-11 with its Day-0 contract
-([GLM-5.3-Flash](families/GLM53_FLASH.md)) and lifted when its runner landed;
-and FNX, whose gate was lifted on 2026-09-10 once `FlashNextForwardRunner`
-landed.
+That table is **empty today**.
 
 FNU has no column of its own in the field tables below: every value equals
 FNX's except `family` and the two storage-shaped PLE fields,
@@ -81,7 +80,7 @@ guessing.
 
 | Field | Type | Selects | G4 | Divergence |
 | --- | --- | --- | --- | --- |
-| `family` | `ModelFamily` | The tensor-name contract, the layer graph shape (norm sandwich vs plain pre-norm), and family-specific kernel behavior. Stored in `manifest.json -> arch.family`; absent means Gemma 4, the format's original architecture. | `.gemma4` | One value per family; every family diverges by definition. |
+| `family` | `ModelFamily` | The tensor-name contract, the layer graph shape (norm sandwich vs plain pre-norm), and family-specific kernel behavior. Stored in `manifest.json -> arch.family`; an absent value was Gemma 4, the format's original (now retired) architecture, and is refused. The `ArchConfig.init` default is `.qwen36`. | `.gemma4` | One value per family; every family diverges by definition. |
 
 ## Dimensions
 

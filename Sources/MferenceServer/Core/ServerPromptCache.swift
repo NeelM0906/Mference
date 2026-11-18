@@ -5,8 +5,7 @@ public enum ServerPromptCacheMode: String, Sendable, Equatable {
     case off
     case singlePrefix = "single-prefix"
     /// Several retained turn-boundary prefixes under a byte budget, for
-    /// runners that can snapshot their prefix state (Qwen 3.6 and the
-    /// Flash-Next families). Every other
+    /// runners that can snapshot their prefix state (Qwen 3.6). Every other
     /// runner serves it exactly as `singlePrefix`.
     case multiPrefix = "multi-prefix"
 }
@@ -21,10 +20,6 @@ public enum ServerPromptCacheBytes: Equatable, Sendable {
 
     /// `auto` is min(4 GiB, physical / 8) on hosts with at least 24 GiB,
     /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below.
-    /// The Flash-Next families cap that at 1.5 GiB: their routed experts
-    /// (50–175 GB) stream through the file cache, which every retained byte
-    /// shrinks. 1.5 GiB holds one 32K row image (about 1.06 GB on the
-    /// Unsloth install) plus a few recurrent checkpoints (about 116 MB each).
     func resolved(family: ModelFamily? = nil,
                   physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
         switch self {
@@ -40,12 +35,7 @@ public enum ServerPromptCacheBytes: Equatable, Sendable {
             } else {
                 general = 0
             }
-            switch family {
-            case .qwen38flashnext?, .qwen38flashnextudiq3xxs?:
-                return min(general, 3 * Self.gibibyte / 2)
-            default:
-                return general
-            }
+            return general
         }
     }
 }
@@ -90,14 +80,12 @@ extension PromptPrefixCache {
         domain: ServerPromptCacheDomain,
         request: ValidatedChatRequest,
         renderedPromptIDs: [Int32],
-        tokenizer: MFTokenizer,
-        gemmaRecoverablePrefix: ((Int) -> Int)? = nil
+        tokenizer: MFTokenizer
     ) -> ServerPromptCacheMatch {
         match(domain: domain,
               turn: request.promptCacheTurn,
               renderedPromptIDs: renderedPromptIDs,
-              tokenizer: tokenizer,
-              gemmaRecoverablePrefix: gemmaRecoverablePrefix)
+              tokenizer: tokenizer)
     }
 }
 

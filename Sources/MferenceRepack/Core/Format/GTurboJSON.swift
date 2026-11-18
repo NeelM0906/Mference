@@ -30,8 +30,7 @@ enum GTurboJSON {
         switch family {
         case .minicpm5:
             return "W2.1b-weight+kld-2026-09-10-vs-openbmb-MiniCPM5-2B-MLX"
-        case .gemma4, .qwen36, .qwen38, .deepseekV4Flash, .inklingSmall, .maple,
-             .qwen38flashnext, .qwen38flashnextudiq3xxs, .glm53Flash, .flint:
+        case .qwen36, .qwen38, .maple:
             return "W2.1b-weight+kld-2026-09-02-vs-mlx-community-qwen36"
         }
     }
@@ -68,74 +67,20 @@ enum GTurboJSON {
             "hiddenActivation": arch.hiddenActivation,
             "fullAttentionLayerMask": arch.fullAttentionLayerMask.map { Int($0) }
         ]
-        // Family extension fields. Gemma manifests omit them (byte-identical
-        // to the pre-family format); the reader treats absence as the Gemma
-        // defaults.
-        if arch.family != .gemma4 {
-            archDict["family"] = arch.family.rawValue
-            archDict["attnOutputGate"] = arch.attnOutputGate
-            archDict["attentionScale"] = arch.attentionScale
-            archDict["embeddingScaledBySqrtHidden"] = arch.embeddingScaledBySqrtHidden
-            archDict["routerScaled"] = arch.routerScaled
-            archDict["ffnSandwichNorms"] = arch.ffnSandwichNorms
-            archDict["sharedExpertGated"] = arch.sharedExpertGated
-            archDict["ropeNeoxSubdim"] = arch.ropeNeoxSubdim
-            archDict["linearNumKHeads"] = arch.linearNumKHeads
-            archDict["linearNumVHeads"] = arch.linearNumVHeads
-            archDict["linearKeyHeadDim"] = arch.linearKeyHeadDim
-            archDict["linearValueHeadDim"] = arch.linearValueHeadDim
-            archDict["linearConvKernelSize"] = arch.linearConvKernelSize
-        }
-        // DeepSeek-V4 extension fields. Gated on the family so existing Qwen
-        // manifests stay byte-identical; the reader treats absence as the
-        // zeroed/"softmax"/1.0/0.0 defaults these fields hold for Gemma and
-        // Qwen anyway.
-        if arch.family == .deepseekV4Flash {
-            archDict["caQLoraRank"] = arch.caQLoraRank
-            archDict["caOLoraRank"] = arch.caOLoraRank
-            archDict["caOGroups"] = arch.caOGroups
-            archDict["caRopeHeadDim"] = arch.caRopeHeadDim
-            archDict["caIndexNHeads"] = arch.caIndexNHeads
-            archDict["caIndexHeadDim"] = arch.caIndexHeadDim
-            archDict["caIndexTopK"] = arch.caIndexTopK
-            archDict["caCSACompressRate"] = arch.caCSACompressRate
-            archDict["caHCACompressRate"] = arch.caHCACompressRate
-            archDict["caCompressRopeTheta"] = arch.caCompressRopeTheta
-            archDict["caRopeScalingFactor"] = arch.caRopeScalingFactor
-            archDict["caRopeScalingOriginalMax"] = arch.caRopeScalingOriginalMax
-            archDict["caRopeScalingBetaFast"] = arch.caRopeScalingBetaFast
-            archDict["caRopeScalingBetaSlow"] = arch.caRopeScalingBetaSlow
-            archDict["hcMult"] = arch.hcMult
-            archDict["hcSinkhornIters"] = arch.hcSinkhornIters
-            archDict["hcEps"] = arch.hcEps
-            archDict["numHashRoutedLayers"] = arch.numHashRoutedLayers
-            archDict["routerScoringFunc"] = arch.routerScoringFunc
-            archDict["routedScalingFactor"] = arch.routedScalingFactor
-            archDict["swigluLimit"] = arch.swigluLimit
-        }
-        // Inkling extension fields, gated on the family for the same reason:
-        // the other three manifests stay byte-identical, and the reader treats
-        // absence as the defaults those families already hold.
-        if arch.family == .inklingSmall {
-            archDict["routerScoringFunc"] = arch.routerScoringFunc
-            archDict["routedScalingFactor"] = arch.routedScalingFactor
-            archDict["relDRel"] = arch.relDRel
-            archDict["relExtent"] = arch.relExtent
-            archDict["relProjDim"] = arch.relProjDim
-            archDict["relLogScalingFloor"] = arch.relLogScalingFloor
-            archDict["relLogScalingAlpha"] = arch.relLogScalingAlpha
-            archDict["sconvKernelSize"] = arch.sconvKernelSize
-            archDict["numSharedExperts"] = arch.numSharedExperts
-            archDict["numDenseLayers"] = arch.numDenseLayers
-            archDict["denseIntermediateSize"] = arch.denseIntermediateSize
-            archDict["sharedExpertSink"] = arch.sharedExpertSink
-            archDict["embedNormEnabled"] = arch.embedNormEnabled
-            archDict["logitsWidthMultiplier"] = arch.logitsWidthMultiplier
-            archDict["routerGateBias"] = arch.routerGateBias
-            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
-            archDict["routerGlobalScale"] = arch.routerGlobalScale
-            archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
-        }
+        // Family extension fields, written for every family.
+        archDict["family"] = arch.family.rawValue
+        archDict["attnOutputGate"] = arch.attnOutputGate
+        archDict["attentionScale"] = arch.attentionScale
+        archDict["embeddingScaledBySqrtHidden"] = arch.embeddingScaledBySqrtHidden
+        archDict["routerScaled"] = arch.routerScaled
+        archDict["ffnSandwichNorms"] = arch.ffnSandwichNorms
+        archDict["sharedExpertGated"] = arch.sharedExpertGated
+        archDict["ropeNeoxSubdim"] = arch.ropeNeoxSubdim
+        archDict["linearNumKHeads"] = arch.linearNumKHeads
+        archDict["linearNumVHeads"] = arch.linearNumVHeads
+        archDict["linearKeyHeadDim"] = arch.linearKeyHeadDim
+        archDict["linearValueHeadDim"] = arch.linearValueHeadDim
+        archDict["linearConvKernelSize"] = arch.linearConvKernelSize
         // Qwen 3.8 is dense: the reader validates numSharedExperts against 0
         // (absence would default to 1) and numDenseLayers/denseIntermediateSize
         // against the full-depth dense FFN, so all three must be written.
@@ -153,63 +98,6 @@ enum GTurboJSON {
             archDict["denseIntermediateSize"] = arch.denseIntermediateSize
             archDict["qkNorm"] = arch.qkNorm
         }
-        // Qwen3.8-Flash-Next: the covered axes are value changes the non-Gemma
-        // block above already publishes. These are the three NEW axes, written
-        // under their own names plus a `requiredAxes` list, so a runtime that
-        // cannot execute them can say which ones it is missing instead of
-        // reporting an unrecognised family.
-        // GLM-5.3-Flash: the low-rank query rank and indexer head shape ride
-        // the V4 `ca*` keys, the KDA geometry the `linear*` keys (already
-        // emitted above), mHC and router fields their DSV4 keys, the dense
-        // leading layers the Inkling keys, then its own axes and the
-        // `requiredAxes` list the capability gate refuses it by.
-        if arch.family == .glm53Flash, let axes = arch.glm53 {
-            archDict["caQLoraRank"] = arch.caQLoraRank
-            archDict["caIndexNHeads"] = arch.caIndexNHeads
-            archDict["caIndexHeadDim"] = arch.caIndexHeadDim
-            archDict["caIndexTopK"] = arch.caIndexTopK
-            archDict["hcMult"] = arch.hcMult
-            archDict["hcSinkhornIters"] = arch.hcSinkhornIters
-            archDict["hcEps"] = arch.hcEps
-            archDict["numHashRoutedLayers"] = arch.numHashRoutedLayers
-            archDict["routerScoringFunc"] = arch.routerScoringFunc
-            archDict["routedScalingFactor"] = arch.routedScalingFactor
-            archDict["swigluLimit"] = arch.swigluLimit
-            archDict["numSharedExperts"] = arch.numSharedExperts
-            archDict["numDenseLayers"] = arch.numDenseLayers
-            archDict["denseIntermediateSize"] = arch.denseIntermediateSize
-            archDict["routerGateBias"] = arch.routerGateBias
-            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
-            archDict["qkNorm"] = arch.qkNorm
-            archDict["kvLoraRank"] = axes.kvLoraRank
-            archDict["qkNopeHeadDim"] = axes.qkNopeHeadDim
-            archDict["vHeadDim"] = axes.vHeadDim
-            archDict["indexKPool"] = axes.indexKPool
-            archDict["indexKPoolAlwaysSelectTail"] = axes.indexKPoolAlwaysSelectTail
-            archDict["indexerKNormEps"] = axes.indexerKNormEps
-            archDict["kdaGateLowerBound"] = axes.kdaGateLowerBound
-            archDict["rmsNormEps"] = axes.rmsNormEps
-            archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
-            archDict["requiredAxes"] = Glm53Axes.requiredAxisNames
-        }
-        if arch.family == .qwen38flashnext || arch.family == .qwen38flashnextudiq3xxs,
-           let axes = arch.flashNext {
-            archDict["numSharedExperts"] = arch.numSharedExperts
-            archDict["numDenseLayers"] = arch.numDenseLayers
-            archDict["unpaddedVocabSize"] = arch.unpaddedVocabSize
-            archDict["hcCount"] = axes.hcCount
-            archDict["hcLowRank"] = axes.hcLowRank
-            archDict["indexerNumHeads"] = axes.indexerNumHeads
-            archDict["indexerHeadDim"] = axes.indexerHeadDim
-            archDict["indexerNumKVHeads"] = axes.indexerNumKVHeads
-            archDict["indexerBudget"] = axes.indexerBudget
-            archDict["indexerCompressRatio"] = axes.indexerCompressRatio
-            archDict["pleLayerIDs"] = axes.pleLayerIDs
-            archDict["pleNgramShardCount"] = axes.pleNgramShardCount
-            archDict["pleNgramVocabSizeBase"] = axes.pleNgramVocabSizeBase
-            archDict["pleConvKernelSize"] = axes.pleConvKernelSize
-            archDict["requiredAxes"] = FlashNextAxes.requiredAxisNames
-        }
         if arch.family == .maple {
             archDict["routerScoringFunc"] = arch.routerScoringFunc
             archDict["routedScalingFactor"] = arch.routedScalingFactor
@@ -217,16 +105,6 @@ enum GTurboJSON {
             archDict["numSharedExperts"] = arch.numSharedExperts
             archDict["numDenseLayers"] = arch.numDenseLayers
             archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
-        }
-        if arch.family == .flint {
-            archDict["numSharedExperts"] = arch.numSharedExperts
-            archDict["numDenseLayers"] = arch.numDenseLayers
-            archDict["denseIntermediateSize"] = arch.denseIntermediateSize
-            archDict["routerScoringFunc"] = arch.routerScoringFunc
-            archDict["routedScalingFactor"] = arch.routedScalingFactor
-            archDict["routerNormAfterTopK"] = arch.routerNormAfterTopK
-            archDict["noRopeLayerMask"] = arch.noRopeLayerMask.map { Int($0) }
-            archDict["attentionSinks"] = arch.attentionSinks
         }
         let quantBits = [
             "embedding": bitWidths.embedding,
@@ -248,19 +126,6 @@ enum GTurboJSON {
         // Dense family: there is no router, shared expert or routed expert to
         // quantize. Mark the slots absent (Maple's sharedExpert convention);
         // embedding/attention keep the affine INT4 entries from the loop.
-        // GLM-5.3-Flash's router gate is unquantized BF16; the manifest
-        // records the slot as such rather than the 8-bit default a BF16
-        // tensor would otherwise leave in place.
-        if arch.family == .glm53Flash || arch.family == .flint
-            || (arch.family == .gemma4 && bitWidths.router == 16) {
-            quantDict["router"] = [
-                "weightBits": 16,
-                "scheme": "unquantized",
-                "scaleType": "none",
-                "biasType": "none",
-                "groupSize": 0,
-            ]
-        }
         if arch.family == .qwen38 || arch.family == .minicpm5 {
             let absent: [String: Any] = [
                 "weightBits": 0,
@@ -385,9 +250,6 @@ enum GTurboJSON {
                 ] as [String: Any]
             }
         }
-        if !plan.plePools.isEmpty {
-            manifest["plePool"] = encodePlePools(plan.plePools)
-        }
         if let flashHead = plan.flashHead {
             manifest["flashHead"] = [
                 "nClusters": flashHead.nClusters,
@@ -403,53 +265,6 @@ enum GTurboJSON {
         }
         return try JSONSerialization.data(withJSONObject: manifest,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-    }
-
-    /// The additive `plePool` manifest block. `kind` names the pool format so a
-    /// future revision can be told apart; readers must refuse an unknown kind.
-    ///
-    /// Row `i` of shard `s` lives at
-    /// `shards[s].offset + (i / rowsPerBlock) * blockStride + (i % rowsPerBlock) * rowStride`.
-    /// A row's record is `[rowWeightBytes | rowScaleBytes | rowBiasBytes]` — for
-    /// a BF16 pool the companion sizes are 0 and the record is just the raw row.
-    /// Blocks are page-aligned and rows never straddle a page, so one row costs
-    /// one page fault and a cached page serves `rowsPerBlock` neighbours.
-    static func encodePlePools(_ pools: [PleRowPoolPlan]) -> [String: Any] {
-        [
-            "kind": "rowLookupPoolV1",
-            "layers": pools.map { pool in
-                let quantized = pool.storage == .int4AffineG64
-                return [
-                    "layer": pool.layerIndex,
-                    "file": pool.relativePath,
-                    "sourceTensor": pool.sourceTensorPrefix,
-                    "rows": pool.totalRows,
-                    "rowDim": pool.rowDim,
-                    "storage": pool.storage.rawValue,
-                    "weightBits": pool.bits,
-                    // IQ4_NL rows carry their FP16 scale inside each 18-byte block.
-                    "scheme": quantized ? "affine" : pool.storage == .iq4nl ? "iq4_nl" : "none",
-                    "scaleType": quantized ? "BF16" : pool.storage == .iq4nl ? "FP16" : "none",
-                    "biasType": quantized ? "BF16" : "none",
-                    "groupSize": pool.groupSize,
-                    "rowWeightBytes": pool.rowWeightBytes,
-                    "rowScaleBytes": pool.rowCompanionBytes,
-                    "rowBiasBytes": pool.rowCompanionBytes,
-                    "rowStride": pool.rowStride,
-                    "rowsPerBlock": pool.rowsPerBlock,
-                    "blockStride": pool.blockStride,
-                    "fileSize": pool.fileSize,
-                    "shards": pool.shards.map {
-                        [
-                            "shard": $0.shardIndex,
-                            "rows": $0.rows,
-                            "offset": $0.regionOffset,
-                            "size": $0.regionBytes,
-                        ] as [String: Any]
-                    },
-                ] as [String: Any]
-            },
-        ]
     }
 
     static func encodeLayout(plan: RepackPlan,
@@ -498,9 +313,9 @@ enum GTurboJSON {
         let obj: [String: Any] = [
             "expertStride": expertStride,
             "numLayers": arch.numLayers,
-            // Skip leading dense-FFN layers, which carry no routed experts
-            // (Inkling's layers 0-1). Taking `layers.first` would publish 0
-            // here and contradict the manifest, which selects the same way.
+            // Skip layers that carry no routed experts (every layer of a dense
+            // family). Taking `layers.first` would publish 0 here and
+            // contradict the manifest, which selects the same way.
             "expertsPerLayer": plan.layers.first(where: { $0.expertsPerLayer > 0 })?
                 .expertsPerLayer ?? 0,
             "layers": layersArr

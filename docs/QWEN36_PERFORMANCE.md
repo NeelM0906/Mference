@@ -51,21 +51,19 @@ after production runs failed to beat the accepted path.
 
 ## Memory: the 8 GB envelope
 
-The whole point of the runtime is a 26B-class MoE on an 8 GB Mac in about
-2 GB of process memory. Qwen 3.6 meets that budget with more headroom than
-Gemma 4, because its experts are half the size and only 10 of its 40 layers
-keep a KV cache:
+The whole point of the runtime is a large MoE on an 8 GB Mac in about
+2 GB of process memory. Qwen 3.6 meets that budget because its experts are
+small and only 10 of its 40 layers keep a KV cache:
 
-| Component | Qwen 3.6 35B-A3B | Gemma 4 26B-A4B |
-| --- | ---: | ---: |
-| Common weights (mapped, file-backed) | 1.39 GB | 1.35 GB |
-| Routed-expert slots, 16 per layer | 1.13 GB | 1.61 GB |
-| KV cache at 4K | 84 MB | 320 MB |
-| Gated-DeltaNet recurrent state | 64 MB | — |
-| Routed-expert files on disk | 18.1 GB | 12.9 GB |
+| Component | Qwen 3.6 35B-A3B |
+| --- | ---: |
+| Common weights (mapped, file-backed) | 1.39 GB |
+| Routed-expert slots, 16 per layer | 1.13 GB |
+| KV cache at 4K | 84 MB |
+| Gated-DeltaNet recurrent state | 64 MB |
+| Routed-expert files on disk | 18.1 GB |
 
-Only the on-disk footprint is larger; every resident component is equal or
-smaller.
+Only the on-disk footprint is large; the routed experts stay on SSD.
 
 ### Measured under an emulated 8 GB machine
 
@@ -92,11 +90,10 @@ Community protocol, 16 slots, one measured rep under pressure:
 All runs reached `stop=endOfTurn`; process footprint stayed ~1.1 GB. With
 the pool unable to cache, decode is SSD-latency-bound: the honest 8 GB
 story is 11–14 tok/s on M5-class hardware, and less on older 8 GB
-machines with slower SSDs and GPUs — compare the 8 GB M2 and 24 GB M5
-Gemma 4 rows in [Benchmarks](BENCHMARKS.md).
+machines with slower SSDs and GPUs.
 
 The practical 8 GB requirement is therefore disk, not memory: the install
-needs about 19.6 GB free, against Gemma's 14.3 GB.
+needs about 19.6 GB free.
 
 ## Where decode time goes
 
@@ -148,13 +145,10 @@ Each of these was measured before being ruled out.
   2931 ms, but the synchronous advice calls cost what the reads saved; total
   decode was unchanged (19.3 vs 19.3 tok/s). It stays off by default.
 
-## Why Qwen 3.6 decodes slower than Gemma 4 here
+## What limits Qwen 3.6 decode here
 
-The repository's published M5 Pro rows put Gemma 4 at 31-35 tok/s; the current
-Qwen 3.6 production cases measure 23.5-29.3 tok/s on this M5. The workloads and
-M5 variants differ, so this is a project-level range comparison rather than a
-token-for-token model A/B. Two facts about the remaining gap are measured here,
-and the explanation for it is not.
+The current Qwen 3.6 production cases measure 23.5-29.3 tok/s on this M5.
+What limits them is partly measured here; one explanation is not.
 
 Measured:
 
@@ -163,23 +157,18 @@ Measured:
   same case do not speed up (21.4, 22.1, 20.8 tok/s back to back), and
   constraining the host to an ~8 GB working set does not slow it down. Both
   point to its expert reads already being served from SSD rather than cache.
-- Qwen reads *fewer* routed-expert bytes per token than Gemma: at most 540 MiB
-  (40 layers x 8 experts x 1.69 MiB) against at most 769 MiB (30 x 8 x
-  3.36 MiB). So the gap is not read volume.
-- With the same 16 slots, Qwen caches at most 6.2% of a layer's 256 experts
-  against Gemma's 12.5% of 128, so it misses more often. Raising Qwen to 32
-  slots recovers Gemma-equivalent coverage; the frozen byte-identical A/B gains
-  9.2-36.3% by case, or 18.1% by geometric mean.
+- Qwen reads at most 540 MiB of routed-expert bytes per token (40 layers x 8
+  experts x 1.69 MiB).
+- With 16 slots, Qwen caches at most 6.2% of a layer's 256 experts, so it
+  misses often. Raising Qwen to 32 slots doubles that coverage; the frozen
+  byte-identical A/B gains 9.2-36.3% by case, or 18.1% by geometric mean.
 
 Not measured, and stated here as a hypothesis rather than a finding: that
-Gemma is faster mainly because its 12.9 GB expert pool largely stays in the OS
-page cache on a 24 GB host while Qwen's 18.1 GB pool does not, so Gemma's reads
-are served from memory and Qwen's from SSD. It is consistent with everything
-above, and with scattered reads across Qwen's expert files measuring 5-10 GB/s
-against 30+ GB/s for reads that hit cache. But confirming it requires running
-Gemma 4 under the same protocol on this host, and only Qwen is installed here.
-The actual per-run cache hit rate was also not instrumented, so no
-bytes-per-second figure is quoted for either model.
+Qwen's 18.1 GB pool does not stay in the OS page cache on a 24 GB host, so its
+reads are served from SSD. It is consistent with everything above, and with
+scattered reads across Qwen's expert files measuring 5-10 GB/s against
+30+ GB/s for reads that hit cache. The actual per-run cache hit rate was not
+instrumented, so no bytes-per-second figure is quoted.
 
 The dedicated Qwen compute paths and larger-host cache default narrow this gap.
 Whatever remains follows from the checkpoint's shape against the host's memory;
@@ -190,9 +179,9 @@ the 16-slot path remains available for the original memory budget.
 Decode performs one `commit` + `waitUntilCompleted` per layer to read the
 router's top-8 expert IDs back to the CPU. A measured round trip on this host
 is ~196 us, so Qwen's 40 layers spend ~7.8 ms/token (15%) in submission and
-completion latency alone — against Gemma 4's 30 layers at ~5.9 ms. This is
-the structural cost of having 10 more layers, and it cannot be removed
-without breaking the router-then-read dependency.
+completion latency alone. This is the structural cost of a per-layer
+readback, and it cannot be removed without breaking the router-then-read
+dependency.
 
 ## Warming the page cache backfires
 
@@ -299,7 +288,7 @@ memory. The phase report shows the consequence: the GPU is busy for about half
 of decode and waits for expert reads for the rest (10.4 s busy, 10.3 s gap over
 160 tokens).
 
-Shadow prefetch, the accepted DeepSeek-V4-Flash default, predicts the next
+Shadow prefetch predicts the next
 layer's experts and reads them into the existing slots without ever blocking a
 real plan. It is the Qwen 3.6 default on hosts from 16 GiB to below 24 GiB,
 with a budget of four speculative reads per layer (budget 8 at 24 GiB and on
@@ -332,7 +321,7 @@ On a 32 GiB M1 Max (macOS 27.2.1) at main `ad99455`, half of long-decode layer
 steps (49.8%) still found all eight experts in memory without prefetch. Shadow
 prefetch raised that to about 69.5% and shortened the GPU wait for expert reads
 by 2.7 ms per token. Qwen 3.6 now defaults to budget 8 on hosts above 24 GiB up
-to 32 GiB (only 32 GiB is measured); Gemma 4 there is unmeasured and stays off.
+to 32 GiB (only 32 GiB is measured).
 
 | M1 Max 32 GiB, `ad99455` | Off | Budget 4 | Budget 8 |
 | --- | ---: | ---: | ---: |

@@ -1,5 +1,8 @@
 # Decode attribution: Qwen 3.6 and DSV4-Flash — M5/24 GB, 2026-08-07
 
+> Dated record. The retired family it names (DeepSeek-V4-Flash) is no longer
+> supported; see [Retired model families](../../RETIRED_FAMILIES.md).
+
 `MFERENCE_PHASES=1` greedy decode breakdowns on a quiet machine, production
 profiles (Qwen: 32 slots; DSV4: 16 slots, `--rdadvise adaptive`,
 trusted-receipt). Diagnostic runs, not protocol benchmarks.

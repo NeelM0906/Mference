@@ -9,7 +9,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap")
     let remoteOutput = tmpPathForRemote("remote")
     defer { cleanUpRemote([snapshotDir, remoteOutput]) }
-    let snapshot = try SyntheticSnapshot.build(
+    let snapshot = try SyntheticSnapshot.buildQwen(
       at: snapshotDir,
       seed: 0x1020_3040_5060_7080)
 
@@ -49,7 +49,7 @@ extension RemotePayloadCopyTests {
     let snapshotDir = tmpDirForRemote("snap-resume")
     let output = tmpPathForRemote("remote-resume")
     defer { cleanUpRemote([snapshotDir, output]) }
-    let snapshot = try SyntheticSnapshot.build(
+    let snapshot = try SyntheticSnapshot.buildQwen(
       at: snapshotDir,
       seed: 0x56_4738_2910)
 

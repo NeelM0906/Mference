@@ -104,8 +104,7 @@ def scored(content, finish="stop", calls=None):
 
 class ScreenRubricTests(unittest.TestCase):
     """Negative rubric cases, through the release screen's `score` (which hands
-    content and JSON cases to the legacy `swift_qwen_task_screen.score`). Moved
-    from the removed Swift-Qwen task-screen test."""
+    content and JSON cases to `text_score`)."""
 
     def test_exact_content_and_incomplete_answers(self):
         self.assertTrue(screen.score({"expected": "4"}, scored("\n4\n"))[0])

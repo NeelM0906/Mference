@@ -11,7 +11,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .defaultsToy())
     #expect(model.openLayerFileCount() == 0)
     _ = try model.routedExpert(layer: 0, expert: 3)
     #expect(model.openLayerFileCount() == 1)
@@ -29,7 +29,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .defaultsToy())
     let view = try model.routedExpert(layer: 1, expert: 4)
     let bufContents = view.buffer.contents()
     let b0 = bufContents.load(fromByteOffset: Int(view.offset), as: UInt8.self)
@@ -48,7 +48,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .defaultsToy())
 
     // Flip one byte inside layer_01.bin AFTER the manifest is written.
     let url = dir.appendingPathComponent("packed_experts/layer_01.bin")

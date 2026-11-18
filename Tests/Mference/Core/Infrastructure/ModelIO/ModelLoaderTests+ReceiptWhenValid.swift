@@ -18,7 +18,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
 
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .trustedReceiptWhenValid)
     #expect(model.integrityPolicy == .sizeCheckTrustedReceipt)
     _ = try model.routedExpert(layer: 0, expert: 0)
@@ -32,7 +32,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
 
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .trustedReceiptWhenValid)
     #expect(model.integrityPolicy == .fullSha256)
     #expect {
@@ -55,7 +55,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
 
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .trustedReceiptWhenValid)
     #expect(model.integrityPolicy == .fullSha256)
     _ = try model.routedExpert(layer: 0, expert: 0)
@@ -74,7 +74,7 @@ extension ModelLoaderTests {
     // The size check fails, so the load falls back to hashing, which rejects
     // the truncated file when it is first touched.
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .trustedReceiptWhenValid)
     #expect(model.integrityPolicy == .fullSha256)
     #expect(throws: (any Error).self) {
@@ -88,7 +88,7 @@ extension ModelLoaderTests {
     try Self.writeVerifiedInstallReceipt(directoryURL: dir)
     let device = try #require(MTLCreateSystemDefaultDevice())
 
-    let model = try Model.load(directoryURL: dir, device: device, expecting: .gemma4Toy())
+    let model = try Model.load(directoryURL: dir, device: device, expecting: .defaultsToy())
     #expect(model.integrityPolicy == .fullSha256)
   }
 }
