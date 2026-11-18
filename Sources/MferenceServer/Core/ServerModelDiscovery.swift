@@ -71,18 +71,16 @@ public enum ServerLibraryProbe {
             return .notAModelDirectory
         }
 
+        // A retired install (by checkpoint ID, a family-less Gemma 4 manifest,
+        // or a retired family) is listed as not runnable, not as broken.
+        if let retired = ManifestReader.retiredInstall(manifestURL: manifestURL) {
+            return .notRunnable(family: retired.identifier, detail: retired.detail)
+        }
         // A gated family has to be told apart from a broken install, and
         // `peekFamily` reports both by throwing. Asking the runner table first
         // keeps the two apart without matching on error text, and the moment a
         // family's gate lifts its entry disappears and the install simply falls
         // through to `peekFamily` and gets listed.
-        if let raw = rawFamily(manifestURL: manifestURL),
-           ManifestReader.retiredFamilies.contains(raw) {
-            return .notRunnable(
-                family: raw,
-                detail: "\(raw) is a retired family (docs/RETIRED_FAMILIES.md); "
-                    + "the install is left on disk but not served")
-        }
         if let raw = rawFamily(manifestURL: manifestURL),
            let missingAxes = gatedFamilies.map({ $0[raw] })
                ?? ManifestReader.missingRunnerAxes(forRawFamily: raw) {
