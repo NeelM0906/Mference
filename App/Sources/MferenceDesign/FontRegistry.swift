@@ -33,14 +33,17 @@ public enum MFFontRegistry {
     }
 
     /// The first directory that holds every bundled face: the app's
-    /// `Resources/Fonts`, then `App/Resources/Fonts` in the source tree.
+    /// `Resources/Fonts`, then (debug builds only: `swift test`, `swift run`)
+    /// `App/Resources/Fonts` in the source tree.
     public static func fontsDirectory() -> URL? {
-        let sourceTree = URL(fileURLWithPath: #filePath)
+        var candidates = [Bundle.main.resourceURL?.appendingPathComponent("Fonts")]
+        #if DEBUG
+        candidates.append(URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()  // MferenceDesign
             .deletingLastPathComponent()  // Sources
             .deletingLastPathComponent()  // App
-            .appendingPathComponent("Resources/Fonts")
-        let candidates = [Bundle.main.resourceURL?.appendingPathComponent("Fonts"), sourceTree]
+            .appendingPathComponent("Resources/Fonts"))
+        #endif
         return candidates.compactMap { $0 }.first { directory in
             fileNames.allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path) }
         }
