@@ -135,7 +135,7 @@ public struct MFButtonStyle: ButtonStyle {
             }
         }
 
-        var font: Font { self == .large ? MFFont.buttonLarge : MFFont.calloutEmphasis }
+        var font: Font { self == .large ? MFFont.bodyEmphasis : MFFont.calloutEmphasis }
     }
 
     let kind: Kind
