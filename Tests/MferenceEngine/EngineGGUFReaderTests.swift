@@ -116,6 +116,21 @@ struct EngineGGUFReaderTests {
         #expect(throws: EngineGGUFReader.ReadError.missingArchitecture) { try parse(anonymous.data()) }
     }
 
+    @Test func oddTypesOnSuffixKeysAreSkippedNotFatal() throws {
+        var builder = GGUFHeaderBuilder()
+        builder.keys = [("general.architecture", .string("qwen35")),
+                        ("other.context_length", .f32(4.5)),
+                        ("other.nextn_predict_layers", .strings(["x"])),
+                        ("qwen35.context_length", .u32(32_768))]
+        builder.tensors = ["nextn.pre_projection.weight", "blk.0.attn_norm.weight"]
+        let metadata = try parse(builder.data())
+        #expect(metadata.contextLength == 32_768)
+        #expect(metadata.nextNTensorCount == 1)
+        builder.keys = [("general.architecture", .string("qwen35")),
+                        ("qwen35.context_length", .i32(-1))]
+        #expect(try parse(builder.data()).contextLength == nil)
+    }
+
     @Test func contextIsOptional() throws {
         var builder = GGUFHeaderBuilder()
         builder.keys = [("general.architecture", .string("llama")),

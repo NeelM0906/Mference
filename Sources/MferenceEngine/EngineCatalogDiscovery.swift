@@ -203,7 +203,7 @@ public enum EngineCatalogDiscovery {
                     skipped.append(EngineCatalogSkip(
                         location: install.directory,
                         reason: "\(install.identifier) is not in the product model list; "
-                            + "--catalog all lists it",
+                            + "the developer catalog scope lists it",
                         modelID: install.identifier))
                 }
             }
@@ -227,14 +227,16 @@ public enum EngineCatalogDiscovery {
                 files.append((file.standardizedFileURL, rank))
             }
         }
-        var usedIDs = Set(models.map(\.id))
+        // Product identifiers are reserved even before their file is seen, so
+        // an unrelated GGUF named like a product model can never displace it.
+        var usedIDs = Set(models.map(\.id)).union(productGGUFFiles.values.map(\.modelID))
         var ggufWinners: [EngineProductSlot: URL] = [:]
         for (file, _) in files {
             let name = file.lastPathComponent
             let slot = productGGUFFiles[name]
             if slot == nil, scope == .product {
                 skipped.append(EngineCatalogSkip(
-                    location: file, reason: "\(name) is not in the product model list; --catalog all lists it"))
+                    location: file, reason: "\(name) is not in the product model list; the developer catalog scope lists it"))
                 continue
             }
             let id = slot?.modelID ?? ggufModelID(fileName: name)
@@ -371,14 +373,16 @@ public enum EngineCatalogDiscovery {
         }.sorted { $0.path < $1.path }
     }
 
-    /// Regular `.gguf` files directly in `directory`, in path order.
+    /// `.gguf` files directly in `directory` that are, or link to, regular
+    /// files, in path order. A symlink keeps its own path as the location.
     public static func ggufFiles(in directory: URL) -> [URL] {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
         else { return [] }
         return contents.filter {
             $0.pathExtension.lowercased() == "gguf"
-                && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                && (try? $0.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey])
+                    .isRegularFile) == true
         }.sorted { $0.path < $1.path }
     }
 
@@ -386,7 +390,8 @@ public enum EngineCatalogDiscovery {
     /// directory. Metadata only.
     public static func bytesOnDisk(_ url: URL) -> UInt64 {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
-        if let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true {
+        if let values = try? url.resolvingSymlinksInPath().resourceValues(forKeys: keys),
+           values.isRegularFile == true {
             return UInt64(values.fileSize ?? 0)
         }
         guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys))

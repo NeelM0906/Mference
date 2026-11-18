@@ -203,10 +203,58 @@ struct EngineCatalogDiscoveryTests {
         #expect(EngineInstallProbe.probe(directory: plain) == .notAModelDirectory)
     }
 
+    /// Every family's identifier, pinned to the server's spelling at the time
+    /// of the lift (`ServerFamilyModelID`), so a change on either side shows.
     @Test func nativeIdentifiersMatchTheServer() {
+        let expected: [ModelFamily: String] = [
+            .gemma4: "gemma-4-26b-a4b-it",
+            .qwen36: "qwen3.6-35b-a3b",
+            .qwen38: "qwen3.8-27b-4bit",
+            .deepseekV4Flash: "deepseek-v4-flash-2bit-dq",
+            .inklingSmall: "inkling-small-4bit",
+            .maple: "maple-preview-2bit-mlx",
+            .flint: "flint-40b-a2.5b-jang-4m",
+            .qwen38flashnext: "qwen3.8-flash-next-int4g64",
+            .qwen38flashnextudiq3xxs: "unsloth-qwen3.8-flash-next-ud-iq3_xxs",
+            .minicpm5: "minicpm5-2b-int4g64",
+            .glm53Flash: "glm-5.3-flash-mlx-mixed-4-8bit",
+        ]
+        #expect(Set(expected.keys) == Set(ModelFamily.allCases))
+        for (family, id) in expected {
+            #expect(EngineNativeModelID.modelID(for: family) == id)
+        }
+        #expect(EngineNativeModelID.modelID(for: .gemma4, checkpointID: CheckpointIdentity.gemma4QAT)
+                == CheckpointIdentity.gemma4QAT)
+        #expect(EngineNativeModelID.modelID(for: .qwen38, checkpointID: CheckpointIdentity.swiftQwen38)
+                == CheckpointIdentity.swiftQwen38)
         #expect(EngineNativeModelID.modelID(for: .qwen36) == EngineProductSlot.qwen36.modelID)
         #expect(EngineNativeModelID.modelID(for: .minicpm5) == EngineProductSlot.minicpm5.modelID)
         #expect(EngineNativeModelID.modelID(for: .maple) == EngineProductSlot.maple.modelID)
         #expect(EngineCatalogDiscovery.ggufModelID(fileName: "Foo-Bar.Q4.gguf") == "foo-bar.q4")
+    }
+
+    @Test func aGGUFNamedLikeAProductModelNeverDisplacesIt() {
+        let disk = Self.fileSystem(
+            children: [:], probes: [:],
+            ggufFiles: ["/a": ["/a/qwen3.8-27b.gguf"], "/b": ["/b/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"]],
+            headers: ["/a/qwen3.8-27b.gguf": .success(Self.meta(mtp: false)),
+                      "/b/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf": .success(Self.meta(mtp: true))])
+        let catalog = EngineCatalogDiscovery.discover(roots: [], ggufDirectories: [Self.dir("/a"), Self.dir("/b")],
+                                                      scope: .all, fileSystem: disk)
+        #expect(catalog.models.map(\.location.path) == ["/b/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"])
+        #expect(catalog.skipped.contains { $0.location.path == "/a/qwen3.8-27b.gguf" })
+    }
+
+    @Test func aSymlinkedGGUFIsListedAndMeasuredThroughItsTarget() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("engine-gguf-link-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let target = root.appendingPathComponent("blob")
+        try Data(count: 1_234).write(to: target)
+        let link = root.appendingPathComponent("Model.gguf")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        #expect(EngineCatalogDiscovery.ggufFiles(in: root).map(\.lastPathComponent) == ["Model.gguf"])
+        #expect(EngineCatalogDiscovery.bytesOnDisk(link) == 1_234)
     }
 }

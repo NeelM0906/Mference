@@ -2,8 +2,9 @@ import Foundation
 
 /// Reads the facts the catalog needs from a GGUF file's header: architecture,
 /// name, context length, tensor count, and the next-token-prediction (MTP)
-/// tensors. Only the header is read, through a bounded buffer; tensor data is
-/// never touched, so listing a 12 GB file costs a few megabytes of reads (the
+/// tensors. Only the header is parsed, through a bounded 1 MiB read window
+/// that may run at most that far past the header; tensor data is never
+/// parsed, so listing a 12 GB file costs a few megabytes of reads (the
 /// tokenizer vocabulary dominates the header).
 public enum EngineGGUFReader {
     public enum ReadError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -60,7 +61,9 @@ public enum EngineGGUFReader {
                 name = try reader.stringValue(type: type, key: key)
             default:
                 if key.hasSuffix(".context_length") || key.hasSuffix(".nextn_predict_layers") {
-                    integers[key] = try reader.integerValue(type: type, key: key)
+                    // Another architecture's key, or an odd type, is not a
+                    // reason to refuse the file: a non-integer is skipped.
+                    integers[key] = try reader.integerValueOrSkip(type: type)
                 } else {
                     try reader.skipValue(type: type, depth: 0)
                 }
@@ -76,7 +79,7 @@ public enum EngineGGUFReader {
                 throw ReadError.malformed("tensor \(tensor) has \(dimensions) dimensions")
             }
             try reader.skip(UInt64(dimensions) * 8 + 4 + 8)
-            if tensor.contains(".nextn.") { nextN += 1 }
+            if tensor.hasPrefix("nextn.") || tensor.contains(".nextn.") { nextN += 1 }
         }
 
         let context = integers["\(architecture).context_length"].map { Int(clamping: $0) }
@@ -170,23 +173,27 @@ public enum EngineGGUFReader {
             return try string()
         }
 
-        mutating func integerValue(type: UInt32, key: String) throws -> UInt64 {
+        /// A non-negative integer value, or nil (with the value skipped) for
+        /// any other type or a negative number.
+        mutating func integerValueOrSkip(type: UInt32) throws -> UInt64? {
+            func nonNegative(_ value: Int64) -> UInt64? { value >= 0 ? UInt64(value) : nil }
             switch type {
             case 0: return UInt64(try bytes(1).first ?? 0)
-            case 2: return UInt64(try bytes(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }.littleEndian)
+            case 1: return nonNegative(Int64(Int8(bitPattern: try bytes(1).first ?? 0)))
+            case 2: return UInt64(try u16())
+            case 3: return nonNegative(Int64(Int16(bitPattern: try u16())))
             case 4: return UInt64(try u32())
+            case 5: return nonNegative(Int64(Int32(bitPattern: try u32())))
             case 10: return try u64()
-            case 5:
-                let value = Int32(bitPattern: try u32())
-                guard value >= 0 else { throw ReadError.malformed("\(key) is negative") }
-                return UInt64(value)
-            case 11:
-                let value = Int64(bitPattern: try u64())
-                guard value >= 0 else { throw ReadError.malformed("\(key) is negative") }
-                return UInt64(value)
+            case 11: return nonNegative(Int64(bitPattern: try u64()))
             default:
-                throw ReadError.malformed("\(key) is not an integer")
+                try skipValue(type: type, depth: 0)
+                return nil
             }
+        }
+
+        mutating func u16() throws -> UInt16 {
+            try bytes(2).withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }.littleEndian
         }
 
         mutating func skipValue(type: UInt32, depth: Int) throws {

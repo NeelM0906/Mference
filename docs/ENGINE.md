@@ -174,7 +174,8 @@ a weight file or a tensor.
   the server's probe. A partial install, or a family with no runner, is
   reported as skipped with the reason.
 - **GGUF files** are the `.gguf` files directly in each root and in
-  `~/llm-models/gguf`. `EngineGGUFReader` reads only the header: the
+  `~/llm-models/gguf` (a symlinked file counts). `EngineGGUFReader` parses
+  only the header, through a 1 MiB read window: the
   architecture, `general.name`, `<arch>.context_length`, the tensor count,
   and the `blk.N.nextn.*` tensors of an MTP head. Split GGUFs
   (`-00001-of-0000N`) are skipped.
@@ -194,7 +195,7 @@ product models are listed:
 - Everything else found is skipped with "not in the product model list". A
   request for its ID gets that reason rather than "unknown model".
 
-The developer scope `.all` (the server's `--catalog all`) also lists every
+The developer scope `.all` (planned as the server's `--catalog all`) also lists every
 other runnable model. Native installs keep the server's identifier rules:
 the family ID, or `<id>@<directory basename>` when the ID is shared or
 already taken by a product model, then `#n`. A GGUF that is not a product

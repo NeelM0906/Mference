@@ -17,7 +17,9 @@ import MferenceEngine
 ///
 /// The request is built the way the server's validator builds one that sets
 /// only `temperature: 0` and `max_tokens`: every other sampling field comes
-/// from the checkpoint's generation defaults. Run only after the AGENTS.md
+/// from the checkpoint's generation defaults. Messages use the system, user,
+/// assistant, and tool roles only: the validator's developer-role rewrite is
+/// not mirrored, and a developer message is refused. Run only after the AGENTS.md
 /// preflight, under the machine lock, with no other model process.
 @Suite(.serialized) struct NativeBackendInstalledTests {
     private static let environment = ProcessInfo.processInfo.environment
@@ -49,7 +51,11 @@ import MferenceEngine
     /// and `max_tokens`.
     static func request(_ prompt: PromptCase, defaults: GenerationConfig) throws -> EngineRequest {
         let messages = try prompt.messages.map { message -> MFTokenizer.Message in
-            guard let role = MFTokenizer.Role(rawValue: message.role) else {
+            // The server's validator rewrites some roles (developer becomes
+            // system outside Gemma); this harness does not, so the prompt set
+            // must not use them.
+            guard message.role != "developer",
+                  let role = MFTokenizer.Role(rawValue: message.role) else {
                 throw EngineError.invalidRequest(message: "role \(message.role)", param: nil, code: "test")
             }
             return MFTokenizer.Message(role: role, content: message.content)
