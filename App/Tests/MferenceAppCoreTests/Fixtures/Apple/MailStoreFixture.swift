@@ -79,8 +79,9 @@ struct MailStoreFixture {
         ]
     }
 
-    /// Builds the store under a new temporary folder.
-    static func make(version: String = "V10", schema: Schema = .current) throws -> MailStoreFixture {
+    /// `extraInbox` adds that many newer inbox messages (bodies not written),
+    /// to push older mailboxes' mail out of any global window.
+    static func make(version: String = "V10", schema: Schema = .current, extraInbox: Int = 0) throws -> MailStoreFixture {
         let root = URL.temporaryDirectory.appending(path: "mail-fixture-\(UUID().uuidString)", directoryHint: .isDirectory)
         let mailData = root.appending(path: "\(version)/MailData", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: mailData, withIntermediateDirectories: true)
@@ -109,8 +110,15 @@ struct MailStoreFixture {
             CREATE TABLE message_global_data (ROWID INTEGER PRIMARY KEY, message_id_header TEXT);
             """)
         let quote = { (text: String) in "'" + text.replacingOccurrences(of: "'", with: "''") + "'" }
+        var extra: [Message] = []
+        for index in 0..<extraInbox {
+            extra.append(Message(rowID: Int64(10_000 + index), messageID: "<bulk\(index)@example.com>", name: "Bulk",
+                                 address: "bulk@example.com", subject: "Bulk \(index)", summary: "",
+                                 date: received.addingTimeInterval(Double(index + 1) * 60),
+                                 mailbox: "imap://\(account)/INBOX", raw: "Subject: Bulk\n\nx\n"))
+        }
         var mailboxIDs: [String: Int] = [:]
-        for (index, message) in messages.enumerated() {
+        for (index, message) in (messages + extra).enumerated() {
             let n = index + 1
             let mailboxID = mailboxIDs[message.mailbox] ?? (mailboxIDs.count + 1)
             if mailboxIDs[message.mailbox] == nil {

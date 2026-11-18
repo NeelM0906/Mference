@@ -123,6 +123,8 @@ public final class MailInboxModel {
         let choices = MailBucketDefaults.all.map { MailSortBucket(key: $0.key, description: $0.description) }
         guard let result = try? await assistant.sortMail(items, into: choices) else { return }
         for (messageID, key) in result.value {
+            // The person may have moved it while the sorter ran: theirs wins.
+            guard assignment[messageID] == nil else { continue }
             assignment[messageID] = key
             try? store.assign(messageID, to: key, manual: false)
         }

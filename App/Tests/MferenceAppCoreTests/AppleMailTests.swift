@@ -34,6 +34,26 @@ final class RecordingPermissionBroker: PermissionBroker, @unchecked Sendable {
     }
 }
 
+/// Sorts every message into "important" once `gate` opens.
+struct GatedSorter: AppleModelServicing {
+    var gate: ScanTestLatch
+
+    func activeModel() async -> Result<AssistantModelKind, AssistantModelError> { .success(.appleOnDevice) }
+    func title(for text: String) async throws -> AssistantResult<String> { .init(value: "", model: .appleOnDevice) }
+    func summary(of text: String) async throws -> AssistantResult<String> { .init(value: "", model: .appleOnDevice) }
+    func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket]) async throws
+        -> AssistantResult<[String: String]> {
+        await gate.wait()
+        return AssistantResult(value: Dictionary(uniqueKeysWithValues: messages.map { ($0.messageID, "important") }),
+                               model: .appleOnDevice)
+    }
+    func fillReceipt(from recognizedText: String) async throws -> AssistantResult<ReceiptDraft> {
+        throw AssistantModelError.unreadableAnswer
+    }
+    func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone) async throws
+        -> AssistantResult<MailEventSuggestion?> { .init(value: nil, model: .appleOnDevice) }
+}
+
 @Suite struct AppleMailTests {
     @Test func readsTheSyntheticStoreNewestFirstWithoutDeletedMail() async throws {
         let fixture = try MailStoreFixture.make()
@@ -51,6 +71,33 @@ final class RecordingPermissionBroker: PermissionBroker, @unchecked Sendable {
         #expect(sent.map(\.subject) == ["Re: Lisbon flights"])
         #expect(try await source.messages(in: [.inbox], limit: 1).count == 1)
         #expect(try await source.accounts().map(\.id) == [MailStoreFixture.account])
+    }
+
+    @Test func aQuietMailboxIsNotCrowdedOutByNewerMail() async throws {
+        let fixture = try MailStoreFixture.make(extraInbox: 300)
+        defer { fixture.remove() }
+        let source = AppleMailSource(mailRoot: fixture.root)
+        #expect(try await source.messages(in: [.sent], limit: 50).map(\.subject) == ["Re: Lisbon flights"])
+        #expect(try await source.messages(in: [.inbox], limit: 10).count == 10)
+    }
+
+    @Test @MainActor func aMoveDuringSortingSticks() async throws {
+        let fixture = try MailStoreFixture.make()
+        defer { fixture.remove() }
+        let container = try AppModelContainer.inMemory()
+        let gate = ScanTestLatch()
+        let sorter = GatedSorter(gate: gate)
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
+                                   assistant: sorter, drafter: nil, sender: RecordingMailSender(),
+                                   broker: RecordingPermissionBroker())
+        let loading = Task { await model.load() }
+        for _ in 0..<1_000 where !model.isSorting { await Task.yield() }
+        let review = try #require(model.messages(in: .bucket("other")).first { $0.messageID == "<review@example.com>" })
+        model.markDone(review)
+        await gate.open()
+        await loading.value
+        #expect(model.count(in: .done) == 1)
+        #expect(model.messages(in: .bucket("important")).allSatisfy { $0.messageID != "<review@example.com>" })
     }
 
     @Test func bodiesComeFromEMLXAsTextWithTrackersCounted() async throws {
