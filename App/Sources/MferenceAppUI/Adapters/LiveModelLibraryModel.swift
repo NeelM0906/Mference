@@ -111,7 +111,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
             switch row.availability {
             case .loaded?: .loaded
             case .loading?: .loading
-            default: row.loadFailure.map(ModelEntryState.failed) ?? .ready
+            default: row.loadFailure.map(ModelEntryState.loadFailed) ?? .ready
             }
         case .downloading(_, let received, let total):
             .downloading(TransferProgress(completedBytes: Int64(clamping: received), totalBytes: Int64(clamping: total)))
@@ -121,7 +121,7 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
             .downloading(TransferProgress(completedBytes: Int64(clamping: row.sizeBytes),
                                           totalBytes: Int64(clamping: row.sizeBytes)))
         case .failed(let message):
-            .failed(message)
+            .downloadFailed(message)
         case .downloadable, .notInstalled, .notOffered:
             .notInstalled
         }

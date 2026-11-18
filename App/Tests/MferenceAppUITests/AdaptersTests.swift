@@ -56,7 +56,7 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         var row = ModelLibraryRow(model: .quick, state: .installed, sizeBytes: 1, isDefault: true, fit: .fits,
                                   availability: .ready)
         row.loadFailure = "The model could not be loaded: out of memory"
-        #expect(LiveModelLibraryModel.state(row) == .failed("The model could not be loaded: out of memory"))
+        #expect(LiveModelLibraryModel.state(row) == .loadFailed("The model could not be loaded: out of memory"))
         row.availability = .loading
         #expect(LiveModelLibraryModel.state(row) == .loading)
     }
@@ -97,7 +97,7 @@ func eventually(_ condition: () -> Bool) async -> Bool {
                                           downloads: services.downloads)
         model.download(AppModel.deep.modelID)
         let failed = await eventually {
-            if case .failed? = model.entries.first(where: { $0.id == AppModel.deep.modelID })?.state { true } else { false }
+            if case .downloadFailed? = model.entries.first(where: { $0.id == AppModel.deep.modelID })?.state { true } else { false }
         }
         #expect(failed)
     }
