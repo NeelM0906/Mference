@@ -46,6 +46,8 @@ let package = Package(
                 .product(name: "MferenceEngine", package: "Mference"),
                 .product(name: "Mference", package: "Mference"),
             ],
+            // Versioned web-answer prompt and tool schemas (spec 4.5.3), U3.
+            resources: [.process("Web/Resources")],
             swiftSettings: appSwiftSettings),
         .target(
             name: "MferenceAppUI",

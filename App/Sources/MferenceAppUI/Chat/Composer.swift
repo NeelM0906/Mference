@@ -34,6 +34,14 @@ struct Composer: View {
         .overlay(RoundedRectangle(cornerRadius: MFRadius.xl).strokeBorder(MFColor.hairlineStrong))
         .shadow(color: MFColor.ink.opacity(0.05), radius: MFSpacing.m, y: MFSpacing.xs)
         .onAppear { focused = true }
+        .confirmationDialog("Turn on web search?", isPresented: Binding(
+            get: { model.webConsentRequested },
+            set: { if !$0 { model.declineWebConsent() } })) {
+            Button("Turn on web search") { model.confirmWebConsent() }
+            Button("Not now", role: .cancel) { model.declineWebConsent() }
+        } message: {
+            Text("Mference searches through SearXNG, running on this Mac. Only your search queries leave it; the pages it finds are read here. You can turn this off in Settings > Privacy.")
+        }
         .onKeyPress(.escape) {
             guard pickerOpen else { return .ignored }
             pickerOpen = false

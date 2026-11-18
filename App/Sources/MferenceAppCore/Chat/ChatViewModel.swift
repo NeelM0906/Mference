@@ -103,6 +103,8 @@ public final class ChatViewModel {
     public private(set) var webEnabled = false
     public private(set) var isPrivate = false
     public private(set) var title = Conversation.defaultTitle
+    /// The person turned web on for the first time: ask before enabling (L7).
+    public private(set) var webConsentRequested = false
     /// How many times streamed text was pushed to the view (tests check the
     /// batching with it).
     @ObservationIgnored public private(set) var flushCount = 0
@@ -212,11 +214,27 @@ public final class ChatViewModel {
     }
 
     public func setWebEnabled(_ enabled: Bool) {
+        if enabled, tools?.needsWebConsent == true {
+            webConsentRequested = true
+            return
+        }
         webEnabled = enabled
         if let conversation = selectedConversation {
             try? store.update(conversation) { $0.webEnabled = enabled }
         }
         tools?.webUsageChanged(enabled: enabled)
+    }
+
+    /// "Turn on" in the web consent prompt.
+    public func confirmWebConsent() {
+        webConsentRequested = false
+        tools?.grantWebConsent()
+        setWebEnabled(true)
+    }
+
+    /// "Not now" in the web consent prompt.
+    public func declineWebConsent() {
+        webConsentRequested = false
     }
 
     public func setPrivate(_ value: Bool) {
@@ -371,10 +389,11 @@ public final class ChatViewModel {
                     continue
                 }
 
+                let sources = Self.cited(citations, in: summary.content)
                 let saved = try store.append(to: conversation, role: .assistant, content: summary.content,
                                              reasoning: summary.reasoning, model: model, now: now()) {
                     $0.steps = steps
-                    $0.citations = citations
+                    $0.citations = sources
                     $0.finishRawValue = ChatFinish(summary.finish).rawValue
                     $0.promptTokens = summary.promptTokens
                     $0.completionTokens = summary.completionTokens
@@ -476,6 +495,17 @@ public final class ChatViewModel {
             citations.append(citation)
         }
         citations.sort { $0.number < $1.number }
+    }
+
+    /// The sources an answer shows: those it cites, in number order. Numbers
+    /// stay as the model saw them, so "[3]" still opens source 3.
+    static func cited(_ citations: [ChatCitation], in answer: String) -> [ChatCitation] {
+        let valid = Set(citations.map(\.number))
+        var used: Set<Int> = []
+        for segment in CitationMarkers.segments(answer, valid: valid) {
+            if case .citation(let number) = segment { used.insert(number) }
+        }
+        return citations.filter { used.contains($0.number) }
     }
 
     /// The sentence the chat shows for an error.

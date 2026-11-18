@@ -1,0 +1,66 @@
+# Bundled SearXNG: sources and checksums
+
+Mference's web answers use [SearXNG](https://github.com/searxng/searxng), run
+unmodified as a separate local process on 127.0.0.1, only while web search is
+on (App Program spec 4.5, decisions L7 and P10). SearXNG is licensed
+AGPL-3.0-or-later; the exact source the app runs is shipped inside the app at
+`Contents/Resources/SearXNG/source/searxng-cccbc9e158b0ac3bb2158e9841a647a5bec57b57.tar.gz`, with its licence in
+`Contents/Resources/SearXNG/licenses/`. The only file added to the package is
+`searx/version_frozen.py` (the version string SearXNG's own `freeze` command
+writes, since the app has no git checkout).
+
+`App/Scripts/searxng/prepare.sh` downloads everything below, refuses any file
+whose SHA-256 differs, and assembles the runtime that `bundle.sh` copies into
+the app. Pins live in `App/Scripts/searxng/pins.env` and
+`App/Scripts/searxng/wheels.lock`; change them there and here together.
+
+Our settings (`settings.yml` next to this file) turn on JSON output and turn
+off the bot limiter, the image proxy and metrics; port and secret are set per
+launch.
+
+## Runtime
+
+| What | Version | URL | SHA-256 |
+| --- | --- | --- | --- |
+| python-build-standalone (CPython, PSF licence) | 3.12.16, release 20261026, aarch64-apple-darwin install_only_stripped | https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz | `353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e` |
+| SearXNG source (AGPL-3.0-or-later) | commit `cccbc9e158b0ac3bb2158e9841a647a5bec57b57` (2026.11.2+cccbc9e15) | https://github.com/searxng/searxng/archive/cccbc9e158b0ac3bb2158e9841a647a5bec57b57.tar.gz | `fd685caeae4773d668c0fe8e8242986ca6a6e24ceb72449ff4fdf4abd8573a85` |
+
+## Wheels (CPython 3.12, macOS arm64)
+
+Resolved from SearXNG's `requirements.txt` at the pinned commit
+(`uv pip compile --python-version 3.12 --python-platform aarch64-apple-darwin --only-binary :all:`),
+one wheel each chosen by `lock_wheels.py`. SHA-256 values are PyPI's.
+
+| Wheel | URL | SHA-256 |
+| --- | --- | --- |
+| `annotated_doc-0.0.7-py3-none-any.whl` | https://files.pythonhosted.org/packages/5e/b1/9530d6bee606979d54501adcc767d958a38929827f11a524b0d93429d2ad/annotated_doc-0.0.7-py3-none-any.whl | `6bc31bbbec6dfaaedc1676dbc11dbda96fe22a2b5c400e9ebad113fec44a9dc6` |
+| `babel-2.18.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/77/f5/21d2de20e8b8b0408f0681956ca2c69f1320a3848ac50e6e7f39c6159675/babel-2.18.0-py3-none-any.whl | `e2b422b277c2b9a9630c1d7903c2a00d0830c409c59ac8cae9081c92f1aeba35` |
+| `blinker-1.9.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl | `ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc` |
+| `certifi-2026.10.23-py3-none-any.whl` | https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl | `e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1` |
+| `cffi-2.1.1-cp312-cp312-macosx_11_0_arm64.whl` | https://files.pythonhosted.org/packages/54/7d/16e5a096677b5e313ca80cd5e5170efa3ea44624a82bb111925522da64b1/cffi-2.1.1-cp312-cp312-macosx_11_0_arm64.whl | `f81b3b8f3d4e343550fa4baa0e479bba9f2d29ce9c2e9b51d1ce1718d7442fcf` |
+| `click-8.5.1-py3-none-any.whl` | https://files.pythonhosted.org/packages/31/7d/164b7ffc8624fe9efb4221bf9af485d5c1e41b9ae118045d2b6dc5457d8b/click-8.5.1-py3-none-any.whl | `8bb5376d2006950386f8c6427613334a2acadc5f559cb80e638d00b4df957e37` |
+| `curl_cffi-0.17.0-cp310-abi3-macosx_11_0_arm64.whl` | https://files.pythonhosted.org/packages/dc/ab/cd7e71bc96c36521193d3dcd38e1a08a9939538fc34b50ba81f30201f9b3/curl_cffi-0.17.0-cp310-abi3-macosx_11_0_arm64.whl | `88cb5e34eb23eb2106711b06df68027209c72be709df239c6029345551e0acfd` |
+| `flask-3.1.3-py3-none-any.whl` | https://files.pythonhosted.org/packages/7f/9c/34f6962f9b9e9c71f6e5ed806e0d0ff03c9d1b0b2340088a0cf4bce09b18/flask-3.1.3-py3-none-any.whl | `f4bcbefc124291925f1a26446da31a5178f9483862233b23c0c96a20701f670c` |
+| `flask_babel-4.0.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/14/c2/e0ab5abe37882e118482884f2ec660cd06da644ddfbceccf5f88f546b574/flask_babel-4.0.0-py3-none-any.whl | `638194cf91f8b301380f36d70e2034c77ee25b98cb5d80a1626820df9a6d4625` |
+| `isodate-0.7.2-py3-none-any.whl` | https://files.pythonhosted.org/packages/15/aa/0aca39a37d3c7eb941ba736ede56d689e7be91cab5d9ca846bde3999eba6/isodate-0.7.2-py3-none-any.whl | `28009937d8031054830160fce6d409ed342816b543597cece116d966c6d99e15` |
+| `itsdangerous-2.2.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl | `c6242fc49e35958c8b15141343aa660db5fc54d4f13a1db01a3f5891b98700ef` |
+| `jinja2-3.1.6-py3-none-any.whl` | https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl | `85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67` |
+| `lxml-6.1.3-cp312-cp312-macosx_10_13_universal2.whl` | https://files.pythonhosted.org/packages/dd/1f/a180b57d9eeabaab77f9d5aa30356898ea749c4795596a8f66d1eb6bef2e/lxml-6.1.3-cp312-cp312-macosx_10_13_universal2.whl | `0c0710ac085a157b593c38fbcacd950f15c4afa8e2057527185875ab302752bc` |
+| `markdown_it_py-4.2.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl | `9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a` |
+| `markupsafe-3.0.4-cp312-cp312-macosx_11_0_arm64.whl` | https://files.pythonhosted.org/packages/a2/f0/d6613774d86fbf6d145751d43c59875e47a6f9f17daee0aef173bd36d90e/markupsafe-3.0.4-cp312-cp312-macosx_11_0_arm64.whl | `0930db9bdc62d22944e10b066448bb65dc9abe9112880c7cab8da54db4284d5f` |
+| `mdurl-0.1.2-py3-none-any.whl` | https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl | `84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8` |
+| `msgspec-0.22.0-cp312-cp312-macosx_11_0_arm64.whl` | https://files.pythonhosted.org/packages/fb/02/109165edaafb895668d87177972a32ade9126a54f3736123d8e44be9096d/msgspec-0.22.0-cp312-cp312-macosx_11_0_arm64.whl | `b60b43425a47eb9cfe987f6874e354ca7c760e58e295b4e2273ff03574df28a1` |
+| `pycparser-3.12-py3-none-any.whl` | https://files.pythonhosted.org/packages/b6/ae/315bbeee126a769cbde43cf4908acb4b40408d8bf8bbf334dd7368d8dadf/pycparser-3.12-py3-none-any.whl | `a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e` |
+| `pygments-2.21.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl | `2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9` |
+| `python_dateutil-3.0.0-py2.py3-none-any.whl` | https://files.pythonhosted.org/packages/5a/17/cebee01d1c0c1441174cf0456ddc91b280d79acb65340c05e41d77866ee8/python_dateutil-3.0.0-py2.py3-none-any.whl | `3c79630202e4152c6add678446984236efe4f57e84d8e892aab0637bab82e9fd` |
+| `pytz-2026.6-py2.py3-none-any.whl` | https://files.pythonhosted.org/packages/b6/25/564f3fc5b70c1398d706c51f2b1470d0ea0b1b2f96fee67877b6f5bdf3b6/pytz-2026.6-py2.py3-none-any.whl | `7fed3fee8fd6bd4a2b7b75a8d56021d0624127bf69bd5691f115db929ac570b3` |
+| `pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl` | https://files.pythonhosted.org/packages/89/a0/6cf41a19a1f2f3feab0e9c0b74134aa2ce6849093d5517a0c550fe37a648/pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl | `fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0` |
+| `rich-15.0.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl | `33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb` |
+| `shellingham-1.5.4-py2.py3-none-any.whl` | https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl | `7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686` |
+| `six-1.17.0-py2.py3-none-any.whl` | https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl | `4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274` |
+| `typer-0.27.3-py3-none-any.whl` | https://files.pythonhosted.org/packages/07/ea/2e31b67051e91a133189e9c000c222502ddc6969856416de0d095de4c0b0/typer-0.27.3-py3-none-any.whl | `e50022f28b82a86313e54501317a1db64bf8f8d036ff8cfe5ca7e47675454aff` |
+| `typing_extensions-4.16.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl | `481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8` |
+| `tzdata-2026.6-py2.py3-none-any.whl` | https://files.pythonhosted.org/packages/0a/66/9a06c2227fedfd4919f0eaaa8b94377d9730882a7e4f95823c9a331ab5e1/tzdata-2026.6-py2.py3-none-any.whl | `0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec` |
+| `valkey-6.1.1-py3-none-any.whl` | https://files.pythonhosted.org/packages/d0/a2/252afa4da08c714460f49e943070f86a02931f99f886182765194002fe33/valkey-6.1.1-py3-none-any.whl | `e2691541c6e1503b53c714ad9a35551ac9b7c0bbac93865f063dbc859a46de92` |
+| `werkzeug-3.1.9-py3-none-any.whl` | https://files.pythonhosted.org/packages/a1/38/df03f564f43cec2684823f3cccae1a652ee7face1cbaa76fb223096e64d7/werkzeug-3.1.9-py3-none-any.whl | `6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab` |
+| `whitenoise-6.12.0-py3-none-any.whl` | https://files.pythonhosted.org/packages/db/eb/d5583a11486211f3ebd4b385545ae787f32363d453c19fffd81106c9c138/whitenoise-6.12.0-py3-none-any.whl | `fc5e8c572e33ebf24795b47b6a7da8da3c00cff2349f5b04c02f28d0cc5a3cc2` |
