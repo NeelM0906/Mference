@@ -38,12 +38,18 @@ struct MailContent: View {
         Group {
             switch model.status {
             case .available, nil:
-                HStack(spacing: 0) {
-                    MailSidebar(model: model).frame(width: 245)
-                    divider
-                    MailList(model: model).frame(width: 365)
-                    divider
-                    MailReader(model: model).frame(maxWidth: .infinity, maxHeight: .infinity)
+                GeometryReader { proxy in
+                    // Columns scale with the window: about 200 and 300 pt at
+                    // the mockup's width, the reader takes the rest.
+                    let sidebar = min(max(proxy.size.width * 0.17, 190), 220)
+                    let list = min(max(proxy.size.width * 0.25, 280), 350)
+                    HStack(spacing: 0) {
+                        MailSidebar(model: model).frame(width: sidebar)
+                        divider
+                        MailList(model: model).frame(width: list)
+                        divider
+                        MailReader(model: model).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
             case .needsFullDiskAccess:
                 AppleEmptyState(systemImage: "lock.shield", title: "Read Apple Mail on this Mac",
@@ -256,21 +262,22 @@ struct MailRow: View {
         VStack(alignment: .leading, spacing: MFSpacing.xxs) {
             HStack(alignment: .firstTextBaseline) {
                 Text(message.senderName.isEmpty ? message.senderAddress : message.senderName)
-                    .font(message.isRead ? MFFont.body : MFFont.bodyEmphasis)
+                    .font(MFFont.callout.weight(message.isRead ? .medium : .semibold))
                     .foregroundStyle(MFColor.ink)
                     .lineLimit(1)
                 Spacer()
                 Text(Self.timeLabel(message.date))
-                    .font(MFFont.callout)
+                    .font(MFFont.caption)
                     .foregroundStyle(MFColor.secondary)
             }
             Text(message.subject)
-                .font(MFFont.bodyEmphasis)
+                .font(MFFont.calloutEmphasis)
                 .foregroundStyle(MFColor.ink)
                 .lineLimit(1)
             Text(message.snippet)
-                .font(MFFont.body)
+                .font(MFFont.caption)
                 .foregroundStyle(MFColor.secondary)
+                .lineSpacing(MFSpacing.xxs)
                 .lineLimit(2)
         }
         .padding(.horizontal, MFSpacing.l + MFSpacing.xs)
@@ -313,7 +320,7 @@ struct MailReader: View {
                         Text(body.text)
                             .font(MFFont.body)
                             .foregroundStyle(MFColor.ink)
-                            .lineSpacing(MFSpacing.xs)
+                            .lineSpacing(MFSpacing.xs + MFSpacing.xxs)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
@@ -361,9 +368,10 @@ struct MailReader: View {
                     .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.accentFill))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: MFSpacing.xxs) {
-                    Text("\(card.title) · \(card.start.formatted(.dateTime.weekday(.abbreviated).hour().minute())) to \(card.end.formatted(date: .omitted, time: .shortened))")
+                    Text("\(card.title) · \(CalendarTimeFormat.dayRange(card.start, card.end))")
                         .font(MFFont.bodyEmphasis)
                         .foregroundStyle(MFColor.ink)
+                        .lineLimit(1)
                     Text("Nothing changes until you add it.")
                         .font(MFFont.body)
                         .foregroundStyle(MFColor.secondary)
