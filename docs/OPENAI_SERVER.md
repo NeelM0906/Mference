@@ -391,8 +391,11 @@ template in the GGUF file:
   above apply: it reads `reasoning_effort` (`xhigh`, `medium`, `low`, `none`;
   omitted is `xhigh` with thinking on), and a request with an explicit effort
   rejects `developer` messages. Deep is served with MTP draft decoding
-  (llama.cpp's `draft-mtp`), which keeps greedy output identical to decoding
-  without it; while MTP is on, Deep reuses no prompt prefix (see Prompt reuse).
+  (llama.cpp's `draft-mtp`). Its greedy output is equivalent to decoding
+  without MTP but not guaranteed byte-identical, since verifying drafted
+  tokens in a batch differs numerically from single-token decode (8 of 10
+  server outputs matched in validation; see [the engine](ENGINE.md)). While
+  MTP is on, Deep reuses no prompt prefix (see Prompt reuse).
 
 Qwen 3.6 opts into its source thinking template with
 `chat_template_kwargs: {"enable_thinking": true}` or an explicit

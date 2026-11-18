@@ -36,10 +36,15 @@ The product offers five models, and the catalog lists only these by default.
 
 Deep decodes with its MTP head: `LlamaBackend` loads the GGUF's nextn
 layer and drafts with llama.cpp's own `draft-mtp` (`common_speculative`, up
-to three drafted tokens per step, verified by the target). Greedy output is
-token-identical with MTP on and off. The catalog requires the file's MTP
-tensors, and the server serves Deep only with MTP. While MTP is on, each
-request starts from an empty context (no prompt-prefix reuse).
+to three drafted tokens per step, verified by the target). Greedy output
+with MTP on is equivalent to MTP off but not guaranteed byte-identical: the
+target verifies the drafted tokens as one batch, which differs numerically
+from single-token decode, so a near-tied token can come out differently. It
+was token-identical on all 7 engine trace cases. Through the server, 8 of 10
+outputs (5 requests, each streamed and not) matched; the other two, one
+prompt in both modes, differ from one phrase on. The catalog requires the file's MTP tensors, and the server
+serves Deep only with MTP. While MTP is on, each request starts from an empty
+context (no prompt-prefix reuse).
 
 `EngineProductSlot` holds this table in code. The IDs are stable: a client
 stores them, and the native ones are the IDs `MferenceServer` already used for
