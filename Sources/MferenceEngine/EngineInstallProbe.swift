@@ -6,24 +6,11 @@ import Mference
 /// their identifiers; checkpoint variants keep their own identity.
 public enum EngineNativeModelID {
     public static func modelID(for family: ModelFamily, checkpointID: String? = nil) -> String {
-        if family == .gemma4, checkpointID == CheckpointIdentity.gemma4QAT {
-            return CheckpointIdentity.gemma4QAT
-        }
-        if family == .qwen38, checkpointID == CheckpointIdentity.swiftQwen38 {
-            return CheckpointIdentity.swiftQwen38
-        }
         return switch family {
-        case .gemma4: "gemma-4-26b-a4b-it"
         case .qwen36: "qwen3.6-35b-a3b"
         case .qwen38: "qwen3.8-27b-4bit"
-        case .deepseekV4Flash: "deepseek-v4-flash-2bit-dq"
-        case .inklingSmall: "inkling-small-4bit"
         case .maple: "maple-preview-2bit-mlx"
-        case .flint: "flint-40b-a2.5b-jang-4m"
-        case .qwen38flashnext: "qwen3.8-flash-next-int4g64"
-        case .qwen38flashnextudiq3xxs: "unsloth-qwen3.8-flash-next-ud-iq3_xxs"
         case .minicpm5: "minicpm5-2b-int4g64"
-        case .glm53Flash: "glm-5.3-flash-mlx-mixed-4-8bit"
         }
     }
 }
@@ -67,6 +54,9 @@ public enum EngineInstallProbe {
         let manifestURL = directory.appendingPathComponent("manifest.json")
         guard fileManager.fileExists(atPath: manifestURL.path) else {
             return .notAModelDirectory
+        }
+        if let retired = ManifestReader.retiredInstall(manifestURL: manifestURL) {
+            return .notRunnable(family: retired.identifier, detail: retired.detail)
         }
         if let raw = rawFamily(manifestURL: manifestURL),
            let missingAxes = gatedFamilies.map({ $0[raw] })

@@ -11,7 +11,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .defaultsToy())
     let embed = model.embedding
     #expect(embed.length == UInt64(1024 * 64))
     #expect(embed.shape.0 == 1024 && embed.shape.1 == 64)
@@ -28,7 +28,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .defaultsToy())
 
     _ = try model.qProj(layer: 0)
     _ = try model.kProj(layer: 0)
@@ -44,7 +44,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .defaultsToy())
     let norm = model.finalNorm
     let contents = norm.buffer.contents()
     // Norm region was patterned 0xC0 | (i & 0x3F).
@@ -62,7 +62,7 @@ extension ModelLoaderTests {
     #expect {
       _ = try Model.load(
         directoryURL: dir, device: device,
-        expecting: .gemma4Toy())
+        expecting: .defaultsToy())
     } throws: { error in
       if case ModelError.partialInstall = error { return true }
       return false
@@ -83,7 +83,7 @@ extension ModelLoaderTests {
     #expect {
       _ = try Model.load(
         directoryURL: dir, device: device,
-        expecting: .gemma4Toy())
+        expecting: .defaultsToy())
     } throws: { error in
       if case ModelError.checksumMismatch = error { return true }
       return false
@@ -98,12 +98,12 @@ extension ModelLoaderTests {
     let full = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .defaultsToy(),
       integrityPolicy: .fullSha256)
     let trusted = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .defaultsToy(),
       integrityPolicy: .sizeCheckTrustedReceipt)
 
     #expect(full.embedding.length == trusted.embedding.length)
@@ -134,7 +134,7 @@ extension ModelLoaderTests {
     #expect {
       _ = try Model.load(
         directoryURL: dir, device: device,
-        expecting: .gemma4Toy())
+        expecting: .defaultsToy())
     } throws: { error in
       if case ModelError.expertStrideNotPageAligned = error { return true }
       return false

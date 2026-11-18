@@ -66,8 +66,6 @@ extension EnginePromptCacheBytes {
 
     /// `auto` is min(4 GiB, physical / 8) on hosts with at least 24 GiB,
     /// 1 GiB on 16 to under 24 GiB, and 0 (single-prefix behaviour) below.
-    /// The Flash-Next families cap that at 1.5 GiB: their routed experts
-    /// stream through the file cache, which every retained byte shrinks.
     public func resolved(family: ModelFamily? = nil,
                          physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
         switch self {
@@ -83,12 +81,7 @@ extension EnginePromptCacheBytes {
             } else {
                 general = 0
             }
-            switch family {
-            case .qwen38flashnext?, .qwen38flashnextudiq3xxs?:
-                return min(general, 3 * Self.gibibyte / 2)
-            default:
-                return general
-            }
+            return general
         }
     }
 }
@@ -155,25 +148,15 @@ public actor NativeEngineModel: EngineModel {
         let maxContext = options.nativeMaxContext ?? family.maximumContext
         let tokenizerFolder = MFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
-            throw MFTokenizerError.missingToolTemplate
+            throw MFTokenizerError.missingTokenizerSidecar(
+                modelDirectory.appendingPathComponent("tokenizer", isDirectory: true).path)
         }
         let templateURL = tokenizerFolder.appendingPathComponent("chat_template.jinja")
         let tokenizer = try await MFTokenizer.load(forModelDirectory: modelDirectory)
-        // DeepSeek ships no chat_template.jinja — its chat framing is native
-        // Swift — so the prompt-cache identity hashes a pinned constant that
-        // changes only when that native render does. Every other dialect
-        // still requires the bundled template.
+        // The prompt-cache identity hashes the installed chat template.
         let templateData: Data
-        if tokenizer.dialect == .gemma {
-            templateData = try tokenizer.effectiveGemmaChatTemplateData()
-        } else if tokenizer.dialect == .glm5 {
-            // GLM-5.3 renders natively (`Glm5ChatTemplate.swift`); the
-            // identity follows the native render, not the sidecar.
-            templateData = Data("native:glm5:v1".utf8)
-        } else if FileManager.default.fileExists(atPath: templateURL.path) {
+        if FileManager.default.fileExists(atPath: templateURL.path) {
             templateData = try Data(contentsOf: templateURL)
-        } else if tokenizer.dialect == .deepseek {
-            templateData = Data("native:deepseek:v1".utf8)
         } else {
             throw MFTokenizerError.missingToolTemplate
         }
@@ -262,8 +245,6 @@ public actor NativeEngineModel: EngineModel {
             chatDialect: tokenizer.dialect,
             generationDefaults: tokenizer.generationDefaults,
             maxContext: maxContext,
-            isGemmaQAT: tokenizer.isGemmaQAT,
-            usesSwiftQwenTemplate: tokenizer.isSwiftQwen,
             acceptsReasoningEffort: tokenizer.acceptsReasoningEffort,
             supportsQwenReasoningEffort: tokenizer.supportsQwenReasoningEffort,
             reusesPromptPrefixes: requestedPromptCacheMode != .off,
@@ -401,11 +382,6 @@ public actor NativeEngineModel: EngineModel {
             endRequest()
         }
 
-        let recovery = (runner as? any GemmaPrefixRecovering).flatMap {
-            $0.supportsGemmaPrefixRecovery && tokenizer.dialect == .gemma ? $0 : nil
-        }
-        var recoveryOutcome = promptCacheMode == .off ? "cache_disabled" : "cold_or_incompatible_history"
-        var captureOutcome: String?
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
         if let prefixStates, let snapshotRunner {
@@ -423,21 +399,13 @@ public actor NativeEngineModel: EngineModel {
                 domain: promptCacheDomain,
                 turn: request.promptCacheTurn,
                 renderedPromptIDs: promptIDs,
-                tokenizer: tokenizer,
-                gemmaRecoverablePrefix: recovery.map { capable in { limit in
-                    let available = capable.gemmaRecoverablePrefix(upTo: limit)
-                    if available == 0 { recoveryOutcome = "state_unavailable" }
-                    return available
-                } }).fitting(maxContext: maxContext) {
+                tokenizer: tokenizer).fitting(maxContext: maxContext) {
             case .miss:
                 promptCache.invalidate()
                 effectivePromptIDs = promptIDs
                 completionStart = .reset
             case .hit(let effective, let cached):
                 effectivePromptIDs = effective
-                if let recovery, cached != runner.continuationPosition {
-                    recoveryOutcome = try recovery.recoverGemmaPrefix(to: cached).rawValue + "_prefix"
-                } else { recoveryOutcome = "full_prefix" }
                 completionStart = .resume(cachedPromptTokens: cached)
             }
         } else {
@@ -461,9 +429,8 @@ public actor NativeEngineModel: EngineModel {
         let startsInThinking = tokenizer.startsInThinking(
             reasoningEffort: request.reasoningEffort, promptIDs: effectivePromptIDs)
         let countsPayloadTokens = tokenizer.dialect == .chatml
-            || tokenizer.dialect == .glm5 || tokenizer.dialect == .minicpm
+            || tokenizer.dialect == .minicpm
         let decoder = countsPayloadTokens || needsToolTemplate || startsInThinking
-            || tokenizer.dialect == .gemma || tokenizer.requiresStructuredAssistantDecoding
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: Set(request.tools.map(\.name)),
@@ -483,15 +450,7 @@ public actor NativeEngineModel: EngineModel {
         var decodingError: Error?
         var shouldStop = false
 
-        var checkpoint: (position: Int, capture: () throws -> Void)?
-        if promptCacheMode == .singlePrefix, let recovery,
-           let boundary = try tokenizer.gemmaRecoveryBoundary(messages: request.messages,
-                tools: request.tools, reasoningEffort: request.reasoningEffort,
-                preserveThinking: request.preserveThinking, promptIDs: effectivePromptIDs) {
-            checkpoint = (boundary, {
-                captureOutcome = try recovery.captureGemmaPrefix() ? "captured" : "unavailable"
-            })
-        }
+        let checkpoint: (position: Int, capture: () throws -> Void)? = nil
 
         let result = try await runRawCompletion(
             producer: runner,
@@ -572,7 +531,7 @@ public actor NativeEngineModel: EngineModel {
             }
         }
         if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
-            throw GemmaToolCallParserError.malformed
+            throw ToolCallParserError.malformed
         }
         let tail = stopMatcher.finish()
         if !tail.isEmpty {
@@ -608,7 +567,6 @@ public actor NativeEngineModel: EngineModel {
                 result: result,
                 reasoningContent: reasoning.isEmpty ? nil : reasoning,
                 stopStringFiltered: stopMatcher.isStopped)
-            if promptCache.entry == nil { recovery?.discardGemmaPrefix() }
         }
         completed = true
         endRequest()
@@ -628,8 +586,6 @@ public actor NativeEngineModel: EngineModel {
             diagnostics: RuntimeDiagnostics.enabled ? RuntimeDiagnostics(
                 result: result,
                 memory: .capture(model: model, producer: runner, scratch: scratch),
-                gemmaRecovery: recovery.map { .init(outcome: recoveryOutcome,
-                    capture: captureOutcome, allocatedBytes: $0.gemmaRecoveryBytes) },
                 prefixCache: prefixStates.map {
                     PrefixCacheDiagnostics(cache: $0, memory: memoryGovernor?.report)
                 }) : nil)

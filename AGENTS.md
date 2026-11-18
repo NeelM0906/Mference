@@ -1,11 +1,9 @@
 # Mference
 
-Swift and Metal inference for pinned checkpoints on Apple Silicon: Gemma 4
-26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, Inkling-Small
-276B-A12B, Maple Preview, Qwen 3.8 27B, Qwen3.8-Flash-Next 180B-A3.5B (also
-as Unsloth's UD-IQ3_XXS GGUF quantization), and MiniCPM5-2B. The shared core and KV cache stay resident; routed experts stream
-from SSD per token. Qwen 3.8 27B and MiniCPM5-2B are dense and fully
-resident. Through the `MferenceEngine` library, `MferenceServer --library`
+Swift and Metal inference for pinned checkpoints on Apple Silicon: Qwen 3.6
+35B-A3B, Maple Preview, Qwen 3.8 27B, and MiniCPM5-2B. The shared core and KV
+cache stay resident; routed experts stream from SSD per token. Qwen 3.8 27B
+and MiniCPM5-2B are dense and fully resident. Through the `MferenceEngine` library, `MferenceServer --library`
 runs GGUF models with llama.cpp linked in-process: Qwen3.5-4B (Unsloth
 UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
 GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers five models: Quick,
@@ -38,18 +36,19 @@ swift run -c release MferenceCLI \
 ```
 
 The installer streams each pinned checkpoint without staging the full source.
-Set `HF_TOKEN` only if requested. Source reads range from ~5 GB (MiniCPM5) to
-~360 GB (Flash-Next), producing installs from ~1.4 GB to ~175 GB; check disk
-before installing, and read
-[docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) or
-[docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) before touching those two.
+Set `HF_TOKEN` only if requested. Source reads range from ~5 GB (MiniCPM5) up
+to the vendor BF16 repo that the `qwen36original` control install reads,
+producing installs from ~1.4 GB to ~20 GB; check disk before installing.
+Retired families are listed in
+[docs/RETIRED_FAMILIES.md](docs/RETIRED_FAMILIES.md); this runtime no longer
+loads their installs.
 Cancellation preserves verified completed ranges; continue with `--resume` or
 remove them with `--discard-partial`.
 
 ## Models and the library
 
-Install directories take the family's own label (`gemma4.gturbo`,
-`qwen36.gturbo`, `minicpm5.gturbo`, and so on for the labels
+Install directories take the family's own label (`qwen36.gturbo`,
+`qwen38.gturbo`, `minicpm5.gturbo`, and so on for the labels
 `MferenceRepack --help` lists), but detection goes by each directory's own
 manifest, not its name. `MferenceServer --library`
 scans the library roots — the `Mference.libraryRoot` default if set,

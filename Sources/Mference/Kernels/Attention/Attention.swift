@@ -26,7 +26,6 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 ///   - `out` : `[numQHeads, headDim]`
 final class Attention {
     private let ctx: MetalContext
-    private let gemmaQAT: GemmaQATAttention?
     private let psoGroupedVecFull: MTLComputePipelineState
     private let psoGroupedVecFull256: MTLComputePipelineState
     // Built on first use, so only the Qwen 3.6 instances that set
@@ -94,9 +93,8 @@ final class Attention {
     private let dPartial: MTLBuffer
     private let oPartial: MTLBuffer
 
-    init(context: MetalContext, gemmaQATMaxContext: Int? = nil) throws {
+    init(context: MetalContext) throws {
         self.ctx = context
-        self.gemmaQAT = try gemmaQATMaxContext.map { try GemmaQATAttention(context: context, maxContext: $0) }
         self.psoGroupedVecFull = try Self.specializedPipeline(context,
                                                               "attention_decode_full_grouped_vec_partial",
                                                               headDim: 512,
@@ -454,15 +452,6 @@ final class Attention {
                      "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
         precondition(ringCapacity == 0 || preferGQASWA,
                      "FP16 KV ring is only valid for SWA attention")
-        if let gemmaQAT {
-            gemmaQAT.encode(commandBuffer: commandBuffer,
-                q: q, qOffset: qOffset, k: k, kOffset: kOffset,
-                v: v, vOffset: vOffset, out: out, outOffset: outOffset,
-                headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
-                seqLen: seqLen, kvStart: kvStart, scale: scale, ringCapacity: ringCapacity,
-                grouped: forceGroupedVector)
-            return
-        }
         let geometry = Self.splitGeometry(headDim: headDim,
                                           numQHeads: numQHeads,
                                           numKVHeads: numKVHeads,

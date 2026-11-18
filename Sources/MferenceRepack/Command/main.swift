@@ -3,59 +3,31 @@ import MferenceRepackCore
 
 private let usage = """
 Usage:
-  MferenceRepack [--dry-run] [--model <gemma4|gemma4qat|qwen36|qwen36original|qwen38|swiftqwen38|deepseekv4flash|inklingsmall|maple|flint|qwen38flashnext|minicpm5|minicpm5mlx|glm53flash>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
+  MferenceRepack [--dry-run] [--model <qwen36|qwen36original|qwen38|maple|minicpm5|minicpm5mlx>] --output <model.gturbo> [--overwrite] [--resume] [--skip-mtp] [--base-url <url>]
   MferenceRepack --attach-mtp <mtp-shard.safetensors> --output <model.gturbo>
   MferenceRepack --discard-partial --output <model.gturbo>
   MferenceRepack --verify-install --input-gturbo <model.gturbo>
-  MferenceRepack --implicit-qat-biases --input-gturbo <gemma4qat.gturbo> --output <new.gturbo>
   MferenceRepack --help
 
 --attach-mtp appends the Qwen 3.8 MTP draft-layer tensors from a local BF16
 safetensors shard to an existing install (projections quantized to INT4
 affine group-64), enabling speculative decoding.
 
---implicit-qat-biases writes a copy of a Gemma 4 QAT install whose routed
-experts are stored without their bias arrays (each is exactly -8 x scale; the
-runtime rebuilds them after every read), about 10 % fewer bytes per expert
-read. The input is only read; the output must not exist yet. Every bias group
-and every input file hash is checked before the output is finished.
-
 --skip-mtp drops the source checkpoint's own mtp.* draft-layer group instead
 of carrying it. Vision towers are always skipped. Either way the decision is
 recorded in manifest.json -> sidecars rather than left implicit.
 
-qwen38flashnextudiq3xxs (unlisted) copies Unsloth's UD-IQ3_XXS GGUF quant of
-Qwen3.8-Flash-Next, a third-party quant, in its own ggml formats (~83.6 GB
-read). It installs by name; the runtime runs it with the expert slot cache.
-
-qwen38flashnext and qwen36original read the model vendor's original BF16 repo
-and quantize to INT4 affine group-64 during the install. qwen38flashnext keeps
-its two gating tensors per layer at INT8; its capability gate was lifted on
-2026-09-10, so an install loads through the ordinary funnel. qwen36original is
-the same checkpoint qwen36 installs from mlx-community's pre-quantized
-conversion, put through our own quantizer instead; installing both and
-comparing them is the W2.1b quantizer-quality gate
-(docs/QUANTIZER_QUALITY.md).
-
-swiftqwen38 reads the pinned ukisai/Swift-Qwen3.8-27b BF16 source and quantizes
-its text and MTP weights in flight. It is a qualification candidate, distinct
-from base qwen38; see docs/families/SWIFT_QWEN38.md.
+qwen36original reads the model vendor's original BF16 repo and quantizes to
+INT4 affine group-64 during the install. It is the same checkpoint qwen36
+installs from mlx-community's pre-quantized conversion, put through our own
+quantizer instead; installing both and comparing them is the W2.1b
+quantizer-quality gate (docs/QUANTIZER_QUALITY.md).
 
 minicpm5 reads openbmb/MiniCPM5-2B's BF16 upload and quantizes to INT4 affine
 group-64 during the install (~5 GB read, ~1.4 GB written); minicpm5mlx is the
 vendor's own MLX INT4 conversion of the same checkpoint, the W2.1b control.
 
-glm53flash reads PipeNetwork's pre-quantized mixed 4/8-bit MLX conversion of
-GLM-5.3-Flash (~181 GB; check disk first). Resident and bounded streamed
-prefill are implemented; see docs/families/GLM53_FLASH.md and the prefill
-qualification matrix for the validated profiles and remaining limits.
-
-gemma4qat preserves the aligned checkpoint's native INT4/group-32 weights and
-BF16 routers. Its install is separate from gemma4 and uses the checkpoint's
-installed chat template and generation settings. The launcher installs it under
-$HOME/llm-models/gemma4qat.gturbo.
-
-The installer streams the selected checkpoint (default: the supported Gemma 4
+The installer streams the selected checkpoint (default: the supported Qwen 3.6
 checkpoint) from Hugging Face and repackages it without materializing the
 source checkpoint on disk. Set HF_TOKEN only if Hugging Face requests
 authentication. A cancelled or interrupted download can be continued with
@@ -88,7 +60,6 @@ private struct Arguments {
     var resume = false
     var discardPartial = false
     var verifyInstall = false
-    var implicitQATBiases = false
     var attachMTP: String?
     var inputGTurbo: String?
     var baseURL: URL?
@@ -120,9 +91,6 @@ private struct Arguments {
                 index += 1
             case "--verify-install":
                 parsed.verifyInstall = true
-                index += 1
-            case "--implicit-qat-biases":
-                parsed.implicitQATBiases = true
                 index += 1
             case "--attach-mtp":
                 guard index + 1 < values.count else {
@@ -177,17 +145,6 @@ private struct Arguments {
             guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.verifyInstall,
                   !parsed.skipMTP else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
-            }
-            return parsed
-        }
-        if parsed.implicitQATBiases {
-            guard parsed.inputGTurbo != nil, parsed.output != nil else {
-                throw ParseError.missingRequired("--input-gturbo and --output")
-            }
-            guard parsed.attachMTP == nil, !parsed.verifyInstall, !parsed.overwrite,
-                  !parsed.resume, !parsed.dryRun, !parsed.skipMTP, parsed.baseURL == nil else {
-                throw ParseError.invalidMode(
-                    "--implicit-qat-biases only accepts --input-gturbo and --output")
             }
             return parsed
         }
@@ -281,22 +238,6 @@ private func run(_ values: [String]) async -> Int32 {
         }
     }
 
-    if arguments.implicitQATBiases, let input = arguments.inputGTurbo, let output = arguments.output {
-        do {
-            let result = try QATImpliedBiasConverter.run(
-                inputGTurbo: input, outputGTurbo: output,
-                progress: { print($0) })
-            print("Converted \(result.layers) layers: expert \(result.expertStride) -> "
-                + "\(result.storedExpertStride) bytes; routed experts \(result.routedBytesBefore) -> "
-                + "\(result.routedBytesAfter) bytes; \(result.groupsChecked) bias groups checked")
-            print("Output: \(output)")
-            return 0
-        } catch {
-            printError("implicit-qat-biases failed: \(error)")
-            return 1
-        }
-    }
-
     if arguments.verifyInstall, let input = arguments.inputGTurbo {
         do {
             let result = try VerifiedInstallTool.run(
@@ -330,16 +271,8 @@ private func run(_ values: [String]) async -> Int32 {
             print("Dry run for \(source.displayName)")
             print("Source revision: \(result.resolvedCommit)")
             print("Range requests: \(result.rangeRequestCount)")
-            print("Source bytes to read: \(result.remoteBytesToDownload + result.sourceMetadataBytes)")
+            print("Source bytes to read: \(result.remoteBytesToDownload)")
             print("Output bytes: \(result.outputBytes)")
-            if result.supportingFileBytes > 0 {
-                print("Source metadata/assets bytes (included, excluding retries): \(result.sourceMetadataBytes)")
-                print("Resumable payload range bytes: \(result.remoteBytesToDownload)")
-                print("Required assets and layout bytes (included): \(result.supportingFileBytes)")
-                print("Additional metadata/staging reserve bytes: \(result.metadataReserveBytes)")
-                print("Free-space reserve bytes: \(source.reserveBytes)")
-                print("Manifest and receipt final sizes are accounted from the metadata reserve.")
-            }
             print("Resident entries: \(result.residentEntryCount)")
             print("Expert layers: \(result.expertLayerCount)")
             print("Excluded multimodal tensors: "
@@ -361,15 +294,6 @@ private func run(_ values: [String]) async -> Int32 {
         print("Installed \(source.displayName)")
         print("Source revision: \(result.resolvedCommit)")
         print("Model: \(result.outputDir)")
-        if source == .gemma4QAT {
-            print("Installed bytes: \(result.outputBytes)")
-            print("Payload bytes reused: \(result.reusedBytes); downloaded this run: \(result.downloadedThisRunBytes)")
-            print("Source metadata/assets bytes (excluding retries): \(result.sourceMetadataBytes)")
-            print("Largest temporary payload range bytes: \(audit.largestRemoteTransferBytes); writer scratch bytes: \(audit.largestScratchBytes)")
-            print("Range retries: \(result.remoteRetryCount)")
-            print("Install elapsed seconds: \(String(format: "%.3f", audit.wallTimeSeconds))")
-            print("Installation verified; select the separate gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned model.")
-        }
         return 0
     } catch {
         printError("install failed: \(error)")

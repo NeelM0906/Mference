@@ -12,11 +12,9 @@ import Testing
 /// conversion writes. The vendor's own repo does not agree: it ships the trunk
 /// as `model.language_model.` and a top-level `lm_head.weight`.
 ///
-/// This was invisible for as long as Flash-Next was the only original-repo
-/// family, because Flash-Next has no runner to disagree with. It is not
-/// invisible now, and it fails *after* the manifest gate rather than at it, so
-/// it is worth pinning here rather than rediscovering it at the end of a
-/// 72 GB install.
+/// A mismatch fails *after* the manifest gate rather than at it, so it is
+/// worth pinning here rather than rediscovering it at the end of a 72 GB
+/// install.
 ///
 /// The literal expectations below are the runner's spellings, transcribed from
 /// `Model.trunkPrefix` and `Model.lmHeadName`; the real end-to-end proof is
@@ -39,7 +37,7 @@ import Testing
     @Test("Qwen 3.6 is written under the spelling its runner looks up")
     func qwen36IsRenamedToTheRunnersSpelling() {
         let renamed = Self.vendorNames.map {
-            FlashNextPlanner.residentName(for: $0, family: .qwen36)
+            OriginalRepoPlanner.residentName(for: $0, family: .qwen36)
         }
         #expect(renamed == [
             "language_model.model.embed_tokens.weight",
@@ -64,7 +62,7 @@ import Testing
             names.append("model.language_model.layers.\(layer).self_attn.o_proj.weight")
         }
         let renamed = names.map {
-            FlashNextPlanner.residentName(for: $0, family: .qwen36)
+            OriginalRepoPlanner.residentName(for: $0, family: .qwen36)
         }
         #expect(Set(renamed).count == Set(names).count)
     }
@@ -75,7 +73,7 @@ import Testing
     func renamingPreservesPolicyDecisions() {
         let policy = QuantBitPolicy.moeRouterInt8
         for name in Self.vendorNames {
-            let renamed = FlashNextPlanner.residentName(for: name, family: .qwen36)
+            let renamed = OriginalRepoPlanner.residentName(for: name, family: .qwen36)
             #expect(policy.bits(forTensorNamed: name)
                 == policy.bits(forTensorNamed: renamed), "\(name)")
         }
@@ -89,7 +87,7 @@ import Testing
         for name in ["mtp.fc_embedding.weight",
                      "model.visual.patch_embed.proj.weight",
                      "something.else.entirely"] {
-            #expect(FlashNextPlanner.residentName(for: name, family: .qwen36) == name,
+            #expect(OriginalRepoPlanner.residentName(for: name, family: .qwen36) == name,
                     "\(name)")
         }
     }

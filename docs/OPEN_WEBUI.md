@@ -15,7 +15,7 @@ so nothing here depends on CORS.
 git clone https://github.com/NeelM0906/Mference.git && cd Mference
 ./mference-ui.sh doctor          # prerequisites only; no download or settings changes
 swift build -c release
-./mference-ui.sh install gemma4   # ~15 GB; see "Installing models" first
+./mference-ui.sh install qwen36   # ~20 GB; see "Installing models" first
 ./mference-ui.sh                  # starts both halves, opens the browser
 ```
 
@@ -72,104 +72,32 @@ To run the two halves by hand, start the server yourself and give Open WebUI the
 ## Installing models
 
 ```bash
-./mference-ui.sh install gemma4
+./mference-ui.sh install qwen36
 ./mference-ui.sh install qwen36 --resume   # extra arguments reach MferenceRepack
 ```
 
 The install normally runs `MferenceRepack` into `scratch/<family>.gturbo`, which is one
 of the roots library mode scans, so a model installed this way appears in the
-picker the next time the UI starts. Supported selectors are `gemma4`, `gemma4qat`, `qwen36`,
-`qwen38`, `deepseekv4flash`, `inklingsmall`, `maple`, `qwen38flashnext`, and
-`minicpm5`, `glm53flash`, and `swiftqwen38`, plus the two quantizer-control installs `qwen36original` and
+picker the next time the UI starts. Supported selectors are `qwen36`, `qwen38`,
+`maple`, and `minicpm5`, plus the two quantizer-control installs `qwen36original` and
 `minicpm5mlx`; the launcher reads that list out of `MferenceRepack`'s own help,
 so it cannot drift.
 
-The Unsloth UD-IQ3_XXS Flash-Next install (`qwen38flashnextudiq3xxs`, about
-85 GB) is an unlisted label, so the launcher does not offer it. Install it with
-`MferenceRepack` as its [family page](families/QWEN38_FLASH_NEXT_UNSLOTH.md#reproduction)
-shows; once it is in a scanned root, library mode serves it like any other model.
-
-The optional `swiftqwen38` selector installs a separately identified
-[Swift-Qwen qualification candidate](families/SWIFT_QWEN38.md), not a replacement
-of `qwen38`. Its server reasoning policy defaults to `xhigh`; see that page for
-request-level controls and the remaining client-history qualification gates.
-
-### Gemma QAT installation
-
-`gemma4qat` installs the pinned
-`mlx-community/gemma-4-26B-A4B-it-qat-q4_0-mlx-aligned` checkpoint separately
-at `$HOME/llm-models/gemma4qat.gturbo`. A `.gturbo` installation is a directory.
-The original `gemma4` selector and installation are unchanged.
-
-```bash
-./mference-ui.sh install gemma4qat --dry-run  # prints the actual destination
-./mference-ui.sh install gemma4qat
-./mference-ui.sh install gemma4qat --resume  # continues a saved partial install
-.build/release/MferenceRepack --verify-install \
-  --input-gturbo "$HOME/llm-models/gemma4qat.gturbo"
-```
-
-For source/layout and disk checks, use the repacker's own dry-run:
-
-```bash
-.build/release/MferenceRepack --model gemma4qat \
-  --output "$HOME/llm-models/gemma4qat.gturbo" --dry-run
-```
-
-The installation is about 14.45 GB (14,451,052,105 bytes on the validation
-machine after verification). While it downloads, the installer writes
-the routed experts in the source layout (about 15.8 GB); after the download it
-stores each layer file without its implied biases, one layer at a time. Free
-space must therefore cover the larger figure plus one compact layer (about
-0.43 GB), the installer's 1 GiB free-space reserve and bounded
-transfer/metadata staging. Receipt size can vary with the destination path.
-The dry-run reports payload, required assets, aligned output, and reserves
-separately. These are storage quantities, not measured peak inference memory.
-
-Native INT4 group-32 weights, BF16 companions and BF16 routers are copied
-without requantization. Routed-expert biases are exactly `-8 * scale`; the
-installer checks every group and then leaves them out, and the runtime
-rebuilds them after each read (see
-[routed-expert storage](families/GEMMA4_QAT.md#routed-expert-storage)). The source config, tokenizer, tokenizer config, chat
-template and generation config are required and covered by install hashes.
-The checkpoint's model identity is
-`gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned`, regardless of directory name.
-
-QAT uses the checkpoint's installed chat template and sampling settings; see
-[QAT controls and current qualification](RUNTIME_CONTROLS.md#gemma-qat).
-Library discovery lists it separately in `/v1/models` and the picker. The
-existing Gemma remains available. QAT thinking is off by default. Both Gemma
-HTTP profiles accept `preserve_thinking` and apply their source history policy:
-keep current tool-call thoughts, remove earlier thoughts after a new user prompt.
-M2 timing observations and a separate
-short-chat CLI peak-memory measurement are recorded in the
-[QAT model guide](families/GEMMA4_QAT.md); general loop reduction, other hardware
-and wider-context resource limits remain unverified.
-The source pin, measured files, resume proof and qualification limits are kept
-in the author's local validation record, which is not part of the repository.
-
-For Swift-Qwen, use **Controls → Advanced Params → Reasoning Effort**, switch
-from Default to Custom, and enter `xhigh`, `medium`, `low`, or `none`. Default
-means `xhigh`. Reset this chat-level control to Default before switching to a
-non-Swift model. Base Qwen 3.8 now also accepts explicit efforts through the API
-and CLI for matched comparisons; other models reject them. The history adapter
-below remains Swift-only, so this does not newly qualify base-Qwen reasoning
-history replay through Open WebUI.
+Base Qwen 3.8 accepts explicit reasoning efforts through the API and CLI;
+other models reject them.
 
 The launcher runs the pinned Open WebUI 0.11.3 through
-`Scripts/openwebui-mference.py`. Its narrow, process-local compatibility hook
-preserves `reasoning_content` when Open WebUI rebuilds Swift-Qwen assistant
-history, including native tool loops. Without it, upstream 0.11.3 displays
-reasoning but drops it from generic OpenAI-compatible replay. The hook changes
-no installed package files, other models, tool permissions, branding, or chat
-storage. It runs a single loopback worker and refuses an unqualified package
-version rather than silently losing history. When launching Open WebUI by hand,
-use the script with that package environment's Python and the same launcher
-environment, including `WEBUI_SECRET_KEY`.
+`Scripts/openwebui-mference.py`, which checks the package version without
+loading its database and runs a single loopback worker. It changes no installed
+package files, tool permissions, branding, or chat storage, and refuses an
+unqualified package version. When launching Open WebUI by hand, use the script
+with that package environment's Python and the same launcher environment,
+including `WEBUI_SECRET_KEY`.
 
-Downloads range from ~5 GB (MiniCPM5-2B) to ~360 GB read for Flash-Next.
-Check disk first, and read [docs/DEEPSEEK_V4_FLASH.md](DEEPSEEK_V4_FLASH.md) or
-[docs/INKLING_SMALL.md](INKLING_SMALL.md) before installing either of those two.
+Downloads range from ~5 GB (MiniCPM5-2B) to about 20 GB (Qwen 3.6); the
+`qwen36original` control install reads the vendor's larger BF16 repo. Check disk
+first; the repacker's `--dry-run` prints the exact budget. Retired families are
+listed in [Retired model families](RETIRED_FAMILIES.md).
 A cancelled download continues with `--resume`.
 
 Every family above has a runner, so every complete install of one is listed.
@@ -257,7 +185,7 @@ Open WebUI 0.11 defaults every model to "native function calling" and attaches
 its own builtin tool schemas — web search, code interpreter, memory, notes,
 time, ask-user and more — to every chat request. `MferenceServer` does what an
 OpenAI-compatible server must and renders those tools into the prompt. Measured
-on this host with Gemma 4, the same one-line question cost 27 prompt tokens
+on this host with a since-retired model, the same one-line question cost 27 prompt tokens
 sent to the server directly and 5,445 tokens sent through the UI, turning a
 2-second answer into a 45-second prefill.
 
@@ -317,8 +245,8 @@ A staging directory (`<name>.partial`) or one whose sibling
 is reported once on stderr, with the reason:
 
 ```text
-[2026-09-10T05:03:39Z] library skipped /path/qwen38flashnext.gturbo: not runnable (qwen3.8-flash-next-int4g64): no runner for qwen38flashnext; missing axes hyperConnectionsLowRank, attentionIndexer, pleNgramEmbedding
-[2026-09-10T05:03:39Z] library ready models=gemma-4-26b-a4b-it,qwen3.6-35b-a3b
+[2026-09-10T05:03:39Z] library skipped /path/<install>.gturbo: not runnable (<model-id>): <reason>
+[2026-09-10T05:03:39Z] library ready models=qwen3.6-35b-a3b,minicpm5-2b-int4g64
 ```
 
 ### The product catalog
@@ -334,7 +262,8 @@ swap between a GGUF and a native model is still one process releasing one
 model before it loads the next. Deep is served only with MTP draft decoding
 (llama.cpp's `draft-mtp`). (A build without the llama.cpp backend declines every GGUF with `no
 llama.cpp backend in this build`.) Every
-other runnable install — Flash-Next, Gemma 4 — is declined: the skip line says
+other runnable install — the native Qwen 3.8 27B (`qwen3.8-27b-4bit`), for
+example — is declined: the skip line says
 so, and a request naming it gets HTTP 400 `model_not_runnable` with a message
 that points to `--catalog all`. When a product model has several installs, the
 one served is the `--model` install if it is one of them, else the one under the
@@ -357,9 +286,8 @@ next time the launcher runs.
 
 With `--catalog all`, an install alone in its family is advertised under that
 family's identifier —
-`gemma-4-26b-a4b-it`, `qwen3.6-35b-a3b`, `qwen3.8-27b-4bit`,
-`deepseek-v4-flash-2bit-dq`, `inkling-small-4bit`, `maple-preview-2bit-mlx`,
-`qwen3.8-flash-next-int4g64`, `minicpm5-2b-int4g64`.
+`qwen3.6-35b-a3b`, `qwen3.8-27b-4bit`, `maple-preview-2bit-mlx`,
+`minicpm5-2b-int4g64`.
 
 A product model keeps its stable identifier under `--catalog all` too, and is
 served from the install chosen as described above (`--model`, then the
@@ -389,10 +317,8 @@ A family the repacker can install but no runner can execute yet is **skipped**,
 not listed as unusable. Listing it would put a permanently failing entry in the
 model picker. The skip line names it, and the moment its capability gate lifts
 the install is listed with no code change and no configuration — library mode
-lists whatever the runtime accepts. Gemma QAT is now listed after its required
-assets and install receipt pass validation. Missing or malformed files remain
-incomplete-install errors. A missing QAT selection never falls back to the
-original Gemma.
+lists whatever the runtime accepts. Missing or malformed files remain
+incomplete-install errors.
 
 ### Error statuses in library mode
 
@@ -502,7 +428,7 @@ version from the notice or from `OPEN_WEBUI_VERSION` at the top of
 
 **The picker is empty.** Nothing completed an install under the roots being
 scanned. Run `./mference-ui.sh models` to see what discovery found and what it
-skipped, then `./mference-ui.sh install gemma4`. A model installed while the
+skipped, then `./mference-ui.sh install qwen36`. A model installed while the
 server is running does not appear until the launcher restarts.
 
 **A request comes back `400`.** See
@@ -519,7 +445,7 @@ Params**.
 - **One context length for every model.** `--max-context` applies to whichever
   model is resident, and a model whose native context is shorter refuses to
   load (Maple: 128,000; MiniCPM5: 131,072). `--max-context max` instead gives
-  each model its own native context, Gemma 4's full 262,144 included.
+  each model its own native context, Qwen 3.8 27B's full 262,144 included.
 - **The library is fixed at startup.** Installing a model while the server runs
   does not add it; restart the launcher.
 - **Parameters the server rejects.** `n > 1`, `logprobs`, a non-zero

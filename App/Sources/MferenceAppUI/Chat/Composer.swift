@@ -10,7 +10,9 @@ struct Composer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.s) {
-            TextField("Ask anything. It stays on this Mac.", text: $model.draft, axis: .vertical)
+            TextField(model.webEnabled ? "Ask anything. Web searches go out through SearXNG."
+                                        : "Ask anything. It stays on this Mac.",
+                      text: $model.draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(MFFont.body)
                 .foregroundStyle(MFColor.ink)
@@ -34,6 +36,14 @@ struct Composer: View {
         .overlay(RoundedRectangle(cornerRadius: MFRadius.xl).strokeBorder(MFColor.hairlineStrong))
         .shadow(color: MFColor.ink.opacity(0.05), radius: MFSpacing.m, y: MFSpacing.xs)
         .onAppear { focused = true }
+        .confirmationDialog("Turn on web search?", isPresented: Binding(
+            get: { model.webConsentRequested },
+            set: { if !$0 { model.declineWebConsent() } })) {
+            Button("Turn on web search") { model.confirmWebConsent() }
+            Button("Not now", role: .cancel) { model.declineWebConsent() }
+        } message: {
+            Text("The model still runs on this Mac. When it searches, its queries, which can include words from your chat, go to search engines through SearXNG on this Mac, and the pages it reads are fetched from this Mac. You can turn this off in Settings > Privacy.")
+        }
         .onKeyPress(.escape) {
             guard pickerOpen else { return .ignored }
             pickerOpen = false

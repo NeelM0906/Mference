@@ -115,26 +115,12 @@ public enum VerifiedInstallTool {
         let numLayers: Int
         let expertsPerLayer: Int
         let layers: [Layer]
-        let expertStorage: ExpertStorage?
-
-        /// Bytes of one expert in its layer file. `expertStride` stays the
-        /// expanded size the kernels address; the runtime loader validates
-        /// the rest of `expertStorage`.
-        var storedExpertStride: UInt64 { expertStorage?.storedExpertStride ?? expertStride }
-    }
-
-    private struct ExpertStorage: Decodable {
-        let storedExpertStride: UInt64
     }
 
     private struct Layer: Decodable {
         let layer: Int
         let file: String
         let experts: [Expert]
-        /// Per-layer stored stride; only a GGUF install (WS4) writes it, since
-        /// its ggml types vary by layer. Absent, every layer uses the
-        /// layout's single stored stride.
-        let expertStride: UInt64?
     }
 
     private struct Expert: Decodable {
@@ -226,34 +212,22 @@ public enum VerifiedInstallTool {
               layout.expertsPerLayer == manifest.expertsPerLayer else {
             throw RepackError.configurationInvalid(detail: "packed expert layout dimensions mismatch manifest")
         }
-        guard layout.expertStride % pageSize == 0,
-              layout.storedExpertStride % pageSize == 0 else {
+        guard layout.expertStride % pageSize == 0 else {
             throw RepackError.configurationInvalid(
-                detail: "expertStride \(layout.expertStride) or stored stride "
-                    + "\(layout.storedExpertStride) is not page-aligned")
+                detail: "expertStride \(layout.expertStride) is not page-aligned")
         }
         guard layout.layers.count == layout.numLayers else {
             throw RepackError.configurationInvalid(detail: "packed expert layout layer count mismatch")
         }
         for layer in layout.layers {
-            let layerStride = layer.expertStride ?? layout.storedExpertStride
-            // Only a per-layer stride (GGUF installs) needs its own check; the
-            // single stored stride was checked above, and dense layers that
-            // carry no experts are handled below.
-            if let own = layer.expertStride {
-                guard own > 0, own % pageSize == 0, own <= layout.storedExpertStride else {
-                    throw RepackError.configurationInvalid(
-                        detail: "packed_experts/\(layer.file) stride \(own) is not page-aligned "
-                            + "or exceeds the layout's \(layout.storedExpertStride)")
-                }
-            }
+            let layerStride = layout.expertStride
             let expectedLayerSize = UInt64(layout.expertsPerLayer) * layerStride
             guard layer.layer >= 0 && layer.layer < layout.numLayers else {
                 throw RepackError.configurationInvalid(detail: "packed expert layer index out of range")
             }
-            // Leading dense-FFN layers carry no routed experts, so the writer
-            // emits an empty layout entry and no blob for them (Inkling's
-            // layers 0-1). The exception is bounded by the manifest's declared
+            // Dense-FFN layers carry no routed experts, so the writer emits an
+            // empty layout entry and no blob for them (every layer of Qwen 3.8
+            // and MiniCPM5). The exception is bounded by the manifest's declared
             // dense-layer count: an empty ROUTED layer means a broken install
             // that the runtime loader would reject, and verification must not
             // certify it.

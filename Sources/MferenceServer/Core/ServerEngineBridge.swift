@@ -158,8 +158,6 @@ public final class ServerSessionEngineModel: EngineModel {
             chatDialect: model.chatDialect,
             generationDefaults: model.generationDefaults,
             maxContext: maxContext,
-            isGemmaQAT: model.isGemmaQAT,
-            usesSwiftQwenTemplate: model.usesSwiftQwenTemplate,
             acceptsReasoningEffort: model.acceptsReasoningEffort,
             supportsQwenReasoningEffort: model.supportsQwenReasoningEffort)
         self.model = Mutex(model)
@@ -232,9 +230,7 @@ struct EngineModelAdapter: ServerLoadedModel {
     let model: any EngineModel
 
     var chatDialect: ChatDialect { model.traits.chatDialect }
-    var isGemmaQAT: Bool { model.traits.isGemmaQAT }
     var generationDefaults: GenerationConfig { model.traits.generationDefaults }
-    var usesSwiftQwenTemplate: Bool { model.traits.usesSwiftQwenTemplate }
     var acceptsReasoningEffort: Bool { model.traits.acceptsReasoningEffort }
     var supportsQwenReasoningEffort: Bool { model.traits.supportsQwenReasoningEffort }
 

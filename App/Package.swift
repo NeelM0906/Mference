@@ -46,11 +46,19 @@ let package = Package(
                 .product(name: "MferenceEngine", package: "Mference"),
                 .product(name: "Mference", package: "Mference"),
             ],
+            // Versioned web-answer prompt and tool schemas (spec 4.5.3), U3.
+            resources: [.process("Web/Resources")],
             swiftSettings: appSwiftSettings),
         .target(
             name: "MferenceAppUI",
             dependencies: ["MferenceAppCore", "MferenceDesign"],
             swiftSettings: uiSwiftSettings),
+        // End-to-end smoke, one request per model through EngineService.live()
+        // (U2). Built release and run only under the machine lock.
+        .executableTarget(
+            name: "MferenceSmoke",
+            dependencies: ["MferenceAppCore"],
+            swiftSettings: appSwiftSettings),
         .executableTarget(
             name: "MferenceMac",
             dependencies: ["MferenceAppUI", "MferenceAppCore", "MferenceDesign"],

@@ -39,12 +39,12 @@ struct EngineCatalogDiscoveryTests {
     }
 
     static let standardDisk = fileSystem(
-        children: ["/lib": ["/lib/flashnext.gturbo", "/lib/gguf", "/lib/maple.gturbo", "/lib/minicpm5.gturbo",
-                            "/lib/half.gturbo", "/lib/qwen36.gturbo"]],
+        children: ["/lib": ["/lib/gguf", "/lib/maple.gturbo", "/lib/minicpm5.gturbo",
+                            "/lib/half.gturbo", "/lib/qwen36.gturbo", "/lib/qwen38.gturbo"]],
         probes: ["/lib/qwen36.gturbo": .complete(family: .qwen36),
                  "/lib/minicpm5.gturbo": .complete(family: .minicpm5),
                  "/lib/maple.gturbo": .complete(family: .maple),
-                 "/lib/flashnext.gturbo": .complete(family: .qwen38flashnextudiq3xxs),
+                 "/lib/qwen38.gturbo": .complete(family: .qwen38),
                  "/lib/half.gturbo": .partial("receipt missing")],
         ggufFiles: ["/lib/gguf": [quickFile.path, deepFile.path, "/lib/gguf/Other-Model.Q8_0.gguf"]],
         headers: [quickFile.path: .success(meta(mtp: false)),
@@ -69,9 +69,9 @@ struct EngineCatalogDiscoveryTests {
         #expect(qwen36.contextLength == ModelFamily.qwen36.maximumContext)
         #expect(qwen36.sizeBytes == 42)
 
-        // Flash-Next is found but not offered, and says so when requested.
-        #expect(catalog.descriptor(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs") == nil)
-        #expect(catalog.unavailableReason(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs")?
+        // Native Qwen 3.8 is found but not offered, and says so when requested.
+        #expect(catalog.descriptor(for: "qwen3.8-27b-4bit") == nil)
+        #expect(catalog.unavailableReason(for: "qwen3.8-27b-4bit")?
             .contains("not in the product model list") == true)
         #expect(catalog.skipped.contains { $0.location == Self.dir("/lib/half.gturbo") })
         #expect(catalog.skipped.contains { $0.location.lastPathComponent == "Other-Model.Q8_0.gguf" })
@@ -95,12 +95,12 @@ struct EngineCatalogDiscoveryTests {
                                                       scope: .all, fileSystem: Self.standardDisk)
         #expect(catalog.models.map(\.id) == [
             "maple-preview-2bit-mlx", "minicpm5-2b-int4g64", "other-model.q8_0", "qwen3.5-4b",
-            "qwen3.6-35b-a3b", "qwen3.8-27b", "unsloth-qwen3.8-flash-next-ud-iq3_xxs",
+            "qwen3.6-35b-a3b", "qwen3.8-27b", "qwen3.8-27b-4bit",
         ])
         let other = try #require(catalog.descriptor(for: "other-model.q8_0"))
         #expect(other.product == nil)
         #expect(other.contextLength == 8_192)
-        #expect(catalog.descriptor(for: "unsloth-qwen3.8-flash-next-ud-iq3_xxs")?.product == nil)
+        #expect(catalog.descriptor(for: "qwen3.8-27b-4bit")?.product == nil)
     }
 
     @Test func theEarliestRootAndTheCanonicalLabelWinADuplicateProductInstall() {
@@ -216,30 +216,77 @@ struct EngineCatalogDiscoveryTests {
         #expect(EngineInstallProbe.probe(directory: plain) == .notAModelDirectory)
     }
 
+    /// An install of a retired family is left on disk but never served: the
+    /// probe names it as not runnable, even the developer catalog scope does
+    /// not list it, and a request for it is told why. A legacy manifest with
+    /// no `arch.family` (a Gemma 4 install) is not complete either.
+    @Test func aRetiredFamilyInstallIsNotRunnableAndNeverListed() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("engine-retired-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func install(_ name: String, arch: [String: Any], modelID: String? = nil) throws -> URL {
+            let directory = root.appendingPathComponent("\(name).gturbo", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let manifest: [String: Any] = ["modelID": modelID ?? "test/\(name)", "arch": arch]
+            try JSONSerialization.data(withJSONObject: manifest)
+                .write(to: directory.appendingPathComponent("manifest.json"))
+            return directory
+        }
+        let retired = try install("flashnext-iq3", arch: ["family": "qwen38flashnextudiq3xxs"])
+        let legacy = try install("legacy", arch: [:])
+        let swiftQwen = try install("swift-qwen", arch: ["family": "qwen38"],
+                                    modelID: "swift-qwen3.8-27b-int4g64")
+
+        guard case .notRunnable(let family, let detail) = EngineInstallProbe.probe(directory: retired) else {
+            Issue.record("a retired-family install must be reported as not runnable")
+            return
+        }
+        #expect(family == "qwen38flashnextudiq3xxs")
+        #expect(detail.contains("retired family"))
+        // No arch.family (the original Gemma 4 format): not runnable, under
+        // its modelID.
+        guard case .notRunnable(let legacyID, let legacyDetail) =
+            EngineInstallProbe.probe(directory: legacy) else {
+            Issue.record("a manifest without arch.family must be reported as not runnable")
+            return
+        }
+        #expect(legacyID == "test/legacy")
+        #expect(legacyDetail.contains("no arch.family"))
+        // Swift-Qwen3.8 carries the kept qwen38 family; refused by checkpoint ID.
+        guard case .notRunnable(let swiftID, let swiftDetail) =
+            EngineInstallProbe.probe(directory: swiftQwen) else {
+            Issue.record("a Swift-Qwen3.8 install must be reported as not runnable")
+            return
+        }
+        #expect(swiftID == "swift-qwen3.8-27b-int4g64")
+        #expect(swiftDetail.contains("Swift-Qwen3.8"))
+
+        let catalog = EngineCatalogDiscovery.discover(roots: [root], ggufDirectories: [], scope: .all,
+                                                      fileSystem: .live)
+        #expect(catalog.models.isEmpty)
+        let reason = try #require(catalog.unavailableReason(for: "qwen38flashnextudiq3xxs"))
+        #expect(reason.hasPrefix("not runnable"))
+        #expect(reason.contains("retired family"))
+    }
+
     /// Every family's identifier, pinned to the server's spelling at the time
     /// of the lift (`ServerFamilyModelID`), so a change on either side shows.
     @Test func nativeIdentifiersMatchTheServer() {
         let expected: [ModelFamily: String] = [
-            .gemma4: "gemma-4-26b-a4b-it",
             .qwen36: "qwen3.6-35b-a3b",
             .qwen38: "qwen3.8-27b-4bit",
-            .deepseekV4Flash: "deepseek-v4-flash-2bit-dq",
-            .inklingSmall: "inkling-small-4bit",
             .maple: "maple-preview-2bit-mlx",
-            .flint: "flint-40b-a2.5b-jang-4m",
-            .qwen38flashnext: "qwen3.8-flash-next-int4g64",
-            .qwen38flashnextudiq3xxs: "unsloth-qwen3.8-flash-next-ud-iq3_xxs",
             .minicpm5: "minicpm5-2b-int4g64",
-            .glm53Flash: "glm-5.3-flash-mlx-mixed-4-8bit",
         ]
         #expect(Set(expected.keys) == Set(ModelFamily.allCases))
         for (family, id) in expected {
             #expect(EngineNativeModelID.modelID(for: family) == id)
         }
-        #expect(EngineNativeModelID.modelID(for: .gemma4, checkpointID: CheckpointIdentity.gemma4QAT)
-                == CheckpointIdentity.gemma4QAT)
-        #expect(EngineNativeModelID.modelID(for: .qwen38, checkpointID: CheckpointIdentity.swiftQwen38)
-                == CheckpointIdentity.swiftQwen38)
+        // No kept family has a checkpoint variant with its own identifier.
+        #expect(EngineNativeModelID.modelID(for: .qwen38, checkpointID: CheckpointIdentity.baseQwen38)
+                == CheckpointIdentity.baseQwen38)
+        #expect(EngineNativeModelID.modelID(for: .qwen36, checkpointID: "test/qwen36-requant")
+                == "qwen3.6-35b-a3b")
         #expect(EngineNativeModelID.modelID(for: .qwen36) == EngineProductSlot.qwen36.modelID)
         #expect(EngineNativeModelID.modelID(for: .minicpm5) == EngineProductSlot.minicpm5.modelID)
         #expect(EngineNativeModelID.modelID(for: .maple) == EngineProductSlot.maple.modelID)

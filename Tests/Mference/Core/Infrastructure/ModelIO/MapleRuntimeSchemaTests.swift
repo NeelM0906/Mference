@@ -55,6 +55,7 @@ import Testing
         return try ManifestReaderTests.writeToyManifest(
             overrides,
             archOverrides: archOverrides,
+            includesFamily: false,
             config: maple
         ).0
     }

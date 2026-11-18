@@ -1,5 +1,9 @@
 # Qwen 3.6 residency ladder — Phase 1 design
 
+> Dated record. The retired families it names (Gemma 4, DeepSeek-V4-Flash, and
+> Inkling-Small) are no longer supported; see [Retired model
+> families](../../RETIRED_FAMILIES.md).
+
 **Date:** 2026-08-07
 **Status:** Approved by project owner
 **Scope:** Qwen 3.6 35B-A3B decode/prefill performance on Apple silicon

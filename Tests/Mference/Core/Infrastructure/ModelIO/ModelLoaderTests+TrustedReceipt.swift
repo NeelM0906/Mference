@@ -13,7 +13,7 @@ extension ModelLoaderTests {
       _ = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy(),
+        expecting: .defaultsToy(),
         integrityPolicy: .sizeCheckTrustedReceipt)
     } throws: { error in
       if case ModelError.trustedReceiptInvalid = error { return true }
@@ -51,7 +51,7 @@ extension ModelLoaderTests {
       let defaultModel = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy())
+        expecting: .defaultsToy())
       _ = try defaultModel.routedExpert(layer: 0, expert: 0)
     } throws: { error in
       if case ModelError.checksumMismatch = error { return true }
@@ -61,7 +61,7 @@ extension ModelLoaderTests {
     let trustedModel = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .defaultsToy(),
       integrityPolicy: .sizeCheckTrustedReceipt)
     _ = try trustedModel.routedExpert(layer: 0, expert: 0)
   }
@@ -83,7 +83,7 @@ extension ModelLoaderTests {
       _ = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy(),
+        expecting: .defaultsToy(),
         integrityPolicy: .sizeCheckTrustedReceipt)
     } throws: { error in
       if case ModelError.trustedReceiptInvalid = error { return true }
@@ -100,7 +100,7 @@ extension ModelLoaderTests {
     _ = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .defaultsToy(),
       integrityPolicy: .sizeCheckTrustedReceipt,
       loadStats: &stats)
     #expect(stats.manifestSha256Nanos > 0)
@@ -122,7 +122,7 @@ extension ModelLoaderTests {
       _ = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy(),
+        expecting: .defaultsToy(),
         integrityPolicy: .sizeCheckTrustedReceipt)
     } throws: { error in
       if case ModelError.trustedReceiptInvalid = error { return true }
@@ -144,7 +144,7 @@ extension ModelLoaderTests {
       _ = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy(),
+        expecting: .defaultsToy(),
         integrityPolicy: .sizeCheckTrustedReceipt)
     } throws: { error in
       if case ModelError.trustedReceiptInvalid(let detail) = error {
@@ -173,7 +173,7 @@ extension ModelLoaderTests {
       _ = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy(),
+        expecting: .defaultsToy(),
         integrityPolicy: .sizeCheckTrustedReceipt)
     } throws: { error in
       if case ModelError.trustedReceiptInvalid(let detail) = error {
@@ -200,7 +200,7 @@ extension ModelLoaderTests {
       _ = try Model.load(
         directoryURL: dir,
         device: device,
-        expecting: .gemma4Toy(),
+        expecting: .defaultsToy(),
         integrityPolicy: .sizeCheckTrustedReceipt)
     } throws: { error in
       if case ModelError.trustedReceiptInvalid(let detail) = error {

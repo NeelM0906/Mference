@@ -14,7 +14,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
 
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .trustedReceiptWhenValid)
     #expect(model.integrityPolicy == .fullSha256)
     #expect(model.integrityFallbackDetail == "\(VerifiedInstallReceiptReader.fileName) is missing")
@@ -33,7 +33,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
 
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .trustedReceiptWhenValid)
     #expect(model.integrityPolicy == .fullSha256)
     #expect(model.integrityFallbackDetail == "model directory mismatch")
@@ -47,7 +47,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
 
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .trustedReceiptWhenValid)
     #expect(model.integrityPolicy == .sizeCheckTrustedReceipt)
     #expect(model.verifyAutoFallbackNotice == nil)
@@ -61,7 +61,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
 
     let model = try Model.load(
-      directoryURL: dir, device: device, expecting: .gemma4Toy(),
+      directoryURL: dir, device: device, expecting: .defaultsToy(),
       integrityPolicy: .fullSha256)
     #expect(model.integrityPolicy == .fullSha256)
     #expect(model.verifyAutoFallbackNotice == nil)

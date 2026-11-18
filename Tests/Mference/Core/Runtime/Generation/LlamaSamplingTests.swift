@@ -121,7 +121,7 @@ extension RawCompletionLoopTests {
     @Test(arguments: [false, true], [false, true])
     func frequencyUsesPromptAndGeneratedCountsOnResetAndResume(resume: Bool, chunked: Bool) async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let ids = try ["a", "b", "c"].map { try #require(tokenizer.encode($0, addBOS: false).first) }
         let prompt = [ids[0], ids[0]]
         let cached = resume ? 1 : 0

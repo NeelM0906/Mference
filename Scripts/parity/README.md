@@ -1,14 +1,9 @@
 # Reference-parity golden generators
 
 Generators for the committed reference-parity goldens under
-`Tests/Mference/Fixtures/`. The Qwen3.8-Flash-Next (`qwen4exp`), GLM-5.3-Flash
-and GGUF quant-golden harnesses were removed together with those families'
-tests; their runtime and installer code is unchanged.
-
-[`gguf_make_quant_tables.py`](gguf_make_quant_tables.py) is not a golden
-generator: it writes the runtime source
-`Sources/Mference/Infrastructure/ModelIO/GGUFQuantTables.swift` from the pinned
-`ggml-common.h`, and stays with that source.
+`Tests/Mference/Fixtures/`. Generators for the
+[retired families](../../docs/RETIRED_FAMILIES.md), and the GGUF quant-table
+generator whose runtime source went with them, were removed.
 
 ## minicpm5 reference-parity goldens
 

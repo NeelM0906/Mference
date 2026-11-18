@@ -1,5 +1,8 @@
 # Experiment inventory
 
+> Dated record. Families it names that are no longer supported (Gemma 4,
+> DeepSeek-V4-Flash) are listed in [Retired model families](../RETIRED_FAMILIES.md).
+
 This is the curated experiment and decision index behind [Optimizing a 14.3 GB
 model for an 8 GB machine](../OPTIMIZATION_JOURNEY.md). It records what shipped,
 what worked only under a named condition, what failed, what a stronger gate
@@ -62,9 +65,10 @@ summaries rather than tabled entries:
 [Qwen resident rung](summaries/10-qwen-resident-rung.md),
 [mlx-lm Qwen baseline attempt](summaries/11-mlx-qwen-baseline.md),
 [decode attribution](summaries/12-decode-attribution-qwen-dsv4.md),
-[DSV4 streaming iterations](summaries/13-dsv4-streaming-iterations.md),
-[DSV4 shadow prefetch](summaries/14-dsv4-shadow-prefetch.md), and the
-[GPU-resident slot map](summaries/15-gpu-slot-map.md). The campaign landed
+and the
+[GPU-resident slot map](summaries/15-gpu-slot-map.md). (The DSV4 streaming
+iterations and DSV4 shadow prefetch summaries were removed with the retired
+families.) The campaign landed
 on main via PR #16 (merge `e030f4e`, 2026-08-13), alongside the Maple
 family from PR #15. The 103 tabled entries below are the original Gemma 4
 program.

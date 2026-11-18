@@ -4,7 +4,7 @@ import Testing
 @testable import MferenceServerCore
 
 private func entry(_ modelID: String,
-                   family: ModelFamily = .gemma4,
+                   family: ModelFamily = .qwen36,
                    path: String) -> ServerLibraryEntry {
     ServerLibraryEntry(modelID: modelID,
                        familyModelID: modelID,
@@ -67,7 +67,7 @@ struct ServerLibraryListingTests {
     @Test func listingIsAHeaderAndOneRowPerInstallInModelOrder() {
         let index = ServerLibraryIndex(entries: [
             entry("qwen3.6-35b-a3b", family: .qwen36, path: "/roots/qwen36.gturbo"),
-            entry("gemma-4-26b-a4b-it", family: .gemma4, path: "/roots/gemma4.gturbo"),
+            entry("maple-preview-2bit-mlx", family: .maple, path: "/roots/maple.gturbo"),
         ])
         let text = ServerLibraryListing.text(for: index) { _ in 14_291_921_884 }
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -77,11 +77,11 @@ struct ServerLibraryListingTests {
         #expect(lines[0].contains("BYTES"))
         #expect(lines[0].hasSuffix("PATH"))
         // Sorted by identifier, exactly as /v1/models lists them.
-        #expect(lines[1].hasPrefix("gemma-4-26b-a4b-it"))
+        #expect(lines[1].hasPrefix("maple-preview-2bit-mlx"))
         #expect(lines[2].hasPrefix("qwen3.6-35b-a3b   "))
-        #expect(lines[1].contains("gemma4"))
+        #expect(lines[1].contains("  maple  "))
         #expect(lines[2].contains("qwen36"))
-        #expect(lines[1].hasSuffix("/roots/gemma4.gturbo"))
+        #expect(lines[1].hasSuffix("/roots/maple.gturbo"))
         #expect(lines[2].hasSuffix("/roots/qwen36.gturbo"))
         #expect(lines[1].contains("14291921884"))
         // Every row starts its PATH column at the same offset.
@@ -97,7 +97,7 @@ struct ServerLibraryListingTests {
     /// install.
     @Test func unknownSizePrintsADashNotZero() throws {
         let index = ServerLibraryIndex(entries: [
-            entry("gemma-4-26b-a4b-it", path: "/roots/gemma4.gturbo"),
+            entry("qwen3.6-35b-a3b", path: "/roots/qwen36.gturbo"),
         ])
         let text = ServerLibraryListing.text(for: index) { _ in nil }
         let row = try #require(text.split(separator: "\n").last)
@@ -110,8 +110,8 @@ struct ServerLibraryListingTests {
     @Test func installedBytesComeFromTheReceipt() throws {
         let root = try ServerLibraryFixture.makeRoot("listing")
         defer { try? FileManager.default.removeItem(at: root) }
-        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "gemma4")
-        let listed = entry("gemma-4-26b-a4b-it", path: directory.path)
+        let directory = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
+        let listed = entry("qwen3.6-35b-a3b", path: directory.path)
         // The fixture's receipt records no file sizes at all.
         #expect(ServerLibraryListing.receiptInstalledBytes(listed) == nil)
 
@@ -130,7 +130,7 @@ struct ServerLibraryListingTests {
     }
 
     @Test func aMissingReceiptIsReportedAsUnknownRatherThanCrashing() {
-        let listed = entry("gemma-4-26b-a4b-it",
+        let listed = entry("qwen3.6-35b-a3b",
                            path: "/nonexistent/\(UUID().uuidString).gturbo")
         #expect(ServerLibraryListing.receiptInstalledBytes(listed) == nil)
     }
@@ -258,7 +258,7 @@ struct ServerEmptyLibraryTests {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = Data(
-            #"{"model":"gemma-4-26b-a4b-it","messages":[{"role":"user","content":"hi"}]}"#
+            #"{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"hi"}]}"#
                 .utf8)
         let (body, response) = try await URLSession.shared.data(for: request)
         #expect((response as? HTTPURLResponse)?.statusCode == 404)

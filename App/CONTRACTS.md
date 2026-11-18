@@ -20,7 +20,11 @@ Rules that follow from them:
   SwiftUI only. Only `MferenceAppCore/Engine` imports `MferenceEngine` or
   `Mference`.
 - Every color, font, spacing and radius in a view comes from
-  `MferenceDesign`; no raw hex or point literals in views.
+  `MferenceDesign`; no raw hex or point literals in views. Deviation
+  (coordinator ruling 2026-11-18): a screen may keep its own layout sizes
+  (column widths, panel widths, icon frames) as named constants in a
+  per-screen `*Metrics` enum; inside `MferenceDesign`, component sizes are
+  named in `MFMetrics`.
 - Tests drive the engine through `EngineService` over an `EngineHost` with
   `FakeEngineBackend`; no test loads a model or touches the network.
 - Rich per-feature values (citations, steps, scan fields) are Codable types

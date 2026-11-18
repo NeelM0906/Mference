@@ -180,7 +180,7 @@ import MferenceValidationSupport
     func runLoop(seq: [Int32], end: Int32, prompt: String = "go",
                          config: GenerationConfig) async throws -> (Collected, RawDecodeResult) {
         let ctx = try MetalContext()
-        let tok = try await MFTokenizer.load()
+        let tok = try await MFTokenizer.chatMLFixture()
         let producer = ScriptedLogitProducer(vocabSize: tok.vocabSize,
                                              step: automaton(seq, end: end))
         let promptIds = tok.encode(prompt, addBOS: true)
