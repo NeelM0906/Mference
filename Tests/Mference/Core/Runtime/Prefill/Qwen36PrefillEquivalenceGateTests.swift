@@ -34,10 +34,19 @@ import Testing
 /// `MFERENCE_QWEN36_PREFILL_GATE_OUT` saves the rows, one key per gate in one
 /// JSON document.
 enum Qwen36PrefillGateFixture {
-    static let answerNames = ["medium-review.qwen36", "long-synthesis.qwen36"]
+    /// Qwen 3.6's own answers, plus the two Gemma 4 answers the gate also
+    /// teacher-forces so the model is scored on another model's text.
+    static let answerNames = ["medium-review.qwen36", "long-synthesis.qwen36",
+                              "medium-review.gemma4", "long-synthesis.gemma4"]
+
+    static var repositoryRoot: URL {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        return root
+    }
 
     static func savedAnswer(_ name: String) throws -> String {
-        let url = GemmaPrefillGateFixture.repositoryRoot
+        let url = repositoryRoot
             .appendingPathComponent("Tests/Mference/Fixtures/qwen36-prefill-gate/answers.json")
         let answers = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))
         return try #require(answers[name], "missing saved answer \(name)")
@@ -196,13 +205,11 @@ struct Qwen36PrefillEquivalenceGateTests {
         async throws {
         let install = URL(fileURLWithPath: try #require(
             ProcessInfo.processInfo.environment["MFERENCE_QWEN36_PREFILL_GATE"]))
-        let root = GemmaPrefillGateFixture.repositoryRoot
+        let root = Qwen36PrefillGateFixture.repositoryRoot
         let prompts = root.appendingPathComponent("docs/benchmark-prompts/real-generation-v1")
         let tokenizer = try await MFTokenizer.load(forModelDirectory: install)
         func answerTokens(_ answer: String, count: Int) throws -> [Int32] {
-            let text = answer.hasSuffix(".qwen36")
-                ? try Qwen36PrefillGateFixture.savedAnswer(answer)
-                : try GemmaPrefillGateFixture.savedAnswer(answer)
+            let text = try Qwen36PrefillGateFixture.savedAnswer(answer)
             let tail = tokenizer.encode(text, addBOS: false)
             try #require(tail.count >= count)
             return Array(tail.prefix(count))
@@ -236,11 +243,11 @@ struct Qwen36PrefillEquivalenceGateTests {
             try chat("medium+qwen-answer", prompt: "medium-review.json",
                      answer: "medium-review.qwen36", continuation: 300),
             try chat("medium+gemma-answer", prompt: "medium-review.json",
-                     answer: "medium-review.original", continuation: 300),
+                     answer: "medium-review.gemma4", continuation: 300),
             try chat("long+qwen-answer", prompt: "long-synthesis.json",
                      answer: "long-synthesis.qwen36", continuation: 200),
             try chat("long+gemma-answer", prompt: "long-synthesis.json",
-                     answer: "long-synthesis.original", continuation: 200),
+                     answer: "long-synthesis.gemma4", continuation: 200),
             try item("docs-8k+qwen-answer", messages: [MFTokenizer.Message(role: .user, content: longQuestion)],
                      answer: "long-synthesis.qwen36", continuation: 200),
         ]

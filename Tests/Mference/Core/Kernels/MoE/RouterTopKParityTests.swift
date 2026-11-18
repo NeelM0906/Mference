@@ -49,58 +49,7 @@ import MferenceValidationSupport
 
     // MARK: - k6 sqrtsoftplus (DeepSeek V4 learned routing)
 
-    @Test("Parallel sqrtsoftplus k6 select matches the serial kernel bit for bit",
-          arguments: Fixture.expertCounts)
-    func k6SelectMatchesSerial(numExperts: UInt32) throws {
-        let context = try MetalContext()
-        let serial = try context.pipeline("router_topk_select_sqrtsoftplus_k6")
-        let parallel = try context.pipeline(
-            "router_topk_select_sqrtsoftplus_k6_par")
-        var rng = SplitMix64(seed: 0x5EED_0002 &+ UInt64(numExperts))
-
-        for trial in 0..<Fixture.trials {
-            let logits = Self.logits(count: Int(numExperts),
-                                     trial: trial,
-                                     rng: &rng)
-            // Duplicated correction biases add a second source of exact ties in
-            // the selection score.
-            let bias = (0..<Int(numExperts)).map { index -> Float in
-                trial % 3 == 0 ? Float((index / 7) % 4) * 0.25 : rng.uniform(-0.3, 0.3)
-            }
-            let expected = try Self.runK6(context: context, pipeline: serial,
-                                          logits: logits, correctionBias: bias)
-            let actual = try Self.runK6(context: context, pipeline: parallel,
-                                        logits: logits, correctionBias: bias)
-            #expect(actual == expected,
-                    "numExperts=\(numExperts) trial=\(trial)")
-        }
-    }
-
     // MARK: - k6 hash weighting (DeepSeek V4 frozen routing)
-
-    @Test("Parallel hash weights match the serial kernel bit for bit")
-    func hashWeightsMatchSerial() throws {
-        let context = try MetalContext()
-        let serial = try context.pipeline("router_hash_weights_k6")
-        let parallel = try context.pipeline("router_hash_weights_k6_par")
-        var rng = SplitMix64(seed: 0x5EED_0003)
-        let numExperts = 256
-
-        for trial in 0..<Fixture.trials {
-            let logits = Self.logits(count: numExperts, trial: trial, rng: &rng)
-            // Repeated experts are legal in a frozen tid2eid row.
-            let indices = (0..<6).map { slot -> UInt32 in
-                trial % 4 == 0
-                    ? UInt32((slot % 2) * 17)
-                    : UInt32(rng.next() % UInt64(numExperts))
-            }
-            let expected = try Self.runHash(context: context, pipeline: serial,
-                                            logits: logits, indices: indices)
-            let actual = try Self.runHash(context: context, pipeline: parallel,
-                                          logits: logits, indices: indices)
-            #expect(actual == expected, "trial=\(trial)")
-        }
-    }
 
     // MARK: - Fixtures
 

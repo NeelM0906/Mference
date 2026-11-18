@@ -7,7 +7,7 @@ import Testing
 /// command buffer at stage boundaries. It is a diagnostic, so it must leave the
 /// logits and the following decode step bit-identical.
 @Suite(.serialized) struct PrefillStageBreakdownTests {
-    @Test(arguments: ["gemma", "qwen"])
+    @Test(arguments: ["qwen"])
     func breakdownLeavesPrefillAndDecodeUnchanged(family: String) async throws {
         let off = try await Self.run(family: family, breakdown: nil)
         let breakdown = PrefillStageBreakdown()

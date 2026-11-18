@@ -1,8 +1,11 @@
 import Jinja
 import Testing
 
-@Suite("Jinja whitespace around Gemma literal braces")
-struct GemmaJinjaWhitespaceTests {
+/// The two local swift-jinja patches (`Vendor/swift-jinja`): literal braces keep
+/// their whitespace-control behaviour, and the `nullOutput` policy renders
+/// `none` as Python does while leaving null tests and omitted `else` alone.
+@Suite("Jinja local patches: null output and literal-brace whitespace")
+struct JinjaPatchTests {
     @Test func pythonNullOutputIsScopedAndPreservesNullTests() throws {
         let template = try Template("{% macro value(x) %}{{ x }}{% endmacro %}{{ value(none) }}|{{ missing }}|{{ none is none }}")
         let environment = Environment()

@@ -29,36 +29,6 @@ struct ServerPromptCacheTests {
             Issue.record("Exact rendered prefixes remain reusable")
         }
     }
-    @Test func swiftQwenHistoryIsPreservedAndBaseDomainCannotReuseIt() async throws {
-        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Mference/Core/Tokenization/Fixtures/ChatMLTokenizer")
-        let tok = try await MFTokenizer.load(from: fixture, family: .qwen38)
-            .forCheckpoint(CheckpointIdentity.swiftQwen38)
-        let initial = request(messages: [.init(role: .user, content: "A")])
-        func checkpointDomain(_ id: String) -> ServerPromptCacheDomain {
-            .init(modelID: id, sourceSnapshotHash: "source", runtimeProfileHash: "profile",
-                  maximumContext: 16384, kvStorage: "fp16", fp16RingEnabled: true, templateSHA256: "template")
-        }
-        let swift = checkpointDomain(CheckpointIdentity.swiftQwen38)
-        var cache = ServerPromptCache()
-        cache.publish(domain: swift, request: initial, content: "B", calls: [],
-                      result: rawResult(prompt: [1], kvBacked: [1, 2], boundary: 3, reason: .endOfTurn),
-                      reasoningContent: "Check A")
-        #expect(cache.entry?.assistantTurn.message.reasoningContent == "Check A")
-        #expect(cache.match(domain: checkpointDomain("qwen3.8-27b-4bit"), request: initial,
-                            renderedPromptIDs: [1, 2, 3, 4], tokenizer: tok) == .miss)
-        let continuation = request(messages: initial.messages + [
-            .init(role: .assistant, content: "B", reasoningContent: "Check A"),
-            .init(role: .user, content: "C")])
-        #expect(cache.match(domain: swift, request: continuation,
-                            renderedPromptIDs: [1, 9, 3, 4], tokenizer: tok) == .miss)
-        if case .hit = cache.match(domain: swift, request: continuation,
-                                    renderedPromptIDs: [1, 2, 3, 4], tokenizer: tok) {} else {
-            Issue.record("an exact Swift prefix should remain reusable")
-        }
-        cache.invalidate()
-        #expect(cache.entry == nil)
-    }
     private let domain = ServerPromptCacheDomain(
         modelID: "model",
         sourceSnapshotHash: "snapshot",
@@ -67,52 +37,6 @@ struct ServerPromptCacheTests {
         kvStorage: "fp16",
         fp16RingEnabled: true,
         templateSHA256: "template")
-
-    @Test func gemmaNewUserHistoryDoesNotUseLegacyAppendBridge() async throws {
-        let tokenizer = try await MFTokenizer.load()
-        let initial = request(messages: [
-            MFTokenizer.Message(role: .user, content: "first"),
-        ])
-        let initialPrompt = tokenizer.encode(
-            try tokenizer.applyChatTemplate(initial.messages),
-            addBOS: false)
-        let generated = tokenizer.encode("answer", addBOS: false)
-        let kvBacked = initialPrompt + generated
-        var cache = ServerPromptCache()
-        cache.publish(
-            domain: domain,
-            request: initial,
-            content: "answer",
-            calls: [],
-            result: rawResult(
-                prompt: initialPrompt,
-                kvBacked: kvBacked,
-                boundary: tokenizer.endOfTurnID,
-                reason: .endOfTurn))
-
-        let continuation = request(messages: initial.messages + [
-            MFTokenizer.Message(role: .assistant, content: "answer"),
-            MFTokenizer.Message(role: .user, content: "second"),
-        ])
-        let rendered = tokenizer.encode(
-            try tokenizer.applyChatTemplate(continuation.messages),
-            addBOS: false)
-        let match = cache.match(
-            domain: domain,
-            request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
-
-        // Accepted canonical-template contract: the generation-only empty
-        // thought block is absent from historical assistant text. The old
-        // append bridge retained it. Without a runtime recovery capability,
-        // this cache matcher must decline that non-canonical full-position hit.
-        // Gemma partial-prefix recovery has its own runner-backed proof.
-        #expect(match == .miss)
-        #expect(!rendered.prefix(kvBacked.count).elementsEqual(kvBacked))
-        #expect(tokenizer.decode(rendered, skipSpecialTokens: false)
-            .contains("<|turn>model\nanswer<turn|>\n<|turn>user\nsecond"))
-    }
 
     @Test func capturedOpenCodeToolResultUsesFrozenToolBoundary() async throws {
         let tokenizer = try await MFTokenizer.load()

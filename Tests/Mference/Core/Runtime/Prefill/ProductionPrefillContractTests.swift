@@ -7,14 +7,14 @@ import Testing
 /// covered by the family suites. These assertions consume actual dispatch
 /// reports after cold/warm multi-token calls, rather than factory preferences.
 @Suite(.serialized) struct ProductionPrefillContractTests {
-    @Test(arguments: ["gemma", "qwen"])
+    @Test(arguments: ["qwen"])
     func realRunnerBatchesWarmAppends(family: String) async throws {
         let streamed = try await Self.warmAppendRow(family: family, resident: false)
         let resident = try await Self.warmAppendRow(family: family, resident: true)
         #expect(streamed == resident, "bounded expert tiles preserve the resident result")
     }
 
-    @Test(arguments: ["gemma", "qwen"], [false, true])
+    @Test(arguments: ["qwen"], [false, true])
     func interruptedWarmAppendRequiresReset(family: String, resident: Bool) async throws {
         let gemma = family == "gemma"
         let config: ArchConfig = gemma ? .gemma4Toy(topKExperts: 8) : .qwen36Toy()

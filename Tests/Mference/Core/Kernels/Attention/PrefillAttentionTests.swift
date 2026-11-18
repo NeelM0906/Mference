@@ -242,52 +242,6 @@ import MferenceValidationSupport
         #expect(full.usedTensorOps == prefill.tensorOpsPipelineAvailable)
     }
 
-    /// The QAT profile keeps its source-arithmetic kernels unless the runner
-    /// lets full attention use TensorOps; sliding-window layers always keep them.
-    @Test func qatFullAttentionUsesTensorOpsOnlyWhenAllowed() throws {
-        let context = try MetalContext()
-        let plain = try PrefillAttention(context: context)
-        let exact = try PrefillAttention(context: context, gemmaQATMaxContext: 256)
-        let allowed = try PrefillAttention(context: context, gemmaQATMaxContext: 256,
-                                           gemmaQATFullAttentionTensorOps: true)
-        #expect(!exact.tensorOpsPipelineAvailable)
-        #expect(allowed.tensorOpsPipelineAvailable == plain.tensorOpsPipelineAvailable)
-
-        // QAT full layers pass the causal extent as their window.
-        let full = Self.makeFixture(start: 130, chunk: 5, window: 135, seed: 0xA875,
-                                    headDim: 512, qHeads: 16, kvHeads: 2)
-        let exactFull = try Self.runKernel(full, context: context, prefill: exact,
-                                           path: .fullTensorOps2DPreferred)
-        let allowedFull = try Self.runKernel(full, context: context, prefill: allowed,
-                                             path: .fullTensorOps2DPreferred)
-        let exactTiledPath = try Self.runKernel(full, context: context, prefill: allowed,
-                                                path: .causalTiled)
-        #expect(!exactFull.usedTensorOps)
-        #expect(allowedFull.usedTensorOps == plain.tensorOpsPipelineAvailable)
-        #expect(!exactTiledPath.usedTensorOps)
-        #expect(exactTiledPath.values == exactFull.values, "the non-tensor path must stay source-exact")
-        if allowedFull.usedTensorOps {
-            let plainFull = try Self.runKernel(full, context: context, prefill: plain,
-                                               path: .fullTensorOps2DPreferred)
-            #expect(allowedFull.values == plainFull.values)
-        } else {
-            #expect(allowedFull.values == exactFull.values)
-        }
-        for (label, values) in [("exact", exactFull.values), ("allowed", allowedFull.values)] {
-            let maxAbs = RelError.maxAbsDiff(values, Self.reference(full))
-            #expect(maxAbs <= 2e-2, "QAT \(label) full maxAbs=\(maxAbs)")
-        }
-
-        let sliding = Self.makeFixture(start: 130, chunk: 5, window: 64, seed: 0xA876,
-                                       headDim: 256, qHeads: 16, kvHeads: 8)
-        let exactSliding = try Self.runKernel(sliding, context: context, prefill: exact,
-                                              path: .fullTensorOps2DPreferred)
-        let allowedSliding = try Self.runKernel(sliding, context: context, prefill: allowed,
-                                                path: .fullTensorOps2DPreferred)
-        #expect(!allowedSliding.usedTensorOps)
-        #expect(allowedSliding.values == exactSliding.values)
-    }
-
     /// The other TensorOps tests return early when the path is unavailable, so
     /// on their own they would stay green if the kernel silently disappeared
     /// from the shader library. This one fails loudly instead: once a device

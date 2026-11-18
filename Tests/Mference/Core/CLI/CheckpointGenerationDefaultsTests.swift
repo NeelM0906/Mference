@@ -4,8 +4,8 @@ import Testing
 @testable import MferenceCLICore
 
 @Suite struct CheckpointGenerationDefaultsTests {
-    // Verbatim generation_config.json files from the pinned revisions in
-    // SupportedModelSource: qwen36 38740b84, deepseekV4Flash 722bf559, glm53Flash d43ea8b4.
+    // Verbatim generation_config.json from the pinned qwen36 revision 38740b84
+    // in SupportedModelSource.
     static func fixture(_ name: String) throws -> Data {
         try Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -21,12 +21,22 @@ import Testing
     }
 
     @Test func absentKeysAreOffNotLibraryDefaults() throws {
-        let dsv4 = try CheckpointGeneration.defaults(from: Self.fixture("deepseekV4Flash"))
-        #expect(dsv4.temperature == 1 && dsv4.topK == nil && dsv4.topP == 1 && dsv4.minP == 0)
-        // GLM ships temperature without do_sample: the author's values still sample.
-        let glm = try CheckpointGeneration.defaults(from: Self.fixture("glm53Flash"))
-        #expect(glm.temperature == 1 && glm.topK == 256 && glm.topP == 0.95)
-        #expect(!glm.isPureGreedy)
+        // Shapes of real checkpoints' files (formerly the DeepSeek-V4-Flash and
+        // GLM-5.3-Flash fixtures): do_sample without top_k, and temperature
+        // without do_sample.
+        let sampled = try CheckpointGeneration.defaults(from: Data(#"""
+            {"_from_model_config": true, "bos_token_id": 0, "eos_token_id": 1, "do_sample": true,
+             "temperature": 1.0, "top_p": 1.0, "transformers_version": "4.46.3"}
+            """#.utf8))
+        #expect(sampled.temperature == 1 && sampled.topK == nil && sampled.topP == 1 && sampled.minP == 0)
+        // Temperature without do_sample: the author's values still sample.
+        let implicit = try CheckpointGeneration.defaults(from: Data(#"""
+            {"_from_model_config": true, "eos_token_id": [154820, 154827, 154829],
+             "pad_token_id": 154820, "temperature": 1.0, "top_p": 0.95,
+             "transformers_version": "5.16.0"}
+            """#.utf8))
+        #expect(implicit.temperature == 1 && implicit.topK == 256 && implicit.topP == 0.95)
+        #expect(!implicit.isPureGreedy)
     }
 
     @Test func zeroTopKMeansDisabled() throws {

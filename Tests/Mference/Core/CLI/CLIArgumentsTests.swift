@@ -20,18 +20,15 @@ import Mference
         }
     }
     @Test func emptyTruncationHasActionableNoticeWithoutChangingSuccessOutput() throws {
-        let swift = try #require(emptyResponseLimitNotice(reason: .maxTokens,
-            hasVisibleText: false, isSwiftQwen: true))
-        #expect(swift.contains("--max-new"))
-        #expect(swift.contains("--max-context"))
-        #expect(swift.contains("--reasoning-effort medium or low"))
         let base = try #require(emptyResponseLimitNotice(reason: .maxTokens,
             hasVisibleText: false, isSwiftQwen: false))
+        #expect(base.contains("--max-new"))
+        #expect(base.contains("--max-context"))
         #expect(!base.contains("--reasoning-effort"))
         #expect(emptyResponseLimitNotice(reason: .maxTokens,
-            hasVisibleText: true, isSwiftQwen: true) == nil)
+            hasVisibleText: true, isSwiftQwen: false) == nil)
         #expect(emptyResponseLimitNotice(reason: .endOfTurn,
-            hasVisibleText: false, isSwiftQwen: true) == nil)
+            hasVisibleText: false, isSwiftQwen: false) == nil)
     }
     @Test func usageListsMaple() {
         #expect(Args.usage.contains("Maple"))
@@ -292,27 +289,9 @@ import Mference
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
             for: .qwen36, physicalMemoryBytes: 16 * gib) == 2048)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .gemma4, physicalMemoryBytes: 16 * gib) == 2048)
-        #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .inklingSmall, physicalMemoryBytes: 16 * gib) == 128)
+            for: .maple, physicalMemoryBytes: 16 * gib) == 128)
         #expect(PrefillChunkChoice.auto.chatChunkTokens(
             for: .qwen36, physicalMemoryBytes: 8 * gib) == 128)
-    }
-
-    /// Interactive `--chat` on the Unsloth Flash-Next install takes the
-    /// server's RAM tiers; an explicit chunk still wins.
-    @Test func chatAutoChunkFollowsTheUnslothFlashNextTiers() {
-        let gib = UInt64(1) << 30
-        #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib) == 4096)
-        #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 24 * gib) == 1024)
-        #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 8 * gib) == 128)
-        #expect(PrefillChunkChoice.auto.chatChunkTokens(
-            for: .qwen38flashnext, physicalMemoryBytes: 32 * gib) == 128)
-        #expect(PrefillChunkChoice.fixed(256).chatChunkTokens(
-            for: .qwen38flashnextudiq3xxs, physicalMemoryBytes: 32 * gib) == 256)
     }
 
     @Test func chatFixedChunkWinsOverTheFamilyDefault() {

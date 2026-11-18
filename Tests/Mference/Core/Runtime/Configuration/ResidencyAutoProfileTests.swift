@@ -40,45 +40,6 @@ import Testing
         }
     }
 
-    @Test("192 GiB host gives Flash-Next its measured resident rung")
-    func flashNextOn192GiBUsesResidentMode() {
-        let mode = RuntimeConfiguration.defaultExpertStreamingMode(
-            for: .qwen38flashnext,
-            physicalMemoryBytes: 192 * Self.gib,
-            expertPoolBytes: UInt64(68_000_000_000),
-            coreWeightsBytes: UInt64(5_000_000_000))
-        guard case .resident = mode else {
-            Issue.record("expected resident Flash-Next mode, got \(mode)")
-            return
-        }
-    }
-
-    @Test("Smaller Flash-Next hosts retain the bounded 16-slot rung")
-    func flashNextBelow192GiBKeepsSmallSlots() {
-        let mode = RuntimeConfiguration.defaultExpertStreamingMode(
-            for: .qwen38flashnext,
-            physicalMemoryBytes: 128 * Self.gib,
-            expertPoolBytes: UInt64(68_000_000_000),
-            coreWeightsBytes: UInt64(5_000_000_000))
-        guard case .pread(let slots) = mode, slots == 16 else {
-            Issue.record("expected 16-slot Flash-Next fallback, got \(mode)")
-            return
-        }
-    }
-
-    @Test("Flash-Next resident auto keeps 32 GiB of headroom")
-    func flashNextResidentModeRequiresHeadroom() {
-        let mode = RuntimeConfiguration.defaultExpertStreamingMode(
-            for: .qwen38flashnext,
-            physicalMemoryBytes: 192 * Self.gib,
-            expertPoolBytes: 170 * Self.gib,
-            coreWeightsBytes: 5 * Self.gib)
-        guard case .pread(let slots) = mode, slots == 16 else {
-            Issue.record("expected 16-slot Flash-Next fallback, got \(mode)")
-            return
-        }
-    }
-
     @Test("Non-Qwen families keep the slot default")
     func nonQwenFamiliesStayOnSlots() {
         let mode = RuntimeConfiguration.defaultExpertStreamingMode(

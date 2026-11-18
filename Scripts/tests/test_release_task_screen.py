@@ -97,5 +97,34 @@ class ReleaseScreenTests(unittest.TestCase):
         self.assertIn("timeout", result["error"])
 
 
+
+def scored(content, finish="stop", calls=None):
+    return {"choices": [{"finish_reason": finish, "message": {"content": content, "tool_calls": calls or []}}]}
+
+
+class ScreenRubricTests(unittest.TestCase):
+    """Negative rubric cases, through the release screen's `score` (which hands
+    content and JSON cases to the legacy `swift_qwen_task_screen.score`). Moved
+    from the removed Swift-Qwen task-screen test."""
+
+    def test_exact_content_and_incomplete_answers(self):
+        self.assertTrue(screen.score({"expected": "4"}, scored("\n4\n"))[0])
+        self.assertFalse(screen.score({"expected": "4"}, scored("4", "length"))[0])
+        self.assertFalse(screen.score({"expected": "4"}, scored("Answer: 4"))[0])
+        self.assertFalse(screen.score({"expected": "4"}, {"error": "failure"})[0])
+
+    def test_json_types_extra_fields_and_fences(self):
+        case = {"expected_json": {"ok": True, "count": 3}}
+        self.assertTrue(screen.score(case, scored('{"count":3,"ok":true}'))[0])
+        for text in ('{"count":3,"ok":1}', '{"count":3,"ok":true,"extra":0}', '```json\n{"count":3,"ok":true}\n```'):
+            self.assertFalse(screen.score(case, scored(text))[0])
+
+    def test_tool_call_shape_name_and_arguments(self):
+        case = {"expected_call": {"name": "add", "arguments": {"a": 2}}}
+        call = {"function": {"name": "add", "arguments": '{"a":2}'}}
+        self.assertTrue(screen.score(case, scored(None, "tool_calls", [call]))[0])
+        self.assertFalse(screen.score(case, scored(None, "tool_calls", [call, call]))[0])
+        self.assertFalse(screen.score(case, scored(None, "stop", [call]))[0])
+
 if __name__ == "__main__":
     unittest.main()

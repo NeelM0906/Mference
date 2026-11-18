@@ -285,12 +285,16 @@ import Metal
     }
 }
 
-/// Speculative prefetch on a fixture that can actually miss: the DeepSeek-V4
-/// toy routes 6 of 16 experts per layer, so an 8-slot cache guarantees real
-/// evictions and gives the previous-token predictor something to predict.
-/// This is also the primary target path (`produceTokenDSV4`).
+/// Speculative prefetch on a fixture that can actually miss: the Qwen 3.6 toy
+/// widened to 32 routed experts (still top-8) over a 16-slot cache, so the
+/// cache evicts and the predictors have something to predict. Shadow is
+/// Qwen 3.6's default mode on the measured memory tiers. Ported from the
+/// removed DeepSeek-V4 toy suite (16 experts, top-6, 8 slots); its
+/// hash-routed-layer case has no Qwen counterpart and was dropped.
 @Suite(.serialized)
-struct SpeculativePrefetchDSV4Tests {
+struct SpeculativePrefetchQwenTests {
+
+    private static let numExperts = 32
 
     private struct Harness {
         let dir: URL
@@ -298,13 +302,14 @@ struct SpeculativePrefetchDSV4Tests {
         let logits: MTLBuffer
     }
 
-    /// Eight slots for sixteen experts: every token evicts.
-    private func makeHarness(slots: Int = 8) throws -> Harness {
-        let dir = try DSV4ToySynthetic.write()
+    /// Sixteen slots for thirty-two experts at top-8: every token can evict.
+    private func makeHarness(slots: Int = 16) throws -> Harness {
+        let config = ArchConfig.qwen36Toy(numExperts: Self.numExperts)
+        let dir = try QwenToySynthetic.write(config)
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir,
                                    device: ctx.device,
-                                   expecting: .deepseekV4Toy(),
+                                   expecting: config,
                                    streamingMode: .pread(slotCount: slots))
         let runtime = RuntimeConfiguration(expertCacheSlots: slots,
                                            prefillChunkTokens: 32,
@@ -335,8 +340,8 @@ struct SpeculativePrefetchDSV4Tests {
 
     /// The default "previous token's routing" predictor provably cannot issue a
     /// read: only layer L's own plans touch layer L's slots, so last token's
-    /// experts are still resident when we would predict them. Even with 16
-    /// experts, top-6 routing and only 8 slots — a cache that evicts on every
+    /// experts are still resident when we would predict them. Even with 32
+    /// experts, top-8 routing and only 16 slots — a cache that evicts on every
     /// token — the predicted set is always the resident set.
     @Test func previousTokenPredictorNeverFindsANonResidentExpert() async throws {
         let h = try makeHarness()
@@ -359,7 +364,7 @@ struct SpeculativePrefetchDSV4Tests {
         h.runner.speculativePrefetchMode = .prefetch
         // Predict the whole expert file: guarantees non-resident experts every
         // layer, so the machinery is exercised on every single layer step.
-        h.runner.speculativeExpertPredictor = { _ in Array(0..<16) }
+        h.runner.speculativeExpertPredictor = { _ in Array(0..<Self.numExperts) }
 
         _ = try await decode(h, steps: 4)
 
@@ -376,7 +381,7 @@ struct SpeculativePrefetchDSV4Tests {
         let h = try makeHarness()
         defer { try? FileManager.default.removeItem(at: h.dir) }
         h.runner.speculativePrefetchMode = .advise
-        h.runner.speculativeExpertPredictor = { _ in Array(0..<16) }
+        h.runner.speculativeExpertPredictor = { _ in Array(0..<Self.numExperts) }
 
         _ = try await decode(h, steps: 4)
 
@@ -434,24 +439,6 @@ struct SpeculativePrefetchDSV4Tests {
         #expect(try await decode(pilot, steps: 6) == baseline)
     }
 
-    /// Hash-routed layers bypass the GEMV: their expert set is an exact
-    /// function of the token id, so predictions for them are perfect. The toy
-    /// has hash-routed layers, so decoding the same token repeatedly must
-    /// confirm every hash-layer prediction.
-    @Test func hashRoutedNextLayerPredictionIsExact() async throws {
-        let h = try makeHarness()
-        defer { try? FileManager.default.removeItem(at: h.dir) }
-        h.runner.speculativePrefetchMode = .pilot
-        #expect(ArchConfig.deepseekV4Toy().numHashRoutedLayers > 0)
-
-        for position in 0..<5 {
-            try await h.runner.produce(token: 3, position: position, into: h.logits)
-        }
-        // Predictions exist and at least the hash-layer ones are confirmed.
-        #expect(h.runner.totalSpecPrefetchPredicted > 0)
-        #expect(h.runner.totalSpecPrefetchConfirmed > 0)
-    }
-
     /// Determinism under an aggressively wrong predictor: speculation evicting
     /// and refilling slots on every layer must not change a single logit.
     @Test func aggressiveMispredictionDoesNotChangeLogits() async throws {
@@ -467,7 +454,7 @@ struct SpeculativePrefetchDSV4Tests {
         nonisolated(unsafe) var tick = 0
         noisy.runner.speculativeExpertPredictor = { layer in
             tick += 1
-            return [(layer * 7 + tick) % 16, (layer * 3 + tick * 5) % 16]
+            return [(layer * 7 + tick) % Self.numExperts, (layer * 3 + tick * 5) % Self.numExperts]
         }
         #expect(try await decode(noisy, steps: 5) == baseline)
     }
@@ -489,6 +476,11 @@ struct SpeculativePrefetchDSV4Tests {
         defer { try? FileManager.default.removeItem(at: advise.dir) }
         advise.runner.speculativePrefetchMode = .advise
         #expect(try await decode(advise, steps: 6) == baseline)
+
+        let shadow = try makeHarness()
+        defer { try? FileManager.default.removeItem(at: shadow.dir) }
+        shadow.runner.speculativePrefetchMode = .shadow
+        #expect(try await decode(shadow, steps: 6) == baseline)
     }
 
     /// Speculation must survive a mid-stream reset (the pending read is joined,

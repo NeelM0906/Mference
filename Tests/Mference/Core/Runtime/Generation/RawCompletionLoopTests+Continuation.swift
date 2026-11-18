@@ -7,7 +7,7 @@ extension RawCompletionLoopTests {
     @Test(arguments: [false, true])
     func checkpointSplitsOnlyPrefillAndPreservesAccounting(chunked: Bool) async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load(from: GemmaThinkingTests.fixtureFolder(), family: .gemma4)
+        let tokenizer = try await MFTokenizer.load(from: try ChatMLTemplateTests.fixtureFolder(), family: .qwen36)
         let prompt: [Int32] = [1, 2, 3, 4, 5, 6, 7]
         let producer = ContinuationProducer(vocabSize: tokenizer.vocabSize,
             terminalToken: tokenizer.eosID, position: 2)
