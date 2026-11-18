@@ -21,9 +21,11 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
         self.library = library
         self.settings = settings
         self.downloads = downloads
-        let destination = downloads?.destination ?? DownloadSource.defaultDestination
+        // Free space where downloads go; unknown without a download manager
+        // (nothing else is probed).
+        let destination = downloads?.destination
         self.freeDisk = freeDisk ?? {
-            DownloadManager.availableCapacity(destination).map { Int64(clamping: $0) }
+            destination.flatMap(DownloadManager.availableCapacity).map { Int64(clamping: $0) }
         }
     }
 
@@ -69,6 +71,15 @@ public final class LiveModelLibraryModel: ModelLibraryModel {
     public func cancelDownload(_ id: String) {
         guard let model = AppModel(modelID: id) else { return }
         library.discardDownload(model)
+    }
+
+    /// "Add a model file": validates the GGUF against the pinned Quick and
+    /// Deep files, copies it into ~/llm-models/gguf (atomic rename; the
+    /// original stays where it is) and refreshes the catalog.
+    public func addModelFile(at url: URL) async throws {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        try await library.importModelFile(at: url)
     }
 
     // MARK: Mapping

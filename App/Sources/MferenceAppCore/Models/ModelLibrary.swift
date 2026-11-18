@@ -202,6 +202,23 @@ public final class ModelLibrary {
         Task { try? await downloads.download(approval) }
     }
 
+    /// Adds a model file the person picked: validated against the pinned
+    /// product files, copied into the downloads folder, then the engine's
+    /// catalog is refreshed so the row shows it installed. The original is
+    /// never moved or deleted.
+    @discardableResult
+    public func importModelFile(at url: URL) async throws -> AppModel {
+        // The download manager's folder: ~/llm-models/gguf in the app, a
+        // temporary directory in tests and previews.
+        guard let downloads else { throw ModelImportError.file("model files cannot be added here") }
+        let destination = downloads.destination
+        let sources = AppModel.allCases.compactMap { downloads.source(for: $0) }
+        let model = try await ModelFileImporter(destination: destination, sources: sources).importFile(at: url)
+        await engine.refreshCatalog()
+        await refreshOptions()
+        return model
+    }
+
     public func pauseDownload(_ model: AppModel) {
         guard let downloads else { return }
         Task { await downloads.pause(model) }
