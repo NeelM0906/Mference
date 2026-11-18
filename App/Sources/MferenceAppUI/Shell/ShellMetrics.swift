@@ -18,7 +18,4 @@ enum ShellMetrics {
     static let searchRowIconWidth: CGFloat = 18
     /// The Coming later column.
     static let comingLaterWidth: CGFloat = 520
-    /// The window: the mockup's 1200 x 748, and the smallest useful size.
-    static let defaultWindow = CGSize(width: 1200, height: 748)
-    static let minimumWindow = CGSize(width: 960, height: 640)
 }

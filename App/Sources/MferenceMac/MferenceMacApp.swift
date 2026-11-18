@@ -29,7 +29,7 @@ struct MferenceMacApp: App {
                     }
                 }
         }
-        .defaultSize(width: 1200, height: 748)
+        .defaultSize(MFLayout.defaultWindow)
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             ShellCommands(model: shell)

@@ -52,10 +52,10 @@ public struct MFChip: View {
     }
 
     public var body: some View {
-        HStack(spacing: MFSpacing.xs + 1) {
+        HStack(spacing: MFMetrics.chipIconGap) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.system(size: MFMetrics.iconSize - 2, weight: .semibold))
+                    .font(.system(size: MFMetrics.chipIconSize, weight: .semibold))
                     .accessibilityHidden(true)
             }
             Text(title)
@@ -111,8 +111,22 @@ public struct MFBadge: View {
 
 // MARK: - Progress
 
+/// Progress values from the outside world: anything that is not a finite
+/// number counts as unknown; the rest is clamped to 0...1.
+public enum MFProgress {
+    public static func fraction(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return min(max(value, 0), 1)
+    }
+
+    /// Whole percent, rounded down; nil when unknown.
+    public static func percent(_ value: Double?) -> Int? {
+        fraction(value).map { Int(($0 * 100).rounded(.down)) }
+    }
+}
+
 /// A download or load in progress: "Downloading · 62%" on the accent fill.
-/// `fraction` is nil while the total is unknown.
+/// The percentage is left out while the fraction is unknown (nil, NaN, infinite).
 public struct MFProgressBadge: View {
     let label: String
     let fraction: Double?
@@ -126,32 +140,39 @@ public struct MFProgressBadge: View {
         MFChip(Self.text(label: label, fraction: fraction), tone: .accent)
     }
 
-    /// "Downloading · 62%", or the label alone when the total is unknown.
+    /// "Downloading · 62%", or the label alone when the fraction is unknown.
     public static func text(label: String, fraction: Double?) -> String {
-        guard let fraction else { return label }
-        let percent = Int((min(max(fraction, 0), 1) * 100).rounded(.down))
+        guard let percent = MFProgress.percent(fraction) else { return label }
         return "\(label) · \(percent)%"
     }
 }
 
-/// The thin progress bar of the model library (`.bar`).
+/// The thin progress bar of the model library (`.bar`). An unknown fraction
+/// draws the empty track and reads as "unknown".
 public struct MFProgressBar: View {
-    let fraction: Double
+    let fraction: Double?
+    let label: String
 
-    public init(_ fraction: Double) { self.fraction = min(max(fraction, 0), 1) }
+    /// - Parameter label: what is progressing, for VoiceOver ("Downloading Deep").
+    public init(_ fraction: Double?, label: String) {
+        self.fraction = MFProgress.fraction(fraction)
+        self.label = label
+    }
 
     public var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule().fill(MFColor.hairline)
-                Capsule().fill(MFColor.accent)
-                    .frame(width: proxy.size.width * fraction)
+                if let fraction {
+                    Capsule().fill(MFColor.accent)
+                        .frame(width: proxy.size.width * fraction)
+                }
             }
         }
         .frame(height: MFMetrics.progressBar)
         .accessibilityElement()
-        .accessibilityLabel("Progress")
-        .accessibilityValue("\(Int((fraction * 100).rounded(.down))) percent")
+        .accessibilityLabel(label)
+        .accessibilityValue(MFProgress.percent(fraction).map { "\($0) percent" } ?? "unknown")
     }
 }
 
@@ -187,7 +208,7 @@ public struct MFSourceChip: View {
 
     public var body: some View {
         Button(action: action) {
-            HStack(spacing: MFSpacing.s - 2) {
+            HStack(spacing: MFSpacing.snug) {
                 Text("\(number)")
                     .font(MFFont.calloutEmphasis)
                     .foregroundStyle(MFColor.accent)
@@ -196,10 +217,10 @@ public struct MFSourceChip: View {
                     .foregroundStyle(MFColor.ink)
                     .lineLimit(1)
             }
-            .padding(.horizontal, MFSpacing.m - 2)
-            .frame(height: MFMetrics.controlHeight - 2)
+            .padding(.horizontal, MFSpacing.compact)
+            .frame(height: MFMetrics.sourceChipHeight)
             .background(Capsule().fill(MFColor.surface))
-            .overlay(Capsule().strokeBorder(MFColor.hairline))
+            .overlay(Capsule().strokeBorder(MFColor.hairline, lineWidth: MFLayout.hairline))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)

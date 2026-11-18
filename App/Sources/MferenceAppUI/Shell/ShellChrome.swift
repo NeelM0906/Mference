@@ -7,8 +7,7 @@ struct ShellBrand: View {
     var body: some View {
         HStack(spacing: MFSpacing.s) {
             Text("M")
-                .font(MFFont.calloutEmphasis)
-                .fontWeight(.bold)
+                .font(MFFont.calloutSemibold)
                 .foregroundStyle(MFColor.secondary)
                 .frame(width: ShellMetrics.markSide, height: ShellMetrics.markSide)
                 .background(
@@ -17,8 +16,7 @@ struct ShellBrand: View {
                                              startPoint: .topLeading, endPoint: .bottomTrailing)))
                 .overlay(RoundedRectangle(cornerRadius: ShellMetrics.markRadius).strokeBorder(MFColor.hairlineStrong))
             Text("Mference")
-                .font(MFFont.bodyEmphasis)
-                .fontWeight(.semibold)
+                .font(MFFont.brand)
                 .foregroundStyle(MFColor.ink)
         }
         .accessibilityElement(children: .ignore)
@@ -54,12 +52,12 @@ struct ShellTrailingControls: View {
     var body: some View {
         HStack(spacing: MFSpacing.m) {
             MFChip("On this Mac", systemImage: "lock", tone: .success)
-                .help("Everything runs on this Mac. No account, nothing sent anywhere.")
+                .help("Runs on this Mac. Nothing leaves it except web searches you turn on and downloads you approve.")
 
             Button {
                 model.isSearchPresented.toggle()
             } label: {
-                HStack(spacing: MFSpacing.s - 2) {
+                HStack(spacing: MFSpacing.snug) {
                     Image(systemName: "magnifyingglass")
                         .accessibilityHidden(true)
                     MFKeycap("⌘K")
@@ -82,9 +80,9 @@ struct ShellTrailingControls: View {
             .help("Appearance: \(model.appearance.title)")
 
             Button {
-                model.show(model.selection == .settings ? .chat : .settings)
+                model.toggleSettings()
             } label: {
-                HStack(spacing: MFSpacing.s - 2) {
+                HStack(spacing: MFSpacing.snug) {
                     Image(systemName: AppSection.settings.systemImage)
                         .accessibilityHidden(true)
                     if model.selection == .settings {
@@ -93,9 +91,8 @@ struct ShellTrailingControls: View {
                 }
             }
             .buttonStyle(MFPillButtonStyle(isSelected: model.selection == .settings))
-            .accessibilityLabel("Settings")
-            .accessibilityAddTraits(model.selection == .settings ? .isSelected : [])
-            .help("Settings (⌘,)")
+            .accessibilityLabel(model.selection == .settings ? "Close Settings" : "Settings")
+            .help(model.selection == .settings ? "Close Settings" : "Settings (⌘,)")
         }
     }
 }
@@ -117,10 +114,10 @@ struct ShellChromeBar: View {
             Spacer(minLength: MFSpacing.l)
             ShellTrailingControls(model: model)
         }
-        .padding(.horizontal, MFSpacing.m + 2)
-        .padding(.vertical, MFSpacing.m - 2)
+        .padding(.horizontal, MFSpacing.comfortable)
+        .padding(.vertical, MFSpacing.compact)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(MFColor.hairline).frame(height: 1)
+            Rectangle().fill(MFColor.chromeDivider).frame(height: MFLayout.hairline)
         }
     }
 }
@@ -135,7 +132,7 @@ struct ShellWindowButtonsPlaceholder: View {
             Circle().fill(Color(nsColor: .systemGreen))
         }
         .frame(width: ShellMetrics.windowButtonsSize.width, height: ShellMetrics.windowButtonsSize.height)
-        .padding(.trailing, MFSpacing.xs + 2)
+        .padding(.trailing, MFSpacing.snug)
         .accessibilityHidden(true)
     }
 }
