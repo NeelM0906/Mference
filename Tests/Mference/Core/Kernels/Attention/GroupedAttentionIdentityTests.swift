@@ -13,8 +13,14 @@ struct GroupedAttentionIdentityTests {
     /// Gemma's 512/16/2 and Qwen 3.6's 256/16/2 full attention.
     static let headDims: [Int] = [512, 256]
 
-    @Test(arguments: headDims, [1, 3, 16, 17, 33, 65, 257, 16_384, 65_536])
+    @Test(arguments: headDims, [1, 3, 16, 17, 33, 65, 257])
     func exactOrder(headDim: Int, seqLen: Int) throws {
+        try compare(seqLen: seqLen, pattern: "random", headDim: headDim)
+    }
+
+    /// The same check at production context lengths (full tier).
+    @Test(.fullTier, arguments: headDims, [16_384, 65_536])
+    func exactOrderAtProductionLength(headDim: Int, seqLen: Int) throws {
         try compare(seqLen: seqLen, pattern: "random", headDim: headDim)
     }
 
