@@ -1,9 +1,8 @@
 import Foundation
 import SQLite3
 
-/// A minimal read-only SQLite connection for Mail's Envelope Index. Opened
-/// with `SQLITE_OPEN_READONLY` and `mode=ro`, so Mference never writes to
-/// Mail's store.
+/// A minimal read-only SQLite connection (`SQLITE_OPEN_READONLY`, `mode=ro`)
+/// for the private copy of Mail's Envelope Index.
 final class ReadOnlySQLite {
     enum Value: Sendable, Hashable {
         case integer(Int64)
@@ -30,13 +29,12 @@ final class ReadOnlySQLite {
 
     private var handle: OpaquePointer?
 
-    /// `immutable` skips locking and the WAL: only for a store no process is
-    /// writing (Mail quit), when the plain read-only open cannot proceed.
-    init(url: URL, immutable: Bool = false) throws {
+    /// Opens `url` read-only. `AppleMailSource` only ever passes its private
+    /// copy of Mail's index here, never Mail's live file.
+    init(url: URL) throws {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false) ?? URLComponents()
         components.scheme = "file"
         components.queryItems = [URLQueryItem(name: "mode", value: "ro")]
-            + (immutable ? [URLQueryItem(name: "immutable", value: "1")] : [])
         let uri = components.string ?? "file:\(url.path)?mode=ro"
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
         let code = sqlite3_open_v2(uri, &handle, flags, nil)

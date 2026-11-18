@@ -34,6 +34,14 @@ public final class MailInboxModel {
     public private(set) var draftState: DraftState = .idle
     public private(set) var draftModelLabel: String?
     public private(set) var isSorting = false
+    /// Some mail is unsorted because Apple's model is off; the list offers
+    /// "Sort with Quick".
+    public private(set) var needsManualSort = false
+    /// A text field is being edited (draft or bucket names): E and Z type
+    /// letters then, they do not mark Done or undo.
+    public var isEditingDraft = false
+    public var isRenamingBuckets = false
+    public var isEditingText: Bool { isEditingDraft || isRenamingBuckets }
     public private(set) var errorMessage: String?
 
     private var inbox: [MailMessageSummary] = []
@@ -70,6 +78,7 @@ public final class MailInboxModel {
     /// Reads without asking; the screen shows the reason and a button when
     /// Full Disk Access is missing.
     public func load(limit: Int = 300) async {
+        await source.reload()
         let status = await source.status()
         self.status = status
         refreshBuckets()
@@ -86,8 +95,16 @@ public final class MailInboxModel {
         } catch {
             errorMessage = "Mail could not be read: \(error)"
         }
-        await sortUnassigned()
-        if selected == nil, let first = messages.first { await open(first) }
+        // Show the newest message first, then sort in the background with
+        // Apple's model only: Quick would replace the person's chat model,
+        // so sorting with it waits for a click (`sortWithQuick`).
+        if selected == nil, let first = inbox.first { await open(first) }
+        await sortUnassigned(allowFallback: false)
+    }
+
+    /// The person clicked "Sort with Quick" (Apple Intelligence is off).
+    public func sortWithQuick() async {
+        await sortUnassigned(allowFallback: true)
     }
 
     /// The person clicked the button under the reason: the broker opens the
@@ -111,9 +128,9 @@ public final class MailInboxModel {
     }
 
     /// Sorts messages no one placed yet. The person's own moves stick.
-    public func sortUnassigned() async {
+    public func sortUnassigned(allowFallback: Bool) async {
         let unsorted = inbox.filter { assignment[$0.messageID] == nil }
-        guard !unsorted.isEmpty else { return }
+        guard !unsorted.isEmpty else { needsManualSort = false; return }
         isSorting = true
         defer { isSorting = false }
         let items = unsorted.map {
@@ -121,7 +138,15 @@ public final class MailInboxModel {
                          subject: $0.subject, snippet: $0.snippet)
         }
         let choices = MailBucketDefaults.all.map { MailSortBucket(key: $0.key, description: $0.description) }
-        guard let result = try? await assistant.sortMail(items, into: choices) else { return }
+        let result: AssistantResult<[String: String]>
+        do {
+            result = try await assistant.sortMail(items, into: choices, allowFallback: allowFallback)
+        } catch {
+            // Apple's model is off: offer Quick on a click instead.
+            needsManualSort = !allowFallback
+            return
+        }
+        needsManualSort = false
         for (messageID, key) in result.value {
             // The person may have moved it while the sorter ran: theirs wins.
             guard assignment[messageID] == nil else { continue }
@@ -194,6 +219,7 @@ public final class MailInboxModel {
     // MARK: Reading
 
     public func open(_ message: MailMessageSummary) async {
+        isEditingDraft = false
         selected = message
         body = nil
         eventCard = nil
@@ -239,7 +265,31 @@ public final class MailInboxModel {
 
     // MARK: Draft and send
 
+    /// Replies are offered for received mail only, not for Drafts or Sent.
+    public var canReply: Bool {
+        guard let selected else { return false }
+        return selected.mailbox.kind != .drafts && selected.mailbox.kind != .sent
+    }
+
+    /// Who the reply goes to and from, and its subject, for the draft card.
+    public var replyDraft: MailDraft? {
+        guard let message = selected, canReply else { return nil }
+        return MailDraft.reply(to: message, headers: body?.headers ?? [:], accountAddresses: accounts.map(\.name),
+                               body: draft)
+    }
+
+    /// Send is possible only for a finished draft that is not being
+    /// rewritten, sent or already sent.
+    public var canSend: Bool {
+        guard canReply, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        switch draftState {
+        case .writing, .sending, .sent: return false
+        case .idle, .ready, .failed: return true
+        }
+    }
+
     public func writeDraft(tone: DraftTone = .standard) async {
+        guard canReply, draftState != .writing, draftState != .sending, draftState != .sent else { return }
         guard let message = selected, let drafter else {
             draftState = .failed("Quick is needed to write drafts. Install it from the model library.")
             return
@@ -249,28 +299,31 @@ public final class MailInboxModel {
         do {
             let text = try await drafter.draft(replyTo: message, body: body?.text ?? message.snippet, tone: tone,
                                                previous: previous)
-            guard selected?.messageID == message.messageID else { return }
+            // A different message, or a draft that changed state meanwhile,
+            // keeps what it has.
+            guard selected?.messageID == message.messageID, draftState == .writing else { return }
             draft = text
             draftModelLabel = drafter.model.shortName
             draftState = .ready
-        } catch let error as EngineServiceError {
-            draftState = .failed(error.userMessage)
-        } catch let error as AssistantModelError {
-            draftState = .failed(error.userMessage)
         } catch {
-            draftState = .failed("The draft could not be written.")
+            guard selected?.messageID == message.messageID, draftState == .writing else { return }
+            switch error {
+            case let error as EngineServiceError: draftState = .failed(error.userMessage)
+            case let error as AssistantModelError: draftState = .failed(error.userMessage)
+            default: draftState = .failed("The draft could not be written.")
+            }
         }
     }
 
     /// Only the Send button calls this.
     public func send() async {
-        guard let message = selected else { return }
+        guard canSend, let reply = replyDraft else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
         draftState = .sending
         do {
-            try await sender.send(MailDraft(to: message.senderAddress, subject: MailDraft.replySubject(message.subject),
-                                            body: text, inReplyTo: message.messageID))
+            var outgoing = reply
+            outgoing.body = text
+            try await sender.send(outgoing)
             draftState = .sent
         } catch let error as MailSendError {
             draftState = .failed(error.userMessage)

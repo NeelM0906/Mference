@@ -11,7 +11,7 @@ import Testing
         let source = AppleUIFixtures.FixedMailSource(status: .available(version: "V10"), inbox: AppleUIFixtures.inbox,
                                                      bodies: AppleUIFixtures.bodies)
         let assistant = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [
-            .success(AppleUIFixtures.sortAnswer), .success(AppleUIFixtures.eventAnswer),
+            .success(AppleUIFixtures.eventAnswer), .success(AppleUIFixtures.sortAnswer),
         ])
         let draft = "Hi Priya, 11 works. I’ve moved it on my side. I’ll have the copy decisions written up by Tuesday so we can spend the time on the screens. See you Wednesday!"
         let model = MailInboxModel(source: source, context: container.mainContext,

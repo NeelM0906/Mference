@@ -151,4 +151,36 @@ struct MailStoreFixture {
     func remove() {
         try? FileManager.default.removeItem(at: root)
     }
+
+    /// Mail's own writer: puts the index in WAL mode and adds mail that
+    /// stays in the write-ahead log (not checkpointed) while open.
+    final class WALWriter {
+        private var db: OpaquePointer?
+
+        init(index: URL) throws {
+            guard sqlite3_open(index.path, &db) == SQLITE_OK else { throw MailSourceError.unreadable("writer") }
+            try exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        }
+
+        func insertInboxMessage(rowID: Int64, messageID: String, subject: String) throws {
+            try exec("""
+                INSERT INTO subjects VALUES (\(rowID), '\(subject)');
+                INSERT INTO addresses VALUES (\(rowID), 'fresh@example.com', 'Fresh');
+                INSERT INTO summaries VALUES (\(rowID), '');
+                INSERT INTO message_global_data VALUES (\(rowID), '\(messageID)');
+                INSERT INTO messages VALUES (\(rowID), \(rowID), \(rowID), '', \(rowID), 1900000000, 1, 0, 0, \(rowID));
+                """)
+        }
+
+        func exec(_ sql: String) throws {
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                throw MailSourceError.unreadable(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+
+        func close() {
+            sqlite3_close(db)
+            db = nil
+        }
+    }
 }

@@ -30,6 +30,8 @@ struct ScanContent: View {
     @Bindable var session: ScanSession
     @State private var isDropTargeted = false
     @State private var exportMessage: String?
+    /// The image decoded once per file (bounded), not on every keystroke.
+    @State private var preview: (url: URL, image: CGImage)?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -42,6 +44,14 @@ struct ScanContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: session.imageURL) { loadPreview() }
+    }
+
+    private func loadPreview() {
+        guard let url = session.imageURL else { preview = nil; return }
+        if preview?.url == url { return }
+        // Decoded once per file and bounded to 2048 px, so it is cheap here.
+        if let image = VisionScanner.loadImage(at: url, maximumPixelSize: 2_048) { preview = (url, image) }
     }
 
     // MARK: Image
@@ -49,8 +59,8 @@ struct ScanContent: View {
     private var imagePane: some View {
         ZStack {
             StripedBackground()
-            if let url = session.imageURL, let image = NSImage(contentsOf: url) {
-                Image(nsImage: image)
+            if let preview, preview.url == session.imageURL {
+                Image(decorative: preview.image, scale: 1)
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
@@ -260,16 +270,19 @@ struct ScanContent: View {
         }
     }
 
+    /// Exports the receipts already saved; a scan in review stays unsaved
+    /// until the person clicks Add row.
     private func exportCSV() {
-        if session.phase == .review { confirm() }
         do {
-            let csv = try session.exportCSV()
+            let file = try session.exportCSVFile()
             let panel = NSSavePanel()
             panel.allowedContentTypes = [.commaSeparatedText]
             panel.nameFieldStringValue = "Receipts.csv"
             guard panel.runModal() == .OK, let url = panel.url else { return }
-            try Data(csv.utf8).write(to: url, options: .atomic)
-            exportMessage = "Exported to \(url.lastPathComponent)."
+            try file.write(to: url, options: .atomic)
+            exportMessage = session.phase == .review
+                ? "Exported your saved receipts to \(url.lastPathComponent). This one is not saved yet: click Add row."
+                : "Exported to \(url.lastPathComponent)."
         } catch {
             exportMessage = "The CSV could not be written: \(error.localizedDescription)"
         }

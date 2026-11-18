@@ -15,6 +15,7 @@ extension AppleUIFixtures {
             self.bodies = bodies
         }
 
+        func reload() async {}
         func status() async -> MailStoreStatus { status }
         func messages(in kinds: Set<MailboxRef.Kind>, limit: Int) async throws -> [MailMessageSummary] {
             kinds.contains(.inbox) ? Array(inbox.prefix(limit)) : []

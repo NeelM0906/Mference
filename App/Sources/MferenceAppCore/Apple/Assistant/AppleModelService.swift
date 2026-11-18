@@ -22,8 +22,10 @@ public protocol AppleModelServicing: Sendable {
     /// One or two sentences.
     func summary(of text: String) async throws -> AssistantResult<String>
     /// Message-ID to bucket key. Messages the model left out or put in an
-    /// unknown bucket are missing from the map.
-    func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket]) async throws
+    /// unknown bucket, or whose batch failed, are missing from the map.
+    /// `allowFallback` false sorts with Apple's model only, so background
+    /// sorting never loads Quick over the person's chat model.
+    func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket], allowFallback: Bool) async throws
         -> AssistantResult<[String: String]>
     /// Receipt fields read from recognized text; the person confirms them.
     func fillReceipt(from recognizedText: String) async throws -> AssistantResult<ReceiptDraft>
@@ -65,31 +67,37 @@ public struct AppleModelService: AppleModelServicing {
     }
 
     public func title(for text: String) async throws -> AssistantResult<String> {
-        let request = AssistantRequest(instructions: AssistantPrompts.title,
-                                       prompt: AssistantPrompts.clip(text, to: 2_000), maximumTokens: 32)
+        let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.title),
+                                       prompt: AssistantPrompts.textPrompt("Write the title for this text.", text,
+                                                                           limit: 2_000),
+                                       maximumTokens: 32)
         return try await run(request) { AssistantAnswerParser.singleLine($0, maxWords: 6) }
     }
 
     public func summary(of text: String) async throws -> AssistantResult<String> {
-        let request = AssistantRequest(instructions: AssistantPrompts.summary,
-                                       prompt: AssistantPrompts.clip(text, to: Self.textLimit), maximumTokens: 120)
+        let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.summary),
+                                       prompt: AssistantPrompts.textPrompt("Summarize this text.", text,
+                                                                           limit: Self.textLimit),
+                                       maximumTokens: 120)
         return try await run(request, parse: AssistantAnswerParser.paragraph)
     }
 
-    public func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket]) async throws
+    public func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket], allowFallback: Bool) async throws
         -> AssistantResult<[String: String]> {
         let keys = Set(buckets.map(\.key))
         var assignments: [String: String] = [:]
         var usedModel: AssistantModelKind?
+        var lastError: (any Error)?
         var start = 0
         while start < messages.count {
             try Task.checkCancellation()
             let batch = Array(messages[start..<min(start + Self.mailBatchSize, messages.count)])
             start += Self.mailBatchSize
-            let request = AssistantRequest(instructions: AssistantPrompts.mailSort,
+            let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.mailSort),
                                            prompt: AssistantPrompts.mailSortPrompt(messages: batch, buckets: buckets),
                                            maximumTokens: 24 * batch.count + 32)
-            let result = try await run(request) { answer -> [String: String]? in
+            // Each batch stands alone: one failed batch keeps the others.
+            let parse = { (answer: String) -> [String: String]? in
                 guard let object = AssistantAnswerParser.jsonObject(in: answer) else { return nil }
                 var mapped: [String: String] = [:]
                 for (number, value) in object {
@@ -102,18 +110,27 @@ public struct AppleModelService: AppleModelServicing {
                 // those messages are left out, as documented.
                 return mapped
             }
-            assignments.merge(result.value) { _, new in new }
-            usedModel = usedModel ?? result.model
+            do {
+                let result = try await run(request, models: allowFallback ? candidates : [primary], parse: parse)
+                assignments.merge(result.value) { _, new in new }
+                usedModel = usedModel ?? result.model
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
         }
         if let usedModel {
             return AssistantResult(value: assignments, model: usedModel)
         }
+        if let lastError { throw lastError }
         return AssistantResult(value: [:], model: try await activeModel().get())
     }
 
     public func fillReceipt(from recognizedText: String) async throws -> AssistantResult<ReceiptDraft> {
-        let request = AssistantRequest(instructions: AssistantPrompts.receiptFields,
-                                       prompt: AssistantPrompts.clip(recognizedText, to: Self.textLimit),
+        let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.receiptFields),
+                                       prompt: AssistantPrompts.textPrompt("Fill the fields from this receipt.",
+                                                                           recognizedText, limit: Self.textLimit),
                                        maximumTokens: 600)
         return try await run(request) { answer in
             AssistantAnswerParser.jsonObject(in: answer).map(ReceiptDraft.init(json:))
@@ -123,7 +140,8 @@ public struct AppleModelService: AppleModelServicing {
     public func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone) async throws
         -> AssistantResult<MailEventSuggestion?> {
         let prompt = AssistantPrompts.eventPrompt(subject: subject, body: body, received: received, timeZone: timeZone)
-        let request = AssistantRequest(instructions: AssistantPrompts.mailEvent, prompt: prompt, maximumTokens: 120)
+        let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.mailEvent),
+                                       prompt: prompt, maximumTokens: 120)
         return try await run(request) { answer -> MailEventSuggestion?? in
             guard let object = AssistantAnswerParser.jsonObject(in: answer) else { return nil }
             // Only an explicit "no meeting" (no title) is a valid empty
@@ -144,8 +162,13 @@ public struct AppleModelService: AppleModelServicing {
     /// Tries each available model in order until one gives a readable answer.
     private func run<Value: Sendable>(_ request: AssistantRequest,
                                       parse: (String) -> Value?) async throws -> AssistantResult<Value> {
+        try await run(request, models: candidates, parse: parse)
+    }
+
+    private func run<Value: Sendable>(_ request: AssistantRequest, models: [any AssistantTextModel],
+                                      parse: (String) -> Value?) async throws -> AssistantResult<Value> {
         var lastError: AssistantModelError?
-        for model in candidates {
+        for model in models {
             try Task.checkCancellation()
             if case .unavailable(let reason) = await model.availability() {
                 // A later model's reason says more ("Apple Intelligence is off
@@ -172,5 +195,13 @@ public struct AppleModelService: AppleModelServicing {
             }
         }
         throw lastError ?? AssistantModelError.noModelAvailable(reason: "No on-device model is available.")
+    }
+}
+
+extension AppleModelServicing {
+    /// Sorts with any available model (Apple's, else Quick).
+    public func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket]) async throws
+        -> AssistantResult<[String: String]> {
+        try await sortMail(messages, into: buckets, allowFallback: true)
     }
 }

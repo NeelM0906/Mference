@@ -149,6 +149,12 @@ public final class ScanSession {
         fields = ScanFields(fields: [])
     }
 
+    /// The CSV file of every confirmed receipt (UTF-8 with BOM). A scan
+    /// still in review is not included and not confirmed.
+    public func exportCSVFile() throws -> Data {
+        Data([0xEF, 0xBB, 0xBF]) + Data(try exportCSV().utf8)
+    }
+
     /// CSV of every confirmed receipt, oldest first.
     public func exportCSV() throws -> String {
         let descriptor = FetchDescriptor<ScanRecord>(

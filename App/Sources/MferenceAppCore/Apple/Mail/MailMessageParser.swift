@@ -22,14 +22,19 @@ public struct MailBody: Sendable, Hashable {
 public enum MailMessageParser {
     /// Largest message read, so a huge attachment never lands in memory twice.
     public static let maximumBytes = 8 * 1024 * 1024
+    /// Largest HTML part reduced to text.
+    public static let maximumHTMLBytes = 512 * 1024
+    /// Longest body shown.
+    public static let maximumTextCharacters = 100_000
 
     /// `.emlx`: a byte count line, the RFC 822 message, then a plist.
     public static func parseEMLX(_ data: Data) -> MailBody? {
-        guard let newline = data.firstIndex(of: 0x0A),
+        guard let newline = data.firstIndex(of: 0x0A), newline - data.startIndex <= 20,
               let count = Int(String(decoding: data[data.startIndex..<newline], as: UTF8.self)
-                .trimmingCharacters(in: .whitespaces)) else { return parseMessage(data) }
+                .trimmingCharacters(in: .whitespaces)), count >= 0 else { return parseMessage(data) }
         let start = data.index(after: newline)
-        let end = min(data.endIndex, start + max(0, count))
+        // A count larger than the file (or absurd) reads to the end.
+        let end = count <= data.endIndex - start ? start + count : data.endIndex
         return parseMessage(data[start..<end])
     }
 
@@ -41,14 +46,14 @@ public enum MailMessageParser {
         collect(part, plain: &plain, html: &html, depth: 0)
         if let plain, !plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let images = html.map(MailHTML.remoteImages) ?? []
-            return MailBody(text: normalize(plain),
+            return MailBody(text: cap(normalize(plain)),
                             trackersRemoved: images.filter(\.isTracker).count,
                             remoteImagesBlocked: images.filter { !$0.isTracker }.count,
                             headers: part.headers)
         }
         if let html {
             let images = MailHTML.remoteImages(in: html)
-            return MailBody(text: normalize(MailHTML.text(from: html)),
+            return MailBody(text: cap(normalize(MailHTML.text(from: html))),
                             trackersRemoved: images.filter(\.isTracker).count,
                             remoteImagesBlocked: images.filter { !$0.isTracker }.count,
                             headers: part.headers)
@@ -66,6 +71,10 @@ public enum MailMessageParser {
         if part.isAttachment { return }
         if type == "text/plain" || type.isEmpty, plain == nil { plain = part.decodedText }
         else if type == "text/html", html == nil { html = part.decodedText }
+    }
+
+    static func cap(_ text: String) -> String {
+        text.count > maximumTextCharacters ? String(text.prefix(maximumTextCharacters)) + "\n\n[Message shortened]" : text
     }
 
     static func normalize(_ text: String) -> String {
@@ -271,18 +280,102 @@ public enum MailHTML {
                                "spacer", "1x1"]
 
     public static func remoteImages(in html: String) -> [RemoteImage] {
-        html.matches(of: /(?is)<img\b[^>]*>/).compactMap { match in
-            let tag = String(match.output)
+        scan(html).imageTags.compactMap { tag in
             guard let source = attribute("src", in: tag),
                   source.lowercased().hasPrefix("http") || source.hasPrefix("//") else { return nil }
-            let width = attribute("width", in: tag).flatMap { Int($0.filter(\.isNumber)) }
-            let height = attribute("height", in: tag).flatMap { Int($0.filter(\.isNumber)) }
+            let width = attribute("width", in: tag).flatMap { Int($0.filter(\.isNumber).prefix(6)) }
+            let height = attribute("height", in: tag).flatMap { Int($0.filter(\.isNumber).prefix(6)) }
             let style = (attribute("style", in: tag) ?? "").lowercased().replacingOccurrences(of: " ", with: "")
             let tiny = (width.map { $0 <= 2 } ?? false) || (height.map { $0 <= 2 } ?? false)
                 || style.contains("display:none") || style.contains("width:1px") || style.contains("height:1px")
             let hinted = trackerHints.contains { source.lowercased().contains($0) }
             return RemoteImage(source: source, isTracker: tiny || (hinted && width == nil && height == nil))
         }
+    }
+
+    static let skippedElements: Set<String> = ["script", "style", "head", "title", "template", "noscript"]
+    static let blockElements: Set<String> = ["p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "table",
+                                             "blockquote", "ul", "ol", "section", "article", "header", "footer"]
+
+    /// One linear pass over at most `maximumHTMLBytes`: text with block
+    /// breaks, and the `<img>` tags. Unclosed tags or comments end the scan
+    /// instead of rescanning (no quadratic time on hostile mail).
+    static func scan(_ html: String) -> (text: String, imageTags: [String]) {
+        let bounded = html.utf8.count > MailMessageParser.maximumHTMLBytes
+            ? String(decoding: html.utf8.prefix(MailMessageParser.maximumHTMLBytes), as: UTF8.self) : html
+        let chars = Array(bounded.unicodeScalars)
+        var text = String.UnicodeScalarView()
+        var images: [String] = []
+        var index = 0
+        func lower(_ scalar: Unicode.Scalar) -> Unicode.Scalar {
+            ("A"..."Z").contains(scalar) ? Unicode.Scalar(scalar.value + 32)! : scalar
+        }
+        func matches(_ literal: String, at position: Int) -> Bool {
+            let pattern = Array(literal.unicodeScalars)
+            guard position + pattern.count <= chars.count else { return false }
+            for offset in pattern.indices where lower(chars[position + offset]) != pattern[offset] { return false }
+            return true
+        }
+        /// The first position of `literal` at or after `position`, or nil.
+        func find(_ literal: String, from position: Int) -> Int? {
+            var cursor = position
+            while cursor < chars.count {
+                if matches(literal, at: cursor) { return cursor }
+                cursor += 1
+            }
+            return nil
+        }
+        while index < chars.count {
+            let scalar = chars[index]
+            guard scalar == "<" else {
+                text.append(scalar)
+                index += 1
+                continue
+            }
+            if matches("<!--", at: index) {
+                guard let close = find("-->", from: index + 4) else { break }
+                index = close + 3
+                continue
+            }
+            // The tag's end, skipping ">" inside quoted attribute values.
+            var cursor = index + 1
+            var quote: Unicode.Scalar?
+            while cursor < chars.count {
+                let current = chars[cursor]
+                if let open = quote {
+                    if current == open { quote = nil }
+                } else if current == "\"" || current == "'" {
+                    quote = current
+                } else if current == ">" {
+                    break
+                }
+                cursor += 1
+            }
+            guard cursor < chars.count else { break }
+            var nameStart = index + 1
+            let closing = nameStart < cursor && chars[nameStart] == "/"
+            if closing { nameStart += 1 }
+            var nameEnd = nameStart
+            while nameEnd < cursor, chars[nameEnd].properties.isAlphabetic || ("0"..."9").contains(chars[nameEnd]) {
+                nameEnd += 1
+            }
+            let name = String(String.UnicodeScalarView(chars[nameStart..<nameEnd].map(lower)))
+            let tagStart = index
+            index = cursor + 1
+            if !closing, skippedElements.contains(name) {
+                guard let close = find("</\(name)", from: index), let end = find(">", from: close) else { break }
+                index = end + 1
+            } else if name == "br" {
+                text.append("\n")
+            } else if name == "img", !closing {
+                images.append(String(String.UnicodeScalarView(chars[tagStart...cursor])))
+            } else if name == "li", !closing {
+                text.append(contentsOf: "• ".unicodeScalars)
+            } else if closing, blockElements.contains(name) {
+                text.append("\n")
+            }
+        }
+        return (String(text), images)
     }
 
     static func attribute(_ name: String, in tag: String) -> String? {
@@ -299,14 +392,7 @@ public enum MailHTML {
     /// Text of an HTML body: scripts, styles and comments dropped, block
     /// elements become line breaks, entities decoded.
     public static func text(from html: String) -> String {
-        var text = html
-        text = text.replacing(/(?is)<(script|style|head|title)\b.*?<\/\1\s*>/, with: "")
-        text = text.replacing(/(?s)<!--.*?-->/, with: "")
-        text = text.replacing(/(?i)<br\s*\/?>/, with: "\n")
-        text = text.replacing(/(?i)<\/(p|div|tr|li|h[1-6]|table|blockquote)\s*>/, with: "\n")
-        text = text.replacing(/(?i)<li\b[^>]*>/, with: "• ")
-        text = text.replacing(/(?s)<[^>]+>/, with: "")
-        return decodeEntities(text)
+        decodeEntities(scan(html).text)
     }
 
     static func decodeEntities(_ text: String) -> String {

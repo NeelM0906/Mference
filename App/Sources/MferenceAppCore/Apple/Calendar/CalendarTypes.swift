@@ -1,9 +1,25 @@
 import Foundation
 
+/// Which event, and for a repeating one which occurrence: every occurrence
+/// of a series shares EventKit's identifier.
+public struct EventReference: Sendable, Hashable, Codable {
+    /// EventKit's `calendarItemIdentifier`.
+    public var eventID: String
+    /// The occurrence's original start, for repeating events; nil otherwise.
+    public var occurrenceDate: Date?
+
+    public init(eventID: String, occurrenceDate: Date? = nil) {
+        self.eventID = eventID
+        self.occurrenceDate = occurrenceDate
+    }
+}
+
 /// One Apple Calendar event, as the week view shows it.
 public struct CalendarEvent: Sendable, Hashable, Identifiable {
-    /// EventKit's `calendarItemIdentifier`.
-    public var id: String
+    /// EventKit's `calendarItemIdentifier` (shared by a series' occurrences).
+    public var eventID: String
+    /// The occurrence's original start, for repeating events; nil otherwise.
+    public var occurrenceDate: Date?
     public var title: String
     public var start: Date
     public var end: Date
@@ -13,9 +29,10 @@ public struct CalendarEvent: Sendable, Hashable, Identifiable {
     public var calendarColor: UInt32?
     public var location: String?
 
-    public init(id: String, title: String, start: Date, end: Date, isAllDay: Bool = false,
+    public init(id: String, occurrenceDate: Date? = nil, title: String, start: Date, end: Date, isAllDay: Bool = false,
                 calendarName: String = "Calendar", calendarColor: UInt32? = nil, location: String? = nil) {
-        self.id = id
+        self.eventID = id
+        self.occurrenceDate = occurrenceDate
         self.title = title
         self.start = start
         self.end = end
@@ -23,6 +40,14 @@ public struct CalendarEvent: Sendable, Hashable, Identifiable {
         self.calendarName = calendarName
         self.calendarColor = calendarColor
         self.location = location
+    }
+
+    public var reference: EventReference { EventReference(eventID: eventID, occurrenceDate: occurrenceDate) }
+
+    /// Unique per occurrence: the identifier, plus the occurrence date for
+    /// repeating events.
+    public var id: String {
+        occurrenceDate.map { "\(eventID)@\(Int($0.timeIntervalSince1970))" } ?? eventID
     }
 }
 
@@ -63,18 +88,26 @@ public struct ProposedEvent: Sendable, Hashable, Identifiable, Codable {
     public var source: ItemSource
     /// The event this one moves, if it reschedules one (shown struck through).
     public var replacesEventID: String?
+    /// For a repeating event, the occurrence it moves.
+    public var replacesOccurrence: Date?
     /// One line under the question ("From Priya's email this morning.").
     public var note: String?
 
     public init(id: UUID = UUID(), title: String, start: Date, end: Date, source: ItemSource,
-                replacesEventID: String? = nil, note: String? = nil) {
+                replacesEventID: String? = nil, replacesOccurrence: Date? = nil, note: String? = nil) {
         self.id = id
         self.title = title
         self.start = start
         self.end = end
         self.source = source
         self.replacesEventID = replacesEventID
+        self.replacesOccurrence = replacesOccurrence
         self.note = note
+    }
+
+    /// The occurrence this proposal moves, if any.
+    public var replaces: EventReference? {
+        replacesEventID.map { EventReference(eventID: $0, occurrenceDate: replacesOccurrence) }
     }
 }
 
@@ -87,7 +120,27 @@ public struct TodoItem: Sendable, Hashable, Identifiable, Codable {
     public var source: ItemSource
     /// The matching Apple Reminder once synced.
     public var reminderID: String?
+    /// What Mference last pushed to Reminders: only fields changed here since
+    /// then are pushed again, so edits made in Reminders survive.
+    public var lastSynced: ReminderFields?
+    /// The reminder was deleted in Reminders: it is not created again.
+    public var unlinkedFromReminders: Bool = false
     public var createdAt: Date
+
+    /// The fields Mference owns in a reminder.
+    public struct ReminderFields: Sendable, Hashable, Codable {
+        public var title: String
+        public var isDone: Bool
+        public var due: Date?
+
+        public init(title: String, isDone: Bool, due: Date?) {
+            self.title = title
+            self.isDone = isDone
+            self.due = due
+        }
+    }
+
+    public var reminderFields: ReminderFields { ReminderFields(title: title, isDone: isDone, due: due) }
 
     public init(id: UUID = UUID(), title: String, isDone: Bool = false, due: Date? = nil,
                 source: ItemSource = ItemSource(kind: .manual, label: "Added by you"),
@@ -135,10 +188,22 @@ public protocol CalendarServicing: Sendable {
     func events(from start: Date, to end: Date) async throws -> [CalendarEvent]
     /// Creates the event (and removes the one it replaces, if any).
     func add(_ proposal: ProposedEvent) async throws -> CalendarEvent
-    func update(eventID: String, title: String, start: Date, end: Date) async throws -> CalendarEvent
-    func remove(eventID: String) async throws
+    /// Changes this occurrence only (`.thisEvent`).
+    func update(_ event: EventReference, title: String, start: Date, end: Date) async throws -> CalendarEvent
+    /// Deletes this occurrence only.
+    func remove(_ event: EventReference) async throws
 
-    /// Creates or updates one Reminder per to-do in the "Mference" list;
-    /// returns to-do id to reminder id.
-    func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: String]
+    /// Creates a Reminder for each new to-do in the "Mference" list and, for
+    /// linked ones, pushes only the fields Mference changed since the last
+    /// sync; never touches notes after creation, never recreates a reminder
+    /// deleted in Reminders.
+    func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: ReminderSyncOutcome]
+}
+
+/// What happened to one to-do in a Reminders sync.
+public enum ReminderSyncOutcome: Sendable, Hashable {
+    /// Linked to this reminder; these fields are now in Reminders.
+    case synced(reminderID: String, fields: TodoItem.ReminderFields)
+    /// The reminder was deleted in Reminders; the to-do stays here only.
+    case deletedInReminders
 }

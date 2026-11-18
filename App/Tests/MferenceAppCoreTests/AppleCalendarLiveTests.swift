@@ -42,13 +42,13 @@ import Testing
         var found = try await service.events(from: start.addingTimeInterval(-60), to: start.addingTimeInterval(3_600))
         #expect(found.contains { $0.id == created.id && $0.title == title })
 
-        let edited = try await service.update(eventID: created.id, title: title + " (edited)",
+        let edited = try await service.update(created.reference, title: title + " (edited)",
                                               start: start.addingTimeInterval(3_600), end: start.addingTimeInterval(5_400))
         log.append("edited to \(edited.start)")
         found = try await service.events(from: start, to: start.addingTimeInterval(7_200))
         #expect(found.contains { $0.id == created.id && $0.title.hasSuffix("(edited)") })
 
-        try await service.remove(eventID: created.id)
+        try await service.remove(created.reference)
         found = try await service.events(from: start.addingTimeInterval(-60), to: start.addingTimeInterval(7_200))
         #expect(!found.contains { $0.id == created.id })
         log.append("deleted; window empty of the test event: \(!found.contains { $0.id == created.id })")
