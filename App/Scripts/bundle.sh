@@ -26,8 +26,10 @@
 #    `Mference --verify-bundle`, which loads both engine resource bundles the
 #    way their `Bundle.module` accessors do and checks their files.
 #
-# SearXNG hook (team U3): put the relocatable runtime and SearXNG under
-# App/Resources/SearXNG/. This script copies that directory verbatim (ditto,
+# SearXNG hook (team U3): first runs U3's App/Scripts/searxng/prepare.sh
+# when it exists (pinned, SHA-256-checked downloads, decision P10; cached
+# under App/.build/searxng-cache, so later runs reuse it), which builds the
+# relocatable runtime under App/Resources/SearXNG/. This script copies that directory verbatim (ditto,
 # so symlinks and modes survive) to Contents/Resources/SearXNG and signs every
 # Mach-O file inside it ad hoc before sealing the app, so nothing else is
 # needed here. Keep large or downloaded payloads gitignored inside that
@@ -80,6 +82,11 @@ EXECUTABLE="$BIN_DIR/MferenceMac"
 for required in Mference_Mference Mference_LlamaCpp; do
     [[ -d "$BIN_DIR/$required.bundle" ]] || { echo "bundle.sh: $BIN_DIR/$required.bundle not found" >&2; exit 1; }
 done
+
+SEARXNG_PREPARE="$APP_DIR/Scripts/searxng/prepare.sh"
+if [[ -x "$SEARXNG_PREPARE" ]]; then
+    "$SEARXNG_PREPARE"
+fi
 
 STAGING="$OUT_DIR/Mference.app.staging"
 rm -rf "$STAGING"
