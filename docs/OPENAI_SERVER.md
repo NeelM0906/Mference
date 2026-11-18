@@ -317,8 +317,9 @@ aliases are rejected.
 When an install carries the checkpoint's `generation_config.json`, its sampler
 values replace these defaults; otherwise the defaults below (temperature `0.8`,
 Top-K `40`) apply. Keys the checkpoint leaves out are off (no Top-K, Top-P, or
-Min-P, and neutral penalties), and Top-P below 1 without Top-K uses a 256-token
-window.
+Min-P, and neutral penalties), and Top-P below 1 without Top-K uses a 64-token
+window, the widest the fused sampler handles (full-vocabulary nucleus is not
+implemented).
 
 Without a checkpoint `generation_config.json`, all families default to temperature `0.8`, Top-K `40`, Top-P `0.95`, Min-P
 `0.05`, repetition penalty `1.0`, presence/frequency penalties `0.0`, and a
