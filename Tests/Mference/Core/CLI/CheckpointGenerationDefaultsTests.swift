@@ -35,15 +35,34 @@ import Testing
              "pad_token_id": 154820, "temperature": 1.0, "top_p": 0.95,
              "transformers_version": "5.16.0"}
             """#.utf8))
-        #expect(implicit.temperature == 1 && implicit.topK == 256 && implicit.topP == 0.95)
+        #expect(implicit.temperature == 1 && implicit.topK == 64 && implicit.topP == 0.95)
         #expect(!implicit.isPureGreedy)
     }
 
     @Test func zeroTopKMeansDisabled() throws {
         let nucleus = try CheckpointGeneration.defaults(from: Data(#"{"top_k": 0, "top_p": 0.9}"#.utf8))
-        #expect(nucleus.topK == 256 && nucleus.topP == 0.9)
+        #expect(nucleus.topK == 64 && nucleus.topP == 0.9)
         let plain = try CheckpointGeneration.defaults(from: Data(#"{"top_k": 0}"#.utf8))
         #expect(plain.topK == nil)
+    }
+
+    /// Top-P below one without Top-K falls back to the fused sampler's widest
+    /// window, 64; an explicit Top-K is kept as written, below or above 64.
+    @Test func nucleusFallbackStaysOnTheFusedTopK64Sampler() throws {
+        #expect(CheckpointGeneration.nucleusFallbackTopK == 64)
+        let minicpm5 = try CheckpointGeneration.defaults(from: Data(#"""
+            {"_from_model_config": true, "bos_token_id": 0, "eos_token_id": [1, 130073],
+             "pad_token_id": 1, "do_sample": true, "temperature": 1.0, "top_p": 0.95,
+             "transformers_version": "5.6.2"}
+            """#.utf8))
+        #expect(minicpm5.topK == 64 && minicpm5.topP == 0.95 && minicpm5.temperature == 1)
+        for explicit in [1, 20, 64, 100, 256] {
+            let c = try CheckpointGeneration.defaults(
+                from: Data(#"{"top_k": \#(explicit), "top_p": 0.9}"#.utf8))
+            #expect(c.topK == explicit && c.topP == 0.9)
+        }
+        let noNucleus = try CheckpointGeneration.defaults(from: Data(#"{"top_p": 1.0}"#.utf8))
+        #expect(noNucleus.topK == nil)
     }
 
     @Test func doSampleFalseIsGreedy() throws {
