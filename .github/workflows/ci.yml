@@ -74,10 +74,9 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.scope == 't0' || needs.changes.outputs.scope == 'full'
-    # macos-26 runs the suite (including the MSL 4.0 tensor-ops path). There
-    # is no macos-15 leg: the maintainer removed it on 2026-11-18, so nothing
-    # in CI checks the declared macOS 15 / Swift 6.1 floor any more. Release
-    # configuration is built locally before every merge (engine program G1).
+    # macos-26 runs the suite (including the MSL 4.0 tensor-ops path) on the
+    # declared macOS 26 floor, with the image's default Swift (6.2+). Release configuration is built
+    # locally before every merge (engine program G1).
     strategy:
       fail-fast: false
       matrix:
