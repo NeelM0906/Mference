@@ -47,6 +47,19 @@ import Testing
             on: FixtureModelLibrary().machine).map(\.id) == [AppModel.deep.modelID])
     }
 
+    struct MissingFile: FileRevealingError, LocalizedError {
+        let fileToShow: URL?
+        var errorDescription: String? { "That file is not a GGUF model." }
+    }
+
+    @Test func importFailureOffersShowInFinderOnlyForAFile() {
+        let file = URL(fileURLWithPath: "/tmp/model.gguf")
+        let withFile = ImportFailure(MissingFile(fileToShow: file))
+        #expect(withFile.fileToShow == file)
+        #expect(withFile.message == "That file is not a GGUF model.")
+        #expect(ImportFailure(CocoaError(.fileReadNoPermission)).fileToShow == nil)
+    }
+
     @Test func approvalIsTheDownloadPath() throws {
         let library = FixtureModelLibrary(deep: .notInstalled)
         let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })

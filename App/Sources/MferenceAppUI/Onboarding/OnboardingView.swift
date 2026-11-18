@@ -63,7 +63,8 @@ public struct OnboardingView: View {
         HStack(spacing: 0) {
             OnboardingSidebar(step: step)
                 .frame(width: OnboardingMetrics.sidebarWidth)
-                .background(MFColor.sidebar)
+                .background(LinearGradient(colors: [MFColor.accentFillFaint, MFColor.sidebar],
+                                           startPoint: .top, endPoint: .bottom))
             Rectangle().fill(MFColor.hairline).frame(width: MFLayout.hairline)
             VStack(alignment: .leading, spacing: 0) {
                 MFScroll {
@@ -353,9 +354,14 @@ enum OnboardingMetrics {
 /// The left column: mark, promise, steps, and the "No account" note.
 struct OnboardingSidebar: View {
     let step: OnboardingView.Step
+    @Environment(\.mfRendersStatically) private var rendersStatically
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.xl) {
+            if rendersStatically {
+                // Snapshot stand-in for the window buttons the real window draws here.
+                ShellWindowButtonsPlaceholder()
+            }
             Text("M")
                 .font(MFFont.largeTitle)
                 .foregroundStyle(MFColor.secondary)
@@ -395,7 +401,7 @@ struct OnboardingSidebar: View {
             .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairline, lineWidth: MFLayout.hairline))
         }
         .padding(MFSpacing.xl)
-        .padding(.top, MFSpacing.xxl)
+        .padding(.top, rendersStatically ? 0 : MFSpacing.xxl)
         .frame(maxHeight: .infinity, alignment: .top)
     }
 }

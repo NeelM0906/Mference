@@ -37,8 +37,13 @@ public struct RootView: View {
 
     public var body: some View {
         if showsOnboarding, let library = screenModels?.library {
+            // The first-run window keeps its close and minimise buttons; the
+            // left panel runs under them, as in the mockup.
             OnboardingView(library: library) { model.completeOnboarding() }
+                .ignoresSafeArea(edges: .top)
                 .frame(minWidth: MFLayout.minimumWindow.width, minHeight: MFLayout.minimumWindow.height)
+                .toolbar(removing: .title)
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
                 .preferredColorScheme(model.appearance.colorScheme)
         } else {
             shell

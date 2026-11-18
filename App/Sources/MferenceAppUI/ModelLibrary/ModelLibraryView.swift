@@ -1,3 +1,4 @@
+import AppKit
 import MferenceAppCore
 import MferenceDesign
 import SwiftUI
@@ -5,16 +6,15 @@ import UniformTypeIdentifiers
 
 /// Settings > Models: the model library (`08b-model-library.png`). Installed
 /// and downloading models, the active downloads, adding a model file, and
-/// model behaviour (default model, MTP, idle unload). A download other than
-/// Quick's starts only after the person approves it here (L4).
+/// model behaviour (default model, MTP, idle unload). Deep downloads from
+/// Settings > Models after approval (L4); browsing other models is Later.
 public struct ModelLibraryView: View {
     let library: any ModelLibraryModel
     /// False in offline mode: downloads are off and say why.
     let downloadsAllowed: Bool
     @State private var detailsID: String?
-    @State private var pendingDownload: ModelEntry?
     @State private var importing = false
-    @State private var importError: String?
+    @State private var importFailure: ImportFailure?
 
     public init(library: any ModelLibraryModel, downloadsAllowed: Bool = true) {
         self.library = library
@@ -39,34 +39,28 @@ public struct ModelLibraryView: View {
                              set: { detailsID = $0?.id })) { target in
             ModelDetailsSheet(library: library, id: target.id)
         }
-        .confirmationDialog(
-            pendingDownload.map { "Download \($0.title)?" } ?? "",
-            isPresented: Binding(get: { pendingDownload != nil }, set: { if !$0 { pendingDownload = nil } }),
-            presenting: pendingDownload
-        ) { entry in
-            Button("Download") { Self.approveDownload(entry, in: library) }
-            Button("Not now", role: .cancel) {}
-        } message: { entry in
-            Text(Self.approvalMessage(for: entry))
-        }
         .fileImporter(isPresented: $importing, allowedContentTypes: Self.modelFileTypes) { result in
             guard case .success(let url) = result else { return }
             Task {
-                do { try await library.addModelFile(at: url) } catch { importError = error.localizedDescription }
+                do { try await library.addModelFile(at: url) } catch { importFailure = ImportFailure(error) }
             }
         }
-        .alert("The model file was not added", isPresented: Binding(get: { importError != nil },
-                                                                     set: { if !$0 { importError = nil } })) {
+        .alert("The model file was not added",
+               isPresented: Binding(get: { importFailure != nil }, set: { if !$0 { importFailure = nil } }),
+               presenting: importFailure) { failure in
+            if let file = failure.fileToShow {
+                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+            }
             Button("OK", role: .cancel) {}
-        } message: {
-            Text(importError ?? "")
+        } message: { failure in
+            Text(failure.message)
         }
     }
 
     static let modelFileTypes: [UTType] = [UTType(filenameExtension: "gguf") ?? .data]
 
-    /// The approval dialog's "Download": the only way a download that needs
-    /// approval starts from this screen.
+    /// The approval dialog's "Download" (Settings > Models): the only way a
+    /// download that needs approval starts.
     static func approveDownload(_ entry: ModelEntry, in library: any ModelLibraryModel) {
         library.download(entry.id)
     }
@@ -107,23 +101,18 @@ public struct ModelLibraryView: View {
         }
     }
 
+    /// Only Quick and Deep download in this version (Deep from Settings >
+    /// Models); browsing other models comes later.
     private var browseMenu: some View {
-        let offered = Self.downloadable(library.entries, on: library.machine)
-        return Menu {
-            ForEach(offered) { entry in
-                Button("\(entry.title)\(entry.sizeBytes.map { " · " + ModelFormat.bytes($0) } ?? "")") {
-                    pendingDownload = entry
-                }
-            }
-        } label: {
-            Text("Browse models")
+        HStack(spacing: MFSpacing.s) {
+            Button("Browse models") {}
+                .buttonStyle(.mfSecondary)
+                .disabled(true)
+            MFBadge(.later)
         }
-        .menuStyle(.button)
-        .buttonStyle(.mfPrimary)
-        .fixedSize()
-        .disabled(offered.isEmpty || !downloadsAllowed)
-        .help(!downloadsAllowed ? "Offline mode is on." :
-              offered.isEmpty ? "Every model offered for this Mac is installed." : "Download another model.")
+        .help("Coming later")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Browse models, coming later")
     }
 
     private var modelTable: some View {
@@ -196,6 +185,19 @@ public struct ModelLibraryView: View {
 
     static func idleShort(_ minutes: Int) -> String {
         minutes >= 60 && minutes % 60 == 0 ? "\(minutes / 60) h" : "\(minutes) min"
+    }
+}
+
+/// What the import alert shows: the error's message and, when the error
+/// points at a file (U2's `ModelImportError` via `FileRevealingError`), a
+/// "Show in Finder" for it.
+struct ImportFailure {
+    let message: String
+    let fileToShow: URL?
+
+    init(_ error: any Error) {
+        message = error.localizedDescription
+        fileToShow = (error as? any FileRevealingError)?.fileToShow
     }
 }
 
