@@ -51,10 +51,16 @@ public enum ReceiptHeuristics {
         return found
     }
 
+    /// The last amount on a line, keeping a refund's sign: `-44.49`,
+    /// `-$44.49`, `$-44.49`, `44.49-` and `(44.49)` are all negative; a
+    /// spaced dash ("1/8 - 12.50") is a separator, not a sign.
     static func lastAmount(in line: String) -> Decimal? {
-        let pattern = /(\d+(?:[,.]\d{3})*[.,]\d{2})(?!\d)/
-        guard let match = line.matches(of: pattern).last else { return nil }
-        return ReceiptValueParser.decimal(String(match.output.1))
+        let pattern = /(\()?(-)?[$€£¥]?(-)?(\d+(?:[,.]\d{3})*[.,]\d{2})(?!\d)(\))?(-)?/
+        guard let match = line.matches(of: pattern).last,
+              let magnitude = ReceiptValueParser.decimal(String(match.output.4)) else { return nil }
+        let output = match.output
+        let negative = (output.1 != nil && output.5 != nil) || output.2 != nil || output.3 != nil || output.6 != nil
+        return negative ? -magnitude : magnitude
     }
 
     static func date(in lines: [String]) -> String? {
