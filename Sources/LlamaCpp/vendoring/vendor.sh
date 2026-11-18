@@ -20,6 +20,10 @@ VERSION=1.0.0
 
 src=${1:?usage: vendor.sh <llama.cpp checkout> [--check]}
 mode=${2:-write}
+case "$mode" in
+  write|--check) ;;
+  *) echo "usage: vendor.sh <llama.cpp checkout> [--check]" >&2; exit 2 ;;
+esac
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 target=$(cd -- "$here/.." && pwd)
 
@@ -28,6 +32,19 @@ if [[ "$head" != "$PIN" ]]; then
   echo "error: $src is at $head, expected $PIN" >&2
   exit 1
 fi
+# Files are read from the working tree, so it must be the commit itself.
+if ! git -C "$src" diff --quiet HEAD --; then
+  echo "error: $src has uncommitted changes" >&2
+  exit 1
+fi
+
+# Our own files in the target directory: everything else must be in the
+# manifest.
+ours=(
+  include/module.modulemap
+  vendoring/vendor.sh vendoring/VENDORING.md vendoring/UPSTREAM.sha256
+  vendoring/LICENSE-llama.cpp vendoring/LICENSE-nlohmann-json
+)
 
 # Upstream paths, relative to the checkout. Destination is the same path,
 # except public headers, which go to include/.
@@ -147,12 +164,19 @@ if [[ "$mode" == "--check" ]]; then
   while IFS= read -r p; do
     cmp -s "$tmp/$p" "$target/$p" || { echo "differs from upstream: $p" >&2; status=1; }
   done < <(manifest_paths "$tmp/vendoring/UPSTREAM.sha256")
+  cmp -s "$src/LICENSE" "$here/LICENSE-llama.cpp" || { echo "differs from upstream: vendoring/LICENSE-llama.cpp" >&2; status=1; }
+  cmp -s "$src/licenses/LICENSE-jsonhpp" "$here/LICENSE-nlohmann-json" || { echo "differs from upstream: vendoring/LICENSE-nlohmann-json" >&2; status=1; }
+  # Anything else under the target would be compiled by SwiftPM unnoticed.
+  while IFS= read -r p; do
+    echo "not in the manifest: $p" >&2; status=1
+  done < <(comm -23 <(cd "$target" && find . -type f ! -name .DS_Store | sed 's|^\./||' | LC_ALL=C sort) \
+                    <({ manifest_paths "$tmp/vendoring/UPSTREAM.sha256"; printf '%s\n' "${ours[@]}"; } | LC_ALL=C sort))
   [[ $status -eq 0 ]] && echo "vendored llama.cpp matches $PIN ($(manifest_paths "$tmp/vendoring/UPSTREAM.sha256" | wc -l | tr -d ' ') files)"
   exit $status
 fi
 
-# Write: replace only the vendored directories; shim/, include/mference_*.h,
-# include/module.modulemap and vendoring/ (except the manifest) are ours.
+# Write: replace only the files in the old manifest; the files in $ours keep
+# their content (the manifest and licence copies are refreshed below).
 if [[ -f "$here/UPSTREAM.sha256" ]]; then
   while IFS= read -r p; do rm -f "$target/$p"; done < <(manifest_paths "$here/UPSTREAM.sha256")
 fi

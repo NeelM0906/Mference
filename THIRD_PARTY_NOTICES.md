@@ -69,9 +69,13 @@ backends with the Metal kernel sources, libllama, and the part of `common/`
 that speculative decoding links against. `Sources/LlamaCpp/vendoring/vendor.sh`
 copies them and verifies them against `vendoring/UPSTREAM.sha256`; three
 version and build-info files are generated from upstream's templates. llama.cpp
-is under the same MIT license and copyright notice as ggml, preserved in
-[`LICENSE-GGML`](LICENSE-GGML) and in
+is under the same MIT license as ggml, with the ggml authors' notice preserved
+in [`LICENSE-GGML`](LICENSE-GGML) and in
 [`Sources/LlamaCpp/vendoring/LICENSE-llama.cpp`](Sources/LlamaCpp/vendoring/LICENSE-llama.cpp).
+Individual vendored files carry further notices of their own, kept unchanged
+in the files: for example `ggml/src/ggml-cpu/llamafile/sgemm.cpp` (Mozilla
+Foundation, MIT) and the YaRN RoPE code (Jeffrey Quesnelle and Bowen Peng,
+MIT).
 
 ## nlohmann/json
 

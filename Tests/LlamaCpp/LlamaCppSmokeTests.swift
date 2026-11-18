@@ -55,7 +55,13 @@ struct LlamaCppSmokeTests {
         defer { ggml_backend_free(cpu) }
 
         for backend in [metal, cpu] {
-            let out = try Self.compute(backend: backend, k: k, m: m, n: n, a: a, b: b, c: c)
+            // ggml_backend_graph_compute aborts the process on an op the
+            // backend cannot run; a paravirtual CI GPU may lack what MUL_MAT
+            // needs. Then only the kernel build above is checked for Metal.
+            guard let out = try Self.compute(backend: backend, k: k, m: m, n: n, a: a, b: b, c: c) else {
+                print("LlamaCpp smoke: \(String(cString: ggml_backend_name(backend))) does not support every op; compute skipped")
+                continue
+            }
             for (got, want) in zip(out, reference) {
                 #expect(abs(got - want) <= 1e-4 * max(1, abs(want)))
             }
@@ -91,7 +97,7 @@ struct LlamaCppSmokeTests {
 
     private static func compute(
         backend: ggml_backend_t, k: Int, m: Int, n: Int, a: [Float], b: [Float], c: [Float]
-    ) throws -> [Float] {
+    ) throws -> [Float]? {
         let params = ggml_init_params(
             mem_size: 8 * ggml_tensor_overhead() + ggml_graph_overhead(),
             mem_buffer: nil,
@@ -106,6 +112,9 @@ struct LlamaCppSmokeTests {
         let result = try #require(ggml_add(ctx, ggml_mul_mat(ctx, ta, tb), tc))
         let graph = try #require(ggml_new_graph(ctx))
         ggml_build_forward_expand(graph, result)
+        for i in 0..<ggml_graph_n_nodes(graph) where !ggml_backend_supports_op(backend, ggml_graph_node(graph, i)) {
+            return nil
+        }
 
         let buffer = try #require(ggml_backend_alloc_ctx_tensors(ctx, backend))
         defer { ggml_backend_buffer_free(buffer) }
