@@ -284,8 +284,15 @@ public struct SettingsView: View {
                     .accessibilityLabel("Resume downloading \(entry.title)")
             case .downloadFailed:
                 ModelStatusBadge(state: entry.state)
-                // Approved when the download first started: no second dialog.
-                Button("Retry") { if let library { ModelLibraryView.retryDownload(entry, in: library) } }
+                // Quick retries directly; Deep asks again (L4: one approval
+                // dialog for every Deep download).
+                Button("Retry") {
+                    if entry.installsWithoutApproval {
+                        if let library { ModelLibraryView.retryDownload(entry, in: library) }
+                    } else {
+                        pendingDownload = entry
+                    }
+                }
                     .buttonStyle(.mfSecondary)
                     .disabled(offline || !(library?.machine.hasRoom(for: entry.sizeBytes) ?? false))
                     .help(offline ? "Offline mode is on." : "Download \(entry.title) again")
