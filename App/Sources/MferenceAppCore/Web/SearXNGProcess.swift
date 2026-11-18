@@ -19,17 +19,18 @@ public struct SearXNGRuntime: Sendable, Hashable {
         FileManager.default.isExecutableFile(atPath: python.path) && FileManager.default.fileExists(atPath: settings.path)
     }
 
-    /// `MFERENCE_SEARXNG_DIR`, then `Contents/Resources/SearXNG` in the app,
-    /// then (development builds run from `App/.build`) `App/.build/searxng/SearXNG`.
+    /// `MFERENCE_SEARXNG_DIR`, then `Contents/Resources/SearXNG/runtime` in the
+    /// app (bundle.sh copies `App/Resources/SearXNG`), then, for development
+    /// builds run from `App/.build`, `App/Resources/SearXNG/runtime`.
     public static func locate(bundle: Bundle = .main,
                               environment: [String: String] = ProcessInfo.processInfo.environment) -> SearXNGRuntime? {
         var candidates: [URL] = []
         if let override = environment["MFERENCE_SEARXNG_DIR"] { candidates.append(URL(fileURLWithPath: override)) }
-        if let resources = bundle.resourceURL { candidates.append(resources.appending(path: "SearXNG")) }
+        if let resources = bundle.resourceURL { candidates.append(resources.appending(path: "SearXNG/runtime")) }
         var directory = bundle.executableURL?.deletingLastPathComponent()
         while let current = directory, current.path != "/" {
             if current.lastPathComponent == ".build" {
-                candidates.append(current.appending(path: "searxng/SearXNG"))
+                candidates.append(current.deletingLastPathComponent().appending(path: "Resources/SearXNG/runtime"))
                 break
             }
             directory = current.deletingLastPathComponent()

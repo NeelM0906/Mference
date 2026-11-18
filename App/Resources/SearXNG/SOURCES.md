@@ -4,8 +4,8 @@ Mference's web answers use [SearXNG](https://github.com/searxng/searxng), run
 unmodified as a separate local process on 127.0.0.1, only while web search is
 on (App Program spec 4.5, decisions L7 and P10). SearXNG is licensed
 AGPL-3.0-or-later; the exact source the app runs is shipped inside the app at
-`Contents/Resources/SearXNG/source/searxng-cccbc9e158b0ac3bb2158e9841a647a5bec57b57.tar.gz`, with its licence in
-`Contents/Resources/SearXNG/licenses/`. The only file added to the package is
+`Contents/Resources/SearXNG/runtime/source/searxng-cccbc9e158b0ac3bb2158e9841a647a5bec57b57.tar.gz`, with its licence in
+`Contents/Resources/SearXNG/runtime/licenses/`. The only file added to the package is
 `searx/version_frozen.py` (the version string SearXNG's own `freeze` command
 writes, since the app has no git checkout).
 

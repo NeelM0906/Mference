@@ -6,8 +6,9 @@
 # wheels.lock before anything from it is used.
 #
 # Usage: App/Scripts/searxng/prepare.sh [--out DIR] [--cache DIR]
-#   --out    where the runtime goes (default App/.build/searxng/SearXNG);
-#            bundle.sh copies it to Mference.app/Contents/Resources/SearXNG
+#   --out    where the runtime goes (default App/Resources/SearXNG/runtime,
+#            gitignored); bundle.sh copies App/Resources/SearXNG into
+#            Mference.app/Contents/Resources/SearXNG and signs it
 #   --cache  verified downloads, reused across runs (default App/.build/searxng-cache)
 #
 # Re-running is cheap: cached files are re-verified, the output is rebuilt.
@@ -15,7 +16,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$(cd "$HERE/../.." && pwd)"
-OUT="$APP_DIR/.build/searxng/SearXNG"
+OUT="$APP_DIR/Resources/SearXNG/runtime"
 CACHE="$APP_DIR/.build/searxng-cache"
 
 while [[ $# -gt 0 ]]; do
@@ -31,12 +32,12 @@ done
 source "$HERE/pins.env"
 PY_MINOR="${PYTHON_VERSION%.*}"                 # 3.12
 
-# Refuse to delete anything but a SearXNG output directory.
+# Refuse to delete anything but a SearXNG runtime directory.
 case "$OUT" in
-    */SearXNG) ;;
-    *) echo "--out must end in /SearXNG (got: $OUT)" >&2; exit 64 ;;
+    /SearXNG|/SearXNG/runtime) echo "refusing --out $OUT" >&2; exit 64 ;;
+    */SearXNG/runtime|*/SearXNG) ;;
+    *) echo "--out must end in /SearXNG/runtime or /SearXNG (got: $OUT)" >&2; exit 64 ;;
 esac
-[[ "$OUT" != "/SearXNG" ]] || { echo "refusing --out /SearXNG" >&2; exit 64; }
 
 # Temporary directories are removed however the script ends.
 TEMP_DIRS=()

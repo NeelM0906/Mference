@@ -1,6 +1,7 @@
 # Third-party software in the bundled SearXNG runtime
 
-Shipped inside the app at `Contents/Resources/SearXNG/` (see `SOURCES.md` for
+Shipped inside the app at `Contents/Resources/SearXNG/runtime/` (paths below are
+relative to it; see `SOURCES.md` for
 the exact downloads and checksums).
 
 | Component | Licence | Where the licence text is |
