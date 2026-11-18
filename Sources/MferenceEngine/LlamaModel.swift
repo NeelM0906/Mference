@@ -204,9 +204,7 @@ actor LlamaModel: EngineModel {
             return true
         }
 
-        // From here until a clean return, the memory may hold anything.
         let reused: Int
-        cacheIsTrusted = false
         let clock = ContinuousClock()
         let prefillSeconds: Double
         let decodeStart: ContinuousClock.Instant
@@ -218,6 +216,8 @@ actor LlamaModel: EngineModel {
             // from empty ones (no prefix reuse).
             reused = 0
             cachedTokens = []
+            // From here until a clean return, the memory may hold anything.
+            cacheIsTrusted = false
             let prefillStart = clock.now
             let status = prompt.withUnsafeBufferPointer { buffer in
                 mference_mtp_begin(mtp, buffer.baseAddress, Int32(buffer.count),
@@ -255,7 +255,10 @@ actor LlamaModel: EngineModel {
             draftProposed = proposed
             draftAccepted = accepted
         } else {
+            // The reusable prefix is read while the cache is still trusted;
+            // from here until a clean return, the memory may hold anything.
             reused = reusablePrefix(of: prompt, context: context)
+            cacheIsTrusted = false
             let prefillStart = clock.now
             var position = reused
             while position < prompt.count {

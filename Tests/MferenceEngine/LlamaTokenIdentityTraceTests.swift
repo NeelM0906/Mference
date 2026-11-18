@@ -118,8 +118,15 @@ struct LlamaTokenIdentityTraceTests {
                     ],
                     tools: tools, generationConfig: GenerationConfig(temperature: 0),
                     maximumCompletionTokens: maxTokens, reasoningEffort: thinking ? .xhigh : nil)
-                let warm = try await model.generate(try await model.prepare(followUp)) { _ in }
+                let warmPrepared = try await model.prepare(followUp)
+                let warm = try await model.generate(warmPrepared) { _ in }
                 let warmTokens = await model.lastSampledTokens
+                // The context holds the tool-call prompt plus every sampled
+                // token but the last (never decoded). When the follow-up's
+                // prompt extends exactly that, the plain path must reuse it.
+                let held = prepared.promptTokens + tokens.dropLast()
+                let extendsHeld = warmPrepared.promptTokens.count > held.count
+                    && Array(warmPrepared.promptTokens.prefix(held.count)) == held
                 await model.discardCachedPrompt()
                 let cold = try await model.generate(try await model.prepare(followUp)) { _ in }
                 let coldTokens = await model.lastSampledTokens
@@ -130,14 +137,19 @@ struct LlamaTokenIdentityTraceTests {
                     "warm_prefill_seconds": warm.timings.prefillSeconds ?? 0,
                     "cold_prefill_seconds": cold.timings.prefillSeconds ?? 0,
                     "warm_equals_cold_tokens": warmTokens == coldTokens,
+                    "follow_up_extends_held_tokens": extendsHeld,
                     "warm_content": warm.content,
                 ]
                 try JSONSerialization.data(withJSONObject: reuse, options: [.prettyPrinted, .sortedKeys])
                     .write(to: directory.appendingPathComponent("prefix-reuse.json"))
-                // Recorded, not required: a thinking turn re-renders its
-                // reasoning differently from how it was generated, and a
-                // recurrent state cannot roll back, so it re-prefills.
+                // A thinking turn re-renders its reasoning differently from how
+                // it was generated, and a recurrent state cannot roll back, so
+                // it re-prefills; reuse is required only for an exact extension
+                // on the plain path.
                 #expect(warm.usage.promptTokens == cold.usage.promptTokens)
+                if extendsHeld, !model.traits.usesDraftDecoding {
+                    #expect(warm.usage.cachedPromptTokens == held.count)
+                }
             }
         }
         await model.unload()
