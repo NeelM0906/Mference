@@ -213,9 +213,12 @@ public struct SettingsView: View {
                 MFListRow("Choose the model for me",
                           subtitle: "Coming later. For now you choose the model for each chat yourself.") {
                     MFBadge(.later)
+                    // The normal off look: the Later chip carries the state, and a
+                    // constant binding keeps it off (L3).
                     Toggle("Choose the model for me", isOn: .constant(false))
                         .toggleStyle(.mf)
-                        .disabled(true)
+                        .allowsHitTesting(false)
+                        .accessibilityValue("Off, coming later")
                 }
                 MFListRow("Speech · Cactus Whistle",
                           subtitle: "Dictation and meeting notes, transcribed on this Mac. Arrives with Notes in a later version.") {
