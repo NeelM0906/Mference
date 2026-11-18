@@ -159,12 +159,15 @@ public struct ModelLibraryView: View {
             .padding(.horizontal, MFSpacing.l)
             .padding(.vertical, MFSpacing.s)
             .background(MFColor.canvas)
-            ForEach(library.entries.filter { $0.state != .notInstalled }) { entry in
+            // Installed, downloading and failed models, plus any model this
+            // Mac is offered (L4) but has not downloaded: its Download opens
+            // the approval dialog.
+            ForEach(library.entries.filter { $0.state != .notInstalled || $0.isOffered(on: library.machine) }) { entry in
                 ModelTableRow(entry: entry,
                               canRetry: downloadsAllowed && library.machine.hasRoom(for: entry.sizeBytes),
                               onDetails: { detailsID = entry.id },
                               onRetry: {
-                                  if entry.installsWithoutApproval {
+                                  if entry.installsWithoutApproval, case .downloadFailed = entry.state {
                                       Self.retryDownload(entry, in: library)
                                   } else {
                                       pendingDownload = entry
@@ -258,7 +261,8 @@ enum LibraryMetrics {
 /// One installed, downloading or failed model.
 struct ModelTableRow: View {
     let entry: ModelEntry
-    /// Downloads are allowed (not offline) and the disk has room.
+    /// Downloads are allowed (not offline) and the disk has room (Download
+    /// and Retry).
     let canRetry: Bool
     let onDetails: () -> Void
     let onRetry: () -> Void
@@ -291,6 +295,12 @@ struct ModelTableRow: View {
                         .disabled(!canRetry)
                         .help(canRetry ? "Download \(entry.title) again" : "Offline mode is on, or the disk needs more free space.")
                         .accessibilityLabel("Retry downloading \(entry.title)")
+                } else if entry.state == .notInstalled {
+                    Button("Download…", action: onRetry)
+                        .buttonStyle(.mfSecondary)
+                        .disabled(!canRetry)
+                        .help(canRetry ? "Download \(entry.title), after you approve" : "Offline mode is on, or the disk needs more free space.")
+                        .accessibilityLabel("Download \(entry.title)")
                 } else {
                     Button("Details", action: onDetails)
                         .buttonStyle(.mfSecondary)

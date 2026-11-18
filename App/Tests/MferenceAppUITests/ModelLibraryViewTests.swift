@@ -57,6 +57,18 @@ import Testing
         #expect(full.downloads.isEmpty)
     }
 
+    /// A first Deep download from the library: the table offers it (32 GB
+    /// Mac) but nothing downloads until the approval dialog's Download.
+    @Test func firstDeepDownloadFromTheLibraryNeedsApproval() throws {
+        let library = FixtureModelLibrary(deep: .notInstalled)
+        let deep = try #require(library.entries.first { $0.id == AppModel.deep.modelID })
+        try Snapshot.render(ModelLibraryView(library: library), name: "library-deep-offered-check")
+        #expect(!ModelLibraryView.retryDownload(deep, in: library))
+        #expect(library.downloads.isEmpty)
+        #expect(ModelLibraryView.approveDownload(deep, in: library))
+        #expect(library.downloads == [AppModel.deep.modelID])
+    }
+
     @Test func quickRetriesWithoutADialogWhenItFits() throws {
         let library = FixtureModelLibrary(quick: .downloadFailed("Network"))
         let quick = try #require(library.entries.first { $0.id == AppModel.quick.modelID })
