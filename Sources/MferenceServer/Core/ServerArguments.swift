@@ -317,10 +317,28 @@ public struct ServerArguments: Equatable, Sendable {
 }
 
 extension ServerArguments {
+    /// Diagnostic, not a supported control: `MFERENCE_DRAFT_DECODING=off`
+    /// turns draft (MTP) decoding off, so validation can compare Deep with
+    /// MTP on and off through the server. Output is the same either way
+    /// (greedy-exact); only speed changes.
+    public static let draftDecodingEnvironmentKey = "MFERENCE_DRAFT_DECODING"
+
     /// The runtime flags as engine load options. `--max-context` applies to
     /// native models; GGUF models keep the engine's default context (32,768,
     /// capped at the file's own).
     public var engineLoadOptions: EngineLoadOptions {
+        engineLoadOptions(environment: ProcessInfo.processInfo.environment)
+    }
+
+    public func engineLoadOptions(environment: [String: String]) -> EngineLoadOptions {
+        var options = baseEngineLoadOptions
+        if environment[Self.draftDecodingEnvironmentKey] == "off" {
+            options.draftDecoding = .off
+        }
+        return options
+    }
+
+    private var baseEngineLoadOptions: EngineLoadOptions {
         let mode: EnginePromptCacheMode = switch promptCacheMode {
         case .off: .off
         case .singlePrefix: .singlePrefix

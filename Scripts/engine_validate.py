@@ -309,15 +309,18 @@ def ledger(entries, seed=20261118):
     return lines
 
 
+# The schema's keys are sorted below the function wrapper: the engine renders
+# JSON objects with sorted keys and llama.cpp in request order, so only a
+# sorted schema renders byte-identically on both (GGUF identity).
 WEATHER_TOOL = {
     "type": "function",
     "function": {
         "name": "get_weather",
         "description": "Current weather for a city.",
         "parameters": {
-            "type": "object",
-            "properties": {"city": {"type": "string", "description": "City name"}},
+            "properties": {"city": {"description": "City name", "type": "string"}},
             "required": ["city"],
+            "type": "object",
         },
     },
 }
@@ -571,6 +574,32 @@ def rss_kb(pid):
         return None
 
 
+def rss_tree_kb(root_pid, table=None):
+    """RSS of a process and all its descendants, in KiB: the whole UI stack
+    (launcher, MferenceServer, Open WebUI) counts toward memory."""
+    if table is None:
+        try:
+            out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss="], capture_output=True,
+                                 text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        table = [tuple(int(x) for x in line.split()) for line in out.splitlines()
+                 if len(line.split()) == 3]
+    children = {}
+    rss = {}
+    for pid, ppid, kb in table:
+        children.setdefault(ppid, []).append(pid)
+        rss[pid] = kb
+    if root_pid not in rss:
+        return None
+    total, stack = 0, [root_pid]
+    while stack:
+        pid = stack.pop()
+        total += rss.get(pid, 0)
+        stack.extend(children.get(pid, []))
+    return total
+
+
 def parse_swapusage(text):
     """`used` from `sysctl -n vm.swapusage`, in MiB."""
     m = re.search(r"used\s*=\s*([0-9.]+)([MG])", text or "")
@@ -592,8 +621,9 @@ def swap_used_mib():
 class Sampler:
     """Samples the server's RSS and system swap while a block runs."""
 
-    def __init__(self, pid, interval=0.25):
+    def __init__(self, pid, interval=0.25, tree=False):
         self.pid = pid
+        self.tree = tree
         self.interval = interval
         self.peak_rss_kb = 0
         self.swap_start = None
@@ -612,7 +642,7 @@ class Sampler:
         ticks = 0
         while not self._stop.is_set():
             if self.pid:
-                value = rss_kb(self.pid)
+                value = rss_tree_kb(self.pid) if self.tree else rss_kb(self.pid)
                 if value:
                     self.peak_rss_kb = max(self.peak_rss_kb, value)
             if ticks % 8 == 0:
@@ -1006,6 +1036,134 @@ def cmd_traceparity(args):
 
 
 # ---------------------------------------------------------------------------
+# Open WebUI (section 8 item 6): one chat per model through the UI's own API
+
+
+UI_QUESTION = "In one short sentence: what is the capital of France?"
+
+
+def ui_request(host, port, method, path, token=None, payload=None, timeout=3600.0):
+    """(status, parsed JSON or None, raw text); status 0 on a transport error."""
+    _check_host(host)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        conn.request(method, path, body=json.dumps(payload).encode() if payload is not None else None,
+                     headers=headers)
+        resp = conn.getresponse()
+        status, raw = resp.status, resp.read().decode("utf-8", "replace")
+    except (OSError, http.client.HTTPException) as error:
+        return 0, None, f"transport error: {error!r}"
+    finally:
+        conn.close()
+    try:
+        return status, json.loads(raw), raw
+    except ValueError:
+        return status, None, raw
+
+
+def ui_stream_chat(host, port, token, payload, timeout):
+    """A streamed chat through Open WebUI, as its frontend streams one.
+    Returns (status, canonical result, raw)."""
+    _check_host(host)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    raw_lines = []
+    try:
+        conn.request("POST", "/api/chat/completions", body=json.dumps(dict(payload, stream=True)).encode(),
+                     headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                              "Authorization": "Bearer " + token})
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return resp.status, {"error": "http"}, resp.read().decode("utf-8", "replace")
+
+        def lines():
+            for line in iter(resp.readline, b""):
+                raw_lines.append(line.decode("utf-8", "replace"))
+                yield line
+
+        result = canonical_from_chunks(list(parse_sse_lines(lines())))
+        return 200, result, "".join(raw_lines)
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        return 0, {"error": repr(error)}, "".join(raw_lines) + f"\ntransport error: {error!r}"
+    finally:
+        conn.close()
+
+
+def cmd_ui(args):
+    """Signs in through Open WebUI's no-auth session (what its frontend does
+    with WEBUI_AUTH off), checks the model list and that builtin tools are
+    off per model (the launcher's configuration), and completes one streamed
+    chat per model through Open WebUI, which forwards each to MferenceServer.
+    A chat counts only with a non-empty answer that ends in `stop`."""
+    out = Path(args.out)
+    expected = [model(k) for k in args.expect.split(",") if k]
+    report = {"chats": [], "problems": [], "expected": [m["id"] for m in expected]}
+
+    def finish(code):
+        report["ok"] = (code == 0 and not report["problems"] and len(report["chats"]) == len(expected)
+                        and all(c["ok"] for c in report["chats"]))
+        _write(out / "ui.json", json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False))
+        if report.get("swap_trip"):
+            return SWAP_TRIP
+        return 0 if report["ok"] else 1
+
+    token = None
+    for attempt in range(5):
+        status, body, raw = ui_request(args.host, args.port, "POST", "/api/v1/auths/signin",
+                                       payload={"email": "", "password": ""}, timeout=60)
+        token = (body or {}).get("token") if status == 200 else None
+        if token:
+            break
+        time.sleep(2)
+    if not token:
+        report["problems"].append(f"sign-in failed: HTTP {status}: {raw[:200]}")
+        return finish(1)
+
+    status, body, raw = ui_request(args.host, args.port, "GET", "/api/models", token, timeout=120)
+    listed = sorted(m.get("id") for m in (body or {}).get("data", []) if isinstance(m, dict))
+    report["listed"] = listed
+    missing = [m["id"] for m in expected if m["id"] not in listed]
+    if status != 200 or missing:
+        report["problems"].append(f"/api/models HTTP {status}, missing {missing}")
+    forbidden = sorted(set(listed) & FORBIDDEN_IDS)
+    if forbidden:
+        report["problems"].append(f"forbidden models listed: {forbidden}")
+    for entry in expected:
+        status, body, raw = ui_request(args.host, args.port, "GET",
+                                       f"/api/v1/models/model?id={entry['id']}", token, timeout=60)
+        tools = (((body or {}).get("meta") or {}).get("capabilities") or {}).get("builtin_tools")
+        # Unconfigured models default to builtin tools on, and the launcher
+        # treats a configuration failure as a warning: only an explicit
+        # `false` from a successful lookup counts.
+        if status != 200 or tools is not False:
+            report["problems"].append(f"{entry['id']}: builtin tools not confirmed off "
+                                      f"(HTTP {status}, builtin_tools={tools!r})")
+
+    for entry in expected:
+        started = time.perf_counter()
+        payload = {"model": entry["id"], "max_tokens": args.max_tokens,
+                   "messages": [{"role": "user", "content": UI_QUESTION}]}
+        with Sampler(args.pid, tree=True) as sampler:
+            status, result, raw = ui_stream_chat(args.host, args.port, token, payload, args.timeout)
+        answer = result.get("content") or ""
+        chat = {"model": entry["id"], "http_status": status, "seconds": time.perf_counter() - started,
+                "content": answer, "reasoning_chars": len(result.get("reasoning_content") or ""),
+                "finish_reason": result.get("finish_reason"), **sampler.report(),
+                "ok": status == 200 and "error" not in result and bool(answer.strip())
+                      and result.get("finish_reason") == "stop"}
+        _write(out / f"chat-{entry['id']}.raw.sse", raw)
+        report["chats"].append(chat)
+        print(f"[ui] {entry['id']}: HTTP {status} {chat['seconds']:.1f}s finish={chat['finish_reason']} "
+              f"peak_rss={chat['peak_rss_mib']}MiB {answer[:80]!r}", file=sys.stderr, flush=True)
+        if sampler.swap_grew:
+            report["swap_trip"] = True
+            break
+    return finish(0)
+
+
+# ---------------------------------------------------------------------------
 # Speed bar (section 8 item 4): engine no more than 5% slower than reference
 
 
@@ -1235,6 +1393,19 @@ def summarize(root):
                              f"{', '.join(row.get('differs_in') or []) or '-'} |")
         lines.append("")
 
+    ui = _load(root / "ui" / "ui.json")
+    if ui:
+        lines += ["## Open WebUI (one chat per model)", "",
+                  "| Model | HTTP | OK | Seconds | Peak RSS of the UI stack MiB | Answer |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for chat in ui.get("chats", []):
+            answer = (chat.get("content") or "").replace("|", "/").replace("\n", " ")[:80]
+            lines.append(f"| {chat['model']} | {chat['http_status']} | {_fmt(bool(chat['ok']))} | "
+                         f"{_fmt(chat.get('seconds'))} | {_fmt(chat.get('peak_rss_mib'))} | {answer or '-'} |")
+        for problem in ui.get("problems", []):
+            lines.append(f"\nUI problem: {problem}")
+        lines.append("")
+
     swap = _load(root / "swap" / "swap.json")
     if swap:
         lines += ["## Swap chain", "", "| From | To | OK | Load s | Peak RSS MiB | Swap grew | Problems |",
@@ -1244,6 +1415,11 @@ def summarize(root):
                          f"{_fmt(s.get('load_s'))} | {_fmt(s.get('peak_rss_mib'))} | "
                          f"{'YES' if s.get('swap_grew') else 'no'} | {'; '.join(s.get('problems') or []) or '-'} |")
         lines.append("")
+    for name, result in (("ui", "ui.json"), ("swap", "swap.json")):
+        if (root / name / "run.json").exists() and not (root / name / result).exists():
+            run = _load(root / name / "run.json") or {}
+            lines += [f"**{name} phase produced no {result}** (run status {run.get('status')}); "
+                      f"see {name}/server.log", ""]
     trips = sorted(str(p.relative_to(root)) for p in root.rglob("SWAP_TRIP"))
     if trips:
         lines += ["**SWAP GUARD TRIPPED**: " + ", ".join(trips), ""]
@@ -1254,6 +1430,23 @@ def cmd_summary(args):
     text = summarize(args.results)
     _write(Path(args.results) / "summary.md", text)
     print(text)
+    return 0
+
+
+def extra_for(key, extra, model_extras):
+    """The request extras for one model: the global --extra, then that
+    model's --model-extra entries ("key=JSON" lines) on top."""
+    merged = json.loads(extra) if extra else {}
+    for line in (model_extras or "").splitlines():
+        name, _, value = line.partition("=")
+        if name.strip() == key and value.strip():
+            merged.update(json.loads(value))
+    return merged
+
+
+def cmd_extrafor(args):
+    merged = extra_for(args.key, args.extra, args.model_extras)
+    print(json.dumps(merged, sort_keys=True) if merged else "")
     return 0
 
 
@@ -1331,6 +1524,20 @@ def main(argv=None):
         sp.add_argument("--label")
         sp.add_argument("--out", required=True)
         sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("extrafor")
+    sp.add_argument("key")
+    sp.add_argument("--extra", default="")
+    sp.add_argument("--model-extras", default="")
+    sp.set_defaults(func=cmd_extrafor)
+
+    sp = sub.add_parser("ui")
+    server(sp)
+    sp.add_argument("--pid", type=int, default=0, help="launcher PID; its whole process tree is sampled")
+    sp.add_argument("--expect", default=",".join(PRODUCT_ORDER))
+    sp.add_argument("--max-tokens", type=int, default=2048)
+    sp.add_argument("--out", required=True)
+    sp.set_defaults(func=cmd_ui)
 
     sp = sub.add_parser("tracecases")
     sp.add_argument("cases")

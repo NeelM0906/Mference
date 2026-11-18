@@ -28,6 +28,13 @@
 #              cold server, must equal the trace (content, reasoning, tool
 #              calls, finish reason, token count); then one warm pass over all
 #              cases on one server, reported but not gated
+#   ui         ./mference-ui.sh --no-browser --no-build as one model hold, with
+#              the launcher's defaults (the server's defaults): Open WebUI lists
+#              the --models models (and no Flash-Next), each with builtin tools
+#              off, and completes one streamed chat per model through its own
+#              API with a non-empty answer that ends in `stop`; the RSS of the
+#              whole UI stack (launcher, MferenceServer, Open WebUI) is sampled.
+#              Until Deep is served (MTP), leave deep out of --models here
 #   summary    rebuild summary.md from what is on disk
 #
 # Not covered here: G5 through MferenceCLI (the CLI does not use the engine),
@@ -46,9 +53,20 @@
 #                                (default: -c 32768 -ngl 99 -np 1 --jinja)
 #   --upstream-mtp-args "<args>" added for the Deep MTP-on upstream run
 #   --mtp-off-args "<args>"      MferenceServer arguments that turn Deep MTP off
-#   --mtp-off-env "<K=V ...>"    environment that turns Deep MTP off
+#   --mtp-off-env "<K=V ...>"    environment that turns Deep MTP off; for
+#                                MferenceServer that is the diagnostic toggle
+#                                MFERENCE_DRAFT_DECODING=off (not a supported
+#                                control), honoured by the llama.cpp backend's
+#                                MTP path; every other run has it unset
 #   --extra '<json>'             merged into every request body
+#   --model-extra <key>='<json>' merged into that model's requests, repeatable;
+#                                for GGUF identity against upstream llama-server
+#                                give Quick '{"chat_template_kwargs":
+#                                {"enable_thinking": false}}' (llama-server
+#                                thinks by default, the engine does not)
 #   --port <n>                   loopback port (default 8091)
+#   --ui-port <n>                Open WebUI port for the ui phase (default
+#                                port + 1000)
 #   --runs <n>                   readings per prompt size (default 2)
 #   --results-root <dir>         default $PROGRAM/results; an existing
 #                                <date>-<sha> directory is refused
@@ -134,15 +152,29 @@ check_loopback_args() {
 RUN_DIR="" RUN_KEY="" RUN_VARIANT="" TIME_PID="" SERVER_PID="" SWAP_BEFORE=""
 STARTED="" READY_AT="" RUN_STATUS=0 SERVER_STOPPED=1
 
+# Every descendant of a PID: the processes this run started under it.
+descendants() {
+  local pid child
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    echo "$child"; descendants "$child"
+  done
+}
+
 stop_server() {
   [ "$SERVER_STOPPED" = 1 ] && return 0
   SERVER_STOPPED=1
   # Only the server this run started: the child of our own /usr/bin/time.
   [ -n "$SERVER_PID" ] || SERVER_PID=$(pgrep -P "$TIME_PID" 2>/dev/null | head -1 || true)
+  # For the ui launcher these are MferenceServer and Open WebUI: recorded now,
+  # so a launcher that has to be killed cannot leave them running.
+  local started_under=""
+  [ -z "$SERVER_PID" ] || started_under=$(descendants "$SERVER_PID")
+  # Never signal /usr/bin/time itself: it ignores SIGINT, and a TERM would
+  # orphan the server it waits for. Signal its child.
   if [ -n "$SERVER_PID" ]; then
     kill -TERM "$SERVER_PID" 2>/dev/null || true
   else
-    kill -TERM "$TIME_PID" 2>/dev/null || true
+    pkill -TERM -P "$TIME_PID" 2>/dev/null || true
   fi
   local waited=0
   while kill -0 "$TIME_PID" 2>/dev/null && [ "$waited" -lt 120 ]; do
@@ -150,8 +182,16 @@ stop_server() {
   done
   if kill -0 "$TIME_PID" 2>/dev/null; then
     note "server ${SERVER_PID:-?} ignored TERM for 60 s; sending KILL"
-    if [ -n "$SERVER_PID" ]; then kill -KILL "$SERVER_PID" 2>/dev/null || true; fi
+    if [ -n "$SERVER_PID" ]; then kill -KILL "$SERVER_PID" 2>/dev/null || true
+    else pkill -KILL -P "$TIME_PID" 2>/dev/null || true; fi
   fi
+  local pid
+  for pid in $started_under; do
+    if kill -0 "$pid" 2>/dev/null; then
+      note "process $pid started by this run is still alive; sending KILL"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
   wait "$TIME_PID" 2>/dev/null || true
 }
 
@@ -212,10 +252,12 @@ run_one() {
   # Preflight, inside the lock: general checks, then every model this run loads.
   "$LOCK" preflight >"$RUN_DIR/preflight.txt" 2>&1 \
     || { cat "$RUN_DIR/preflight.txt" >&2; refuse "preflight failed"; }
-  if [ "$variant" = swap ]; then
+  if [ "$variant" = swap ] || [ "$variant" = ui ]; then
     local chain_key
+    # The swap run loads its chain; the ui run loads the --models models.
     local chain_keys
-    if [ -n "$SWAP_CHAIN" ]; then chain_keys=${SWAP_CHAIN//,/ }
+    if [ "$variant" = ui ]; then chain_keys="${MODEL_KEYS[*]}"
+    elif [ -n "$SWAP_CHAIN" ]; then chain_keys=${SWAP_CHAIN//,/ }
     else chain_keys=$("${checker[@]}" registry chain); fi
     for chain_key in $chain_keys; do
       preflight_model "$chain_key" "$RUN_DIR/preflight.txt"
@@ -239,6 +281,9 @@ $others"
       if [ "$variant" = engine-nomtp ]; then
         if [ -n "$MTP_OFF_ARGS" ]; then read -r -a off <<<"$MTP_OFF_ARGS"; args+=("${off[@]}"); fi
         if [ -n "$MTP_OFF_ENV" ]; then read -r -a env_prefix <<<"$MTP_OFF_ENV"; fi
+      else
+        # Every other run is MTP-default whatever the caller's shell exports.
+        env_prefix=(-u MFERENCE_DRAFT_DECODING)
       fi
       ;;
     main)
@@ -255,6 +300,16 @@ $others"
       fi
       # Last, so nothing passed through can override the loopback binding.
       args+=(--host 127.0.0.1 --port "$PORT")
+      ;;
+    ui)
+      # The launcher is the hold's one command; it starts MferenceServer and
+      # Open WebUI and stops both on TERM. It must not build (--no-build).
+      binary="$repo_root/mference-ui.sh"
+      args=(--no-browser --no-build --build-path "${SERVER%/release/MferenceServer}"
+            --data-dir "$RUN_DIR/webui-data" --server-port "$PORT" --webui-port "$UI_PORT")
+      [ -x "$SERVER" ] || fail "server binary not found: $SERVER"
+      env_prefix=(-u MFERENCE_DRAFT_DECODING)
+      if lsof -nP -iTCP:"$UI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then refuse "port $UI_PORT is already in use"; fi
       ;;
     *) fail "unknown variant $variant" ;;
   esac
@@ -283,7 +338,11 @@ $others"
   local ready=0
   for i in $(seq 1 3600); do
     kill -0 "$SERVER_PID" 2>/dev/null || break
-    if curl --silent --fail --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    if [ "$variant" = ui ]; then
+      # The launcher prints this after Open WebUI answers and after its own
+      # model configuration (which signs in too): no sign-in race.
+      if grep -q "UI ready at http://127.0.0.1:$UI_PORT" "$log" 2>/dev/null; then ready=1; break; fi
+    elif curl --silent --fail --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
       ready=1; break
     fi
     sleep 0.5
@@ -292,7 +351,12 @@ $others"
   READY_AT=$(python3 -c 'import time; print(time.time())')
 
   local rc=0
-  if [ "${variant#trace-}" != "$variant" ]; then
+  local run_extra; run_extra=$("${checker[@]}" extrafor "$key" --extra "$EXTRA" --model-extras "$MODEL_EXTRAS")
+  if [ "$variant" = ui ]; then
+    "${checker[@]}" ui --port "$UI_PORT" --pid "$SERVER_PID" --out "$RUN_DIR" \
+      --expect "$(IFS=,; echo "${MODEL_KEYS[*]}")" || rc=$?
+    RUN_STATUS=$rc
+  elif [ "${variant#trace-}" != "$variant" ]; then
     # No probe: the case's own request must be the first this server sees.
     local trace_dir; trace_dir=$(trace_dir_for "$key")
     [ -n "$trace_dir" ] || fail "no --trace for $key"
@@ -328,15 +392,15 @@ $others"
     esac
     # Load: library mode loads on the first request and logs the duration.
     "${checker[@]}" probe --port "$PORT" --model "$model_id" --out "$RUN_DIR/load-probe.json" \
-      || RUN_STATUS=1
+      ${run_extra:+--extra "$run_extra"} || RUN_STATUS=1
     if want prompts || want identity; then
       "${checker[@]}" prompts --port "$PORT" --model "$model_id" --out "$RUN_DIR" \
-        ${EXTRA:+--extra "$EXTRA"} || RUN_STATUS=1
+        ${run_extra:+--extra "$run_extra"} || RUN_STATUS=1
     fi
     if want readings; then
       rc=0
       "${checker[@]}" readings --port "$PORT" --model "$model_id" --pid "$SERVER_PID" \
-        --runs "$RUNS" --out "$RUN_DIR/readings.json" ${EXTRA:+--extra "$EXTRA"} || rc=$?
+        --runs "$RUNS" --out "$RUN_DIR/readings.json" ${run_extra:+--extra "$run_extra"} || rc=$?
       if [ "$rc" = "$SWAP_TRIP" ]; then RUN_STATUS=$SWAP_TRIP
       elif [ "$rc" != 0 ]; then RUN_STATUS=1; fi
     fi
@@ -371,6 +435,8 @@ SWAP_CHAIN=""
 TRACE_CASES=""
 TRACES=""
 TRACE_MAX_TOKENS=256
+UI_PORT=""
+MODEL_EXTRAS=""
 
 if [ "${1:-}" = _run ]; then
   shift
@@ -384,8 +450,11 @@ if [ "${1:-}" = _run ]; then
   EXTRA=$ENGINE_VALIDATE_EXTRA PORT=$ENGINE_VALIDATE_PORT RUNS=$ENGINE_VALIDATE_RUNS
   RESULTS=$ENGINE_VALIDATE_RESULTS NO_RELEASE_LINE=$ENGINE_VALIDATE_NO_RELEASE_LINE
   SWAP_CHAIN=${ENGINE_VALIDATE_SWAP_CHAIN:-}
+  IFS=, read -r -a MODEL_KEYS <<<"${ENGINE_VALIDATE_MODELS:-quick,deep,qwen36,minicpm5,maple}"
   TRACE_CASES=${ENGINE_VALIDATE_TRACE_CASES:-} TRACES=${ENGINE_VALIDATE_TRACES:-}
   TRACE_MAX_TOKENS=${ENGINE_VALIDATE_TRACE_MAX_TOKENS:-256}
+  UI_PORT=${ENGINE_VALIDATE_UI_PORT:-}
+  MODEL_EXTRAS=${ENGINE_VALIDATE_MODEL_EXTRAS:-}
   run_one "$@"
 fi
 
@@ -413,9 +482,14 @@ while [ $# -gt 0 ]; do
     --trace-cases) TRACE_CASES=$2; shift 2 ;;
     --trace) TRACES="${TRACES:+$TRACES }$2"; shift 2 ;;
     --trace-max-tokens) TRACE_MAX_TOKENS=$2; shift 2 ;;
+    --ui-port) UI_PORT=$2; shift 2 ;;
+    --model-extra)
+      case "$2" in *=*) ;; *) fail "--model-extra needs <key>=<json>" ;; esac
+      MODEL_EXTRAS="${MODEL_EXTRAS:+$MODEL_EXTRAS
+}$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    models|prompts|readings|identity|swap|trace|summary) PHASES+=("$1"); shift ;;
+    -h|--help) sed -n '2,97p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    models|prompts|readings|identity|swap|trace|ui|summary) PHASES+=("$1"); shift ;;
     *) fail "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -430,9 +504,26 @@ if [ -n "$SWAP_CHAIN" ]; then
   for key in "${chain_check[@]}"; do "${checker[@]}" registry "$key" id >/dev/null || exit 2; done
 fi
 case "$PORT" in ''|*[!0-9]*) fail "--port must be a number" ;; esac
+[ -n "$UI_PORT" ] || UI_PORT=$((PORT + 1000))
+case "$UI_PORT" in ''|*[!0-9]*) fail "--ui-port must be a number" ;; esac
 for passthrough in "$SERVER_ARGS" "$UPSTREAM_ARGS" "$UPSTREAM_MTP_ARGS" "$MTP_OFF_ARGS"; do
   check_loopback_args "$passthrough"
 done
+
+if [ -n "$MODEL_EXTRAS" ]; then
+  while IFS= read -r line; do
+    "${checker[@]}" registry "${line%%=*}" id >/dev/null || fail "--model-extra: unknown model ${line%%=*}"
+    "${checker[@]}" extrafor "${line%%=*}" --model-extras "$line" >/dev/null 2>&1 \
+      || fail "--model-extra ${line%%=*}: not a JSON object"
+  done <<<"$MODEL_EXTRAS"
+fi
+
+if want ui; then
+  case "$SERVER" in
+    */release/MferenceServer) ;;
+    *) fail "the ui phase needs --server <build dir>/release/MferenceServer (the launcher's --build-path layout)" ;;
+  esac
+fi
 
 if want trace; then
   [ -n "$TRACE_CASES" ] && [ -f "$TRACE_CASES/cases.tsv" ] || fail "the trace phase needs --trace-cases <dir with cases.tsv>"
@@ -521,6 +612,9 @@ if [ "$DRY_RUN" = 1 ]; then
   if want swap; then
     lock_cmd "eng validate swap chain" "$script_dir/engine-validate.sh" _run quick swap "$RESULTS/swap"
   fi
+  if want ui; then
+    lock_cmd "eng validate ui" "$script_dir/engine-validate.sh" _run quick ui "$RESULTS/ui"
+  fi
   if want trace; then
     for key in "${MODEL_KEYS[@]}"; do
       [ -n "$(trace_dir_for "$key")" ] || continue
@@ -549,7 +643,7 @@ if [ "$BUILD" = 1 ]; then
     || fail "build failed or the quiet flag is set; stop and wait"
 fi
 needs_server=0
-for p in models prompts readings identity swap trace; do if want "$p"; then needs_server=1; fi; done
+for p in models prompts readings identity swap trace ui; do if want "$p"; then needs_server=1; fi; done
 if [ "$needs_server" = 1 ]; then
   [ -x "$SERVER" ] || fail "server binary not found: $SERVER (build it, or pass --build)"
 fi
@@ -568,9 +662,10 @@ export ENGINE_VALIDATE_UPSTREAM_MTP_ARGS="$UPSTREAM_MTP_ARGS"
 export ENGINE_VALIDATE_MTP_OFF_ARGS="$MTP_OFF_ARGS" ENGINE_VALIDATE_MTP_OFF_ENV="$MTP_OFF_ENV"
 export ENGINE_VALIDATE_EXTRA="$EXTRA" ENGINE_VALIDATE_PORT="$PORT" ENGINE_VALIDATE_RUNS="$RUNS"
 export ENGINE_VALIDATE_RESULTS="$RESULTS" ENGINE_VALIDATE_NO_RELEASE_LINE="$NO_RELEASE_LINE"
-export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN"
+export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN" ENGINE_VALIDATE_MODELS="$MODELS"
 export ENGINE_VALIDATE_TRACE_CASES="$TRACE_CASES" ENGINE_VALIDATE_TRACES="$TRACES"
-export ENGINE_VALIDATE_TRACE_MAX_TOKENS="$TRACE_MAX_TOKENS"
+export ENGINE_VALIDATE_TRACE_MAX_TOKENS="$TRACE_MAX_TOKENS" ENGINE_VALIDATE_UI_PORT="$UI_PORT"
+export ENGINE_VALIDATE_MODEL_EXTRAS="$MODEL_EXTRAS"
 
 abort() {
   "${checker[@]}" summary "$RESULTS" >/dev/null 2>&1 || true
@@ -603,6 +698,10 @@ fi
 
 if want swap; then
   locked_run "eng validate swap chain" quick swap "$RESULTS/swap"
+fi
+
+if want ui; then
+  locked_run "eng validate ui" quick ui "$RESULTS/ui"
 fi
 
 if want trace; then

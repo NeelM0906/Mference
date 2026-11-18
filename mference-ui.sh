@@ -25,6 +25,8 @@ kv_reserve=0
 preload_model=""
 library_roots=()
 dry_run=0
+open_browser=1
+build_server=1
 command_name=run
 install_family=""
 repack_arguments=()
@@ -82,6 +84,10 @@ usage: ./mference-ui.sh [options]                      start the UI
                          up front, passed through to MferenceServer. By
                          default Gemma 4, Qwen 3.6 and Inkling grow it with
                          the conversation from 16384 tokens.
+  --no-browser           Do not open the browser; print the UI address only.
+  --no-build             Use the MferenceServer already built under
+                         --build-path instead of an incremental build (for
+                         scripted runs that build in a separate step).
   --dry-run              Print what would run, start nothing, exit 0. Works
                          for every subcommand, before or after it.
   --help                 Show this message.
@@ -123,6 +129,8 @@ while [[ $# -gt 0 ]]; do
     --prefill-chunk) require_value "$@"; prefill_chunk="$2"; shift 2 ;;
     --catalog) require_value "$@"; catalog="$2"; shift 2 ;;
     --kv-reserve) kv_reserve=1; shift ;;
+    --no-browser) open_browser=0; shift ;;
+    --no-build) build_server=0; shift ;;
     --dry-run) dry_run=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) note "error: unknown option $1"; usage >&2; exit 2 ;;
@@ -258,6 +266,11 @@ check_no_model_process() {
 }
 
 ensure_server_binary() {
+  if [[ "$build_server" -eq 0 ]]; then
+    [[ -x "$server_binary" ]] || fail "--no-build: $server_binary does not exist; build it first."
+    note "using $server_binary as built (--no-build)"
+    return
+  fi
   # Incremental builds are cheap when current. Merely finding an executable
   # can silently run the previous release after a source update.
   note "checking/building MferenceServer (release)"
@@ -304,6 +317,9 @@ open_webui_python() {
 ensure_open_webui() {
   local binary
   binary="$(open_webui_binary)"
+  if [[ -z "$binary" && "$build_server" -eq 0 ]]; then
+    fail "--no-build: open-webui is not installed; run ./mference-ui.sh once without --no-build."
+  fi
   if [[ -z "$binary" ]]; then
     if ! command -v uv >/dev/null 2>&1; then
       note "error: neither open-webui nor uv is installed."
@@ -422,7 +438,11 @@ cmd_install() {
 cmd_models() {
   if [[ "$dry_run" -eq 1 ]]; then
     echo "would check: pgrep -fl '$model_process_pattern'"
-    echo "would build: swift build -c release --scratch-path $build_path --product MferenceServer (incremental)"
+    if [[ "$build_server" -eq 1 ]]; then
+      echo "would build: swift build -c release --scratch-path $build_path --product MferenceServer (incremental)"
+    else
+      echo "would use:   $server_binary as built (--no-build)"
+    fi
     echo "would run:   $server_binary ${list_arguments[*]}"
     exit 0
   fi
@@ -443,7 +463,11 @@ cmd_run() {
   if [[ "$dry_run" -eq 1 ]]; then
     echo "would check: pgrep -fl '$model_process_pattern'"
     echo "would ensure: open-webui $OPEN_WEBUI_VERSION (uv tool install --python 3.11 open-webui==$OPEN_WEBUI_VERSION)"
-    echo "would build: swift build -c release --scratch-path $build_path --product MferenceServer (incremental)"
+    if [[ "$build_server" -eq 1 ]]; then
+      echo "would build: swift build -c release --scratch-path $build_path --product MferenceServer (incremental)"
+    else
+      echo "would use:   $server_binary as built (--no-build)"
+    fi
     echo "would run:   $server_binary ${server_arguments[*]}"
     echo "would wait:  http://127.0.0.1:$server_port/health"
     echo "would read:  http://127.0.0.1:$server_port/v1/models"
@@ -456,7 +480,11 @@ cmd_run() {
     done
     echo "  WEBUI_SECRET_KEY=<created on launch at $data_directory/webui-secret-key>"
     echo "would wait:  http://127.0.0.1:$webui_port"
-    echo "would open:  http://127.0.0.1:$webui_port"
+    if [[ "$open_browser" -eq 1 ]]; then
+      echo "would open:  http://127.0.0.1:$webui_port"
+    else
+      echo "would print: http://127.0.0.1:$webui_port (--no-browser)"
+    fi
     exit 0
   fi
 
@@ -489,7 +517,11 @@ cmd_run() {
   webui_pid=$!
   wait_for_webui
   configure_models
-  open "http://127.0.0.1:$webui_port" || note "open the UI yourself: http://127.0.0.1:$webui_port"
+  if [[ "$open_browser" -eq 1 ]]; then
+    open "http://127.0.0.1:$webui_port" || note "open the UI yourself: http://127.0.0.1:$webui_port"
+  else
+    note "UI ready at http://127.0.0.1:$webui_port"
+  fi
 
   note "Control-C stops both."
   # Exit when either child does, then stop the other through the trap. `wait -n`
@@ -508,11 +540,21 @@ webui_pid=""
 
 stop_children() {
   trap - INT TERM EXIT
-  # Only the two processes this script started.
-  local pid
+  # Only the two processes this script started. Each gets 30 s to stop after
+  # TERM (Open WebUI waits for a request in flight, which can wait on a model
+  # load), then KILL, so the launcher never leaves a model process behind.
+  local pid waited
   for pid in "$webui_pid" "$server_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
+      waited=0
+      while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt 60 ]]; do
+        sleep 0.5; waited=$((waited + 1))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        note "process $pid ignored TERM for 30 s; sending KILL"
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
       wait "$pid" 2>/dev/null || true
     fi
   done

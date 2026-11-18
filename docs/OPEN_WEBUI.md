@@ -51,10 +51,16 @@ Options:
 ./mference-ui.sh --server-port 8081 --webui-port 3001
 ./mference-ui.sh --build-path /tmp/mference-build  # separate toolchain build artifacts
 ./mference-ui.sh --data-dir /tmp/mference-ui-test # isolated chats/settings for testing
+./mference-ui.sh --catalog all                   # every runnable install (developer switch)
+./mference-ui.sh --no-browser                    # print the UI address instead of opening it
+./mference-ui.sh --no-build                      # use the MferenceServer already built
 ```
 
 `--dry-run` works for every subcommand, before or after it, and prints each step
-without running any of them.
+without running any of them. `--no-build` skips the launcher's incremental
+`swift build` and fails if no server binary exists under `--build-path`; scripted
+runs that build in a separate step, such as the validation harness
+(`Scripts/engine-validate.sh`, phase `ui`), use it together with `--no-browser`.
 
 To run the two halves by hand, start the server yourself and give Open WebUI the
 [environment the launcher sets](#environment-the-launcher-sets):

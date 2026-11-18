@@ -427,6 +427,142 @@ class TraceParityTests(unittest.TestCase):
             self.assertEqual(report["rows"][0]["differs_in"], ["content"])
 
 
+class FakeOpenWebUI:
+    """Open WebUI's no-auth sign-in, model list, and chat endpoint."""
+
+    def __init__(self, models, fail_model=None, truncate_model=None, tools_on=False, signin_failures=0,
+                 unconfigured=False):
+        outer = self
+        self.models, self.fail_model, self.chats = models, fail_model, []
+        self.truncate_model, self.tools_on = truncate_model, tools_on
+        self.signins, self.signin_failures = 0, signin_failures
+        self.unconfigured = unconfigured
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _json(self, status, body):
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.headers.get("Authorization") != "Bearer t0k":
+                    return self._json(401, {"detail": "no"})
+                if self.path.startswith("/api/v1/models/model"):
+                    if outer.unconfigured:
+                        return self._json(404, {"detail": "not found"})
+                    tools = outer.tools_on
+                    return self._json(200, {"meta": {"capabilities": {"builtin_tools": tools}}})
+                self._json(200, {"data": [{"id": m} for m in outer.models]})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == "/api/v1/auths/signin":
+                    outer.signins += 1
+                    if outer.signins <= outer.signin_failures:
+                        return self._json(400, {"detail": "busy"})
+                    return self._json(200, {"token": "t0k", "role": "admin"})
+                outer.chats.append(body["model"])
+                if body["model"] == outer.fail_model:
+                    return self._json(500, {"detail": "boom"})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                finish = "length" if body["model"] == outer.truncate_model else "stop"
+                for chunk in ({"choices": [{"delta": {"content": "Paris."}}]},
+                              {"choices": [{"delta": {}, "finish_reason": finish}]}):
+                    self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
+                self.wfile.write(b"data: [DONE]\n\n")
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class UITests(unittest.TestCase):
+    ALL = [ev.model(k)["id"] for k in ev.PRODUCT_ORDER]
+
+    def test_one_chat_per_model(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL) as ui:
+            rc = ev.main(["ui", "--port", str(ui.port), "--out", tmp])
+            self.assertEqual(rc, 0)
+            self.assertEqual(ui.chats, self.ALL)
+            report = json.loads((Path(tmp) / "ui.json").read_text())
+            self.assertTrue(all(c["ok"] for c in report["chats"]))
+            (Path(tmp) / "meta.json").write_text("{}")
+            (Path(tmp) / "ui").mkdir()
+            (Path(tmp) / "ui" / "ui.json").write_text(json.dumps(report))
+            self.assertIn("## Open WebUI", ev.summarize(tmp))
+
+    def test_missing_model_or_failed_chat_fails(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL[:-1]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, fail_model=self.ALL[0]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+
+    def test_truncated_answer_tools_on_and_forbidden_models_fail(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, truncate_model=self.ALL[1]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, tools_on=True) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+        # An unconfigured model (lookup 404) is not confirmed off either.
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, unconfigured=True) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+            report = json.loads((Path(tmp) / "ui.json").read_text())
+            self.assertTrue(any("not confirmed off" in p for p in report["problems"]))
+        with tempfile.TemporaryDirectory() as tmp, \
+                FakeOpenWebUI(self.ALL + ["qwen3.8-flash-next-int4g64"]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+
+    def test_sign_in_is_retried_and_expect_selects_models(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL[:2], signin_failures=2) as ui:
+            rc = ev.main(["ui", "--port", str(ui.port), "--expect", "quick", "--out", tmp])
+            self.assertEqual(rc, 0)
+            self.assertEqual(ui.chats, [self.ALL[0]])
+
+    def test_transport_error_still_writes_the_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeOpenWebUI(self.ALL)
+            port = server.port
+            server.httpd.server_close()  # nothing listens on the port now
+            self.assertEqual(ev.main(["ui", "--port", str(port), "--out", tmp]), 1)
+            report = json.loads((Path(tmp) / "ui.json").read_text())
+            self.assertIn("sign-in failed", report["problems"][0])
+
+    def test_rss_tree(self):
+        table = [(1, 0, 10), (2, 1, 20), (3, 2, 30), (4, 9, 99)]
+        self.assertEqual(ev.rss_tree_kb(1, table), 60)
+        self.assertIsNone(ev.rss_tree_kb(7, table))
+
+
+class ExtraTests(unittest.TestCase):
+    def test_model_extra_merges_over_the_global_extra(self):
+        extras = 'quick={"chat_template_kwargs": {"enable_thinking": false}}\ndeep={"x": 1}'
+        self.assertEqual(ev.extra_for("quick", '{"seed": 3}', extras),
+                         {"seed": 3, "chat_template_kwargs": {"enable_thinking": False}})
+        self.assertEqual(ev.extra_for("qwen36", '{"seed": 3}', extras), {"seed": 3})
+        self.assertEqual(ev.extra_for("maple", "", ""), {})
+
+    def test_tool_schema_keys_are_sorted_below_the_wrapper(self):
+        params = ev.WEATHER_TOOL["function"]["parameters"]
+        self.assertEqual(list(params), sorted(params))
+        self.assertEqual(list(params["properties"]["city"]), sorted(params["properties"]["city"]))
+        self.assertEqual(list(ev.WEATHER_TOOL["function"]), ["name", "description", "parameters"])
+
+
 class SwapLogTests(unittest.TestCase):
     def test_release_before_start_fails(self):
         events = ev.swap_events(
@@ -564,6 +700,19 @@ class ShellTests(unittest.TestCase):
             (Path(tmp) / "cases.tsv").write_text("")
             result = self.run_script(*base, "--models", "quick", "--trace", f"quick={tmp}/trace")
             self.assertIn("has no cases", result.stderr)
+
+    def test_ui_phase_is_one_hold(self):
+        result = self.run_script("--dry-run", "ui", "--port", "8095")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runs = [l for l in result.stdout.splitlines() if "_run quick ui" in l]
+        self.assertEqual(len(runs), 1)
+
+    def test_model_extra_is_validated(self):
+        ok = self.run_script("--dry-run", "prompts", "--model-extra",
+                             'quick={"chat_template_kwargs": {"enable_thinking": false}}')
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        for bad in ("quick", "flashnext={}", "quick=not-json"):
+            self.assertNotEqual(self.run_script("--dry-run", "prompts", "--model-extra", bad).returncode, 0)
 
     def test_unknown_model_is_rejected(self):
         result = subprocess.run(["bash", str(self.SCRIPT), "--dry-run", "--models", "flashnext"],

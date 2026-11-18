@@ -219,8 +219,13 @@ struct ServerEngineCatalogTests {
                                              shadowPrefetchBudget: 2,
                                              prefillChunkTokens: 512,
                                              reserveFullKV: true))
-        let defaults = try ServerArguments.parse(["--library"]).engineLoadOptions
+        let defaults = try ServerArguments.parse(["--library"]).engineLoadOptions(environment: [:])
         #expect(defaults == EngineLoadOptions())
+        // The diagnostic MTP switch for validation; anything but "off" is ignored.
+        let library = try ServerArguments.parse(["--library"])
+        #expect(library.engineLoadOptions(environment: ["MFERENCE_DRAFT_DECODING": "off"]).draftDecoding == .off)
+        #expect(library.engineLoadOptions(environment: ["MFERENCE_DRAFT_DECODING": "on"]).draftDecoding
+                == .automatic)
         #expect(try ServerArguments.parse(["--library", "--max-context", "max"]).engineLoadOptions
                 .nativeMaxContext == nil)
     }
