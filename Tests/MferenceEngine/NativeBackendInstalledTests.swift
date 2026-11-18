@@ -81,9 +81,9 @@ import MferenceEngine
                              maximumCompletionTokens: prompt.max_tokens)
     }
 
-    /// Content, reasoning, and tool calls (name and arguments; call ids are
-    /// random) in one text, the same canonical form the server-side
-    /// comparison script writes.
+    /// Content, reasoning, tool calls (name and arguments; call ids are
+    /// random), finish reason, and token usage in one text, the same
+    /// canonical form the server-side comparison script writes.
     static func canonical(_ completion: EngineCompletion) -> String {
         var text = "content:\n" + completion.content + "\nreasoning:\n" + (completion.reasoningContent ?? "")
         text += "\ntool_calls:\n"
@@ -91,6 +91,11 @@ import MferenceEngine
             text += call.name + " " + call.argumentsJSON + "\n"
         }
         text += "finish_reason: " + completion.finishReason.rawValue + "\n"
+        let usage = completion.usage
+        let reasoning = usage.reasoningTokens.map(String.init) ?? "-"
+        let visible = usage.visibleTokens.map(String.init) ?? "-"
+        text += "usage: prompt=\(usage.promptTokens) completion=\(usage.completionTokens) "
+            + "reasoning=\(reasoning) visible=\(visible)\n"
         return text
     }
 
