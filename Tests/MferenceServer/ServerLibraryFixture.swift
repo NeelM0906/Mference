@@ -129,11 +129,13 @@ enum ServerLibraryFixture {
     @discardableResult
     static func makeRetiredInstall(in root: URL,
                                    named name: String,
-                                   family: String?) throws -> URL {
+                                   family: String?,
+                                   modelID: String? = nil) throws -> URL {
         let directory = try makeCompleteInstall(in: root, named: name)
         let manifestURL = directory.appendingPathComponent("manifest.json")
         var manifest = try JSONSerialization.jsonObject(
             with: Data(contentsOf: manifestURL)) as! [String: Any]
+        if let modelID { manifest["modelID"] = modelID }
         var arch = manifest["arch"] as! [String: Any]
         if let family {
             arch["family"] = family

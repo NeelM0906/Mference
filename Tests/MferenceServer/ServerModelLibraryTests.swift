@@ -253,11 +253,34 @@ struct ServerLibraryProbeTests {
         #expect(family == "qwen38flashnextudiq3xxs")
         #expect(detail.contains("retired family"))
 
+        // No arch.family: the original Gemma 4 format. Not runnable, listed
+        // under its modelID, never an incomplete install.
         let legacy = try ServerLibraryFixture.makeRetiredInstall(
             in: root, named: "legacy", family: nil)
-        if case .complete = ServerLibraryProbe.probe(directory: legacy) {
-            Issue.record("a manifest without arch.family must not be advertised")
+        guard case .notRunnable(let legacyID, let legacyDetail) =
+            ServerLibraryProbe.probe(directory: legacy) else {
+            Issue.record("a manifest without arch.family must be reported as not runnable")
+            return
         }
+        #expect(legacyID == "test/legacy")
+        #expect(legacyDetail.contains("no arch.family") && legacyDetail.contains("retired family"))
+    }
+
+    /// Swift-Qwen3.8 is a `qwen38` install, so its family alone would run it
+    /// as base Qwen 3.8 and collide with a base install's ID. It is refused by
+    /// checkpoint ID instead.
+    @Test func retiredSwiftQwenCheckpointIsNotRunnable() throws {
+        let root = try ServerLibraryFixture.makeRoot("swift-qwen")
+        let directory = try ServerLibraryFixture.makeRetiredInstall(
+            in: root, named: "swift-qwen", family: "qwen38",
+            modelID: "swift-qwen3.8-27b-int4g64")
+        guard case .notRunnable(let identifier, let detail) =
+            ServerLibraryProbe.probe(directory: directory) else {
+            Issue.record("a Swift-Qwen3.8 install must be reported as not runnable")
+            return
+        }
+        #expect(identifier == "swift-qwen3.8-27b-int4g64")
+        #expect(detail.contains("Swift-Qwen3.8") && detail.contains("retired family"))
     }
 
     @Test func corruptManifestIsPartial() throws {
@@ -442,6 +465,31 @@ struct ServerLibraryDiscoveryTests {
         #expect(skip.reason.contains("not runnable"))
         #expect(skip.reason.contains("retired family"))
         #expect(skip.modelID == "qwen38flashnextudiq3xxs")
+    }
+
+    /// Real discovery over a root with a kept install, a Swift-Qwen3.8
+    /// install (kept `qwen38` family, retired checkpoint) and a family-less
+    /// Gemma 4 install: only the kept one is listed; the other two are
+    /// skipped as not runnable under their own checkpoint IDs, so Swift-Qwen
+    /// never takes the base Qwen 3.8 identifier.
+    @Test func retiredCheckpointAndFamilylessInstallsAreSkippedByID() throws {
+        let root = try ServerLibraryFixture.makeRoot("discovery-retired-ids")
+        let swift = try ServerLibraryFixture.makeRetiredInstall(
+            in: root, named: "swift-qwen", family: "qwen38",
+            modelID: "swift-qwen3.8-27b-int4g64")
+        let legacy = try ServerLibraryFixture.makeRetiredInstall(
+            in: root, named: "legacy", family: nil, modelID: "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned")
+        let kept = try ServerLibraryFixture.makeCompleteInstall(in: root, named: "qwen36")
+
+        let index = ServerLibraryDiscovery.discover(roots: [root])
+        #expect(index.entries.map(\.directory) == [kept])
+        #expect(!index.entries.contains { $0.modelID == "swift-qwen3.8-27b-int4g64" || $0.modelID == "qwen3.8-27b-4bit" })
+        let swiftSkip = try #require(index.skipped.first { $0.directory == swift })
+        #expect(swiftSkip.modelID == "swift-qwen3.8-27b-int4g64")
+        #expect(swiftSkip.reason.contains("not runnable") && swiftSkip.reason.contains("Swift-Qwen3.8"))
+        let legacySkip = try #require(index.skipped.first { $0.directory == legacy })
+        #expect(legacySkip.modelID == "gemma-4-26b-a4b-it-qat-q4_0-mlx-aligned")
+        #expect(legacySkip.reason.contains("no arch.family"))
     }
 }
 
