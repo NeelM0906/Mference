@@ -76,57 +76,64 @@ public enum MFColor {
 public enum MFFont {
     public static let familyName = "Geist"
 
-    /// 28: onboarding hero titles.
-    public static let largeTitle = geist(28, .semibold)
-    /// 22: screen titles.
-    public static let title = geist(22, .semibold)
-    /// 17: conversation title, card titles.
-    public static let headline = geist(17, .semibold)
-    /// 15: body text, messages, nav pills.
-    public static let body = geist(15, .regular)
-    /// 15 medium: emphasised body, button labels.
-    public static let bodyEmphasis = geist(15, .medium)
-    /// 13: list rows, secondary text.
-    public static let callout = geist(13, .regular)
-    /// 13 medium: chip labels, badges.
-    public static let calloutEmphasis = geist(13, .medium)
-    /// 12: captions, engine labels.
-    public static let caption = geist(12, .regular)
-    /// 11.5 semibold, uppercase, tracked: sidebar and picker section headers.
-    public static let sectionHeader = geist(11.5, .semibold)
+    // The scale measured from the mockup CSS (coordinator correction,
+    // 2026-11-18): every size here is the .dc.html px value.
 
-    // Emphasis variants and component sizes from the mockup CSS.
-
-    /// 24 semibold: first-run page titles.
-    public static let display = geist(24, .semibold)
-    /// 16 semibold: settings section titles, first-run card titles.
-    public static let sectionTitle = geist(16, .semibold)
-    /// 15 semibold: banner and card headlines.
-    public static let bodySemibold = geist(15, .semibold)
-    /// 14 medium: large buttons (first-run footer).
-    public static let buttonLarge = geist(14, .medium)
-    /// 14 semibold: the app name in the chrome.
-    public static let brand = geist(14, .semibold)
-    /// 13.5: first-run card body and step list.
-    public static let bodySmall = geist(13.5, .regular)
-    /// 13.5 medium: the current step, selected sidebar row.
-    public static let bodySmallEmphasis = geist(13.5, .medium)
-    /// 13.5 semibold: list row titles.
+    /// 24/600: hero and first-run page titles.
+    public static let largeTitle = geist(24, .semibold)
+    /// 19/600: screen and reader titles.
+    public static let title = geist(19, .semibold)
+    /// 15/600: panel headers (chat title, "Important", "To-dos"), banner titles.
+    public static let headline = geist(15, .semibold)
+    /// 14/400: messages, mail body, page copy.
+    public static let body = geist(14, .regular)
+    /// 14/500: emphasised body, large button labels.
+    public static let bodyEmphasis = geist(14, .medium)
+    /// 13.5/600: list row titles, settings rows.
     public static let rowTitle = geist(13.5, .semibold)
-    /// 13 semibold: table row titles, inline emphasis.
-    public static let calloutSemibold = geist(13, .semibold)
-    /// 12.5: list row subtitles.
-    public static let rowSubtitle = geist(12.5, .regular)
-    /// 11.5 medium: chips and badges.
+    /// 13/400: rows, nav, buttons.
+    public static let callout = geist(13, .regular)
+    /// 13/500: nav pills, button labels.
+    public static let calloutEmphasis = geist(13, .medium)
+    /// 12.5/400: previews and row subtitles.
+    public static let preview = geist(12.5, .regular)
+    /// 12/400: captions, engine labels.
+    public static let caption = geist(12, .regular)
+    /// 11.5/500: chips and badges.
     public static let chip = geist(11.5, .medium)
+    /// 11/600, uppercase, tracked (`sectionHeaderTracking`): sidebar, picker
+    /// and table section headers.
+    public static let sectionHeader = geist(11, .semibold)
+    /// 0.06em of the 11pt section header.
+    public static let sectionHeaderTracking: CGFloat = 0.66
+    /// 10.5/600: citation marks.
+    public static let micro = geist(10.5, .semibold)
+
+    // Variants the CSS uses that are not in the base scale.
+
+    /// 16/600: settings section titles (`h2`), first-run card titles.
+    public static let sectionTitle = geist(16, .semibold)
+    /// 14/600: the app name in the chrome.
+    public static let brand = geist(14, .semibold)
+    /// 13.5/400 and 13.5/500: first-run card body and step list (current step).
+    public static let bodySmall = geist(13.5, .regular)
+    public static let bodySmallEmphasis = geist(13.5, .medium)
+    /// 13/600: table row titles, inline emphasis.
+    public static let calloutSemibold = geist(13, .semibold)
     /// 11 monospaced: keycaps (Geist Mono in the mockup; not bundled).
     public static let keycap = Font.system(size: 11, weight: .medium, design: .monospaced)
-    /// 10.5 semibold: citation numbers.
-    public static let citation = geist(10.5, .semibold)
 
     public static func geist(_ size: CGFloat, _ weight: Font.Weight) -> Font {
         .custom(familyName, size: size, relativeTo: .body).weight(weight)
     }
+}
+
+/// Extra line spacing (points). The mockup's line heights are 1.35-1.6;
+/// message and mail bodies use `relaxed`.
+public enum MFLineSpacing {
+    public static let tight: CGFloat = 2
+    public static let normal: CGFloat = 4
+    public static let relaxed: CGFloat = 6
 }
 
 /// Spacing scale (points).
