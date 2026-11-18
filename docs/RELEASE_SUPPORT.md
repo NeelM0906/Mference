@@ -31,6 +31,19 @@ Allow separate room for builds, Open WebUI, and long-context cache spill.
 | `maple` | Retained preview checkpoint | 6.59 GB | Installed 16/8-slot 512-window boundary, continuation and recovery checks pass on 256 GiB M3 Ultra. [Evidence](RELEASE_VALIDATION_2026-09-20.md). Not newly quality-ranked; approximate FlashHead remains opt-in. |
 | `minicpm5` | Smallest download / dense regression option | ~1.43 GB | Historical 24 GB M5 evidence; longer community cases need more than the frozen generation allowance and are disclosed separately. [Evidence](families/MINICPM5.md). |
 
+### Maple known deviation
+
+On Apple7 GPUs (M1), the Maple Q/K norm and RoPE kernel test
+(`MapleQKNormRoPETests.swift:74`) measures a maximum absolute difference of
+0.0234 against its CPU reference at position 127,999, above the 2^-7
+(0.0078) bound the test applies to Apple7 and newer devices. CI's
+paravirtualized GPU measures the same value. Maple's generated output is
+byte-identical to `main` on these machines; only this kernel tolerance check
+fails. The likely cause is lower-precision GPU `sin`/`cos` at very large
+positions. It is not fixed: the test and its bound are unchanged, and the
+2026-11-15 ruling that a run whose only failure is this test counts as green
+still applies.
+
 ### Reasoning, tools and context
 
 Swift's source-faithful default is `xhigh`; `medium`, `low`, and `none` are
