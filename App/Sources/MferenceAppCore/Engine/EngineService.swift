@@ -177,15 +177,16 @@ public actor EngineService: EngineServicing {
                 }
             }
         }
+        let finish: GenerationFinish = switch completion.finishReason {
+        case .stop: .stop
+        case .length: .length
+        case .toolCalls: .toolCalls
+        }
         return GenerationSummary(
             content: completion.content,
             reasoning: completion.reasoningContent,
             toolCalls: completion.toolCalls.map(Self.toolCall),
-            finish: switch completion.finishReason {
-            case .stop: .stop
-            case .length: .length
-            case .toolCalls: .toolCalls
-            },
+            finish: finish,
             promptTokens: completion.usage.promptTokens,
             completionTokens: completion.usage.completionTokens,
             prefillSeconds: completion.timings.prefillSeconds,
