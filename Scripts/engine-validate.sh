@@ -28,10 +28,13 @@
 #              cold server, must equal the trace (content, reasoning, tool
 #              calls, finish reason, token count); then one warm pass over all
 #              cases on one server, reported but not gated
-#   ui         ./mference-ui.sh --no-browser --no-build as one model hold:
-#              Open WebUI lists the five models and completes one chat per
-#              model through its own API; the RSS of the whole UI stack
-#              (launcher, MferenceServer, Open WebUI) is sampled
+#   ui         ./mference-ui.sh --no-browser --no-build as one model hold, with
+#              the launcher's defaults (the server's defaults): Open WebUI lists
+#              the --models models (and no Flash-Next), each with builtin tools
+#              off, and completes one streamed chat per model through its own
+#              API with a non-empty answer that ends in `stop`; the RSS of the
+#              whole UI stack (launcher, MferenceServer, Open WebUI) is sampled.
+#              Until Deep is served (MTP), leave deep out of --models here
 #   summary    rebuild summary.md from what is on disk
 #
 # Not covered here: G5 through MferenceCLI (the CLI does not use the engine),
@@ -53,7 +56,8 @@
 #   --mtp-off-env "<K=V ...>"    environment that turns Deep MTP off; for
 #                                MferenceServer that is the diagnostic toggle
 #                                MFERENCE_DRAFT_DECODING=off (not a supported
-#                                control; unset, MTP stays on for Deep)
+#                                control), honoured by the llama.cpp backend's
+#                                MTP path; every other run has it unset
 #   --extra '<json>'             merged into every request body
 #   --port <n>                   loopback port (default 8091)
 #   --ui-port <n>                Open WebUI port for the ui phase (default
@@ -143,11 +147,23 @@ check_loopback_args() {
 RUN_DIR="" RUN_KEY="" RUN_VARIANT="" TIME_PID="" SERVER_PID="" SWAP_BEFORE=""
 STARTED="" READY_AT="" RUN_STATUS=0 SERVER_STOPPED=1
 
+# Every descendant of a PID: the processes this run started under it.
+descendants() {
+  local pid child
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    echo "$child"; descendants "$child"
+  done
+}
+
 stop_server() {
   [ "$SERVER_STOPPED" = 1 ] && return 0
   SERVER_STOPPED=1
   # Only the server this run started: the child of our own /usr/bin/time.
   [ -n "$SERVER_PID" ] || SERVER_PID=$(pgrep -P "$TIME_PID" 2>/dev/null | head -1 || true)
+  # For the ui launcher these are MferenceServer and Open WebUI: recorded now,
+  # so a launcher that has to be killed cannot leave them running.
+  local started_under=""
+  [ -z "$SERVER_PID" ] || started_under=$(descendants "$SERVER_PID")
   if [ -n "$SERVER_PID" ]; then
     kill -TERM "$SERVER_PID" 2>/dev/null || true
   else
@@ -161,6 +177,13 @@ stop_server() {
     note "server ${SERVER_PID:-?} ignored TERM for 60 s; sending KILL"
     if [ -n "$SERVER_PID" ]; then kill -KILL "$SERVER_PID" 2>/dev/null || true; fi
   fi
+  local pid
+  for pid in $started_under; do
+    if kill -0 "$pid" 2>/dev/null; then
+      note "process $pid started by this run is still alive; sending KILL"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
   wait "$TIME_PID" 2>/dev/null || true
 }
 
@@ -248,6 +271,9 @@ $others"
       if [ "$variant" = engine-nomtp ]; then
         if [ -n "$MTP_OFF_ARGS" ]; then read -r -a off <<<"$MTP_OFF_ARGS"; args+=("${off[@]}"); fi
         if [ -n "$MTP_OFF_ENV" ]; then read -r -a env_prefix <<<"$MTP_OFF_ENV"; fi
+      else
+        # Every other run is MTP-default whatever the caller's shell exports.
+        env_prefix=(-u MFERENCE_DRAFT_DECODING)
       fi
       ;;
     main)
@@ -272,6 +298,7 @@ $others"
       args=(--no-browser --no-build --build-path "${SERVER%/release/MferenceServer}"
             --data-dir "$RUN_DIR/webui-data" --server-port "$PORT" --webui-port "$UI_PORT")
       [ -x "$SERVER" ] || fail "server binary not found: $SERVER"
+      env_prefix=(-u MFERENCE_DRAFT_DECODING)
       if lsof -nP -iTCP:"$UI_PORT" -sTCP:LISTEN >/dev/null 2>&1; then refuse "port $UI_PORT is already in use"; fi
       ;;
     *) fail "unknown variant $variant" ;;
@@ -301,8 +328,11 @@ $others"
   local ready=0
   for i in $(seq 1 3600); do
     kill -0 "$SERVER_PID" 2>/dev/null || break
-    if [ "$variant" = ui ]; then ready_url="http://127.0.0.1:$UI_PORT/"; else ready_url="http://127.0.0.1:$PORT/health"; fi
-    if curl --silent --fail --max-time 2 "$ready_url" >/dev/null 2>&1; then
+    if [ "$variant" = ui ]; then
+      # The launcher prints this after Open WebUI answers and after its own
+      # model configuration (which signs in too): no sign-in race.
+      if grep -q "UI ready at http://127.0.0.1:$UI_PORT" "$log" 2>/dev/null; then ready=1; break; fi
+    elif curl --silent --fail --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
       ready=1; break
     fi
     sleep 0.5
@@ -312,7 +342,8 @@ $others"
 
   local rc=0
   if [ "$variant" = ui ]; then
-    "${checker[@]}" ui --port "$UI_PORT" --pid "$SERVER_PID" --out "$RUN_DIR" || rc=$?
+    "${checker[@]}" ui --port "$UI_PORT" --pid "$SERVER_PID" --out "$RUN_DIR" \
+      --expect "$(IFS=,; echo "${MODEL_KEYS[*]}")" || rc=$?
     RUN_STATUS=$rc
   elif [ "${variant#trace-}" != "$variant" ]; then
     # No probe: the case's own request must be the first this server sees.
@@ -407,6 +438,7 @@ if [ "${1:-}" = _run ]; then
   EXTRA=$ENGINE_VALIDATE_EXTRA PORT=$ENGINE_VALIDATE_PORT RUNS=$ENGINE_VALIDATE_RUNS
   RESULTS=$ENGINE_VALIDATE_RESULTS NO_RELEASE_LINE=$ENGINE_VALIDATE_NO_RELEASE_LINE
   SWAP_CHAIN=${ENGINE_VALIDATE_SWAP_CHAIN:-}
+  IFS=, read -r -a MODEL_KEYS <<<"${ENGINE_VALIDATE_MODELS:-quick,deep,qwen36,minicpm5,maple}"
   TRACE_CASES=${ENGINE_VALIDATE_TRACE_CASES:-} TRACES=${ENGINE_VALIDATE_TRACES:-}
   TRACE_MAX_TOKENS=${ENGINE_VALIDATE_TRACE_MAX_TOKENS:-256}
   UI_PORT=${ENGINE_VALIDATE_UI_PORT:-}
@@ -439,7 +471,7 @@ while [ $# -gt 0 ]; do
     --trace-max-tokens) TRACE_MAX_TOKENS=$2; shift 2 ;;
     --ui-port) UI_PORT=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,92p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     models|prompts|readings|identity|swap|trace|ui|summary) PHASES+=("$1"); shift ;;
     *) fail "unknown argument: $1 (see --help)" ;;
   esac
@@ -460,6 +492,13 @@ case "$UI_PORT" in ''|*[!0-9]*) fail "--ui-port must be a number" ;; esac
 for passthrough in "$SERVER_ARGS" "$UPSTREAM_ARGS" "$UPSTREAM_MTP_ARGS" "$MTP_OFF_ARGS"; do
   check_loopback_args "$passthrough"
 done
+
+if want ui; then
+  case "$SERVER" in
+    */release/MferenceServer) ;;
+    *) fail "the ui phase needs --server <build dir>/release/MferenceServer (the launcher's --build-path layout)" ;;
+  esac
+fi
 
 if want trace; then
   [ -n "$TRACE_CASES" ] && [ -f "$TRACE_CASES/cases.tsv" ] || fail "the trace phase needs --trace-cases <dir with cases.tsv>"
@@ -598,7 +637,7 @@ export ENGINE_VALIDATE_UPSTREAM_MTP_ARGS="$UPSTREAM_MTP_ARGS"
 export ENGINE_VALIDATE_MTP_OFF_ARGS="$MTP_OFF_ARGS" ENGINE_VALIDATE_MTP_OFF_ENV="$MTP_OFF_ENV"
 export ENGINE_VALIDATE_EXTRA="$EXTRA" ENGINE_VALIDATE_PORT="$PORT" ENGINE_VALIDATE_RUNS="$RUNS"
 export ENGINE_VALIDATE_RESULTS="$RESULTS" ENGINE_VALIDATE_NO_RELEASE_LINE="$NO_RELEASE_LINE"
-export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN"
+export ENGINE_VALIDATE_SWAP_CHAIN="$SWAP_CHAIN" ENGINE_VALIDATE_MODELS="$MODELS"
 export ENGINE_VALIDATE_TRACE_CASES="$TRACE_CASES" ENGINE_VALIDATE_TRACES="$TRACES"
 export ENGINE_VALIDATE_TRACE_MAX_TOKENS="$TRACE_MAX_TOKENS" ENGINE_VALIDATE_UI_PORT="$UI_PORT"
 

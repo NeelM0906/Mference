@@ -430,9 +430,11 @@ class TraceParityTests(unittest.TestCase):
 class FakeOpenWebUI:
     """Open WebUI's no-auth sign-in, model list, and chat endpoint."""
 
-    def __init__(self, models, fail_model=None):
+    def __init__(self, models, fail_model=None, truncate_model=None, tools_on=False, signin_failures=0):
         outer = self
         self.models, self.fail_model, self.chats = models, fail_model, []
+        self.truncate_model, self.tools_on = truncate_model, tools_on
+        self.signins, self.signin_failures = 0, signin_failures
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -449,16 +451,29 @@ class FakeOpenWebUI:
             def do_GET(self):
                 if self.headers.get("Authorization") != "Bearer t0k":
                     return self._json(401, {"detail": "no"})
+                if self.path.startswith("/api/v1/models/model"):
+                    tools = outer.tools_on
+                    return self._json(200, {"meta": {"capabilities": {"builtin_tools": tools}}})
                 self._json(200, {"data": [{"id": m} for m in outer.models]})
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 if self.path == "/api/v1/auths/signin":
+                    outer.signins += 1
+                    if outer.signins <= outer.signin_failures:
+                        return self._json(400, {"detail": "busy"})
                     return self._json(200, {"token": "t0k", "role": "admin"})
                 outer.chats.append(body["model"])
                 if body["model"] == outer.fail_model:
                     return self._json(500, {"detail": "boom"})
-                self._json(200, {"choices": [{"message": {"content": "Paris."}}]})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                finish = "length" if body["model"] == outer.truncate_model else "stop"
+                for chunk in ({"choices": [{"delta": {"content": "Paris."}}]},
+                              {"choices": [{"delta": {}, "finish_reason": finish}]}):
+                    self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
+                self.wfile.write(b"data: [DONE]\n\n")
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.httpd.server_address[1]
@@ -493,6 +508,30 @@ class UITests(unittest.TestCase):
             self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
         with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, fail_model=self.ALL[0]) as ui:
             self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+
+    def test_truncated_answer_tools_on_and_forbidden_models_fail(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, truncate_model=self.ALL[1]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL, tools_on=True) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+        with tempfile.TemporaryDirectory() as tmp, \
+                FakeOpenWebUI(self.ALL + ["qwen3.8-flash-next-int4g64"]) as ui:
+            self.assertEqual(ev.main(["ui", "--port", str(ui.port), "--out", tmp]), 1)
+
+    def test_sign_in_is_retried_and_expect_selects_models(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeOpenWebUI(self.ALL[:2], signin_failures=2) as ui:
+            rc = ev.main(["ui", "--port", str(ui.port), "--expect", "quick", "--out", tmp])
+            self.assertEqual(rc, 0)
+            self.assertEqual(ui.chats, [self.ALL[0]])
+
+    def test_transport_error_still_writes_the_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = FakeOpenWebUI(self.ALL)
+            port = server.port
+            server.httpd.server_close()  # nothing listens on the port now
+            self.assertEqual(ev.main(["ui", "--port", str(port), "--out", tmp]), 1)
+            report = json.loads((Path(tmp) / "ui.json").read_text())
+            self.assertIn("sign-in failed", report["problems"][0])
 
     def test_rss_tree(self):
         table = [(1, 0, 10), (2, 1, 20), (3, 2, 30), (4, 9, 99)]

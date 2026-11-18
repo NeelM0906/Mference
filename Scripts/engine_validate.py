@@ -1040,6 +1040,7 @@ UI_QUESTION = "In one short sentence: what is the capital of France?"
 
 
 def ui_request(host, port, method, path, token=None, payload=None, timeout=3600.0):
+    """(status, parsed JSON or None, raw text); status 0 on a transport error."""
     _check_host(host)
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
     headers = {"Content-Type": "application/json"}
@@ -1049,61 +1050,110 @@ def ui_request(host, port, method, path, token=None, payload=None, timeout=3600.
         conn.request(method, path, body=json.dumps(payload).encode() if payload is not None else None,
                      headers=headers)
         resp = conn.getresponse()
-        raw = resp.read().decode("utf-8", "replace")
+        status, raw = resp.status, resp.read().decode("utf-8", "replace")
+    except (OSError, http.client.HTTPException) as error:
+        return 0, None, f"transport error: {error!r}"
     finally:
         conn.close()
     try:
-        return resp.status, json.loads(raw), raw
+        return status, json.loads(raw), raw
     except ValueError:
-        return resp.status, None, raw
+        return status, None, raw
+
+
+def ui_stream_chat(host, port, token, payload, timeout):
+    """A streamed chat through Open WebUI, as its frontend streams one.
+    Returns (status, canonical result, raw)."""
+    _check_host(host)
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    raw_lines = []
+    try:
+        conn.request("POST", "/api/chat/completions", body=json.dumps(dict(payload, stream=True)).encode(),
+                     headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                              "Authorization": "Bearer " + token})
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return resp.status, {"error": "http"}, resp.read().decode("utf-8", "replace")
+
+        def lines():
+            for line in iter(resp.readline, b""):
+                raw_lines.append(line.decode("utf-8", "replace"))
+                yield line
+
+        result = canonical_from_chunks(list(parse_sse_lines(lines())))
+        return 200, result, "".join(raw_lines)
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        return 0, {"error": repr(error)}, "".join(raw_lines) + f"\ntransport error: {error!r}"
+    finally:
+        conn.close()
 
 
 def cmd_ui(args):
     """Signs in through Open WebUI's no-auth session (what its frontend does
-    with WEBUI_AUTH off), checks the model list, and completes one chat per
-    model through Open WebUI, which forwards each to MferenceServer."""
+    with WEBUI_AUTH off), checks the model list and that builtin tools are
+    off per model (the launcher's configuration), and completes one streamed
+    chat per model through Open WebUI, which forwards each to MferenceServer.
+    A chat counts only with a non-empty answer that ends in `stop`."""
     out = Path(args.out)
     expected = [model(k) for k in args.expect.split(",") if k]
-    report = {"chats": [], "problems": []}
-    status, body, raw = ui_request(args.host, args.port, "POST", "/api/v1/auths/signin",
-                                   payload={"email": "", "password": ""})
-    token = (body or {}).get("token") if status == 200 else None
+    report = {"chats": [], "problems": [], "expected": [m["id"] for m in expected]}
+
+    def finish(code):
+        report["ok"] = (code == 0 and not report["problems"] and len(report["chats"]) == len(expected)
+                        and all(c["ok"] for c in report["chats"]))
+        _write(out / "ui.json", json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False))
+        if report.get("swap_trip"):
+            return SWAP_TRIP
+        return 0 if report["ok"] else 1
+
+    token = None
+    for attempt in range(5):
+        status, body, raw = ui_request(args.host, args.port, "POST", "/api/v1/auths/signin",
+                                       payload={"email": "", "password": ""}, timeout=60)
+        token = (body or {}).get("token") if status == 200 else None
+        if token:
+            break
+        time.sleep(2)
     if not token:
         report["problems"].append(f"sign-in failed: HTTP {status}: {raw[:200]}")
-    else:
-        status, body, raw = ui_request(args.host, args.port, "GET", "/api/models", token)
-        listed = sorted(m.get("id") for m in (body or {}).get("data", []) if isinstance(m, dict))
-        report["listed"] = listed
-        missing = [m["id"] for m in expected if m["id"] not in listed]
-        if status != 200 or missing:
-            report["problems"].append(f"/api/models HTTP {status}, missing {missing}")
-        for entry in expected:
-            started = time.perf_counter()
-            with Sampler(args.pid, tree=True) as sampler:
-                status, body, raw = ui_request(args.host, args.port, "POST", "/api/chat/completions", token,
-                                               {"model": entry["id"], "stream": False,
-                                                "messages": [{"role": "user", "content": UI_QUESTION}]},
-                                               timeout=args.timeout)
-            message = (((body or {}).get("choices") or [{}])[0].get("message") or {})
-            answer = message.get("content") or ""
-            reasoning = message.get("reasoning_content") or ""
-            chat = {"model": entry["id"], "http_status": status, "seconds": time.perf_counter() - started,
-                    "content": answer, "reasoning_chars": len(reasoning), **sampler.report(),
-                    "ok": status == 200 and bool(answer.strip() or reasoning.strip())}
-            if not chat["ok"]:
-                chat["raw"] = raw[:2000]
-            report["chats"].append(chat)
-            print(f"[ui] {entry['id']}: HTTP {status} {chat['seconds']:.1f}s "
-                  f"peak_rss={chat['peak_rss_mib']}MiB {answer[:80]!r}", file=sys.stderr, flush=True)
-            if sampler.swap_grew:
-                report["swap_trip"] = True
-                break
-    report["ok"] = not report["problems"] and bool(report["chats"]) and \
-        all(c["ok"] for c in report["chats"]) and len(report["chats"]) == len(expected)
-    _write(out / "ui.json", json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False))
-    if report.get("swap_trip"):
-        return SWAP_TRIP
-    return 0 if report["ok"] else 1
+        return finish(1)
+
+    status, body, raw = ui_request(args.host, args.port, "GET", "/api/models", token, timeout=120)
+    listed = sorted(m.get("id") for m in (body or {}).get("data", []) if isinstance(m, dict))
+    report["listed"] = listed
+    missing = [m["id"] for m in expected if m["id"] not in listed]
+    if status != 200 or missing:
+        report["problems"].append(f"/api/models HTTP {status}, missing {missing}")
+    forbidden = sorted(set(listed) & FORBIDDEN_IDS)
+    if forbidden:
+        report["problems"].append(f"forbidden models listed: {forbidden}")
+    for entry in expected:
+        status, body, raw = ui_request(args.host, args.port, "GET",
+                                       f"/api/v1/models/model?id={entry['id']}", token, timeout=60)
+        tools = (((body or {}).get("meta") or {}).get("capabilities") or {}).get("builtin_tools")
+        if status == 200 and tools is True:
+            report["problems"].append(f"{entry['id']}: builtin tools are on (launcher configuration failed)")
+
+    for entry in expected:
+        started = time.perf_counter()
+        payload = {"model": entry["id"], "max_tokens": args.max_tokens,
+                   "messages": [{"role": "user", "content": UI_QUESTION}]}
+        with Sampler(args.pid, tree=True) as sampler:
+            status, result, raw = ui_stream_chat(args.host, args.port, token, payload, args.timeout)
+        answer = result.get("content") or ""
+        chat = {"model": entry["id"], "http_status": status, "seconds": time.perf_counter() - started,
+                "content": answer, "reasoning_chars": len(result.get("reasoning_content") or ""),
+                "finish_reason": result.get("finish_reason"), **sampler.report(),
+                "ok": status == 200 and "error" not in result and bool(answer.strip())
+                      and result.get("finish_reason") == "stop"}
+        _write(out / f"chat-{entry['id']}.raw.sse", raw)
+        report["chats"].append(chat)
+        print(f"[ui] {entry['id']}: HTTP {status} {chat['seconds']:.1f}s finish={chat['finish_reason']} "
+              f"peak_rss={chat['peak_rss_mib']}MiB {answer[:80]!r}", file=sys.stderr, flush=True)
+        if sampler.swap_grew:
+            report["swap_trip"] = True
+            break
+    return finish(0)
 
 
 # ---------------------------------------------------------------------------
@@ -1358,6 +1408,11 @@ def summarize(root):
                          f"{_fmt(s.get('load_s'))} | {_fmt(s.get('peak_rss_mib'))} | "
                          f"{'YES' if s.get('swap_grew') else 'no'} | {'; '.join(s.get('problems') or []) or '-'} |")
         lines.append("")
+    for name, result in (("ui", "ui.json"), ("swap", "swap.json")):
+        if (root / name / "run.json").exists() and not (root / name / result).exists():
+            run = _load(root / name / "run.json") or {}
+            lines += [f"**{name} phase produced no {result}** (run status {run.get('status')}); "
+                      f"see {name}/server.log", ""]
     trips = sorted(str(p.relative_to(root)) for p in root.rglob("SWAP_TRIP"))
     if trips:
         lines += ["**SWAP GUARD TRIPPED**: " + ", ".join(trips), ""]
@@ -1450,6 +1505,7 @@ def main(argv=None):
     server(sp)
     sp.add_argument("--pid", type=int, default=0, help="launcher PID; its whole process tree is sampled")
     sp.add_argument("--expect", default=",".join(PRODUCT_ORDER))
+    sp.add_argument("--max-tokens", type=int, default=2048)
     sp.add_argument("--out", required=True)
     sp.set_defaults(func=cmd_ui)
 

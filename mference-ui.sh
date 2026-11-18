@@ -317,6 +317,9 @@ open_webui_python() {
 ensure_open_webui() {
   local binary
   binary="$(open_webui_binary)"
+  if [[ -z "$binary" && "$build_server" -eq 0 ]]; then
+    fail "--no-build: open-webui is not installed; run ./mference-ui.sh once without --no-build."
+  fi
   if [[ -z "$binary" ]]; then
     if ! command -v uv >/dev/null 2>&1; then
       note "error: neither open-webui nor uv is installed."
@@ -537,11 +540,21 @@ webui_pid=""
 
 stop_children() {
   trap - INT TERM EXIT
-  # Only the two processes this script started.
-  local pid
+  # Only the two processes this script started. Each gets 30 s to stop after
+  # TERM (Open WebUI waits for a request in flight, which can wait on a model
+  # load), then KILL, so the launcher never leaves a model process behind.
+  local pid waited
   for pid in "$webui_pid" "$server_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
+      waited=0
+      while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt 60 ]]; do
+        sleep 0.5; waited=$((waited + 1))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        note "process $pid ignored TERM for 30 s; sending KILL"
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
       wait "$pid" 2>/dev/null || true
     fi
   done
