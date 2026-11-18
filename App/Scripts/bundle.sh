@@ -26,10 +26,13 @@
 #    `Mference --verify-bundle`, which loads both engine resource bundles the
 #    way their `Bundle.module` accessors do and checks their files.
 #
-# SearXNG hook (team U3): first runs U3's App/Scripts/searxng/prepare.sh
-# when it exists (pinned, SHA-256-checked downloads, decision P10; cached
-# under App/.build/searxng-cache, so later runs reuse it), which builds the
-# relocatable runtime under App/Resources/SearXNG/. This script copies that directory verbatim (ditto,
+# SearXNG hook (team U3): when U3's App/Scripts/searxng/prepare.sh exists,
+# bundle.sh runs `prepare.sh --offline`, which builds the relocatable runtime
+# into App/.build/searxng/SearXNG from the already-verified download cache
+# only. bundle.sh never downloads: if the cache is missing it stops and says
+# to run `App/Scripts/searxng/prepare.sh --fetch` once (pinned, SHA-256-checked
+# downloads, decision P10). Without prepare.sh it falls back to
+# App/Resources/SearXNG/. It copies that directory verbatim (ditto,
 # so symlinks and modes survive) to Contents/Resources/SearXNG and signs every
 # Mach-O file inside it ad hoc before sealing the app, so nothing else is
 # needed here. Keep large or downloaded payloads gitignored inside that
@@ -83,9 +86,18 @@ for required in Mference_Mference Mference_LlamaCpp; do
     [[ -d "$BIN_DIR/$required.bundle" ]] || { echo "bundle.sh: $BIN_DIR/$required.bundle not found" >&2; exit 1; }
 done
 
+# SearXNG (U3): prepared from the verified cache only, never downloaded here.
 SEARXNG_PREPARE="$APP_DIR/Scripts/searxng/prepare.sh"
+SEARXNG_SRC=""
 if [[ -x "$SEARXNG_PREPARE" ]]; then
-    "$SEARXNG_PREPARE"
+    SEARXNG_SRC="$APP_DIR/.build/searxng/SearXNG"
+    if ! "$SEARXNG_PREPARE" --offline --out "$SEARXNG_SRC"; then
+        echo "bundle.sh: SearXNG is not prepared from a verified cache." >&2
+        echo "bundle.sh: run App/Scripts/searxng/prepare.sh --fetch once (it downloads the pinned runtime), then bundle again." >&2
+        exit 1
+    fi
+elif [[ -d "$RESOURCES_SRC/SearXNG" ]]; then
+    SEARXNG_SRC="$RESOURCES_SRC/SearXNG"
 fi
 
 STAGING="$OUT_DIR/Mference.app.staging"
@@ -110,8 +122,8 @@ if [[ -d "$RESOURCES_SRC/Fonts" ]]; then
 fi
 
 # SearXNG hook (U3), see the header.
-if [[ -d "$RESOURCES_SRC/SearXNG" ]]; then
-    ditto --norsrc --noextattr "$RESOURCES_SRC/SearXNG" "$STAGING/Contents/Resources/SearXNG"
+if [[ -n "$SEARXNG_SRC" ]]; then
+    ditto --norsrc --noextattr "$SEARXNG_SRC" "$STAGING/Contents/Resources/SearXNG"
     while IFS= read -r -d '' candidate; do
         if [[ "$(file -b "$candidate")" == *Mach-O* ]]; then
             codesign --force --sign - --timestamp=none "$candidate"
