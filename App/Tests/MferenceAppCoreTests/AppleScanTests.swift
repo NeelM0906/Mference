@@ -165,6 +165,7 @@ struct GatedScanner: DocumentRecognizing {
         #expect(lines[0] == "Date,Merchant,Category,Total,Tax,Currency,Paid with,Items")
         #expect(lines[1] == #"2026-09-12,"'=HYPERLINK(""x"")","Home, garden",1330.55,98.56,USD,Visa,Pot 1204.00; Soil"#)
         #expect(csv.hasSuffix("\r\n"))
+        #expect(ScanCSVExporter.fileData([]).starts(with: [0xEF, 0xBB, 0xBF]))
         #expect(ScanCSVExporter.cell("-12.50") == "-12.50")
         #expect(ScanCSVExporter.cell("-cmd") == "'-cmd")
     }
@@ -207,6 +208,7 @@ struct GatedScanner: DocumentRecognizing {
 
         let csv = try session.exportCSV()
         #expect(csv.contains("2026-09-12,Corner Hardware,Tools,44.49,3.53,USD,Visa,"))
+        #expect(try session.exportCSVFile().starts(with: [0xEF, 0xBB, 0xBF]))
         session.reset()
         #expect(session.phase == .empty)
     }
@@ -264,6 +266,36 @@ struct GatedScanner: DocumentRecognizing {
         #expect(throws: (any Error).self) { try session.confirm() }
         #expect(session.phase == .review)
         #expect(try container.mainContext.fetchCount(FetchDescriptor<ScanRecord>()) == 0)
+    }
+
+    @Test @MainActor func exportingNeverConfirmsTheScanInReview() async throws {
+        let container = try AppModelContainer.inMemory()
+        let model = ScriptedAssistantTextModel(kind: .appleOnDevice, availability: .unavailable(reason: "off"),
+                                               answer: "unused")
+        let session = ScanSession(scanner: FixedScanner(lines: ["CORNER HARDWARE", "TOTAL 44.49"]),
+                                  assistant: AppleModelService(primary: model, fallback: nil),
+                                  context: container.mainContext, imageDirectory: URL.temporaryDirectory)
+        session.open(URL(filePath: "/fixtures/receipt.png"))
+        await session.waitForReading()
+        let csv = try session.exportCSV()
+        #expect(csv.components(separatedBy: "\r\n").filter { !$0.isEmpty }.count == 1)  // header only
+        #expect(session.phase == .review)
+        #expect(try container.mainContext.fetchCount(FetchDescriptor<ScanRecord>()) == 0)
+    }
+
+    @Test func largeImagesDecodeBounded() throws {
+        let directory = URL.temporaryDirectory.appending(path: "scan-big-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let context = try #require(CGContext(data: nil, width: 6_000, height: 1_000, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(),
+                                             bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let url = directory.appending(path: "wide.png")
+        let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try #require(context.makeImage()), nil)
+        #expect(CGImageDestinationFinalize(destination))
+        let image = try #require(VisionScanner.loadImage(at: url))
+        #expect(max(image.width, image.height) == VisionScanner.maximumPixelSize)
     }
 
     @Test func acceptsImageAndPDFFiles() {
