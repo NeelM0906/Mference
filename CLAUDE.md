@@ -39,9 +39,8 @@ bash -n mference-ui.sh && python3 Scripts/tests/test_mference_ui.py
 - The build, the Swift suite, the link check, and `Scripts/tests/test_*.py`
   (stdlib `unittest`, no dependencies) never download or load a model. CI runs
   the suite, the Python checks and the link check on `macos-26` (the MSL 4.0
-  tensor-ops path) and must stay green. There is no `macos-15` leg, so CI no
-  longer checks the declared Swift 6.1 / MSL 3.2 floor; build release locally
-  before merging.
+  tensor-ops path, and the declared macOS 26 floor) and must stay green; build
+  release locally before merging.
 - The link checker covers this file too, so keep relative links valid when
   renaming or moving docs.
 
@@ -169,11 +168,12 @@ injected loaders.
 - **Bounded memory.** Never put a whole checkpoint, shard, expert pool, or
   large tensor in Swift heap memory. Weights are mapped and wrapped with
   `makeBuffer(bytesNoCopy:)`; installer copies go through bounded scratch.
-- **macOS 15 / Swift 6.1 floor.** Metal 4 tensor-ops code stays behind
-  `__HAVE_TENSOR__` in shaders and the `MetalSDKCompatibility.swift` shims in
-  Swift, with a working fallback. MSL 4.0 is selected only under
-  `#available(macOS 26)`: handing it to the macOS 15 compiler fails the whole
-  shader library.
+- **macOS 26 / Swift 6.2 floor** (`Package.swift`: tools 6.2, `.macOS(.v26)`,
+  `.iOS(.v26)`). Metal 4 tensor-ops code stays behind `__HAVE_TENSOR__` in
+  shaders with a working fallback, since not every GPU builds the tensor
+  pipelines. The older-OS code (`#available(macOS 26)` branches, the
+  `MetalSDKCompatibility.swift` shims, MSL-version selection) is dead and is
+  being removed in a separate, byte-identity-gated change; do not add to it.
 - **Exact vs approximate.** An exact optimization must keep output
   byte-identical to its control. Approximate features (Maple FlashHead, the
   DFlash2 drafter) are opt-in flags and never change a default path.

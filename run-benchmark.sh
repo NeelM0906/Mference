@@ -31,14 +31,14 @@ case "${reps}" in
 esac
 
 # ---------------------------------------------------------------------------
-# Preflight. AGENTS.md requires macOS 15+, Swift 6.1+, enough disk, acceptable
+# Preflight. AGENTS.md requires macOS 26+, Swift 6.2+, enough disk, acceptable
 # memory pressure, a completed model, and no other model process, before any
 # model run. Every one of these aborts rather than warns.
 # ---------------------------------------------------------------------------
 
 os_version=$(sw_vers -productVersion) || fail "could not read macOS version"
-[ "${os_version%%.*}" -ge 15 ] 2>/dev/null \
-  || fail "macOS 15 or later required; found ${os_version}"
+[ "${os_version%%.*}" -ge 26 ] 2>/dev/null \
+  || fail "macOS 26 or later required; found ${os_version}"
 
 swift_version=$(swift --version 2>&1 |
   sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)
@@ -47,8 +47,8 @@ swift_major=${swift_version%%.*}
 swift_tail=${swift_version#*.}
 swift_minor=${swift_tail%%.*}
 [ "${swift_major}" -gt 6 ] 2>/dev/null ||
-  { [ "${swift_major}" -eq 6 ] && [ "${swift_minor}" -ge 1 ]; } 2>/dev/null ||
-  fail "Swift 6.1 or later required; found ${swift_version}"
+  { [ "${swift_major}" -eq 6 ] && [ "${swift_minor}" -ge 2 ]; } 2>/dev/null ||
+  fail "Swift 6.2 or later required; found ${swift_version}"
 
 free_gb=$(df -g . | awk 'NR==2 { print $4 }')
 [ -n "${free_gb}" ] || fail "could not determine free disk space"

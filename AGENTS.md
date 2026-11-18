@@ -79,7 +79,7 @@ you launched.
 
 ## Test rules
 
-Before a model run, require macOS 15+, Swift 6.1+, enough disk, acceptable
+Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable
 `memory_pressure -Q`, a completed install of the model the run needs, and no
 process from `pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`.
 If a check fails, inform the user and stop; do not terminate apps or delete or

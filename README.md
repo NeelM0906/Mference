@@ -66,16 +66,16 @@ a long model list.
 
 ## Supported hardware
 
-* **Apple Silicon Macs only** (arm64), macOS 15 or later, Metal 3.
+* **Apple Silicon Macs only** (arm64), macOS 26 or later.
 * How much RAM you need depends on the model. The low-memory streamed families
   run on an 8 GB Mac; the dense Qwen 3.8 27B needs a 24 GB-class Mac; GLM-5.3-Flash
   is targeted at a 256 GiB host, where all of its experts stay resident.
 * A fast local SSD matters, because that is where the experts come from.
-* On macOS 26 the shaders compile at MSL 4.0 and use the Metal 4 tensor-ops
-  prefill kernels where their pipelines build (some need an Apple10 GPU). On
-  macOS 15 they compile at MSL 3.2 with the non-tensor kernels. Both paths run
-  everything and agree within kernel tolerance, not bit for bit, so expect the
-  same quality but not identical sampled tokens.
+* The shaders compile at MSL 4.0 and use the Metal 4 tensor-ops prefill
+  kernels where their pipelines build (some need an Apple10 GPU); elsewhere
+  the non-tensor kernels run. Both paths run everything and agree within
+  kernel tolerance, not bit for bit, so expect the same quality but not
+  identical sampled tokens across GPUs.
 
 # So, what can I do with this software?
 
@@ -119,7 +119,7 @@ exactly that.
 
 ## Start here
 
-You need macOS 15+, Swift 6.1+ (Xcode 16.3+ or the matching Command Line
+You need macOS 26+, Swift 6.2+ (Xcode 26+ or the matching Command Line
 Tools), and [`uv`](https://github.com/astral-sh/uv) if you want the browser UI
 (`brew install uv`). The CLI and the server do not need Python.
 

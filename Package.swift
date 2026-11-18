@@ -1,4 +1,4 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 6.2
 import PackageDescription
 
 // llama.cpp (Sources/LlamaCpp) is built with the defines its CMake build uses
@@ -32,14 +32,16 @@ let llamaCppCXXSettings: [CXXSetting] =
     + llamaCppHeaderPaths.map { CXXSetting.headerSearchPath($0) }
     + [.define("NDEBUG", .when(configuration: .release)), .unsafeFlags(["-w"])]
 
-// macOS 15 / iOS 18 is the floor set by `Synchronization.Mutex` and SwiftUI's
-// `WindowDragGesture`. Building against a newer SDK still lights up the MSL 4.0
-// tensor-ops kernels at runtime; see `MetalSDKCompatibility.swift`.
+// macOS 26 / iOS 26 is the floor (maintainer decision, 2026-11-18); macOS 26
+// runs on every Apple Silicon Mac. The older-OS compatibility code under
+// Sources/ (`#available(macOS 26, *)` branches, the
+// `MetalSDKCompatibility.swift` shims, MSL-version selection) is now dead and
+// is removed in a separate, byte-identity-gated change.
 let package = Package(
     name: "Mference",
     platforms: [
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(name: "Mference", targets: ["Mference"]),

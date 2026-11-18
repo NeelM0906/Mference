@@ -51,7 +51,7 @@ visible answer is a truncated generation, not a successful fast response.
 
 ### Release boundary
 
-- macOS 15+, Apple Silicon, Swift 6.1+; source build, not a signed application.
+- macOS 26+, Apple Silicon, Swift 6.2+; source build, not a signed application.
 - CLI and loopback server are native; Open WebUI 0.11.3 is the only supplied UI.
 - One model owner at a time; in-process library switching unloads the old model.
 - No application authentication/TLS: never expose either service publicly.

@@ -30,8 +30,8 @@ It is not a code-signing or notarization identity.
 Use [checkpoint choices and limits](RELEASE_SUPPORT.md) to distinguish the
 first-use recommendation from optional qualification candidates.
 
-1. Install Xcode 16.3+ or matching Command Line Tools (Swift 6.1+), on an
-   Apple Silicon Mac running macOS 15 or newer. For the UI, install `uv` too.
+1. Install Xcode 26+ or matching Command Line Tools (Swift 6.2+), on an
+   Apple Silicon Mac running macOS 26 or newer. For the UI, install `uv` too.
 2. Clone the repository or extract the tagged source archive and enter it.
 3. Run `./mference-ui.sh doctor`. This does not build, download, start a model,
    open the UI database, or change settings. It checks platform, toolchain,
@@ -75,7 +75,7 @@ needed. For an existing OpenAI client, see [the server guide](OPENAI_SERVER.md).
 A release recommendation requires all of the following evidence, recorded
 against a commit rather than inferred from a merge or fluent output:
 
-- Release build and serial package tests on macOS 15 / Swift 6.1 and macOS 26.
+- Release build and serial package tests on macOS 26 / Swift 6.2.
 - Launcher/adapter unit checks, source archive completeness, and Markdown links.
 - A real installed-model smoke test and browser/server streaming, cancellation,
   history reuse and model-switch recovery with isolated UI data.
@@ -97,8 +97,8 @@ included, what remains disabled and the maintainer publication steps.
 ## Build a downloadable source candidate
 
 The **Source release candidate** GitHub Actions workflow is manually triggered
-with a version such as `0.1.0-rc.1`. It first runs the same macOS 15 / Swift 6.1,
-macOS 26, script and documentation checks as PR CI. Only after those jobs pass
+with a version such as `0.1.0-rc.1`. It first runs the same macOS 26, script and
+documentation checks as PR CI. Only after those jobs pass
 does it package and extract the archive, rebuild all release products using
 the pinned dependency lock, rerun serial tests and check executable help,
 launcher/adapter/packaging scripts and documentation from the extracted tree.

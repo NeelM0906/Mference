@@ -8,7 +8,7 @@
 # SKIPPED stage does not. Each stage prints one result line and the script ends
 # with a single verdict line.
 #
-#   0  preflight          macOS 15+, Swift 6.1+, memory headroom, free disk on
+#   0  preflight          macOS 26+, Swift 6.2+, memory headroom, free disk on
 #                         the results volume (and the model volume when a
 #                         gturbo-dir is given), no other model or installer
 #                         process, release MferenceCLI and MferenceRepack
@@ -152,8 +152,8 @@ echo "bringup-check ${family}${model_dir:+ ${model_dir}}"
 pgrep_pattern='(\.build/release/|/)(MferenceServer|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 
 if [ "${dry_run}" -eq 1 ]; then
-  show "sw_vers -productVersion   # require 15+"
-  show "swift --version           # require 6.1+"
+  show "sw_vers -productVersion   # require 26+"
+  show "swift --version           # require 6.2+"
   show "memory_pressure -Q        # require \${MIN_FREE_PCT:-20}% free"
   show "df -g .                   # require \${MIN_FREE_GB:-5} GiB free for run output"
   [ -n "${model_dir}" ] && show "df -g ${model_dir}          # require 1 GiB free beside the model (verify receipt)"
@@ -162,8 +162,8 @@ if [ "${dry_run}" -eq 1 ]; then
   ok 0 "preflight (dry run)"
 else
   os_version=$(sw_vers -productVersion) || fail "could not read macOS version"
-  [ "${os_version%%.*}" -ge 15 ] 2>/dev/null \
-    || bad 0 "macOS 15 or later required; found ${os_version}"
+  [ "${os_version%%.*}" -ge 26 ] 2>/dev/null \
+    || bad 0 "macOS 26 or later required; found ${os_version}"
 
   swift_version=$(swift --version 2>&1 |
     sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)
@@ -172,8 +172,8 @@ else
   swift_tail=${swift_version#*.}
   swift_minor=${swift_tail%%.*}
   [ "${swift_major}" -gt 6 ] 2>/dev/null ||
-    { [ "${swift_major}" -eq 6 ] && [ "${swift_minor}" -ge 1 ]; } 2>/dev/null ||
-    bad 0 "Swift 6.1 or later required; found ${swift_version}"
+    { [ "${swift_major}" -eq 6 ] && [ "${swift_minor}" -ge 2 ]; } 2>/dev/null ||
+    bad 0 "Swift 6.2 or later required; found ${swift_version}"
 
   free_pct=$(memory_pressure -Q 2>/dev/null |
     sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p' | head -1)

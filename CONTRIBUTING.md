@@ -5,9 +5,9 @@ benchmark reports from Apple Silicon Macs.
 
 ## Before opening a change
 
-- Keep the package compatible with macOS 15 and Swift 6.1. Metal 4 tensor-ops
-  code must stay behind `__HAVE_TENSOR__` in the shaders and behind the
-  `MetalSDKCompatibility.swift` shims in Swift, with a working fallback path.
+- The floor is macOS 26 and Swift 6.2. Metal 4 tensor-ops code must stay
+  behind `__HAVE_TENSOR__` in the shaders, with a working fallback path for
+  GPUs that cannot build the tensor pipelines.
 - Preserve the bounded-memory model path. Never load a complete checkpoint,
   shard, or large model tensor into Swift heap memory.
 - Keep public runtime controls limited to those documented in
