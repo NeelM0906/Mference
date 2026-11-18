@@ -21,6 +21,10 @@ public final class CalendarWeekModel {
     /// One user-facing sentence after a failed action.
     public private(set) var errorMessage: String?
     public private(set) var isSyncingReminders = false
+    /// Opens Settings > Connections (the "Settings" link in the to-do panel);
+    /// set by the app.
+    @ObservationIgnored public var openSettings: (@MainActor () -> Void)?
+    @ObservationIgnored private var loadGeneration = 0
 
     public let layout: WeekLayout
     private let service: any CalendarServicing
@@ -115,9 +119,15 @@ public final class CalendarWeekModel {
 
     public func reload() async {
         guard access == .granted else { events = []; return }
+        // A slower load for a week the person already left must not
+        // overwrite the newer one.
+        loadGeneration += 1
+        let generation = loadGeneration
         let interval = layout.interval(from: weekStart)
         do {
-            events = try await service.events(from: interval.start, to: interval.end)
+            let loaded = try await service.events(from: interval.start, to: interval.end)
+            guard generation == loadGeneration else { return }
+            events = loaded
             errorMessage = nil
         } catch let error as CalendarServiceError {
             errorMessage = error.userMessage
@@ -211,10 +221,20 @@ public final class CalendarWeekModel {
             return
         }
         do {
-            let ids = try await service.syncReminders(todos)
+            let outcomes = try await service.syncReminders(todos)
             persist {
                 for index in $0.todos.indices {
-                    if let id = ids[$0.todos[index].id] { $0.todos[index].reminderID = id }
+                    switch outcomes[$0.todos[index].id] {
+                    case .synced(let reminderID, let fields)?:
+                        $0.todos[index].reminderID = reminderID
+                        $0.todos[index].lastSynced = fields
+                    case .deletedInReminders?:
+                        $0.todos[index].reminderID = nil
+                        $0.todos[index].lastSynced = nil
+                        $0.todos[index].unlinkedFromReminders = true
+                    case nil:
+                        break
+                    }
                 }
             }
             errorMessage = nil

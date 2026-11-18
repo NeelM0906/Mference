@@ -42,17 +42,17 @@ public actor InMemoryCalendarService: CalendarServicing {
 
     public func add(_ proposal: ProposedEvent) async throws -> CalendarEvent {
         guard calendarState == .granted else { throw CalendarServiceError.noAccess(calendarState) }
-        let replaced = storedEvents.first { $0.id == proposal.replacesEventID }
+        let replaced = proposal.replaces.flatMap { reference in storedEvents.first { $0.reference == reference } }
         let event = CalendarEvent(id: makeID(), title: proposal.title, start: proposal.start, end: proposal.end,
                                   calendarName: replaced?.calendarName ?? "Calendar",
                                   calendarColor: replaced?.calendarColor, location: replaced?.location)
-        storedEvents.removeAll { $0.id == proposal.replacesEventID }
+        if let reference = proposal.replaces { storedEvents.removeAll { $0.reference == reference } }
         storedEvents.append(event)
         return event
     }
 
-    public func update(eventID: String, title: String, start: Date, end: Date) async throws -> CalendarEvent {
-        guard let index = storedEvents.firstIndex(where: { $0.id == eventID }) else {
+    public func update(_ reference: EventReference, title: String, start: Date, end: Date) async throws -> CalendarEvent {
+        guard let index = storedEvents.firstIndex(where: { $0.reference == reference }) else {
             throw CalendarServiceError.eventNotFound
         }
         storedEvents[index].title = title
@@ -61,20 +61,40 @@ public actor InMemoryCalendarService: CalendarServicing {
         return storedEvents[index]
     }
 
-    public func remove(eventID: String) async throws {
-        guard storedEvents.contains(where: { $0.id == eventID }) else { throw CalendarServiceError.eventNotFound }
-        storedEvents.removeAll { $0.id == eventID }
+    public func remove(_ reference: EventReference) async throws {
+        guard storedEvents.contains(where: { $0.reference == reference }) else { throw CalendarServiceError.eventNotFound }
+        storedEvents.removeAll { $0.reference == reference }
     }
 
-    public func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: String] {
+    public func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: ReminderSyncOutcome] {
         guard remindersState == .granted else { throw CalendarServiceError.noAccess(remindersState) }
-        var ids: [UUID: String] = [:]
-        for todo in todos {
-            let id = todo.reminderID ?? makeID()
-            reminders[id] = todo
-            ids[todo.id] = id
+        var outcomes: [UUID: ReminderSyncOutcome] = [:]
+        for todo in todos where !todo.unlinkedFromReminders {
+            if let id = todo.reminderID {
+                guard var stored = reminders[id] else { outcomes[todo.id] = .deletedInReminders; continue }
+                let last = todo.lastSynced
+                if last?.title != todo.title { stored.title = todo.title }
+                if last?.isDone != todo.isDone { stored.isDone = todo.isDone }
+                if last?.due != todo.due { stored.due = todo.due }
+                reminders[id] = stored
+                outcomes[todo.id] = .synced(reminderID: id, fields: stored.reminderFields)
+            } else {
+                let id = makeID()
+                reminders[id] = todo
+                outcomes[todo.id] = .synced(reminderID: id, fields: todo.reminderFields)
+            }
         }
-        return ids
+        return outcomes
+    }
+
+    /// Tests: the person edits or deletes a reminder in Reminders.
+    public func editReminder(_ id: String, title: String? = nil, isDone: Bool? = nil) {
+        if let title { reminders[id]?.title = title }
+        if let isDone { reminders[id]?.isDone = isDone }
+    }
+
+    public func deleteReminder(_ id: String) {
+        reminders[id] = nil
     }
 
     private func makeID() -> String {

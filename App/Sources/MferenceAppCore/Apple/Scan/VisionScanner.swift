@@ -118,13 +118,25 @@ public struct VisionScanner: DocumentRecognizing {
         return try await recognize(image: image)
     }
 
-    /// The image at `url`, or the first page of a PDF rendered at 200 dpi.
-    public static func loadImage(at url: URL) -> CGImage? {
+    /// Longest side, in pixels, an image is decoded at: enough for text
+    /// recognition, bounded for memory (a 100-megapixel photo decodes small).
+    public static let maximumPixelSize = 4_096
+
+    /// The image at `url` (decoded at most `maximumPixelSize` on its longest
+    /// side, orientation applied), or the first page of a PDF at 200 dpi.
+    public static func loadImage(at url: URL, maximumPixelSize: Int = maximumPixelSize) -> CGImage? {
         if url.pathExtension.lowercased() == "pdf" {
             return renderFirstPage(of: url)
         }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
+        else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
     static func renderFirstPage(of url: URL) -> CGImage? {

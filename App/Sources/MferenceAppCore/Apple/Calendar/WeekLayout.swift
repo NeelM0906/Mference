@@ -70,10 +70,10 @@ public struct WeekLayout: Sendable {
     /// Timed blocks inside the grid; all-day events and ones outside the
     /// hours shown are left out (the view lists them above the grid).
     public func blocks(weekStart: Date, events: [CalendarEvent], proposals: [ProposedEvent]) -> [WeekBlock] {
-        let moving = Set(proposals.compactMap(\.replacesEventID))
+        let moving = Set(proposals.compactMap(\.replaces))
         var blocks: [WeekBlock] = []
         for event in events where !event.isAllDay {
-            let kind: WeekBlock.Kind = moving.contains(event.id) ? .moving(event) : .event(event)
+            let kind: WeekBlock.Kind = moving.contains(event.reference) ? .moving(event) : .event(event)
             if let block = place(kind, start: event.start, end: event.end, weekStart: weekStart) { blocks.append(block) }
         }
         for proposal in proposals {

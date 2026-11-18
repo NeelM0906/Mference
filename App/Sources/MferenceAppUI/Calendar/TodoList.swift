@@ -66,8 +66,8 @@ struct TodoList: View {
     private var syncCard: some View {
         HStack(alignment: .center, spacing: MFSpacing.s) {
             Text(model.remindersSyncEnabled
-                 ? "Apple Reminders sync is on. Each sync asks first."
-                 : "Apple Reminders sync is off. Each sync asks first.")
+                 ? "Syncs to the Mference list in Reminders when you click Sync now."
+                 : "Apple Reminders sync is off. Turn it on in Settings.")
                 .font(MFFont.callout)
                 .foregroundStyle(MFColor.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -79,10 +79,11 @@ struct TodoList: View {
                     .foregroundStyle(MFColor.accent)
                     .disabled(model.isSyncingReminders || model.todos.isEmpty)
             } else {
-                Text("Settings")
+                Button("Settings") { model.openSettings?() }
+                    .buttonStyle(.link)
                     .font(MFFont.calloutEmphasis)
                     .foregroundStyle(MFColor.accent)
-                    .accessibilityHint("Turn on Reminders sync in Settings > Connections")
+                    .accessibilityHint("Opens Settings > Connections, where Reminders sync is turned on")
             }
         }
         .padding(MFSpacing.m + MFSpacing.xxs)
