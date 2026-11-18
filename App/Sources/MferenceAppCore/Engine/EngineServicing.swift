@@ -329,9 +329,16 @@ public struct GenerationStream: AsyncSequence, Sendable {
     public struct Iterator: AsyncIteratorProtocol {
         var base: AsyncThrowingStream<GenerationUpdate, any Error>.Iterator
         let request: RequestHandle
+        var completed = false
 
+        /// Ends with `.completed`, or throws: a request that stops because
+        /// the iterating task was cancelled throws `CancellationError`
+        /// rather than ending quietly without a completion.
         public mutating func next() async throws -> GenerationUpdate? {
-            try await base.next()
+            let element = try await base.next()
+            if case .completed? = element { completed = true }
+            if element == nil, !completed { try Task.checkCancellation() }
+            return element
         }
     }
 
@@ -357,6 +364,8 @@ public enum EngineServiceError: Error, Sendable, Hashable {
     case shuttingDown
     case modelUnloaded
     case loadFailed(String)
+    /// Generation stopped on an engine error after it started.
+    case generationFailed(String)
 
     /// The sentence the UI shows.
     public var userMessage: String {
@@ -370,6 +379,7 @@ public enum EngineServiceError: Error, Sendable, Hashable {
         case .shuttingDown: "Mference is quitting."
         case .modelUnloaded: "The model was unloaded. Send the message again."
         case .loadFailed(let message): "The model could not be loaded: \(message)"
+        case .generationFailed(let message): "The answer stopped because of an error: \(message)"
         }
     }
 }
