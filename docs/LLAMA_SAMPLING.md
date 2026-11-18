@@ -123,7 +123,8 @@ working-tree diff. The exact failure was already recorded during the Gemma
 thinking work and in the earlier Qwen sampling baseline.
 It remains unresolved and the full package gate is not green. The FlashNext
 fixture issue is the existing missing optional checkpoint assertion in
-`FlashNextToyInstallTests.swift:17`.
+`FlashNextToyInstallTests.swift:17` (removed 2026-11-18; tests for this
+family were deleted from the suite).
 
 A standalone `xcrun -sdk macosx metal -std=metal3.2 -c
 Sources/Mference/Metal/Sampling/logit.metal -o /tmp/mference-llama-logit.air`

@@ -27,4 +27,7 @@ were removed with the rest of the Gemma tests. The root package's
 `Scripts/test.sh`.
 
 When an upstream release fixes this defect, replace the local package only
-after the same oracle, dependency tests, and model-family template tests pass.
+after `JinjaPatchTests`, the dependency tests, and the remaining template
+fixture tests (`ChatMLTemplateTests`, `MiniCPM5TemplateTests`, and
+`Qwen38ChatTests`, whose Qwen 3.8 renders are compared against an independent
+Python Jinja2 oracle) pass.

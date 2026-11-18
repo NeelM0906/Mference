@@ -352,7 +352,8 @@ layers is **BF16** while `mlp.gate.global_scale` is FP32, and the scalar
 reader assumed FP32, poisoning layers 0-1 with a garbage gain. The engine's
 own CPU parity harness could not catch that one (it shared the accessor);
 only the independent reference oracle could — which is why
-`Tests/.../InklingLayerParityTests.swift` keeps both modes.
+`Tests/.../InklingLayerParityTests.swift` kept both modes (removed
+2026-11-18; tests for this family were deleted from the suite).
 
 An earlier note in this section blamed a first garbage run on corrupt
 resumed shards — that was real, but The first real run

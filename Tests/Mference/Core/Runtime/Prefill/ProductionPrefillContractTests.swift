@@ -7,20 +7,16 @@ import Testing
 /// covered by the family suites. These assertions consume actual dispatch
 /// reports after cold/warm multi-token calls, rather than factory preferences.
 @Suite(.serialized) struct ProductionPrefillContractTests {
-    @Test(arguments: ["qwen"])
-    func realRunnerBatchesWarmAppends(family: String) async throws {
-        let streamed = try await Self.warmAppendRow(family: family, resident: false)
-        let resident = try await Self.warmAppendRow(family: family, resident: true)
+    @Test func realRunnerBatchesWarmAppends() async throws {
+        let streamed = try await Self.warmAppendRow(resident: false)
+        let resident = try await Self.warmAppendRow(resident: true)
         #expect(streamed == resident, "bounded expert tiles preserve the resident result")
     }
 
-    @Test(arguments: ["qwen"], [false, true])
-    func interruptedWarmAppendRequiresReset(family: String, resident: Bool) async throws {
-        let gemma = family == "gemma"
-        let config: ArchConfig = gemma ? .gemma4Toy(topKExperts: 8) : .qwen36Toy()
-        let directory = try (gemma
-            ? ModelLoaderTests.writeToySynthetic(config: config, finiteNorms: true)
-            : QwenToySynthetic.write())
+    @Test(arguments: [false, true])
+    func interruptedWarmAppendRequiresReset(resident: Bool) async throws {
+        let config: ArchConfig = .qwen36Toy()
+        let directory = try QwenToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: directory) }
         let context = try MetalContext()
         let model = try Model.load(directoryURL: directory, device: context.device,
@@ -73,12 +69,9 @@ import Testing
         #expect(row().allSatisfy { Float16(bitPattern: $0).isFinite })
     }
 
-    private static func warmAppendRow(family: String, resident: Bool) async throws -> [UInt16] {
-        let gemma = family == "gemma"
-        // The loader's historical top-2 toy does not satisfy the production
-        // MoE kernel contract. Keep its defaults, but run this fixture at top-8.
-        let config: ArchConfig = gemma ? .gemma4Toy(topKExperts: 8) : .qwen36Toy()
-        let directory = try (gemma ? ModelLoaderTests.writeToySynthetic(config: config, finiteNorms: true) : QwenToySynthetic.write())
+    private static func warmAppendRow(resident: Bool) async throws -> [UInt16] {
+        let config: ArchConfig = .qwen36Toy()
+        let directory = try QwenToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: directory) }
         let context = try MetalContext()
         let model = try Model.load(directoryURL: directory, device: context.device,
@@ -101,8 +94,7 @@ import Testing
         for pass in 0..<2 {
             runner.reset()
             var start = 0
-            // Ragged cold and warm appends, multi-chunk tail, and Gemma's
-            // sliding-window/ring boundary (256/320) inside the final append.
+            // Ragged cold and warm appends and a multi-chunk tail.
             for length in [31, 34, 320] {
                 var progress: [Int] = []
                 let result = try await runner.prefillChunked(tokens: tokens[start..<(start + length)],

@@ -240,5 +240,28 @@ extension RemotePayloadCopyTests {
     let verify = try VerifiedInstallTool.run(
       options: VerifyInstallOptions(inputGTurbo: output))
     #expect(verify.unexpectedEntries.isEmpty)
+
+    // Byte for byte, the resumed payload equals an uninterrupted install of
+    // the same snapshot: no damaged byte survived the resume. (The original
+    // QAT suite compared against the source tensors with a QAT-layout parser;
+    // the uninterrupted install is the Qwen equivalent.)
+    let reference = tmpPathForRemote("qwen-remote-damaged-reference")
+    defer { cleanUpRemote([reference]) }
+    _ = try await RemoteStreamingRepacker(
+      options: remoteOptions(outputDir: reference, session: fakeHFSession())
+    ).run()
+    func payloadFiles(_ root: String) throws -> [String] {
+      try FileManager.default.subpathsOfDirectory(atPath: root)
+        .filter { $0.hasSuffix(".bin") || $0 == "packed_experts/layout.json" }
+        .sorted()
+    }
+    let files = try payloadFiles(output)
+    #expect(files.contains("model_weights.bin"))
+    #expect(files == (try payloadFiles(reference)))
+    for name in files {
+      let resumed = try Data(contentsOf: URL(fileURLWithPath: output + "/" + name))
+      let uninterrupted = try Data(contentsOf: URL(fileURLWithPath: reference + "/" + name))
+      #expect(resumed == uninterrupted, "\(name)")
+    }
   }
 }

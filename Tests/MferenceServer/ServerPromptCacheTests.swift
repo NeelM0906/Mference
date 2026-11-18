@@ -29,6 +29,41 @@ struct ServerPromptCacheTests {
             Issue.record("Exact rendered prefixes remain reusable")
         }
     }
+    /// A source-template (explicit-effort) Qwen 3.8 turn keeps its reasoning
+    /// history, reuses only an exact rendered prefix, and is never reused
+    /// across cache domains (here another checkpoint's model ID).
+    @Test func baseQwen38HistoryIsPreservedAndOtherDomainCannotReuseIt() async throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Mference/Core/Tokenization/Fixtures/ChatMLTokenizer")
+        let tok = try await MFTokenizer.load(from: fixture, family: .qwen38)
+            .forCheckpoint(CheckpointIdentity.baseQwen38)
+        var initial = request(messages: [.init(role: .user, content: "A")])
+        initial.reasoningEffort = .low
+        func checkpointDomain(_ id: String) -> ServerPromptCacheDomain {
+            .init(modelID: id, sourceSnapshotHash: "source", runtimeProfileHash: "profile",
+                  maximumContext: 16384, kvStorage: "fp16", fp16RingEnabled: true, templateSHA256: "template")
+        }
+        let base = checkpointDomain(CheckpointIdentity.baseQwen38)
+        var cache = ServerPromptCache()
+        cache.publish(domain: base, request: initial, content: "B", calls: [],
+                      result: rawResult(prompt: [1], kvBacked: [1, 2], boundary: 3, reason: .endOfTurn),
+                      reasoningContent: "Check A")
+        #expect(cache.entry?.assistantTurn.message.reasoningContent == "Check A")
+        #expect(cache.match(domain: checkpointDomain("qwen3.6-35b-a3b"), request: initial,
+                            renderedPromptIDs: [1, 2, 3, 4], tokenizer: tok) == .miss)
+        var continuation = request(messages: initial.messages + [
+            .init(role: .assistant, content: "B", reasoningContent: "Check A"),
+            .init(role: .user, content: "C")])
+        continuation.reasoningEffort = .low
+        #expect(cache.match(domain: base, request: continuation,
+                            renderedPromptIDs: [1, 9, 3, 4], tokenizer: tok) == .miss)
+        if case .hit = cache.match(domain: base, request: continuation,
+                                    renderedPromptIDs: [1, 2, 3, 4], tokenizer: tok) {} else {
+            Issue.record("an exact base Qwen 3.8 prefix should remain reusable")
+        }
+        cache.invalidate()
+        #expect(cache.entry == nil)
+    }
     private let domain = ServerPromptCacheDomain(
         modelID: "model",
         sourceSnapshotHash: "snapshot",

@@ -4,21 +4,13 @@ import Testing
 
 /// The per-tensor bit policy the original-repo planner consults.
 ///
-/// Two things are being protected here. The first is that the policy actually
-/// reproduces the mixture a trusted community conversion chose — for Qwen 3.6
-/// that is mlx-community's, which overrides every layer's `mlp.gate` and
-/// `mlp.shared_expert_gate` to INT8 group-64 and leaves the rest at INT4. The
-/// second is that the *same two suffixes* resolve against Flash-Next's real
-/// tensor names, which are the vendor's own and are never rewritten by the
-/// planner — including the `mtp.` draft layer's, which share no prefix with the
-/// text stack at all and would be quietly missed by a rule keyed on anything
-/// but a suffix.
-///
-/// Flash-Next used to be the negative case here: it shipped uniform INT4 and
-/// this suite asserted that it stayed that way. The 2026-09-10 measurement on
-/// its own install reversed that (see `QuantBitPolicy.moeRouterInt8`), so the
-/// assertions are inverted rather than deleted — the property is still that the
-/// override set is exactly the gating tensors and nothing adjacent to them.
+/// The policy must reproduce the mixture a trusted community conversion chose
+/// — for Qwen 3.6 that is mlx-community's, which overrides every layer's
+/// `mlp.gate` and `mlp.shared_expert_gate` to INT8 group-64 and leaves the rest
+/// at INT4 — and the override set must be exactly those gating tensors and
+/// nothing adjacent to them. The family table below pins which families share
+/// that policy. (The Flash-Next tensor-name cases were removed 2026-11-18 with
+/// that family's tests.)
 @Suite struct QuantBitPolicyTests {
 
     /// Qwen 3.6's real resident inventory, per layer, abbreviated to the

@@ -1,19 +1,32 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import Mference
 
 /// Base Qwen 3.8 27B (`qwen3.8-27b-4bit`) chat and structured-decoder cases:
-/// the visible answer after a tool-history suffix, XML tool calls after the
-/// thought, tool examples inside reasoning, and a string-typed tool argument
-/// through the decoder and the rendered history. Moved from the removed
-/// Swift-Qwen suite, which ran each case for both checkpoints; these are the
-/// base-checkpoint runs, on the synthetic ChatML fixture.
+/// an explicit reasoning effort renders through the source template, an
+/// omitted effort keeps the legacy render, the visible answer after a
+/// tool-history suffix, XML tool calls after the thought, tool examples inside
+/// reasoning, and a string-typed tool argument through the decoder and the
+/// rendered history. Moved from the removed Swift-Qwen suite, which ran each
+/// case for both checkpoints; these are the base-checkpoint runs, on the
+/// synthetic ChatML fixture with the pinned Qwen 3.8 source template
+/// (`Fixtures/SwiftQwenTemplate`) installed as its `chat_template.jinja`.
 @Suite("Qwen 3.8 chat and structured decoding")
 struct Qwen38ChatTests {
     typealias Message = MFTokenizer.Message
 
     private func tokenizer() async throws -> MFTokenizer {
-        try await MFTokenizer.load(from: try ChatMLTemplateTests.fixtureFolder(), family: .qwen38)
+        let fixture = try #require(Bundle.module.url(forResource: "SwiftQwenTemplate",
+                                                     withExtension: nil, subdirectory: "Fixtures"))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.copyItem(at: ChatMLTemplateTests.fixtureFolder(), to: folder)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = try Data(contentsOf: fixture.appendingPathComponent("chat_template.jinja"))
+        #expect(SHA256.hash(data: source.dropLast()).map { String(format: "%02x", $0) }.joined()
+                == "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041")
+        try source.write(to: folder.appendingPathComponent("chat_template.jinja"))
+        return try await MFTokenizer.load(from: folder, family: .qwen38)
             .forCheckpoint(CheckpointIdentity.baseQwen38)
     }
 
@@ -31,6 +44,80 @@ struct Qwen38ChatTests {
                     ], reasoningContent: "Need lookup."),
                     .init(role: .tool, content: "Found A", toolCallID: "call_1")]
         default: return [.init(role: .user, content: " Hi ")]
+        }
+    }
+
+    @Test func mtpDefaultsOnForBaseQwen38() {
+        #expect(CheckpointIdentity.qwenMTPEnabled(modelID: CheckpointIdentity.baseQwen38, setting: nil))
+    }
+
+    /// An explicit effort opts base Qwen 3.8 into the source template; the
+    /// renders match the independent Python Jinja2 oracle.
+    @Test func explicitEffortRendersMatchIndependentJinjaOracle() async throws {
+        struct Oracle: Decodable { let name: String; let effort: String; let render: String }
+        let base = try await tokenizer()
+        let url = try #require(Bundle.module.url(forResource: "oracle", withExtension: "json",
+                                               subdirectory: "Fixtures/SwiftQwenTemplate"))
+        let cases = try JSONDecoder().decode([Oracle].self, from: Data(contentsOf: url))
+        for item in cases {
+            let effort = try #require(QwenReasoningEffort(rawValue: item.effort))
+            let ids = try base.encodeChat(messages: messages(item.name), reasoningEffort: effort)
+            #expect(base.decode(ids, skipSpecialTokens: false) == item.render,
+                    "\(item.name)/\(item.effort)")
+            #expect(ids == base.encode(item.render, addBOS: false))
+            #expect(base.startsInThinking(reasoningEffort: effort) == (effort != .off))
+        }
+        #expect(base.stopTokenIDs == [248046, 248044])
+    }
+
+    @Test func toolsDoNotForceThinkingOffWithAnExplicitEffort() async throws {
+        let tok = try await tokenizer()
+        let tools: [MFTokenizer.FunctionDefinition] = [.init(name: "lookup", description: "Lookup",
+                                                 parameters: .object(["type": .string("object")]))]
+        for effort in QwenReasoningEffort.allCases {
+            let ids = try tok.encodeChat(messages: messages("single"), tools: tools, reasoningEffort: effort)
+            let text = tok.decode(ids, skipSpecialTokens: false)
+            #expect(text.contains("<tools>"))
+            #expect(text.hasSuffix(effort == .off ? "<think>\n\n</think>\n\n" : "<think>\n"))
+        }
+    }
+
+    /// Without an effort, base Qwen 3.8 keeps its legacy render: ordinary chat
+    /// opens thinking and a tools turn closes it. With an effort it rejects
+    /// developer turns like the source template does.
+    @Test func omittedEffortKeepsLegacyRender() async throws {
+        let base = try await tokenizer()
+        let input = messages("single")
+        let legacy = try base.encodeChat(messages: input)
+        #expect(base.decode(legacy, skipSpecialTokens: false) == "<|im_start|>user\n Hi <|im_end|>\n<|im_start|>assistant\n<think>\n")
+        let tools: [MFTokenizer.FunctionDefinition] = [.init(name: "lookup", description: "Lookup",
+            parameters: .object(["type": .string("object"), "properties": .object([
+                "query": .object(["type": .string("string")])])]))]
+        for effort in QwenReasoningEffort.allCases {
+            for name in ["single", "history", "tool_result"] {
+                let actual = try base.encodeChat(messages: messages(name), tools: tools, reasoningEffort: effort)
+                #expect(base.startsInThinking(reasoningEffort: effort, promptIDs: actual) == (effort != .off))
+            }
+            #expect(throws: MFTokenizerError.self) {
+                try base.encodeChat(messages: [.init(role: .developer, content: "Guide"),
+                    .init(role: .user, content: "Hi")], reasoningEffort: effort)
+            }
+        }
+        #expect(try base.encodeChat(messages: input) == legacy)
+        #expect(base.decode(try base.encodeChat(messages: input, tools: tools), skipSpecialTokens: false)
+            .hasSuffix("<think>\n\n</think>\n\n"))
+    }
+
+    /// Profile selection is per checkpoint: base Qwen 3.8 accepts an effort,
+    /// Qwen 3.6 refuses one.
+    @Test func qwen36RefusesAnEffortThatBaseQwen38Accepts() async throws {
+        let base = try await tokenizer()
+        #expect(!base.isSwiftQwen)
+        #expect(base.supportsQwenReasoningEffort)
+        let other = try base.forCheckpoint("qwen3.6-35b-a3b")
+        #expect(!other.supportsQwenReasoningEffort)
+        #expect(throws: MFTokenizerError.self) {
+            try other.encodeChat(messages: messages("single"), reasoningEffort: .low)
         }
     }
 
@@ -133,5 +220,21 @@ struct Qwen38ChatTests {
         let rendered = tok.decode(try tok.encodeChat(messages: history, tools: tools), skipSpecialTokens: false)
         #expect(rendered.contains("<parameter=text>\n123\n</parameter>"))
         #expect(try decoder.finish().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func reasoningIsSeparateAndIncludesDetokenizerFlush(startsInThought: Bool) async throws {
+        let tok = try await tokenizer()
+        let decoder = StructuredAssistantDecoder(tokenizer: tok, allowedTools: [], startsInThought: startsInThought)
+        var reasoning = ""
+        decoder.onReasoning = { reasoning += $0 }
+        if !startsInThought {
+            #expect(try decoder.consume(tokenID: #require(tok.thinkStartID), delta: "<think>") == [])
+        }
+        #expect(try decoder.consume(tokenID: 12, delta: "Check") == [])
+        #expect(try decoder.consumeFlushedText(" A") == [])
+        #expect(try decoder.consume(tokenID: #require(tok.thinkEndID), delta: "</think>") == [])
+        #expect(try decoder.consume(tokenID: 13, delta: "Answer") == [.content("Answer")])
+        #expect(reasoning == "Check A")
     }
 }

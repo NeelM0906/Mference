@@ -47,10 +47,6 @@ import MferenceValidationSupport
         }
     }
 
-    // MARK: - k6 sqrtsoftplus (DeepSeek V4 learned routing)
-
-    // MARK: - k6 hash weighting (DeepSeek V4 frozen routing)
-
     // MARK: - Fixtures
 
     /// Trials deliberately mix continuous logits with heavily quantized ones so
@@ -113,82 +109,6 @@ import MferenceValidationSupport
         commandBuffer.waitUntilCompleted()
         #expect(commandBuffer.error == nil)
         return Selection(indices: readIndices(indexBuffer, count: topK),
-                         weightBits: readWeightBits(weightBuffer, count: topK))
-    }
-
-    private static func runK6(context: MetalContext,
-                              pipeline: MTLComputePipelineState,
-                              logits: [Float],
-                              correctionBias: [Float]) throws -> Selection {
-        let topK = 6
-        guard let logitBuffer = context.device.makeBuffer(
-                  bytes: logits,
-                  length: logits.count * MemoryLayout<Float>.stride,
-                  options: .storageModeShared),
-              let biasBuffer = context.device.makeBuffer(
-                  bytes: correctionBias,
-                  length: correctionBias.count * MemoryLayout<Float>.stride,
-                  options: .storageModeShared),
-              let indexBuffer = context.device.makeBuffer(
-                  length: topK * MemoryLayout<UInt32>.stride,
-                  options: .storageModeShared),
-              let weightBuffer = Fp16Buffer.make(context.device, count: topK),
-              let commandBuffer = context.queue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw CocoaError(.fileReadUnknown)
-        }
-        var expertCount = UInt32(logits.count)
-        var routeScale = Float(2.5)
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(logitBuffer, offset: 0, index: 0)
-        encoder.setBuffer(biasBuffer, offset: 0, index: 1)
-        encoder.setBuffer(indexBuffer, offset: 0, index: 2)
-        encoder.setBuffer(weightBuffer, offset: 0, index: 3)
-        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
-        encoder.setBytes(&routeScale, length: MemoryLayout<Float>.stride, index: 5)
-        encoder.dispatchThreadgroups(
-            MTLSize(width: 1, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-        encoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        #expect(commandBuffer.error == nil)
-        return Selection(indices: readIndices(indexBuffer, count: topK),
-                         weightBits: readWeightBits(weightBuffer, count: topK))
-    }
-
-    private static func runHash(context: MetalContext,
-                                pipeline: MTLComputePipelineState,
-                                logits: [Float],
-                                indices: [UInt32]) throws -> Selection {
-        let topK = 6
-        guard let logitBuffer = context.device.makeBuffer(
-                  bytes: logits,
-                  length: logits.count * MemoryLayout<Float>.stride,
-                  options: .storageModeShared),
-              let indexBuffer = context.device.makeBuffer(
-                  bytes: indices,
-                  length: indices.count * MemoryLayout<UInt32>.stride,
-                  options: .storageModeShared),
-              let weightBuffer = Fp16Buffer.make(context.device, count: topK),
-              let commandBuffer = context.queue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw CocoaError(.fileReadUnknown)
-        }
-        var routeScale = Float(2.5)
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(logitBuffer, offset: 0, index: 0)
-        encoder.setBuffer(indexBuffer, offset: 0, index: 1)
-        encoder.setBuffer(weightBuffer, offset: 0, index: 2)
-        encoder.setBytes(&routeScale, length: MemoryLayout<Float>.stride, index: 3)
-        encoder.dispatchThreadgroups(
-            MTLSize(width: 1, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-        encoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        #expect(commandBuffer.error == nil)
-        return Selection(indices: indices,
                          weightBits: readWeightBits(weightBuffer, count: topK))
     }
 

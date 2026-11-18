@@ -1,0 +1,62 @@
+[
+  {
+    "name": "single",
+    "effort": "xhigh",
+    "render": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "single",
+    "effort": "medium",
+    "render": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "single",
+    "effort": "low",
+    "render": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "single",
+    "effort": "none",
+    "render": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+    "name": "history",
+    "effort": "xhigh",
+    "render": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\nBe terse.<|im_end|>\n<|im_start|>user\nA<|im_end|>\n<|im_start|>assistant\n<think>\nCheck A.\n</think>\n\nB<|im_end|>\n<|im_start|>user\nC<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "history",
+    "effort": "medium",
+    "render": "<|im_start|>system\nBe terse.<|im_end|>\n<|im_start|>user\nA<|im_end|>\n<|im_start|>assistant\n<think>\nCheck A.\n</think>\n\nB<|im_end|>\n<|im_start|>user\nC<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "history",
+    "effort": "low",
+    "render": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\nBe terse.<|im_end|>\n<|im_start|>user\nA<|im_end|>\n<|im_start|>assistant\n<think>\nCheck A.\n</think>\n\nB<|im_end|>\n<|im_start|>user\nC<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "history",
+    "effort": "none",
+    "render": "<|im_start|>system\nBe terse.<|im_end|>\n<|im_start|>user\nA<|im_end|>\n<|im_start|>assistant\n<think>\nCheck A.\n</think>\n\nB<|im_end|>\n<|im_start|>user\nC<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+    "name": "tool_result",
+    "effort": "xhigh",
+    "render": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nLookup A<|im_end|>\n<|im_start|>assistant\n<think>\nNeed lookup.\n</think>\n\n<tool_call>\n<function=lookup>\n<parameter=query>\nA\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nFound A\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "tool_result",
+    "effort": "medium",
+    "render": "<|im_start|>user\nLookup A<|im_end|>\n<|im_start|>assistant\n<think>\nNeed lookup.\n</think>\n\n<tool_call>\n<function=lookup>\n<parameter=query>\nA\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nFound A\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "tool_result",
+    "effort": "low",
+    "render": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n<|im_start|>user\nLookup A<|im_end|>\n<|im_start|>assistant\n<think>\nNeed lookup.\n</think>\n\n<tool_call>\n<function=lookup>\n<parameter=query>\nA\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nFound A\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+    "name": "tool_result",
+    "effort": "none",
+    "render": "<|im_start|>user\nLookup A<|im_end|>\n<|im_start|>assistant\n<think>\nNeed lookup.\n</think>\n\n<tool_call>\n<function=lookup>\n<parameter=query>\nA\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nFound A\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  }
+]

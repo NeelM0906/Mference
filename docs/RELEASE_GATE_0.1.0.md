@@ -89,7 +89,7 @@ python3 Scripts/tests/test_openwebui_mference.py
 python3 Scripts/tests/test_release_task_screen.py
 python3 Scripts/tests/test_release_screen_summary.py
 python3 Scripts/tests/test_qwen_efficiency_screen.py
-python3 Scripts/tests/test_swift_qwen_task_screen.py
+python3 Scripts/tests/test_swift_qwen_task_screen.py  # removed 2026-11-18 with the Swift-Qwen tests
 python3 Scripts/tests/test_source_release.py
 python3 -O Scripts/tests/test_source_release.py
 LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb

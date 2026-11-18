@@ -243,6 +243,21 @@ import Mference
         }
     }
 
+    /// `--reasoning-effort` takes the Qwen 3.8 source template's levels, only
+    /// with `--chat`; "high" is not one of them.
+    @Test func reasoningEffortParsesOnlyInChatMode() throws {
+        for effort in QwenReasoningEffort.allCases {
+            let args = try Args.parse(["--model", "candidate.gturbo", "--chat", "--reasoning-effort", effort.rawValue])
+            #expect(args.reasoningEffort == effort)
+        }
+        #expect(throws: (any Error).self) {
+            try Args.parse(["--model", "candidate.gturbo", "--prompt", "Hi", "--reasoning-effort", "low"])
+        }
+        #expect(throws: (any Error).self) {
+            try Args.parse(["--model", "candidate.gturbo", "--chat", "--reasoning-effort", "high"])
+        }
+    }
+
     @Test func shadowBudgetIsUnsetUnlessGiven() throws {
         #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi"]).shadowBudget == nil)
         #expect(try Args.parse(["--model", "m.gturbo", "--prompt", "hi", "--shadow-budget", "4"]).shadowBudget == 4)
