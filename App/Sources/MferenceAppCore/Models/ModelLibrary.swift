@@ -26,6 +26,11 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
     public var fit: MemoryFit.Verdict
     /// Licence of a downloadable model ("Apache 2.0"); nil when unknown.
     public var licence: String?
+    /// The engine's state for an installed model (loaded, ready, loading,
+    /// unloading); nil when not installed.
+    public var availability: ModelAvailability?
+    /// Install location; nil when not installed.
+    public var location: URL?
 
     public var id: String { model.modelID }
 
@@ -55,13 +60,16 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
     }
 
     public init(model: AppModel, state: State, sizeBytes: UInt64, isDefault: Bool,
-                fit: MemoryFit.Verdict, licence: String? = nil) {
+                fit: MemoryFit.Verdict, licence: String? = nil,
+                availability: ModelAvailability? = nil, location: URL? = nil) {
         self.model = model
         self.state = state
         self.sizeBytes = sizeBytes
         self.isDefault = isDefault
         self.fit = fit
         self.licence = licence
+        self.availability = availability
+        self.location = location
     }
 }
 
@@ -162,7 +170,9 @@ public final class ModelLibrary {
             return ModelLibraryRow(model: model, state: state, sizeBytes: size,
                                    isDefault: settings.defaultModel == model,
                                    fit: memoryFit.verdict(for: model, sizeBytes: size),
-                                   licence: source?.licence)
+                                   licence: source?.licence,
+                                   availability: isInstalled ? option?.availability : nil,
+                                   location: isInstalled ? option?.location : nil)
         }
     }
 
