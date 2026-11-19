@@ -43,6 +43,9 @@ public struct WeekLayout: Sendable {
     public var days: Int
     public var firstHour: Int
     public var lastHour: Int
+    /// A proposal is drawn at least this tall (hours), so its title and a
+    /// two-line "11:00 · proposed from Mail" fit; lanes account for it.
+    public var minimumProposalHours: Double = 0.9
 
     public init(calendar: Calendar = .current, days: Int = 5, firstHour: Int = 9, lastHour: Int = 18) {
         self.calendar = calendar
@@ -140,7 +143,11 @@ public struct WeekLayout: Sendable {
         let bottom = min(endHours, Double(lastHour)) - Double(firstHour)
         guard bottom > top || (bottom == top && startHours >= Double(firstHour) && startHours < Double(lastHour))
         else { return nil }
-        return WeekBlock(kind: kind, day: segment.day, top: top, height: max(bottom - top, 0.5), lane: 0, lanes: 1)
+        var height = max(bottom - top, 0.5)
+        if case .proposal = kind {
+            height = min(max(height, minimumProposalHours), Double(lastHour - firstHour) - top)
+        }
+        return WeekBlock(kind: kind, day: segment.day, top: top, height: height, lane: 0, lanes: 1)
     }
 
     /// Overlapping blocks in one day share the column side by side.
