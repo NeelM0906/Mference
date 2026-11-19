@@ -4,7 +4,9 @@ extension Native {
     /// The JSON encoding of this type (default `Codable` keys, as declared) is
     /// the on-disk contract. `MferenceRepackCore` cannot import `Mference`, so
     /// the production writer (W1) keeps a mirror of these types and a test
-    /// pins the two encodings to each other.
+    /// pins the two encodings to each other. Writers encode with
+    /// `JSONEncoder.OutputFormatting` `[.sortedKeys, .prettyPrinted]`, so the
+    /// bytes are deterministic.
     ///
     /// Directory layout:
     /// - `manifest.json` (this type)

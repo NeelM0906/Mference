@@ -31,26 +31,39 @@ extension Native {
     /// - `alpha`: output of `ssm_alpha` [rows x timeStepRank]
     /// - `beta`: output of `ssm_beta` [rows x timeStepRank]
     ///
-    /// Computation, matching llama.cpp `qwen35` at the pin: causal conv1d over
-    /// `qkv` with the conv state, SiLU; split into q, k, v; L2-normalize q and
-    /// k per head; gate `g = softplus(alpha + dtBias) * a`, `beta = sigmoid(beta)`;
-    /// delta-rule recurrence per value head (q/k head mapping as llama.cpp);
-    /// per-head RMSNorm with `norm` times `silu(z)`.
+    /// Computation, matching llama.cpp `qwen35` at the pin (H = value heads
+    /// = `timeStepRank`, G = q/k heads = `groupCount`, d = `stateSize`):
+    /// 1. causal depthwise conv1d (kernel `convKernel`) over `qkv` with the
+    ///    conv state, then SiLU; the conv state becomes the last
+    ///    `convKernel - 1` input rows
+    /// 2. split the conv output into q [G x d], k [G x d], v [H x d]
+    /// 3. L2-normalize q and k per head: `x / sqrt(sum(x^2) + eps)` with the
+    ///    model's `rmsNormEpsilon`
+    /// 4. `beta = sigmoid(beta)`, `g = softplus(alpha + dtBias) * a`, decay `exp(g)`
+    /// 5. value head `h` uses q/k head `h % G` (tiled, as ggml's
+    ///    `gated_delta_net`, not Hugging Face's `repeat_interleave`)
+    /// 6. per row and head: `S *= exp(g)`; `delta = (v - S k) * beta`;
+    ///    `S += delta k^T`; `o = S q / sqrt(d)` (S per `RecurrentLayout`)
+    /// 7. per-head RMSNorm of `o` with `norm`, times `silu(z)`
     ///
-    /// Output: F32 [rows x ssmInnerSize], the input of `ssm_out`. The live
-    /// state is advanced past all rows. `encodeVerify` additionally writes the
-    /// state after each row `r` into `arena` slot `r`.
+    /// Output: F32 [rows x ssmInnerSize], the input of `ssm_out`. The op reads
+    /// state bank `stateIn` and writes the state after all rows to `stateOut`
+    /// (the two may alias; the `KVStore` passes distinct banks so the step
+    /// can be undone without a copy). `encodeVerify` also writes the state
+    /// after each row `r` into `arena` slot `r`.
     public protocol GDNOp: AnyObject {
         func prepare(config: Qwen35Config, layout: RecurrentLayout) throws
         func encodeDecode(_ encoder: MTLComputeCommandEncoder, weights: GDNLayerWeights,
                           qkv: TensorRef, z: TensorRef, alpha: TensorRef, beta: TensorRef,
-                          state: RecurrentStateRef, output: TensorRef) throws
+                          stateIn: RecurrentStateRef, stateOut: RecurrentStateRef,
+                          output: TensorRef) throws
         func encodeVerify(_ encoder: MTLComputeCommandEncoder, weights: GDNLayerWeights,
                           qkv: TensorRef, z: TensorRef, alpha: TensorRef, beta: TensorRef,
-                          state: RecurrentStateRef, arena: RecurrentVerifyArena,
-                          output: TensorRef) throws
+                          stateIn: RecurrentStateRef, stateOut: RecurrentStateRef,
+                          arena: RecurrentVerifyArena, output: TensorRef) throws
         func encodePrefill(_ encoder: MTLComputeCommandEncoder, weights: GDNLayerWeights,
                            qkv: TensorRef, z: TensorRef, alpha: TensorRef, beta: TensorRef,
-                           state: RecurrentStateRef, output: TensorRef) throws
+                           stateIn: RecurrentStateRef, stateOut: RecurrentStateRef,
+                           output: TensorRef) throws
     }
 }

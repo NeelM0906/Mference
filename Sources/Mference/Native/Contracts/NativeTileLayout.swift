@@ -17,8 +17,8 @@ extension Native {
     /// `TileLayout.gguf` (1, 1, no planes) is the identity. The permutation is
     /// defined by `packedOffset(...)`; the reference repacker, the production
     /// writer (W1) and every kernel (W2) implement exactly this function.
-    /// Which layout each quant type uses on each GPU family is
-    /// `KernelCalibration`'s choice and is recorded per tensor in the manifest.
+    /// Which layout each quant type uses is `PackLayoutTable` (frozen, the
+    /// same on every GPU family) and is recorded per tensor in the manifest.
     public struct TileLayout: Codable, Hashable, Sendable {
         public var rowsPerTile: Int
         public var blocksPerTile: Int

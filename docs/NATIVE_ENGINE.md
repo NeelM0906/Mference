@@ -43,12 +43,12 @@ Related pages, each landing with the component that owns it:
 
 | Layer | Contract | Phase 1 owner | Code |
 |---|---|---|---|
-| Weight store | `WeightStore`, `QuantTensor`, `PackManifest`, `TileLayout`, `TokenizerSource`, `TextTokenizer`, `ChatTemplateSource`, `Qwen35Config` | W1 `mfe-weights` | `Native/Weights/`, `MferenceRepack/Core/Pack/` |
+| Weight store | `WeightStore`, `QuantTensor`, `PackManifest`, `TileLayout`, `PackLayoutTable`, `TokenizerSource`, `TextTokenizer`, `ChatTemplateSource`, `Qwen35Config` | W1 `mfe-weights` | `Native/Weights/`, `MferenceRepack/Core/Pack/` |
 | Kernel library | `QuantGEMM`, `KernelCalibration`, `AttentionOp`, `GDNOp`, `GlueOps` | W2 `mfe-gemm` (GEMM), W3 `mfe-attn` (attention, GDN) | `Native/Kernels/`, `Metal/Native/` |
-| Family runner | `ForwardModel`, `TapPoint`, `TensorTap` | Phase 2 | `Native/Runner/` |
+| Family runner | `ForwardModel`, `ModelComponents`, `ForwardModelFactory`, `TapPoint`, `TensorTap` | Phase 2 | `Native/Runner/` |
 | State manager | `KVStore`, `MemoryPlan`, `MemoryPlanner`, `KVPageGeometry`, `RecurrentLayout` | W4 `mfe-memory` | `Native/Memory/` |
 | Decoding strategies | `DecodingStrategy` (plain only in this program), `Sampler` | W5 `mfe-sched` | `Native/Sampling/` |
-| Scheduler | `StepScheduler`, `GenerationJob`, `StepTimings` | W5 `mfe-sched` | `Native/Scheduler/` |
+| Scheduler | `StepScheduler`, `StepSchedulerFactory`, `GenerationJob`, `StepTimings` | W5 `mfe-sched` | `Native/Scheduler/` |
 
 Every contract has a slow, frozen reference implementation in
 `Native/Reference/`, written in Phase 0. The references are naive Metal
@@ -56,11 +56,19 @@ kernels: one direct port of ggml's dequantization per type, F32
 accumulation, and no tiling. Each has a pure-Swift CPU twin for unit tests.
 Together they form an all-reference `qwen35` path that runs Quick end to end.
 A Phase 1 worker tests its fast component against the references for every
-other layer, so no worker waits on another.
+other layer, so no worker waits on another. Composition is part of the
+contract: the reference `ForwardModelFactory` builds a runner from any
+`ModelComponents` (any mix of reference and fast `WeightStore`, `QuantGEMM`,
+`AttentionOp`, `GDNOp`, `GlueOps` and `KVStore`), and the reference
+`StepSchedulerFactory` takes any `ForwardModel`, `Sampler` and
+`DecodingStrategy`. Swapping one component changes only that component's
+work.
 
 ## The `qwen35` model (Quick)
 
-Quick has 32 blocks with a hidden size of 2560. Block `i` is full attention
+Quick has 32 blocks with a hidden size of 2560 (Deep: 64 main blocks plus
+one `nextn` block; `Qwen35Config.blockCount` counts main blocks only, as
+llama.cpp's `n_layer` does). Block `i` is full attention
 when `(i + 1) % 4 == 0`, which gives 8 full-attention blocks (3, 7, …, 31).
 The other 24 blocks are Gated DeltaNet (GDN). The vocabulary has 248,320
 tokens. The LM head is tied to `token_embd.weight` (Q6_K), and Quick has no
@@ -69,20 +77,21 @@ tokens. The LM head is tied to `token_embd.weight` (Q6_K), and Quick has no
 | Tensor (per block) | Type in Quick | Shape `ne` | Used by |
 |---|---|---|---|
 | `attn_norm`, `post_attention_norm` | F32 | 2560 | `GlueOps.encodeRMSNorm` |
-| `attn_q` (full) | Q5_K | 2560 → 8192 (q and gate) | `QuantGEMM` |
+| `attn_q` (full) | Q4_K, Q5_K | 2560 → 8192 (q and gate) | `QuantGEMM` |
 | `attn_k`, `attn_v` (full) | Q5_K, Q6_K | 2560 → 1024 | `QuantGEMM` |
 | `attn_q_norm`, `attn_k_norm` (full) | F32 | 256 | `AttentionOp` |
 | `attn_output` (full) | Q4_K | 4096 → 2560 | `QuantGEMM` (accumulate into the residual) |
-| `attn_qkv` (GDN) | Q5_K and others | 2560 → 8192 | `QuantGEMM` |
-| `attn_gate` (GDN, z) | Q5_K and others | 2560 → 4096 | `QuantGEMM` |
+| `attn_qkv` (GDN) | Q5_K | 2560 → 8192 | `QuantGEMM` |
+| `attn_gate` (GDN, z) | Q5_K | 2560 → 4096 | `QuantGEMM` |
 | `ssm_alpha`, `ssm_beta` (GDN) | F16 | 2560 → 32 | `QuantGEMM` |
 | `ssm_conv1d`, `ssm_dt.bias`, `ssm_a`, `ssm_norm` (GDN) | F32 | — | `GDNOp` |
 | `ssm_out` (GDN) | Q8_0 | 4096 → 2560 | `QuantGEMM` (accumulate) |
-| `ffn_gate`, `ffn_up` | Q4_K / Q5_K | 2560 → 9216 | `QuantGEMM` |
-| `ffn_down` | Q6_K | 9216 → 2560 | `QuantGEMM` (accumulate) |
+| `ffn_gate`, `ffn_up` | Q4_K, Q5_K, IQ4_XS | 2560 → 9216 | `QuantGEMM` |
+| `ffn_down` | Q4_K, Q5_K, Q6_K | 9216 → 2560 | `QuantGEMM` (accumulate) |
 | `token_embd` | Q6_K | 2560 x 248320 | `QuantGEMM.encodeGetRows` and the LM head |
 
-Per-tensor types vary by layer; the manifest is authoritative. Across the
+Types vary by layer (the table lists the types seen across layers); the
+manifest is authoritative. Across the
 pack, Quick contains Q4_K (74 tensors), Q5_K (69), Q6_K (24), Q8_0 (24),
 IQ4_XS (10), F16 (48) and F32 (177). The fast `QuantGEMM` therefore covers
 Q4_K, Q5_K, Q6_K, Q8_0 and IQ4_XS, plus F16 for the two small GDN gate
@@ -106,7 +115,7 @@ has `rows == 1`, a verify step has 2 to 16 rows, and a prefill chunk has up to
 `QuantGEMM`, `AttentionOp` and `GDNOp` entry points differ
 (`encodeGEMV`/`encodeDecode`, `encodeVerify`, `encodePrefill`).
 
-1. The scheduler calls `kv.markStepStart` and `kv.reserve(rows:)`. It opens
+1. The scheduler calls `kv.beginStep(rows:)`. It opens
    one command buffer with one compute encoder and calls
    `ForwardModel.encodeStep`.
 2. **Embedding.** `QuantGEMM.encodeGetRows(token_embd, tokens)` writes the
@@ -138,8 +147,8 @@ has `rows == 1`, a verify step has 2 to 16 rows, and a prefill chunk has up to
    `Sampler.encodeChoice(logits) → TokenSlot` into the same encoder. Otherwise
    it reads the logits back and calls `Sampler.sample`.
 6. Commit. On a verify step, the scheduler reads the accepted count and calls
-   `kv.rollback(to:)` for the rejected rows. Rollback restores recurrent
-   state from verify-arena slot `r`.
+   `kv.rollback(to:)` for the rejected rows; rollback copies verify-arena
+   slot `r` into the live recurrent bank.
 
 A **prefill chunk** is one step with `rows = chunk` and `LogitRows.none`. The
 prompt's last chunk uses `.last`. Long prompts are processed as several
@@ -163,18 +172,20 @@ This is how per-op parity against the llama.cpp tensor dumps runs.
 |---|---|---|---|
 | Weights | `WeightStore` | Model load to unload | `weights.bin` is mapped read-only and wrapped with `makeBuffer(bytesNoCopy:)`. Every `QuantTensor` is an offset into that buffer. Never copied. |
 | KV arena, page table | `KVStore` | Sized by the `MemoryPlan` at load | One arena buffer holds every physical page, laid out per `KVPageGeometry` (64 tokens per page, `[attnLayer][K/V][kvHead][token][dim]`). Quick FP16 is 2 MiB per page, 32 KiB per token. |
-| Recurrent state | `KVStore` | Same | Per GDN layer, laid out per `RecurrentLayout`: F32 conv tail `[3][8192]`, then F32 S `[32][128][128]`. Quick uses 24 x ~2.1 MiB. |
+| Recurrent state | `KVStore` | Same | Two banks per GDN layer, each laid out per `RecurrentLayout`: F32 conv tail `[3][8192]`, then F32 S `[32][128][128]`. Quick uses 2 x 24 x ~2.1 MiB. A step reads one bank and writes the other (`GDNOp` `stateIn` / `stateOut`), so undoing the most recent step needs no copy. |
 | Verify arena | `KVStore` | Same | `maxVerifyRows` slots per GDN layer. In this program `maxVerifyRows` is 1 (plain decoding), so the arena exists but is unused. |
 | Prefix cache | `KVStore` | Across requests, bounded by the plan | A radix tree over token ids. Each node holds shared, ref-counted KV pages and a recurrent snapshot, in RAM or on the SSD tier. |
-| Activations and scratch | `ForwardModel` | Model lifetime, reused every step | Sized for `maxPrefillChunk` rows. Logits returned by `encodeStep` stay valid until the next `encodeStep`. |
+| Activations and scratch | `ForwardModel` | Model lifetime, reused every step | Sized for `maxPrefillChunk` rows and ring-buffered (depth >= 2) so two steps can be in flight. Logits returned by `encodeStep` stay valid until the second `encodeStep` after it. |
 | Token slots | Scheduler | Model lifetime | Shared-storage `u32` ring used by pipelined decode. |
 | Pipelines | Each op | Built in `prepare`, never while encoding | |
 
 A queued command buffer owns every buffer region it touches until it
-completes. The CPU must not rewrite a staging buffer, a token slot or a page
-a pending command buffer reads. This is the same slot-ownership invariant as
-the rest of Mference. With pipelining, the scheduler double-buffers the
-regions the CPU writes.
+completes. The CPU must not rewrite a staging buffer, a token slot, a page table or a
+page a pending command buffer reads. This is the same slot-ownership
+invariant as the rest of Mference. Up to two steps may be in flight, so each
+owner ring-buffers the CPU-written regions it owns: the model its staging,
+activations and logits, the store its page table and step parameters, the
+scheduler its token slots.
 
 `MemoryPlanner.resolve` runs before any allocation. It accounts for the
 weights mapped, the KV arena at the resolved context, recurrent state, the
@@ -184,6 +195,10 @@ One model is resident at a time.
 
 ## Threading and command buffers
 
+- **Concurrency pattern.** The scheduler receives the model, sampler,
+  strategy and store as `sending` arguments (`StepSchedulerFactory`) and is a
+  `final class ...: @unchecked Sendable` whose only cross-thread state is the
+  job hand-off and the cancellation flag.
 - **One generation thread per model.** The scheduler owns a dedicated
   high-QoS thread (`userInteractive`), not the Swift cooperative pool. A
   measured gap in the earlier engine program came from running llama.cpp
@@ -198,15 +213,16 @@ One model is resident at a time.
   and commits step t+1 while step t runs: step t+1's embedding reads step t's
   `TokenSlot`. The CPU reads the token afterwards for streaming and stop
   checks. If step t ends the generation, step t+1 has already run, so the
-  scheduler rolls it back (`rollback(to:)`). Output must stay byte-identical
-  to the sequential loop.
+  scheduler rolls it back (`rollback(to:)`, which can undo the most recent
+  step). Output must stay byte-identical to the sequential loop.
 - **Encode rules for ops.** An op encodes compute work only, into the encoder
   it is given. It never ends the encoder, commits, waits, or allocates while
   encoding.
 - **Cancellation** is checked between steps. A cancelled generation stops at a
   step boundary with the store consistent: the partial step is rolled back.
 - **Shaders.** Native kernels compile on demand through
-  `MetalContext.moduleLibrary(module:)`. The registered modules are:
+  `MetalContext.modulePipeline(module:name:constants:)`, which compiles each
+  module once per context and caches pipelines. The registered modules are:
   - `native_gemm`, `native_gemm_iq`, `native_attention`, `native_gdn`,
     `native_glue`, `native_reference` and `native_sampling`
   - Each is one file, `Metal/Native/<Area>/<module>.metal`.
@@ -250,6 +266,19 @@ runner:
 
 The catalog keeps the llama.cpp Quick entry as the fallback until the Phase 2
 exit gate. The product slot chooses the backend; the API does not change.
+
+## Pack layout
+
+`TileLayout` defines the byte permutation of GGUF blocks (row groups, block
+chunks, optional field planes) and `PackLayoutTable` freezes which layout each
+type uses. The table is the same on every GPU family, so a pack is portable.
+Version 1 is the identity for every type. A tiled layout enters the table
+only through a coordinator contract PR naming W1 and W2, backed by W2's
+benchmark evidence and a test that it fits every Quick and Deep tensor of
+that type. Packs record their layout per tensor, so older packs stay
+readable. `MferenceRepackCore` cannot import `Mference`, so the production
+writer mirrors `TileLayout`, `QuantBlockFormat`, `PackLayoutTable` and
+`PackManifest`, and a test in `MferenceTestsCore` pins the mirror.
 
 ## Glue
 

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Mference
 
@@ -74,6 +75,24 @@ struct NativeContractTests {
         #expect(config.fullAttentionLayers == [3, 7, 11, 15, 19, 23, 27, 31])
         #expect(config.gatedDeltaNetLayers.count == 24)
         #expect(config.ssmConvChannels == 8192)
+    }
+
+    @Test func deepCountsMainBlocksOnly() {
+        // Deep's GGUF: block_count 65 with nextn_predict_layers 1 -> 64 main blocks.
+        var deep = Self.quick
+        deep.blockCount = 65 - 1
+        deep.nextnPredictLayers = 1
+        #expect(deep.fullAttentionLayers.count == 16)
+        #expect(deep.gatedDeltaNetLayers.count == 48)
+        #expect(deep.fullAttentionLayers.last == 63)
+    }
+
+    @Test func packLayoutTableV1IsIdentityAndFallsBack() {
+        for type in Native.GGMLType.allCases {
+            #expect(Native.PackLayoutTable.layout(for: type) == .gguf)
+            #expect(Native.PackLayoutTable.layout(for: type, rows: 32, blocksPerRow: 10) == .gguf)
+        }
+        #expect(Native.PackLayoutTable.version == 1)
     }
 
     @Test func quickKVPageGeometry() {

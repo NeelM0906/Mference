@@ -82,10 +82,46 @@ extension Native {
         /// Optional per-op capture; nil in production.
         var tap: (any TensorTap)? { get set }
         /// Encode `plan` into `encoder`. The caller has already called
-        /// `kv.reserve(rows: plan.rows)`. Returns the logits (F32,
-        /// `[n x vocabSize]`, n = 0, 1 or rows per `plan.logits`), valid until
-        /// the next `encodeStep`; nil for `.none`. Host tokens are staged by the
-        /// model before it returns (the caller may commit right away).
+        /// `kv.beginStep(rows: plan.rows)`. Returns the logits (F32,
+        /// `[n x vocabSize]`, n = 0, 1 or rows per `plan.logits`); nil for
+        /// `.none`. Host tokens are staged before it returns, so the caller
+        /// may commit right away.
+        ///
+        /// Up to two steps may be in flight: activations, staging and logits
+        /// are ring-buffered (depth >= 2), so encoding step t+1 never rewrites
+        /// what step t reads or returned. Returned logits stay valid until the
+        /// second `encodeStep` after this one.
         func encodeStep(_ plan: StepPlan, encoder: MTLComputeCommandEncoder) throws -> TensorRef?
+    }
+
+    /// The components a `ForwardModel` is built from. Any mix of reference and
+    /// fast implementations must compose: this is how a Phase 1 component is
+    /// tested inside the otherwise all-reference `qwen35` path.
+    public struct ModelComponents {
+        public var device: MTLDevice
+        public var weights: any WeightStore
+        public var gemm: any QuantGEMM
+        public var attention: any AttentionOp
+        public var gdn: any GDNOp
+        public var glue: any GlueOps
+        public var kv: any KVStore
+        public init(device: MTLDevice, weights: any WeightStore, gemm: any QuantGEMM,
+                    attention: any AttentionOp, gdn: any GDNOp, glue: any GlueOps,
+                    kv: any KVStore) {
+            self.device = device
+            self.weights = weights
+            self.gemm = gemm
+            self.attention = attention
+            self.gdn = gdn
+            self.glue = glue
+            self.kv = kv
+        }
+    }
+
+    /// Builds a `ForwardModel` from components. The reference runner provides
+    /// one; it must use exactly the components given (no private shortcuts),
+    /// so swapping one component changes only that component's work.
+    public protocol ForwardModelFactory: AnyObject {
+        func make(_ components: ModelComponents, plan: MemoryPlan) throws -> any ForwardModel
     }
 }

@@ -17,10 +17,12 @@ extension Native {
         /// 0 disables penalties, -1 uses the whole history.
         public var repeatLastN: Int
         public var seed: UInt64?
+        /// Additive logit biases applied first (llama.cpp `logit_bias`).
+        public var logitBias: [Int32: Float]
 
         public init(temperature: Float, topK: Int?, topP: Float?, minP: Float,
                     repetitionPenalty: Float, presencePenalty: Float, frequencyPenalty: Float,
-                    repeatLastN: Int, seed: UInt64?) {
+                    repeatLastN: Int, seed: UInt64?, logitBias: [Int32: Float] = [:]) {
             self.temperature = temperature
             self.topK = topK
             self.topP = topP
@@ -30,6 +32,7 @@ extension Native {
             self.frequencyPenalty = frequencyPenalty
             self.repeatLastN = repeatLastN
             self.seed = seed
+            self.logitBias = logitBias
         }
 
         public init(_ config: GenerationConfig) {
@@ -39,16 +42,21 @@ extension Native {
                       repeatLastN: config.repeatLastN, seed: config.seed)
         }
 
-        /// Greedy: temperature 0 (or below).
-        public var isGreedy: Bool { temperature <= 0 }
+        /// llama.cpp ends the chain with greedy instead of a seeded draw only
+        /// when temperature is exactly 0 (see `docs/LLAMA_SAMPLING.md`).
+        public var isGreedy: Bool { temperature == 0 }
     }
 
-    /// The sampler chain in llama.cpp `common_sampler` order (penalties,
-    /// top-k, top-p, min-p, temperature, then the seeded draw; greedy argmax
-    /// at temperature 0, ties to the lowest token id).
+    /// The sampler chain exactly as llama.cpp `common_sampler` builds it at
+    /// the pin (`common/sampling.cpp`): logit bias, penalties, then the
+    /// truncation samplers in its order (top-k, top-p, min-p for the settings
+    /// `SamplingParams` carries; the others at their neutral defaults),
+    /// temperature, and finally greedy (temperature 0: the first maximum in
+    /// the chain's candidate order) or the seeded draw.
     ///
     /// Token choices must equal llama.cpp's on the same logits, history and
-    /// seed for every setting.
+    /// seed for every setting. The existing `MferenceEngine/LlamaSampler.swift`
+    /// shows the chain llama.cpp builds.
     public protocol Sampler: AnyObject {
         /// Start a generation: set params, clear history, seed the RNG.
         func reset(params: SamplingParams)

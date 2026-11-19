@@ -28,6 +28,9 @@ extension Native {
     /// Accuracy is judged against the reference and the golden per-op tensors
     /// within the tolerances in `docs/NATIVE_PARITY.md`.
     ///
+    /// Layouts: the fast implementation supports, for each type it handles,
+    /// the `PackLayoutTable` layout; the reference supports every layout.
+    ///
     /// Encoding rules (all ops): encode compute work only, into the given
     /// encoder; never end it, commit, wait, or allocate per call. Pipelines are
     /// built in `prepare` (or the initializer), not while encoding.
@@ -51,16 +54,11 @@ extension Native {
                            tokens: TokenSlot, output: TensorRef) throws
     }
 
-    /// Per-GPU-family kernel choices (Splash-style calibration table).
+    /// Per-GPU-family kernel choices (Splash-style calibration table). The
+    /// pack layout is not a calibration choice: it is `PackLayoutTable`, the
+    /// same on every family, so a pack is portable across Macs.
     public protocol KernelCalibration: AnyObject {
         var family: GPUFamilyClass { get }
-        /// The pack layout the fast kernels read for `type`. v1 rule: the
-        /// answer is the same on every family, so a pack is portable across
-        /// Macs; only `variant` may differ per family. The fast `QuantGEMM`
-        /// must support this layout on every family; the reference supports
-        /// every layout, `.gguf` included. A writer records the layout per
-        /// tensor and falls back to `.gguf` where it does not `fit`.
-        func preferredLayout(for type: GGMLType) -> TileLayout
         /// Opaque name of the kernel variant used for `type` at `rows`
         /// (recorded in benchmark tables).
         func variant(for type: GGMLType, rows: GEMMRowClass) -> String

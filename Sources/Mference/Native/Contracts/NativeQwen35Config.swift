@@ -3,7 +3,9 @@ extension Native {
     /// metadata (`qwen35.*` keys). Quick (Qwen3.5-4B UD-Q4_K_XL) values are
     /// given in brackets.
     public struct Qwen35Config: Codable, Equatable, Sendable {
-        /// `block_count` [32].
+        /// Main blocks: GGUF `block_count` minus `nextn_predict_layers`
+        /// (llama.cpp's `n_layer`) [32; Deep 64]. The `nextn` blocks follow at
+        /// indices `blockCount ..< blockCount + nextnPredictLayers`.
         public var blockCount: Int
         /// `embedding_length` [2560].
         public var hiddenSize: Int
@@ -84,7 +86,7 @@ extension Native {
             case gatedDeltaNet
         }
 
-        /// Kind of block `index` (0-based, `0..<blockCount`).
+        /// Kind of main block `index` (0-based, `0..<blockCount`).
         public func layerKind(_ index: Int) -> LayerKind {
             (index + 1) % fullAttentionInterval == 0 ? .fullAttention : .gatedDeltaNet
         }

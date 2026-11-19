@@ -1,3 +1,5 @@
+import Metal
+
 extension Native {
     /// One generation request as the scheduler sees it (already tokenized).
     public struct GenerationJob: Sendable {
@@ -86,6 +88,12 @@ extension Native {
     ///
     /// Exactness: output is byte-identical to a sequential, unpipelined loop
     /// over the same components.
+    ///
+    /// Concurrency: the model, sampler, strategy and store are not `Sendable`.
+    /// A scheduler takes them as `sending` arguments (`StepSchedulerFactory`),
+    /// confines them to its generation thread, and is itself a
+    /// `final class ...: @unchecked Sendable` whose only cross-thread state is
+    /// its job hand-off and cancellation flag (lock- or atomic-protected).
     public protocol StepScheduler: AnyObject, Sendable {
         /// Run `job` to completion; `onEvent` is called on the generation
         /// thread in order. Throws `NativeError.cancelled` only if cancelled
@@ -93,5 +101,12 @@ extension Native {
         func run(_ job: GenerationJob, onEvent: @escaping @Sendable (StepEvent) -> Void) async throws -> GenerationOutcome
         /// Request cancellation of the running job (thread-safe, idempotent).
         func cancel()
+    }
+
+    /// Builds a scheduler over the given components (reference or fast).
+    public protocol StepSchedulerFactory: AnyObject {
+        func make(model: sending any ForwardModel, sampler: sending any Sampler,
+                  strategy: sending any DecodingStrategy,
+                  queue: MTLCommandQueue) throws -> any StepScheduler
     }
 }

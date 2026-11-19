@@ -29,8 +29,12 @@ extension Native {
     ///
     /// Computation, matching llama.cpp `qwen35` at the pin:
     /// 1. per-head RMSNorm of q and k with `qNorm` / `kNorm` (eps from config)
-    /// 2. RoPE on the first `ropeDimensionCount` dims of q and k at each row's
-    ///    position (multi-section rope with identical text positions)
+    /// 2. RoPE on the first `ropeDimensionCount` (n) dims of q and k at each
+    ///    row's position p. llama.cpp uses IMROPE with `ropeSections`; for text
+    ///    the t/h/w positions are all p, which reduces to NEOX pairing: rotate
+    ///    pairs `(i, i + n/2)` for `i < n/2` by `p * ropeFreqBase^(-2i/n)`.
+    ///    `prepare` throws `unsupported` if `ropeSections[3] != 0` (a fourth
+    ///    section would not reduce this way)
     /// 3. append k (after 1-2) and v to the KV pages at the rows' positions
     ///    (F16, or INT8 + scale when the geometry says so)
     /// 4. causal GQA attention of each row over positions `0...its own`,

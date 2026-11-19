@@ -20,8 +20,10 @@ extension Native {
     ///   type F16 (`.f16`) or Int8 (`.int8`)
     /// - `.int8` only, after all values: scales
     ///   `[attnLayer][kv][kvHead][token]` F16, symmetric per (token, head):
-    ///   `x ≈ scale * q`, `scale = max|x| / 127`, `q = round(x / scale)`
-    ///   clamped to -127...127 (`scale = 0`, `q = 0` for an all-zero row)
+    ///   `s = Float16(max|x| / 127)` (computed in F32, then rounded to F16),
+    ///   `q = clamp(rint(x / Float(s)), -127, 127)` with `rint` rounding half
+    ///   to even, dequantized as `Float(s) * q`; `s = 0` and `q = 0` for an
+    ///   all-zero row
     ///
     /// `attnLayer` is the index among full-attention layers (0..<8 for Quick),
     /// not the block index. K is stored after q/k norm and RoPE; V as projected.
@@ -89,6 +91,8 @@ extension Native {
     /// `KVStore` (owns the memory, snapshots) and `GDNOp` (reads/updates it).
     ///
     /// - conv state: F32 `[convKernel - 1][convChannels]`, row 0 oldest
+    ///   (the transpose of llama.cpp's `[channels][convKernel - 1]`; golden
+    ///   state dumps are transposed before comparison)
     /// - delta-rule state S: F32 `[valueHeads][valueDim][keyDim]`, so that the
     ///   head output is `o[h][j] = sum_k S[h][j][k] * q[h][k]`
     ///
@@ -113,7 +117,7 @@ extension Native {
         public var layerBytes: Int { ssmOffset + ssmBytes }
     }
 
-    /// One GDN layer's live recurrent state in GPU memory.
+    /// One GDN layer's recurrent state (one bank) in GPU memory.
     public struct RecurrentStateRef {
         public var layout: RecurrentLayout
         public var buffer: MTLBuffer
@@ -171,12 +175,28 @@ extension Native {
     /// prefix cache. One model resident, one sequence at a time (multi-request
     /// batching is out of scope).
     ///
-    /// Positions: the sequence holds tokens `0..<length`. A step at position
-    /// `p` with `n` rows first calls `reserve(rows: n)` (which requires
-    /// `p == length` and grows `length` by `n`), encodes, and on rejection of
-    /// trailing rows calls `rollback(to:)`. Methods that take a command buffer
-    /// encode their own blit/compute work (no compute encoder may be open on
-    /// it) and are ordered with the step work by the scheduler.
+    /// Positions: the sequence holds tokens `0..<length`. A step with `n`
+    /// rows calls `beginStep(rows: n)`, which reserves positions
+    /// `length ..< length + n`, grows `length` and makes this step's state
+    /// views current (`pageTable()`, `recurrentState(gdnLayer:)`); then the
+    /// step is encoded and committed.
+    ///
+    /// Recurrent state is double-banked so no step copies it: a step reads
+    /// bank `input` and writes bank `output`, and `beginStep` makes the
+    /// previous step's `output` the next step's `input` (optimistic: the step
+    /// is assumed kept). Only the most recent step can be undone:
+    /// `rollback(to:)` with the last step's start restores its `input` bank
+    /// as live; with `start + r + 1` after a verify step it copies verify-arena
+    /// slot `r` into the live bank. That covers verify rejection and the one
+    /// pipelined step that runs past a stop.
+    ///
+    /// Pipelining: up to two steps may be in flight. Every CPU-written region a
+    /// step reads (page table, step parameters) is ring-buffered, so
+    /// `beginStep` for step t+1 never rewrites what step t reads.
+    ///
+    /// Methods that take a command buffer encode their own blit/compute work
+    /// (no compute encoder may be open on it); the scheduler orders them with
+    /// the step work.
     ///
     /// Exactness (D1, inside-Mference rule): restoring a prefix or rolling
     /// back and then continuing must produce logits byte-identical to a cold
@@ -189,24 +209,22 @@ extension Native {
         /// Maximum tokens (the resolved context of the `MemoryPlan`).
         var capacity: Int { get }
 
-        /// Make room for `rows` new tokens at `length` and extend `length`.
-        /// Throws `NativeError.stateOutOfRange` past `capacity`.
-        func reserve(rows: Int) throws
+        /// Begin a step of `rows` tokens at position `length` (pages allocated,
+        /// `length += rows`, state views switched to this step). Throws
+        /// `NativeError.stateOutOfRange` past `capacity`.
+        func beginStep(rows: Int) throws
         /// The page table covering `0..<length` for the current step.
         func pageTable() -> KVPageTable
-        /// Live recurrent state of GDN layer `gdnLayer` (index among GDN layers).
-        func recurrentState(gdnLayer: Int) -> RecurrentStateRef
+        /// Recurrent state banks of GDN layer `gdnLayer` (index among GDN
+        /// layers) for the current step: read `input`, write `output`.
+        func recurrentState(gdnLayer: Int) -> (input: RecurrentStateRef, output: RecurrentStateRef)
         /// Verify arena for GDN layer `gdnLayer`, `slots` >= the verify rows.
         func verifyArena(gdnLayer: Int) -> RecurrentVerifyArena
-        /// Drop tokens `position..<length`. For recurrent state, `position`
-        /// must be the start of the last step (restores the pre-step snapshot)
-        /// or `start + r + 1` after a verify step of rows starting at `start`
-        /// (copies verify slot `r` into the live state).
+        /// Drop tokens `position..<length`. `position` must be the start of
+        /// the most recent step, or `start + r + 1` for a verify step whose
+        /// rows start at `start` (keeps rows `0...r`).
         func rollback(to position: Int, commandBuffer: MTLCommandBuffer) throws
-        /// Snapshot the live recurrent state as "before the next step" (the
-        /// rollback point); called by the scheduler before each step.
-        func markStepStart(commandBuffer: MTLCommandBuffer) throws
-        /// Clear the sequence (length 0, zero recurrent state); cache kept.
+        /// Clear the sequence (length 0, zero recurrent state); prefix cache kept.
         func reset(commandBuffer: MTLCommandBuffer) throws
 
         /// Longest cached prefix of `tokens` with a recurrent snapshot.
@@ -274,8 +292,11 @@ extension Native {
     /// Resolves a `MemoryPlan` before any allocation.
     public protocol MemoryPlanner: AnyObject {
         /// Throws `NativeError.memoryBudgetExceeded` when it does not fit.
+        /// `activationBytes` is the runner's scratch at `maxPrefillChunk`
+        /// rows; `prefixCacheRAMBudget` caps the RAM prefix tier.
         func resolve(config: Qwen35Config, weightsMapped: UInt64, contextLength: Int,
                      precision: KVPrecision, maxVerifyRows: Int, maxPrefillChunk: Int,
+                     activationBytes: UInt64, prefixCacheRAMBudget: UInt64,
                      budget: UInt64) throws -> MemoryPlan
     }
 }
