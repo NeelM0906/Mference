@@ -49,6 +49,9 @@ public final class MailInboxModel {
     private var sent: [MailMessageSummary] = []
     private var assignment: [String: String] = [:]
     @ObservationIgnored private var lastMoved: (messageID: String, previous: String?)?
+    @ObservationIgnored private var sendToken = 0
+    /// Replies already sent from this window, so reopening one shows it sent.
+    @ObservationIgnored private var sentMessageIDs: Set<String> = []
 
     private let source: any MailSource
     private let store: MailBucketStore
@@ -224,7 +227,8 @@ public final class MailInboxModel {
         body = nil
         eventCard = nil
         draft = ""
-        draftState = .idle
+        sendToken += 1
+        draftState = sentMessageIDs.contains(message.messageID) ? .sent : .idle
         do {
             let body = try await source.body(of: message)
             guard selected?.messageID == message.messageID else { return }
@@ -340,18 +344,25 @@ public final class MailInboxModel {
 
     /// Only the Send button calls this.
     public func send() async {
-        guard canSend, let reply = replyDraft else { return }
+        guard canSend, let reply = replyDraft, let message = selected else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        sendToken += 1
+        let token = sendToken
         draftState = .sending
+        let outcome: DraftState
         do {
             var outgoing = reply
             outgoing.body = text
             try await sender.send(outgoing)
-            draftState = .sent
+            outcome = .sent
+            sentMessageIDs.insert(message.messageID)
         } catch let error as MailSendError {
-            draftState = .failed(error.userMessage)
+            outcome = .failed(error.userMessage)
         } catch {
-            draftState = .failed("Mail could not send the reply.")
+            outcome = .failed("Mail could not send the reply.")
         }
+        // Another message may be open by now: its draft is not this one.
+        guard selected?.messageID == message.messageID, token == sendToken else { return }
+        draftState = outcome
     }
 }
