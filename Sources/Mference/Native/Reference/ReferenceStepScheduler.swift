@@ -132,7 +132,7 @@ extension Native {
         /// Encode and run one step; returns its logits view.
         private func step(_ plan: StepPlan) throws -> (TensorRef?, MTLCommandBuffer, Double) {
             let cb = try makeCommandBuffer()
-            try model.kv.beginStep(rows: plan.rows)
+            try model.kv.beginStep(rows: plan.rows, kind: plan.kind)
             guard let encoder = cb.makeComputeCommandEncoder() else { throw NativeError.resource("compute encoder") }
             let encodeStart = DispatchTime.now().uptimeNanoseconds
             let logits = try model.encodeStep(plan, encoder: encoder)

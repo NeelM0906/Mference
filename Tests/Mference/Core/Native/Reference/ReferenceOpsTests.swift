@@ -58,7 +58,7 @@ struct ReferenceOpsTests {
         // 70 rows of prefill crosses a page; then decode, then a verify of 3.
         for (kind, rows) in [(Native.StepKind.prefill, 70), (.decode, 1), (.verify, 3), (.prefill, 1)] {
             let start = kv.length
-            try kv.beginStep(rows: rows)
+            try kv.beginStep(rows: rows, kind: kind)
             let qg = (0..<rows * 256).map { _ in rng.unit() * 2 }
             let k = (0..<rows * 64).map { _ in rng.unit() * 2 }
             let v = (0..<rows * 64).map { _ in rng.unit() * 2 }
@@ -127,7 +127,7 @@ struct ReferenceOpsTests {
         let ones = RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: H))
         let weights = Native.GDNLayerWeights(conv1d: conv, dtBias: ones, a: ones,
                                              norm: RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: d)))
-        try kv.beginStep(rows: 1)
+        try kv.beginStep(rows: 1, kind: .decode)
         let banks = kv.recurrentState(gdnLayer: 0)
         func zeros(_ cols: Int) -> Native.TensorRef {
             RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: cols), rows: 1, cols: cols)
@@ -179,7 +179,7 @@ struct ReferenceOpsTests {
             RefTest.maxRelativeError(x.conv, y.conv) < 1e-5 && RefTest.maxRelativeError(x.ssm, y.ssm) < 1e-4
         }
         for (kind, rows) in [(Native.StepKind.prefill, 9), (.decode, 1), (.verify, 4), (.prefill, 2)] {
-            try kv.beginStep(rows: rows)
+            try kv.beginStep(rows: rows, kind: kind)
             let qkv = (0..<rows * C).map { _ in rng.unit() * 2 }
             let z = (0..<rows * H * d).map { _ in rng.unit() * 2 }
             let alpha = (0..<rows * H).map { _ in rng.unit() * 2 }

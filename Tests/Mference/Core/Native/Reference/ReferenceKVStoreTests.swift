@@ -53,11 +53,11 @@ struct ReferenceKVStoreTests {
         let ctx = try MetalContext()
         let kv = try Self.store(device: ctx.device)
         #expect(throws: Native.NativeError.self) { try kv.rollback(to: 0, commandBuffer: ctx.queue.makeCommandBuffer()!) }
-        try kv.beginStep(rows: 10)
+        try kv.beginStep(rows: 10, kind: .prefill)
         let s1 = kv.recurrentState(gdnLayer: 1)
         #expect(s1.input.offset != s1.output.offset)
         Self.fill(s1.output, 1)
-        try kv.beginStep(rows: 1)
+        try kv.beginStep(rows: 1, kind: .decode)
         let s2 = kv.recurrentState(gdnLayer: 1)
         #expect(s2.input.offset == s1.output.offset && s2.output.offset == s1.input.offset)
         Self.fill(s2.output, 2)
@@ -65,7 +65,7 @@ struct ReferenceKVStoreTests {
         try Self.sync(ctx.queue) { try kv.rollback(to: 10, commandBuffer: $0) }
         #expect(kv.length == 10)
         #expect(throws: Native.NativeError.self) { try kv.rollback(to: 10, commandBuffer: ctx.queue.makeCommandBuffer()!) }
-        try kv.beginStep(rows: 4)
+        try kv.beginStep(rows: 4, kind: .verify)
         let s3 = kv.recurrentState(gdnLayer: 1)
         #expect(s3.input.offset == s1.output.offset)
         #expect(Self.first(s3.input) == 1)
@@ -79,16 +79,38 @@ struct ReferenceKVStoreTests {
         try Self.sync(ctx.queue) { try kv.rollback(to: 12, commandBuffer: $0) }
         #expect(kv.length == 12)
         #expect(Self.first(s3.output) == 11)
-        try kv.beginStep(rows: 1)
+        try kv.beginStep(rows: 1, kind: .decode)
         #expect(kv.recurrentState(gdnLayer: 1).input.offset == s3.output.offset)
-        #expect(throws: Native.NativeError.self) { try kv.beginStep(rows: 200) }
+        #expect(throws: Native.NativeError.self) { try kv.beginStep(rows: 200, kind: .prefill) }
+    }
+
+    /// Keeping only some rows of a step is legal only after a verify step;
+    /// after a prefill (or a kind-less step) the arena slots are stale and the
+    /// store must refuse instead of restoring one.
+    @Test func partialRollbackOnlyAfterVerify() throws {
+        let ctx = try MetalContext()
+        let kv = try Self.store(device: ctx.device)
+        try kv.beginStep(rows: 4, kind: .prefill)
+        #expect(throws: Native.NativeError.self) {
+            try kv.rollback(to: 2, commandBuffer: ctx.queue.makeCommandBuffer()!)
+        }
+        try Self.sync(ctx.queue) { try kv.rollback(to: 4, commandBuffer: $0) }
+        #expect(kv.length == 4)
+        try kv.beginStep(rows: 3)
+        #expect(throws: Native.NativeError.self) {
+            try kv.rollback(to: 5, commandBuffer: ctx.queue.makeCommandBuffer()!)
+        }
+        try Self.sync(ctx.queue) { try kv.rollback(to: 4, commandBuffer: $0) }
+        try kv.beginStep(rows: 3, kind: .verify)
+        try Self.sync(ctx.queue) { try kv.rollback(to: 5, commandBuffer: $0) }
+        #expect(kv.length == 5)
     }
 
     @Test func resetAndPrefixCache() throws {
         let ctx = try MetalContext()
         let kv = try Self.store(device: ctx.device)
         let tokens: [Int32] = Array(0..<70)
-        try kv.beginStep(rows: 70)
+        try kv.beginStep(rows: 70, kind: .prefill)
         Self.fill(kv.recurrentState(gdnLayer: 0).output, 3)
         // Mark K of token 65 (logical page 1).
         let table = kv.pageTable()
@@ -104,7 +126,7 @@ struct ReferenceKVStoreTests {
         #expect(match.handle == handle && match.length == 70)
         try Self.sync(ctx.queue) { try kv.attachPrefix(match, commandBuffer: $0) }
         #expect(kv.length == 70)
-        try kv.beginStep(rows: 1)
+        try kv.beginStep(rows: 1, kind: .decode)
         #expect(Self.first(kv.recurrentState(gdnLayer: 0).input) == 3)
         let t2 = kv.pageTable()
         let p1 = Int(t2.pageTable.contents().advanced(by: t2.pageTableOffset + 4).load(as: UInt32.self))
@@ -116,7 +138,7 @@ struct ReferenceKVStoreTests {
     @Test func prefixBudgetIsEnforced() throws {
         let ctx = try MetalContext()
         let kv = try Self.store(prefixBudget: 1024, device: ctx.device)
-        try kv.beginStep(rows: 3)
+        try kv.beginStep(rows: 3, kind: .prefill)
         #expect(throws: Native.NativeError.self) {
             _ = try Self.syncResult(ctx.queue) { try kv.insertPrefix([1, 2, 3], commandBuffer: $0) }
         }

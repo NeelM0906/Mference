@@ -61,7 +61,7 @@ struct ReferenceModelTests {
     static func step(_ m: Native.ReferenceForwardModel, _ ctx: MetalContext, kind: Native.StepKind,
                      tokens: [Int32], logits: Native.LogitRows) throws -> [Float] {
         let start = m.kv.length
-        try m.kv.beginStep(rows: tokens.count)
+        try m.kv.beginStep(rows: tokens.count, kind: kind)
         var out: Native.TensorRef?
         try RefTest.run(ctx) { enc in
             out = try m.encodeStep(Native.StepPlan(kind: kind, startPosition: start, rows: tokens.count,
