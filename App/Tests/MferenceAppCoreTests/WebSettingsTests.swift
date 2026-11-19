@@ -70,9 +70,52 @@ import Testing
         #expect(web.makeToolbox(webEnabled: true) != nil)
     }
 
-    @Test func offlineModeWithholdsTools() {
-        let web = Self.web(Self.settings(webOn: true, offline: true))
+    @Test func offlineWithWebOnOffersNoToolAndStartsNothing() async throws {
+        let settings = Self.settings(webOn: true, offline: true)
+        let web = Self.web(settings)
         #expect(web.makeToolbox(webEnabled: true) == nil)
+        #expect(web.webUnavailableReason == "Offline mode is on")
+        web.webUsageChanged(enabled: true)
+        try await Task.sleep(for: .milliseconds(200))
+        let process = try #require(web.process)
+        #expect(await process.state == .stopped, "SearXNG must not start in offline mode")
+
+        // The chat's Web toggle shows the reason and stays off, with no
+        // consent prompt; an answer gets no tools.
+        let service = ScriptedEngineService(replies: [.init(content: "Answer.")])
+        let chat = ChatViewModel(service: service, store: ConversationStore(container: try AppModelContainer.inMemory()),
+                                 tools: web)
+        #expect(chat.webBlockedReason == "Offline mode is on")
+        chat.setWebEnabled(true)
+        #expect(!chat.webEnabled)
+        #expect(!chat.webConsentRequested)
+        chat.draft = "Q"
+        chat.send()
+        await chat.waitUntilIdle()
+        #expect(service.requests.first?.options.tools.isEmpty == true)
+
+        // Back online, the same chat can turn web on without asking again.
+        settings.offlineMode = false
+        #expect(chat.webBlockedReason == nil)
+        chat.setWebEnabled(true)
+        #expect(chat.webEnabled)
+        #expect(web.makeToolbox(webEnabled: true) != nil)
+    }
+
+    @Test func goingOfflineStopsSearXNG() async throws {
+        let settings = Self.settings(webOn: true)
+        let web = Self.web(settings)
+        let process = try #require(web.process)
+        settings.offlineMode = true
+        let off = WebError.searchUnavailable("web search is off for now.")
+        var refused = false
+        for _ in 0..<200 where !refused {
+            do { _ = try await process.ensureRunning() } catch let error as WebError where error == off {
+                refused = true
+            } catch {}
+            if !refused { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(refused, "SearXNG still startable after offline mode turned on")
     }
 
     @Test func turningTheSwitchOffStopsSearXNG() async throws {

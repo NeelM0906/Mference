@@ -278,6 +278,11 @@ public final class WebAnswers: ChatToolboxProvider {
 
     public var needsWebConsent: Bool { !settings.webSearchEnabled }
 
+    /// Offline mode blocks web search whatever the switch says.
+    public var webUnavailableReason: String? {
+        settings.offlineMode ? "Offline mode is on" : nil
+    }
+
     public func grantWebConsent() {
         settings.webSearchEnabled = true
     }
