@@ -31,4 +31,12 @@ import Testing
         let renderer = ImageRenderer(content: CalendarView().frame(width: 600, height: 600))
         #expect(renderer.nsImage != nil)
     }
+
+    @Test func editingKeepsTheExactDurationUnlessTheLengthChanges() {
+        let start = Date(timeIntervalSince1970: 1_790_000_000)
+        let twoMinutes = CalendarEvent(id: "short", title: "Stand", start: start, end: start.addingTimeInterval(125))
+        let moved = start.addingTimeInterval(3_600)
+        #expect(EventEditForm.end(for: twoMinutes, start: moved, minutes: nil) == moved.addingTimeInterval(125))
+        #expect(EventEditForm.end(for: twoMinutes, start: moved, minutes: 30) == moved.addingTimeInterval(1_800))
+    }
 }
