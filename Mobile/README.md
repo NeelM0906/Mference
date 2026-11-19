@@ -9,11 +9,14 @@ open iPhone Duo, two panes split at the fold).
 | App target | `MferenceMobile.xcodeproj`, `MferenceMobile/` | Thin `@main` over `MferenceMobileUI`. Bundle ID `ai.mference.ios`, product name Mference. Copies the bundled Geist faces from `App/Resources/Fonts`. |
 | Screens | `MferenceMobileKit/Sources/MferenceMobileUI` | SwiftUI. `MobileRootView` picks tabs (iPhone, Duo closed) or two panes (window 700 pt or wider: Duo open). |
 | Phone services | `MferenceMobileKit/Sources/MferenceMobileCore` | No views: model storage and download, the Mac link, camera, Files export, memory budget. |
+| Sample models | `MferenceMobileKit/Sources/MferenceMobileSamples` | The sample screen models behind previews, tests and (for now) the skeleton build. Never imported by the UI or core targets (tests excepted); not shipped at C-final. |
 | Link protocol | `App/Sources/MferenceLink` | The iPhone to Mac messages, shared with the Mac app. |
 | Build settings | `Config/MferenceMobile.xcconfig` | Simulator builds arm64 only; includes the gitignored `Config/Signing.local.xcconfig`. |
 | Tokens | `App/Sources/MferenceDesign` | Shared with the Mac app. `MFColor` unchanged; phone type and control sizes are `MFPhoneFont` / `MFPhoneMetrics` (`PhoneTokens.swift`). |
 
-This first slice runs on **sample data and scripted replies**. It never loads
+This first slice runs on **sample data and scripted replies**: Calendar and
+Scan on the sample screen models in `MferenceMobileSamples`, Chat on scripted
+replies until its screen model lands. It never loads
 a model, and pairing with the Mac is simulated. Web search on the phone is
 labelled "Web search via paired Mac": searches will go through SearXNG on the
 paired Mac (not wired yet).

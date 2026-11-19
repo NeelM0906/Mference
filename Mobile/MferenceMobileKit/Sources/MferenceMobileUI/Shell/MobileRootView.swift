@@ -43,7 +43,7 @@ public struct MobileRootView: View {
                 }
             }
             .sheet(isPresented: $shell.isAddingEvent) {
-                NewEventSheet(model: model).phoneSheetDetents([.medium])
+                NewEventSheet(model: model.calendar).phoneSheetDetents([.medium])
             }
             .environment(\.phoneSheetsBelowFold, layout.sheetsBelowFold)
             .environment(shell)
@@ -90,10 +90,10 @@ struct CompactShell: View {
                 column { ChatScreen(model: model) }
             }
             Tab(MobileSection.calendar.title, systemImage: MobileSection.calendar.systemImage, value: MobileSection.calendar) {
-                column { CalendarScreen(model: model) }
+                column { CalendarScreen(model: model.calendar) }
             }
             Tab(MobileSection.scan.title, systemImage: MobileSection.scan.systemImage, value: MobileSection.scan) {
-                column { ScanScreen(model: model) }
+                column { ScanScreen(model: model.scan) }
             }
             Tab(MobileSection.settings.title, systemImage: MobileSection.settings.systemImage, value: MobileSection.settings) {
                 column { SettingsScreen(model: model) }
@@ -151,14 +151,14 @@ struct TwoPaneShell: View {
             case .calendar:
                 ScrollView {
                     VStack(alignment: .leading, spacing: MFSpacing.l) {
-                        MonthGridView(model: model)
-                        TodoListView(model: model)
+                        MonthGridView(model: model.calendar)
+                        TodoListView(model: model.calendar)
                     }
                     .padding(.bottom, MFSpacing.l)
                 }
                 .scrollIndicators(.hidden)
             case .scan:
-                ScanCameraView(model: model)
+                ScanCameraView(model: model.scan)
                     .clipShape(RoundedRectangle(cornerRadius: MFRadius.l))
                     .padding(.bottom, MFSpacing.s)
             case .settings:
@@ -212,15 +212,15 @@ struct TwoPaneShell: View {
             }
         case .calendar:
             VStack(spacing: 0) {
-                CalendarHeader(model: model,
-                               title: model.selectedDay.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()),
+                CalendarHeader(model: model.calendar,
+                               title: model.calendar.selectedDay.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()),
                                isAddingEvent: $shell.isAddingEvent, titleFont: MFPhoneFont.title)
                     .padding(.horizontal, MFPhoneMetrics.paneMargin)
                     .padding(.top, MFSpacing.s)
-                DayTimeline(model: model, margin: MFPhoneMetrics.paneMargin)
+                DayTimeline(model: model.calendar, margin: MFPhoneMetrics.paneMargin)
                     .safeAreaInset(edge: .bottom) {
-                        if model.suggestion != nil {
-                            SuggestionBanner(model: model)
+                        if model.calendar.suggestion != nil {
+                            SuggestionBanner(model: model.calendar)
                                 .padding(.horizontal, MFSpacing.m)
                                 .padding(.bottom, MFSpacing.s)
                         }
@@ -228,13 +228,13 @@ struct TwoPaneShell: View {
             }
         case .scan:
             ScrollView {
-                if model.scanPhase == .viewfinder {
+                if model.scan.scanPhase == .viewfinder {
                     Text("Point the camera at a receipt, a document, a card or a whiteboard. The fields appear here.")
                         .font(MFPhoneFont.callout)
                         .foregroundStyle(MFColor.secondary)
                         .padding(.top, MFSpacing.xxl)
                 } else {
-                    ScanFieldsView(model: model, compact: false)
+                    ScanFieldsView(model: model.scan, compact: false)
                         .padding(.top, MFSpacing.m)
                 }
             }
