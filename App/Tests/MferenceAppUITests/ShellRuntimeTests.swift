@@ -9,7 +9,7 @@ import Testing
 @Suite struct ShellRuntimeTests {
     @Test func chatAndScreensShareTheOneEngine() {
         let services = AppServices.preview()
-        let runtime = AppRuntime(services: services, web: WebAnswers(runtime: nil))
+        let runtime = AppRuntime(services: services, web: WebAnswers(settings: services.settings, runtime: nil, legacyStore: InMemorySettingsStore()))
         #expect(runtime.services === services)
         #expect((runtime.chat.service as AnyObject) === (services.engine as AnyObject))
         #expect(runtime.screenModels.library != nil && runtime.screenModels.memory != nil

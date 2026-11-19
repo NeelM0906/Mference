@@ -127,11 +127,12 @@ do {
     let loadTime = loadStarted.duration(to: .now)
     result.loadSeconds = Double(loadTime.components.seconds) + Double(loadTime.components.attoseconds) / 1e18
     if webMode {
-        // An isolated defaults suite: the run turns web search on without
-        // touching the person's own setting.
-        let settings = WebSearchSettings(suiteName: "ai.mference.checkpoint")
-        settings.isEnabled = true
-        let web = WebAnswers(settings: settings)
+        // In-memory settings: the run turns web search on (and offline mode
+        // off) without touching the person's own settings.
+        let settings = AppSettings(store: InMemorySettingsStore())
+        settings.webSearchEnabled = true
+        settings.offlineMode = false
+        let web = WebAnswers(settings: settings, legacyStore: InMemorySettingsStore())
         guard web.process != nil else {
             throw WebError.searchUnavailable("no SearXNG runtime; run App/Scripts/searxng/prepare.sh --offline")
         }

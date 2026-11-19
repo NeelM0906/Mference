@@ -39,4 +39,11 @@ public protocol ChatToolboxProvider: Sendable {
     @MainActor var needsWebConsent: Bool { get }
     /// Records the person's agreement (Settings > Privacy shows it).
     @MainActor func grantWebConsent()
+    /// Why web search cannot run right now even with consent ("Offline mode
+    /// is on"), shown on the chat's Web toggle; nil when it can.
+    @MainActor var webUnavailableReason: String? { get }
+}
+
+extension ChatToolboxProvider {
+    public var webUnavailableReason: String? { nil }
 }

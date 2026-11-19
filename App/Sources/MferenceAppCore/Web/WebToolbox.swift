@@ -66,6 +66,9 @@ extension ToolJSON {
 public final class WebToolbox: ChatToolbox {
     public let spec: WebAnswersSpec
     private let searchBase: (@Sendable () async throws -> URL)?
+    /// Re-read before every tool call: Settings or offline mode may have
+    /// turned web search off while this answer was being written.
+    private let isAllowed: (@Sendable () async -> Bool)?
     private let http: WebHTTP
     private let client: SearXNGClient
     private let reader: PageReader
@@ -90,7 +93,9 @@ public final class WebToolbox: ChatToolbox {
 
     /// `searchBase` returns the running SearXNG's base URL (starting it if
     /// needed); nil when this build has no SearXNG, and the tools say so.
-    public init(spec: WebAnswersSpec, http: WebHTTP, searchBase: (@Sendable () async throws -> URL)?) {
+    public init(spec: WebAnswersSpec, http: WebHTTP, searchBase: (@Sendable () async throws -> URL)?,
+                isAllowed: (@Sendable () async -> Bool)? = nil) {
+        self.isAllowed = isAllowed
         self.spec = spec
         self.searchBase = searchBase
         self.http = http
@@ -103,6 +108,9 @@ public final class WebToolbox: ChatToolbox {
     public var definitions: [ToolDefinition] { spec.tools }
 
     public func run(_ call: ToolCall) async -> ToolOutcome {
+        if let isAllowed, !(await isAllowed()) {
+            return failure("Web search was turned off (Settings or offline mode); answer without the web.")
+        }
         switch call.name {
         case "web_search":
             guard let raw = call.arguments[string: "query"]?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -213,30 +221,20 @@ public final class WebToolbox: ChatToolbox {
     }
 }
 
-/// The person's opt-in for web search (L7: off until turned on). Settings >
-/// Privacy shows the same switch.
-public struct WebSearchSettings: Sendable {
-    public static let enabledKey = "web.searchEnabled"
-    private let suiteName: String?
-
-    /// `suiteName` nil: the app's standard defaults.
-    public init(suiteName: String? = nil) {
-        self.suiteName = suiteName
-    }
-
-    private var defaults: UserDefaults { suiteName.flatMap(UserDefaults.init(suiteName:)) ?? .standard }
-
-    public var isEnabled: Bool {
-        get { defaults.bool(forKey: Self.enabledKey) }
-        nonmutating set { defaults.set(newValue, forKey: Self.enabledKey) }
-    }
-}
-
-/// Gives the chat its web tools and runs SearXNG only while some chat has web
-/// on. One per app; `shutdown()` on quit.
+/// Gives the chat its web tools and runs SearXNG only while web search is on.
+/// One per app; `shutdown()` on quit.
+///
+/// The master switch is `AppSettings.webSearchEnabled` (Settings > Privacy,
+/// the person's consent, L7), together with offline mode
+/// (`AppSettings.isWebSearchActive`). A chat's own Web toggle works only while
+/// that is on; with it off, turning a chat's Web on asks for consent, and
+/// agreeing turns the master switch on.
 @MainActor
 public final class WebAnswers: ChatToolboxProvider {
-    public let settings: WebSearchSettings
+    /// The pre-AppSettings key, read once and removed (see `migrateLegacyConsent`).
+    public static let legacyEnabledKey = "web.searchEnabled"
+
+    public let settings: AppSettings
     public let process: SearXNGProcess?
     private let spec: WebAnswersSpec?
     private let protocolClasses: [AnyClass]?
@@ -244,14 +242,18 @@ public final class WebAnswers: ChatToolboxProvider {
     /// Lives as long as the app (one `WebAnswers` per app).
     private var terminationObserver: (any NSObjectProtocol)?
 
-    public init(settings: WebSearchSettings = WebSearchSettings(),
+    /// `legacyStore` is where an older build kept its own web switch
+    /// (`UserDefaults.standard` in the app).
+    public init(settings: AppSettings,
                 runtime: SearXNGRuntime? = SearXNGRuntime.locate(),
-                protocolClasses: [AnyClass]? = nil) {
+                protocolClasses: [AnyClass]? = nil,
+                legacyStore: any SettingsStore = UserDefaults.standard) {
         self.settings = settings
         let process = runtime.map { SearXNGProcess(runtime: $0) }
         self.process = process
         self.spec = try? WebAnswersSpec.load()
         self.protocolClasses = protocolClasses
+        Self.migrateLegacyConsent(from: legacyStore, into: settings)
         // Belt and braces for quit: the shell awaits `shutdown()`; if the app
         // terminates without it, SearXNG still gets SIGTERM synchronously.
         // (`NSApplication.willTerminateNotification`, by name: Core does not
@@ -260,27 +262,56 @@ public final class WebAnswers: ChatToolboxProvider {
             forName: Notification.Name("NSApplicationWillTerminateNotification"), object: nil, queue: nil) { _ in
             process?.terminateNow()
         }
+        followMasterSwitch()
     }
 
-    public var needsWebConsent: Bool { !settings.isEnabled }
+    /// An earlier build stored its own consent under `web.searchEnabled`. If
+    /// the person had turned it on, carry that over once; then drop the key.
+    static func migrateLegacyConsent(from store: any SettingsStore, into settings: AppSettings) {
+        guard let legacy = store.object(forKey: legacyEnabledKey) as? Bool else { return }
+        if legacy, !settings.webSearchEnabled { settings.webSearchEnabled = true }
+        store.set(nil, forKey: legacyEnabledKey)
+    }
+
+    /// Stops SearXNG whenever web search stops being active (switched off in
+    /// Settings, or offline mode turned on).
+    private func followMasterSwitch() {
+        let active = withObservationTracking {
+            settings.isWebSearchActive
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.followMasterSwitch() }
+        }
+        if !active, let process { Task { await process.stop() } }
+    }
+
+    public var needsWebConsent: Bool { !settings.webSearchEnabled }
+
+    /// Offline mode blocks web search whatever the switch says.
+    public var webUnavailableReason: String? {
+        settings.offlineMode ? "Offline mode is on" : nil
+    }
 
     public func grantWebConsent() {
-        settings.isEnabled = true
+        settings.webSearchEnabled = true
     }
 
     public func makeToolbox(webEnabled: Bool) -> (any ChatToolbox)? {
-        guard webEnabled, settings.isEnabled, let spec else { return nil }
+        guard webEnabled, settings.isWebSearchActive, let spec else { return nil }
         let http = WebHTTP(allowlist: WebAllowlist(), protocolClasses: protocolClasses)
+        let settings = self.settings
+        let isAllowed: @Sendable () async -> Bool = { await MainActor.run { settings.isWebSearchActive } }
         var searchBase: (@Sendable () async throws -> URL)?
         if let process {
-            searchBase = { try await process.ensureRunning() }
+            // Allowed by the check above (run() re-reads Settings first), so
+            // a stop from an earlier off/offline phase does not block it.
+            searchBase = { try await process.ensureRunning(resumingAfterStop: true) }
         }
-        return WebToolbox(spec: spec, http: http, searchBase: searchBase)
+        return WebToolbox(spec: spec, http: http, searchBase: searchBase, isAllowed: isAllowed)
     }
 
     public func webUsageChanged(enabled: Bool) {
         guard let process else { return }
-        if enabled, settings.isEnabled {
+        if enabled, settings.isWebSearchActive {
             Task { await process.warmUp() }
         } else if !enabled {
             Task { await process.stop() }

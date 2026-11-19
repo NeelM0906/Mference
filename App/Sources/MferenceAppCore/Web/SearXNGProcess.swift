@@ -85,7 +85,11 @@ public actor SearXNGProcess {
     }
 
     /// The base URL of a healthy SearXNG, starting or restarting it if needed.
-    public func ensureRunning() async throws -> URL {
+    /// `resumingAfterStop`: the caller has just checked that web search is
+    /// on for it (a chat's toolbox, which re-reads Settings before every
+    /// call), so a previous stop does not block this start.
+    public func ensureRunning(resumingAfterStop: Bool = false) async throws -> URL {
+        if resumingAfterStop { stoppedByPerson = false }
         guard !stoppedByPerson else { throw Self.webOff }
         if case .running(let url) = state, process?.isRunning == true, await Self.isHealthy(url) {
             return url

@@ -216,7 +216,11 @@ public final class ChatViewModel {
         warmUp(model)
     }
 
+    /// Why the Web toggle cannot turn on now (offline mode), if it cannot.
+    public var webBlockedReason: String? { tools?.webUnavailableReason }
+
     public func setWebEnabled(_ enabled: Bool) {
+        if enabled, webBlockedReason != nil { return }
         if enabled, tools?.needsWebConsent == true {
             webConsentRequested = true
             return

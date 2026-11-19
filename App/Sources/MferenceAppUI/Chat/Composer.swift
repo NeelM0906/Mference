@@ -10,7 +10,7 @@ struct Composer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.s) {
-            TextField(model.webEnabled ? "Ask anything. Web searches go out through SearXNG."
+            TextField(model.webEnabled && model.webBlockedReason == nil ? "Ask anything. Web searches go out through SearXNG."
                                         : "Ask anything. It stays on this Mac.",
                       text: $model.draft, axis: .vertical)
                 .textFieldStyle(.plain)
@@ -70,24 +70,28 @@ struct Composer: View {
     }
 
     private var webChip: some View {
-        Button {
+        let blocked = model.webBlockedReason
+        let isOn = model.webEnabled && blocked == nil
+        return Button {
             model.setWebEnabled(!model.webEnabled)
         } label: {
             HStack(spacing: MFSpacing.xs + 1) {
-                Image(systemName: "globe").imageScale(.small)
-                Text(model.webEnabled ? "Web on" : "Web off")
+                Image(systemName: blocked == nil ? "globe" : "wifi.slash").imageScale(.small)
+                Text(blocked ?? (isOn ? "Web on" : "Web off"))
             }
             .font(MFFont.chip)
-            .foregroundStyle(model.webEnabled ? MFColor.accent : MFColor.secondary)
+            .foregroundStyle(isOn ? MFColor.accent : (blocked == nil ? MFColor.secondary : MFColor.tertiary))
             .padding(.horizontal, MFSpacing.s + 1)
             .frame(height: ChatMetrics.controlHeight)
-            .background(model.webEnabled ? MFColor.accentFill : MFColor.fill, in: Capsule())
+            .background(isOn ? MFColor.accentFill : MFColor.fill, in: Capsule())
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(blocked != nil)
         .accessibilityLabel("Web search")
-        .accessibilityValue(model.webEnabled ? "On" : "Off")
-        .accessibilityHint("Searches go through SearXNG on this Mac; pages are fetched from this Mac")
+        .accessibilityValue(blocked ?? (isOn ? "On" : "Off"))
+        .accessibilityHint(blocked == nil ? "Searches go through SearXNG on this Mac; pages are fetched from this Mac"
+                                          : "Turn off offline mode in Settings to search the web")
     }
 
     private var modelButton: some View {
