@@ -14,6 +14,7 @@
 /* Begin PBXFileReference section */
 		A1000000000000000000F001 /* Mference.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mference.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000000000000000000F002 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Fonts; path = ../App/Resources/Fonts; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000F005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = Config/Info.plist; sourceTree = SOURCE_ROOT; };
 		A1000000000000000000F004 /* MferenceMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = MferenceMobile.xcconfig; path = Config/MferenceMobile.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -43,6 +44,7 @@
 				A1000000000000000000F003 /* MferenceMobile */,
 				A1000000000000000000F002 /* Fonts */,
 				A1000000000000000000F004 /* MferenceMobile.xcconfig */,
+				A1000000000000000000F005 /* Info.plist */,
 				A1000000000000000000E002 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -187,6 +189,11 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Mference;
+				INFOPLIST_FILE = Config/Info.plist;
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Mference shows your events in Calendar and changes them only when you approve.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Mference uses the camera to scan receipts and documents.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Mference looks for your Mac on this Wi-Fi so they can work together.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Mference shows your reminders as to-dos and changes them only when you approve.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -216,6 +223,11 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Mference;
+				INFOPLIST_FILE = Config/Info.plist;
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Mference shows your events in Calendar and changes them only when you approve.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Mference uses the camera to scan receipts and documents.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Mference looks for your Mac on this Wi-Fi so they can work together.";
+				INFOPLIST_KEY_NSRemindersFullAccessUsageDescription = "Mference shows your reminders as to-dos and changes them only when you approve.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

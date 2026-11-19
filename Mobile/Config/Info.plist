@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Keys the generated Info.plist cannot carry. Everything else, the
+	     permission reasons included, is an INFOPLIST_KEY_* build setting on the
+	     app target. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_mference._tcp</string>
+	</array>
+</dict>
+</plist>
