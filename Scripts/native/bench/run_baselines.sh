@@ -10,8 +10,11 @@
 #   GGML_METAL_PATH_RESOURCES=<llama.cpp>/ggml/src/ggml-metal \
 #   Scripts/native/bench/run_baselines.sh <out-dir> [step...]
 #
-# Steps (default: all): llama-bench-pp-tg llama-bench-pp32k llama-bench-tg-depth
+# Steps (default: all): llama-bench-pp-tg llama-bench-pp8k llama-bench-tg-depth
 # mfe-bench-ttft kbench-quick kbench-deep-iq sched-bench
+#
+# Contexts are 512, 4K and 8K: no evaluation or benchmark goes above 8K tokens
+# (maintainer decision, 2026-11-19).
 #
 # sched-bench runs SchedulerBenchTests' 10 ms reference loops
 # (MFERENCE_NATIVE_BENCH=1). Its test bundle is built first, outside the lock
@@ -27,7 +30,7 @@ GR="$OUT/guarded-run.sh"
 cp "$HERE/../guarded-run.sh" "$GR"   # a frozen copy: never edited while it runs
 WS=${WS:-ws2}
 steps=("$@")
-[ ${#steps[@]} -eq 0 ] && steps=(llama-bench-pp-tg llama-bench-pp32k llama-bench-tg-depth mfe-bench-ttft kbench-quick kbench-deep-iq sched-bench)
+[ ${#steps[@]} -eq 0 ] && steps=(llama-bench-pp-tg llama-bench-pp8k llama-bench-tg-depth mfe-bench-ttft kbench-quick kbench-deep-iq sched-bench)
 REPO=$(cd "$HERE/../../.." && pwd -P)
 PLUG=(-Xswiftc -plugin-path -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing)
 
@@ -67,12 +70,12 @@ run_step() {
 for s in "${steps[@]}"; do
     case "$s" in
         llama-bench-pp-tg) run_step "$s" "$BUILD/llama-bench" -m "$GGUF" -ngl 99 -p 512,4096 -n 128 -r 5 -o json ;;
-        llama-bench-pp32k) run_step "$s" "$BUILD/llama-bench" -m "$GGUF" -ngl 99 -p 32768 -n 0 -r 2 -o json ;;
-        llama-bench-tg-depth) run_step "$s" "$BUILD/llama-bench" -m "$GGUF" -ngl 99 -p 0 -n 128 -d 4096,32768 -r 3 -o json ;;
-        mfe-bench-ttft) run_step "$s" "$BUILD/mfe-bench" --model "$GGUF" --tokens "$TOKENS" --ctx 512,4096,32768 \
+        llama-bench-pp8k) run_step "$s" "$BUILD/llama-bench" -m "$GGUF" -ngl 99 -p 8192 -n 0 -r 5 -o json ;;
+        llama-bench-tg-depth) run_step "$s" "$BUILD/llama-bench" -m "$GGUF" -ngl 99 -p 0 -n 128 -d 4096,8192 -r 3 -o json ;;
+        mfe-bench-ttft) run_step "$s" "$BUILD/mfe-bench" --model "$GGUF" --tokens "$TOKENS" --ctx 512,4096,8192 \
                             --gen 128 --suffix 64 --reps 3 --json "$OUT/$s.json" ;;
         kbench-quick) run_step "$s" "$BUILD/mfe-kbench" --suite dispatch,copy,gemm,attn,gdn --rows 1,2,4,8,16,512 \
-                          --ctx 512,4096,32768 --reps 20 --json "$OUT/$s.json" ;;
+                          --ctx 512,4096,8192 --reps 20 --json "$OUT/$s.json" ;;
         kbench-deep-iq) run_step "$s" "$BUILD/mfe-kbench" --suite dispatch,copy,gemm --types iq3_s,iq3_xxs,iq4_xs \
                             --shapes 5120:12288,5120:10240,5120:6144,5120:1024,6144:5120,5120:17408,17408:5120 \
                             --rows 1,2,4,8,16 --reps 20 --json "$OUT/$s.json" ;;
