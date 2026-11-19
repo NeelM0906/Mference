@@ -22,6 +22,8 @@ extension Native {
         public func prepare(config: Qwen35Config, layout: RecurrentLayout) throws {
             guard layout.convKernel == config.ssmConvKernel, layout.convKernel >= 2,
                   layout.convChannels == config.ssmConvChannels,
+                  config.ssmConvChannels == 2 * config.ssmGroupCount * config.ssmStateSize
+                    + config.ssmTimeStepRank * config.ssmStateSize,
                   layout.valueHeads == config.ssmTimeStepRank,
                   layout.keyDim == config.ssmStateSize, layout.valueDim == config.ssmStateSize,
                   layout.keyDim <= 256, config.ssmInnerSize == layout.valueHeads * layout.valueDim,

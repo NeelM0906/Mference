@@ -36,8 +36,12 @@ extension Native {
                 guard tensor.byteCount == tensor.rows * blocksPerRow * format.bytes else {
                     throw NativeError.invalidShape("\(tensor.name): byteCount \(tensor.byteCount)")
                 }
-                var fb = [UInt32](repeating: 0, count: 8)
-                for (i, f) in format.fields.enumerated() { fb[i] = UInt32(f.bytes) }
+                var bytes: (UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32) = (0, 0, 0, 0, 0, 0, 0, 0)
+                withUnsafeMutableBytes(of: &bytes) { raw in
+                    for (i, f) in format.fields.enumerated() {
+                        raw.storeBytes(of: UInt32(f.bytes), toByteOffset: i * 4, as: UInt32.self)
+                    }
+                }
                 type = tensor.type.rawValue
                 blockElems = UInt32(format.elements)
                 blockBytes = UInt32(format.bytes)
@@ -46,7 +50,7 @@ extension Native {
                 blocksPerTile = UInt32(tensor.layout.blocksPerTile)
                 planes = tensor.layout.planes ? 1 : 0
                 fieldCount = UInt32(format.fields.count)
-                fieldBytes = (fb[0], fb[1], fb[2], fb[3], fb[4], fb[5], fb[6], fb[7])
+                fieldBytes = bytes
             }
         }
 
@@ -56,6 +60,11 @@ extension Native {
         }
 
         /// Dispatch `width x height` threads in 2-D threadgroups.
+        ///
+        /// The reference ops encode several dependent dispatches into one
+        /// encoder (append K/V then attend; scan then gated norm; GEMM then
+        /// add). They rely on the compute encoder's default serial dispatch:
+        /// each dispatch sees every write of the dispatches before it.
         static func dispatch(_ encoder: MTLComputeCommandEncoder, _ pipeline: MTLComputePipelineState,
                              width: Int, height: Int) {
             guard width > 0, height > 0 else { return }

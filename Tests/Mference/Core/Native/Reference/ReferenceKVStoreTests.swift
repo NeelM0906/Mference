@@ -137,14 +137,59 @@ struct ReferenceKVStoreTests {
 
     @Test func prefixBudgetIsEnforced() throws {
         let ctx = try MetalContext()
-        let kv = try Self.store(prefixBudget: 1024, device: ctx.device)
+        // A snapshot larger than the whole budget is refused for that reason.
+        let tiny = try Self.store(prefixBudget: 1024, device: ctx.device)
+        try tiny.beginStep(rows: 3, kind: .prefill)
+        do {
+            _ = try Self.syncResult(ctx.queue) { try tiny.insertPrefix([1, 2, 3], commandBuffer: $0) }
+            Issue.record("insertPrefix fit a 1 KiB budget")
+        } catch Native.NativeError.memoryBudgetExceeded(_, let budget) {
+            #expect(budget == 1024)
+        }
+        // A budget of exactly one snapshot keeps the most recent one.
+        let probe = try Self.store(device: ctx.device)
+        let one = UInt64(probe.geometry.pageBytes + probe.gdnLayerCount * probe.recurrentLayout.layerBytes)
+        let kv = try Self.store(prefixBudget: one, device: ctx.device)
         try kv.beginStep(rows: 3, kind: .prefill)
-        #expect(throws: Native.NativeError.self) {
-            _ = try Self.syncResult(ctx.queue) { try kv.insertPrefix([1, 2, 3], commandBuffer: $0) }
+        _ = try Self.syncResult(ctx.queue) { try kv.insertPrefix([1, 2, 3], commandBuffer: $0) }
+        try Self.sync(ctx.queue) { try kv.reset(commandBuffer: $0) }
+        try kv.beginStep(rows: 3, kind: .prefill)
+        _ = try Self.syncResult(ctx.queue) { try kv.insertPrefix([4, 5, 6], commandBuffer: $0) }
+        #expect(kv.lookupPrefix([1, 2, 3, 9]) == nil)
+        #expect(kv.lookupPrefix([4, 5, 6, 9])?.length == 3)
+        #expect(kv.footprint.prefixCacheRAM == one)
+    }
+
+    /// insertPrefix, attachPrefix and reset end the undoable step.
+    @Test func rollbackIsRefusedAfterCacheOperationsAndReset() throws {
+        let ctx = try MetalContext()
+        let kv = try Self.store(device: ctx.device)
+        func refused() {
+            #expect(throws: Native.NativeError.self) {
+                try kv.rollback(to: kv.length - 1, commandBuffer: ctx.queue.makeCommandBuffer()!)
+            }
         }
-        #expect(throws: Native.NativeError.self) {
-            _ = try Self.syncResult(ctx.queue) { try kv.insertPrefix([1, 2], commandBuffer: $0) }
+        try kv.beginStep(rows: 4, kind: .prefill)
+        let handle = try Self.syncResult(ctx.queue) { try kv.insertPrefix([1, 2, 3, 4], commandBuffer: $0) }
+        refused()
+        try Self.sync(ctx.queue) { try kv.reset(commandBuffer: $0) }
+        #expect(throws: Native.NativeError.self) { try kv.rollback(to: 0, commandBuffer: ctx.queue.makeCommandBuffer()!) }
+        try Self.sync(ctx.queue) {
+            try kv.attachPrefix(Native.PrefixMatch(handle: handle, length: 4, tier: .ram), commandBuffer: $0)
         }
+        refused()
+    }
+
+    /// Consecutive steps use different page-table ring slots.
+    @Test func ringSlotsAlternate() throws {
+        let ctx = try MetalContext()
+        let kv = try Self.store(device: ctx.device)
+        try kv.beginStep(rows: 2, kind: .prefill)
+        let a = kv.pageTable().pageTableOffset
+        try kv.beginStep(rows: 1, kind: .decode)
+        let b = kv.pageTable().pageTableOffset
+        try kv.beginStep(rows: 1, kind: .decode)
+        #expect(a != b && kv.pageTable().pageTableOffset == a)
     }
 
     static func syncResult<T>(_ queue: MTLCommandQueue, _ body: (MTLCommandBuffer) throws -> T) throws -> T {

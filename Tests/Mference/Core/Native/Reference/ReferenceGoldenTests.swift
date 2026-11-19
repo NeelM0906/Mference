@@ -73,13 +73,19 @@ struct ReferenceGoldenTests {
         return (max(kl, 0), arg)
     }
 
+    /// Proposed D1 epsilon (nats per token) until the harness's parity PR.
+    static let maxKLBar = 0.01
+    static let meanKLBar = 0.001
+
     @Test(.enabled(if: enabled))
     func teacherForcedD1() throws {
         let ctx = try MetalContext()
         let pack = URL(fileURLWithPath: try #require(Self.env["MFERENCE_NATIVE_QUICK_PACK"]))
         let chunk = Int(Self.env["MFERENCE_NATIVE_PREFILL_CHUNK"] ?? "") ?? 256
         var reports: [PromptReport] = []
+        var skipped: [String] = []
         var agree = 0, total = 0
+        var allKL: [Double] = []
         for golden in try Self.prompts() {
             // Every model and KV arena is freed before the next prompt: buffers
             // from makeBuffer are autoreleased and would otherwise accumulate.
@@ -88,6 +94,11 @@ struct ReferenceGoldenTests {
                 let prompt = golden.promptTokens
                 let generated = golden.generatedTokens
                 let argmax = golden.manifest.argmaxTokens ?? generated
+                guard !generated.isEmpty else {
+                    print("reference D1 \(golden.id): no generated tokens, no positions to score")
+                    skipped.append(golden.id)
+                    return
+                }
                 let logits = try golden.logits()
                 #expect(logits.rows == generated.count && logits.positions.first == prompt.count - 1)
                 let positions = prompt.count + generated.count
@@ -141,11 +152,32 @@ struct ReferenceGoldenTests {
                 try Self.writeReport(reports, name: "d1-teacher-forced.json")
                 agree += agreements
                 total += kls.count
+                allKL += kls
             }
         }
         let overall = Double(agree) / Double(max(total, 1))
-        print("reference D1 overall: greedy agreement \(agree)/\(total) = \(overall)")
+        let meanKL = allKL.reduce(0, +) / Double(max(allKL.count, 1))
+        let maxKL = allKL.max() ?? 0
+        print("reference D1 overall: greedy agreement \(agree)/\(total) = \(overall), "
+              + "per-token KL mean \(meanKL) max \(maxKL)")
+        struct Summary: Codable {
+            var positions: Int
+            var agreements: Int
+            var greedyAgreement: Double
+            var meanKL: Double
+            var maxKL: Double
+            var skippedPrompts: [String]
+            var bar: String
+        }
+        try Self.writeReport(Summary(positions: total, agreements: agree, greedyAgreement: overall, meanKL: meanKL,
+                                     maxKL: maxKL, skippedPrompts: skipped,
+                                     bar: "agreement >= 0.99, per-token KL max <= \(Self.maxKLBar), mean <= \(Self.meanKLBar)"),
+                             name: "d1-summary.json")
+        #expect(total > 0)
         #expect(overall >= 0.99)
+        // H's proposed epsilon until the parity harness sets it (docs/NATIVE_PARITY.md).
+        #expect(maxKL <= Self.maxKLBar, "per-token KL max \(maxKL)")
+        #expect(meanKL <= Self.meanKLBar, "per-token KL mean \(meanKL)")
     }
 
     // MARK: Per-component goldens
@@ -186,10 +218,15 @@ struct ReferenceGoldenTests {
         try glue.prepare(config: c)
         var reports: [ComponentReport] = []
         var worst: [String: Double] = [:]
+        var notFullyCaptured: [String] = []
         for golden in try Self.prompts() {
             let embed = try golden.tensor(for: .embedding, config: c)
             let rows = embed.rows
-            guard embed.positions == Array(0..<rows), rows <= 512 else { continue }
+            // Ops with history (attention, GDN) need every position from 0.
+            guard embed.positions == Array(0..<rows), rows <= 512 else {
+                notFullyCaptured.append(golden.id)
+                continue
+            }
             try autoreleasepool {
                 func all(_ m: GoldenMatrix) -> [Float] { (0..<m.rows).flatMap { m.row($0) } }
                 func load(_ b: GoldenTapMap.Boundary, _ layer: Int) throws -> [Float] { all(try golden.tensor(b, layer: layer)) }
@@ -335,6 +372,22 @@ struct ReferenceGoldenTests {
             print("reference component worst relative error \(component): \(value)")
         }
         try Self.writeReport(reports, name: "components.json")
+        print("reference components: prompts not captured from position 0 (skipped): \(notFullyCaptured)")
+        // Every component of every layer of its kind was checked on at least one prompt.
+        var covered: [String: Set<Int>] = [:]
+        for r in reports { covered[r.component, default: []].insert(r.layer) }
+        let attention = Set(c.fullAttentionLayers), gdn = Set(c.gatedDeltaNetLayers), all = Set(0..<c.blockCount)
+        let expected: [String: Set<Int>] = [
+            "get_rows": [-1], "rms_norm": all, "swiglu": all,
+            "gemm.ffn_gate": all, "gemm.ffn_up": all, "gemm.ffn_down": all,
+            "gemm.attn_q": attention, "gemm.attn_k": attention, "gemm.attn_v": attention, "attention": attention,
+            "gemm.attn_output": attention,
+            "gemm.attn_qkv": gdn, "gemm.attn_gate": gdn, "gemm.ssm_alpha": gdn, "gemm.ssm_beta": gdn, "gdn": gdn,
+            "gdn.conv_state": gdn, "gdn.ssm_state": gdn, "gemm.ssm_out": gdn,
+        ]
+        for (component, layers) in expected {
+            #expect(covered[component] == layers, "\(component) covered \(covered[component].map { $0.sorted() } ?? [])")
+        }
         #expect(!reports.isEmpty)
         for (component, value) in worst { #expect(value < 2e-2, "\(component) worst relative error \(value)") }
     }

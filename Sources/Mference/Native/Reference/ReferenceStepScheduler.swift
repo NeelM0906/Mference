@@ -72,9 +72,17 @@ extension Native {
         private let sampler: any Sampler
         private let strategy: any DecodingStrategy
         private let queue: MTLCommandQueue
-        private let thread = ReferenceGenerationThread(name: "mference.native.reference.generation")
+        let thread = ReferenceGenerationThread(name: "mference.native.reference.generation")
         private let cancelLock = NSLock()
-        private var cancelRequested = false
+
+        /// One submitted generation's cancellation flag (guarded by `cancelLock`).
+        final class Generation: @unchecked Sendable {
+            var cancelled = false
+        }
+        /// The generation executing on the thread, if any.
+        private var active: Generation?
+        /// Submitted generations not yet started, in submission order.
+        private var pending: [Generation] = []
 
         init(model: any ForwardModel, sampler: any Sampler, strategy: any DecodingStrategy, queue: MTLCommandQueue) {
             self.model = model
@@ -83,25 +91,35 @@ extension Native {
             self.queue = queue
         }
 
+        /// Cancels the running generation; when none has started yet, the
+        /// next one to start (which then throws `cancelled` before its first
+        /// step). Cancellation belongs to one generation: it never carries
+        /// over to a later one.
         public func cancel() {
-            cancelLock.lock()
-            cancelRequested = true
-            cancelLock.unlock()
+            cancelLock.withLock { (active ?? pending.first)?.cancelled = true }
         }
 
-        private var isCancelled: Bool {
-            cancelLock.lock()
-            defer { cancelLock.unlock() }
-            return cancelRequested
+        var pendingCount: Int { cancelLock.withLock { pending.count } }
+
+        private func isCancelled(_ g: Generation) -> Bool {
+            cancelLock.withLock { g.cancelled }
         }
 
         public func run(_ job: GenerationJob,
                         onEvent: @escaping @Sendable (StepEvent) -> Void) async throws -> GenerationOutcome {
-            cancelLock.withLock { cancelRequested = false }
+            let generation = Generation()
+            cancelLock.withLock { pending.append(generation) }
             return try await withCheckedThrowingContinuation { continuation in
                 thread.submit {
+                    self.cancelLock.withLock {
+                        self.pending.removeAll { $0 === generation }
+                        self.active = generation
+                    }
+                    defer { self.cancelLock.withLock { self.active = nil } }
                     do {
-                        continuation.resume(returning: try self.execute(job, onEvent: onEvent))
+                        continuation.resume(returning: try autoreleasepool {
+                            try self.execute(job, generation, onEvent: onEvent)
+                        })
                     } catch {
                         continuation.resume(throwing: error)
                     }
@@ -143,9 +161,21 @@ extension Native {
             try autoreleasepool {
                 let cb = try makeCommandBuffer()
                 try model.kv.beginStep(rows: plan.rows, kind: plan.kind)
-                guard let encoder = cb.makeComputeCommandEncoder() else { throw NativeError.resource("compute encoder") }
+                guard let encoder = cb.makeComputeCommandEncoder() else {
+                    try undo(plan)
+                    throw NativeError.resource("compute encoder")
+                }
                 let encodeStart = DispatchTime.now().uptimeNanoseconds
-                let logits = try model.encodeStep(plan, encoder: encoder)
+                let logits: TensorRef?
+                do {
+                    logits = try model.encodeStep(plan, encoder: encoder)
+                } catch {
+                    // beginStep already advanced the store: end the encoder
+                    // without committing, then undo the step.
+                    encoder.endEncoding()
+                    try undo(plan)
+                    throw error
+                }
                 let encodeNanos = Double(DispatchTime.now().uptimeNanoseconds - encodeStart)
                 encoder.endEncoding()
                 try commitAndWait(cb)
@@ -154,7 +184,19 @@ extension Native {
             }
         }
 
-        private func execute(_ job: GenerationJob, onEvent: @Sendable (StepEvent) -> Void) throws -> GenerationOutcome {
+        /// Roll the store back to before `plan`'s step (it was never committed).
+        private func undo(_ plan: StepPlan) throws {
+            let cb = try makeCommandBuffer()
+            try model.kv.rollback(to: plan.startPosition, commandBuffer: cb)
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+
+        private func execute(_ job: GenerationJob, _ generation: Generation,
+                             onEvent: @Sendable (StepEvent) -> Void) throws -> GenerationOutcome {
+            guard strategy.maxDraftRows == 0 else {
+                throw NativeError.unsupported("the reference scheduler runs plain decoding only (\(strategy.name))")
+            }
             let prompt = job.promptTokens
             guard !prompt.isEmpty else { throw NativeError.invalidShape("empty prompt") }
             guard (1...model.maxPrefillChunk).contains(job.prefillChunk) else {
@@ -164,7 +206,7 @@ extension Native {
             guard prompt.count < kv.capacity else {
                 throw NativeError.stateOutOfRange("prompt of \(prompt.count) tokens, capacity \(kv.capacity)")
             }
-            if isCancelled { throw NativeError.cancelled }
+            if isCancelled(generation) { throw NativeError.cancelled }
             let start = DispatchTime.now().uptimeNanoseconds
             func seconds(since t: UInt64) -> Double { Double(DispatchTime.now().uptimeNanoseconds - t) / 1e9 }
 
@@ -192,7 +234,7 @@ extension Native {
                 logits = try step(plan).logits
                 position += n
                 onEvent(.prefillProgress(done: position, total: prompt.count))
-                if !last && isCancelled {
+                if !last && isCancelled(generation) {
                     timings.prefillSeconds = seconds(since: start)
                     return GenerationOutcome(tokens: [], stopReason: .cancelled, promptTokenCount: prompt.count,
                                              reusedPrefixTokens: reused, timings: timings)
@@ -202,7 +244,12 @@ extension Native {
             if job.reusePrefix {
                 try autoreleasepool {
                     let cb = try makeCommandBuffer()
-                    if (try? kv.insertPrefix(prompt, commandBuffer: cb)) != nil { try commitAndWait(cb) }
+                    do {
+                        _ = try kv.insertPrefix(prompt, commandBuffer: cb)
+                        try commitAndWait(cb)
+                    } catch NativeError.memoryBudgetExceeded {
+                        // The prompt does not fit the prefix budget: generate without caching it.
+                    }
                 }
             }
 
@@ -214,7 +261,7 @@ extension Native {
             let decodeStart = DispatchTime.now().uptimeNanoseconds
             while true {
                 if job.maxNewTokens <= generated.count { reason = .maxTokens; break }
-                if isCancelled { reason = .cancelled; break }
+                if isCancelled(generation) { reason = .cancelled; break }
                 guard let current = logits else { throw NativeError.invalidShape("model returned no logits") }
                 let stepStart = DispatchTime.now().uptimeNanoseconds
                 let row = UnsafeBufferPointer(
@@ -228,7 +275,7 @@ extension Native {
                 onEvent(.token(token))
                 if job.maxNewTokens <= generated.count { reason = .maxTokens; break }
                 if kv.length >= kv.capacity { reason = .contextFull; break }
-                if isCancelled { reason = .cancelled; break }
+                if isCancelled(generation) { reason = .cancelled; break }
                 let r = try step(StepPlan(kind: .decode, startPosition: kv.length, rows: 1,
                                           input: .host([token]), logits: .last))
                 logits = r.logits
