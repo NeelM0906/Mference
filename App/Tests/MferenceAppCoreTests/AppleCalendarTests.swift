@@ -61,7 +61,7 @@ enum CalendarFixtures {
         #expect(proposal?.day == 2)
         #expect(proposal?.top == 2)
         #expect(proposal?.height == 0.75)
-        let focusFriday = blocks.first { $0.id == "event-focus-fri" }
+        let focusFriday = blocks.first { $0.id == "event-focus-fri-d4" }
         #expect(focusFriday?.top == 0 && focusFriday?.height == 2)
         #expect(Self.layout.allDayEvents(weekStart: start, events: CalendarFixtures.events)[3]?.map(\.title) == ["Offsite"])
     }
@@ -188,6 +188,40 @@ enum CalendarFixtures {
         #expect(!model.events.contains { $0.title.hasPrefix("Lunch") })
         #expect(await model.deleteEvent(edited) == false)  // already gone
         #expect(model.errorMessage != nil)
+
+    @Test func eventsCrossingMidnightShowOnEveryDayTheyTouch() {
+        let start = Self.layout.weekStart(containing: CalendarFixtures.now)
+        let overnight = CalendarEvent(id: "deploy", title: "Deploy", start: CalendarFixtures.date(15, 16),
+                                      end: CalendarFixtures.date(16, 11))
+        let fromLastWeek = CalendarEvent(id: "trip", title: "Trip", start: CalendarFixtures.date(13, 20),
+                                         end: CalendarFixtures.date(14, 10))
+        let blocks = Self.layout.blocks(weekStart: start, events: [overnight, fromLastWeek], proposals: [])
+        #expect(blocks.filter { $0.title == "Deploy" }.map(\.day).sorted() == [1, 2])
+        let wednesday = blocks.first { $0.title == "Deploy" && $0.day == 2 }
+        #expect(wednesday?.top == 0 && wednesday?.height == 2)
+        #expect(blocks.filter { $0.title == "Trip" }.map(\.day) == [0])
+        #expect(Set(blocks.map(\.id)).count == blocks.count)
+        // A part entirely outside the hours is listed above the grid that day.
+        let lateOnly = CalendarEvent(id: "late", title: "Late", start: CalendarFixtures.date(16, 21),
+                                     end: CalendarFixtures.date(17, 8))
+        let outside = Self.layout.outsideGrid(weekStart: start, events: [lateOnly])
+        #expect(outside[2]?.map(\.title) == ["Late"] && outside[3]?.map(\.title) == ["Late"])
+    }
+
+    @Test @MainActor func editsMadeInRemindersBecomeTheToDosOwn() async throws {
+        let defaults = UserDefaults(suiteName: "mference-tests-\(UUID().uuidString)")!
+        RemindersSyncSetting.setEnabled(true, defaults)
+        let service = InMemoryCalendarService(remindersAccess: .granted)
+        let model = Self.model(service: service, defaults: defaults)
+        let todo = TodoItem(title: "Send copy decisions")
+        model.addTodo(todo)
+        await model.syncReminders()
+        let id = try #require(model.todos.first?.reminderID)
+        await service.editReminder(id, title: "Send copy decisions to Priya")
+        await model.syncReminders()
+        #expect(model.todos.first?.title == "Send copy decisions to Priya")
+        await model.syncReminders()  // a third sync must not revert the Reminders edit
+        #expect(await service.reminders[id]?.title == "Send copy decisions to Priya")
     }
 
     @Test func overlappingEventsShareTheColumn() {

@@ -45,13 +45,7 @@ struct ScanContent: View {
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: session.imageURL) { loadPreview() }
-        .shellToolbar(id: "scan.actions") {
-            captureLater
-            Button("Open file", action: openFile)
-                .buttonStyle(.applePrimary)
-                .keyboardShortcut("o", modifiers: .command)
-                .help("Read a receipt or document on this Mac")
-        }
+        .shellToolbar(id: "scan.actions") { ScanToolbarActions(session: session) }
     }
 
     private func loadPreview() {
@@ -115,19 +109,6 @@ struct ScanContent: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Drop area for receipts and documents")
-    }
-
-    /// "Capture screen area" needs Screen Recording access, which Scan does
-    /// not ask for in this version (spec 4.6): shown, off, marked Later.
-    private var captureLater: some View {
-        HStack(spacing: MFSpacing.s) {
-            Button("Capture screen area") {}
-                .buttonStyle(.appleSecondary)
-                .disabled(true)
-            AppleChip(text: "Later", tone: .preview)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Capture screen area, coming later")
     }
 
     /// ⌘V: an image file's URL, or image data, from the clipboard.
@@ -295,12 +276,7 @@ struct ScanContent: View {
     // MARK: Actions
 
     private func openFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image, .pdf]
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose a receipt or document to read on this Mac."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        session.open(url)
+        ScanToolbarActions.chooseFile(for: session)
     }
 
     private func confirm() {
@@ -328,5 +304,37 @@ struct ScanContent: View {
         } catch {
             exportMessage = "The CSV could not be written: \(error.localizedDescription)"
         }
+    }
+}
+
+/// Capture (Later) and Open file in the shell toolbar, as their own view so
+/// the retained toolbar item acts on the live session.
+struct ScanToolbarActions: View {
+    var session: ScanSession
+
+    var body: some View {
+        HStack(spacing: MFSpacing.s) {
+            HStack(spacing: MFSpacing.s) {
+                Button("Capture screen area") {}
+                    .buttonStyle(.appleSecondary)
+                    .disabled(true)
+                AppleChip(text: "Later", tone: .preview)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Capture screen area, coming later")
+            Button("Open file") { ScanToolbarActions.chooseFile(for: session) }
+                .buttonStyle(.applePrimary)
+                .keyboardShortcut("o", modifiers: .command)
+                .help("Read a receipt or document on this Mac")
+        }
+    }
+
+    static func chooseFile(for session: ScanSession) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .pdf]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a receipt or document to read on this Mac."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        session.open(url)
     }
 }

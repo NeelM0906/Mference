@@ -34,7 +34,6 @@ public struct CalendarView: View {
 
 struct CalendarContent: View {
     @Bindable var model: CalendarWeekModel
-    @State private var showsNewEvent = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -71,14 +70,7 @@ struct CalendarContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .shellToolbar(id: "calendar.new-event") {
-            Button("New event") { showsNewEvent = true }
-                .buttonStyle(.applePrimary)
-                .keyboardShortcut("n", modifiers: .command)
-                .popover(isPresented: $showsNewEvent, arrowEdge: .bottom) {
-                    NewEventForm(model: model) { showsNewEvent = false }
-                }
-        }
+        .shellToolbar(id: "calendar.new-event") { NewEventToolbarButton(model: model) }
     }
 
     private var header: some View {
@@ -336,6 +328,22 @@ struct ProposalCard: View {
         return proposal.replacesEventID == nil
             ? "Add \(proposal.title) on \(when)?"
             : "Move the \(proposal.title.lowercased()) to \(when)?"
+    }
+}
+
+/// New event (⌘N) in the shell toolbar: its own view with its own state,
+/// since the shell keeps a toolbar item by id.
+struct NewEventToolbarButton: View {
+    var model: CalendarWeekModel
+    @State private var showsForm = false
+
+    var body: some View {
+        Button("New event") { showsForm = true }
+            .buttonStyle(.applePrimary)
+            .keyboardShortcut("n", modifiers: .command)
+            .popover(isPresented: $showsForm, arrowEdge: .bottom) {
+                NewEventForm(model: model) { showsForm = false }
+            }
     }
 }
 

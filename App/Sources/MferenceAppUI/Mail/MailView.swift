@@ -66,29 +66,7 @@ struct MailContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .shellToolbar(id: "mail.compose") {
-            Button { model.isComposing = true } label: {
-                HStack(spacing: MFSpacing.s) {
-                    Text("Compose")
-                    Text("C")
-                        .font(MFFont.caption)
-                        .padding(.horizontal, MFSpacing.xs + MFSpacing.xxs)
-                        .padding(.vertical, MFSpacing.xxs)
-                        .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(MFColor.onInk.opacity(0.18)))
-                        .accessibilityHidden(true)
-                }
-            }
-            .buttonStyle(.applePrimary)
-            .keyboardShortcut("c", modifiers: [])
-            .disabled(model.isEditingText || !isMailAvailable)
-            .sheet(isPresented: $model.isComposing) { ComposeSheet(model: model) }
-            .accessibilityLabel("Compose a new message")
-        }
-    }
-
-    private var isMailAvailable: Bool {
-        if case .available = model.status { return true }
-        return false
+        .shellToolbar(id: "mail.compose") { ComposeToolbarButton(model: model) }
     }
 
     private var divider: some View { Rectangle().fill(MFColor.hairline).frame(width: 1) }
@@ -571,5 +549,35 @@ struct ComposeSheet: View {
         }
         .padding(MFSpacing.l)
         .frame(width: 520)
+    }
+}
+
+/// Compose (C) in the shell toolbar. The shell keeps a toolbar item by id,
+/// so this view reads the model live in its own body.
+struct ComposeToolbarButton: View {
+    @Bindable var model: MailInboxModel
+
+    private var isMailAvailable: Bool {
+        if case .available = model.status { return true }
+        return false
+    }
+
+    var body: some View {
+        Button { model.isComposing = true } label: {
+            HStack(spacing: MFSpacing.s) {
+                Text("Compose")
+                Text("C")
+                    .font(MFFont.caption)
+                    .padding(.horizontal, MFSpacing.xs + MFSpacing.xxs)
+                    .padding(.vertical, MFSpacing.xxs)
+                    .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(MFColor.onInk.opacity(0.18)))
+                    .accessibilityHidden(true)
+            }
+        }
+        .buttonStyle(.applePrimary)
+        .keyboardShortcut("c", modifiers: [])
+        .disabled(model.isEditingText || !isMailAvailable)
+        .sheet(isPresented: $model.isComposing) { ComposeSheet(model: model) }
+        .accessibilityLabel("Compose a new message")
     }
 }
