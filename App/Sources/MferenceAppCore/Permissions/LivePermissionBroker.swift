@@ -121,9 +121,18 @@ public struct LivePermissionBroker: PermissionBroker {
             await openSystemSettings(for: .fullDiskAccess)
             return await state(of: permission)
         }
-        // The system prompt already ran this session and left it open: send
-        // the person to System Settings instead of asking again.
+        // The system prompt already ran this session and left it open.
         if prompted.contains(permission) {
+            // Mail automation reads as undetermined whenever Mail is not
+            // running, not only after a failed prompt: skip our reason, but
+            // let the system call launch Mail and check again.
+            if permission == .mailAutomation {
+                do { try await system.prompt(permission) } catch {
+                    Self.log.error("mailAutomation: re-check failed: \(String(describing: error), privacy: .public)")
+                }
+                let after = await state(of: permission)
+                return after == .notDetermined ? .needsSystemSettings : after
+            }
             Self.log.notice("\(permission.rawValue, privacy: .public): prompt already shown this session; not asking again")
             return .needsSystemSettings
         }

@@ -215,6 +215,18 @@ import Testing
         #expect(log.calls == ["reason:reminders", "prompt:reminders"])
     }
 
+    @Test func mailAutomationRecoversAfterMailQuits() async {
+        // Granted earlier; Mail quit, so the probe reads undetermined again.
+        // The broker must not show the reason again, but must still launch
+        // Mail and re-check rather than answer System Settings for good.
+        let log = CallLog()
+        let broker = log.broker(goOn: true, grant: .granted)
+        #expect(await broker.request(.mailAutomation) == .granted)
+        log.set(.notDetermined, .mailAutomation)
+        #expect(await broker.request(.mailAutomation) == .granted)
+        #expect(log.calls == ["reason:mailAutomation", "prompt:mailAutomation", "prompt:mailAutomation"])
+    }
+
     @Test func aDeclinedReasonCanBeAskedAgainLater() async {
         // Declining our own reason is the person's choice, not a failed
         // prompt: a later request may show the reason again.
