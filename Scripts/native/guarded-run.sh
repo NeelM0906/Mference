@@ -10,16 +10,18 @@
 #
 # Before: refuses unless `pmset -g batt` shows AC Power, `lock.sh preflight`
 # passes (no --model: a GGUF is not an install directory), the GGUF exists and
-# no other model process runs. During: samples swap every 5 s; any growth over
-# SWAP_GUARD_MB (default 0: any growth, the program's swap guard) stops the
-# command (INT, then TERM after 30 s) and exits 70; growth seen only at the end
-# also exits 70. After: records swap at start and end, the exit code, wall time
+# no other model process runs. During: samples swap every 5 s; any growth
+# (the program's swap guard; SWAP_GUARD_MB may only be 0) stops the command
+# (INT, then TERM after 30 s) and exits 70; growth seen only at the end also
+# exits 70. After: records swap at start and end, the exit code, wall time
 # and /usr/bin/time -l's peak memory footprint in <log-dir>/run.json.
 # Exit status: the command's; 70 swap guard; 71 a precondition failed.
 set -uo pipefail
 # LOCK: the machine lock script (the program's scratch/program/lock.sh).
 LOCK=${LOCK:?set LOCK to the machine lock script}
 SWAP_GUARD_MB=${SWAP_GUARD_MB:-0}
+# The program's guard is "any growth": refuse anything looser.
+case "$SWAP_GUARD_MB" in 0|0.0) ;; *) echo "guarded-run.sh: SWAP_GUARD_MB must be 0 (any swap growth stops the run)" >&2; exit 71 ;; esac
 
 [ $# -ge 4 ] && [ "$3" = "--" ] || { echo "usage: guarded-run.sh <log-dir> <gguf> -- <command> [args...]" >&2; exit 2; }
 LOG=$1; GGUF=$2; shift 3

@@ -23,8 +23,8 @@ cases from [`Scripts/engine_validate.py`](../Scripts/engine_validate.py), the
 | `tool-call` | C4 tool-roundtrip, first turn | 289 | off | 256 | 28 (EOG) | all, + 8 decode steps |
 | `tool-result` | C4 tool-roundtrip, second turn (fixed tool call) | 357 | off | 192 | 20 (EOG) | all, + 8 decode steps |
 | `explain-thinking` | real-generation-v1/short-explanation.json, thinking on | 60 | on | 512 | 512 (limit) | all, + 8 decode steps |
-| `essay-512` | quick-v1 (new): a long free-form answer | 66 | off | 512 | 512 (limit) | all, + 8 decode steps |
-| `review-512` | real-generation-v1/medium-review.json (~512 tokens) | 426 | off | 512 | 512 (limit) | first 64, last 64, stride 32, + 8 decode steps |
+| `essay-512` | quick-v1 (new): a long free-form answer (512 = generated tokens) | 66 | off | 512 | 512 (limit) | all, + 8 decode steps |
+| `review-512` | real-generation-v1/medium-review.json (the 512-class prompt; 426 tokens with this template) | 426 | off | 512 | 512 (limit) | first 64, last 64, stride 32, + 8 decode steps |
 | `doc-2k` | C4 doc-2k | 2,661 | off | 128 | 25 (EOG) | first 16, last 32, stride 128, + 8 decode steps |
 | `synthesis-3k` | real-generation-v1/long-synthesis.json (~3K tokens, long answer) | 2,940 | off | 512 | 512 (limit) | first 16, last 32, stride 256, + 8 decode steps |
 | `doc-4k` | C4 ledger generator, 120 entries, question on entry 87 (~4K tokens) | 3,989 | off | 128 | 33 (EOG) | first 16, last 32, stride 256, + 8 decode steps |
@@ -134,6 +134,7 @@ Each prompt directory holds `golden.json`, `prompt.txt`, `logits.f32` and
 | `n_vocab`, `prompt_tokens`, `generated_tokens`, `stopped_on_eog` | tokens of pass A |
 | `logits` | `{file, rows, cols, position_ranges}` of pass A |
 | `capture` | chunk size, selected positions, decode steps, state steps |
+| `timing_s` | wall times of the passes; indicative only, never a baseline (goldens captured before the fix that synchronizes after prefill record a near-zero `prefill`) |
 | `tensors[]` | `{key, name, base, layer, occurrence, op, ne, cols, rows, position_ranges, file}` |
 
 `name` is the llama.cpp callback name (`<base>-<layer>`, or `<base>` for the
@@ -184,13 +185,22 @@ and compare its output (`GoldenTapMap.Boundary`):
 | `gdnQKV`, `gdnZ` | `linear_attn_qkv_mixed-l`, `z-l` | 8192, 4096 | |
 | `gdnAlpha`, `gdnBeta` | `alpha-l`, `beta-l` | 32 | projections before softplus / sigmoid |
 | `gdnOutput` | `final_output-l` | 4096 | `GDNOp` output, input of `ssm_out` |
-| `gdnConvState` | `conv_states-l` | 24576 | first decode step only: conv tail before the step, ggml `ne [3, 8192]` (index `c*3 + k`) |
+| `gdnConvState` | `conv_states-l` | 24576 | first decode step only: conv tail before the step, ggml `ne [3, 8192]`, so `[8192][3]` with index `c*3 + k` |
 | `gdnState` | `state_predelta-l` | 524288 | first decode step only: S before the step, ggml `ne [128, 128, 32]`; head `h`, element `h*16384 + j*128 + i` is `S[i][j]` (key `i`, value `j`) |
 | `ffnInput` | `attn_post_norm-l` | 2560 | |
 | `ffnGate`, `ffnUp`, `ffnSwiGLU` | `ffn_gate-l`, `ffn_up-l`, `ffn_swiglu-l` | 9216 | |
 | `ffnDown` | `ffn_out-l` | 2560 | |
 
+Layouts against `RecurrentLayout` (conv tail `[convKernel - 1][convChannels]`,
+then S `[valueHeads][valueDim][keyDim]`):
+- **conv needs a transpose.** The golden is ggml's `[channels][taps]`, the
+  layout `[taps][channels]`. `GoldenPrompt.convState(layer:position:)` returns
+  it transposed.
+- **S needs none.** ggml's element `h*16384 + j*128 + i` is already the
+  layout's `[h][j][i]`. `GoldenPrompt.ssmState(layer:position:)` returns it as
+  stored.
+
 Together the decode-step state goldens let a GDN decode step at 512, 4K or
-32K context be tested on its own: start from `gdnConvState` / `gdnState` at
-`n_prompt`, feed the step's `gdnQKV`, `gdnZ`, `gdnAlpha`, `gdnBeta`, compare
-`gdnOutput`.
+32K context be tested on its own: start from `convState` / `ssmState` at
+`n_prompt`, feed the step's `gdnQKV`, `gdnZ`, `gdnAlpha`, `gdnBeta`, and
+compare `gdnOutput`.

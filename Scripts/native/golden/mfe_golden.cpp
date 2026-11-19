@@ -269,7 +269,9 @@ static bool eval_cb(struct ggml_tensor * t, bool ask, void * user) {
             const size_t off = ix[0] * t->nb[0] + ix[1] * t->nb[1] + ix[2] * t->nb[2] + ix[3] * t->nb[3];
             row[idx++] = *(const float *) (raw.data() + off);
         }
-        fwrite(row.data(), sizeof(float), per, f.fp);
+        if (fwrite(row.data(), sizeof(float), per, f.fp) != (size_t) per) {
+            fprintf(stderr, "mfe-golden: short write to %s\n", f.rel.c_str()); exit(1);
+        }
         f.positions.push_back(positions[k]);
     }
     return true;
@@ -482,6 +484,7 @@ int main(int argc, char ** argv) {
                 }
                 if (llama_decode(ctx, b) != 0) { fprintf(stderr, "mfe-golden: prefill failed\n"); return 1; }
             }
+            llama_synchronize(ctx);  // llama_decode may return before the GPU finishes
             t_prefill = now_s() - ta0;
             int pos = n_prompt;
             for (int g = 0; g < max_new; ++g) {
@@ -503,8 +506,9 @@ int main(int argc, char ** argv) {
         llama_free(ctx);
         {
             FILE * f = fopen((dir + "/logits.f32").c_str(), "wb");
-            fwrite(logits.data(), sizeof(float), logits.size(), f);
-            fclose(f);
+            if (!f) { fprintf(stderr, "mfe-golden: cannot write %s/logits.f32\n", dir.c_str()); return 1; }
+            const bool ok = fwrite(logits.data(), sizeof(float), logits.size(), f) == logits.size();
+            if (fclose(f) != 0 || !ok) { fprintf(stderr, "mfe-golden: short write to %s/logits.f32\n", dir.c_str()); return 1; }
         }
         std::vector<int64_t> logit_pos;
         for (size_t g = 0; g < gen.size(); ++g) logit_pos.push_back(n_prompt - 1 + (int64_t) g);
@@ -555,7 +559,10 @@ int main(int argc, char ** argv) {
             llama_batch_free(b);
             llama_free(ctx);
             t_pass_b = now_s() - tb0;
-            for (auto & kv : cap.files) { fclose(kv.second.fp); kv.second.fp = nullptr; }
+            for (auto & kv : cap.files) {
+                if (fclose(kv.second.fp) != 0) { fprintf(stderr, "mfe-golden: cannot close %s\n", kv.second.rel.c_str()); return 1; }
+                kv.second.fp = nullptr;
+            }
         }
 
         // ---------------- manifest
