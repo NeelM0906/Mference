@@ -31,6 +31,9 @@ extension Native {
         /// Write `gguf` as an `.mfpack` directory at `directory` (which must not
         /// exist). `layout` chooses each tensor's tile layout; a layout that
         /// does not fit the tensor falls back to `.gguf`, as the contract says.
+        /// `layoutTableVersion` records `PackLayoutTable.version` when every
+        /// tensor is in the table's layout, and 0 when `layout` chose others.
+        /// On failure the partially written directory is removed.
         @discardableResult
         public static func write(gguf url: URL, to directory: URL, label: String,
                                  layout: (GGMLType, _ rows: Int, _ blocksPerRow: Int) -> TileLayout = {
@@ -49,6 +52,9 @@ extension Native {
             let template = gguf.string("tokenizer.chat_template") ?? ""
 
             try fm.createDirectory(at: directory, withIntermediateDirectories: false)
+            var completed = false
+            defer { if !completed { try? fm.removeItem(at: directory) } }
+            var followsTable = true
             let weightsURL = directory.appendingPathComponent("weights.bin")
             guard fm.createFile(atPath: weightsURL.path, contents: nil) else {
                 throw NativeError.resource("cannot create \(weightsURL.path)")
@@ -66,6 +72,9 @@ extension Native {
                     let blocksPerRow = cols / format.elements
                     var chosen = layout(info.type, rows, blocksPerRow)
                     if !chosen.fits(rows: rows, blocksPerRow: blocksPerRow) { chosen = .gguf }
+                    if chosen != PackLayoutTable.layout(for: info.type, rows: rows, blocksPerRow: blocksPerRow) {
+                        followsTable = false
+                    }
 
                     let aligned = (written + pageAlignment - 1) / pageAlignment * pageAlignment
                     if aligned > written {
@@ -99,7 +108,7 @@ extension Native {
                 source: .init(fileName: url.lastPathComponent, byteCount: UInt64(gguf.fileSize),
                               sha256: sourceSHA, ggufVersion: gguf.version),
                 config: config,
-                layoutTableVersion: PackLayoutTable.version,
+                layoutTableVersion: followsTable ? PackLayoutTable.version : 0,
                 tensors: entries,
                 metadata: gguf.scalarMetadataStrings())
             let encoder = JSONEncoder()
@@ -117,6 +126,7 @@ extension Native {
                                   tensorCount: entries.count, weightsByteCount: written,
                                   verifiedAt: ISO8601DateFormatter().string(from: Date()))
             try encoder.encode(receipt).write(to: directory.appendingPathComponent("verified-install.json"))
+            completed = true
             return manifest
         }
 

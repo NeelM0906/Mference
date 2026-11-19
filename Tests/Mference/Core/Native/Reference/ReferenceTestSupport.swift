@@ -3,7 +3,7 @@ import Metal
 @testable import Mference
 
 /// Shared helpers for the reference tests: deterministic quant blocks (the
-/// same generator as `Scripts/native-reference/ggml_dequant_digests.c`),
+/// same generator as `Scripts/native/reference/ggml_dequant_digests.c`),
 /// tensors in any tile layout, and small Metal plumbing.
 enum RefTest {
     struct SplitMix64 {

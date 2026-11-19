@@ -3,13 +3,14 @@
 // same blocks in Swift and checks Native.ReferenceDequant against these
 // digests bit for bit. Build and run (no model, no download):
 //
-//   Scripts/native-reference/run_ggml_dequant_digests.sh
+//   Scripts/native/reference/run_ggml_dequant_digests.sh
 //
 // Compiled with -ffp-contract=off so `a * b - c` is not fused, matching Swift.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "ggml-quants.h"
+#include "ggml-impl.h"
 
 static uint64_t state;
 static uint64_t next64(void) {  // splitmix64
@@ -51,7 +52,28 @@ static void fill(uint64_t seed, int bytes, int d0, int d1) {
     }
 }
 
+// `n` finite F16 (or BF16) bit patterns from scale16().
+static void fill16(uint64_t seed, int n) {
+    state = seed;
+    for (int i = 0; i < n; ++i) put16(blocks + 2 * i, scale16());
+}
+
 int main(void) {
+    // Unquantized types: the conversions ggml's to_float uses for them.
+    fill16(8, 1024);
+    for (int i = 0; i < 1024; ++i) { ggml_fp16_t h; memcpy(&h, blocks + 2 * i, 2); out[i] = GGML_FP16_TO_FP32(h); }
+    printf("f16 %016llx\n", (unsigned long long) fnv(out, 1024));
+    fill16(9, 1024);
+    for (int i = 0; i < 1024; ++i) { ggml_bf16_t h; memcpy(&h, blocks + 2 * i, 2); out[i] = GGML_BF16_TO_FP32(h); }
+    printf("bf16 %016llx\n", (unsigned long long) fnv(out, 1024));
+    state = 10;
+    for (int i = 0; i < 1024; ++i) {
+        uint32_t bits = (uint32_t)(next64() & 0x807FFFFFull) | 0x3F000000u;
+        memcpy(blocks + 4 * i, &bits, 4);
+        memcpy(&out[i], blocks + 4 * i, 4);
+    }
+    printf("f32 %016llx\n", (unsigned long long) fnv(out, 1024));
+
     fill(1, 34, 0, -1);   dequantize_row_q8_0((const block_q8_0 *)blocks, out, NB * 32);
     printf("q8_0 %016llx\n", (unsigned long long) fnv(out, NB * 32));
     fill(2, 144, 0, 2);   dequantize_row_q4_K((const block_q4_K *)blocks, out, NB * 256);

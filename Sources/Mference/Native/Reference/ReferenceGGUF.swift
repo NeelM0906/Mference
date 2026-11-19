@@ -33,28 +33,40 @@ extension Native {
         public let alignment: Int
         public let dataOffset: Int
         public let fileSize: Int
-        private let base: UnsafeMutableRawPointer
-        private let mappedLength: Int
+        /// Owns the mapping, so a parse that throws still unmaps the file.
+        private let mapping: ReferenceMappedFile
 
         public init(url: URL) throws {
             self.url = url
-            let fd = open(url.path, O_RDONLY)
-            guard fd >= 0 else { throw NativeError.missing("GGUF \(url.path)") }
-            defer { close(fd) }
-            var st = stat()
-            guard fstat(fd, &st) == 0, st.st_size > 24 else { throw NativeError.integrity("GGUF too small") }
-            fileSize = Int(st.st_size)
-            guard let p = mmap(nil, fileSize, PROT_READ, MAP_PRIVATE, fd, 0), p != MAP_FAILED else {
-                throw NativeError.resource("mmap \(url.path)")
-            }
-            base = p
-            mappedLength = fileSize
+            let mapping = try ReferenceMappedFile(url: url)
+            guard mapping.size > 24 else { throw NativeError.integrity("GGUF too small") }
+            let parsed = try Self.parse(base: mapping.base, size: mapping.size)
+            self.mapping = mapping
+            fileSize = mapping.size
+            version = parsed.version
+            keys = parsed.keys
+            metadata = parsed.metadata
+            tensors = parsed.tensors
+            alignment = parsed.alignment
+            dataOffset = parsed.dataOffset
+        }
 
-            var cursor = Cursor(base: UnsafeRawPointer(p), size: fileSize)
+        struct Parsed {
+            var version: Int
+            var keys: [String]
+            var metadata: [String: Value]
+            var tensors: [TensorInfo]
+            var alignment: Int
+            var dataOffset: Int
+        }
+
+        /// Parses a GGUF header. Every size, count and offset is checked:
+        /// hostile input throws `NativeError`, never traps.
+        static func parse(base: UnsafeRawPointer, size: Int) throws -> Parsed {
+            var cursor = Cursor(base: base, size: size)
             guard try cursor.bytes(4) == Array("GGUF".utf8) else { throw NativeError.integrity("not a GGUF file") }
             let v = try cursor.u32()
             guard v == 2 || v == 3 else { throw NativeError.unsupported("GGUF version \(v)") }
-            version = Int(v)
             let tensorCount = try cursor.u64()
             let keyCount = try cursor.u64()
             guard tensorCount < 1 << 20, keyCount < 1 << 20 else { throw NativeError.integrity("GGUF counts") }
@@ -63,16 +75,23 @@ extension Native {
             for _ in 0..<keyCount {
                 let key = try cursor.string()
                 let type = try cursor.u32()
+                guard metadata[key] == nil else { throw NativeError.integrity("GGUF key \(key) appears twice") }
                 metadata[key] = try cursor.value(type: type)
                 keys.append(key)
             }
             var infos: [TensorInfo] = []
+            var names: Set<String> = []
             for _ in 0..<tensorCount {
                 let name = try cursor.string()
-                let dims = Int(try cursor.u32())
+                guard names.insert(name).inserted else { throw NativeError.integrity("tensor \(name) appears twice") }
+                let dims = try cursor.int(cursor.u32())
                 guard (1...4).contains(dims) else { throw NativeError.integrity("tensor \(name) dims \(dims)") }
                 var shape: [Int] = []
-                for _ in 0..<dims { shape.append(Int(try cursor.u64())) }
+                for _ in 0..<dims {
+                    let d = try cursor.int(cursor.u64())
+                    guard d > 0 else { throw NativeError.invalidShape("tensor \(name) dimension \(d)") }
+                    shape.append(d)
+                }
                 let rawType = try cursor.u32()
                 guard let type = GGMLType(rawValue: rawType) else {
                     throw NativeError.unsupported("tensor \(name) ggml type \(rawType)")
@@ -81,45 +100,65 @@ extension Native {
                 guard let format = QuantBlockFormat.of(type) else {
                     throw NativeError.unsupported("tensor \(name) type \(type)")
                 }
-                let elements = shape.reduce(1, *)
-                guard elements % format.elements == 0 else {
-                    throw NativeError.invalidShape("tensor \(name) \(shape) not whole \(type) blocks")
+                var elements = 1
+                for d in shape {
+                    let (product, overflow) = elements.multipliedReportingOverflow(by: d)
+                    guard !overflow else { throw NativeError.invalidShape("tensor \(name) \(shape) overflows") }
+                    elements = product
                 }
-                infos.append(TensorInfo(name: name, shape: shape, type: type, offset: offset,
-                                        byteCount: elements / format.elements * format.bytes))
+                guard shape[0] % format.elements == 0 else {
+                    throw NativeError.invalidShape("tensor \(name) \(shape) rows are not whole \(type) blocks")
+                }
+                let (bytes, overflow) = (elements / format.elements).multipliedReportingOverflow(by: format.bytes)
+                guard !overflow else { throw NativeError.invalidShape("tensor \(name) byte count overflows") }
+                infos.append(TensorInfo(name: name, shape: shape, type: type, offset: offset, byteCount: bytes))
             }
             var align = 32
-            if case .uint(let a)? = metadata["general.alignment"] { align = Int(a) }
-            alignment = align
-            dataOffset = (cursor.position + align - 1) / align * align
+            if let a = metadata["general.alignment"] {
+                guard case .uint(let raw) = a, let value = Int(exactly: raw), value > 0, value & (value - 1) == 0,
+                      value <= 1 << 20 else {
+                    throw NativeError.integrity("general.alignment must be a power of two")
+                }
+                align = value
+            }
+            let dataOffset = (cursor.position + align - 1) / align * align
+            guard dataOffset <= size else { throw NativeError.integrity("GGUF data section past the end") }
+            // Offsets must be aligned, in bounds and non-overlapping.
+            var spans: [(Int, Int, String)] = []
             for info in infos {
-                guard dataOffset + Int(info.offset) + info.byteCount <= fileSize else {
+                guard let start = Int(exactly: info.offset), start % align == 0 else {
+                    throw NativeError.integrity("tensor \(info.name) offset \(info.offset) is not \(align)-aligned")
+                }
+                let (end, overflow) = start.addingReportingOverflow(info.byteCount)
+                guard !overflow, end <= size - dataOffset else {
                     throw NativeError.integrity("tensor \(info.name) runs past the end of the file")
                 }
+                spans.append((start, end, info.name))
             }
-            self.keys = keys
-            self.metadata = metadata
-            self.tensors = infos
+            spans.sort { $0.0 < $1.0 }
+            for (a, b) in zip(spans, spans.dropFirst()) where b.0 < a.1 {
+                throw NativeError.integrity("tensors \(a.2) and \(b.2) overlap")
+            }
+            return Parsed(version: Int(v), keys: keys, metadata: metadata, tensors: infos, alignment: align,
+                          dataOffset: dataOffset)
         }
-
-        deinit { munmap(base, mappedLength) }
 
         /// The tensor's bytes, in GGUF order (valid for this object's lifetime).
         public func bytes(of info: TensorInfo) -> UnsafeRawBufferPointer {
-            UnsafeRawBufferPointer(start: UnsafeRawPointer(base) + dataOffset + Int(info.offset), count: info.byteCount)
+            UnsafeRawBufferPointer(start: mapping.base + dataOffset + Int(info.offset), count: info.byteCount)
         }
 
         /// The whole file (valid for this object's lifetime).
         public var fileBytes: UnsafeRawBufferPointer {
-            UnsafeRawBufferPointer(start: UnsafeRawPointer(base), count: fileSize)
+            UnsafeRawBufferPointer(start: mapping.base, count: fileSize)
         }
 
         // MARK: Typed metadata access
 
         public func int(_ key: String) -> Int? {
             switch metadata[key] {
-            case .uint(let v)?: return Int(v)
-            case .int(let v)?: return Int(v)
+            case .uint(let v)?: return Int(exactly: v)
+            case .int(let v)?: return Int(exactly: v)
             default: return nil
             }
         }
@@ -169,8 +208,12 @@ extension Native {
             }
             mutating func u32() throws -> UInt32 { try load(UInt32.self) }
             mutating func u64() throws -> UInt64 { try load(UInt64.self) }
+            func int<T: BinaryInteger>(_ v: T) throws -> Int {
+                guard let i = Int(exactly: v) else { throw NativeError.integrity("GGUF value \(v) out of range") }
+                return i
+            }
             mutating func string() throws -> String {
-                let n = Int(try u64())
+                let n = try int(u64())
                 guard n < 1 << 26 else { throw NativeError.integrity("GGUF string of \(n) bytes") }
                 try need(n)
                 defer { position += n }
@@ -192,7 +235,7 @@ extension Native {
                 case 9:
                     guard depth < 2 else { throw NativeError.integrity("GGUF arrays nested too deeply") }
                     let elementType = try u32()
-                    let count = Int(try u64())
+                    let count = try int(u64())
                     guard count < 1 << 26 else { throw NativeError.integrity("GGUF array of \(count)") }
                     var values: [Value] = []
                     values.reserveCapacity(count)
@@ -224,17 +267,21 @@ extension Native.ReferenceGGUFFile {
         let nextn = int("\(arch).nextn_predict_layers") ?? 0
         let sections: [Int] = (array("\(arch).rope.dimension_sections") ?? []).compactMap {
             switch $0 {
-            case .uint(let v): return Int(v)
-            case .int(let v): return Int(v)
+            case .uint(let v): return Int(exactly: v)
+            case .int(let v): return Int(exactly: v)
             default: return nil
             }
+        }
+        let blocks = try req("block_count")
+        guard nextn >= 0, blocks > nextn else {
+            throw Native.NativeError.invalidShape("block_count \(blocks), nextn_predict_layers \(nextn)")
         }
         guard let embd = tensors.first(where: { $0.name == "token_embd.weight" }), embd.shape.count == 2 else {
             throw Native.NativeError.missing("token_embd.weight")
         }
         let keyLength = try req("attention.key_length")
         return Native.Qwen35Config(
-            blockCount: try req("block_count") - nextn,
+            blockCount: blocks - nextn,
             hiddenSize: try req("embedding_length"),
             ffnSize: try req("feed_forward_length"),
             headCount: try req("attention.head_count"),
@@ -263,14 +310,17 @@ extension Native.ReferenceGGUFFile {
             guard let a = array(k) else { throw Native.NativeError.missing("GGUF key \(k)") }
             return a.map { if case .string(let s) = $0 { return s } else { return "" } }
         }
-        let types: [Int32] = (array("tokenizer.ggml.token_type") ?? []).map {
+        let types: [Int32] = try (array("tokenizer.ggml.token_type") ?? []).map {
+            let t: Int32?
             switch $0 {
-            case .int(let v): return Int32(v)
-            case .uint(let v): return Int32(v)
-            default: return 0
+            case .int(let v): t = Int32(exactly: v)
+            case .uint(let v): t = Int32(exactly: v)
+            default: t = nil
             }
+            guard let t else { throw Native.NativeError.integrity("tokenizer.ggml.token_type value") }
+            return t
         }
-        func id(_ k: String) -> Int32? { int(k).map { Int32($0) } }
+        func id(_ k: String) -> Int32? { int(k).flatMap { Int32(exactly: $0) } }
         return Native.TokenizerData(
             model: string("tokenizer.ggml.model") ?? "",
             pre: string("tokenizer.ggml.pre") ?? "",

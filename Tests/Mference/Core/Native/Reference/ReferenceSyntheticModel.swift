@@ -12,10 +12,18 @@ enum RefSynthetic {
         var bytes: [UInt8]
     }
 
-    /// Minimal GGUF v3 writer.
+    /// Minimal GGUF writer (v3 by default; `version`, `alignment` and raw
+    /// tensor offsets can be overridden to build hostile files).
     struct GGUFBuilder {
         var kv: [(String, UInt32, [UInt8])] = []
         var tensors: [Tensor] = []
+        var version: UInt32 = 3
+        var alignment = 32
+        /// Tensor index → offset written in its info (data is still laid out
+        /// at the natural offsets).
+        var offsetOverride: [Int: UInt64] = [:]
+        /// Tensor index → raw `ne` written in its info.
+        var dimsOverride: [Int: [UInt64]] = [:]
 
         static func le<T: FixedWidthInteger>(_ v: T) -> [UInt8] { withUnsafeBytes(of: v.littleEndian) { Array($0) } }
         static func str(_ s: String) -> [UInt8] { le(UInt64(s.utf8.count)) + Array(s.utf8) }
@@ -31,20 +39,21 @@ enum RefSynthetic {
         }
 
         func data() -> Data {
-            var out = Array("GGUF".utf8) + Self.le(UInt32(3)) + Self.le(UInt64(tensors.count)) + Self.le(UInt64(kv.count))
+            var out = Array("GGUF".utf8) + Self.le(version) + Self.le(UInt64(tensors.count)) + Self.le(UInt64(kv.count))
             for (k, t, v) in kv { out += Self.str(k) + Self.le(t) + v }
             var offset = 0
             var offsets: [Int] = []
             for t in tensors {
                 offsets.append(offset)
-                offset = (offset + t.bytes.count + 31) / 32 * 32
+                offset = (offset + t.bytes.count + alignment - 1) / alignment * alignment
             }
-            for (t, o) in zip(tensors, offsets) {
-                out += Self.str(t.name) + Self.le(UInt32(t.shape.count))
-                for d in t.shape { out += Self.le(UInt64(d)) }
-                out += Self.le(t.type.rawValue) + Self.le(UInt64(o))
+            for (i, (t, o)) in zip(tensors, offsets).enumerated() {
+                let dims = dimsOverride[i] ?? t.shape.map { UInt64($0) }
+                out += Self.str(t.name) + Self.le(UInt32(dims.count))
+                for d in dims { out += Self.le(d) }
+                out += Self.le(t.type.rawValue) + Self.le(offsetOverride[i] ?? UInt64(o))
             }
-            while out.count % 32 != 0 { out.append(0) }
+            while out.count % alignment != 0 { out.append(0) }
             let base = out.count
             for (t, o) in zip(tensors, offsets) {
                 while out.count < base + o { out.append(0) }

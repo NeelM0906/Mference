@@ -92,29 +92,40 @@ extension Native {
             ranks.reserveCapacity(data.merges.count)
             for (i, merge) in data.merges.enumerated() {
                 let bytes = Array(merge.utf8)
-                // llama.cpp splits at the first space after the first byte.
-                guard bytes.count > 1, let sep = bytes[1...].firstIndex(of: 0x20) else {
-                    ranks[BytePair(left: [], right: [])] = i
-                    continue
+                // llama.cpp splits at the first space after the first byte
+                // (no space: an empty pair) and keeps the first rank of a
+                // repeated pair (`bpe_ranks.emplace`).
+                var pair = BytePair(left: [], right: [])
+                if bytes.count > 1, let sep = bytes[1...].firstIndex(of: 0x20) {
+                    pair = BytePair(left: Array(bytes[..<sep]), right: Array(bytes[(sep + 1)...]))
                 }
-                ranks[BytePair(left: Array(bytes[..<sep]), right: Array(bytes[(sep + 1)...]))] = i
+                if ranks[pair] == nil { ranks[pair] = i }
             }
             self.texts = texts
             self.textToID = textToID
             self.ranks = ranks
             self.attrs = attrs
-            func valid(_ id: Int32?) -> Int32? {
-                guard let id, id >= 0, Int(id) < texts.count else { return nil }
-                return id
-            }
-            bosTokenID = valid(data.bosTokenID)
-            eosTokenID = valid(data.eosTokenID)
+            let ids = Self.specialIDs(data)
+            bosTokenID = ids.bos
+            eosTokenID = ids.eos
             addBOS = data.addBOS ?? false
             addEOS = data.addEOS ?? false
             applySpecialTokenRules()
         }
 
         // MARK: llama.cpp special-token rules (llama_vocab::impl::load)
+
+        /// BOS and EOS as llama.cpp resolves them for a gpt2 vocabulary: both
+        /// default to id 11; a GGUF id replaces the default when it is in
+        /// range; a default out of range is disabled.
+        public static func specialIDs(_ data: TokenizerData) -> (bos: Int32?, eos: Int32?) {
+            let n = data.tokens.count
+            func resolve(_ key: Int32?) -> Int32? {
+                if let key, key >= 0, Int(key) < n { return key }
+                return 11 < n ? 11 : nil
+            }
+            return (resolve(data.bosTokenID), resolve(data.eosTokenID))
+        }
 
         private func applySpecialTokenRules() {
             func id(_ text: String) -> Int32? { textToID[Array(text.utf8)] }
@@ -398,9 +409,14 @@ extension Native {
             if !attr.intersection([.unknown, .control, .userDefined]).isEmpty { return text }
             if attr.contains(.normal) { return ReferenceUnicode.decodeByteText(text) }
             if attr.contains(.byte) {
-                let cpts = String(decoding: text, as: UTF8.self).unicodeScalars.map { $0.value }
-                if cpts.count == 1, let b = ReferenceUnicode.utf8ToByte[cpts[0]] { return [b] }
-                return []
+                // `token_to_byte` for BPE: strtol(text.substr(3, 2), 16).
+                guard text.count >= 3 else { return [] }
+                var value = 0
+                for b in text[3 ..< min(5, text.count)] {
+                    guard let digit = Int(String(UnicodeScalar(b)), radix: 16) else { break }
+                    value = value * 16 + digit
+                }
+                return [UInt8(truncatingIfNeeded: value)]
             }
             return []
         }
@@ -585,7 +601,8 @@ extension Native {
                 } else {
                     out += Array("[UNK_BYTE_0x".utf8)
                     for b in utf8(scalar.value) { out += Array(String(format: "%02x", b).utf8) }
-                    out += Array("]".utf8)
+                    // llama.cpp appends the whole token text, then "]".
+                    out += text + Array("]".utf8)
                 }
             }
             return out

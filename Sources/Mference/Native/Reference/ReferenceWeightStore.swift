@@ -34,6 +34,11 @@ extension Native {
                 throw NativeError.integrity("manifest.json does not match verified-install.json")
             }
             let mapping = try ReferenceMappedFile(url: directory.appendingPathComponent("weights.bin"))
+            guard receipt.format == manifest.format, receipt.formatVersion == manifest.formatVersion,
+                  receipt.sourceSHA256 == manifest.source.sha256, receipt.tensorCount == manifest.tensors.count,
+                  receipt.weightsByteCount == UInt64(mapping.size) else {
+                throw NativeError.integrity("verified-install.json does not describe this pack")
+            }
             guard let buffer = device.makeBuffer(bytesNoCopy: UnsafeMutableRawPointer(mutating: mapping.base),
                                                  length: mapping.mappedLength, options: .storageModeShared,
                                                  deallocator: nil) else {
@@ -82,6 +87,7 @@ extension Native {
                 guard t.shape[0] % format.elements == 0,
                       UInt64(elements / format.elements * format.bytes) == t.byteCount,
                       t.layout.fits(rows: rows, blocksPerRow: t.shape[0] / format.elements),
+                      t.offset % ReferencePackWriter.pageAlignment == 0,
                       t.offset + t.byteCount <= UInt64(fileSize) else {
                     throw NativeError.integrity("\(t.name): shape, size, layout or offset is inconsistent")
                 }
@@ -113,12 +119,10 @@ extension Native {
 
         public init(template: String, data: TokenizerData) {
             self.template = template
-            func text(_ id: Int32?) -> String? {
-                guard let id, id >= 0, Int(id) < data.tokens.count else { return nil }
-                return data.tokens[Int(id)]
-            }
-            bosToken = text(data.bosTokenID)
-            eosToken = text(data.eosTokenID)
+            let ids = ReferenceTokenizer.specialIDs(data)
+            func text(_ id: Int32?) -> String? { id.map { data.tokens[Int($0)] } }
+            bosToken = text(ids.bos)
+            eosToken = text(ids.eos)
         }
     }
 

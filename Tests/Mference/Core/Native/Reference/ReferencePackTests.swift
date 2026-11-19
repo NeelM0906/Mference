@@ -77,4 +77,41 @@ struct ReferencePackTests {
         }
         try? FileManager.default.removeItem(at: fx.dir)
     }
+
+    @Test func writerCleansUpAndRecordsTheLayoutTableVersion() throws {
+        let device = try #require(MetalContext.makeSystemDefaultDevice())
+        let dir = try RefSynthetic.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let gguf = dir.appendingPathComponent("tiny.gguf")
+        try RefSynthetic.gguf().write(to: gguf)
+
+        // A failure after the directory exists (here: manifest.json cannot be
+        // written) removes the partial pack.
+        let failing = dir.appendingPathComponent("failing.mfpack")
+        #expect(throws: (any Error).self) {
+            try Native.ReferencePackWriter.write(gguf: gguf, to: failing, label: "x", layout: { _, _, _ in
+                try? FileManager.default.createDirectory(at: failing.appendingPathComponent("manifest.json"),
+                                                         withIntermediateDirectories: true)
+                return .gguf
+            })
+        }
+        #expect(!FileManager.default.fileExists(atPath: failing.path))
+
+        let table = try Native.ReferencePackWriter.write(gguf: gguf, to: dir.appendingPathComponent("a.mfpack"),
+                                                         label: "a")
+        #expect(table.layoutTableVersion == Native.PackLayoutTable.version)
+        let tiled = try Native.ReferencePackWriter.write(gguf: gguf, to: dir.appendingPathComponent("b.mfpack"),
+                                                         label: "b", layout: RefSynthetic.tiled)
+        #expect(tiled.layoutTableVersion == 0)
+
+        // The store checks the receipt against the manifest and the file.
+        let receiptURL = dir.appendingPathComponent("a.mfpack/verified-install.json")
+        var receipt = try JSONDecoder().decode(Native.ReferencePackWriter.Receipt.self,
+                                               from: Data(contentsOf: receiptURL))
+        receipt.tensorCount += 1
+        try JSONEncoder().encode(receipt).write(to: receiptURL)
+        #expect(throws: Native.NativeError.self) {
+            _ = try Native.ReferenceWeightStore(directory: dir.appendingPathComponent("a.mfpack"), device: device)
+        }
+    }
 }
