@@ -208,6 +208,21 @@ struct ReferenceGoldenTests {
                                                                 name: "\(golden.id) \(component) layer \(layer)") {
                         failures.append(failure)
                     }
+                    // Diagnostic split: prompt rows (llama.cpp prefill path)
+                    // and decode rows (its single-row path), when the tensor
+                    // has one row per position.
+                    let prompt = golden.promptTokens.count
+                    if want.count % rows == 0, ours.count == want.count, prompt < rows {
+                        let cols = want.count / rows
+                        for (suffix, range) in [("@prompt", 0 ..< prompt), ("@decode", prompt ..< rows)] {
+                            var part = ParityMetrics.ErrorStats()
+                            part.add(golden: Array(want[range.lowerBound * cols ..< range.upperBound * cols]),
+                                     candidate: Array(ours[range.lowerBound * cols ..< range.upperBound * cols]))
+                            reports.append(ComponentReport(prompt: golden.id, component: component + suffix, layer: layer,
+                                                           toleranceClass: cls.rawValue, relativeL2: part.relativeL2,
+                                                           maxAbsError: part.maxAbs, meanAbsError: part.meanAbs))
+                        }
+                    }
                 }
                 func zeros(_ n: Int, _ cols: Int) -> Native.TensorRef {
                     RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: n * cols), rows: n, cols: cols)
