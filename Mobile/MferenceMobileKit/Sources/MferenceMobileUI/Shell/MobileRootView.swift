@@ -2,13 +2,16 @@ import MferenceDesign
 import SwiftUI
 import UIKit
 
-/// The app's root. Picks the layout from the window width: tabs on iPhone
-/// and Duo closed, two panes split at the fold on Duo open. Both read the
-/// same `MobileAppModel`, so folding keeps everything where it was.
+/// The app's root. Picks the layout from the window size (`ShellLayout`):
+/// tabs on iPhone and Duo closed, tabs in one centred column on a turned Duo,
+/// two panes split at the fold on Duo open. All of them read the same
+/// `MobileAppModel` and `ShellState`, held here, so folding, unfolding or
+/// turning keeps everything where it was.
 public struct MobileRootView: View {
     @State private var model: MobileAppModel
-    /// The full window width, measured under the safe area, to place the fold.
-    @State private var windowWidth: CGFloat = 0
+    @State private var shell = ShellState()
+    /// The full window size, measured under the safe area, to place the fold.
+    @State private var windowSize: CGSize = .zero
 
     public init(model: MobileAppModel) {
         _model = State(initialValue: model)
@@ -17,23 +20,39 @@ public struct MobileRootView: View {
     public var body: some View {
         GeometryReader { geometry in
             let contentMinX = geometry.frame(in: .global).minX
-            let fullWidth = windowWidth > 0 ? windowWidth : geometry.size.width
-            let fold = FoldGeometry(width: geometry.size.width, foldX: fullWidth / 2 - contentMinX)
+            let full = windowSize
+            let layout = ShellLayout(windowSize: full)
             Group {
-                if model.isFirstRunPresented {
+                if full.width <= 0 {
+                    // Until the window is measured: deciding from the safe-area
+                    // size could pick the wrong shell and rebuild it a frame later.
+                    Color.clear
+                } else if model.isFirstRunPresented {
                     FirstRunView(model: model)
-                } else if FoldGeometry(width: fullWidth).mode == .twoPane {
-                    TwoPaneShell(model: model, fold: fold)
                 } else {
-                    CompactShell(model: model)
+                    switch layout {
+                    case .twoPane:
+                        TwoPaneShell(model: model, shell: shell,
+                                     fold: FoldGeometry(width: geometry.size.width,
+                                                        foldX: full.width / 2 - contentMinX))
+                    case .turned(let turned):
+                        CompactShell(model: model, columnWidth: turned.columnWidth)
+                    case .tabs:
+                        CompactShell(model: model)
+                    }
                 }
             }
+            .sheet(isPresented: $shell.isAddingEvent) {
+                NewEventSheet(model: model).phoneSheetDetents([.medium])
+            }
+            .environment(\.phoneSheetsBelowFold, layout.sheetsBelowFold)
+            .environment(shell)
         }
         .background(
             GeometryReader { full in
                 Color.clear
-                    .onAppear { windowWidth = full.size.width }
-                    .onChange(of: full.size.width) { windowWidth = full.size.width }
+                    .onAppear { windowSize = full.size }
+                    .onChange(of: full.size) { windowSize = full.size }
             }
             .ignoresSafeArea())
         .background(MFColor.canvas.ignoresSafeArea())
@@ -57,26 +76,39 @@ public struct MobileRootView: View {
     }
 }
 
-/// iPhone and Duo closed: the system's floating tab bar, selected tab in ink.
+/// iPhone, Duo closed and a turned Duo: the system's floating tab bar,
+/// selected tab in ink. On a turned Duo each screen sits in one centred
+/// column `columnWidth` wide; the tab bar keeps the full width.
 struct CompactShell: View {
     @Bindable var model: MobileAppModel
+    /// nil: screens take the full width.
+    var columnWidth: CGFloat?
 
     var body: some View {
         TabView(selection: $model.selection) {
             Tab(MobileSection.chat.title, systemImage: MobileSection.chat.systemImage, value: MobileSection.chat) {
-                ChatScreen(model: model)
+                column { ChatScreen(model: model) }
             }
             Tab(MobileSection.calendar.title, systemImage: MobileSection.calendar.systemImage, value: MobileSection.calendar) {
-                CalendarScreen(model: model)
+                column { CalendarScreen(model: model) }
             }
             Tab(MobileSection.scan.title, systemImage: MobileSection.scan.systemImage, value: MobileSection.scan) {
-                ScanScreen(model: model)
+                column { ScanScreen(model: model) }
             }
             Tab(MobileSection.settings.title, systemImage: MobileSection.settings.systemImage, value: MobileSection.settings) {
-                SettingsScreen(model: model)
+                column { SettingsScreen(model: model) }
             }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
+    }
+
+    /// The same structure with or without a column, so turning the Duo
+    /// keeps each screen's identity (scroll position, navigation).
+    private func column<Screen: View>(@ViewBuilder _ screen: () -> Screen) -> some View {
+        screen()
+            .frame(maxWidth: columnWidth ?? .infinity)
+            .frame(maxWidth: .infinity)
+            .background(MFColor.canvas.ignoresSafeArea())
     }
 }
 
@@ -84,9 +116,8 @@ struct CompactShell: View {
 /// on the right. Nothing sits within the keep-out around the fold.
 struct TwoPaneShell: View {
     @Bindable var model: MobileAppModel
+    @Bindable var shell: ShellState
     let fold: FoldGeometry
-    @State private var settingsGroup: SettingsGroup = .models
-    @State private var isAddingEvent = false
 
     private var keepOut: CGFloat { MFPhoneMetrics.foldKeepOut }
 
@@ -103,9 +134,6 @@ struct TwoPaneShell: View {
                 .padding(.leading, keepOut)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .background(MFColor.canvas.ignoresSafeArea())
-        }
-        .sheet(isPresented: $isAddingEvent) {
-            NewEventSheet(model: model).presentationDetents([.medium])
         }
     }
 
@@ -140,19 +168,19 @@ struct TwoPaneShell: View {
                         .padding(.bottom, MFSpacing.s)
                     ForEach(SettingsGroup.allCases) { group in
                         Button {
-                            settingsGroup = group
+                            shell.settingsGroup = group
                         } label: {
                             Text(group.rawValue)
-                                .font(group == settingsGroup ? MFPhoneFont.button : MFPhoneFont.callout)
+                                .font(group == shell.settingsGroup ? MFPhoneFont.button : MFPhoneFont.callout)
                                 .foregroundStyle(MFColor.ink)
                                 .padding(.horizontal, MFSpacing.m)
                                 .frame(maxWidth: .infinity, minHeight: MFPhoneMetrics.touchTarget, alignment: .leading)
                                 .background(RoundedRectangle(cornerRadius: MFRadius.m)
-                                    .fill(group == settingsGroup ? MFColor.sidebarSelected : .clear))
+                                    .fill(group == shell.settingsGroup ? MFColor.sidebarSelected : .clear))
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityAddTraits(group == settingsGroup ? .isSelected : [])
+                        .accessibilityAddTraits(group == shell.settingsGroup ? .isSelected : [])
                     }
                     Spacer()
                     Label("No account and no usage reporting.", systemImage: "lock")
@@ -186,7 +214,7 @@ struct TwoPaneShell: View {
             VStack(spacing: 0) {
                 CalendarHeader(model: model,
                                title: model.selectedDay.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()),
-                               isAddingEvent: $isAddingEvent, titleFont: MFPhoneFont.title)
+                               isAddingEvent: $shell.isAddingEvent, titleFont: MFPhoneFont.title)
                     .padding(.horizontal, MFPhoneMetrics.paneMargin)
                     .padding(.top, MFSpacing.s)
                 DayTimeline(model: model, margin: MFPhoneMetrics.paneMargin)
@@ -214,12 +242,12 @@ struct TwoPaneShell: View {
         case .settings:
             ScrollView {
                 VStack(alignment: .leading, spacing: MFSpacing.m) {
-                    Text(settingsGroup.rawValue).font(MFPhoneFont.title).foregroundStyle(MFColor.ink)
-                    if settingsGroup == .models {
+                    Text(shell.settingsGroup.rawValue).font(MFPhoneFont.title).foregroundStyle(MFColor.ink)
+                    if shell.settingsGroup == .models {
                         Text("This iPhone: [model], [8 GB] memory, [96 GB] free. One model is loaded at a time.")
                             .font(MFPhoneFont.preview).foregroundStyle(MFColor.secondary)
                     }
-                    SettingsGroupContent(group: settingsGroup, model: model)
+                    SettingsGroupContent(group: shell.settingsGroup, model: model)
                 }
                 .padding(.horizontal, MFPhoneMetrics.paneMargin)
                 .padding(.vertical, MFSpacing.m)
