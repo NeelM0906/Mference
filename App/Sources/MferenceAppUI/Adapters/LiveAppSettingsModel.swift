@@ -28,14 +28,22 @@ public final class BrokerConnections: AppleConnectionsProviding {
     public private(set) var askedForMail = false
 
     @ObservationIgnored private let broker: any PermissionBroker
+    /// Only the newest refresh writes: an older one that read before a grant
+    /// must not overwrite what a newer one read after it.
+    @ObservationIgnored private var refreshGeneration: UInt64 = 0
 
     public init(broker: any PermissionBroker) {
         self.broker = broker
     }
 
     public func refresh() async {
-        calendar = await broker.state(of: .calendar)
-        mail = await broker.state(of: .fullDiskAccess)
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        let calendar = await broker.state(of: .calendar)
+        let mail = await broker.state(of: .fullDiskAccess)
+        guard generation == refreshGeneration else { return }
+        self.calendar = calendar
+        self.mail = mail
     }
 
     public func connectionState(_ kind: ConnectionKind) -> ConnectionState {
@@ -92,11 +100,13 @@ public final class LiveAppSettingsModel: AppSettingsModel {
         self.connections = connections
         Task { await connections.refresh() }
         if let activationNotification {
+            // Runs on the posting thread and hops to the main actor itself,
+            // so it does not depend on the main operation queue's turn.
             activation = NotificationCenter.default.addObserver(
-                forName: activationNotification, object: nil, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated {
+                forName: activationNotification, object: nil, queue: nil) { [weak self] _ in
+                    Task { @MainActor in
                         guard let connections = self?.connections else { return }
-                        Task { await connections.refresh() }
+                        await connections.refresh()
                     }
                 }
         }

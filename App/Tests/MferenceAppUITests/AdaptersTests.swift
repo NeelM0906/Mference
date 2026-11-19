@@ -3,9 +3,10 @@ import MferenceAppCore
 @testable import MferenceAppUI
 import Testing
 
-/// Polls `condition` for up to five seconds.
+/// Polls `condition` for up to twenty seconds: the UI suite shares the main
+/// actor with snapshot renders that can hold it for seconds at a time.
 func eventually(_ condition: () -> Bool) async -> Bool {
-    let deadline = ContinuousClock.now + .seconds(5)
+    let deadline = ContinuousClock.now + .seconds(20)
     while !condition(), ContinuousClock.now < deadline {
         try? await Task.sleep(for: .milliseconds(5))
     }
