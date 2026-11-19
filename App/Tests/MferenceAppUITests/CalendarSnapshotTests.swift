@@ -25,6 +25,15 @@ import Testing
         await notAsked.load()
         try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
                 .environment(notAsked), name: "04-calendar-todos-access")
+
+        // Asked, but macOS showed no prompt.
+        let noPrompt = CalendarWeekModel(service: InMemoryCalendarService(calendarAccess: .notDetermined,
+                                                                          promptShown: false),
+                                         store: PlannerStore(url: nil), defaults: defaults, now: { fixedNow })
+        await noPrompt.requestAccess()
+        #expect(noPrompt.access == .promptNotShown)
+        try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
+                .environment(noPrompt), name: "04-calendar-todos-no-prompt")
     }
 
     @Test func shellSlotBuildsWithoutServices() {

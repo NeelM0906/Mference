@@ -1,5 +1,7 @@
+import EventKit
 import Foundation
 @testable import MferenceAppCore
+import Synchronization
 import Testing
 
 enum CalendarFixtures {
@@ -291,6 +293,93 @@ enum CalendarFixtures {
         #expect(model.access == .blocked)
         await model.openCalendarSettings()
         #expect(await service.openedSettings == [.calendar])
+    }
+
+    /// The maintainer's loop: Continue under the reason, no macOS prompt, and
+    /// the screen asked again. Now it says so, points to System Settings,
+    /// and nothing asks again on its own.
+    @Test @MainActor func aPromptMacOSNeverShowsEndsTheLoop() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events, calendarAccess: .notDetermined,
+                                              promptShown: false)
+        let model = Self.model(service: service)
+        await model.load()
+        await model.requestAccess()
+        #expect(model.access == .promptNotShown)
+        // Adding a proposal or a new event does not ask again.
+        model.propose(CalendarFixtures.moveProposal)
+        let proposal = try #require(model.proposals.first)
+        await model.add(proposal)
+        #expect(await model.createEvent(title: "Dentist", start: CalendarFixtures.date(16, 9),
+                                        end: CalendarFixtures.date(16, 9, 30)) == false)
+        // Coming back to the app re-reads without asking, and keeps the state.
+        await model.recheckAccess()
+        #expect(model.access == .promptNotShown)
+        #expect(await service.requests == [.calendar])
+        await model.openCalendarSettings()
+        #expect(await service.openedSettings == [.calendar])
+        // Turned on in System Settings: the next activation shows the week.
+        await service.setCalendarAccess(.granted)
+        await model.recheckAccess()
+        #expect(model.access == .granted)
+        #expect(model.events.count == 10)
+        #expect(await service.requests == [.calendar])
+    }
+
+    /// The maintainer granted Full Access in the macOS prompt and the week
+    /// stayed empty until a relaunch: a grant (or EventKit's change notice)
+    /// now shows the events at once.
+    @Test @MainActor func aGrantShowsTheWeekWithoutARelaunch() async {
+        let granted = InMemoryCalendarService(events: CalendarFixtures.events, calendarAccess: .notDetermined)
+        let model = Self.model(service: granted)
+        await model.load()
+        await model.requestAccess()
+        #expect(model.access == .granted && model.events.count == 10)
+
+        // Turned on outside the prompt: EventKit's change notice reloads.
+        let later = InMemoryCalendarService(events: CalendarFixtures.events, calendarAccess: .notDetermined,
+                                            promptShown: false)
+        let waiting = Self.model(service: later)
+        await waiting.requestAccess()
+        #expect(waiting.access == .promptNotShown && waiting.events.isEmpty)
+        await later.setCalendarAccess(.granted)
+        await waiting.calendarChanged()
+        #expect(waiting.access == .granted && waiting.events.count == 10)
+    }
+
+    /// Codex on #163: the live service passes the broker's answer on while
+    /// EventKit still reads "not determined", and trusts a grant even if the
+    /// status read lags it.
+    @Test func theEventKitServicePassesTheBrokersAnswerOn() async {
+        let undetermined: @Sendable (EKEntityType) -> EKAuthorizationStatus = { _ in .notDetermined }
+        let noPrompt = EventKitService(broker: RecordingPermissionBroker([.calendar: .needsSystemSettings]),
+                                       eventStore: EventStoreBox(), authorization: undetermined)
+        #expect(await noPrompt.requestCalendarAccess() == .needsSystemSettings)
+        let declined = EventKitService(broker: RecordingPermissionBroker([.calendar: .notDetermined]),
+                                       eventStore: EventStoreBox(), authorization: undetermined)
+        #expect(await declined.requestCalendarAccess() == .notDetermined)
+        let lagging = EventKitService(broker: RecordingPermissionBroker([.calendar: .granted]),
+                                      eventStore: EventStoreBox(), authorization: undetermined)
+        #expect(await lagging.requestCalendarAccess() == .granted)
+    }
+
+    /// The broker surfaces a refused request: one reason, the error logged,
+    /// and System Settings as the answer instead of "not determined".
+    @Test func aRefusedSystemPromptAnswersSystemSettings() async {
+        struct Refused: Error {}
+        let reasons = Mutex(0)
+        let broker = LivePermissionBroker(
+            presentReason: { _ in reasons.withLock { $0 += 1 }; return true },
+            system: .init(state: { _ in .notDetermined },
+                          prompt: { _ in throw Refused() },
+                          openURL: { _ in }))
+        #expect(await broker.request(.calendar) == .needsSystemSettings)
+        #expect(await broker.request(.reminders) == .needsSystemSettings)
+        #expect(reasons.withLock { $0 } == 2)
+        // A declined reason is not a failure: still undecided, nothing logged.
+        let declined = LivePermissionBroker(
+            presentReason: { _ in false },
+            system: .init(state: { _ in .notDetermined }, prompt: { _ in throw Refused() }, openURL: { _ in }))
+        #expect(await declined.request(.calendar) == .notDetermined)
     }
 
     @Test @MainActor func addingAProposalMovesTheEventWithOneClick() async {
