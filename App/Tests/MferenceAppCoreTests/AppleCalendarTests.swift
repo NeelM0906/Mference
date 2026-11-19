@@ -188,6 +188,7 @@ enum CalendarFixtures {
         #expect(!model.events.contains { $0.title.hasPrefix("Lunch") })
         #expect(await model.deleteEvent(edited) == false)  // already gone
         #expect(model.errorMessage != nil)
+    }
 
     @Test func eventsCrossingMidnightShowOnEveryDayTheyTouch() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
