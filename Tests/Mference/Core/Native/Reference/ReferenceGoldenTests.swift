@@ -98,6 +98,12 @@ struct ReferenceGoldenTests {
                     return out
                 }
                 var position = 0
+                // A line per prefill chunk and decode step, so a long GPU-bound
+                // run (near-zero CPU time while it waits) reads as progress.
+                func progress(_ what: String) {
+                    print("reference D1 \(golden.id): \(what), position \(position)/\(positions), "
+                          + "\(Int(Date().timeIntervalSince(start))) s")
+                }
                 // Row g: logits after the prompt and the first g golden tokens.
                 let result = try ParityHarness.compareLogits(golden: golden) { g in
                     var out: Native.TensorRef?
@@ -108,10 +114,12 @@ struct ReferenceGoldenTests {
                             out = try step(.prefill, Array(prompt[position ..< position + n]), at: position,
                                            logits: last ? .last : .none)
                             position += n
+                            progress("prefill chunk of \(n)")
                         }
                     } else {
                         out = try step(.decode, [generated[g - 1]], at: position, logits: .last)
                         position += 1
+                        progress("decode step \(g)/\(generated.count)")
                     }
                     return out.map(RefTest.floats)
                 }
