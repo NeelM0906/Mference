@@ -43,6 +43,17 @@ bash -n mference-ui.sh && python3 Scripts/tests/test_mference_ui.py
 - The link checker covers this file too, so keep relative links valid when
   renaming or moving docs.
 
+The Mac app is a separate SwiftPM package in `App/` (see [The Mac app](#the-mac-app-app)):
+
+```bash
+swift build --package-path App -j 4               # debug, while iterating
+swift build -c release --package-path App -j 4    # the gate build (warnings are errors)
+swift test --package-path App -j 4                # model-free: fake engine, no network
+App/Scripts/searxng/prepare.sh --offline          # SearXNG runtime from the verified cache
+App/Scripts/searxng/prepare.sh --fetch            # by hand only: downloads the pinned runtime
+App/Scripts/bundle.sh                             # build/Mference.app, ad hoc signed
+```
+
 ## Architecture
 
 Read [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) first, then
@@ -59,6 +70,8 @@ the tree are listed in [docs/RETIRED_FAMILIES.md](docs/RETIRED_FAMILIES.md).
 | `MferenceRepackCore` → `MferenceRepack` | `Sources/MferenceRepack/{Core,Command}` | Installer. Deliberately does **not** depend on `Mference`. |
 | `MferenceCLICore` → `MferenceCLI` | `Sources/MferenceCLI` | `Args.parse` → `run(args:)`. |
 | `MferenceServerCore` → `MferenceServer` | `Sources/MferenceServer/{Core,Command}` | swift-nio HTTP, pinned to an exact version. |
+| `MferenceEngine` | `Sources/MferenceEngine` | Embeddable engine: `EngineCatalog`, `EngineHost` (one resident model), `NativeBackend`, `LlamaBackend`, `FakeEngineBackend` for tests. See [docs/ENGINE.md](docs/ENGINE.md). |
+| `LlamaCpp` | `Sources/LlamaCpp` | Vendored llama.cpp built in-process for the GGUF models (Quick, Deep with MTP). |
 | `MferenceValidationSupport` | `Sources/MferenceValidation/Support` | Test-only: CPU references, `Tolerance`, seeded PRNG. |
 | `Vendor/swift-jinja` | local package | Patched so canonical chat templates render byte-exact; its upstream tests run as `JinjaCompatibilityTests`. |
 
@@ -163,8 +176,57 @@ model. The chat dialect comes from the loaded tokenizer's special tokens
 (`ChatDialect`), not from the family. Server tests use `NIOEmbedded` and
 injected loaders.
 
+## The Mac app (`App/`)
+
+`App/Package.swift` (tools 6.2, macOS 26) links the engine in-process through
+`.package(path: "..")`; the app never edits the engine package (root
+`Sources/`, `Tests/`, `Package.swift`). [App/CONTRACTS.md](App/CONTRACTS.md)
+lists the shared contracts (design tokens, `EngineServicing`, the SwiftData
+schema, `AppSection`, `PermissionBroker`); changing one is its own PR.
+
+| Target | Path | Notes |
+| --- | --- | --- |
+| `MferenceDesign` | `App/Sources/MferenceDesign` | Tokens (`MFColor`, `MFFont`, `MFSpacing`, `MFRadius`, `MFLineSpacing`) and components. Views use tokens only. |
+| `MferenceAppCore` | `App/Sources/MferenceAppCore` | No SwiftUI views. `Engine/` (`EngineServicing`, `EngineService` over `EngineHost`), `Services/AppServices` (the one composition root), `Models/` (library, downloads, memory fit), `Chat/`, `Web/` (bundled SearXNG, tools, citations), `Apple/` (Vision, EventKit, Mail, FoundationModels), `Persistence/` (SwiftData), `Permissions/`, `Memory/`, `Settings/`. Only `Engine/` imports `MferenceEngine` or `Mference`. |
+| `MferenceAppUI` | `App/Sources/MferenceAppUI` | SwiftUI screens, one folder per mockup board; `Shell/` routes `AppSection`s; `Adapters/` (`ScreenModels.live`) maps core services to view-facing protocols. |
+| `MferenceMac` | `App/Sources/MferenceMac` | `@main`: sets `AGX_RELAX_CDM_CTXSTORE_TIMEOUT` before any Metal device exists; `AppRuntime` must build exactly one `AppServices.live` and shut it down in order on quit (web first, then the engine). |
+| `MferenceSmoke` | `App/Sources/MferenceSmoke` | Real-model smoke through the app's engine path; refuses to run without `MFERENCE_APP_SMOKE=1`. |
+
+- One `AppServices` per process, so one `EngineHost` and one resident model;
+  never construct a second `EngineService.live()`.
+- `App/Scripts/bundle.sh` assembles `build/Mference.app` (bundle ID
+  `ai.mference.app`, no App Sandbox, ad hoc signed), copies the
+  `Mference_Mference` and `Mference_LlamaCpp` resource bundles and the SearXNG
+  runtime, and verifies the bundle. `prepare.sh` never downloads unless run
+  with `--fetch`; every download is pinned with its SHA-256 in
+  `App/Resources/SearXNG/SOURCES.md` or `App/Resources/Fonts/SOURCES.md`.
+- Tests are Swift Testing, model-free: `EngineService` over an `EngineHost`
+  with `FakeEngineBackend`, `ScriptedEngineService`, `AppleServices.preview`,
+  synthetic Mail/Calendar fixtures, loopback servers. Live suites
+  (`MFERENCE_EVENTKIT_LIVE`, `MFERENCE_MAIL_LIVE`, `MFERENCE_SEARXNG_DIR`,
+  `MFERENCE_SCAN_ACCURACY_*`) are env-gated and skipped by default.
+
+### App work never loads a model
+
+Engine work needs the models and the machine for long, frequent model runs,
+and app work must never gate it. So for all frontend, UI and application work
+(development, local testing, iteration, PR gates):
+
+- Use the fake engine only (`FakeEngineBackend`, `ScriptedEngineService`,
+  `AppleServices.preview`, fixtures). Never load a real model: no
+  `EngineService.live()` generation, no `MferenceSmoke`, no `MferenceCLI` or
+  `MferenceServer` runs, no Apple on-device model runs, no chats in the bundled
+  app.
+- Never take the machine lock for app work; app builds and model-free tests
+  run unlocked in their own worktree with `-j 4`.
+- Real-model app checks happen only at program checkpoints, scheduled around
+  engine work, and then follow the model-run rules in
+  [AGENTS.md](AGENTS.md) (one model process, AC power, swap guard).
+
 ## Invariants
 
+- **App work never loads a model.** See
+  [App work never loads a model](#app-work-never-loads-a-model).
 - **Bounded memory.** Never put a whole checkpoint, shard, expert pool, or
   large tensor in Swift heap memory. Weights are mapped and wrapped with
   `makeBuffer(bytesNoCopy:)`; installer copies go through bounded scratch.
@@ -190,6 +252,10 @@ injected loaders.
 
 - `scratch/` is gitignored and is where local installs
   (`scratch/<family>.gturbo`), parity venvs, and toy checkpoints live.
+- `App/.build`, `App/build/` and the generated SearXNG runtime
+  (`App/Resources/SearXNG/runtime`) are ignored. The root `.gitignore` drops
+  any `models/` directory, so `App/.gitignore` re-includes the app's `Models`
+  source folders.
 - `.gitignore` also drops `*_SPEC.md`, `*_NOTES.md`, `*_PLAN.md`, `PHASE*.md`,
   `notes/`, `*.bin`, and `*.pdf`; a new doc with one of those names will not be
   tracked.
