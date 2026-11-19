@@ -83,7 +83,18 @@ struct MailSidebar: View {
     @Bindable var model: MailInboxModel
 
     var body: some View {
+        // Scrolls when many accounts or a tall window's text size need it.
+        MFScroll {
         VStack(alignment: .leading, spacing: MFSpacing.xs) {
+            // Mail's standard mailboxes: fixed names, Inbox first.
+            AppleSectionHeader(text: "Mailboxes")
+                .padding(.horizontal, MFSpacing.s)
+                .padding(.bottom, MFSpacing.xs)
+            folderRow("Inbox", folder: .inbox)
+            folderRow("Sent", folder: .sent, showsCount: false)
+            folderRow("Drafts", folder: .drafts)
+            folderRow("Spam", folder: .junk)
+            folderRow("Trash", folder: .trash, showsCount: false)
             HStack {
                 AppleSectionHeader(text: "Sorted for you")
                     .lineLimit(1)
@@ -97,6 +108,7 @@ struct MailSidebar: View {
                     .fixedSize()
             }
             .padding(.horizontal, MFSpacing.s)
+            .padding(.top, MFSpacing.l)
             .padding(.bottom, MFSpacing.xs)
             ForEach(model.buckets, id: \.key) { bucket in
                 if model.isRenamingBuckets {
@@ -105,13 +117,7 @@ struct MailSidebar: View {
                     folderRow(bucket.name, folder: .bucket(bucket.key))
                 }
             }
-            AppleSectionHeader(text: "Mail")
-                .padding(.horizontal, MFSpacing.s)
-                .padding(.top, MFSpacing.l)
-                .padding(.bottom, MFSpacing.xs)
             folderRow("Done", folder: .done, showsZero: false)
-            folderRow("Drafts", folder: .drafts)
-            folderRow("Sent", folder: .sent, showsCount: false)
             if !model.accounts.isEmpty {
                 AppleSectionHeader(text: "Accounts")
                     .padding(.horizontal, MFSpacing.s)
@@ -131,9 +137,10 @@ struct MailSidebar: View {
                     .padding(.vertical, MFSpacing.xs + MFSpacing.xxs)
                 }
             }
-            Spacer()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(MFSpacing.m + MFSpacing.xs)
+        }
         .background(MFColor.canvas)
     }
 

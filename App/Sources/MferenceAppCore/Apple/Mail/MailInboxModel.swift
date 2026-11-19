@@ -6,12 +6,16 @@ import SwiftData
 /// its event card and the reply draft.
 @MainActor @Observable
 public final class MailInboxModel {
-    /// What the left column selects.
+    /// What the left column selects: Mail's standard mailboxes (fixed
+    /// names), the "Sorted for you" buckets (renamable, L8) and Done.
     public enum Folder: Hashable, Sendable {
-        case bucket(String)
-        case done
+        case inbox
         case drafts
         case sent
+        case junk
+        case trash
+        case bucket(String)
+        case done
     }
 
     public enum DraftState: Sendable, Hashable {
@@ -25,7 +29,7 @@ public final class MailInboxModel {
 
     public private(set) var status: MailStoreStatus?
     public private(set) var buckets: [MailBucketDefaults.Bucket] = []
-    public var folder: Folder = .bucket(MailBucketDefaults.all[0].key)
+    public var folder: Folder = .inbox
     public private(set) var accounts: [MailAccount] = []
     public private(set) var selected: MailMessageSummary?
     public private(set) var body: MailBody?
@@ -47,6 +51,8 @@ public final class MailInboxModel {
     private var inbox: [MailMessageSummary] = []
     private var drafts: [MailMessageSummary] = []
     private var sent: [MailMessageSummary] = []
+    private var junk: [MailMessageSummary] = []
+    private var trash: [MailMessageSummary] = []
     private var assignment: [String: String] = [:]
     @ObservationIgnored private var lastMoved: (messageID: String, previous: String?)?
     /// Replies being sent and already sent, per message: reopening one shows
@@ -91,8 +97,11 @@ public final class MailInboxModel {
             async let inboxMessages = source.messages(in: [.inbox], limit: limit)
             async let draftMessages = source.messages(in: [.drafts], limit: 50)
             async let sentMessages = source.messages(in: [.sent], limit: 50)
+            async let junkMessages = source.messages(in: [.junk], limit: 50)
+            async let trashMessages = source.messages(in: [.trash], limit: 50)
             async let accountList = source.accounts()
             (inbox, drafts, sent, accounts) = try await (inboxMessages, draftMessages, sentMessages, accountList)
+            (junk, trash) = try await (junkMessages, trashMessages)
             let stored = try store.assignments(for: inbox.map(\.messageID))
             assignment = stored.mapValues(\.bucketKey)
             errorMessage = nil
@@ -102,7 +111,7 @@ public final class MailInboxModel {
         // Show the newest message first, then sort in the background with
         // Apple's model only: Quick would replace the person's chat model,
         // so sorting with it waits for a click (`sortWithQuick`).
-        if selected == nil, let first = inbox.first { await open(first) }
+        if selected == nil, let first = messages.first { await open(first) }
         await sortUnassigned(allowFallback: false)
     }
 
@@ -193,12 +202,16 @@ public final class MailInboxModel {
 
     public func messages(in folder: Folder) -> [MailMessageSummary] {
         switch folder {
+        // Every inbox message but the ones marked Done (they are in Done).
+        case .inbox: return inbox.filter { assignment[$0.messageID] != MailBucketDefaults.doneKey }
         case .bucket(let key):
             let fallback = MailBucketDefaults.all.last?.key
             return inbox.filter { (assignment[$0.messageID] ?? fallback) == key }
         case .done: return inbox.filter { assignment[$0.messageID] == MailBucketDefaults.doneKey }
         case .drafts: return drafts
         case .sent: return sent
+        case .junk: return junk
+        case .trash: return trash
         }
     }
 
@@ -206,10 +219,13 @@ public final class MailInboxModel {
 
     public var folderTitle: String {
         switch folder {
+        case .inbox: "Inbox"
         case .bucket(let key): buckets.first { $0.key == key }?.name ?? key
         case .done: "Done"
         case .drafts: "Drafts"
         case .sent: "Sent"
+        case .junk: "Spam"
+        case .trash: "Trash"
         }
     }
 
@@ -303,13 +319,13 @@ public final class MailInboxModel {
     /// Replies are offered for received mail only, not for Drafts or Sent.
     public var canReply: Bool {
         guard let selected else { return false }
-        return selected.mailbox.kind != .drafts && selected.mailbox.kind != .sent
+        return ![.drafts, .sent, .junk, .trash].contains(selected.mailbox.kind)
     }
 
     /// Who the reply goes to and from, and its subject, for the draft card.
     public var replyDraft: MailDraft? {
         guard let message = selected, canReply else { return nil }
-        return MailDraft.reply(to: message, headers: body?.headers ?? [:], accountAddresses: accounts.map(\.name),
+        return MailDraft.reply(to: message, headers: body?.headers ?? [:], accountAddresses: accounts.compactMap(\.address),
                                body: draft)
     }
 

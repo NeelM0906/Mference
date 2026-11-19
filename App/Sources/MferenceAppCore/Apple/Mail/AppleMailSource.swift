@@ -70,8 +70,8 @@ public struct MailboxRef: Sendable, Hashable {
         case "drafts": return .drafts
         case "sent", "sent messages", "sent items", "sent mail": return .sent
         case "archive", "all mail": return .archive
-        case "trash", "deleted messages", "deleted items", "bin": return .trash
-        case "junk", "spam": return .junk
+        case "trash", "deleted messages", "deleted items", "deleted", "bin": return .trash
+        case "junk", "spam", "junk e-mail", "junk email", "bulk mail": return .junk
         default: return .other
         }
     }
@@ -117,13 +117,22 @@ public protocol MailSource: Sendable {
 }
 
 public struct MailAccount: Sendable, Hashable, Identifiable {
+    /// Mail's account folder (a UUID in current versions).
     public var id: String
+    /// What the sidebar shows: the address, else the account's name, else
+    /// "Mail account". Never the folder UUID.
     public var name: String
+    /// The account's own address when known: replies are sent from it.
+    public var address: String?
 
-    public init(id: String, name: String) {
+    public init(id: String, name: String, address: String? = nil) {
         self.id = id
         self.name = name
+        self.address = address ?? (name.contains("@") ? name : nil)
     }
+
+    /// Shown when nothing names the account.
+    public static let unnamed = "Mail account"
 }
 
 /// Reads Apple Mail's local store: the Envelope Index (SQLite) for lists and
@@ -140,6 +149,9 @@ public actor AppleMailSource: MailSource {
     ]
 
     private let mailRoot: URL
+    /// The system's account list (`~/Library/Accounts/Accounts4.sqlite`),
+    /// which names Mail's account folders; nil reads only Mail's own store.
+    private let accountsDatabase: URL?
     private var database: ReadOnlySQLite?
     /// A private copy of the Envelope Index (with its -wal and -shm) that
     /// this source reads; Mail's own files are only ever copied, never opened
@@ -148,9 +160,15 @@ public actor AppleMailSource: MailSource {
     private var versionDirectory: URL?
     private var features: (summaries: Bool, globalData: Bool, subjectPrefix: Bool) = (false, false, false)
 
+    public static let defaultMailRoot = URL.libraryDirectory.appending(path: "Mail", directoryHint: .isDirectory)
+
     /// `mailRoot` is `~/Library/Mail` in the app, a fixture folder in tests.
-    public init(mailRoot: URL = URL.libraryDirectory.appending(path: "Mail", directoryHint: .isDirectory)) {
+    /// `accountsDatabase` defaults to the system's account list only for the
+    /// real Mail folder, so a fixture never reads this Mac's accounts.
+    public init(mailRoot: URL = AppleMailSource.defaultMailRoot, accountsDatabase: URL? = nil) {
         self.mailRoot = mailRoot
+        self.accountsDatabase = accountsDatabase ?? (mailRoot.standardizedFileURL == Self.defaultMailRoot.standardizedFileURL
+            ? URL.libraryDirectory.appending(path: "Accounts/Accounts4.sqlite") : nil)
     }
 
     deinit {
@@ -317,27 +335,65 @@ public actor AppleMailSource: MailSource {
 
     public func accounts() async throws -> [MailAccount] {
         let database = try open()
-        let rows = try database.query("SELECT DISTINCT url FROM mailboxes")
-        var ids: [String] = []
-        for url in rows.compactMap({ $0["url"]?.string }) {
-            let id = MailboxRef(url: url).accountID
-            if !id.isEmpty, !ids.contains(id) { ids.append(id) }
+        let mailboxes = try database.query("SELECT ROWID AS id, url FROM mailboxes").compactMap { row -> (Int64, MailboxRef)? in
+            guard let id = row["id"]?.int else { return nil }
+            return (id, MailboxRef(url: row["url"]?.string ?? ""))
         }
-        return ids.map { MailAccount(id: $0, name: accountName(for: $0)) }
+        var ids: [String] = []
+        for (_, mailbox) in mailboxes where !mailbox.accountID.isEmpty && !ids.contains(mailbox.accountID) {
+            ids.append(mailbox.accountID)
+        }
+        let system = systemAccountNames()
+        return ids.map { id in
+            let named = system[id]
+            let sentFrom = try? sentFromAddress(account: id, mailboxes: mailboxes, database: database)
+            let address = named?.address ?? sentFrom
+            return MailAccount(id: id, name: address ?? named?.name ?? MailAccount.unnamed, address: address)
+        }
     }
 
-    /// The account's own address if Mail recorded it, else its folder name.
-    private func accountName(for id: String) -> String {
-        guard let version = versionDirectory else { return id }
-        let plist = version.appending(path: "MailData/Accounts.plist")
-        if let data = try? Data(contentsOf: plist),
-           let object = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-           let accounts = object["MailAccounts"] as? [[String: Any]],
-           let match = accounts.first(where: { ($0["AccountPath"] as? String)?.hasSuffix(id) == true || $0["uniqueId"] as? String == id }),
-           let address = (match["EmailAddresses"] as? [String])?.first ?? match["AccountName"] as? String {
-            return address
+    /// The address the account's Sent mailboxes were sent from most often.
+    private func sentFromAddress(account: String, mailboxes: [(Int64, MailboxRef)],
+                                 database: ReadOnlySQLite) throws -> String? {
+        let sent = mailboxes.filter { $0.1.accountID == account && $0.1.kind == .sent }.map(\.0)
+        guard !sent.isEmpty else { return nil }
+        let placeholders = Array(repeating: "?", count: sent.count).joined(separator: ", ")
+        let rows = try database.query("""
+            SELECT a.address AS address, count(*) AS n FROM messages m
+            JOIN addresses a ON a.ROWID = m.sender
+            WHERE m.mailbox IN (\(placeholders)) AND a.address LIKE '%@%'
+            GROUP BY lower(a.address) ORDER BY n DESC LIMIT 1
+            """, sent.map { .integer($0) })
+        return rows.first?["address"]?.string
+    }
+
+    /// Mail's account folders are named by the system account's identifier:
+    /// its user name (an address) or description ("iCloud"), or its parent
+    /// account's. Read from a private immutable copy; any failure means no
+    /// names, never an error.
+    func systemAccountNames() -> [String: (name: String?, address: String?)] {
+        guard let accountsDatabase, FileManager.default.fileExists(atPath: accountsDatabase.path),
+              let snapshot = try? Self.snapshot(accountsDatabase) else { return [:] }
+        defer { try? FileManager.default.removeItem(at: snapshot) }
+        let copy = snapshot.appending(path: accountsDatabase.lastPathComponent)
+        guard (try? ReadOnlySQLite.checkpointPrivateCopy(at: copy)) != nil,
+              let connection = try? ReadOnlySQLite(url: copy),
+              let columns = try? connection.columns(of: "ZACCOUNT"),
+              columns.isSuperset(of: ["ZIDENTIFIER", "ZUSERNAME", "ZACCOUNTDESCRIPTION", "ZPARENTACCOUNT"]),
+              let rows = try? connection.query("""
+                  SELECT a.ZIDENTIFIER AS id, a.ZUSERNAME AS user, a.ZACCOUNTDESCRIPTION AS description,
+                         p.ZUSERNAME AS parent_user, p.ZACCOUNTDESCRIPTION AS parent_description
+                  FROM ZACCOUNT a LEFT JOIN ZACCOUNT p ON p.Z_PK = a.ZPARENTACCOUNT
+                  """) else { return [:] }
+        var names: [String: (name: String?, address: String?)] = [:]
+        for row in rows {
+            guard let id = row["id"]?.string, !id.isEmpty else { continue }
+            let text = { (key: String) in row[key]?.string.flatMap { $0.isEmpty ? nil : $0 } }
+            let address = [text("user"), text("parent_user")].compactMap { $0 }.first { $0.contains("@") }
+            let name = text("description") ?? text("parent_description") ?? text("user") ?? text("parent_user")
+            names[id] = (name, address)
         }
-        return id
+        return names
     }
 
     public func body(of message: MailMessageSummary) async throws -> MailBody {

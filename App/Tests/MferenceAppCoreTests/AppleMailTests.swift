@@ -115,7 +115,73 @@ struct GatedSorter: AppleModelServicing {
         let sent = try await source.messages(in: [.sent], limit: 10)
         #expect(sent.map(\.subject) == ["Re: Lisbon flights"])
         #expect(try await source.messages(in: [.inbox], limit: 1).count == 1)
-        #expect(try await source.accounts().map(\.id) == [MailStoreFixture.account])
+        #expect(try await source.accounts().map(\.id) == [MailStoreFixture.account, MailStoreFixture.secondAccount])
+    }
+
+    /// The maintainer's decision: Mail's standard mailboxes, fixed and not
+    /// renamable, with Inbox selected and listing every inbox message; the
+    /// sorted buckets and Done stay a section of their own.
+    @Test @MainActor func standardMailboxesAreFixedAndInboxComesFirst() async throws {
+        let fixture = try MailStoreFixture.make()
+        defer { fixture.remove() }
+        let container = try AppModelContainer.inMemory()
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
+                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+                                                                                                    answer: "{}"),
+                                                                fallback: nil),
+                                   drafter: nil, sender: RecordingMailSender(), broker: RecordingPermissionBroker())
+        await model.load()
+        #expect(model.folder == .inbox)
+        #expect(model.messages.map(\.messageID) == ["<review@example.com>", "<redlines@example.com>",
+                                                    "<dental@example.com>"])
+        #expect(model.selected?.messageID == "<review@example.com>")
+        #expect(model.messages(in: .sent).map(\.subject) == ["Re: Lisbon flights"])
+        #expect(model.messages(in: .junk).map(\.subject) == ["You won!"])
+        #expect(model.messages(in: .trash).map(\.subject) == ["Old thread"])
+        #expect(model.messages(in: .drafts).isEmpty)
+        await model.select(.junk)
+        #expect(model.folderTitle == "Spam" && !model.canReply)
+        await model.select(.trash)
+        #expect(model.folderTitle == "Trash")
+
+        // Renaming a bucket never renames a mailbox; Done leaves the Inbox.
+        model.rename(bucket: "important", to: "Needs me")
+        await model.select(.inbox)
+        #expect(model.folderTitle == "Inbox")
+        let first = try #require(model.messages.first)
+        model.markDone(first)
+        #expect(model.count(in: .inbox) == 2 && model.count(in: .done) == 1)
+    }
+
+    @Test func mailboxKindsCoverCommonProviderNames() {
+        let kind = { (path: String) in MailboxRef(url: "imap://A/\(path)").kind }
+        #expect(kind("%5BGmail%5D/Spam") == .junk)
+        #expect(kind("Junk%20E-mail") == .junk)
+        #expect(kind("Bulk%20Mail") == .junk)
+        #expect(kind("%5BGmail%5D/Trash") == .trash)
+        #expect(kind("Deleted%20Items") == .trash)
+        #expect(kind("Sent%20Items") == .sent)
+    }
+
+    /// Accounts show an address or a name, never Mail's folder UUID: the
+    /// system's account list first, then the account's Sent address, then
+    /// "Mail account".
+    @Test func accountsShowAnAddressOrANameNeverTheFolderID() async throws {
+        let fixture = try MailStoreFixture.make()
+        defer { fixture.remove() }
+        let plain = try await AppleMailSource(mailRoot: fixture.root).accounts()
+        #expect(plain.map(\.name) == ["me@example.com", MailAccount.unnamed])
+        #expect(plain.map(\.address) == ["me@example.com", nil])
+
+        let accounts = fixture.root.appending(path: "Accounts4.sqlite")
+        try MailStoreFixture.writeAccounts(at: accounts, rows: [
+            (pk: 1, id: "PARENT-1", user: "neel@work.example", description: "Work", parent: nil),
+            (pk: 2, id: MailStoreFixture.account, user: nil, description: nil, parent: 1),
+            (pk: 3, id: MailStoreFixture.secondAccount, user: nil, description: "iCloud", parent: nil),
+        ])
+        let named = try await AppleMailSource(mailRoot: fixture.root, accountsDatabase: accounts).accounts()
+        #expect(named.map(\.name) == ["neel@work.example", "iCloud"])
+        #expect(!named.contains { $0.name.contains(MailStoreFixture.account) })
     }
 
     @Test func aQuietMailboxIsNotCrowdedOutByNewerMail() async throws {
@@ -417,7 +483,8 @@ struct GatedSorter: AppleModelServicing {
         #expect(model.status == .available(version: "V10"))
         #expect(model.count(in: .bucket("important")) == 2)
         #expect(model.count(in: .bucket("calendar")) == 1)
-        #expect(model.folderTitle == "Important")
+        #expect(model.folder == .inbox && model.folderTitle == "Inbox")
+        #expect(model.count(in: .inbox) == 3)
         #expect(model.selected?.messageID == "<review@example.com>")
         #expect(model.body?.trackersRemoved == 2)
         let card = try #require(model.eventCard)
@@ -434,7 +501,9 @@ struct GatedSorter: AppleModelServicing {
         model.draft = "Hi Priya, 11 works."
         await model.send()
         #expect(model.draftState == .sent)
-        #expect(await sender.sent == [MailDraft(to: "priya@example.com", subject: "Re: Wednesday design review",
+        // Sent from the account's own address (read from its Sent mailbox).
+        #expect(await sender.sent == [MailDraft(to: "priya@example.com", from: "me@example.com",
+                                                subject: "Re: Wednesday design review",
                                                 body: "Hi Priya, 11 works.", inReplyTo: "<review@example.com>")])
         #expect(!model.canSend)  // sent once; the button stays off
 

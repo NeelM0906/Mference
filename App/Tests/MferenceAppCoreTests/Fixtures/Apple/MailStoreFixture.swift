@@ -21,6 +21,8 @@ struct MailStoreFixture {
     }
 
     static let account = "4F7A2C1E-0000-4000-8000-0000000000AA"
+    /// A second account with only a Junk mailbox: nothing in Mail names it.
+    static let secondAccount = "7C3D9B20-0000-4000-8000-0000000000BB"
     static let received = Date(timeIntervalSince1970: 1_789_465_320)  // 2026-09-15 09:42 UTC
 
     let root: URL
@@ -76,6 +78,12 @@ struct MailStoreFixture {
             Message(rowID: 5, messageID: "<sent@example.com>", name: "You", address: "me@example.com",
                     subject: "Re: Lisbon flights", summary: "Thanks!", date: received.addingTimeInterval(-3_600),
                     mailbox: "imap://\(account)/Sent%20Messages", raw: "Subject: Re: Lisbon flights\n\nThanks!\n"),
+            Message(rowID: 6, messageID: "<prize@example.com>", name: "Prize Desk", address: "win@example.net",
+                    subject: "You won!", summary: "Claim now.", date: received.addingTimeInterval(-7_200),
+                    mailbox: "imap://\(secondAccount)/Junk", raw: "Subject: You won!\n\nClaim now.\n"),
+            Message(rowID: 7, messageID: "<old@example.com>", name: "Old Thread", address: "old@example.com",
+                    subject: "Old thread", summary: "Thrown away.", date: received.addingTimeInterval(-9_000),
+                    mailbox: "imap://\(account)/Deleted%20Messages", raw: "Subject: Old thread\n\nThrown away.\n"),
         ]
     }
 
@@ -147,6 +155,22 @@ struct MailStoreFixture {
     }
 
     enum Schema { case current, missingDeleted }
+
+    /// A synthetic system account list (the `ZACCOUNT` columns the reader uses).
+    static func writeAccounts(at url: URL,
+                              rows: [(pk: Int, id: String, user: String?, description: String?, parent: Int?)]) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK else { throw MailSourceError.unreadable("open") }
+        defer { sqlite3_close(db) }
+        let quote = { (text: String?) in text.map { "'" + $0.replacingOccurrences(of: "'", with: "''") + "'" } ?? "NULL" }
+        var sql = "CREATE TABLE ZACCOUNT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER TEXT, ZUSERNAME TEXT, "
+            + "ZACCOUNTDESCRIPTION TEXT, ZPARENTACCOUNT INTEGER);"
+        for row in rows {
+            sql += "INSERT INTO ZACCOUNT VALUES (\(row.pk), \(quote(row.id)), \(quote(row.user)), "
+                + "\(quote(row.description)), \(row.parent.map(String.init) ?? "NULL"));"
+        }
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw MailSourceError.unreadable("accounts") }
+    }
 
     func remove() {
         try? FileManager.default.removeItem(at: root)
