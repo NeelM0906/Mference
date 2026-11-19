@@ -69,6 +69,14 @@ public struct LlamaBackend: EngineBackend {
         return device.supportsFamily(.apple7)
     }
 
+    /// Picks llama.cpp's `n_gpu_layers`: full Metal offload when the device
+    /// supports the fast kernel paths, CPU otherwise; an explicit
+    /// `MFERENCE_LLAMA_GPU_LAYERS` override wins either way.
+    static func gpuLayerCount(supportsFastPaths: Bool, override: Int32? = nil) -> Int32 {
+        if let override { return override }
+        return supportsFastPaths ? -1 : 0
+    }
+
     public func load(_ descriptor: EngineModelDescriptor,
                      options: EngineLoadOptions) async throws -> any EngineModel {
         guard case .gguf(let metadata) = descriptor.format else {
@@ -86,11 +94,10 @@ public struct LlamaBackend: EngineBackend {
         // machines report Apple5 and decode slower than the CPU backend, so
         // keep the model on CPU there. On real Apple silicon (M1 and later)
         // the check always passes and the offload decision is unchanged.
-        modelParams.n_gpu_layers = Self.metalSupportsFastPaths() ? -1 : 0
-        if let override = ProcessInfo.processInfo.environment["MFERENCE_LLAMA_GPU_LAYERS"],
-           let layers = Int32(override) {
-            modelParams.n_gpu_layers = layers
-        }
+        let gpuOverride = ProcessInfo.processInfo.environment["MFERENCE_LLAMA_GPU_LAYERS"]
+            .flatMap(Int32.init)
+        modelParams.n_gpu_layers = Self.gpuLayerCount(
+            supportsFastPaths: Self.metalSupportsFastPaths(), override: gpuOverride)
         // Map the file, never read it into process memory; no mlock.
         modelParams.load_mode = LLAMA_LOAD_MODE_MMAP
         modelParams.load_mtp = wantsDraft

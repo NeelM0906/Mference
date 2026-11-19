@@ -234,6 +234,20 @@ struct LlamaBackendTests {
         _ = LlamaSampler(config: config, vocabularySize: 1_000, contextSize: 4_096)
     }
 
+    // MARK: GPU offload
+
+    /// `gpuLayerCount` is the whole offload decision: full Metal offload on
+    /// devices with llama.cpp's fast paths, CPU otherwise, override last.
+    @Test func gpuLayerCountFollowsDeviceCapability() {
+        #expect(LlamaBackend.gpuLayerCount(supportsFastPaths: true) == -1)
+        #expect(LlamaBackend.gpuLayerCount(supportsFastPaths: false) == 0)
+    }
+
+    @Test func gpuLayerCountHonorsOverride() {
+        #expect(LlamaBackend.gpuLayerCount(supportsFastPaths: true, override: 8) == 8)
+        #expect(LlamaBackend.gpuLayerCount(supportsFastPaths: false, override: -1) == -1)
+    }
+
     // MARK: Loading
 
     @Test func refusesANativeDescriptor() async {
