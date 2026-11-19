@@ -68,6 +68,9 @@ public final class AppSettings {
     /// Called with the new value whenever `offlineMode` changes; the
     /// composition root pauses running downloads when it turns on.
     @ObservationIgnored public var onOfflineModeChange: ((Bool) -> Void)?
+    /// Called when the Apple Intelligence model switch changes (the chat
+    /// picker shows or hides Apple's row).
+    @ObservationIgnored public var onUseAppleModelChange: ((Bool) -> Void)?
 
     /// Minutes after the last token before the model is released; 0 never.
     public var idleUnloadMinutes: Int {
@@ -113,9 +116,12 @@ public final class AppSettings {
 
     /// Apple's on-device model does mail sorting, titles, short summaries and
     /// scan fields when Apple Intelligence is on; Quick does them otherwise
-    /// (L12).
+    /// (L12). While on, it can also be picked for chats.
     public var useAppleModel: Bool {
-        didSet { store.set(useAppleModel, forKey: Key.useAppleModel) }
+        didSet {
+            store.set(useAppleModel, forKey: Key.useAppleModel)
+            if useAppleModel != oldValue { onUseAppleModelChange?(useAppleModel) }
+        }
     }
 
     /// First run finished (or skipped); the onboarding is not shown again.

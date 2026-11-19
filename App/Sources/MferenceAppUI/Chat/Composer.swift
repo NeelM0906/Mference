@@ -76,7 +76,7 @@ struct Composer: View {
             model.setWebEnabled(!model.webEnabled)
         } label: {
             HStack(spacing: MFSpacing.xs + 1) {
-                Image(systemName: blocked == nil ? "globe" : "wifi.slash").imageScale(.small)
+                Image(systemName: blocked == nil || model.webBlockedByModel ? "globe" : "wifi.slash").imageScale(.small)
                 Text(blocked ?? (isOn ? "Web on" : "Web off"))
             }
             .font(MFFont.chip)
@@ -91,7 +91,8 @@ struct Composer: View {
         .accessibilityLabel("Web search")
         .accessibilityValue(blocked ?? (isOn ? "On" : "Off"))
         .accessibilityHint(blocked == nil ? "Searches go through SearXNG on this Mac; pages are fetched from this Mac"
-                                          : "Turn off offline mode in Settings to search the web")
+                           : model.webBlockedByModel ? "Apple’s model answers without the web. Choose Quick or Deep to search"
+                           : "Turn off offline mode in Settings to search the web")
     }
 
     private var modelButton: some View {

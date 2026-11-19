@@ -111,7 +111,7 @@ public actor EngineService: EngineServicing {
 
     static func options(catalog: EngineCatalog, status: EngineHostStatus,
                         physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> [ModelOption] {
-        AppModel.allCases.map { model in
+        AppModel.engineModels.map { model in
             guard let descriptor = catalog.descriptor(for: model.modelID) else {
                 let reason = catalog.unavailableReason(for: model.modelID) ?? "Not installed on this Mac."
                 return ModelOption(model: model, availability: .notInstalled(reason: reason))

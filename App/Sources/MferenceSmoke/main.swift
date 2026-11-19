@@ -117,8 +117,8 @@ while let argument = arguments.popFirst() {
     default: fail("unknown argument \(argument)", code: 2)
     }
 }
-guard let modelName, let model = AppModel(rawValue: modelName) else {
-    fail("--model must be one of \(AppModel.allCases.map(\.rawValue).joined(separator: ", "))", code: 2)
+guard let modelName, let model = AppModel(rawValue: modelName), model.isEngineModel else {
+    fail("--model must be one of \(AppModel.engineModels.map(\.rawValue).joined(separator: ", "))", code: 2)
 }
 if webMode, !promptGiven { prompt = WebCheckpoint.defaultQuestion }
 
