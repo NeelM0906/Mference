@@ -36,6 +36,11 @@ public struct CalendarView: View {
 
 struct CalendarContent: View {
     @Bindable var model: CalendarWeekModel
+    /// The to-do panel per view, once the person toggled it; by default it
+    /// shows in Day and Week and hides in Month and Year.
+    @State private var todoPanel: [CalendarViewMode: Bool] = [:]
+
+    private var showsTodos: Bool { todoPanel[model.mode] ?? (model.mode == .day || model.mode == .week) }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -43,12 +48,12 @@ struct CalendarContent: View {
                 header
                 switch model.access {
                 case .granted:
-                    WeekGrid(model: model)
-                    if let proposal = model.proposalsThisWeek.first {
+                    period
+                    if model.mode == .day || model.mode == .week, let proposal = model.proposalsThisWeek.first {
                         ProposalCard(proposal: proposal, model: model)
                     }
                 case .notAsked:
-                    AppleEmptyState(systemImage: "calendar", title: "See your week here",
+                    AppleEmptyState(systemImage: "calendar", title: "See your calendar here",
                                     message: AppPermission.calendar.reason,
                                     actionTitle: "Show my calendar") { Task { await model.requestAccess() } }
                 case .blocked:
@@ -69,167 +74,618 @@ struct CalendarContent: View {
                 }
             }
             .padding(.horizontal, MFSpacing.xl)
-            .padding(.vertical, MFSpacing.l)
+            .padding(.top, MFSpacing.l)
+            .padding(.bottom, model.mode == .day || model.mode == .week ? 0 : MFSpacing.l)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            Rectangle().fill(MFColor.hairline).frame(width: 1)
-            TodoList(model: model)
-                .frame(width: 315)
-                .background(MFColor.canvas)
+            if showsTodos {
+                Rectangle().fill(MFColor.hairline).frame(width: 1)
+                TodoList(model: model)
+                    .frame(width: 315)
+                    .background(MFColor.canvas)
+            }
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Back from System Settings: look again while access is missing.
+        // Back from System Settings: look again while access is missing,
+        // and pick up Reminders changes made while away.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.recheckAccess() }
         }
-        // Access granted in the prompt or System Settings, or events edited
-        // in Calendar: show them now, not after a relaunch.
+        // Access granted, or events or reminders edited in Calendar or
+        // Reminders: show them now, not after a relaunch.
         .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
             Task { await model.calendarChanged() }
         }
         .shellToolbar(id: "calendar.new-event") { NewEventToolbarButton(model: model) }
     }
 
+    @ViewBuilder
+    private var period: some View {
+        switch model.mode {
+        case .day, .week: TimeGrid(model: model)
+        case .month: MonthGrid(model: model)
+        case .year: YearGrid(model: model)
+        }
+    }
+
     private var header: some View {
         HStack(spacing: MFSpacing.m) {
-            Text(model.weekTitle)
+            Text(model.title)
                 .font(MFFont.title)
                 .foregroundStyle(MFColor.ink)
+                .lineLimit(1)
                 .accessibilityAddTraits(.isHeader)
-            Button("Today") { Task { await model.showToday() } }
-                .buttonStyle(.appleSecondary)
-                .keyboardShortcut("t", modifiers: .command)
+            Spacer(minLength: MFSpacing.m)
+            ModeSwitch(model: model)
+            Spacer(minLength: MFSpacing.m)
             HStack(spacing: MFSpacing.xs) {
-                Button { Task { await model.showWeek(offset: -1) } } label: { Image(systemName: "chevron.left") }
-                    .accessibilityLabel("Previous week")
+                Button { Task { await model.step(-1) } } label: { Image(systemName: "chevron.left") }
+                    .accessibilityLabel("Previous \(model.mode.title.lowercased())")
                     .keyboardShortcut(.leftArrow, modifiers: .command)
-                Button { Task { await model.showWeek(offset: 1) } } label: { Image(systemName: "chevron.right") }
-                    .accessibilityLabel("Next week")
+                    .buttonStyle(.appleQuiet)
+                Button("Today") { Task { await model.showToday() } }
+                    .buttonStyle(.appleSecondary)
+                    .keyboardShortcut("t", modifiers: .command)
+                Button { Task { await model.step(1) } } label: { Image(systemName: "chevron.right") }
+                    .accessibilityLabel("Next \(model.mode.title.lowercased())")
                     .keyboardShortcut(.rightArrow, modifiers: .command)
+                    .buttonStyle(.appleQuiet)
+            }
+            Button {
+                todoPanel[model.mode] = !showsTodos
+            } label: {
+                Image(systemName: "checklist")
+                    .foregroundStyle(showsTodos ? MFColor.accent : MFColor.secondary)
             }
             .buttonStyle(.appleQuiet)
-            Spacer()
-            HStack(spacing: 0) {
-                Text("Week")
-                    .font(MFFont.bodyEmphasis)
-                    .foregroundStyle(MFColor.onInk)
-                    .padding(.horizontal, MFSpacing.l)
-                    .padding(.vertical, MFSpacing.s)
-                    .background(Capsule().fill(MFColor.ink))
-            }
-            .padding(MFSpacing.xs)
-            .background(Capsule().fill(MFColor.fill))
-            .accessibilityLabel("Week view")
+            .accessibilityLabel(showsTodos ? "Hide to-dos" : "Show to-dos")
+            .keyboardShortcut("t", modifiers: [.command, .option])
         }
     }
 }
 
-/// The hour grid with the week's blocks.
-struct WeekGrid: View {
+/// Day, Week, Month, Year (⌘1 to ⌘4).
+struct ModeSwitch: View {
     var model: CalendarWeekModel
-    /// Fixed hour rows (mockup 04); the grid scrolls through the day.
-    private let hourHeight: CGFloat = 72
-    private let gutter: CGFloat = 70
 
     var body: some View {
-        let layout = model.layout
-        let hours = Array(layout.firstHour..<layout.lastHour)
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                Color.clear.frame(width: gutter, height: 1)
-                ForEach(Array(model.days.enumerated()), id: \.offset) { _, day in
-                    dayLabel(day).frame(maxWidth: .infinity)
+        HStack(spacing: 0) {
+            ForEach(Array(CalendarViewMode.allCases.enumerated()), id: \.element) { index, mode in
+                let selected = model.mode == mode
+                Button { Task { await model.show(mode) } } label: {
+                    Text(mode.title)
+                        .font(selected ? MFFont.bodyEmphasis : MFFont.body)
+                        .foregroundStyle(selected ? MFColor.onInk : MFColor.secondary)
+                        .padding(.horizontal, MFSpacing.l)
+                        .padding(.vertical, MFSpacing.xs + MFSpacing.xxs)
+                        .background(Capsule().fill(selected ? MFColor.ink : .clear))
+                        .contentShape(Capsule())
                 }
+                .buttonStyle(.plain)
+                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+                .help("\(mode.title) (⌘\(index + 1))")
             }
-            .padding(.bottom, MFSpacing.s)
-            let outside = model.outsideGrid
-            if !outside.isEmpty {
-                HStack(alignment: .top, spacing: 0) {
-                    Text("All day")
-                        .font(MFFont.caption)
-                        .foregroundStyle(MFColor.tertiary)
-                        .frame(width: gutter, alignment: .leading)
-                    ForEach(model.days.indices, id: \.self) { day in
-                        VStack(alignment: .leading, spacing: MFSpacing.xxs) {
-                            ForEach(outside[day] ?? []) { event in
-                                Text(event.isAllDay ? event.title : "\(EventBlockView.time(event.start)) \(event.title)")
-                                    .font(MFFont.caption)
-                                    .foregroundStyle(MFColor.ink)
-                                    .lineLimit(1)
-                                    .padding(.horizontal, MFSpacing.s)
-                                    .padding(.vertical, MFSpacing.xxs)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(MFColor.fill))
-                                    .accessibilityLabel(event.isAllDay ? "\(event.title), all day"
-                                                        : "\(event.title), \(EventBlockView.range(event.start, event.end))")
-                            }
-                        }
-                        .padding(.horizontal, MFSpacing.xs)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .padding(MFSpacing.xxs)
+        .background(Capsule().fill(MFColor.fill))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Calendar view")
+    }
+}
+
+/// Day and week: a column per day over the whole 24 hours, scrolled to the
+/// morning (or an earlier event) when the period changes.
+struct TimeGrid: View {
+    var model: CalendarWeekModel
+    @Environment(\.mfRendersStatically) private var rendersStatically
+    @State private var position = ScrollPosition(edge: .top)
+    /// A new event being made by double-clicking an empty slot.
+    @State private var draftStart: Date?
+    private let hourHeight: CGFloat = 56
+    private let gutter: CGFloat = 64
+    /// Room above midnight's line so its label is not cut.
+    private let topInset: CGFloat = 8
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // The day view's title already names its day.
+            if model.mode == .week {
+                HStack(spacing: 0) {
+                    Color.clear.frame(width: gutter, height: 1)
+                    ForEach(model.days, id: \.self) { day in
+                        dayLabel(day).frame(maxWidth: .infinity)
                     }
                 }
                 .padding(.bottom, MFSpacing.s)
             }
+            allDayRow
             Rectangle().fill(MFColor.hairline).frame(height: 1)
             GeometryReader { outer in
-                MFScroll {
-                ZStack(alignment: .topLeading) {
-                    VStack(spacing: 0) {
-                        ForEach(hours, id: \.self) { hour in
-                            HStack(alignment: .top, spacing: 0) {
-                                Text(hourLabel(hour))
-                                    .font(MFFont.callout)
-                                    .foregroundStyle(MFColor.tertiary)
-                                    .frame(width: gutter, alignment: .leading)
-                                    .padding(.top, MFSpacing.xs)
-                                Spacer()
-                            }
-                            .frame(height: hourHeight, alignment: .top)
-                            .overlay(alignment: .bottom) { Rectangle().fill(MFColor.hairlineFaint).frame(height: 1) }
-                        }
-                    }
-                    let columnWidth = (outer.size.width - gutter) / CGFloat(max(model.days.count, 1))
-                    ForEach(model.blocks) { block in
-                        let laneWidth = (columnWidth - MFSpacing.s) / CGFloat(block.lanes)
-                        EventBlockButton(block: block, model: model)
-                            .frame(width: laneWidth - MFSpacing.xxs,
-                                   height: CGFloat(block.height) * hourHeight - MFSpacing.xs)
-                            .offset(x: gutter + CGFloat(block.day) * columnWidth + MFSpacing.xs
-                                        + CGFloat(block.lane) * laneWidth,
-                                    y: CGFloat(block.top) * hourHeight + MFSpacing.xxs)
-                    }
-                }
-                .frame(width: outer.size.width, height: CGFloat(hours.count) * hourHeight, alignment: .topLeading)
+                let grid = gridContent(width: outer.size.width)
+                if rendersStatically {
+                    Color.clear
+                        .overlay(alignment: .top) { grid.offset(y: -scrollTarget) }
+                        .clipped()
+                } else {
+                    ScrollView { grid }
+                        .scrollPosition($position)
+                        .onAppear { position.scrollTo(y: scrollTarget) }
+                        .onChange(of: scrollKey) { position.scrollTo(y: scrollTarget) }
                 }
             }
         }
     }
 
+    /// Scroll again when the period or view changes.
+    private var scrollKey: String { "\(model.mode.rawValue)-\(model.weekStart.timeIntervalSince1970)" }
+
+    /// 7 AM, or an hour that shows the earliest event of the days shown.
+    private var scrollTarget: CGFloat {
+        let earliest = model.blocks.map(\.top).min() ?? 24
+        let hour = max(0, min(7, earliest - 0.25))
+        return CGFloat(hour) * hourHeight
+    }
+
+    @ViewBuilder
+    private var allDayRow: some View {
+        let allDay = model.outsideGrid
+        if !allDay.isEmpty {
+            HStack(alignment: .top, spacing: 0) {
+                Text("All day")
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.tertiary)
+                    .frame(width: gutter, alignment: .leading)
+                ForEach(model.days.indices, id: \.self) { day in
+                    VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+                        ForEach(allDay[day] ?? []) { event in
+                            AllDayChip(event: event, model: model)
+                        }
+                    }
+                    .padding(.horizontal, MFSpacing.xxs)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+            .padding(.vertical, MFSpacing.xs)
+            .overlay(alignment: .top) { Rectangle().fill(MFColor.hairline).frame(height: 1) }
+        }
+    }
+
+    private func gridContent(width: CGFloat) -> some View {
+        let columnWidth = (width - gutter) / CGFloat(max(model.days.count, 1))
+        return ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                ForEach(0..<24, id: \.self) { hour in
+                    HStack(alignment: .top, spacing: 0) {
+                        Text(hourLabel(hour))
+                            .font(MFFont.caption)
+                            .foregroundStyle(MFColor.tertiary)
+                            .frame(width: gutter - MFSpacing.s, alignment: .trailing)
+                            .offset(y: -7)
+                        Spacer()
+                    }
+                    .frame(height: hourHeight, alignment: .top)
+                    .overlay(alignment: .top) {
+                        Rectangle().fill(MFColor.hairlineFaint).frame(height: 1).padding(.leading, gutter)
+                    }
+                }
+            }
+            ForEach(1..<max(model.days.count, 1), id: \.self) { column in
+                Rectangle().fill(MFColor.hairlineFaint)
+                    .frame(width: 1, height: 24 * hourHeight)
+                    .offset(x: gutter + CGFloat(column) * columnWidth)
+            }
+            // Double-click an empty slot: a new event there.
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(width: max(width - gutter, 0), height: 24 * hourHeight)
+                .offset(x: gutter)
+                .onTapGesture(count: 2) { location in
+                    newDraft(at: location, columnWidth: columnWidth)
+                }
+            ForEach(model.blocks) { block in
+                let laneWidth = (columnWidth - MFSpacing.s) / CGFloat(block.lanes)
+                EventBlockButton(block: block, model: model)
+                    .frame(width: max(laneWidth - MFSpacing.xxs, 4),
+                           height: max(CGFloat(block.height) * hourHeight - 2, 14))
+                    .offset(x: gutter + CGFloat(block.day) * columnWidth + MFSpacing.xs
+                                + CGFloat(block.lane) * laneWidth,
+                            y: CGFloat(block.top) * hourHeight + 1)
+            }
+            nowLine(width: width, columnWidth: columnWidth)
+            if let draftStart, let column = model.days.firstIndex(where: { model.layout.calendar.isDate($0, inSameDayAs: draftStart) }) {
+                DraftBlock(start: draftStart, model: model) { self.draftStart = nil }
+                    .frame(width: columnWidth - MFSpacing.s, height: hourHeight - 2)
+                    .offset(x: gutter + CGFloat(column) * columnWidth + MFSpacing.xs,
+                            y: hours(draftStart) * hourHeight + 1)
+            }
+        }
+        .frame(width: width, height: 24 * hourHeight, alignment: .topLeading)
+        .padding(.top, topInset)
+    }
+
+    @ViewBuilder
+    private func nowLine(width: CGFloat, columnWidth: CGFloat) -> some View {
+        if let column = model.days.firstIndex(where: model.isToday) {
+            TimelineView(.periodic(from: .now, by: 60)) { _ in
+                let y = hours(model.currentTime) * hourHeight
+                ZStack(alignment: .topLeading) {
+                    Rectangle().fill(MFColor.danger.opacity(0.35))
+                        .frame(width: max(width - gutter, 0), height: 1)
+                        .offset(x: gutter, y: y)
+                    Rectangle().fill(MFColor.danger)
+                        .frame(width: columnWidth, height: 2)
+                        .offset(x: gutter + CGFloat(column) * columnWidth, y: y - 0.5)
+                    Text(model.currentTime.formatted(date: .omitted, time: .shortened))
+                        .font(MFFont.micro)
+                        .foregroundStyle(MFColor.onInk)
+                        .padding(.horizontal, MFSpacing.xs)
+                        .background(Capsule().fill(MFColor.danger))
+                        .frame(width: gutter - MFSpacing.xxs, alignment: .trailing)
+                        .offset(y: y - 8)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func hours(_ date: Date) -> CGFloat {
+        let calendar = model.layout.calendar
+        return CGFloat(date.timeIntervalSince(calendar.startOfDay(for: date)) / 3_600)
+    }
+
+    private func newDraft(at location: CGPoint, columnWidth: CGFloat) {
+        guard columnWidth > 0 else { return }
+        let column = min(max(Int(location.x / columnWidth), 0), model.days.count - 1)
+        let halfHours = min(max(Int((location.y / hourHeight * 2).rounded(.down)), 0), 46)
+        guard model.days.indices.contains(column) else { return }
+        draftStart = model.layout.calendar.date(byAdding: .minute, value: halfHours * 30, to: model.days[column])
+    }
+
     private func dayLabel(_ day: Date) -> some View {
         let calendar = model.layout.calendar
-        let weekday = day.formatted(Date.FormatStyle(timeZone: calendar.timeZone).weekday(.abbreviated))
-        let number = calendar.component(.day, from: day)
         let today = model.isToday(day)
-        return HStack(spacing: MFSpacing.xs) {
-            Text(weekday).font(MFFont.caption)
-            Text("\(number)").font(MFFont.caption.weight(.bold))
-                .foregroundStyle(today ? MFColor.onInk : MFColor.ink)
+        return Button { Task { await model.open(day, in: .day) } } label: {
+            HStack(spacing: MFSpacing.xs) {
+                Text(CalendarText.weekday(day, calendar: calendar)).font(MFFont.caption)
+                Text("\(calendar.component(.day, from: day))").font(MFFont.caption.weight(.bold))
+                    .foregroundStyle(today ? MFColor.onInk : MFColor.ink)
+            }
+            .foregroundStyle(today ? MFColor.onInk : MFColor.secondary)
+            .padding(.horizontal, today ? MFSpacing.m : MFSpacing.xs)
+            .padding(.vertical, MFSpacing.xxs)
+            .background(Capsule().fill(today ? MFColor.ink : .clear))
+            .contentShape(Capsule())
         }
-        .foregroundStyle(today ? MFColor.onInk : MFColor.secondary)
-        .padding(.horizontal, today ? MFSpacing.m : 0)
-        .padding(.vertical, today ? MFSpacing.xxs : 0)
-        .background(Capsule().fill(today ? MFColor.ink : .clear))
-        .accessibilityElement(children: .combine)
+        .buttonStyle(.plain)
         .accessibilityAddTraits(today ? .isSelected : [])
+        .accessibilityHint("Opens this day")
     }
 
     private func hourLabel(_ hour: Int) -> String {
-        switch hour {
-        case 0: "12 AM"
-        case 12: "12 PM"
-        case 13...: "\(hour - 12) PM"
-        default: "\(hour) AM"
+        let calendar = model.layout.calendar
+        guard let date = calendar.date(byAdding: .hour, value: hour, to: calendar.startOfDay(for: model.weekStart))
+        else { return "" }
+        return CalendarText.hour(date, calendar: calendar)
+    }
+}
+
+/// The dashed block a double-click leaves, with the new-event form beside it.
+struct DraftBlock: View {
+    var start: Date
+    var model: CalendarWeekModel
+    var close: () -> Void
+    @State private var showsForm = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+            Text("New event").font(MFFont.caption.weight(.semibold))
+            Text(start.formatted(date: .omitted, time: .shortened)).font(MFFont.caption)
         }
+        .foregroundStyle(MFColor.accentStrong)
+        .padding(.horizontal, MFSpacing.s)
+        .padding(.vertical, MFSpacing.xs)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: MFRadius.s).fill(MFColor.accentFillFaint))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.s)
+            .strokeBorder(MFColor.accent, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
+        .popover(isPresented: $showsForm, arrowEdge: .trailing) {
+            NewEventForm(model: model, start: start, close: close)
+        }
+        .onChange(of: showsForm) { if !showsForm { close() } }
+    }
+}
+
+/// An all-day event above the grid; click to edit.
+struct AllDayChip: View {
+    var event: CalendarEvent
+    var model: CalendarWeekModel
+    @State private var editing = false
+
+    var body: some View {
+        let tint = EventBlockView.tint(for: event)
+        Button { editing = true } label: {
+            Text(event.title)
+                .font(MFFont.caption.weight(.semibold))
+                .foregroundStyle(MFColor.ink)
+                .lineLimit(1)
+                .padding(.horizontal, MFSpacing.s)
+                .padding(.vertical, MFSpacing.xxs)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(tint.opacity(0.28)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(event.title), all day")
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            EventEditForm(event: event, model: model) { editing = false }
+        }
+    }
+}
+
+/// The month: whole weeks, up to three events a day, "+N more" opens the day.
+struct MonthGrid: View {
+    var model: CalendarWeekModel
+    private let shown = 3
+
+    var body: some View {
+        let calendar = model.calendar
+        let days = model.monthGrid
+        let weeks = stride(from: 0, to: days.count, by: 7).map { Array(days[$0..<min($0 + 7, days.count)]) }
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(CalendarText.weekdaySymbols(calendar: calendar), id: \.self) { symbol in
+                    Text(symbol)
+                        .font(MFFont.caption.weight(.semibold))
+                        .foregroundStyle(MFColor.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.trailing, MFSpacing.s)
+                }
+            }
+            .padding(.bottom, MFSpacing.xs)
+            VStack(spacing: 0) {
+                ForEach(weeks.indices, id: \.self) { row in
+                    HStack(spacing: 0) {
+                        ForEach(weeks[row], id: \.self) { day in
+                            cell(day)
+                        }
+                    }
+                    .frame(maxHeight: .infinity)
+                }
+            }
+            .overlay(alignment: .top) { Rectangle().fill(MFColor.hairline).frame(height: 1) }
+            .overlay(alignment: .leading) { Rectangle().fill(MFColor.hairlineFaint).frame(width: 1) }
+        }
+    }
+
+    private func cell(_ day: Date) -> some View {
+        let calendar = model.calendar
+        let inMonth = calendar.isDate(day, equalTo: model.selectedDate, toGranularity: .month)
+        let today = model.isToday(day)
+        let events = model.events(on: day)
+        let weekend = calendar.isDateInWeekend(day)
+        return VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+            HStack {
+                Spacer(minLength: 0)
+                Button { Task { await model.open(day, in: .day) } } label: {
+                    Text(CalendarText.monthDay(day, calendar: calendar))
+                        .font(MFFont.callout.weight(.semibold))
+                        .foregroundStyle(today ? MFColor.onInk : inMonth ? MFColor.ink : MFColor.tertiary)
+                        .padding(.horizontal, MFSpacing.s)
+                        .frame(minWidth: 24, minHeight: 24)
+                        .background(Capsule().fill(today ? MFColor.ink : .clear))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(day.formatted(date: .complete, time: .omitted))
+                .accessibilityHint("Opens this day")
+            }
+            ForEach(events.prefix(shown)) { event in
+                MonthEventChip(event: event, model: model)
+            }
+            if events.count > shown {
+                Button("+\(events.count - shown) more") { Task { await model.open(day, in: .day) } }
+                    .buttonStyle(.plain)
+                    .font(MFFont.caption.weight(.semibold))
+                    .foregroundStyle(MFColor.secondary)
+                    .padding(.leading, MFSpacing.xs)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(MFSpacing.xs)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(weekend ? MFColor.fillSubtle : .clear)
+        .overlay(alignment: .trailing) { Rectangle().fill(MFColor.hairlineFaint).frame(width: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(MFColor.hairlineFaint).frame(height: 1) }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { Task { await model.open(day, in: .day) } }
+        .clipped()
+    }
+}
+
+/// One event in a month cell: a dot, the time, the title; click to edit.
+struct MonthEventChip: View {
+    var event: CalendarEvent
+    var model: CalendarWeekModel
+    @State private var editing = false
+
+    var body: some View {
+        let tint = EventBlockView.tint(for: event)
+        Button { editing = true } label: {
+            HStack(spacing: MFSpacing.xs) {
+                Circle().fill(tint).frame(width: 7, height: 7)
+                if !event.isAllDay {
+                    Text(event.start.formatted(date: .omitted, time: .shortened))
+                        .foregroundStyle(MFColor.tertiary)
+                        .monospacedDigit()
+                }
+                Text(event.title)
+                    .foregroundStyle(MFColor.ink)
+                    .fontWeight(event.isAllDay ? .semibold : .regular)
+            }
+            .font(MFFont.caption)
+            .lineLimit(1)
+            .padding(.horizontal, MFSpacing.xs)
+            .padding(.vertical, 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(event.isAllDay ? tint.opacity(0.25) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(event.isAllDay ? "\(event.title), all day"
+                            : "\(event.title), \(EventBlockView.range(event.start, event.end))")
+        .popover(isPresented: $editing, arrowEdge: .trailing) {
+            EventEditForm(event: event, model: model) { editing = false }
+        }
+    }
+}
+
+/// The year: twelve small months; a dot marks a day with events. A month's
+/// name opens it, a date opens that day.
+struct YearGrid: View {
+    var model: CalendarWeekModel
+
+    var body: some View {
+        let calendar = model.calendar
+        let year = calendar.dateInterval(of: .year, for: model.selectedDate)?.start ?? model.selectedDate
+        let months = (0..<12).compactMap { calendar.date(byAdding: .month, value: $0, to: year) }
+        let busy = model.daysWithEvents
+        MFScroll {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: MFSpacing.xl, alignment: .top), count: 4),
+                      alignment: .leading, spacing: MFSpacing.l) {
+                ForEach(months, id: \.self) { month in
+                    MiniMonth(model: model, month: month, busyDays: busy, showsTitle: true,
+                              highlightsSelection: false) { day in
+                        Task { await model.open(day, in: .day) }
+                    } openMonth: {
+                        Task { await model.open(month, in: .month) }
+                    }
+                }
+            }
+            .padding(.top, MFSpacing.s)
+        }
+    }
+}
+
+/// A small month: weekday initials, dates, today filled, the selected day
+/// ringed, a dot under days with events. Used by the year view and the
+/// to-do panel.
+struct MiniMonth: View {
+    var model: CalendarWeekModel
+    var month: Date
+    var busyDays: Set<Date>
+    var showsTitle: Bool
+    var highlightsSelection: Bool
+    var pick: (Date) -> Void
+    var openMonth: (() -> Void)?
+
+    var body: some View {
+        let calendar = model.calendar
+        let days = model.monthDays(containing: month)
+        let isCurrentMonth = calendar.isDate(month, equalTo: model.currentTime, toGranularity: .month)
+        VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+            if showsTitle {
+                Button { openMonth?() } label: {
+                    Text(CalendarText.monthName(month, calendar: calendar))
+                        .font(MFFont.headline)
+                        .foregroundStyle(isCurrentMonth ? MFColor.danger : MFColor.ink)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens this month")
+            }
+            Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(Array(CalendarText.weekdayInitials(calendar: calendar).enumerated()), id: \.offset) { _, initial in
+                        Text(initial)
+                            .font(MFFont.micro)
+                            .foregroundStyle(MFColor.tertiary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.bottom, MFSpacing.xxs)
+                    }
+                }
+                ForEach(Array(stride(from: 0, to: days.count, by: 7)), id: \.self) { row in
+                    GridRow {
+                        ForEach(days[row..<min(row + 7, days.count)], id: \.self) { day in
+                            dayButton(day, inMonth: calendar.isDate(day, equalTo: month, toGranularity: .month))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func dayButton(_ day: Date, inMonth: Bool) -> some View {
+        let calendar = model.calendar
+        if !inMonth && showsTitle {
+            Color.clear.frame(maxWidth: .infinity, minHeight: 25, maxHeight: 25)
+        } else {
+            let today = model.isToday(day)
+            let selected = highlightsSelection && model.isSelected(day)
+            Button { pick(day) } label: {
+                ZStack(alignment: .bottom) {
+                    Text("\(calendar.component(.day, from: day))")
+                        .font(MFFont.caption.weight(today ? .bold : .regular))
+                        .monospacedDigit()
+                        .foregroundStyle(today ? MFColor.onInk : inMonth ? MFColor.ink : MFColor.tertiary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(today ? MFColor.ink : .clear))
+                        .overlay(Circle().strokeBorder(selected && !today ? MFColor.accent : .clear, lineWidth: 1.5))
+                    if busyDays.contains(calendar.startOfDay(for: day)) {
+                        Circle().fill(today ? MFColor.accent : MFColor.tertiary).frame(width: 3, height: 3).offset(y: 2)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 25, maxHeight: 25)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(day.formatted(date: .complete, time: .omitted))
+            .accessibilityAddTraits(selected ? .isSelected : [])
+        }
+    }
+}
+
+/// Dates and hours in this Mac's language and region.
+enum CalendarText {
+    static func formatter(_ template: String, calendar: Calendar) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = calendar.locale ?? .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter
+    }
+
+    /// "Wed".
+    static func weekday(_ date: Date, calendar: Calendar) -> String { formatter("EEE", calendar: calendar).string(from: date) }
+
+    /// "9 AM", or "09" on a 24-hour Mac.
+    static func hour(_ date: Date, calendar: Calendar) -> String { formatter("j", calendar: calendar).string(from: date) }
+
+    /// "November".
+    static func monthName(_ date: Date, calendar: Calendar) -> String { formatter("MMMM", calendar: calendar).string(from: date) }
+
+    /// "18", or "Dec 1" on the first of a month.
+    static func monthDay(_ date: Date, calendar: Calendar) -> String {
+        calendar.component(.day, from: date) == 1
+            ? formatter("MMMd", calendar: calendar).string(from: date)
+            : "\(calendar.component(.day, from: date))"
+    }
+
+    /// Short weekday names from the week's first day ("Sun", "Mon", ...).
+    static func weekdaySymbols(calendar: Calendar) -> [String] {
+        rotate(formatter("EEE", calendar: calendar).shortWeekdaySymbols ?? calendar.shortWeekdaySymbols, calendar: calendar)
+    }
+
+    /// One-letter weekday names from the week's first day.
+    static func weekdayInitials(calendar: Calendar) -> [String] {
+        rotate(formatter("EEE", calendar: calendar).veryShortWeekdaySymbols ?? calendar.veryShortWeekdaySymbols,
+               calendar: calendar)
+    }
+
+    private static func rotate(_ symbols: [String], calendar: Calendar) -> [String] {
+        let first = max(calendar.firstWeekday - 1, 0) % max(symbols.count, 1)
+        return Array(symbols[first...] + symbols[..<first])
     }
 }
 
@@ -251,10 +707,17 @@ struct EventBlockView: View {
             }
         }
         .foregroundStyle(foreground)
-        .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
-        .padding(.vertical, MFSpacing.xs + MFSpacing.xxs)
+        .padding(.leading, MFSpacing.s + MFSpacing.xxs)
+        .padding(.trailing, MFSpacing.xs)
+        .padding(.vertical, block.height < 0.5 ? 0 : MFSpacing.xxs + 1)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: MFRadius.s).fill(fill))
+        .overlay(alignment: .leading) {
+            if case .event(let event) = block.kind {
+                RoundedRectangle(cornerRadius: 1.5).fill(Self.tint(for: event)).frame(width: 3).padding(.vertical, 2)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: MFRadius.s))
         .overlay(RoundedRectangle(cornerRadius: MFRadius.s)
             .strokeBorder(isProposal ? MFColor.accent : .clear,
                           style: StrokeStyle(lineWidth: 1.5, dash: isProposal ? [5, 4] : [])))
@@ -272,7 +735,7 @@ struct EventBlockView: View {
         case .moving(let event):
             "\(CalendarTimeFormat.time(event.start)), moving"
         case .event(let event):
-            block.height >= 1 ? Self.range(event.start, event.end) : nil
+            block.height >= 0.75 ? Self.range(event.start, event.end) : nil
         }
     }
 
@@ -288,7 +751,7 @@ struct EventBlockView: View {
         switch block.kind {
         case .proposal: MFColor.accentFillFaint
         case .moving: MFColor.fill
-        case .event(let event): Self.palette(for: event).fill
+        case .event(let event): Self.tint(for: event).opacity(0.22)
         }
     }
 
@@ -296,16 +759,18 @@ struct EventBlockView: View {
         switch block.kind {
         case .proposal: MFColor.accentStrong
         case .moving: MFColor.tertiary
-        case .event(let event): Self.palette(for: event).text
+        case .event: MFColor.ink
         }
     }
 
-    /// Calendars get the mockup's tints, by calendar name so they stay put.
-    static func palette(for event: CalendarEvent) -> (fill: Color, text: Color) {
-        let tints: [(Color, Color)] = [(MFColor.accentFill, MFColor.accentStrong),
-                                       (MFColor.successFill, MFColor.success),
-                                       (MFColor.previewFill, MFColor.preview),
-                                       (MFColor.fill, MFColor.ink)]
+    /// The calendar's own color from Apple Calendar; a steady fallback
+    /// picked by calendar name when it has none.
+    static func tint(for event: CalendarEvent) -> Color {
+        if let hex = event.calendarColor {
+            return Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
+                         blue: Double(hex & 0xFF) / 255)
+        }
+        let tints = [MFColor.accent, MFColor.success, MFColor.preview, MFColor.secondary]
         let index = event.calendarName.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % tints.count
         return tints[index]
     }
@@ -372,9 +837,18 @@ struct NewEventForm: View {
     var model: CalendarWeekModel
     var close: () -> Void
     @State private var title = ""
-    @State private var start = NewEventForm.nextHalfHour()
-    @State private var minutes = 30
+    @State private var start: Date
+    @State private var minutes: Int
     @State private var isAdding = false
+
+    /// `start` nil: the next half hour (toolbar); a double-clicked slot
+    /// passes its time and gets an hour.
+    init(model: CalendarWeekModel, start: Date? = nil, close: @escaping () -> Void) {
+        self.model = model
+        self.close = close
+        _start = State(initialValue: start ?? NewEventForm.nextHalfHour())
+        _minutes = State(initialValue: start == nil ? 30 : 60)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.m) {

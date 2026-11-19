@@ -37,9 +37,12 @@ public struct WeekBlock: Sendable, Hashable, Identifiable {
     }
 }
 
-/// Lays a work week out on an hour grid (mockup 04: Mon to Fri, 9 AM onward).
+/// Lays one day or a week out on an hour grid. The grid covers the whole
+/// day (midnight to midnight) and scrolls, so only all-day events sit above
+/// it; the week starts on the first weekday set on this Mac.
 public struct WeekLayout: Sendable {
     public var calendar: Calendar
+    /// 1 for the day view, 7 for the week.
     public var days: Int
     public var firstHour: Int
     public var lastHour: Int
@@ -47,18 +50,17 @@ public struct WeekLayout: Sendable {
     /// two-line "11:00 · proposed from Mail" fit; lanes account for it.
     public var minimumProposalHours: Double = 0.9
 
-    public init(calendar: Calendar = .current, days: Int = 5, firstHour: Int = 9, lastHour: Int = 18) {
+    public init(calendar: Calendar = .autoupdatingCurrent, days: Int = 7, firstHour: Int = 0, lastHour: Int = 24) {
         self.calendar = calendar
         self.days = days
         self.firstHour = firstHour
         self.lastHour = lastHour
     }
 
-    /// Monday of the week containing `date`.
+    /// The first day of the week containing `date`, by the calendar's own
+    /// first weekday (System Settings > General > Language & Region).
     public func weekStart(containing date: Date) -> Date {
-        var monday = calendar
-        monday.firstWeekday = 2
-        return monday.dateInterval(of: .weekOfYear, for: date)?.start ?? calendar.startOfDay(for: date)
+        calendar.dateInterval(of: .weekOfYear, for: date)?.start ?? calendar.startOfDay(for: date)
     }
 
     public func dayDates(from weekStart: Date) -> [Date] {

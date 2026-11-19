@@ -8,6 +8,9 @@ enum CalendarFixtures {
     static var calendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        calendar.locale = Locale(identifier: "en_US")
+        // A Mac set to start the week on Monday (the grid follows the Mac).
+        calendar.firstWeekday = 2
         return calendar
     }
 
@@ -47,10 +50,10 @@ enum CalendarFixtures {
                                  defaults: UserDefaults = UserDefaults(suiteName: "mference-tests-\(UUID().uuidString)")!)
         -> CalendarWeekModel {
         CalendarWeekModel(service: service, store: store, layout: layout, defaults: defaults,
-                          now: { CalendarFixtures.now })
+                          now: { CalendarFixtures.now }, syncsAutomatically: false)
     }
 
-    @Test func weekStartsOnMondayAndLaysOutBlocks() {
+    @Test func weekStartsOnTheMacsFirstWeekdayAndLaysOutBlocks() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         #expect(start == CalendarFixtures.date(14, 0))
         let blocks = Self.layout.blocks(weekStart: start, events: CalendarFixtures.events,
@@ -58,28 +61,37 @@ enum CalendarFixtures {
         #expect(!blocks.contains { $0.title == "Next week" || $0.title == "Offsite" })
         let review = blocks.first { if case .moving = $0.kind { true } else { false } }
         #expect(review?.day == 2)
-        #expect(review?.top == 1)
+        #expect(review?.top == 10)  // the grid starts at midnight
         let proposal = blocks.first { if case .proposal = $0.kind { true } else { false } }
         #expect(proposal?.day == 2)
-        #expect(proposal?.top == 2)
+        #expect(proposal?.top == 11)
         #expect(proposal?.height == Self.layout.minimumProposalHours)  // 45 min, drawn at the minimum
         let focusFriday = blocks.first { $0.id == "event-focus-fri-d4" }
-        #expect(focusFriday?.top == 0 && focusFriday?.height == 2)
+        #expect(focusFriday?.top == 9 && focusFriday?.height == 2)
+        // A Mac whose week starts on Sunday gets a Sunday-first grid.
+        var sundayFirst = CalendarFixtures.calendar
+        sundayFirst.firstWeekday = 1
+        #expect(WeekLayout(calendar: sundayFirst).weekStart(containing: CalendarFixtures.now) == CalendarFixtures.date(13, 0))
+        #expect(Self.layout.days == 7)
         #expect(Self.layout.allDayEvents(weekStart: start, events: CalendarFixtures.events)[3]?.map(\.title) == ["Offsite"])
     }
 
-    @Test func eventsOutsideTheGridAreListedNotHidden() {
+    /// The maintainer's 3:00 AM event sat in the "All day" row: the grid
+    /// now covers the whole day, so early and late events are placed at
+    /// their hour and only all-day events sit above the grid.
+    @Test func earlyAndLateEventsStayInTheGrid() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         let events = CalendarFixtures.events + [
-            CalendarEvent(id: "gym", title: "Gym", start: CalendarFixtures.date(15, 7), end: CalendarFixtures.date(15, 8)),
+            CalendarEvent(id: "testing", title: "Testing", start: CalendarFixtures.date(17, 3), end: CalendarFixtures.date(17, 4)),
             CalendarEvent(id: "dinner", title: "Dinner", start: CalendarFixtures.date(16, 19), end: CalendarFixtures.date(16, 21)),
         ]
+        let blocks = Self.layout.blocks(weekStart: start, events: events, proposals: [])
+        let early = blocks.first { $0.title == "Testing" }
+        #expect(early?.day == 3 && early?.top == 3 && early?.height == 1)
+        let late = blocks.first { $0.title == "Dinner" }
+        #expect(late?.day == 2 && late?.top == 19 && late?.height == 2)
         let outside = Self.layout.outsideGrid(weekStart: start, events: events)
-        #expect(outside[1]?.map(\.title) == ["Gym"])
-        #expect(outside[2]?.map(\.title) == ["Dinner"])
-        #expect(outside[3]?.map(\.title) == ["Offsite"])
-        #expect(outside[0] == nil)
-        #expect(!Self.layout.blocks(weekStart: start, events: events, proposals: []).contains { $0.title == "Gym" })
+        #expect(outside.mapValues { $0.map(\.title) } == [3: ["Offsite"]])
     }
 
     @Test @MainActor func aDoubleClickOnAddCreatesOneEvent() async {
@@ -160,10 +172,15 @@ enum CalendarFixtures {
         #expect(reminder.title == "Send copy decisions to Priya")  // Reminders' edit kept
         #expect(reminder.isDone)                                  // Mference's change pushed
         #expect(await service.reminders.count == 1)               // the deleted one is not recreated
-        let unlinked = try #require(model.todos.first { $0.id == second.id })
-        #expect(unlinked.reminderID == nil && unlinked.unlinkedFromReminders)
+        #expect(!model.todos.contains { $0.id == second.id })     // and it is deleted here too
         await model.syncReminders()
         #expect(await service.reminders.count == 1)
+
+        // Deleted here: deleted in Reminders at the next sync.
+        model.removeTodo(first.id)
+        await model.syncReminders()
+        #expect(await service.reminders.isEmpty)
+        #expect(model.todos.isEmpty)
     }
 
     @Test @MainActor func newEventFromTheToolbarIsAddedAfterAccess() async {
@@ -201,14 +218,17 @@ enum CalendarFixtures {
         let blocks = Self.layout.blocks(weekStart: start, events: [overnight, fromLastWeek], proposals: [])
         #expect(blocks.filter { $0.title == "Deploy" }.map(\.day).sorted() == [1, 2])
         let wednesday = blocks.first { $0.title == "Deploy" && $0.day == 2 }
-        #expect(wednesday?.top == 0 && wednesday?.height == 2)
+        #expect(wednesday?.top == 0 && wednesday?.height == 11)
+        let tuesday = blocks.first { $0.title == "Deploy" && $0.day == 1 }
+        #expect(tuesday?.top == 16 && tuesday?.height == 8)
         #expect(blocks.filter { $0.title == "Trip" }.map(\.day) == [0])
         #expect(Set(blocks.map(\.id)).count == blocks.count)
-        // A part entirely outside the hours is listed above the grid that day.
+        // A late-night event is drawn on both days, never listed above.
         let lateOnly = CalendarEvent(id: "late", title: "Late", start: CalendarFixtures.date(16, 21),
                                      end: CalendarFixtures.date(17, 8))
-        let outside = Self.layout.outsideGrid(weekStart: start, events: [lateOnly])
-        #expect(outside[2]?.map(\.title) == ["Late"] && outside[3]?.map(\.title) == ["Late"])
+        let late = Self.layout.blocks(weekStart: start, events: [lateOnly], proposals: [])
+        #expect(late.map(\.day).sorted() == [2, 3])
+        #expect(Self.layout.outsideGrid(weekStart: start, events: [lateOnly]).isEmpty)
     }
 
     @Test @MainActor func editsMadeInRemindersBecomeTheToDosOwn() async throws {
@@ -246,8 +266,8 @@ enum CalendarFixtures {
     /// keep its room instead of getting a tiny or negative height.
     @Test func aProposalAtTheBottomEdgeKeepsItsRoom() throws {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
-        let late = ProposedEvent(title: "Late call", start: CalendarFixtures.date(16, 17, 59),
-                                 end: CalendarFixtures.date(16, 18),
+        let late = ProposedEvent(title: "Late call", start: CalendarFixtures.date(16, 23, 59),
+                                 end: CalendarFixtures.date(17, 0),
                                  source: ItemSource(kind: .mail, label: "Priya", reference: "<l@example.com>"))
         let drawn = try #require(Self.layout.blocks(weekStart: start, events: [], proposals: [late]).first)
         let span = Double(Self.layout.lastHour - Self.layout.firstHour)
@@ -282,7 +302,7 @@ enum CalendarFixtures {
         #expect(model.access == .granted)
         #expect(await service.requests == [.calendar])
         #expect(model.events.count == 10)
-        #expect(model.weekTitle == "September 14 to 18")
+        #expect(model.title == "September 2026")
         #expect(model.isToday(CalendarFixtures.date(15, 0)))
     }
 
@@ -416,12 +436,15 @@ enum CalendarFixtures {
     @Test @MainActor func weekNavigation() async {
         let model = Self.model()
         await model.load()
-        await model.showWeek(offset: 1)
+        await model.step(1)
         #expect(model.weekStart == CalendarFixtures.date(21, 0))
         #expect(model.events.map(\.title) == ["Next week"])
-        #expect(model.weekTitle == "September 21 to 25")
-        await model.showWeek(offset: 2)
-        #expect(model.weekTitle == "October 5 to 9")
+        #expect(model.title == "September 2026")
+        await model.step(1)
+        // A week across two months names both.
+        #expect(model.title.hasPrefix("September") && model.title.hasSuffix("October 2026"))
+        await model.step(1)
+        #expect(model.title == "October 2026")
         await model.showToday()
         #expect(model.weekStart == CalendarFixtures.date(14, 0))
     }

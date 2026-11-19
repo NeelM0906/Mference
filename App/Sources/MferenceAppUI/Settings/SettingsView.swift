@@ -417,9 +417,12 @@ public struct SettingsView: View {
                               subtitle: "Read from Mail's local store (asks for Full Disk Access the first time); replies send through Mail when you click Send.")
                 connectionRow(.appleCalendar, title: "Apple Calendar",
                               subtitle: "Shows your events and adds the ones you approve (asks for Calendar access the first time).")
-                MFListRow("Sync to-dos to Reminders",
-                          subtitle: "Off until you turn it on. Asks for Reminders access the first time.") {
-                    settingToggle("Sync to-dos to Reminders", .remindersSyncEnabled)
+                MFListRow("Sync to-dos with Reminders",
+                          subtitle: "Two-way: reminders show as to-dos and to-dos added here go to Reminders. Off until you turn it on; asks for Reminders access the first time.") {
+                    settingToggle("Sync to-dos with Reminders", .remindersSyncEnabled)
+                }
+                if settings?.remindersSyncEnabled == true {
+                    RemindersListsSettings()
                 }
                 MFListRow("Microsoft 365 and Google",
                           subtitle: "Mail and calendar from these providers arrive in a later version.") {
