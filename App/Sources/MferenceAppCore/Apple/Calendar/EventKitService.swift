@@ -46,8 +46,11 @@ public actor EventKitService: CalendarServicing {
     private func request(_ permission: AppPermission, entity: EKEntityType) async -> PermissionState {
         let before = Self.state(EKEventStore.authorizationStatus(for: entity))
         guard before != .granted else { return .granted }
-        _ = await broker.request(permission)
+        let answer = await broker.request(permission)
         let after = Self.state(EKEventStore.authorizationStatus(for: entity))
+        // macOS showed no prompt: still undecided, but only System Settings
+        // can change it now (the caller tells the person so).
+        if after == .notDetermined, answer == .needsSystemSettings { return .needsSystemSettings }
         // A store made before access was granted does not see the data.
         if after == .granted, !storeHasAccess.contains(entity) {
             store = EKEventStore()

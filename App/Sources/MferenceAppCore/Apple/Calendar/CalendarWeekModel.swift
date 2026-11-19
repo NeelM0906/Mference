@@ -11,6 +11,9 @@ public final class CalendarWeekModel {
         case granted
         /// Denied: the screen points to System Settings.
         case blocked
+        /// Asked, but macOS showed no prompt: the screen points to System
+        /// Settings and never shows the reason again on its own.
+        case promptNotShown
     }
 
     public private(set) var access: Access = .notAsked
@@ -90,10 +93,17 @@ public final class CalendarWeekModel {
     public func load() async {
         switch await service.calendarAccess() {
         case .granted: access = .granted
-        case .notDetermined: access = .notAsked
+        case .notDetermined: access = access == .promptNotShown ? .promptNotShown : .notAsked
         case .denied, .needsSystemSettings: access = .blocked
         }
         await reload()
+    }
+
+    /// The app became active again (back from System Settings, say):
+    /// re-reads access while it is missing.
+    public func recheckAccess() async {
+        guard access != .granted else { return }
+        await load()
     }
 
     /// The person clicked "Show my calendar": the broker shows the reason,
@@ -102,7 +112,9 @@ public final class CalendarWeekModel {
         switch await service.requestCalendarAccess() {
         case .granted: access = .granted
         case .notDetermined: access = .notAsked
-        case .denied, .needsSystemSettings: access = .blocked
+        case .denied, .needsSystemSettings:
+            // Still undecided after asking: macOS never showed its prompt.
+            access = await service.calendarAccess() == .notDetermined ? .promptNotShown : .blocked
         }
         await reload()
     }
@@ -159,7 +171,7 @@ public final class CalendarWeekModel {
         guard !addingProposals.contains(proposal.id), proposals.contains(where: { $0.id == proposal.id }) else { return }
         addingProposals.insert(proposal.id)
         defer { addingProposals.remove(proposal.id) }
-        if access != .granted { await requestAccess() }
+        if access == .notAsked { await requestAccess() }
         guard access == .granted else { return }
         do {
             _ = try await service.add(proposal)
@@ -182,7 +194,7 @@ public final class CalendarWeekModel {
             errorMessage = "An event needs a title and an end after its start."
             return false
         }
-        if access != .granted { await requestAccess() }
+        if access == .notAsked { await requestAccess() }
         guard access == .granted else { return false }
         do {
             _ = try await service.add(ProposedEvent(title: trimmed, start: start, end: end,

@@ -8,11 +8,16 @@ public actor InMemoryCalendarService: CalendarServicing {
     private var calendarState: PermissionState
     private var remindersState: PermissionState
     private let grantOnRequest: Bool
+    /// false: like a Mac that shows no prompt, a request answers
+    /// `.needsSystemSettings` and the state stays undecided.
+    private let promptShown: Bool
     public private(set) var requests: [AppPermission] = []
     private var nextID = 1
 
     public init(events: [CalendarEvent] = [], calendarAccess: PermissionState = .granted,
-                remindersAccess: PermissionState = .notDetermined, grantOnRequest: Bool = true) {
+                remindersAccess: PermissionState = .notDetermined, grantOnRequest: Bool = true,
+                promptShown: Bool = true) {
+        self.promptShown = promptShown
         self.storedEvents = events
         self.calendarState = calendarAccess
         self.remindersState = remindersAccess
@@ -21,8 +26,14 @@ public actor InMemoryCalendarService: CalendarServicing {
 
     public func calendarAccess() async -> PermissionState { calendarState }
 
+    /// Access granted in System Settings while the app was away.
+    public func setCalendarAccess(_ state: PermissionState) {
+        calendarState = state
+    }
+
     public func requestCalendarAccess() async -> PermissionState {
         requests.append(.calendar)
+        if calendarState == .notDetermined, !promptShown { return .needsSystemSettings }
         if calendarState == .notDetermined { calendarState = grantOnRequest ? .granted : .denied }
         return calendarState
     }

@@ -3,6 +3,7 @@ import AVFoundation
 import CoreServices
 import EventKit
 import Foundation
+import os
 
 /// The real `PermissionBroker` (decision L6). It never prompts on its own:
 /// `state(of:)` only reads, and `request(_:)` runs only when a feature asks,
@@ -24,12 +25,13 @@ public struct LivePermissionBroker: PermissionBroker {
         /// Reads the current state; never prompts.
         public var state: @Sendable (AppPermission) async -> PermissionState
         /// Shows the system prompt (or, for Full Disk Access, nothing: the
-        /// person switches it on in System Settings).
-        public var prompt: @Sendable (AppPermission) async -> Void
+        /// person switches it on in System Settings). Throws what the system
+        /// answered when it refused to ask.
+        public var prompt: @Sendable (AppPermission) async throws -> Void
         public var openURL: @Sendable (URL) async -> Void
 
         public init(state: @escaping @Sendable (AppPermission) async -> PermissionState,
-                    prompt: @escaping @Sendable (AppPermission) async -> Void,
+                    prompt: @escaping @Sendable (AppPermission) async throws -> Void,
                     openURL: @escaping @Sendable (URL) async -> Void) {
             self.state = state
             self.prompt = prompt
@@ -37,7 +39,10 @@ public struct LivePermissionBroker: PermissionBroker {
         }
 
         public static func live(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> System {
-            System(
+            // One event store for every Calendar and Reminders request, kept
+            // as long as the broker, not a temporary per request.
+            let events = EventStoreBox()
+            return System(
                 state: { permission in
                     switch permission {
                     case .calendar: LivePermissionBroker.state(EKEventStore.authorizationStatus(for: .event))
@@ -50,8 +55,8 @@ public struct LivePermissionBroker: PermissionBroker {
                 },
                 prompt: { permission in
                     switch permission {
-                    case .calendar: _ = try? await EKEventStore().requestFullAccessToEvents()
-                    case .reminders: _ = try? await EKEventStore().requestFullAccessToReminders()
+                    case .calendar: _ = try await events.store.requestFullAccessToEvents()
+                    case .reminders: _ = try await events.store.requestFullAccessToReminders()
                     case .camera: _ = await AVCaptureDevice.requestAccess(for: .video)
                     case .microphone: _ = await AVCaptureDevice.requestAccess(for: .audio)
                     case .mailAutomation: _ = await LivePermissionBroker.mailAutomationState(ask: true)
@@ -63,6 +68,14 @@ public struct LivePermissionBroker: PermissionBroker {
                 })
         }
     }
+
+    /// EventKit's store is not `Sendable`; its request methods are safe to
+    /// call from any thread.
+    final class EventStoreBox: @unchecked Sendable {
+        let store = EKEventStore()
+    }
+
+    static let log = Logger(subsystem: "ai.mference.app", category: "permissions")
 
     private let presentReason: ReasonPresenter
     private let system: System
@@ -90,9 +103,24 @@ public struct LivePermissionBroker: PermissionBroker {
             // on in System Settings, and the app sees it on its next check.
             await openSystemSettings(for: .fullDiskAccess)
         } else {
-            await system.prompt(permission)
+            do {
+                try await system.prompt(permission)
+            } catch {
+                Self.log.error("""
+                    \(permission.rawValue, privacy: .public) request failed: \
+                    \(String(describing: error), privacy: .public)
+                    """)
+            }
         }
-        return await state(of: permission)
+        let after = await state(of: permission)
+        if after == .notDetermined, permission == .calendar || permission == .reminders {
+            // macOS showed no prompt (it refused the request, or keeps a
+            // decision from an earlier build of the app). Asking again would
+            // only repeat the reason, so the caller is sent to System Settings.
+            Self.log.error("\(permission.rawValue, privacy: .public): no system prompt was shown; still not determined")
+            return .needsSystemSettings
+        }
+        return after
     }
 
     public func openSystemSettings(for permission: AppPermission) async {

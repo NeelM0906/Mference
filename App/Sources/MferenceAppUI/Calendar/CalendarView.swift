@@ -1,3 +1,4 @@
+import AppKit
 import MferenceAppCore
 import MferenceDesign
 import SwiftUI
@@ -53,6 +54,12 @@ struct CalendarContent: View {
                     AppleEmptyState(systemImage: "lock", title: "Calendar is turned off for Mference",
                                     message: "Turn on Mference under System Settings > Privacy & Security > Calendars.",
                                     actionTitle: "Open System Settings") { Task { await model.openCalendarSettings() } }
+                case .promptNotShown:
+                    AppleEmptyState(systemImage: "exclamationmark.lock", title: "macOS didn't show the Calendar prompt",
+                                    message: "Turn on Mference under Privacy & Security > Calendars, then come back here.",
+                                    actionTitle: "Open System Settings > Calendars") {
+                        Task { await model.openCalendarSettings() }
+                    }
                 }
                 if let message = model.errorMessage {
                     Text(message)
@@ -70,6 +77,10 @@ struct CalendarContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Back from System Settings: look again while access is missing.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.recheckAccess() }
+        }
         .shellToolbar(id: "calendar.new-event") { NewEventToolbarButton(model: model) }
     }
 
@@ -343,7 +354,7 @@ struct NewEventToolbarButton: View {
         Button("New event") { showsForm = true }
             .buttonStyle(.applePrimary)
             .keyboardShortcut("n", modifiers: .command)
-            .disabled(model.access == .blocked)
+            .disabled(model.access == .blocked || model.access == .promptNotShown)
             .popover(isPresented: $showsForm, arrowEdge: .bottom) {
                 NewEventForm(model: model) { showsForm = false }
             }

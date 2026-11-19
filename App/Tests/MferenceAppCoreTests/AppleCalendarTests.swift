@@ -1,5 +1,6 @@
 import Foundation
 @testable import MferenceAppCore
+import Synchronization
 import Testing
 
 enum CalendarFixtures {
@@ -291,6 +292,56 @@ enum CalendarFixtures {
         #expect(model.access == .blocked)
         await model.openCalendarSettings()
         #expect(await service.openedSettings == [.calendar])
+    }
+
+    /// The maintainer's loop: Continue under the reason, no macOS prompt, and
+    /// the screen asked again. Now it says so, points to System Settings,
+    /// and nothing asks again on its own.
+    @Test @MainActor func aPromptMacOSNeverShowsEndsTheLoop() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events, calendarAccess: .notDetermined,
+                                              promptShown: false)
+        let model = Self.model(service: service)
+        await model.load()
+        await model.requestAccess()
+        #expect(model.access == .promptNotShown)
+        // Adding a proposal or a new event does not ask again.
+        model.propose(CalendarFixtures.moveProposal)
+        let proposal = try #require(model.proposals.first)
+        await model.add(proposal)
+        #expect(await model.createEvent(title: "Dentist", start: CalendarFixtures.date(16, 9),
+                                        end: CalendarFixtures.date(16, 9, 30)) == false)
+        // Coming back to the app re-reads without asking, and keeps the state.
+        await model.recheckAccess()
+        #expect(model.access == .promptNotShown)
+        #expect(await service.requests == [.calendar])
+        await model.openCalendarSettings()
+        #expect(await service.openedSettings == [.calendar])
+        // Turned on in System Settings: the next activation shows the week.
+        await service.setCalendarAccess(.granted)
+        await model.recheckAccess()
+        #expect(model.access == .granted)
+        #expect(model.events.count == 10)
+        #expect(await service.requests == [.calendar])
+    }
+
+    /// The broker surfaces a refused request: one reason, the error logged,
+    /// and System Settings as the answer instead of "not determined".
+    @Test func aRefusedSystemPromptAnswersSystemSettings() async {
+        struct Refused: Error {}
+        let reasons = Mutex(0)
+        let broker = LivePermissionBroker(
+            presentReason: { _ in reasons.withLock { $0 += 1 }; return true },
+            system: .init(state: { _ in .notDetermined },
+                          prompt: { _ in throw Refused() },
+                          openURL: { _ in }))
+        #expect(await broker.request(.calendar) == .needsSystemSettings)
+        #expect(await broker.request(.reminders) == .needsSystemSettings)
+        #expect(reasons.withLock { $0 } == 2)
+        // A declined reason is not a failure: still undecided, nothing logged.
+        let declined = LivePermissionBroker(
+            presentReason: { _ in false },
+            system: .init(state: { _ in .notDetermined }, prompt: { _ in throw Refused() }, openURL: { _ in }))
+        #expect(await declined.request(.calendar) == .notDetermined)
     }
 
     @Test @MainActor func addingAProposalMovesTheEventWithOneClick() async {
