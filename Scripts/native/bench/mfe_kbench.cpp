@@ -1,19 +1,29 @@
 // mfe-kbench: ggml-metal kernel baselines at the pin (b1b770d9) for the
 // native engine's benchmark gates (docs/NATIVE_BENCHMARKS.md).
 //
-//   mfe-kbench [--suite gemm,attn,gdn,copy] [--types q4_K,...] [--rows 1,4,8,16,512]
-//              [--shapes K:N,...] [--ctx 512,4096,32768] [--reps 20] [--min-mib 256]
+//   mfe-kbench [--suite dispatch,copy,gemm,attn,gdn] [--types q4_K,...] [--rows 1,4,8,16,512]
+//              [--shapes K:N,...] [--ctx 512,4096,32768] [--reps 20] [--min-mib 256] [--max-mib 2048]
 //              [--json <file>]
 //
 // Every measurement builds one ggml graph of M independent copies of the op
-// (distinct weight / KV buffers totalling at least --min-mib MiB, so the
-// system-level cache cannot serve them) and runs it on the Metal backend with
-// concurrent dispatch off (GGML_METAL_CONCURRENCY_DISABLE), as a model graph's
-// dependent ops run. Time per op = median graph time / M over --reps runs
-// after 3 warm-ups. Reported per op: microseconds, bytes the op must read
-// (weights or KV/state plus activations), the bandwidth that implies, and the
-// share of the memory-bandwidth floor (bytes / peak) against the nominal peak
-// and against this run's measured copy bandwidth. No model is loaded.
+// on the Metal backend, with concurrent dispatch off
+// (GGML_METAL_CONCURRENCY_DISABLE), as a model graph's dependent ops run. The
+// copies use distinct weight, KV or state buffers. M is sized from each copy's
+// own working set so the graph's distinct bytes reach at least --min-mib, past
+// the system cache, and its total allocation stays within --max-mib (bounded
+// memory). A GEMM's activation is shared by every copy.
+//
+// Timing is host wall-clock around the synchronous ggml_backend_graph_compute
+// (ggml-metal exposes no GPU timestamps): time per op = median graph time / M
+// over --reps runs, after 3 warm-ups. Each op therefore includes its share of
+// dispatch cost; the "dispatch" suite reports that floor. W2 and W3 must time
+// their kernels the same way (M copies in one synchronous submission, host
+// clock) for the >= ggml-metal gates to compare like with like.
+//
+// Reported per op: microseconds, bytes the op must read (weights or KV/state
+// plus activations), the bandwidth that implies, and the share of the
+// memory-bandwidth floor (bytes / peak) against the nominal peak and against
+// this run's measured copy bandwidth. No model is loaded.
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -43,13 +53,14 @@ static double now_us() {
 }
 
 struct Options {
-    std::vector<std::string> suites = {"copy", "gemm", "attn", "gdn"};
+    std::vector<std::string> suites = {"dispatch", "copy", "gemm", "attn", "gdn"};
     std::vector<std::string> types;   // empty: Quick's
     std::vector<int> rows = {1, 2, 4, 8, 16, 512};
     std::vector<std::pair<int, int>> shapes;  // empty: per type, Quick's
     std::vector<int> ctx = {512, 4096, 32768};
     int reps = 20;
-    double min_mib = 256;
+    double min_mib = 256;   // per-graph distinct working set, past the system cache
+    double max_mib = 2048;  // cap on a graph's total allocation (bounded memory)
     double nominal_gbs = 400;
     std::string json;
 };
@@ -61,15 +72,27 @@ struct Result {
 };
 
 static std::vector<Result> g_results;
+
+// Copies of an op whose distinct per-copy working set is `per_copy` bytes:
+// enough to pass --min-mib (past the system cache), never more than
+// --max-mib in all (bounded memory). `shared` bytes are allocated once.
+static int copies_for(const Options & o, double per_copy, double shared = 0) {
+    const double mib = 1 << 20;
+    int c = std::max(1, (int) std::ceil(o.min_mib * mib / per_copy));
+    const int cap = std::max(1, (int) std::floor((o.max_mib * mib - shared) / per_copy));
+    return std::min(c, cap);
+}
 static double g_copy_gbs = 0;
 
 // Runs `build` (which adds one op copy per call into ctx and returns its
 // output) M times into a graph, allocates, initializes with `init`, and times.
 template <typename Build, typename Init>
 static double time_graph(ggml_backend_t be, int copies, int reps, size_t ctx_tensors, Build build, Init init) {
-    ggml_init_params ip = { ggml_tensor_overhead() * (ctx_tensors * copies + 16) + ggml_graph_overhead_custom(4096, false), nullptr, true };
+    // graph capacity scales with the copies (each copy adds a few nodes and leafs)
+    const size_t graph_size = std::max<size_t>(4096, ctx_tensors * (size_t) copies * 2 + 64);
+    ggml_init_params ip = { ggml_tensor_overhead() * (ctx_tensors * copies + 16) + ggml_graph_overhead_custom(graph_size, false), nullptr, true };
     ggml_context * ctx = ggml_init(ip);
-    ggml_cgraph * gf = ggml_new_graph_custom(ctx, 4096, false);
+    ggml_cgraph * gf = ggml_new_graph_custom(ctx, graph_size, false);
     std::vector<ggml_tensor *> outs;
     for (int i = 0; i < copies; ++i) {
         ggml_tensor * out = build(ctx, i);
@@ -136,6 +159,26 @@ static std::vector<uint8_t> quantized(ggml_type t, int K, int N) {
 
 // ---------------------------------------------------------------- suites
 
+// The host-timing floor: 1024 copies of a one-element op. Every figure here is
+// host wall-clock around a synchronous graph compute (ggml-metal exposes no
+// GPU timestamps), so each op carries about this much dispatch cost; W2/W3
+// time their kernels the same way (docs/NATIVE_BENCHMARKS.md).
+static void bench_dispatch(ggml_backend_t be, const Options & o) {
+    std::vector<ggml_tensor *> xs;
+    const int copies = 1024;
+    const double us = time_graph(be, copies, o.reps, 2,
+        [&](ggml_context * ctx, int) {
+            ggml_tensor * x = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+            xs.push_back(x);
+            return ggml_scale(ctx, x, 2.0f);
+        },
+        [&](ggml_context *) { for (auto * x : xs) set_random(x); });
+    Result r; r.suite = "dispatch"; r.name = "scale 1 element (dispatch floor)"; r.type = "f32";
+    r.copies = copies; r.us = us; r.bytes = 8;
+    g_results.push_back(r);
+    fprintf(stderr, "dispatch floor: %.2f us per op\n", us);
+}
+
 static void bench_copy(ggml_backend_t be, const Options & o) {
     const int64_t n = (int64_t) 256 << 20;  // 256 Mi floats, 1 GiB
     const double us = time_graph(be, 1, o.reps, 2,
@@ -183,14 +226,19 @@ static void bench_gemm(ggml_backend_t be, const Options & o) {
         for (auto [K, N] : shapes) {
             const std::vector<uint8_t> w = quantized(t, K, N);
             const double wbytes = (double) w.size();
-            const int copies = std::max(1, (int) std::ceil(o.min_mib * (1 << 20) / wbytes));
             for (int rows : o.rows) {
+                // one activation x shared by every copy (as every layer reads
+                // its own small input); distinct weights and outputs per copy
+                const double outbytes = 4.0 * N * rows, xbytes = 4.0 * K * rows;
+                const int copies = copies_for(o, wbytes + outbytes, xbytes);
                 std::vector<ggml_tensor *> ws, xs;
+                ggml_tensor * xshared = nullptr;
                 const double us = time_graph(be, copies, o.reps, 3,
                     [&](ggml_context * ctx, int) {
                         ggml_tensor * W = ggml_new_tensor_2d(ctx, t, K, N);
-                        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, rows);
-                        ws.push_back(W); xs.push_back(x);
+                        if (!xshared) { xshared = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K, rows); xs.push_back(xshared); }
+                        ggml_tensor * x = xshared;
+                        ws.push_back(W);
                         return ggml_mul_mat(ctx, W, x);
                     },
                     [&](ggml_context *) {
@@ -198,7 +246,7 @@ static void bench_gemm(ggml_backend_t be, const Options & o) {
                         for (auto * x : xs) set_random(x);
                     });
                 Result r; r.suite = "gemm"; r.type = ts; r.k = K; r.n = N; r.rows = rows; r.copies = copies;
-                r.us = us; r.bytes = wbytes + 4.0 * K * rows + 4.0 * N * rows;
+                r.us = us; r.bytes = wbytes + xbytes + outbytes;
                 r.name = ts + " " + std::to_string(K) + "x" + std::to_string(N);
                 g_results.push_back(r);
                 fprintf(stderr, "gemm %-7s K=%5d N=%6d rows=%3d: %9.1f us  %6.1f GB/s\n", ts.c_str(), K, N, rows, us, r.bytes / us / 1e3);
@@ -215,7 +263,8 @@ static void bench_attn(ggml_backend_t be, const Options & o) {
         for (int rows : o.rows) {
             if (rows > ctxlen) continue;
             const double kvbytes = 2.0 * ctxlen * HKV * D * 2;
-            const int copies = std::max(1, (int) std::ceil(o.min_mib * (1 << 20) / kvbytes));
+            // per copy: K and V, q, mask and output (all distinct)
+            const int copies = copies_for(o, kvbytes + 4.0 * rows * HQ * D * 2 + 2.0 * rows * ctxlen);
             std::vector<ggml_tensor *> qs, ks, vs, ms;
             const double us = time_graph(be, copies, o.reps, 10,
                 [&](ggml_context * ctx, int) {
@@ -260,7 +309,8 @@ static void bench_gdn(ggml_backend_t be, const Options & o) {
     const int S = 128, HK = 16, HV = 32, C = 8192, KC = 4;
     for (int rows : o.rows) {
         const double sbytes = 2.0 * S * S * HV * 4;  // read and write the state
-        const int copies = std::max(1, (int) std::ceil(o.min_mib * (1 << 20) / sbytes));
+        // per copy: state in and out, q/k/v/g/b and the output
+        const int copies = copies_for(o, sbytes + 4.0 * rows * (2 * S * HK + 2 * S * HV + 2 * HV) + 4.0 * S * HV * rows);
         std::vector<ggml_tensor *> all;
         const double us = time_graph(be, copies, o.reps, 8,
             [&](ggml_context * ctx, int) {
@@ -284,7 +334,7 @@ static void bench_gdn(ggml_backend_t be, const Options & o) {
         // and output of each copy are distinct buffers), so it too reaches
         // --min-mib and cannot stay cache-resident
         const double cbytes = 4.0 * C * (KC - 1 + rows) + 4.0 * C * KC + 4.0 * C * rows;
-        const int ccopies = std::max(1, (int) std::ceil(o.min_mib * (1 << 20) / cbytes));
+        const int ccopies = copies_for(o, cbytes);
         std::vector<ggml_tensor *> cv;
         const double cus = time_graph(be, ccopies, o.reps, 3,
             [&](ggml_context * ctx, int) {
@@ -314,6 +364,7 @@ int main(int argc, char ** argv) {
         else if (a == "--ctx") o.ctx = ints(next());
         else if (a == "--reps") o.reps = atoi(next().c_str());
         else if (a == "--min-mib") o.min_mib = atof(next().c_str());
+        else if (a == "--max-mib") o.max_mib = atof(next().c_str());
         else if (a == "--nominal-gbs") o.nominal_gbs = atof(next().c_str());
         else if (a == "--json") o.json = next();
         else if (a == "--shapes") {
@@ -335,7 +386,8 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "device: %s, MTLGPUFamilyApple%d\n", desc ? desc : "?", family);
 
     for (const auto & s : o.suites) {
-        if (s == "copy") bench_copy(be, o);
+        if (s == "dispatch") bench_dispatch(be, o);
+        else if (s == "copy") bench_copy(be, o);
         else if (s == "gemm") bench_gemm(be, o);
         else if (s == "attn") bench_attn(be, o);
         else if (s == "gdn") bench_gdn(be, o);

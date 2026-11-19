@@ -22,13 +22,23 @@ enum SchedulerBench {
         /// Median GPU busy time per command buffer.
         var medianBusyMicroseconds: Double
 
-        init(intervals: [(start: CFTimeInterval, end: CFTimeInterval)], skip: Int = 2) {
-            let sorted = intervals.sorted { $0.start < $1.start }
+        /// `intervals` in any order. `window`, if given, selects the command
+        /// buffers (by start order) to measure: the decode steps alone, say,
+        /// without the prefill or a trailing rollback; otherwise the first
+        /// `skip` are dropped as warm-up. A gap is the idle time before a
+        /// buffer starts, measured from the latest end of any earlier buffer
+        /// (a running max), so overlapping buffers never count as idle.
+        init(intervals: [(start: CFTimeInterval, end: CFTimeInterval)], skip: Int = 2, window: Range<Int>? = nil) {
+            let all = intervals.sorted { $0.start < $1.start }
+            let range = (window ?? min(skip, all.count)..<all.count).clamped(to: 0..<all.count)
+            // latestEnd[i]: the latest end among buffers 0..<i (a running max)
+            var latestEnd = [Double](repeating: -.infinity, count: all.count)
+            for i in all.indices.dropFirst() { latestEnd[i] = max(latestEnd[i - 1], all[i - 1].end) }
             var gaps: [Double] = []
-            for i in 1..<max(1, sorted.count) where i > skip {
-                gaps.append(max(0, sorted[i].start - sorted[i - 1].end) * 1e6)
+            for i in range where i > range.lowerBound {
+                gaps.append(max(0, all[i].start - latestEnd[i]) * 1e6)
             }
-            let busy = sorted.map { ($0.end - $0.start) * 1e6 }
+            let busy = all[range].map { ($0.end - $0.start) * 1e6 }
             let d = ParityMetrics.Distribution(gaps)
             count = gaps.count
             medianMicroseconds = d.median
@@ -114,6 +124,19 @@ final class RecordingCommandQueue: NSObject, MTLCommandQueue, @unchecked Sendabl
     func reset() {
         lock.lock(); spans.removeAll(); lock.unlock()
     }
+
+    /// Waits until at least `count` intervals are recorded (completion
+    /// handlers run asynchronously, after `waitUntilCompleted` returns).
+    /// False on timeout.
+    @discardableResult
+    func waitForIntervals(_ count: Int, timeout: TimeInterval = 5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while intervals.count < count {
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        return true
+    }
 }
 
 // MARK: - The fixed-cost kernel
@@ -161,7 +184,7 @@ final class FixedCostKernel {
 
     /// Iterations that take about `milliseconds` on this GPU (measured).
     func calibrate(queue: MTLCommandQueue, milliseconds: Double) throws -> UInt32 {
-        let buffer = try makeSharedBuffer(queue.device, bytes: 64 * 4)
+        let buffer = try harnessSharedBuffer(queue.device, bytes: 64 * 4)
         var iterations: UInt32 = 1 << 16
         for _ in 0..<12 {
             let ms: Double = try autoreleasepool {
@@ -184,7 +207,7 @@ final class FixedCostKernel {
 }
 
 /// A shared buffer, or a thrown resource error.
-func makeSharedBuffer(_ device: MTLDevice, bytes: Int) throws -> MTLBuffer {
+func harnessSharedBuffer(_ device: MTLDevice, bytes: Int) throws -> MTLBuffer {
     guard let b = device.makeBuffer(length: bytes, options: .storageModeShared) else {
         throw Native.NativeError.resource("buffer \(bytes)")
     }
@@ -222,7 +245,7 @@ final class SyntheticForwardModel: Native.ForwardModel {
         self.kernel = kernel
         self.iterations = iterations
         self.kv = try SyntheticKVStore(device: device, config: Self.toyConfig)
-        self.logits = try makeSharedBuffer(device, bytes: 2 * Self.toyConfig.vocabSize * 4)
+        self.logits = try harnessSharedBuffer(device, bytes: 2 * Self.toyConfig.vocabSize * 4)
     }
 
     /// The token the model "predicts" after position `p`.
@@ -259,7 +282,7 @@ final class SyntheticKVStore: Native.KVStore {
                                                  valueHeads: config.ssmTimeStepRank, keyDim: config.ssmStateSize,
                                                  valueDim: config.ssmStateSize)
         capacity = config.contextLength
-        dummy = try makeSharedBuffer(device, bytes: 4096)
+        dummy = try harnessSharedBuffer(device, bytes: 4096)
     }
 
     private var lastStepKind: Native.StepKind = .prefill

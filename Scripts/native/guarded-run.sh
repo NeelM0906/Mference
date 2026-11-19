@@ -5,14 +5,18 @@
 #
 #   guarded-run.sh [--timing] <log-dir> <gguf> -- <command> [args...]
 #
-# Run it as the single command of its own lock hold:
+# Run it as the single command of its own lock hold (a timing run's hold is
+# quiet, so no build or test starts during it):
 #   lock.sh run --wait 3600 ws2 "mfe <purpose>" -- Scripts/native/guarded-run.sh <log-dir> <gguf> -- ...
+#   lock.sh run --quiet --wait 3600 ws2 "mfe <purpose>" -- Scripts/native/guarded-run.sh --timing <log-dir> <gguf> -- ...
 #
 # Power: every run records its power source in run.json. --timing marks a
 # timing run (benchmark baselines, kernel benchmarks, L5 gates, any tok/s,
 # TTFT or kernel figure that is compared or published): it refuses unless on
-# AC Power, so every compared number shares a power source. Correctness,
-# parity and capture runs may run on battery (program spec section 10).
+# AC Power, so every compared number shares a power source; it waits for
+# running build/test jobs to finish and uses `lock.sh preflight --gating`
+# (no Low Power Mode, thermal state recorded). Correctness, parity and capture
+# runs may run on battery (program spec section 10).
 # Before: refuses unless `lock.sh preflight`
 # passes (no --model: a GGUF is not an install directory), the GGUF exists and
 # no other model process runs. During: samples swap every 5 s; any growth
@@ -40,7 +44,21 @@ power=$(pmset -g batt | head -1 | sed -E "s/.*'(.*)'.*/\1/")
 if [ $timing = 1 ] && [ "$power" != "AC Power" ]; then note "REFUSED: timing run not on AC power ($power)"; exit 71; fi
 note "power source: $power$([ $timing = 1 ] && echo ' (timing run)')"
 if [ ! -f "$GGUF" ]; then note "REFUSED: no GGUF at $GGUF"; exit 71; fi
-if ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
+if [ $timing = 1 ]; then
+    # a timing run measures on a quiet machine: no build or test job may run.
+    # The caller holds the lock with --quiet, so none can start; let running
+    # ones finish (spec section 10), bounded at TIMING_JOB_WAIT_S (default 1800).
+    waited=0
+    while [ "$(pgrep -f '/usr/bin/swift-(build|test) ' | wc -l | tr -d ' ')" != 0 ]; do
+        if [ $waited -ge "${TIMING_JOB_WAIT_S:-1800}" ]; then
+            note "REFUSED: timing run; build or test jobs still running after ${waited} s"; exit 71
+        fi
+        [ $waited = 0 ] && note "timing run: waiting for running build/test jobs to finish"
+        sleep 10; waited=$((waited + 10))
+    done
+    # --gating also refuses Low Power Mode and records the thermal state
+    if ! "$LOCK" preflight --gating >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight --gating failed (see run.log)"; exit 71; fi
+elif ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
 # Processes by exact name (a shell whose command line merely mentions a tool
 # must not count). lock.sh preflight matches process names too, so a test
 # bundle run by a bare `xctest .../MferencePackageTests.xctest` (process name

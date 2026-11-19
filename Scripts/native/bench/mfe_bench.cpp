@@ -14,7 +14,8 @@
 //              history, then the first token (prefix reuse: only the suffix
 //              is prefilled)
 //   decode     --gen greedy tokens after that, one per step: tok/s at depth N
-// Load time (model and context) is reported once. Medians over --reps.
+// Load time (model and context) is reported once. One untimed warm-up per
+// context, then medians over --reps.
 #include "llama.h"
 #include "json.h"
 
@@ -102,7 +103,8 @@ int main(int argc, char ** argv) {
     for (size_t ci = 0; ci < ctxs.size(); ++ci) {
         const int N = ctxs[ci];
         std::vector<double> cold, warm, dec, create;
-        for (int r = 0; r < reps; ++r) {
+        // r = -1 is an untimed warm-up (first-use shader compiles, page-ins)
+        for (int r = -1; r < reps; ++r) {
             const double tc0 = now_s();
             llama_context_params cp = llama_context_default_params();
             cp.n_ctx = ((N + suffix + gen + 1 + 255) / 256) * 256;
@@ -133,6 +135,11 @@ int main(int argc, char ** argv) {
             dec.push_back(gen / (now_s() - t0));
             llama_batch_free(b);
             llama_free(ctx);
+            if (r < 0) {  // the warm-up is not a measurement
+                cold.pop_back(); warm.pop_back(); dec.pop_back(); create.pop_back();
+                fprintf(stderr, "mfe-bench: N=%d warm-up done\n", N);
+                continue;
+            }
             fprintf(stderr, "mfe-bench: N=%d rep=%d cold=%.3fs warm=%.3fs decode=%.1f tok/s\n", N, r, cold.back(), warm.back(), dec.back());
         }
         const double c = median(cold), w = median(warm), d = median(dec), k = median(create);
