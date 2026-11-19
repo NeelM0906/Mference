@@ -112,8 +112,9 @@ extension Native {
         public var addBOS: Bool?
         public var addEOS: Bool?
         /// Every other `tokenizer.ggml.<name>_token_id` key in the GGUF, keyed
-        /// by `<name>` (for example `eot`, `eom`, `fim_pre`, `fim_suf`,
-        /// `fim_mid`, `fim_pad`, `fim_rep`, `fim_sep`, `sep`, `unk`, `mask`).
+        /// by `<name>` exactly as spelled in the key (for example `eot`, `eom`,
+        /// `unknown`, `seperator` (llama.cpp's spelling), `cls`, `mask`,
+        /// `fim_pre`, `fim_suf`, `fim_mid`, `fim_pad`, `fim_rep`, `fim_sep`).
         /// llama.cpp uses these for end-of-generation and special-token
         /// handling. nil in packs written before this field existed.
         public var specialTokenIDs: [String: Int32]?
