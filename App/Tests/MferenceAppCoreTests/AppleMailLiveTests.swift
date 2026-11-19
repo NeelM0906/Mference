@@ -51,4 +51,29 @@ import Testing
         case .unsupported(let detail): "unsupported: \(detail)"
         }
     }
+
+    /// C-B3 "draft": writes one reply with Quick (a model run: run it under
+    /// `lock.sh run` with preflight) to the newest inbox message. Records only
+    /// the draft's length and timing; never sends.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["MFERENCE_MAIL_LIVE_DRAFT"] == "1"))
+    func draftsAReplyWithQuickWithoutSending() async throws {
+        let source = AppleMailSource()
+        guard case .available = await source.status() else {
+            Issue.record("Mail store not readable: \(Self.describe(await source.status()))")
+            return
+        }
+        let newest = try #require(try await source.messages(in: [.inbox], limit: 1).first)
+        let body = try await source.body(of: newest)
+        let engine = EngineService.live()
+        let start = ContinuousClock.now
+        let draft = try await MailReplyDrafter(engine: engine).draft(replyTo: newest, body: body.text)
+        let elapsed = ContinuousClock.now - start
+        await engine.shutdown()
+        #expect(!draft.isEmpty)
+        if let path = ProcessInfo.processInfo.environment["MFERENCE_MAIL_LIVE_REPORT"] {
+            let line = "draft with Quick: \(draft.count) characters in \(elapsed); nothing sent\n"
+            let existing = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            try (existing + line).write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
 }
