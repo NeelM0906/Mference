@@ -59,9 +59,22 @@ struct LinkProtocolTests {
         #expect(decoded.version == LinkProtocol.version)
     }
 
+    /// Every wire type of v1. Adding a case means adding it here and a sample
+    /// above; the switch in `LinkMessage.type` fails to compile without it.
+    static let allTypes: Set<String> = [
+        "hello", "capabilities", "error", "pairRequest", "pairResponse", "pairConfirm", "forget",
+        "webSearch", "webSearchResults", "readPage", "pageText", "jobSubmit", "jobEvent", "jobCancel",
+        "modelOffer", "modelChunkRequest", "modelChunk",
+    ]
+
     @Test func everyTypeHasASample() {
-        let covered = Set(Self.samples.map(\.type))
-        #expect(covered.count == 17)
+        #expect(Set(Self.samples.map(\.type)) == Self.allTypes)
+    }
+
+    @Test func limitsStayInsideTheEnvelope() {
+        #expect(LinkProtocol.maxChunkBytes < LinkProtocol.maxEnvelopeBytes / 2)
+        #expect(LinkProtocol.maxAttachmentBytes < LinkProtocol.maxEnvelopeBytes / 2)
+        #expect(LinkProtocol.maxSearchResults >= LinkWebSearchRequest(query: "q").maxResults)
     }
 
     @Test func wireShapeIsTypeAndBody() throws {

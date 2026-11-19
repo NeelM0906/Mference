@@ -21,11 +21,26 @@ public enum LinkProtocol {
     /// Bonjour service type the Mac advertises and the phone browses
     /// (`NSBonjourServices` on the phone lists it).
     public static let bonjourServiceType = "_mference._tcp"
+
+    // Size limits. A receiver checks a frame's length before decoding it and
+    // answers anything larger with `LinkError.Code.tooLarge`; both apps keep
+    // memory bounded by these, never by what a peer claims.
+
+    /// Largest encoded `LinkEnvelope` (after decryption) either side accepts.
+    public static let maxEnvelopeBytes = 16 * 1_048_576
+    /// Largest `LinkModelChunk.data` and `LinkModelChunkRequest.length`.
+    public static let maxChunkBytes = 4 * 1_048_576
+    /// Largest total of `LinkJobSubmit.attachments` data.
+    public static let maxAttachmentBytes = 8 * 1_048_576
+    /// Largest `LinkWebSearchRequest.maxResults`.
+    public static let maxSearchResults = 20
 }
 
 /// One message on the link. `sequence` starts at 1 for each direction of a
 /// connection and grows by one per envelope; a receiver drops the connection
 /// on a sequence it has already seen or one that skips ahead.
+/// The link layer checks `version` against the version the hello exchange
+/// settled on and drops the connection on a mismatch.
 public struct LinkEnvelope: Codable, Equatable, Sendable {
     public var version: Int
     public var sequence: UInt64
@@ -310,7 +325,9 @@ public struct LinkWebSearchResults: Codable, Equatable, Sendable {
     }
 }
 
-/// Phone to Mac: fetch one page through the Mac's page reader.
+/// Phone to Mac: fetch one page through the Mac's page reader. The Mac fetches
+/// only `http`/`https` URLs on public hosts: it refuses other schemes and
+/// loopback, link-local and private-network targets with a plain `LinkError`.
 public struct LinkReadPageRequest: Codable, Equatable, Sendable {
     public var requestID: UUID
     public var url: URL
@@ -437,9 +454,13 @@ public struct LinkModelOffer: Codable, Equatable, Sendable {
     public var transferID: UUID
     /// The engine catalog's model ID ("quick").
     public var modelID: String
+    /// Display only. The phone never builds a path from it: it stores the file
+    /// where its model storage puts `modelID`, and refuses an offer whose
+    /// `modelID`, `byteCount` and `sha256` do not match the pinned Quick file.
     public var fileName: String
+    /// Positive; the phone checks free space before the first chunk.
     public var byteCount: Int64
-    /// Lower-case hex SHA-256 of the whole file; the phone checks it at the end.
+    /// 64 lower-case hex characters: SHA-256 of the whole file, checked at the end.
     public var sha256: String
 
     public init(transferID: UUID = UUID(), modelID: String, fileName: String,
@@ -453,7 +474,8 @@ public struct LinkModelOffer: Codable, Equatable, Sendable {
 }
 
 /// Phone to Mac: send `length` bytes starting at `offset` (resume = ask from
-/// the first byte not yet on disk).
+/// the first byte not yet on disk). `offset` is in `0..<byteCount`; `length`
+/// is in `1...LinkProtocol.maxChunkBytes`; the Mac refuses anything else.
 public struct LinkModelChunkRequest: Codable, Equatable, Sendable {
     public var transferID: UUID
     public var offset: Int64
