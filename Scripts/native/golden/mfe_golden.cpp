@@ -57,6 +57,8 @@ static void write_file(const std::string & path, const std::string & text) {
     std::ofstream f(path, std::ios::binary);
     if (!f) { fprintf(stderr, "mfe-golden: cannot write %s\n", path.c_str()); exit(1); }
     f << text;
+    f.close();
+    if (!f) { fprintf(stderr, "mfe-golden: short write to %s\n", path.c_str()); exit(1); }
 }
 
 static void mkdirs(const std::string & path) {

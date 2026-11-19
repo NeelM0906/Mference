@@ -29,7 +29,8 @@ mkdir -p "$LOG"
 note() { echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG/run.log" >&2; }
 swap_mb() { sysctl -n vm.swapusage | sed -E 's/.*used = ([0-9.]+)M.*/\1/'; }
 
-if ! pmset -g batt | grep -q "AC Power"; then note "REFUSED: not on AC power ($(pmset -g batt | head -1))"; exit 71; fi
+power=$(pmset -g batt | head -1 | sed -E "s/.*'(.*)'.*/\1/")
+if [ "$power" != "AC Power" ]; then note "REFUSED: not on AC power ($power)"; exit 71; fi
 if [ ! -f "$GGUF" ]; then note "REFUSED: no GGUF at $GGUF"; exit 71; fi
 if ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
 # Processes by exact name (a shell whose command line merely mentions a tool
@@ -69,7 +70,7 @@ rss=$(grep -E 'maximum resident set size' "$LOG/stderr.log" | awk '{print $1}' |
 delta=$(awk -v a="$s1" -v b="$s0" 'BEGIN { printf "%.2f", a - b }')
 note "exit $rc; wall $((t1 - t0)) s; swap delta ${delta} MB; peak footprint ${peak:-?} B; max RSS ${rss:-?} B"
 cat > "$LOG/run.json" <<EOF
-{"command": "$(echo "$*" | sed 's/"/\\"/g')", "exit": $rc, "wall_s": $((t1 - t0)), "swap_start_mb": $s0, "swap_end_mb": $s1, "swap_delta_mb": $delta, "swap_guard_tripped": $([ $tripped = 1 ] && echo true || echo false), "peak_footprint_bytes": ${peak:-null}, "max_rss_bytes": ${rss:-null}}
+{"command": "$(echo "$*" | sed 's/"/\\"/g')", "exit": $rc, "power_source": "$power", "wall_s": $((t1 - t0)), "swap_start_mb": $s0, "swap_end_mb": $s1, "swap_delta_mb": $delta, "swap_guard_tripped": $([ $tripped = 1 ] && echo true || echo false), "peak_footprint_bytes": ${peak:-null}, "max_rss_bytes": ${rss:-null}}
 EOF
 if [ $tripped = 1 ]; then exit 70; fi
 if awk -v d="$delta" -v g="$SWAP_GUARD_MB" 'BEGIN { exit !(d > g) }'; then
