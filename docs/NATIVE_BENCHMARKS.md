@@ -22,7 +22,8 @@ A run whose swap grows is void, and it stops the program (the swap guard).
 
 ## Running
 
-Every timing run is one command in its own hold of the machine lock, run
+Every timing run is one command in its own quiet hold of the machine lock
+(`lock.sh run --quiet`, so no build or test starts while it measures), run
 through [`Scripts/native/guarded-run.sh`](../Scripts/native/guarded-run.sh)
 with `--timing`. The wrapper:
 - refuses unless it is on AC power, so every compared number shares a power
@@ -136,8 +137,11 @@ The harness is
 
 `SchedulerBenchTests` checks the recorder with two reference loops, one
 sequential and one pipelined (two steps in flight). With
-`MFERENCE_NATIVE_BENCH=1` it prints both at the bound's 10 ms step (a timing
-run: AC power, under the lock):
+`MFERENCE_NATIVE_BENCH=1` it prints both at the bound's 10 ms step. That is a
+timing run: AC power, in a quiet lock hold
+(`lock.sh run --quiet ws2 "mfe sched bench" -- Scripts/test.sh ...`). Builds
+and model-free tests otherwise run outside the lock (`lock.sh build -- ...`,
+at most two machine-wide).
 
 ```bash
 MFERENCE_NATIVE_BENCH=1 Scripts/test.sh --filter SchedulerBenchTests

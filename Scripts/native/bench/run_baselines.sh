@@ -1,9 +1,10 @@
 #!/bin/bash
 # run_baselines.sh: the llama.cpp / ggml-metal baselines of
-# docs/NATIVE_BENCHMARKS.md. Every step is one command in its own hold of the
-# machine lock, through guarded-run.sh --timing (AC power only, swap guard,
-# peak footprint). Steps that already finished (run.json exit 0) are skipped,
-# so a stopped run resumes.
+# docs/NATIVE_BENCHMARKS.md. Every step is one command in its own quiet hold
+# of the machine lock (lock.sh run --quiet: no build or test starts during it),
+# through guarded-run.sh --timing (AC power only, swap guard, peak footprint).
+# Steps whose run.json says "valid": true are skipped, so a stopped run
+# resumes; a void or older record is re-run.
 #
 #   LOCK=<lock.sh> BUILD=<build dir> GGUF=<Quick gguf> TOKENS=<golden long-32k golden.json> \
 #   GGML_METAL_PATH_RESOURCES=<llama.cpp>/ggml/src/ggml-metal \
@@ -32,7 +33,8 @@ run_step() {
     # during or by the end); a void or older record is re-run
     if [ -f "$OUT/$name/run.json" ] && grep -q '"valid": true' "$OUT/$name/run.json"; then echo "$name: done"; return 0; fi
     rm -rf "${OUT:?}/$name"
-    "$LOCK" run --wait 7200 "$WS" "mfe bench $name" -- "$GR" --timing "$OUT/$name" "$GGUF" -- "$@"
+    # a timing run: --quiet so no build or test starts during it (spec section 10)
+    "$LOCK" run --quiet --wait 7200 "$WS" "mfe bench $name" -- "$GR" --timing "$OUT/$name" "$GGUF" -- "$@"
     local rc=$?
     echo "$name exit=$rc" >> "$OUT/summary.txt"
     return $rc
