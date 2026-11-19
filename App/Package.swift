@@ -26,14 +26,16 @@ let package = Package(
     name: "MferenceApp",
     platforms: [
         .macOS(.v26),
-        // MferenceDesign also builds for the iPhone app (Mobile/); the other
-        // targets stay Mac only.
+        // The iPhone app (Mobile/) builds MferenceDesign and MferenceLink, and
+        // MferenceAppCore once its Mac-only parts are guarded (mobile program
+        // decision M5). The executables and MferenceAppUI stay Mac only.
         .iOS(.v26),
     ],
     products: [
         .executable(name: "MferenceMac", targets: ["MferenceMac"]),
         .library(name: "MferenceAppCore", targets: ["MferenceAppCore"]),
         .library(name: "MferenceDesign", targets: ["MferenceDesign"]),
+        .library(name: "MferenceLink", targets: ["MferenceLink"]),
         .library(name: "MferenceAppUI", targets: ["MferenceAppUI"]),
     ],
     dependencies: [
@@ -43,11 +45,20 @@ let package = Package(
         .target(
             name: "MferenceDesign",
             swiftSettings: appSwiftSettings),
+        // The iPhone to Mac link protocol (messages only, Foundation only),
+        // shared by the Mac's pairing listener and the phone. A mobile contract.
+        .target(
+            name: "MferenceLink",
+            swiftSettings: appSwiftSettings),
+        // Shared by the Mac and the iPhone (mobile decision M5). The engine is
+        // linked on macOS only until engine ask E1 lets MferenceEngine build for
+        // iOS; iOS code reaches it behind `#if canImport(MferenceEngine)`.
         .target(
             name: "MferenceAppCore",
             dependencies: [
-                .product(name: "MferenceEngine", package: "Mference"),
-                .product(name: "Mference", package: "Mference"),
+                "MferenceLink",
+                .product(name: "MferenceEngine", package: "Mference", condition: .when(platforms: [.macOS])),
+                .product(name: "Mference", package: "Mference", condition: .when(platforms: [.macOS])),
             ],
             // Versioned web-answer prompt and tool schemas (spec 4.5.3), U3.
             resources: [.process("Web/Resources")],
@@ -73,6 +84,10 @@ let package = Package(
                 .product(name: "MferenceEngine", package: "Mference"),
                 .product(name: "Mference", package: "Mference"),
             ],
+            swiftSettings: appSwiftSettings),
+        .testTarget(
+            name: "MferenceLinkTests",
+            dependencies: ["MferenceLink"],
             swiftSettings: appSwiftSettings),
         .testTarget(
             name: "MferenceAppUITests",

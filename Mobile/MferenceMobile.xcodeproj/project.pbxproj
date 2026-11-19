@@ -14,6 +14,7 @@
 /* Begin PBXFileReference section */
 		A1000000000000000000F001 /* Mference.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mference.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000000000000000000F002 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Fonts; path = ../App/Resources/Fonts; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000F004 /* MferenceMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = MferenceMobile.xcconfig; path = Config/MferenceMobile.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -41,6 +42,7 @@
 			children = (
 				A1000000000000000000F003 /* MferenceMobile */,
 				A1000000000000000000F002 /* Fonts */,
+				A1000000000000000000F004 /* MferenceMobile.xcconfig */,
 				A1000000000000000000E002 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -140,6 +142,7 @@
 /* Begin XCBuildConfiguration section */
 		A10000000000000000007001 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000F004 /* MferenceMobile.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
@@ -160,6 +163,7 @@
 		};
 		A10000000000000000007002 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1000000000000000000F004 /* MferenceMobile.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;

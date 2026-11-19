@@ -1,0 +1,11 @@
+// Build settings shared by every configuration of the Mference iPhone app
+// project. A mobile contract (Mobile/CONTRACTS.md).
+
+// llama.cpp's x86_64 simulator slice fails to link (duplicate ggml_gemm_*
+// repack symbols), so the simulator builds arm64 only.
+EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64
+
+// Signing: copy Signing.local.xcconfig.example to Signing.local.xcconfig in
+// this folder (gitignored) and set your personal team there. Without it the
+// simulator builds still work; a device build needs it.
+#include? "Signing.local.xcconfig"
