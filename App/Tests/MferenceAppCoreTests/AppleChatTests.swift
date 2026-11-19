@@ -13,6 +13,39 @@ final class AppleSwitch: Sendable {
     }
 }
 
+/// An Apple model that streams one piece, then holds until released or
+/// cancelled, and records which.
+final class HoldingAppleChatModel: AppleChatModeling, Sendable {
+    private struct State { var started = false; var released = false; var cancelled = false }
+    private let state = Mutex(State())
+
+    var started: Bool { state.withLock { $0.started } }
+    var cancelled: Bool { state.withLock { $0.cancelled } }
+    func release() { state.withLock { $0.released = true } }
+
+    func info() async -> AppleModelInfo { AppleModelInfo(state: .ready) }
+
+    func generate(turns: [ChatTurn], options: GenerationOptions) -> GenerationStream {
+        GenerationStream { continuation in
+            Task {
+                continuation.yield(.prepared(promptTokens: 1))
+                continuation.yield(.content("Partial"))
+                self.state.withLock { $0.started = true }
+                do {
+                    while !self.state.withLock({ $0.released }) { try await Task.sleep(for: .milliseconds(5)) }
+                } catch {
+                    self.state.withLock { $0.cancelled = true }
+                    continuation.finish(throwing: CancellationError())
+                    return
+                }
+                continuation.yield(.completed(GenerationSummary(content: "Partial", reasoning: nil, toolCalls: [],
+                                                                finish: .stop, promptTokens: 1, completionTokens: 1)))
+                continuation.finish()
+            }
+        }
+    }
+}
+
 @MainActor
 @Suite struct AppleChatTests {
     static func routing(on: Bool = true, info: AppleModelInfo = AppleModelInfo(state: .ready),
@@ -162,6 +195,53 @@ final class AppleSwitch: Sendable {
         chat.newChat()
         chat.select(id)
         #expect(chat.model == .quick)
+        chat.stopObserving()
+    }
+
+    @Test func stopCancelsApplesRequest() async throws {
+        let engine = ScriptedEngineService()
+        let apple = HoldingAppleChatModel()
+        let routing = AppleChatRouting(engine: engine, apple: apple, isEnabled: { true })
+        let (chat, _) = try ChatViewModelTests.viewModel(routing)
+        chat.start()
+        await waitUntil { chat.option(for: .apple) != nil }
+        chat.selectModel(.apple)
+        chat.draft = "Write a long story"
+        chat.send()
+        await waitUntil { apple.started }
+        chat.stop()
+        await chat.waitUntilIdle()
+        // The cancel reaches the producer behind both stream layers.
+        await waitUntil { apple.cancelled }
+        chat.stopObserving()
+    }
+
+    @Test func switchingAppleOffMidAnswerSavesTheFallback() async throws {
+        let engine = ScriptedEngineService(fallback: .init(content: "From Quick."))
+        let apple = HoldingAppleChatModel()
+        let toggle = AppleSwitch(true)
+        let routing = AppleChatRouting(engine: engine, apple: apple, isEnabled: { toggle.isOn })
+        let (chat, _) = try ChatViewModelTests.viewModel(routing)
+        chat.start()
+        await waitUntil { chat.option(for: .apple) != nil }
+        chat.selectModel(.apple)
+        chat.draft = "First"
+        chat.send()
+        await waitUntil { apple.started }
+
+        toggle.isOn = false
+        routing.appleModelChanged()
+        await waitUntil { chat.option(for: .apple) == nil }
+        #expect(chat.model == .quick)
+        apple.release()
+        await chat.waitUntilIdle()
+
+        #expect(chat.selectedConversation?.model == .quick)
+        chat.draft = "Second"
+        chat.send()
+        await chat.waitUntilIdle()
+        #expect(engine.requests.map(\.model) == [.quick])
+        #expect(chat.errorMessage == nil)
         chat.stopObserving()
     }
 

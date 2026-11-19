@@ -281,8 +281,11 @@ public final class ChatViewModel {
         historyTrimmed = false
         let preferred = defaultModel()
         model = preferred.isEngineModel ? preferred : .quick
-        if let conversation = selectedConversation, !isGenerating {
-            try? store.update(conversation) { $0.model = self.model }
+        // Saved at once, even mid-answer: the running answer keeps the model
+        // it started with, and the next send must not reach Apple's model.
+        if let conversation = selectedConversation {
+            let fallback = model
+            try? store.update(conversation) { $0.model = fallback }
         }
     }
 
