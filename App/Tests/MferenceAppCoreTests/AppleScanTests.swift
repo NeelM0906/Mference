@@ -226,6 +226,25 @@ struct GatedScanner: DocumentRecognizing {
         #expect(AppleScanAccuracyTests.normalized(.tax, fields.value(.tax)) == "13.00")
     }
 
+    /// C-B1 re-run: Apple's model wrote line amounts without their point
+    /// (Flat white "450"). A line item takes the amount printed on its row;
+    /// an item not printed anywhere gets no amount, so the CSV never carries
+    /// the model's number.
+    @Test func lineItemsTakeTheAmountPrintedOnTheirRow() throws {
+        let fixture = try #require(ReceiptFixtures.all.first { $0.name == "02-cafe" })
+        let reading = Self.reading(fixture)
+        let model = ReceiptDraft(total: 897, tax: 0, currency: "USD", lineItems: [
+            ReceiptLineItem(name: "Flat white", amount: 450),
+            ReceiptLineItem(name: "Almond croissant", amount: 375),
+            ReceiptLineItem(name: "Blueberry muffin", amount: 999),
+        ])
+        let fields = ReceiptFieldMerger.merge(model: model, text: ReceiptHeuristics.read(reading), reading: reading,
+                                              filledBy: .appleOnDevice)
+        #expect(fields.lineItems.map(\.amount) == [Decimal(string: "4.50"), Decimal(string: "3.75"), nil])
+        let csv = ScanCSVExporter.csv([ScanExportRow(scannedAt: Date(timeIntervalSince1970: 0), fields: fields)])
+        #expect(csv.contains("Flat white 4.50") && !csv.contains("450") && !csv.contains("999"))
+    }
+
     @Test func aModelCardNameIsWrittenOut() throws {
         let books = Self.reading(try #require(ReceiptFixtures.all.first { $0.name == "04-books" }))
         let fields = ReceiptFieldMerger.merge(model: ReceiptDraft(paidWith: "AMEX"), text: ReceiptDraft(),
