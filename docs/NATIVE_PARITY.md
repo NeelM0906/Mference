@@ -84,10 +84,12 @@ make -f Scripts/native/llama/Makefile LL=<llama.cpp> OUT=<build> -j8 all
 
 Run it as one model command under the machine lock.
 [`Scripts/native/guarded-run.sh`](../Scripts/native/guarded-run.sh) refuses
-without AC power, a passing `lock.sh preflight`, the GGUF, or with another
-model process running; it stops the command and exits 70 on any swap growth,
-and records swap at start and end, wall time and peak footprint in
-`<log-dir>/run.json`:
+without a passing `lock.sh preflight` or the GGUF, or with another model
+process running. It stops the command and exits 70 on any swap growth, and it
+records the power source, swap at start and end, wall time and peak footprint
+in `<log-dir>/run.json`. Capture and parity runs may run on battery. Timing
+runs pass `--timing`, which refuses unless on AC power
+(the benchmark protocol):
 
 ```bash
 export LOCK=<program>/lock.sh GGML_METAL_PATH_RESOURCES=<llama.cpp>/ggml/src/ggml-metal
