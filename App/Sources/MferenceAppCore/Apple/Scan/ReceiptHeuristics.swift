@@ -64,14 +64,33 @@ public enum ReceiptHeuristics {
     }
 
     /// Every amount printed on a line, without its sign: what a model's
-    /// amount must match to be taken.
+    /// amount must match to be taken. Amounts with cents anywhere; whole
+    /// amounts ("¥1200", "1,200 €", "TOTAL 1200") only beside a currency sign
+    /// or as the last figure on a total or tax line, so an address number or
+    /// a card's last four digits never vouch for a model's amount.
     static func amounts(in line: String) -> [Decimal] {
-        line.matches(of: /\d+(?:[,.]\d{3})*[.,]\d{2}(?!\d)/).compactMap {
+        var found = line.matches(of: /\d+(?:[,.]\d{3})*[.,]\d{2}(?!\d)/).compactMap {
             ReceiptValueParser.decimal(String($0.output))
         }
+        let whole = { (text: Substring) in
+            Decimal(string: String(text.filter(\.isNumber)), locale: Locale(identifier: "en_US_POSIX"))
+        }
+        let signed = /(?:[$€£¥]|\b(?:USD|EUR|GBP|JPY|CAD|AUD)\b)\s?(\d{1,3}(?:[,.]\d{3})+|\d+)(?![\d.,]\d)/
+        let trailing = /(?:^|[^\d.,])(\d{1,3}(?:[,.]\d{3})+|\d+)\s?(?:[€¥£円]|\b(?:USD|EUR|GBP|JPY|CAD|AUD)\b)/
+        found += line.matches(of: signed).compactMap { whole($0.output.1) }
+        found += line.matches(of: trailing).compactMap { whole($0.output.1) }
+        let lower = line.lowercased()
+        let labelled = (["total", "amount due", "balance due"] + taxLabels).contains { containsWord($0, in: lower) }
+        if labelled, let last = line.firstMatch(of: /(?:^|[^\d.,])(\d{1,3}(?:[,.]\d{3})+|\d+)\s*$/) {
+            found += [whole(last.output.1)].compactMap { $0 }
+        }
+        return found
     }
 
-    static let taxLabels = ["sales tax", "tax", "vat", "gst", "mwst", "ust", "tva", "iva"]
+    /// Tax line labels, including Canada's HST, PST and QST (TPS and TVQ in
+    /// French), and Dutch BTW and Scandinavian moms.
+    static let taxLabels = ["sales tax", "tax", "vat", "gst", "hst", "pst", "qst", "tps", "tvq",
+                            "mwst", "ust", "tva", "iva", "btw", "moms"]
 
     /// Whether the receipt prints a tax line at all.
     static func printsTax(in lines: [String]) -> Bool {
