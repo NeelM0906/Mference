@@ -139,15 +139,11 @@ public enum ReceiptFieldMerger {
         let date = { (iso: String?) in iso.flatMap(ScanFormat.displayDate) }
         let paidWith = model?.paidWith.map { ReceiptHeuristics.payment(in: [$0]) ?? $0 }
         // A line item takes the amount printed on its own row (C-B1: the
-        // model wrote 4.50 as "450"); without such a row, only an amount
-        // printed somewhere on the receipt.
+        // model wrote 4.50 as "450") when that row is unambiguous; otherwise
+        // only an amount printed somewhere on the receipt.
         let lineItems = (model?.lineItems ?? []).map { item -> ReceiptLineItem in
-            let name = item.name.lowercased().trimmingCharacters(in: .whitespaces)
-            if name.count >= 3, let row = rows.first(where: { $0.lowercased().contains(name) }),
-               let printed = ReceiptHeuristics.lastAmount(in: row) {
-                return ReceiptLineItem(name: item.name, amount: printed)
-            }
-            return ReceiptLineItem(name: item.name, amount: vetted(item.amount))
+            ReceiptLineItem(name: item.name,
+                            amount: ReceiptHeuristics.itemAmount(item, rows: rows) ?? vetted(item.amount))
         }
         return ScanFields(
             fields: [

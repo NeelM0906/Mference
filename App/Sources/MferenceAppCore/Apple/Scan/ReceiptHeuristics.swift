@@ -89,6 +89,31 @@ public enum ReceiptHeuristics {
         return found
     }
 
+    /// The amount printed for a model's line item, or nil when no printed
+    /// row can be tied to it. Rows whose label is the item's name come
+    /// first ("Milk", not "Oat milk"); else rows naming it as whole words.
+    /// Among several such rows (an item bought twice at two prices), the
+    /// one matching the model's amount, or that amount with its point
+    /// restored (x100), wins; if none matches and they differ, nil.
+    static func itemAmount(_ item: ReceiptLineItem, rows: [String]) -> Decimal? {
+        let name = item.name.lowercased().trimmingCharacters(in: .whitespaces)
+        guard name.count >= 3 else { return nil }
+        let priced = rows.compactMap { row -> (label: String, amount: Decimal)? in
+            guard let amount = lastAmount(in: row) else { return nil }
+            let label = row.replacing(/\s*\(?-?[$€£¥]?-?\d+(?:[,.]\d{3})*[.,]\d{2}\)?-?\s*$/, with: "")
+                .lowercased().trimmingCharacters(in: .whitespaces)
+            return (label, amount)
+        }
+        var candidates = priced.filter { $0.label == name }
+        if candidates.isEmpty { candidates = priced.filter { containsWord(name, in: $0.label) } }
+        let amounts = candidates.map(\.amount)
+        guard let first = amounts.first else { return nil }
+        if let model = item.amount {
+            if let match = amounts.first(where: { $0 == model || $0 * 100 == model }) { return match }
+        }
+        return amounts.allSatisfy { $0 == first } ? first : nil
+    }
+
     /// Tax line labels, including Canada's HST, PST and QST (TPS and TVQ in
     /// French), and Dutch BTW and Scandinavian moms.
     static let taxLabels = ["sales tax", "tax", "vat", "gst", "hst", "pst", "qst", "tps", "tvq",

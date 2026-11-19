@@ -245,6 +245,23 @@ struct GatedScanner: DocumentRecognizing {
         #expect(csv.contains("Flat white 4.50") && !csv.contains("450") && !csv.contains("999"))
     }
 
+    /// Codex on #167: an item's row is matched by its label, not the first
+    /// row containing its name, and repeated items keep their own prices.
+    @Test func lineItemRowsAreMatchedUnambiguously() {
+        let rows = ["Oat milk   4.50", "Milk   2.00", "Coffee   3.00", "Coffee   3.50", "Milk chocolate bar   1.25"]
+        let amount = { (name: String, model: Decimal?) in
+            ReceiptHeuristics.itemAmount(ReceiptLineItem(name: name, amount: model), rows: rows)
+        }
+        #expect(amount("Milk", 2) == 2)
+        #expect(amount("Milk", 200) == 2)
+        #expect(amount("Oat milk", 450) == Decimal(string: "4.50"))
+        #expect(amount("Coffee", 350) == Decimal(string: "3.50"))
+        #expect(amount("Coffee", 3) == 3)
+        #expect(amount("Coffee", 999) == nil, "two prices and no match: not guessed")
+        #expect(amount("Chocolate", 125) == Decimal(string: "1.25"))
+        #expect(amount("Tea", 2) == nil)
+    }
+
     @Test func aModelCardNameIsWrittenOut() throws {
         let books = Self.reading(try #require(ReceiptFixtures.all.first { $0.name == "04-books" }))
         let fields = ReceiptFieldMerger.merge(model: ReceiptDraft(paidWith: "AMEX"), text: ReceiptDraft(),
