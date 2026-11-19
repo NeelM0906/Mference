@@ -16,7 +16,7 @@ the CLI default.
 
 ## Prepare the Mac
 
-Install the model with the [README instructions](../README.md#start-here),
+Install the model with the [README instructions](../README.md#the-engine-server-and-cli),
 connect a laptop to power, turn off Low Power Mode, quit other demanding apps,
 and build the release CLI:
 
@@ -121,5 +121,4 @@ Open an issue titled `Benchmark: <chip>, <memory>, <macOS version>` and include:
 - any output-quality problem or protocol change.
 
 Compare rows only when the case, prompt tokens, generated tokens, settings, and
-stop reason match. The [recorded baselines](BENCHMARKS.md) say which protocol
-and verify mode produced each row.
+stop reason match.

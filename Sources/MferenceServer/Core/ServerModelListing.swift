@@ -4,9 +4,8 @@ import MferenceEngine
 
 /// Renders what library mode would serve, without loading anything.
 ///
-/// `MferenceServer --library --list-models` and `./mference-ui.sh models` both
-/// print this, so the launcher never has its own idea of what is installed:
-/// discovery answers, and the script only relays the answer.
+/// `MferenceServer --library --list-models` prints this, so the listing never
+/// has its own idea of what is installed: discovery answers.
 public enum ServerLibraryListing {
     /// Printed alone when discovery found nothing. Library mode still starts in
     /// that state — `/v1/models` is simply empty — so this is a normal result

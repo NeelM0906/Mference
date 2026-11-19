@@ -103,11 +103,8 @@ jobs:
           else
             Scripts/test.sh
           fi
-      - name: Check launcher and UI adapters without model downloads
+      - name: Check scripts without model downloads
         run: |
-          bash -n mference-ui.sh
-          python3 Scripts/tests/test_mference_ui.py
-          python3 Scripts/tests/test_openwebui_mference.py
           python3 Scripts/tests/test_release_task_screen.py
           python3 Scripts/tests/test_release_screen_summary.py
           python3 Scripts/tests/test_source_release.py

@@ -3,11 +3,10 @@ import Testing
 
 @testable import MferenceRepackCore
 
-/// `./mference-ui.sh install <family>` validates its argument by reading the
-/// `--model <a|b|c>` alternation out of MferenceRepack's own usage text rather
-/// than keeping a second copy of the list. That makes the alternation a
-/// contract: a source added to `SupportedModelSource.all` but left out of the
-/// usage line would be installable by hand and rejected by the launcher.
+/// The `--model <a|b|c>` alternation in MferenceRepack's usage text is the
+/// list users read, so it must name every source: one added to
+/// `SupportedModelSource.all` but left out of the usage line would be
+/// installable yet undocumented.
 @Suite struct RepackUsageFamiliesTests {
     @Test func usageListsEverySupportedModelSourceInOrder() throws {
         let usageSource = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)

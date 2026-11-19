@@ -71,8 +71,7 @@ public struct ServerArguments: Equatable, Sendable {
       --list-models          With --library: print the models the catalog
                              serves — identifier, engine, installed bytes, and
                              path — then exit 0 without binding a port or
-                             loading a model. This is what
-                             `./mference-ui.sh models` reports.
+                             loading a model.
       --port <1...65535>     Listening port (default 8080).
       --bind <mode>          loopback or tailnet (default loopback). tailnet
                              binds only the machine's Tailscale IPv4 address

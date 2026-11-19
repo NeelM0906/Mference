@@ -62,7 +62,6 @@ class CIScopeTests(unittest.TestCase):
                 "Sources/MferenceServer/Core/HTTPServer.swift",
                 "Tests/MferenceServer/Fixtures/a.json",
                 "Scripts/engine-validate.sh",
-                "mference-ui.sh",
                 PROBE,
             ),
             "t0",

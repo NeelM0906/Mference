@@ -11,15 +11,13 @@ file only adds what it does not cover; do not duplicate its rules here.
 ## Commands
 
 ```bash
-swift build -c release                           # all four products
+swift build -c release                           # all root products
 swift build -c release --product MferenceServer  # one product
 Scripts/test.sh                                  # full suite, serial
 Scripts/test.sh --filter RMSNormTests            # one suite
 Scripts/test.sh --filter 'RMSNormTests/rmsNorm_bf16w_d256'   # one test
 LANG=en_US.UTF-8 ruby Scripts/check_markdown_links.rb        # root *.md and docs/**
 python3 Scripts/check_source_archive.py          # what `git archive HEAD` would ship
-bash -n mference-ui.sh && python3 Scripts/tests/test_mference_ui.py
-./mference-ui.sh doctor                          # prerequisites only; downloads nothing
 ./bringup-check.sh --dry-run <family> [gturbo-dir]
 ```
 
@@ -56,11 +54,13 @@ App/Scripts/bundle.sh                             # build/Mference.app, ad hoc s
 
 ## Architecture
 
-Read [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md) first, then
-[docs/FAMILY_CONTRACT.md](docs/FAMILY_CONTRACT.md). Each family has a dossier
-or performance page under `docs/families/` or `docs/`, and the design specs
-behind the larger ports are in `docs/superpowers/specs/`. Families removed from
-the tree are listed in [docs/RETIRED_FAMILIES.md](docs/RETIRED_FAMILIES.md).
+This section is the architecture overview. The remaining references are
+[docs/ENGINE.md](docs/ENGINE.md) (the engine API) and
+[docs/FAMILY_CONTRACT.md](docs/FAMILY_CONTRACT.md) (the manifest axes). The
+design specs, experiment record, release records and per-family dossiers were
+removed on 2026-11-19 to keep the docs lean; read them from git history
+(`mference-app` before that date) when you need the background. Retired
+families are listed in the README.
 
 ### Targets
 

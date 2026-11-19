@@ -23,7 +23,7 @@ import Testing
 /// through the same saved answers, so every difference comes from that kernel.
 ///
 /// The items are the frozen community prompts with Qwen's and Gemma's answers,
-/// and one prompt of about 8K tokens built from the repository's design docs,
+/// and one prompt of about 8K tokens built from the repository's own docs,
 /// whose second chunk attends to 4,096 cached keys.
 ///
 /// The thresholds are the Gemma prefill gate's, all over every scored
@@ -224,17 +224,17 @@ struct Qwen36PrefillEquivalenceGateTests {
                      answer: answer, continuation: continuation)
         }
 
-        // About 8K prompt tokens of the repository's own design docs, so the
+        // About 8K prompt tokens of the repository's own docs, so the
         // second 4,096-token chunk attends to a full first chunk of cached keys.
         var documents = ""
-        for path in ["docs/SYSTEM_DESIGN.md", "docs/FAMILY_CONTRACT.md", "docs/RUNTIME_CONTROLS.md",
-                     "docs/OPENAI_SERVER.md", "docs/BENCHMARKS.md"] {
+        for path in ["docs/FAMILY_CONTRACT.md", "docs/RUNTIME_CONTROLS.md", "docs/OPENAI_SERVER.md",
+                     "docs/ENGINE.md", "docs/COMMUNITY_BENCHMARKS.md"] {
             let text = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
             documents += "<document path=\"\(path)\">\n\(text)\n</document>\n\n"
             if tokenizer.encode(documents, addBOS: false).count >= documentTokenCount { break }
         }
         var documentTokens = tokenizer.encode(documents, addBOS: false)
-        try #require(documentTokens.count >= documentTokenCount, "the design docs are shorter than the 8K item needs")
+        try #require(documentTokens.count >= documentTokenCount, "the docs are shorter than the 8K item needs")
         documentTokens = Array(documentTokens.prefix(documentTokenCount))
         let longQuestion = tokenizer.decode(documentTokens)
             + "\n\nSummarize how the documents above keep memory bounded while serving a long prompt."

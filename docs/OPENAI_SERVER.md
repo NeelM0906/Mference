@@ -6,23 +6,14 @@ Tailscale IPv4 address with `--bind tailnet`. It has no application-level
 authentication or TLS; do not expose it through a wildcard interface, proxy,
 or tunnel.
 
-This document is the API: one model per process, named by `--model`. If you want
-the **user interface** — a browser, a model picker, chats that persist — start
-at [The Mference UI (Open WebUI)](OPEN_WEBUI.md) and run `./mference-ui.sh`,
-which does everything below for you.
-
-The `--library` mode that UI runs on serves the product models from this one
-process. It runs on the [engine](ENGINE.md) (`EngineCatalog` and `EngineHost`),
-lists the product models in `/v1/models`, and swaps the resident model in place
-when a request names a different one. It changes nothing about the mode
-described here, which is what runs whenever `--library` is absent. The UI guide
-covers library mode, its model identifiers, `--catalog`, and the cost of a swap.
+By default it serves one model per process, named by `--model`.
+[Library mode](#library-mode) (`--library`) instead serves every product model
+from one process and swaps the resident model in place.
 
 ## Start the server
 
-First, install the model with `MferenceRepack` or
-`./mference-ui.sh install <family>`. Then check that no other Mference model
-process is running:
+First, install the model with `MferenceRepack`. Then check that no other
+Mference model process is running:
 
 ```bash
 pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
@@ -203,6 +194,48 @@ The server accepts only function tools. Omit `tool_choice` or set it to `auto`
 to allow calls. Set it to `none` to disable them. The server does not support
 `required`, named tool selection, or `parallel_tool_calls: false`.
 
+## Library mode
+
+With `--library`, the server scans for completed installs and serves the
+product models among them through the [engine](ENGINE.md) (`EngineCatalog` and
+`EngineHost`).
+
+- A bare `--library` scans the default roots: the `Mference.libraryRoot` user
+  default (or `MFERENCE_LIBRARY_ROOT`) if set, `~/llm-models`, the checkout's
+  `scratch/`, and `~/Library/Application Support/Mference`. `--library <dir>`
+  scans that root instead, and repeats; add a bare `--library` to keep the
+  defaults too. Each root contributes itself and its immediate subdirectories.
+- `.gturbo` installs are detected by their own `manifest.json` and install
+  receipt, never by directory name. `.gguf` files are found in each root and in
+  `~/llm-models/gguf`. Partial installs and installs locked by a running
+  `MferenceRepack` are skipped, and every skip is logged once on stderr with
+  its reason.
+- `--catalog product` (the default) lists only the product models, under their
+  stable identifiers: `qwen3.5-4b` (Quick) and `qwen3.8-27b` (Deep) through
+  llama.cpp, and `qwen3.6-35b-a3b`, `minicpm5-2b-int4g64` and
+  `maple-preview-2bit-mlx` through the native runtime. A request for any other
+  runnable install gets `400 model_not_runnable`. `--catalog all` is a
+  developer switch that lists every runnable install; extra installs of one
+  family get an `@<directory basename>` suffix.
+- `MferenceServer --library --list-models` prints what would be served, with
+  engine, size and path, without loading anything or binding a port.
+- `--model-id` is refused in library mode. The library is fixed at startup.
+
+A request that names a model other than the resident one swaps it in process.
+The running and queued generations finish first, the resident model is
+released, and only then does the new one load, so peak memory is one model.
+The request waits for the load rather than getting `503`. The first token
+after a switch therefore takes seconds to tens of seconds, or longer when the
+expert pool has to be hashed. While a model loads, `/health` reports
+`{"status":"loading","model":"…"}`. A failed load leaves nothing resident, and
+the next request retries.
+
+In library mode, prompt rendering and the context check run in the request's
+turn, because the tokenizer belongs to the model being swapped in. A request
+that waited behind another streaming generation therefore reports those
+failures in-band (see [Errors](#errors)), and one that did not wait still gets
+its real status.
+
 ## Errors
 
 The prompt is rendered and checked against the context window before any
@@ -335,7 +368,7 @@ Penalties act on post-softcap logits: positive seen-token logits are divided
 by repetition penalty, nonpositive logits multiplied; then subtract
 `count * frequency_penalty + presence_penalty`. Counts are restricted to the
 penalty window. Nonzero penalties with an enabled window require the logits
-path even at temperature zero. See [sampling compatibility](LLAMA_SAMPLING.md).
+path even at temperature zero.
 Top-K accepts `0` (off) or `1...256`; with positive temperature, disabling
 Top-K requires `top_p: 1`. Full-vocabulary Min-P remains supported.
 
