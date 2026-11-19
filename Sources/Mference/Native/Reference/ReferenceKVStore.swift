@@ -76,7 +76,7 @@ extension Native {
         private(set) var liveBank = 0
         private var stepCounter = 0
         private var ringSlot = 0
-        private struct Step { var start: Int; var rows: Int; var input: Int; var output: Int }
+        private struct Step { var start: Int; var rows: Int; var input: Int; var output: Int; var kind: StepKind? }
         private var lastStep: Step?
 
         private struct PrefixEntry {
@@ -115,7 +115,17 @@ extension Native {
 
         // MARK: Steps
 
+        public func beginStep(rows: Int, kind: StepKind) throws {
+            try begin(rows: rows, kind: kind)
+        }
+
+        /// The deprecated form records no kind, so only whole-step rollback
+        /// is allowed after it.
         public func beginStep(rows: Int) throws {
+            try begin(rows: rows, kind: nil)
+        }
+
+        private func begin(rows: Int, kind: StepKind?) throws {
             guard rows >= 1 else { throw NativeError.invalidShape("beginStep rows \(rows)") }
             guard length + rows <= capacity else {
                 throw NativeError.stateOutOfRange("step of \(rows) at \(length) exceeds capacity \(capacity)")
@@ -127,7 +137,7 @@ extension Native {
                 .assumingMemoryBound(to: UInt32.self)
             for (i, p) in pages.enumerated() { table[i] = UInt32(p) }
             let input = liveBank, output = 1 - liveBank
-            lastStep = Step(start: length, rows: rows, input: input, output: output)
+            lastStep = Step(start: length, rows: rows, input: input, output: output, kind: kind)
             liveBank = output
             length += rows
         }
@@ -173,6 +183,10 @@ extension Native {
             if position == s.start {
                 liveBank = s.input
             } else if position > s.start && position <= s.start + s.rows {
+                guard s.kind == .verify || position == s.start + s.rows else {
+                    throw NativeError.stateOutOfRange(
+                        "rollback into a \(s.kind.map { "\($0)" } ?? "kind-less") step: only verify rows can be kept")
+                }
                 let r = position - s.start - 1
                 if r < s.rows - 1 {
                     guard r < verifySlots else { throw NativeError.stateOutOfRange("verify slot \(r)") }

@@ -58,7 +58,7 @@ struct ReferenceOpsTests {
         // 70 rows of prefill crosses a page; then decode, then a verify of 3.
         for (kind, rows) in [(Native.StepKind.prefill, 70), (.decode, 1), (.verify, 3), (.prefill, 1)] {
             let start = kv.length
-            try kv.beginStep(rows: rows)
+            try kv.beginStep(rows: rows, kind: kind)
             let qg = (0..<rows * 256).map { _ in rng.unit() * 2 }
             let k = (0..<rows * 64).map { _ in rng.unit() * 2 }
             let v = (0..<rows * 64).map { _ in rng.unit() * 2 }
@@ -127,7 +127,7 @@ struct ReferenceOpsTests {
         let ones = RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: H))
         let weights = Native.GDNLayerWeights(conv1d: conv, dtBias: ones, a: ones,
                                              norm: RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: d)))
-        try kv.beginStep(rows: 1)
+        try kv.beginStep(rows: 1, kind: .decode)
         let banks = kv.recurrentState(gdnLayer: 0)
         func zeros(_ cols: Int) -> Native.TensorRef {
             RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: cols), rows: 1, cols: cols)
@@ -137,7 +137,66 @@ struct ReferenceOpsTests {
                 try op.encodeDecode(enc, weights: weights, qkv: zeros(C), z: zeros(H * d), alpha: zeros(H),
                                     beta: zeros(H), stateIn: banks.input, stateOut: banks.output, output: zeros(H * d))
             }
+            // Overlapping input and output banks are refused (the op reads one
+            // bank while it writes the other).
+            let plain = Native.GDNLayerWeights(
+                conv1d: Native.QuantTensor(name: "conv", type: .f32, shape: [K, C], layout: .gguf,
+                                           buffer: RefTest.buffer(ctx.device, floats: [Float](repeating: 0, count: C * K)),
+                                           offset: 0, byteCount: C * K * 4, sourceSHA256: ""),
+                dtBias: ones, a: ones, norm: RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: d)))
+            let shifted = Native.RecurrentStateRef(layout: banks.input.layout, buffer: banks.input.buffer,
+                                                   offset: banks.input.offset + 256)
+            let error = #expect(throws: Native.NativeError.self) {
+                try op.encodeDecode(enc, weights: plain, qkv: zeros(C), z: zeros(H * d), alpha: zeros(H),
+                                    beta: zeros(H), stateIn: banks.input, stateOut: shifted, output: zeros(H * d))
+            }
+            guard case .invalidShape? = error else {
+                Issue.record("expected invalidShape, got \(String(describing: error))")
+                return
+            }
         }
+    }
+
+    /// INT8 pages: an all-zero row stores scale 0 and every q 0; a row whose
+    /// max|x| / 127 exceeds F16 stores the largest finite F16 scale, so loads
+    /// stay finite (no inf scale, no NaN).
+    @Test func int8ZeroAndOverflowRows() throws {
+        let ctx = try MetalContext()
+        let c = RefTest.tiny
+        let plan = try Native.ReferenceMemoryPlanner().resolve(
+            config: c, weightsMapped: 0, contextLength: 64, precision: .int8, maxVerifyRows: 1, maxPrefillChunk: 4,
+            activationBytes: 0, prefixCacheRAMBudget: 0, budget: 1 << 30)
+        let kv = try Native.ReferenceKVStore(config: c, plan: plan, device: ctx.device)
+        let op = Native.ReferenceAttentionOp(context: ctx)
+        try op.prepare(config: c, geometry: kv.geometry)
+        let weights = Native.AttentionLayerWeights(qNorm: RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: 32)),
+                                                   kNorm: RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: 32)))
+        try kv.beginStep(rows: 2, kind: .prefill)
+        // Row 0: zero K and V. Row 1: V of 1e7 (K is normed, so test V).
+        let v = [Float](repeating: 0, count: 64) + [Float](repeating: 1e7, count: 64)
+        let out = RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: 2 * 128), rows: 2, cols: 128)
+        try RefTest.run(ctx) {
+            try op.encodePrefill($0, attnLayer: 0, weights: weights,
+                                 qGate: RefTest.tensor(ctx.device, floats: [Float](repeating: 0.5, count: 2 * 256), rows: 2, cols: 256),
+                                 k: RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: 2 * 64), rows: 2, cols: 64),
+                                 v: RefTest.tensor(ctx.device, floats: v, rows: 2, cols: 64),
+                                 startPosition: 0, kv: kv.pageTable(), output: out)
+        }
+        let g = kv.geometry
+        let table = kv.pageTable()
+        let page = Int(table.pageTable.contents().advanced(by: table.pageTableOffset).load(as: UInt32.self))
+        let base = kv.arena.contents().advanced(by: page * g.pageBytes)
+        for kvIndex in 0..<2 {
+            #expect(base.load(fromByteOffset: g.scaleOffset(attnLayer: 0, kv: kvIndex, kvHead: 0, token: 0),
+                              as: Float16.self) == 0)
+            for dim in 0..<32 {
+                #expect(base.load(fromByteOffset: g.valueOffset(attnLayer: 0, kv: kvIndex, kvHead: 0, token: 0, dim: dim),
+                                  as: Int8.self) == 0)
+            }
+        }
+        let big = base.load(fromByteOffset: g.scaleOffset(attnLayer: 0, kv: 1, kvHead: 0, token: 1), as: Float16.self)
+        #expect(big == Float16.greatestFiniteMagnitude)
+        #expect(RefTest.floats(out).allSatisfy { $0.isFinite })
     }
 
     /// GDN prefill, decode and verify (with arena slots) against the CPU twin,
@@ -179,7 +238,7 @@ struct ReferenceOpsTests {
             RefTest.maxRelativeError(x.conv, y.conv) < 1e-5 && RefTest.maxRelativeError(x.ssm, y.ssm) < 1e-4
         }
         for (kind, rows) in [(Native.StepKind.prefill, 9), (.decode, 1), (.verify, 4), (.prefill, 2)] {
-            try kv.beginStep(rows: rows)
+            try kv.beginStep(rows: rows, kind: kind)
             let qkv = (0..<rows * C).map { _ in rng.unit() * 2 }
             let z = (0..<rows * H * d).map { _ in rng.unit() * 2 }
             let alpha = (0..<rows * H).map { _ in rng.unit() * 2 }

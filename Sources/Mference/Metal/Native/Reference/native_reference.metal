@@ -621,7 +621,9 @@ static void ref_kv_store_row(device uchar * arena, constant RefAttnParams & p, u
     if (p.int8 != 0) {
         float amax = 0.0f;
         for (uint d = 0; d < p.headDim; ++d) amax = max(amax, fabs(v[d]));
-        const half s = half(amax / 127.0f);
+        // Clamped to the largest finite F16: an infinite scale would turn
+        // every value into 0 * inf = NaN on load.
+        const half s = half(min(amax / 127.0f, 65504.0f));
         const float fs = float(s);
         for (uint d = 0; d < p.headDim; ++d) {
             const float q = fs == 0.0f ? 0.0f : clamp(rint(v[d] / fs), -127.0f, 127.0f);

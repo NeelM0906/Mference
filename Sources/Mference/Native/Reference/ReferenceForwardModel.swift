@@ -213,7 +213,7 @@ extension Native {
             case .decode:
                 guard rows == 1 else { throw NativeError.invalidShape("decode step with \(rows) rows") }
             case .verify:
-                guard (2...min(16, maxVerifyRows)).contains(rows) else {
+                guard maxVerifyRows >= 2, (2...min(16, maxVerifyRows)).contains(rows) else {
                     throw NativeError.invalidShape("verify step with \(rows) rows (max \(maxVerifyRows))")
                 }
             case .prefill:

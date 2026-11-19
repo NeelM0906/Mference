@@ -23,7 +23,9 @@ extension Native {
         public static func checkIMROPE(sections: [Int], ropeDims: Int) throws {
             let s = sections + [Int](repeating: 0, count: max(0, 4 - sections.count))
             let sectDims = s[0] + s[1] + s[2] + s[3]
-            guard sectDims > 0 else { return }
+            guard sectDims > 0 else {
+                throw NativeError.unsupported("RoPE sections \(sections) sum to 0 (not IMROPE)")
+            }
             for i in 0..<ropeDims / 2 {
                 let sector = i % sectDims
                 let ok = (sector % 3 == 1 && sector < 3 * s[1]) || (sector % 3 == 2 && sector < 3 * s[2])
@@ -202,7 +204,8 @@ extension Native.ReferenceCPU {
             case .int8:
                 var amax: Float = 0
                 for x in row { amax = max(amax, abs(x)) }
-                let s = Float(Float16(amax / 127))
+                // Clamped to the largest finite F16, as the kernel does.
+                let s = Float(Float16(min(amax / 127, 65504)))
                 return row.map { x in
                     let q: Float = s == 0 ? 0 : min(max((x / s).rounded(.toNearestOrEven), -127), 127)
                     return s * q

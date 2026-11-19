@@ -61,7 +61,7 @@ struct ReferenceModelTests {
     static func step(_ m: Native.ReferenceForwardModel, _ ctx: MetalContext, kind: Native.StepKind,
                      tokens: [Int32], logits: Native.LogitRows) throws -> [Float] {
         let start = m.kv.length
-        try m.kv.beginStep(rows: tokens.count)
+        try m.kv.beginStep(rows: tokens.count, kind: kind)
         var out: Native.TensorRef?
         try RefTest.run(ctx) { enc in
             out = try m.encodeStep(Native.StepPlan(kind: kind, startPosition: start, rows: tokens.count,
@@ -284,5 +284,120 @@ struct ReferenceModelTests {
         let runTask = Task { try await s2.run(job) { _ in s2.cancel() } }
         let cancelled = try await runTask.value
         #expect(cancelled.stopReason == .cancelled)
+    }
+
+    static let greedy = Native.SamplingParams(temperature: 0, topK: nil, topP: nil, minP: 0, repetitionPenalty: 1,
+                                              presencePenalty: 0, frequencyPenalty: 0, repeatLastN: 0, seed: nil)
+
+    /// Events in the order the scheduler emits them (onEvent runs on the
+    /// generation thread, in order).
+    final class EventLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [Native.StepEvent] = []
+        func add(_ e: Native.StepEvent) { lock.withLock { events.append(e) } }
+        var all: [Native.StepEvent] { lock.withLock { events } }
+    }
+
+    @Test func eventsArriveInOrderAndCancelBeforeTheFirstStepThrows() async throws {
+        let fx = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+        let scheduler = try Native.ReferenceStepSchedulerFactory().make(
+            model: try fx.model(chunk: 4), sampler: try Native.ReferenceSampler(context: nil),
+            strategy: Native.ReferencePlainDecoding(), queue: fx.ctx.queue) as! Native.ReferenceStepScheduler
+        let log = EventLog()
+        let prompt: [Int32] = [262, 104, 101, 108, 108, 111, 263, 262, 30, 31]
+        let outcome = try await scheduler.run(Native.GenerationJob(
+            promptTokens: prompt, params: Self.greedy, maxNewTokens: 3, stopTokens: [], reusePrefix: false,
+            prefillChunk: 4)) { log.add($0) }
+        var progress: [Int] = []
+        var tokens: [Int32] = []
+        for e in log.all {
+            switch e {
+            case .prefillProgress(let done, let total):
+                #expect(tokens.isEmpty && total == prompt.count)
+                progress.append(done)
+            case .token(let t): tokens.append(t)
+            }
+        }
+        #expect(progress == [4, 8, 10] && tokens == outcome.tokens)
+
+        // Hold the generation thread, queue a job, cancel it while it waits:
+        // it throws `cancelled` before its first step, and the cancellation
+        // does not carry over to the next job.
+        let gate = DispatchSemaphore(value: 0)
+        scheduler.thread.submit { gate.wait() }
+        let job = Native.GenerationJob(promptTokens: prompt, params: Self.greedy, maxNewTokens: 2, stopTokens: [],
+                                       reusePrefix: false, prefillChunk: 4)
+        let queued = Task { try await scheduler.run(job) { _ in } }
+        while scheduler.pendingCount == 0 { try await Task.sleep(nanoseconds: 1_000_000) }
+        scheduler.cancel()
+        gate.signal()
+        do {
+            _ = try await queued.value
+            Issue.record("a job cancelled before its first step returned")
+        } catch Native.NativeError.cancelled {}
+        let next = try await scheduler.run(job) { _ in }
+        #expect(next.stopReason == .maxTokens && next.tokens.count == 2)
+    }
+
+    /// Lets the test read the store after the model was sent to the scheduler
+    /// (read only once the scheduler's job has finished).
+    final class StoreProbe: @unchecked Sendable {
+        var kv: (any Native.KVStore)?
+    }
+
+    /// A model whose encode throws on the first decode step.
+    final class FailingDecode: Native.ForwardModel {
+        let inner: Native.ReferenceForwardModel
+        init(_ inner: Native.ReferenceForwardModel, probe: StoreProbe) {
+            self.inner = inner
+            probe.kv = inner.kv
+        }
+        var config: Native.Qwen35Config { inner.config }
+        var kv: any Native.KVStore { inner.kv }
+        var maxPrefillChunk: Int { inner.maxPrefillChunk }
+        var maxVerifyRows: Int { inner.maxVerifyRows }
+        var tap: (any Native.TensorTap)? {
+            get { inner.tap }
+            set { inner.tap = newValue }
+        }
+        func encodeStep(_ plan: Native.StepPlan, encoder: MTLComputeCommandEncoder) throws -> Native.TensorRef? {
+            if plan.kind == .decode { throw Native.NativeError.invalidShape("injected") }
+            return try inner.encodeStep(plan, encoder: encoder)
+        }
+    }
+
+    @Test func aFailedEncodeUndoesTheStep() async throws {
+        let fx = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+        let probe = StoreProbe()
+        let scheduler = try Native.ReferenceStepSchedulerFactory().make(
+            model: FailingDecode(try fx.model(chunk: 8), probe: probe), sampler: try Native.ReferenceSampler(context: nil),
+            strategy: Native.ReferencePlainDecoding(), queue: fx.ctx.queue)
+        let prompt: [Int32] = [262, 104, 101, 108]
+        do {
+            _ = try await scheduler.run(Native.GenerationJob(
+                promptTokens: prompt, params: Self.greedy, maxNewTokens: 4, stopTokens: [], reusePrefix: false,
+                prefillChunk: 8)) { _ in }
+            Issue.record("the injected encode failure did not surface")
+        } catch Native.NativeError.invalidShape {}
+        #expect(probe.kv?.length == prompt.count)
+    }
+
+    @Test func verifyStepsNeedVerifyRows() throws {
+        let fx = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+        let m = try fx.model(verify: 1)
+        try m.kv.beginStep(rows: 2, kind: .verify)
+        try RefTest.run(fx.ctx) { enc in
+            let error = #expect(throws: Native.NativeError.self) {
+                _ = try m.encodeStep(Native.StepPlan(kind: .verify, startPosition: 0, rows: 2, input: .host([1, 2]),
+                                                     logits: .all), encoder: enc)
+            }
+            guard case .invalidShape? = error else {
+                Issue.record("expected invalidShape, got \(String(describing: error))")
+                return
+            }
+        }
     }
 }

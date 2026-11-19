@@ -34,5 +34,26 @@ struct ReferenceKernelPinTests {
         #expect(throws: Native.NativeError.self) {
             try Native.ReferenceAttentionOp.checkIMROPE(sections: [11, 11, 9, 1], ropeDims: 64)
         }
+        #expect(throws: Native.NativeError.self) {
+            try Native.ReferenceAttentionOp.checkIMROPE(sections: [0, 0, 0, 0], ropeDims: 64)
+        }
+        #expect(throws: Native.NativeError.self) {
+            try Native.ReferenceAttentionOp.checkIMROPE(sections: [], ropeDims: 64)
+        }
+    }
+
+    /// The kernels' `REF_<TYPE>` constants equal `GGMLType` raw values.
+    @Test func metalTypeConstantsMatchGGMLType() throws {
+        let text = try ReferenceFormatPinTests.header("Sources/Mference/Metal/Native/Reference/native_reference.metal")
+        let regex = try NSRegularExpression(pattern: #"REF_([A-Z0-9_]+) = (\d+)"#)
+        var seen = 0
+        for m in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            let name = String(text[Range(m.range(at: 1), in: text)!]).lowercased()
+            let value = UInt32(text[Range(m.range(at: 2), in: text)!])!
+            let type = try #require(Native.GGMLType.allCases.first { "\($0)".lowercased() == name }, "REF_\(name)")
+            #expect(type.rawValue == value, "REF_\(name.uppercased())")
+            seen += 1
+        }
+        #expect(seen == Native.ReferenceDequant.supportedTypes.count)
     }
 }
