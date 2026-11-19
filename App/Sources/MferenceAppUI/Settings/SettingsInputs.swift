@@ -33,6 +33,9 @@ public enum ConnectionState: Sendable, Hashable {
     case connected
     /// Access was denied or needs Full Disk Access: open System Settings.
     case needsSystemSettings
+    /// Access was turned on in System Settings but macOS applies it only
+    /// from the next launch (Full Disk Access): quit and reopen.
+    case needsRelaunch
     /// The source cannot be read on this Mac (for example an Apple Mail
     /// store version Mference does not read yet), so no setting fixes it.
     /// `detail` is shown as is. Mirrors U4's `unsupported(detail:)`.

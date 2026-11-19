@@ -429,9 +429,12 @@ public struct SettingsView: View {
         }
     }
 
+    static let relaunchHint =
+        "If Mference is already on in Full Disk Access, quit and reopen Mference so macOS applies it."
+
     /// What a connection row shows on the right.
     enum ConnectionDisplay: Equatable {
-        case connected, connectButton, openSystemSettings, notConnected
+        case connected, connectButton, openSystemSettings, quitAndReopen, notConnected
         /// Nothing the person can switch on fixes it; the reason is shown.
         case unsupported(String)
     }
@@ -443,6 +446,7 @@ public struct SettingsView: View {
         case .connected: .connected
         case .notConnected: .connectButton
         case .needsSystemSettings: .openSystemSettings
+        case .needsRelaunch: .quitAndReopen
         case .unsupported(let detail): .unsupported(detail)
         case nil: .notConnected
         }
@@ -462,6 +466,15 @@ public struct SettingsView: View {
                 Button("Open System Settings") { settings?.connect(kind) }
                     .buttonStyle(.mfSecondary)
                     .accessibilityLabel("Open System Settings for \(title)")
+            case .quitAndReopen:
+                HStack(spacing: MFSpacing.s) {
+                    Button("Open System Settings") { settings?.connect(kind) }
+                        .buttonStyle(.mfSecondary)
+                        .accessibilityLabel("Open System Settings for \(title)")
+                    Button("Quit and Reopen") { AppRelaunch.quitAndReopen() }
+                        .buttonStyle(.mfPrimary)
+                        .accessibilityLabel("Quit and reopen Mference to apply access for \(title)")
+                }
             case .notConnected:
                 MFBadge(.custom("Not connected", .neutral))
             case .unsupported:
@@ -474,6 +487,7 @@ public struct SettingsView: View {
     /// The row's description, plus the reason when the source is unsupported.
     static func connectionSubtitle(_ subtitle: String, _ display: ConnectionDisplay) -> String {
         if case .unsupported(let detail) = display { return subtitle + "\n" + detail }
+        if display == .quitAndReopen { return subtitle + "\n" + relaunchHint }
         return subtitle
     }
 

@@ -101,18 +101,25 @@ public final class AppleConnections {
             return
         }
         // The broker shows the reason, then opens the Full Disk Access pane.
+        settingsVisit.begin()
         _ = await broker.request(.fullDiskAccess)
-        hasOpenedFullDiskAccessSettings = true
+        settingsVisit.end()
         await refresh()
     }
 
-    @ObservationIgnored private var hasOpenedFullDiskAccessSettings = false
+    /// Mference left the foreground: during a Mail request, that is the Full
+    /// Disk Access pane opening rather than "Not now".
+    public func appResignedActive() {
+        settingsVisit.appLeft()
+    }
+
+    private var settingsVisit = SettingsVisit()
 
     /// Full Disk Access was opened from Settings but Mail is still not
     /// readable: macOS applies it from the next launch, so Settings offers
     /// Quit and Reopen (`AppRelaunch.quitAndReopen()` in MferenceAppUI).
     public var mailNeedsRelaunch: Bool {
-        status.mail == .needsSystemSettings && hasOpenedFullDiskAccessSettings
+        status.mail == .needsSystemSettings && settingsVisit.happened
     }
 
     /// The Reminders sync switch changed (the switch itself is the

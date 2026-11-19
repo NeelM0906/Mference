@@ -115,13 +115,23 @@ public final class MailInboxModel {
     /// reason, then opens the Full Disk Access pane itself (it cannot be
     /// asked in a dialog).
     public func requestAccess() async {
+        settingsVisit.begin()
         _ = await broker.request(.fullDiskAccess)
-        hasOpenedFullDiskAccessSettings = true
+        settingsVisit.end()
         await load()
     }
 
-    /// The person opened the Full Disk Access pane from here at least once.
-    public private(set) var hasOpenedFullDiskAccessSettings = false
+    /// Mference left the foreground (the view forwards
+    /// `NSApplication.didResignActiveNotification`): during a request, that
+    /// is the Full Disk Access pane opening rather than "Not now".
+    public func appResignedActive() {
+        settingsVisit.appLeft()
+    }
+
+    private var settingsVisit = SettingsVisit()
+
+    /// The person went to the Full Disk Access pane from here at least once.
+    public var hasOpenedFullDiskAccessSettings: Bool { settingsVisit.happened }
 
     /// Full Disk Access was opened but Mail is still not readable: macOS
     /// applies the grant only from the next launch (and an ad hoc rebuild is
