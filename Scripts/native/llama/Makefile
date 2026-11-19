@@ -7,7 +7,7 @@
 #
 #   make -f Scripts/native/llama/Makefile LL=<llama.cpp checkout> OUT=<build dir> -j8 [targets]
 #
-# Targets: mfe-golden (default), llama-bench, all-tools.
+# Targets: mfe-golden (default), llama-bench, mfe-kbench, mfe-bench, all-tools.
 # No metallib is embedded: at run time set
 #   GGML_METAL_PATH_RESOURCES=$(LL)/ggml/src/ggml-metal
 # and ggml compiles kernels/*.metal from source, as the vendored target does.
@@ -68,9 +68,11 @@ COMMON_CXX := arg.cpp chat-auto-parser-generator.cpp chat-auto-parser-helpers.cp
 COMMON_OBJ := $(addprefix $(OUT)/common/,$(subst /,_,$(COMMON_CXX:.cpp=.o))) $(OUT)/common/build-info.o $(OUT)/common/httplib.o
 
 all: $(OUT)/mfe-golden $(OUT)/BUILD_INFO.txt
-all-tools: $(OUT)/mfe-golden $(OUT)/llama-bench $(OUT)/BUILD_INFO.txt
+all-tools: $(OUT)/mfe-golden $(OUT)/llama-bench $(OUT)/mfe-kbench $(OUT)/mfe-bench $(OUT)/BUILD_INFO.txt
 mfe-golden: $(OUT)/mfe-golden
 llama-bench: $(OUT)/llama-bench
+mfe-kbench: $(OUT)/mfe-kbench
+mfe-bench: $(OUT)/mfe-bench
 
 pin-check:
 	@test "$$(git -C $(LL) rev-parse HEAD)" = "$(PIN)" || { echo "llama.cpp checkout $(LL) is not at $(PIN)"; exit 1; }
@@ -149,10 +151,22 @@ $(OUT)/bench/%.o: $(LL)/tools/llama-bench/%.cpp | $(GEN_H)
 $(OUT)/llama-bench: $(GGML_OBJ) $(LLAMA_OBJ) $(COMMON_OBJ) $(OUT)/bench/llama-bench.o $(OUT)/bench/main.o
 	$(CXX) $^ -o $@ $(LDFLAGS)
 
+$(OUT)/tools/mfe-kbench.o: $(NATIVE)/bench/mfe_kbench.cpp | $(GEN_H)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+$(OUT)/mfe-kbench: $(GGML_OBJ) $(OUT)/tools/mfe-kbench.o
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
+$(OUT)/tools/mfe-bench.o: $(NATIVE)/bench/mfe_bench.cpp | $(GEN_H)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+$(OUT)/mfe-bench: $(GGML_OBJ) $(LLAMA_OBJ) $(COMMON_OBJ) $(OUT)/tools/mfe-bench.o
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
 $(OUT)/BUILD_INFO.txt: $(OUT)/mfe-golden
 	{ echo "llama.cpp $$(git -C $(LL) rev-parse HEAD) dirty=$$(git -C $(LL) status --porcelain | wc -l | tr -d ' ')"; \
 	  echo "variant metal+cpu (Scripts/native/llama/Makefile)"; clang --version | head -1; \
 	  echo "CXXFLAGS $(CXXFLAGS) $(CPU_DEFS)"; \
-	  for b in $(OUT)/mfe-golden $(OUT)/llama-bench; do [ -f $$b ] && shasum -a 256 $$b; done; true; } > $@
+	  for b in $(OUT)/mfe-golden $(OUT)/llama-bench $(OUT)/mfe-kbench $(OUT)/mfe-bench; do [ -f $$b ] && shasum -a 256 $$b; done; true; } > $@
 
-.PHONY: all all-tools mfe-golden llama-bench pin-check
+.PHONY: all all-tools mfe-golden llama-bench mfe-kbench mfe-bench pin-check

@@ -81,12 +81,16 @@ peak=$(grep -E 'peak memory footprint' "$LOG/stderr.log" | awk '{print $1}' | ta
 rss=$(grep -E 'maximum resident set size' "$LOG/stderr.log" | awk '{print $1}' | tail -1)
 delta=$(awk -v a="$s1" -v b="$s0" 'BEGIN { printf "%.2f", a - b }')
 note "exit $rc; wall $((t1 - t0)) s; swap delta ${delta} MB; peak footprint ${peak:-?} B; max RSS ${rss:-?} B"
-cat > "$LOG/run.json" <<EOF
-{"command": "$(echo "$*" | sed 's/"/\\"/g')", "exit": $rc, "power_source": "$power", "timing_run": $([ $timing = 1 ] && echo true || echo false), "wall_s": $((t1 - t0)), "swap_start_mb": $s0, "swap_end_mb": $s1, "swap_delta_mb": $delta, "swap_guard_tripped": $([ $tripped = 1 ] && echo true || echo false), "peak_footprint_bytes": ${peak:-null}, "max_rss_bytes": ${rss:-null}}
-EOF
-if [ $tripped = 1 ]; then exit 70; fi
-if awk -v d="$delta" -v g="$SWAP_GUARD_MB" 'BEGIN { exit !(d > g) }'; then
+# Growth seen only at the end trips the guard too. Decide before writing
+# run.json, so the record never shows a void run as clean: "exit" is the
+# command's, "status" the wrapper's, "valid" true only for status 0.
+if [ $tripped = 0 ] && awk -v d="$delta" -v g="$SWAP_GUARD_MB" 'BEGIN { exit !(d > g) }'; then
     note "SWAP GUARD: swap grew by ${delta} MB within the run"
-    exit 70
+    tripped=1
 fi
-exit $rc
+status=$rc
+[ $tripped = 1 ] && status=70
+cat > "$LOG/run.json" <<EOF
+{"command": "$(echo "$*" | sed 's/"/\\"/g')", "exit": $rc, "status": $status, "valid": $([ $status = 0 ] && echo true || echo false), "power_source": "$power", "timing_run": $([ $timing = 1 ] && echo true || echo false), "wall_s": $((t1 - t0)), "swap_start_mb": $s0, "swap_end_mb": $s1, "swap_delta_mb": $delta, "swap_guard_tripped": $([ $tripped = 1 ] && echo true || echo false), "peak_footprint_bytes": ${peak:-null}, "max_rss_bytes": ${rss:-null}}
+EOF
+exit $status
