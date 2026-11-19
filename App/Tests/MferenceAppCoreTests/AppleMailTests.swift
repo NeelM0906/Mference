@@ -520,8 +520,14 @@ struct GatedSorter: AppleModelServicing {
         #expect(model.status == .needsFullDiskAccess)
         #expect(!model.needsRelaunchForAccess)
 
-        // Opened System Settings, but the grant is not applied yet.
+        // "Not now" under the reason: Mference never left, so no relaunch.
         await model.requestAccess()
+        #expect(!model.needsRelaunchForAccess)
+
+        // Opened System Settings (Mference left the foreground right after
+        // the request), but the grant is not applied yet.
+        await model.requestAccess()
+        model.appResignedActive()
         #expect(model.status == .needsFullDiskAccess)
         #expect(model.needsRelaunchForAccess)
 
@@ -539,10 +545,30 @@ struct GatedSorter: AppleModelServicing {
         await connections.refresh()
         #expect(!connections.mailNeedsRelaunch)
         await connections.connectMail()
+        #expect(!connections.mailNeedsRelaunch, "Not now: Settings never opened")
+        await connections.connectMail()
+        connections.appResignedActive()
         #expect(connections.mailNeedsRelaunch)
         await source.setStatus(.available(version: "V10"))
         await connections.refresh()
         #expect(!connections.mailNeedsRelaunch && connections.status.mail == .connected)
+    }
+
+    /// A switch away long after the request is not the Settings visit.
+    @Test func aLateSwitchAwayIsNotASettingsVisit() {
+        let start = ContinuousClock.now
+        var late = SettingsVisit()
+        late.begin()
+        late.end(at: start)
+        late.appLeft(at: start + .seconds(30))
+        #expect(!late.happened)
+        var during = SettingsVisit()
+        during.begin()
+        during.appLeft(at: start)
+        #expect(during.happened)
+        var unasked = SettingsVisit()
+        unasked.appLeft()
+        #expect(!unasked.happened)
     }
 
     @Test func appleScriptEscapesAndRefusesOddAddresses() {

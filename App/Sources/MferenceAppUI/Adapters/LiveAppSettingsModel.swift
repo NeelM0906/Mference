@@ -14,6 +14,12 @@ public protocol AppleConnectionsProviding: AnyObject {
     func connect(_ kind: ConnectionKind)
     /// Reminders sync was switched; turning it on asks for Reminders (L9).
     func remindersSyncSwitched(_ enabled: Bool)
+    /// Mference left the foreground (System Settings came forward, say).
+    func appResignedActive()
+}
+
+extension AppleConnectionsProviding {
+    public func appResignedActive() {}
 }
 
 /// Connection states straight from the `PermissionBroker`: Calendar access
@@ -90,7 +96,10 @@ extension AppleConnections: AppleConnectionsProviding {
     public func connectionState(_ kind: ConnectionKind) -> ConnectionState {
         switch kind {
         case .appleCalendar: Self.connectionState(status.calendar)
-        case .appleMail: Self.connectionState(status.mail, kind: .appleMail)
+        case .appleMail:
+            // Turned on in System Settings, but macOS applies it from the
+            // next launch.
+            mailNeedsRelaunch ? .needsRelaunch : Self.connectionState(status.mail, kind: .appleMail)
         }
     }
 
@@ -132,9 +141,11 @@ public final class LiveAppSettingsModel: AppSettingsModel {
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let connections: any AppleConnectionsProviding
     @ObservationIgnored private var activation: (any NSObjectProtocol)?
+    @ObservationIgnored private var resignation: (any NSObjectProtocol)?
 
     public init(settings: AppSettings, connections: any AppleConnectionsProviding,
-                refreshOn activationNotification: Notification.Name? = NSApplication.didBecomeActiveNotification) {
+                refreshOn activationNotification: Notification.Name? = NSApplication.didBecomeActiveNotification,
+                leaveOn resignNotification: Notification.Name? = NSApplication.didResignActiveNotification) {
         self.settings = settings
         self.connections = connections
         Task { await connections.refresh() }
@@ -149,10 +160,17 @@ public final class LiveAppSettingsModel: AppSettingsModel {
                     }
                 }
         }
+        if let resignNotification {
+            resignation = NotificationCenter.default.addObserver(
+                forName: resignNotification, object: nil, queue: nil) { [weak self] _ in
+                    Task { @MainActor in self?.connections.appResignedActive() }
+                }
+        }
     }
 
     isolated deinit {
         if let activation { NotificationCenter.default.removeObserver(activation) }
+        if let resignation { NotificationCenter.default.removeObserver(resignation) }
     }
 
     public var webSearchEnabled: Bool {

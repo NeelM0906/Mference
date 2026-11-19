@@ -70,6 +70,9 @@ import Testing
         #expect(SettingsView.connectionDisplay(.connected) == .connected)
         #expect(SettingsView.connectionDisplay(.notConnected) == .connectButton)
         #expect(SettingsView.connectionDisplay(.needsSystemSettings) == .openSystemSettings)
+        #expect(SettingsView.connectionDisplay(.needsRelaunch) == .quitAndReopen)
+        #expect(SettingsView.connectionSubtitle("Read from Mail.", .quitAndReopen)
+                == "Read from Mail.\n" + SettingsView.relaunchHint)
         #expect(SettingsView.connectionDisplay(nil) == .notConnected, "unwired reads Not connected, never Later")
         let detail = "This version of Apple Mail stores mail in a way Mference cannot read yet."
         let unsupported = SettingsView.connectionDisplay(.unsupported(detail: detail))

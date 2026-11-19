@@ -170,6 +170,36 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         #expect(!broker.calls.contains { if case .request = $0 { true } else { false } })
     }
 
+    /// Settings > Connections > Mail after Full Disk Access was turned on but
+    /// before a relaunch: the row offers Quit and Reopen.
+    @Test func mailRowOffersARelaunchAfterSettingsWereOpened() async {
+        let source = InMemoryMailSource(status: .needsFullDiskAccess)
+        let broker = FakePermissionBroker(answers: [.fullDiskAccess: .needsSystemSettings])
+        let connections = AppleConnections(calendar: InMemoryCalendarService(), mail: source, broker: broker)
+        let services = AppServices.preview(permissions: broker)
+        let activation = Notification.Name("test-activation-\(UUID().uuidString)")
+        let resign = Notification.Name("test-resign-\(UUID().uuidString)")
+        let settings = LiveAppSettingsModel(settings: services.settings, connections: connections,
+                                            refreshOn: activation, leaveOn: resign)
+        #expect(await eventually { settings.connectionState(.appleMail) == .needsSystemSettings })
+        settings.connect(.appleMail)
+        #expect(await eventually { broker.calls.contains(.request(.fullDiskAccess)) })
+        NotificationCenter.default.post(name: resign, object: nil)
+        #expect(await eventually { settings.connectionState(.appleMail) == .needsRelaunch })
+        await source.setStatus(.available(version: "V10"))
+        NotificationCenter.default.post(name: activation, object: nil)
+        #expect(await eventually { settings.connectionState(.appleMail) == .connected })
+    }
+
+    /// The reopen helper waits for the quitting process instead of a fixed
+    /// delay, and gives up rather than start a second copy.
+    @Test func relaunchWaitsForThisProcessToExit() {
+        let script = AppRelaunch.reopenScript
+        #expect(script.contains(#"kill -0 "$1""#))
+        #expect(script.contains(#"open -n "$0""#))
+        #expect(!script.contains("sleep 1;"))
+    }
+
     @Test func nothingIsRequestedUntilAsked() async {
         let broker = FakePermissionBroker()
         let connections = BrokerConnections(broker: broker)

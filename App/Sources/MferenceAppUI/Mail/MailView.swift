@@ -68,6 +68,9 @@ struct MailContent: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.recheckAccess() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            model.appResignedActive()
+        }
         .shellToolbar(id: "mail.compose") { ComposeToolbarButton(model: model) }
     }
 
