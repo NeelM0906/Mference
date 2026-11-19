@@ -49,8 +49,9 @@ public final class MailInboxModel {
     private var sent: [MailMessageSummary] = []
     private var assignment: [String: String] = [:]
     @ObservationIgnored private var lastMoved: (messageID: String, previous: String?)?
-    @ObservationIgnored private var sendToken = 0
-    /// Replies already sent from this window, so reopening one shows it sent.
+    /// Replies being sent and already sent, per message: reopening one shows
+    /// its real state, and it cannot be sent twice.
+    @ObservationIgnored private var sendingMessageIDs: Set<String> = []
     @ObservationIgnored private var sentMessageIDs: Set<String> = []
 
     private let source: any MailSource
@@ -227,8 +228,8 @@ public final class MailInboxModel {
         body = nil
         eventCard = nil
         draft = ""
-        sendToken += 1
-        draftState = sentMessageIDs.contains(message.messageID) ? .sent : .idle
+        draftState = sentMessageIDs.contains(message.messageID) ? .sent
+            : sendingMessageIDs.contains(message.messageID) ? .sending : .idle
         do {
             let body = try await source.body(of: message)
             guard selected?.messageID == message.messageID else { return }
@@ -344,10 +345,11 @@ public final class MailInboxModel {
 
     /// Only the Send button calls this.
     public func send() async {
-        guard canSend, let reply = replyDraft, let message = selected else { return }
+        guard canSend, let reply = replyDraft, let message = selected,
+              !sendingMessageIDs.contains(message.messageID), !sentMessageIDs.contains(message.messageID) else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        sendToken += 1
-        let token = sendToken
+        sendingMessageIDs.insert(message.messageID)
+        defer { sendingMessageIDs.remove(message.messageID) }
         draftState = .sending
         let outcome: DraftState
         do {
@@ -361,8 +363,9 @@ public final class MailInboxModel {
         } catch {
             outcome = .failed("Mail could not send the reply.")
         }
-        // Another message may be open by now: its draft is not this one.
-        guard selected?.messageID == message.messageID, token == sendToken else { return }
+        // Whatever is open now: if it is this message (even reopened), it
+        // shows the outcome; another message's draft is left alone.
+        guard selected?.messageID == message.messageID else { return }
         draftState = outcome
     }
 }

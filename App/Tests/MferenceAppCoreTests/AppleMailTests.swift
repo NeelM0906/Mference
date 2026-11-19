@@ -271,12 +271,21 @@ struct GatedSorter: AppleModelServicing {
         while model.draftState != .sending, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         let other = try #require(model.messages(in: .bucket("other")).first { $0.messageID != first.messageID })
         await model.open(other)
+        #expect(model.draftState == .idle)
+        // Back to the first while its reply is still sending: it says so and
+        // cannot be sent again.
+        await model.open(first)
+        #expect(model.draftState == .sending)
+        model.draft = "A second reply."
+        #expect(!model.canSend)
         await gate.open()
         await sending.value
-        #expect(model.selected?.messageID == other.messageID)
+        #expect(model.draftState == .sent)
+        #expect(await sender.sent.count == 1)
+        await model.open(other)
         #expect(model.draftState == .idle)
         await model.open(first)
-        #expect(model.draftState == .sent)  // reopening the replied message shows it sent
+        #expect(model.draftState == .sent)
     }
 
     @Test @MainActor func backgroundSortingUsesAppleOnlyAndOffersQuick() async throws {
