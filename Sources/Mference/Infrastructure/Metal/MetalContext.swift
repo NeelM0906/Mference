@@ -179,10 +179,25 @@ public final class MetalContext: @unchecked Sendable {
         "utility": "Metal/Primitives",
     ]
 
+    /// This target's SwiftPM resource bundle. The generated `Bundle.module`
+    /// accessor searches `Bundle.main.bundleURL` — the root of a packaged
+    /// .app, where code signing forbids content — and then a build-directory
+    /// path that does not exist on a clean machine, so check the app's
+    /// Contents/Resources explicitly first.
+    private static let resourceBundle: Bundle = {
+        if let resources = Bundle.main.resourceURL {
+            let packaged = resources.appendingPathComponent("Mference_Mference.bundle")
+            if FileManager.default.fileExists(atPath: packaged.path), let bundle = Bundle(url: packaged) {
+                return bundle
+            }
+        }
+        return .module
+    }()
+
     private static func shaderURL(module: String) -> URL? {
         guard let subdirectory = shaderSubdirectories[module] else { return nil }
-        return Bundle.module.url(forResource: module, withExtension: "metal",
-                                 subdirectory: subdirectory)
+        return resourceBundle.url(forResource: module, withExtension: "metal",
+                                  subdirectory: subdirectory)
     }
 
     /// MSL version used for every runtime shader compile: 4.0, the version the

@@ -500,7 +500,15 @@ ggml_metal_library_t ggml_metal_library_init(ggml_metal_device_t dev) {
     return res;
 #else
 #ifdef SWIFT_PACKAGE
-    NSBundle * bundle = SWIFTPM_MODULE_BUNDLE;
+    // The generated accessor searches the app bundle root and then a
+    // build-directory path; a packaged .app seals resources under
+    // Contents/Resources (the build path does not exist on a clean
+    // machine), so look there first.
+    NSBundle * bundle = [NSBundle bundleWithURL:
+        [[[NSBundle mainBundle] resourceURL] URLByAppendingPathComponent:@"Mference_LlamaCpp.bundle"]];
+    if (bundle == nil) {
+        bundle = SWIFTPM_MODULE_BUNDLE;
+    }
 #else
     NSBundle * bundle = [NSBundle bundleForClass:[GGMLMetalClass class]];
 #endif

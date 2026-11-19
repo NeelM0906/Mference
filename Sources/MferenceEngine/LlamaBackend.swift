@@ -1,6 +1,7 @@
 import Foundation
 import LlamaCpp
 import Mference
+import Metal
 
 /// Failures of the llama.cpp backend itself. Request problems are
 /// `EngineError.invalidRequest`; cancellation is `CancellationError`.
@@ -38,7 +39,9 @@ public enum LlamaBackendError: Error, Equatable, Sendable, CustomStringConvertib
 /// Runs `.gguf` models through llama.cpp, linked in-process.
 ///
 /// A load maps the file (`use_mmap`; the weights never pass through Swift
-/// memory), offloads every layer to Metal, and creates one context of
+/// memory), offloads every layer to Metal when the device supports
+/// llama.cpp's fast paths (otherwise the CPU backend, which is faster on
+/// paravirtual GPUs in VMs), and creates one context of
 /// `descriptor.resolvedContext(options:)` tokens with llama.cpp's default
 /// batch sizes and KV cache types. `EngineHost` loads only with no other model
 /// resident, and `LlamaModel.unload` frees the context and the model before the
@@ -57,6 +60,23 @@ public struct LlamaBackend: EngineBackend {
 
     public init() {}
 
+    /// Whether the default Metal device can run llama.cpp's fast kernel
+    /// paths — the same `supportsFamily(.apple7)` capability ggml-metal
+    /// checks before enabling simdgroup matrix multiply. False when there
+    /// is no GPU, or the GPU is a paravirtual device capped at Apple5.
+    static func metalSupportsFastPaths() -> Bool {
+        guard let device = MTLCreateSystemDefaultDevice() else { return false }
+        return device.supportsFamily(.apple7)
+    }
+
+    /// Picks llama.cpp's `n_gpu_layers`: full Metal offload when the device
+    /// supports the fast kernel paths, CPU otherwise; an explicit
+    /// `MFERENCE_LLAMA_GPU_LAYERS` override wins either way.
+    static func gpuLayerCount(supportsFastPaths: Bool, override: Int32? = nil) -> Int32 {
+        if let override { return override }
+        return supportsFastPaths ? -1 : 0
+    }
+
     public func load(_ descriptor: EngineModelDescriptor,
                      options: EngineLoadOptions) async throws -> any EngineModel {
         guard case .gguf(let metadata) = descriptor.format else {
@@ -68,7 +88,16 @@ public struct LlamaBackend: EngineBackend {
         let wantsDraft = metadata.hasMTP && options.draftDecoding != .off
 
         var modelParams = llama_model_default_params()
-        modelParams.n_gpu_layers = -1
+        // Offload every layer to Metal, unless the device can't run the fast
+        // kernel paths llama.cpp needs. ggml-metal's simdgroup matrix-multiply
+        // path requires MTLGPUFamilyApple7; paravirtual GPUs in virtual
+        // machines report Apple5 and decode slower than the CPU backend, so
+        // keep the model on CPU there. On real Apple silicon (M1 and later)
+        // the check always passes and the offload decision is unchanged.
+        let gpuOverride = ProcessInfo.processInfo.environment["MFERENCE_LLAMA_GPU_LAYERS"]
+            .flatMap(Int32.init)
+        modelParams.n_gpu_layers = Self.gpuLayerCount(
+            supportsFastPaths: Self.metalSupportsFastPaths(), override: gpuOverride)
         // Map the file, never read it into process memory; no mlock.
         modelParams.load_mode = LLAMA_LOAD_MODE_MMAP
         modelParams.load_mtp = wantsDraft
