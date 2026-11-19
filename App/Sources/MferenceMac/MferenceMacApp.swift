@@ -20,10 +20,19 @@ struct MferenceMacApp: App {
     var body: some Scene {
         Window("Mference", id: "main") {
             RootView(model: shell)
+                // ScreenModels, U4's Scan, Calendar and Mail models and the
+                // model container, in one call (U2's helper).
+                .mferenceEnvironment(services: delegate.runtime.services,
+                                     screens: delegate.runtime.screenModels)
                 .environment(delegate.runtime.services)
-                .environment(delegate.runtime.screenModels)
                 .environment(delegate.runtime.chat)
-                .modelContainer(delegate.runtime.services.modelContainer)
+                .onAppear {
+                    // Calendar's "Open Settings" goes to Settings > Connections.
+                    let shell = shell
+                    delegate.runtime.services.apple?.calendar.openSettings = {
+                        shell.openSettings(.connections)
+                    }
+                }
                 .task {
                     if let path = WindowCapture.requestedPath {
                         await WindowCapture.captureAndQuit(to: path)

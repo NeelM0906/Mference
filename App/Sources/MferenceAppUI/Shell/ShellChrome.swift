@@ -51,36 +51,40 @@ struct ShellTrailingControls: View {
     /// Actions the visible screen contributes (`shellToolbar`).
     var items: [ShellToolbarItem] = []
 
+    /// A screen with its own actions (Scan, Calendar, Mail) gets the bar the
+    /// mockup draws for it: its actions and the Settings gear. "On this
+    /// Mac", search and appearance step back (⌘K still opens search).
+    static func showsGeneralControls(screenItems: [ShellToolbarItem]) -> Bool { screenItems.isEmpty }
+
     var body: some View {
         HStack(spacing: MFSpacing.m) {
             ShellToolbarItems(items: items)
-            MFChip("On this Mac", systemImage: "lock", tone: .success)
-                .help("Runs on this Mac. Nothing leaves it except web searches you turn on and model downloads.")
+            if Self.showsGeneralControls(screenItems: items) {
+                MFChip("On this Mac", systemImage: "lock", tone: .success)
+                    .help("Runs on this Mac. Nothing leaves it except web searches you turn on and model downloads.")
 
-            Button {
-                model.isSearchPresented.toggle()
-            } label: {
-                HStack(spacing: MFSpacing.snug) {
-                    Image(systemName: "magnifyingglass")
-                        .accessibilityHidden(true)
-                    MFKeycap("⌘K")
+                Button {
+                    model.isSearchPresented.toggle()
+                } label: {
+                    HStack(spacing: MFSpacing.snug) {
+                        Image(systemName: "magnifyingglass")
+                            .accessibilityHidden(true)
+                        MFKeycap("⌘K")
+                    }
                 }
-            }
-            .buttonStyle(.mfSecondary)
-            .accessibilityLabel("Search everything")
-            .popover(isPresented: $model.isSearchPresented, arrowEdge: .bottom) {
-                ShellSearchPanel(model: model)
-            }
+                .buttonStyle(.mfSecondary)
+                .accessibilityLabel("Search everything")
 
-            Button {
-                model.setAppearance(model.appearance.next)
-            } label: {
-                Image(systemName: model.appearance.systemImage)
-                    .frame(width: ShellMetrics.iconButtonSide, height: ShellMetrics.iconButtonSide)
+                Button {
+                    model.setAppearance(model.appearance.next)
+                } label: {
+                    Image(systemName: model.appearance.systemImage)
+                        .frame(width: ShellMetrics.iconButtonSide, height: ShellMetrics.iconButtonSide)
+                }
+                .buttonStyle(MFPillButtonStyle())
+                .accessibilityLabel("Appearance: \(model.appearance.title)")
+                .help("Appearance: \(model.appearance.title)")
             }
-            .buttonStyle(MFPillButtonStyle())
-            .accessibilityLabel("Appearance: \(model.appearance.title)")
-            .help("Appearance: \(model.appearance.title)")
 
             Button {
                 model.toggleSettings()
@@ -96,6 +100,10 @@ struct ShellTrailingControls: View {
             .buttonStyle(MFPillButtonStyle(isSelected: model.selection == .settings))
             .accessibilityLabel(model.selection == .settings ? "Close Settings" : "Settings")
             .help(model.selection == .settings ? "Close Settings" : "Settings (⌘,)")
+        }
+        // On the whole group, so ⌘K works even when the search button steps back.
+        .popover(isPresented: $model.isSearchPresented, arrowEdge: .bottom) {
+            ShellSearchPanel(model: model)
         }
     }
 }
