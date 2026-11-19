@@ -111,9 +111,17 @@ extension Native {
         /// `tokenizer.ggml.add_bos_token` (absent → llama.cpp's default for the model).
         public var addBOS: Bool?
         public var addEOS: Bool?
+        /// Every other `tokenizer.ggml.<name>_token_id` key in the GGUF, keyed
+        /// by `<name>` exactly as spelled in the key (for example `eot`, `eom`,
+        /// `unknown`, `seperator` (llama.cpp's spelling), `cls`, `mask`,
+        /// `fim_pre`, `fim_suf`, `fim_mid`, `fim_pad`, `fim_rep`, `fim_sep`).
+        /// llama.cpp uses these for end-of-generation and special-token
+        /// handling. nil in packs written before this field existed.
+        public var specialTokenIDs: [String: Int32]?
         public init(model: String, pre: String, tokens: [String], tokenTypes: [Int32],
                     merges: [String], bosTokenID: Int32?, eosTokenID: Int32?,
-                    paddingTokenID: Int32?, addBOS: Bool?, addEOS: Bool?) {
+                    paddingTokenID: Int32?, addBOS: Bool?, addEOS: Bool?,
+                    specialTokenIDs: [String: Int32]? = nil) {
             self.model = model
             self.pre = pre
             self.tokens = tokens
@@ -124,6 +132,7 @@ extension Native {
             self.paddingTokenID = paddingTokenID
             self.addBOS = addBOS
             self.addEOS = addEOS
+            self.specialTokenIDs = specialTokenIDs
         }
     }
 }

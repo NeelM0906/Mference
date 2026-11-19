@@ -98,6 +98,17 @@ struct NativeContractTests {
             .fits(rows: 32, blocksPerRow: 10))
     }
 
+    @Test func tokenizerDataDecodesWithAndWithoutSpecialIDs() throws {
+        let legacy = #"{"model":"gpt2","pre":"qwen35","tokens":["a"],"tokenTypes":[1],"merges":[]}"#
+        let old = try JSONDecoder().decode(Native.TokenizerData.self, from: Data(legacy.utf8))
+        #expect(old.specialTokenIDs == nil)
+        var data = old
+        data.specialTokenIDs = ["eot": 248046, "fim_pre": 248060]
+        let round = try JSONDecoder().decode(Native.TokenizerData.self,
+                                             from: JSONEncoder().encode(data))
+        #expect(round == data)
+    }
+
     @Test func quickKVPageGeometry() {
         let f16 = Native.KVPageGeometry(attentionLayers: 8, kvHeads: 4, headDim: 256)
         #expect(f16.pageBytes == 2 * 1024 * 1024)
