@@ -11,6 +11,12 @@ import MferenceAppCore
 //   lock.sh run a2 "app smoke quick" -- App/.build/release/MferenceSmoke --model quick \
 //       --out /Users/.../scratch/app-program/results/smoke
 //
+// C-A2 (web answers): add `--web`. The question (default
+// `WebCheckpoint.defaultQuestion`, or `--prompt`) goes through the chat with
+// web search on (bundled SearXNG, which `MFERENCE_SEARXNG_DIR` or
+// App/Resources/SearXNG/runtime provides); it passes when the model searched
+// and the answer cites sources. The result's `web` field has the details.
+//
 // Exit 0 pass, 1 the request failed, 2 bad arguments, 4 swap grew during
 // the run (stop all model runs and report), 5 not on AC power at the start
 // (nothing loaded) or at the end, 6 MFERENCE_APP_SMOKE=1 not set (nothing
@@ -48,6 +54,8 @@ struct SmokeResult: Codable {
     var swapUsedAfterBytes: UInt64 = 0
     var swapGrewBytes: Int64 = 0
     var powerSourceAtEnd: String?
+    /// `--web` runs: what the web answer searched, read and cited.
+    var web: WebCheckpointOutcome?
     var error: String?
     var passed = false
 }
@@ -77,11 +85,16 @@ var outDirectory: URL?
 var prompt = "Answer in one short sentence: what is the capital of France?"
 var maxTokens = 64
 var commit: String?
+var webMode = false
+var promptGiven = false
 while let argument = arguments.popFirst() {
     switch argument {
     case "--model": modelName = arguments.popFirst()
     case "--out": outDirectory = arguments.popFirst().map { URL(fileURLWithPath: $0, isDirectory: true) }
-    case "--prompt": prompt = arguments.popFirst() ?? prompt
+    case "--prompt":
+        prompt = arguments.popFirst() ?? prompt
+        promptGiven = true
+    case "--web": webMode = true
     case "--max-tokens": maxTokens = arguments.popFirst().flatMap(Int.init) ?? maxTokens
     case "--commit": commit = arguments.popFirst()
     default: fail("unknown argument \(argument)", code: 2)
@@ -90,6 +103,7 @@ while let argument = arguments.popFirst() {
 guard let modelName, let model = AppModel(rawValue: modelName) else {
     fail("--model must be one of \(AppModel.allCases.map(\.rawValue).joined(separator: ", "))", code: 2)
 }
+if webMode, !promptGiven { prompt = WebCheckpoint.defaultQuestion }
 
 let power = powerSource()
 guard power == kIOPMACPowerKey else { fail("power source is '\(power)'; smoke runs need AC power", code: 5) }
@@ -112,25 +126,46 @@ do {
     try await engine.load(model)
     let loadTime = loadStarted.duration(to: .now)
     result.loadSeconds = Double(loadTime.components.seconds) + Double(loadTime.components.attoseconds) / 1e18
-    let options = GenerationOptions(thinking: model.supportsThinking ? false : nil,
-                                    maximumCompletionTokens: maxTokens)
-    for try await update in engine.generate(model: model, turns: [ChatTurn(role: .user, content: prompt)],
-                                            options: options) {
-        switch update {
-        case .content(let text): result.answer += text
-        case .reasoning(let text): result.reasoningCharacters += text.count
-        case .completed(let summary):
-            result.finish = summary.finish.rawValue
-            result.promptTokens = summary.promptTokens
-            result.completionTokens = summary.completionTokens
-            result.prefillSeconds = summary.prefillSeconds
-            result.decodeSeconds = summary.decodeSeconds
-        case .prepared, .toolCall: break
+    if webMode {
+        // An isolated defaults suite: the run turns web search on without
+        // touching the person's own setting.
+        let settings = WebSearchSettings(suiteName: "ai.mference.checkpoint")
+        settings.isEnabled = true
+        let web = WebAnswers(settings: settings)
+        guard web.process != nil else {
+            throw WebError.searchUnavailable("no SearXNG runtime; run App/Scripts/searxng/prepare.sh --offline")
         }
+        let outcome = await WebCheckpoint.run(question: prompt, model: model, service: engine, tools: web)
+        await web.shutdown()
+        result.web = outcome
+        result.answer = outcome.answer
+        result.reasoningCharacters = outcome.reasoningCharacters
+        result.finish = outcome.finish
+        result.promptTokens = outcome.promptTokens
+        result.completionTokens = outcome.completionTokens
+        result.passed = outcome.passed
+        if !outcome.passed { result.error = outcome.error ?? "web answer failed" }
+    } else {
+        let options = GenerationOptions(thinking: model.supportsThinking ? false : nil,
+                                        maximumCompletionTokens: maxTokens)
+        for try await update in engine.generate(model: model, turns: [ChatTurn(role: .user, content: prompt)],
+                                                options: options) {
+            switch update {
+            case .content(let text): result.answer += text
+            case .reasoning(let text): result.reasoningCharacters += text.count
+            case .completed(let summary):
+                result.finish = summary.finish.rawValue
+                result.promptTokens = summary.promptTokens
+                result.completionTokens = summary.completionTokens
+                result.prefillSeconds = summary.prefillSeconds
+                result.decodeSeconds = summary.decodeSeconds
+            case .prepared, .toolCall: break
+            }
+        }
+        let answer = result.answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        result.passed = result.finish != nil && !answer.isEmpty
+        if !result.passed { result.error = "empty answer" }
     }
-    let answer = result.answer.trimmingCharacters(in: .whitespacesAndNewlines)
-    result.passed = result.finish != nil && !answer.isEmpty
-    if !result.passed { result.error = "empty answer" }
 } catch {
     result.error = (error as? EngineServiceError)?.userMessage ?? String(describing: error)
 }
@@ -153,7 +188,7 @@ print(String(decoding: json, as: UTF8.self))
 if let outDirectory {
     try? FileManager.default.createDirectory(at: outDirectory, withIntermediateDirectories: true)
     let stamp = startedUTC.replacingOccurrences(of: ":", with: "")
-    try? json.write(to: outDirectory.appending(path: "\(model.rawValue)-\(stamp).json"))
+    try? json.write(to: outDirectory.appending(path: "\(model.rawValue)\(webMode ? "-web" : "")-\(stamp).json"))
 }
 
 if swapAfter == nil { fail("cannot read vm.swapusage at the end", code: 8) }
