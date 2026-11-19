@@ -23,10 +23,11 @@ class GuardedRunTests(unittest.TestCase):
         stub = bin_dir / "pmset"
         stub.write_text(f"#!/bin/sh\necho \"Now drawing from '{power}'\"\n", encoding="utf-8")
         stub.chmod(0o755)
-        # the "other model process" check (pgrep -lx) sees none, whatever runs
-        # on this machine; the wrapper's child lookup uses the real pgrep
+        # the "other model process" checks (pgrep -lx, -lf) see none, whatever
+        # runs on this machine; the wrapper's child lookup uses the real pgrep
         pgrep = bin_dir / "pgrep"
-        pgrep.write_text("#!/bin/sh\n[ \"$1\" = \"-lx\" ] && exit 1\nexec /usr/bin/pgrep \"$@\"\n", encoding="utf-8")
+        pgrep.write_text("#!/bin/sh\ncase \"$1\" in -lx|-lf) exit 1 ;; esac\nexec /usr/bin/pgrep \"$@\"\n",
+                         encoding="utf-8")
         pgrep.chmod(0o755)
         env = dict(os.environ, LOCK="/usr/bin/true", PATH=f"{bin_dir}:{os.environ['PATH']}")
         env.pop("SWAP_GUARD_MB", None)
@@ -63,6 +64,34 @@ class GuardedRunTests(unittest.TestCase):
         proc, _ = self.run_script([], "AC Power", {"SWAP_GUARD_MB": "64"})
         self.assertEqual(proc.returncode, 71)
         self.assertIn("SWAP_GUARD_MB must be 0", proc.stderr)
+
+
+class XCTestPatternTests(unittest.TestCase):
+    """The command-line pattern guarded-run.sh passes to pgrep -f for a bare
+    xctest run of the test bundle (pgrep uses extended regular expressions;
+    this pattern means the same in Python's re)."""
+
+    def pattern(self):
+        import re
+        text = SCRIPT.read_text(encoding="utf-8")
+        m = re.search(r"pgrep -lf '([^']+)'", text)
+        self.assertIsNotNone(m)
+        return re.compile(m.group(1).replace("\\\\", "\\"))
+
+    def test_matches_a_bare_xctest_run(self):
+        p = self.pattern()
+        for cmd in ["/Applications/Xcode.app/Contents/Developer/usr/bin/xctest "
+                    "/x/.build/debug/MferencePackageTests.xctest",
+                    "xctest -XCTest Suite/test /x/MferencePackageTests.xctest"]:
+            self.assertTrue(p.search(cmd), cmd)
+
+    def test_ignores_shells_and_other_bundles(self):
+        p = self.pattern()
+        for cmd in ["/bin/zsh -c xctest /x/MferencePackageTests.xctest",
+                    "bash run.sh xctest /x/MferencePackageTests.xctest",
+                    "/usr/bin/xctest /x/OtherTests.xctest",
+                    "swift-build --build-tests MferencePackageTests.xctest"]:
+            self.assertFalse(p.search(cmd), cmd)
 
 
 if __name__ == "__main__":

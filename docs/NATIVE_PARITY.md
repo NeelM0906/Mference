@@ -222,8 +222,8 @@ tokens:
 |---|---|---|
 | Greedy agreement: the candidate's argmax equals the golden token | ≥ 99% of 2,354 positions | D1 (maintainer) |
 | Per-token KL(golden ‖ candidate) of the logits, every position | ≤ ε = 0.01 nats | this page |
-| Mean per-token KL over the set | ≤ 0.001 nats | this page |
-| Agentic parity (`agentic-v1`) | candidate passes ≥ golden − 1 of 32 tasks | this page |
+| Mean per-token KL over the set | ≤ 0.001 nats | this page; an extra gate beyond D1, **pending maintainer sign-off** at the Phase 0 exit |
+| Agentic parity (`agentic-v1`) | at most 1 of 32 tasks regresses (golden passes, candidate fails); no setup errors | this page |
 
 Teacher forcing: the candidate prefills the prompt, then is fed the golden's
 generated tokens one per decode step; row `g` of its logits is compared with
@@ -279,34 +279,89 @@ compound. llama.cpp's own CPU backend therefore does not meet D1 on this set.
 A native engine must stay much closer to ggml-metal's numerics, as the Metal
 variants do.
 
-- **ε = 0.01 nats per token, and a mean of at most 0.001.** That is more
+- **ε = 0.01 nats per token, and a mean of at most 0.001.** ε is more
   than 1,000 times the Metal configuration noise, which leaves room for
   another accumulation order, F32 versus half staging, and different kernel
-  tiling. It is also below the CPU backend's p99 (1.7e-2) and mean (2.4e-3),
-  so a path as far from ggml-metal as the CPU backend fails.
-  `ParityNoiseFloorTests` asserts both directions (the Metal runs pass, the
-  CPU run fails); if that ever changes, ε is revisited.
-- **Per-op, local.** A component fed the golden's inputs at an op boundary
-  must match the golden output within the class's relative L2 bound
-  (`OpToleranceClass.maxLocalRelativeL2`).
-  `ParityHarness.localVerdict` applies it. The bounds are about two times
-  llama.cpp's own local spread, measured at block 0 of the CPU run, whose
-  input (the embedding) is bit-exact against the golden:
+  tiling. It is below the CPU backend's p99 (1.7e-2), so a path as far from
+  ggml-metal as the CPU backend fails. `ParityNoiseFloorTests` asserts both
+  directions (the Metal runs pass, the CPU run fails); if that ever changes,
+  ε is revisited. The mean-KL check is an extra gate beyond D1's "per-token
+  KL ≤ ε" and is **pending maintainer sign-off**.
 
-  | Class | Ops | CPU-backend local rel L2 | Bound |
-  |---|---|---:|---:|
-  | `exact` | embedding (`get_rows`) | 0 | 1e-6 |
-  | `norm` | RMSNorms | 6.7e-8 | 1e-5 |
-  | `gemm` | every quantized projection, FFN, LM head | 3.6e-3 to 5.4e-3 | 1e-2 |
-  | `mixer` | attention and GDN core (`attn_gated`, `final_output`) | 4.9e-3 to 8.2e-3 | 2e-2 |
-  | `residual` | residual adds | (lossless) | 1e-5 |
-  | `state` | GDN conv and S state after a step | (follows `mixer`) | 2e-2 |
+### Per-op bounds
 
-- **Per-op, accumulated (diagnostic).** At the tap points of an end-to-end
-  run, each block's input already carries the earlier blocks' differences.
-  llama.cpp's CPU backend reaches relative L2 4.7e-2 to 5.0e-2 at the last
-  block, final norm and logits, and 0.06 is the diagnostic bound there.
-  The gate for an end-to-end run is the D1 logits bar, not this.
+A component fed the golden's inputs at an op boundary must match the golden
+output within its class's relative L2 bound
+(`OpToleranceClass.maxLocalRelativeL2`), applied by
+`ParityHarness.localVerdict`. `OpToleranceClass.of(_:)` gives the class of a
+`TapPoint`, an op boundary or a golden tensor. It returns nil for a name it
+does not know: it never guesses. GDN's `attn_output` (a `VIEW`, the
+delta-rule output) is `mixer`; full attention's `attn_output` (`MUL_MAT`) is
+`gemm`. A fused kernel is held to the loosest contracted op it contains. A
+caller whose kernel writes `layerOutput` with the residual add fused into a
+GEMM asks for `OpToleranceClass.of(.layerOutput(layer:), fusedGEMM: true)`,
+which is `gemm`; an unfused residual add is `glue`.
+
+The bounds are **provisional**. They are chosen so that meeting them makes D1
+likely, not from a backend that fails it:
+
+| Class | Ops | Bound |
+|---|---|---:|
+| `exact` | embedding (`get_rows`) | 1e-6 |
+| `norm` | RMSNorms | 1e-5 |
+| `gemm` | every quantized projection, FFN, LM head | 2e-2 |
+| `mixer` | attention and GDN core (`attn_gated`, `final_output`, GDN `attn_output`) | 2e-3 |
+| `glue` | residual adds, SwiGLU, copies | 1e-5 |
+| `state` | GDN conv and S state after a step | 2e-3 |
+
+The bounds come from measured data:
+- **gemm (2e-2): set from an implementation that passes D1.** R's naive
+  reference (`Native/Reference`) passes D1 on 10 prompts: 99.69% agreement,
+  max per-token KL 1.7e-3, mean 5.3e-5. Its local GEMM error against the
+  golden, converted to relative L2 from its recorded max and mean errors, is
+  largest on `attn_output` and the FFN GEMMs:
+  - worst estimate 1.03e-2
+  - hard lower bound 8.2e-3
+  - loose upper bound 3.2e-2
+
+  2e-2 is about two times the worst estimate, so a reference at that accuracy
+  passes, and W2's kernels are not held tighter than a D1-passing path.
+- **Local error size alone does not predict D1.** llama.cpp's CPU backend has
+  a smaller GEMM error on `attn_qkv` and `attn_gate` (about 4.5e-3, block 0)
+  yet fails D1 (98.17%, max KL 0.29). Its error is systematic: Q8_K-quantized
+  activations, correlated across every GEMM. The reference's error is
+  rounding noise. A bound on local error size is therefore necessary but not
+  sufficient; D1 on the logits stays the gate for any path.
+- **mixer and state (2e-3) are not derived.** R's attention core is about
+  1e-4 and its GDN core about 2e-7, far inside them, so they stay as
+  provisional bounds.
+- **Confirmation.** Two runs settle the bounds:
+  - R's component run records relative L2 in this metric directly, which
+    replaces the conversion above. If it shows a D1-passing reference above
+    a bound, the bound moves.
+  - The perturbation runs measure D1 against random per-op error.
+    `mfe-golden --perturb <names|'*'> --perturb-scale s [--perturb-op MUL_MAT]`
+    adds Gaussian noise of relative size `s` to the chosen graph tensors in a
+    teacher-forced Metal run, before the ops that read them run. The planned
+    set covers:
+    - every GEMM output at 1e-4, 3e-4, 1e-3 and 3e-3, extended to 1e-2 and
+      3e-2 for the new bound
+    - the mixer outputs at 1e-3 and 1e-2
+    - the norms at 1e-4 and 1e-3
+
+    The bounds become final once each class's bound holds D1 with margin.
+
+Tap points of an end-to-end run carry every earlier block's difference, so
+they have no per-op bound. The D1 logits bar is their gate. For scale, the
+CPU backend's accumulated difference, pooled over every prompt and position,
+is:
+- relative L2 0.094 at `l_out` (all blocks)
+- 0.14 at `result_norm`
+- 0.12 at the logits
+
+Per block, pooled, `l_out` rises steadily from 0.015 at block 0 to 0.114 at
+block 31. On `short-chat` alone it is 4.7e-2 to 5.0e-2 at the last block. The
+noise-floor report prints the whole per-block profile.
 
 Reproduce (reads files only, no model; about 13 minutes):
 
@@ -328,14 +383,31 @@ holds `agentic-v1`: 32 tool-use and structured-output tasks:
 - answering in a required JSON shape
 - exact short answers
 
-Each task goes to an OpenAI-compatible server on loopback (`MferenceServer`)
-at temperature 0. A model-free checker scores the parsed tool calls or
-content: it compares arguments after normalization, evaluates calculator
-expressions with a safe parser, and strips `<think>` blocks. Parity holds when
-the candidate passes at least as many tasks as the llama.cpp golden minus one,
-with every flipped task listed. The checker and the verdict are unit-tested
-without a model (`Scripts/tests/test_agentic_parity.py`). Real runs are model
-runs: one server per lock hold, through the normal server rules.
+Each task goes to an OpenAI-compatible server on loopback at temperature 0.
+A model-free checker scores the parsed tool calls or content: it compares
+arguments after normalization, evaluates calculator expressions with a safe
+parser, rejects arguments that are not a JSON object, and strips `<think>`
+blocks.
+
+Both sides go through the same `MferenceServer` build in `--library` mode:
+the golden is the llama.cpp Quick entry (`LlamaBackend` at the pin), the
+candidate the native Quick entry. The server renders the chat template and
+parses tool calls identically for both, so only the backend differs. A task
+whose prompt renders to a different token count on the two sides is a setup
+error. It is reported apart (`render_mismatch`), fails the comparison, and is
+never counted as a parity result. A request, HTTP or server error on either
+side is also a setup error (`setup_errors`): that task measured nothing, so
+the comparison fails until it is re-run, and an unreachable golden server can
+never certify a candidate.
+
+Parity holds when at most one task regresses (passes on the golden, fails on
+the candidate), no task is missing and no prompt rendered differently. Tasks
+the candidate newly passes are listed, never counted against it, and never
+offset a regression. `run` writes `agentic.json` after every task (`complete`
+turns true at the end), and a request error or timeout fails only its own
+task. The checker and the verdict are unit-tested without a model
+(`Scripts/tests/test_agentic_parity.py`). Real runs are model runs: one server
+per lock hold, under the normal server rules.
 
 ```bash
 python3 Scripts/native/agentic/agentic_parity.py run --port <port> --model <golden-id> --out <dir>/golden

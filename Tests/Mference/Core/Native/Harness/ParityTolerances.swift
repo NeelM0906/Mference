@@ -1,4 +1,5 @@
 import Foundation
+@testable import Mference
 
 /// The numbers of the D1 bar and the per-op tolerances. Their justification
 /// (llama.cpp's own noise floor at the pin) is in `docs/NATIVE_PARITY.md`,
@@ -11,7 +12,9 @@ struct ParityTolerances: Equatable {
     /// ε: the largest per-token KL(golden || candidate), in nats, at any
     /// position.
     var maxTokenKLD: Double
-    /// Mean per-token KL over the set: a tighter check on the bulk.
+    /// Mean per-token KL over the set: a tighter check on the bulk. An extra
+    /// gate beyond D1's "per-token KL ≤ ε": PENDING MAINTAINER SIGN-OFF at the
+    /// Phase 0 exit.
     var meanKLD: Double
 
     /// The D1 bar for a native backend against the llama.cpp Metal golden.
@@ -29,12 +32,12 @@ struct ParityTolerances: Equatable {
     static let d1 = ParityTolerances(minimumAgreement: 0.99, maxTokenKLD: 0.01, meanKLD: 0.001)
 }
 
-/// Per-op tolerance classes. The **local** bound applies to a component fed
-/// the golden's own inputs at an op boundary (`GoldenTapMap.Boundary`) and
-/// compared with the golden output: that is the per-op gate. The
-/// **accumulated** bound is a diagnostic for tap points of an end-to-end run,
-/// where every block's input already carries the earlier blocks' differences;
-/// the D1 logits bar is the gate there.
+/// Per-op tolerance classes. The bound applies to a component fed the
+/// golden's own inputs at an op boundary (`GoldenTapMap.Boundary`, or a tap
+/// point whose input is golden) and compared with the golden output: that is
+/// the per-op gate. Tap points of an end-to-end run accumulate every earlier
+/// block's difference and have no per-op bound; the D1 logits bar is their
+/// gate (`docs/NATIVE_PARITY.md`, "Per-op bounds").
 enum OpToleranceClass: String, CaseIterable {
     /// Embedding lookup (dequantize a row).
     case exact
@@ -44,48 +47,97 @@ enum OpToleranceClass: String, CaseIterable {
     case gemm
     /// Attention / GDN core outputs (F16 KV or recurrent state involved).
     case mixer
-    /// Residual adds.
-    case residual
+    /// Element-wise glue: residual adds, SwiGLU, copies.
+    case glue
     /// GDN recurrent state after a step.
     case state
 
     /// Largest allowed `||c - g|| / ||g||` for a component fed golden inputs.
+    /// PROVISIONAL: set from measured data, and confirmed by the perturbation
+    /// runs (`mfe-golden --perturb`) and by R's exact relative-L2 component
+    /// run (`docs/NATIVE_PARITY.md`, "Per-op bounds").
     ///
-    /// Measured locally at block 0 of the CPU-backend run, whose input (the
-    /// embedding) is bit-exact against the golden:
-    /// - RMSNorm: 6.7e-8.
-    /// - GEMMs: 3.6e-3 to 5.4e-3 (`attn_qkv`, `attn_gate`).
-    /// - GDN core: 4.9e-3 to 8.2e-3.
-    /// The bounds are about two times those, and float rounding for the
-    /// lossless ops.
+    /// The bounds come from an implementation that passes D1. R's naive
+    /// reference passes it: 10 prompts, 99.69% agreement, max KL 1.7e-3, mean
+    /// 5.3e-5. Its local GEMM error against the golden is largest on
+    /// `attn_output` and the FFN GEMMs: worst estimate 1.03e-2, hard lower
+    /// bound 8.2e-3, loose upper bound 3.2e-2. gemm 2e-2 is about two times
+    /// that estimate, so the D1-passing reference passes.
+    ///
+    /// Local error size alone does not predict D1. llama.cpp's CPU backend
+    /// has a smaller GEMM error on `attn_qkv` and `attn_gate` (about 4.5e-3)
+    /// yet fails D1, because its error is systematic (Q8_K-quantized
+    /// activations, correlated across every GEMM), not rounding noise.
+    ///
+    /// mixer and state (2e-3) are not derived. R's attention core is about
+    /// 1e-4 and its GDN core about 2e-7, far inside them, so they stay as
+    /// provisional bounds. The lossless ops keep float rounding.
     var maxLocalRelativeL2: Double {
         switch self {
         case .exact: return 1e-6
         case .norm: return 1e-5
-        case .gemm: return 1e-2
-        case .mixer: return 2e-2
-        case .residual: return 1e-5
-        case .state: return 2e-2
+        case .gemm: return 2e-2
+        case .mixer: return 2e-3
+        case .glue: return 1e-5
+        case .state: return 2e-3
         }
     }
 
-    /// Diagnostic bound for an end-to-end run's tap points: llama.cpp's CPU
-    /// backend reaches 4.7e-2 to 5.0e-2 at the last block, final norm and
-    /// logits.
-    static let maxAccumulatedRelativeL2 = 0.06
-
-    /// The class of a llama.cpp graph tensor base name (`docs/NATIVE_PARITY.md`).
-    static func of(base: String) -> OpToleranceClass {
+    /// The class of a llama.cpp graph tensor, from its base name and, where
+    /// the name is ambiguous, its ggml op (as `golden.json` records it).
+    /// `attn_output` is the `attn_output` GEMM in a full-attention block
+    /// (`MUL_MAT`) but the raw delta-rule output in a GDN block (`VIEW`).
+    /// Nil for a name the harness does not classify: never guessed.
+    static func of(base: String, op: String? = nil) -> OpToleranceClass? {
         switch base {
         case "model.input_embed": return .exact
         case "attn_norm", "attn_post_norm", "result_norm": return .norm
         case "Qcur_full", "Kcur", "Vcur", "linear_attn_qkv_mixed", "z", "alpha", "beta",
-             "ffn_gate", "ffn_up", "ffn_swiglu", "ffn_out", "attn_output", "linear_attn_out", "result_output":
+             "ffn_gate", "ffn_up", "ffn_out", "linear_attn_out", "result_output":
             return .gemm
+        case "attn_output":
+            switch op {
+            case "MUL_MAT": return .gemm
+            case "VIEW": return .mixer
+            default: return nil
+            }
         case "attn_gated", "final_output": return .mixer
-        case "l_out": return .residual
+        case "ffn_swiglu", "l_out": return .glue
         case "conv_states", "state_predelta": return .state
-        default: return .gemm
+        default: return nil
+        }
+    }
+
+    /// The class of a captured golden tensor.
+    static func of(_ tensor: GoldenManifest.Tensor) -> OpToleranceClass? {
+        of(base: tensor.base, op: tensor.op)
+    }
+
+    /// The class a component's output at a `Native.TapPoint` is held to.
+    /// A fused kernel is held to the loosest contracted op it contains. A
+    /// caller whose kernel writes `layerOutput` with the residual add fused
+    /// into the `attn_output`/`ssm_out` or `ffn_down` GEMM passes
+    /// `fusedGEMM: true`, which gives `gemm`; the unfused residual add is
+    /// `glue`. A fused RMSNorm+GEMM is checked at the GEMM's output: `gemm`.
+    static func of(_ point: Native.TapPoint, fusedGEMM: Bool = false) -> OpToleranceClass {
+        switch point {
+        case .embedding: return .exact
+        case .mixerInput, .finalNorm: return .norm
+        case .mixerOutput, .ffnOutput, .logits: return .gemm
+        case .layerOutput: return fusedGEMM ? .gemm : .glue
+        }
+    }
+
+    /// The class of an op boundary (`GoldenTapMap.Boundary`).
+    static func of(_ boundary: GoldenTapMap.Boundary) -> OpToleranceClass {
+        switch boundary {
+        case .attentionQGate, .attentionK, .attentionV, .gdnQKV, .gdnZ, .gdnAlpha, .gdnBeta,
+             .ffnGate, .ffnUp, .ffnDown:
+            return .gemm
+        case .attentionOutput, .gdnOutput: return .mixer
+        case .gdnConvState, .gdnState: return .state
+        case .ffnInput: return .norm
+        case .ffnSwiGLU: return .glue
         }
     }
 }

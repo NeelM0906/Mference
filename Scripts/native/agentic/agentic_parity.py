@@ -8,12 +8,22 @@
 The suite agentic-v1 is 32 deterministic tool-use and structured-output tasks:
 choosing among several tools, extracting arguments (numbers, enums, units,
 names), knowing when not to call a tool, using a tool result in the final
-answer across turns, and answering in a required JSON shape. Each task is sent
-to an OpenAI-compatible server (MferenceServer, loopback) at temperature 0 and
-scored by a model-free checker on the parsed tool calls or content. `run`
-scores one backend; `compare` puts the llama.cpp golden and the native
-candidate side by side. Parity holds when the candidate passes at least as
-many tasks as the golden minus PARITY_SLACK, and every flipped task is listed.
+answer across turns, and answering in a required JSON shape. Each task is sent to an
+OpenAI-compatible server on loopback at temperature 0 and scored by a
+model-free checker on the parsed tool calls or content. `run` scores one
+backend; `compare` puts the golden and the candidate side by side.
+
+Both sides go through the same MferenceServer build in --library mode: the
+golden is the llama.cpp Quick entry (LlamaBackend at the pin), the candidate
+the native Quick entry. The server renders the chat template and parses tool
+calls the same way for both, so only the backend differs. A task whose prompt
+renders to a different token count on the two sides is a setup error,
+reported apart and never counted as a parity result. A request, HTTP or server
+error on either side is a setup error too: the run measured nothing for that
+task, so the comparison fails until it is re-run. Parity holds when at
+most PARITY_SLACK tasks regress (pass on the golden, fail on the candidate),
+no task is missing and no prompt rendered differently; tasks the candidate
+newly passes are listed, never counted against it.
 
 The suite is frozen: a change is agentic-v2. Stdlib only; the checker and the
 verdict are unit-tested without a model (Scripts/tests/test_agentic_parity.py).
@@ -317,17 +327,35 @@ def score(task, result):
     raise ValueError(f"unknown check kind {kind}")
 
 
+def _prompt_tokens(entry):
+    return ((entry or {}).get("result") or {}).get("prompt_tokens")
+
+
 def compare(golden, candidate, slack=PARITY_SLACK):
-    """Verdict from two `run` reports ({task id: {passed, ...}})."""
+    """Verdict from two `run` reports ({task id: {passed, result, ...}})."""
     ids = [t["id"] for t in TASKS]
     missing = [i for i in ids if i not in golden or i not in candidate]
-    g = sum(1 for i in ids if golden.get(i, {}).get("passed"))
-    c = sum(1 for i in ids if candidate.get(i, {}).get("passed"))
-    flips = [{"task": i, "golden": golden[i]["passed"], "candidate": candidate[i]["passed"]}
-             for i in ids if i in golden and i in candidate and golden[i]["passed"] != candidate[i]["passed"]]
-    passed = not missing and c >= g - slack
+    both = [i for i in ids if i in golden and i in candidate]
+    # a request, HTTP or server error measured nothing: on either side it is a
+    # setup error that blocks the verdict, never a scored failure
+    # any "error" key counts, even a null one: the result is not a model answer
+    errored = lambda run: [i for i in both if "error" in (run[i].get("result") or {})]
+    setup_errors = {"golden": errored(golden), "candidate": errored(candidate)}
+    render_mismatch = [i for i in both
+                       if _prompt_tokens(golden[i]) is not None and _prompt_tokens(candidate[i]) is not None
+                       and _prompt_tokens(golden[i]) != _prompt_tokens(candidate[i])]
+    scored = [i for i in both if i not in render_mismatch
+              and i not in setup_errors["golden"] and i not in setup_errors["candidate"]]
+    regressions = [i for i in scored if golden[i]["passed"] and not candidate[i]["passed"]]
+    improvements = [i for i in scored if candidate[i]["passed"] and not golden[i]["passed"]]
+    g = sum(1 for i in scored if golden[i]["passed"])
+    c = sum(1 for i in scored if candidate[i]["passed"])
+    passed = (not missing and not render_mismatch and not setup_errors["golden"]
+              and not setup_errors["candidate"] and len(regressions) <= slack)
     return {"suite": SUITE, "tasks": len(ids), "golden_passed": g, "candidate_passed": c,
-            "slack": slack, "flips": flips, "missing": missing, "parity": passed}
+            "slack": slack, "regressions": regressions, "improvements": improvements,
+            "render_mismatch": render_mismatch, "setup_errors": setup_errors, "missing": missing,
+            "parity": passed}
 
 
 def body_for(task, model):
@@ -338,21 +366,27 @@ def body_for(task, model):
     return body
 
 
-def run_tasks(post, canonical, model):
+def run_tasks(post, canonical, model, on_task=None):
     """Score every task. `post(body)` returns engine_validate.post_chat's
     `(status, parsed, raw, elapsed)`; `canonical(parsed)` its canonical
-    result. A task whose scoring raises is recorded as failed, never aborts
-    the suite."""
+    result. A task whose request or scoring raises is recorded as failed,
+    never aborts the suite. `on_task(report)` runs after every task, so
+    partial results are saved as they come."""
     report = {}
     for task in TASKS:
-        status, parsed, *_ = post(body_for(task, model))
-        result = canonical(parsed) if status == 200 else {"error": f"HTTP {status}"}
+        try:
+            status, parsed, *_ = post(body_for(task, model))
+            result = canonical(parsed) if status == 200 else {"error": f"HTTP {status}"}
+        except Exception as error:  # a timeout or connection error fails this task only
+            result = {"error": f"request failed: {error!r}"}
         try:
             passed, reason = score(task, result)
         except Exception as error:  # a malformed response fails its task only
             passed, reason = False, f"scoring error: {error!r}"
         report[task["id"]] = {"passed": passed, "reason": reason, "result": result}
         print(f"{task['id']}: {'PASS' if passed else 'FAIL'} {reason}", file=sys.stderr)
+        if on_task:
+            on_task(report)
     return report
 
 
@@ -360,10 +394,16 @@ def cmd_run(args):
     ev = _ev()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+
+    def save(report, complete=False):
+        tmp = out / "agentic.json.tmp"
+        tmp.write_text(json.dumps({"suite": SUITE, "model": args.model, "complete": complete,
+                                   "tasks": report}, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(out / "agentic.json")
+
     report = run_tasks(lambda body: ev.post_chat(args.host, args.port, body, args.timeout),
-                       ev.canonical_from_message, args.model)
-    (out / "agentic.json").write_text(json.dumps({"suite": SUITE, "model": args.model, "tasks": report},
-                                                 indent=1, sort_keys=True) + "\n", encoding="utf-8")
+                       ev.canonical_from_message, args.model, on_task=save)
+    save(report, complete=True)
     print(f"{sum(r['passed'] for r in report.values())}/{len(report)} passed")
     return 0
 

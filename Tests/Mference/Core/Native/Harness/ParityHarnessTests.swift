@@ -55,11 +55,22 @@ struct ParityHarnessTests {
         #expect(OpToleranceClass.of(base: "model.input_embed") == .exact)
         #expect(OpToleranceClass.of(base: "attn_norm") == .norm)
         #expect(OpToleranceClass.of(base: "attn_gated") == .mixer)
-        #expect(OpToleranceClass.of(base: "l_out") == .residual)
+        #expect(OpToleranceClass.of(base: "l_out") == .glue)
         #expect(OpToleranceClass.of(base: "state_predelta") == .state)
+        // ambiguous and unknown names are never guessed
+        #expect(OpToleranceClass.of(base: "attn_output", op: "MUL_MAT") == .gemm)
+        #expect(OpToleranceClass.of(base: "attn_output", op: "VIEW") == .mixer)
+        #expect(OpToleranceClass.of(base: "attn_output") == nil)
+        #expect(OpToleranceClass.of(base: "Qcur_reshaped") == nil)
+        #expect(OpToleranceClass.of(Native.TapPoint.mixerOutput(layer: 2)) == .gemm)
+        #expect(OpToleranceClass.of(Native.TapPoint.layerOutput(layer: 2)) == .glue)
+        #expect(OpToleranceClass.of(Native.TapPoint.layerOutput(layer: 2), fusedGEMM: true) == .gemm)
+        #expect(OpToleranceClass.of(GoldenTapMap.Boundary.gdnOutput) == .mixer)
+        // every boundary and tap point has a class
+        for b in GoldenTapMap.Boundary.allCases { _ = OpToleranceClass.of(b) }
         #expect(ParityTolerances.d1 == ParityTolerances(minimumAgreement: 0.99, maxTokenKLD: 0.01, meanKLD: 0.001))
         var s = ParityMetrics.ErrorStats()
-        s.add(golden: [1, 0], candidate: [1.005, 0])
+        s.add(golden: [1, 0], candidate: [1.01, 0])  // rel L2 1e-2: within gemm (2e-2), not norm
         #expect(ParityHarness.localVerdict(s, class: .gemm, name: "x") == nil)
         #expect(ParityHarness.localVerdict(s, class: .norm, name: "x") != nil)
         #expect(ParityHarness.localVerdict(ParityMetrics.ErrorStats(), class: .gemm, name: "x") != nil)
@@ -108,6 +119,10 @@ struct ParityHarnessTests {
         #expect(prefix.missing == [1])
         #expect(!ParityHarness.LogitReport(results: [prefix]).verdict().passed)
         #expect(!ParityHarness.LogitReport(results: []).verdict().passed)
+        // a prompt whose golden has no positions compares nothing: a failure
+        let empty = ParityHarness.LogitResult(promptID: "e", positions: 0, agreements: 0, kld: [],
+                                              disagreements: [], disagreementMargins: [])
+        #expect(!ParityHarness.LogitReport(results: [empty]).verdict().passed)
     }
 
     /// A NaN or infinite candidate logit is never a perfect score, even when
@@ -174,6 +189,8 @@ struct ParityNoiseFloorTests {
             var results: [ParityHarness.LogitResult] = []
             var perClass: [OpToleranceClass: ParityMetrics.ErrorStats] = [:]
             var perBase: [String: ParityMetrics.ErrorStats] = [:]
+            // accumulation profile: l_out per block, and the graph-wide tensors
+            var perLayer: [String: ParityMetrics.ErrorStats] = [:]
             for p in set.prompts {
                 let golden = try GoldenStore.open(p.id)
                 let other = try GoldenStore.open(p.id, root: runURL)
@@ -181,8 +198,11 @@ struct ParityNoiseFloorTests {
                 guard other.manifest.mode == "golden", golden.manifest.mode == "golden" else { continue }
                 for t in golden.tensors where other.entry(named: t.name, occurrence: t.occurrence) != nil {
                     let s = try ParityHarness.compareTensor(named: t.name, occurrence: t.occurrence, golden: golden, run: other)
-                    perClass[OpToleranceClass.of(base: t.base), default: .init()].merge(s)
-                    perBase["\(t.base)#\(t.occurrence)", default: .init()].merge(s)
+                    if let c = OpToleranceClass.of(t) { perClass[c, default: .init()].merge(s) }
+                    perBase["\(t.base)#\(t.occurrence) \(t.op)", default: .init()].merge(s)
+                    if t.base == "l_out" || t.layer < 0 {
+                        perLayer["\(t.base) \(t.layer >= 0 ? String(t.layer) : "")", default: .init()].merge(s)
+                    }
                 }
             }
             let report = ParityHarness.LogitReport(results: results)
@@ -204,6 +224,12 @@ struct ParityNoiseFloorTests {
                     guard let s = perClass[c] else { continue }
                     out += "| \(c.rawValue) | \(s.count) | " + String(format: "%.3g | %.3g | %.3g |\n", s.maxAbs, s.meanAbs, s.relativeL2)
                 }
+                out += "\nAccumulation, pooled over every prompt and position:\n\n| tensor | rel L2 |\n|---|---:|\n"
+                let order = perLayer.keys.sorted { a, b in
+                    let la = Int(a.split(separator: " ").last ?? "") ?? -1, lb = Int(b.split(separator: " ").last ?? "") ?? -1
+                    return la == lb ? a < b : la < lb
+                }
+                for k in order { out += String(format: "| %@ | %.3g |\n", k, perLayer[k]!.relativeL2) }
                 out += "\n| tensor | max abs | mean abs | rel L2 |\n|---|---:|---:|---:|\n"
                 for (k, s) in perBase.sorted(by: { $0.key < $1.key }) {
                     out += String(format: "| %@ | %.3g | %.3g | %.3g |\n", k, s.maxAbs, s.meanAbs, s.relativeL2)
