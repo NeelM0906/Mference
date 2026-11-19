@@ -101,6 +101,12 @@ import Testing
         #expect(seen.ids == ["mail.compose", "mail.refresh"])
     }
 
+    @Test func screenActionsTakeTheGeneralControlsPlace() {
+        #expect(ShellTrailingControls.showsGeneralControls(screenItems: []))
+        let scan = ShellToolbarItem(id: "scan.actions", view: AnyView(Text("Open file")))
+        #expect(!ShellTrailingControls.showsGeneralControls(screenItems: [scan]))
+    }
+
     @Test func itemsAreEqualByID() {
         let a = ShellToolbarItem(id: "x", view: AnyView(Text("1")))
         let b = ShellToolbarItem(id: "x", view: AnyView(Text("2")))
