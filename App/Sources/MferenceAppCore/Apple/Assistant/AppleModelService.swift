@@ -43,22 +43,37 @@ public struct AppleModelService: AppleModelServicing {
     /// Characters of recognized text sent for one receipt or summary.
     static let textLimit = 6_000
 
+    /// Why no job runs when the person switched Apple's model off and no
+    /// fallback may run (background mail sorting, automatic event cards).
+    static let primaryOffReason = "The Apple Intelligence model is off in Settings."
+
     private let primary: any AssistantTextModel
     private let fallback: (any AssistantTextModel)?
+    /// Settings > Models > Apple Intelligence model, read before every job so
+    /// a change applies at once. Off skips `primary`; Quick still runs where
+    /// a fallback is allowed.
+    private let isPrimaryEnabled: @Sendable () async -> Bool
 
-    public init(primary: any AssistantTextModel, fallback: (any AssistantTextModel)?) {
+    public init(primary: any AssistantTextModel, fallback: (any AssistantTextModel)?,
+                isPrimaryEnabled: @escaping @Sendable () async -> Bool = { true }) {
         self.primary = primary
         self.fallback = fallback
+        self.isPrimaryEnabled = isPrimaryEnabled
     }
 
-    /// The production service over the app's engine.
-    public static func live(engine: any EngineServicing) -> AppleModelService {
-        AppleModelService(primary: FoundationTextModel(), fallback: QuickTextModel(engine: engine))
+    /// The production service over the app's engine. `useAppleModel` is the
+    /// person's Settings switch for Apple's on-device model.
+    public static func live(engine: any EngineServicing,
+                            useAppleModel: @escaping @Sendable () async -> Bool) -> AppleModelService {
+        AppleModelService(primary: FoundationTextModel(), fallback: QuickTextModel(engine: engine),
+                          isPrimaryEnabled: useAppleModel)
     }
 
     public func activeModel() async -> Result<AssistantModelKind, AssistantModelError> {
         var reasons: [String] = []
-        for model in candidates {
+        let models = await candidates(allowFallback: true)
+        if models.isEmpty { return .failure(.noModelAvailable(reason: Self.primaryOffReason)) }
+        for model in models {
             switch await model.availability() {
             case .available: return .success(model.kind)
             case .unavailable(let reason): reasons.append(reason)
@@ -112,7 +127,7 @@ public struct AppleModelService: AppleModelServicing {
                 return mapped
             }
             do {
-                let result = try await run(request, models: allowFallback ? candidates : [primary], parse: parse)
+                let result = try await run(request, models: await candidates(allowFallback: allowFallback), parse: parse)
                 assignments.merge(result.value) { _, new in new }
                 usedModel = usedModel ?? result.model
             } catch is CancellationError {
@@ -143,7 +158,7 @@ public struct AppleModelService: AppleModelServicing {
         let prompt = AssistantPrompts.eventPrompt(subject: subject, body: body, received: received, timeZone: timeZone)
         let request = AssistantRequest(instructions: AssistantPrompts.instructions(AssistantPrompts.mailEvent),
                                        prompt: prompt, maximumTokens: 120)
-        return try await run(request, models: allowFallback ? candidates : [primary]) { answer -> MailEventSuggestion?? in
+        return try await run(request, models: await candidates(allowFallback: allowFallback)) { answer -> MailEventSuggestion?? in
             guard let object = AssistantAnswerParser.jsonObject(in: answer) else { return nil }
             // Only an explicit "no meeting" (no title) is a valid empty
             // answer; a meeting whose times do not parse is unreadable, so
@@ -156,14 +171,19 @@ public struct AppleModelService: AppleModelServicing {
 
     // MARK: Running a job
 
-    private var candidates: [any AssistantTextModel] {
-        [primary] + (fallback.map { [$0] } ?? [])
+    /// The models a job may try, in order: Apple's unless the person
+    /// switched it off, then Quick when a fallback is allowed.
+    private func candidates(allowFallback: Bool) async -> [any AssistantTextModel] {
+        var models: [any AssistantTextModel] = []
+        if await isPrimaryEnabled() { models.append(primary) }
+        if allowFallback, let fallback { models.append(fallback) }
+        return models
     }
 
     /// Tries each available model in order until one gives a readable answer.
     private func run<Value: Sendable>(_ request: AssistantRequest,
                                       parse: (String) -> Value?) async throws -> AssistantResult<Value> {
-        try await run(request, models: candidates, parse: parse)
+        try await run(request, models: await candidates(allowFallback: true), parse: parse)
     }
 
     private func run<Value: Sendable>(_ request: AssistantRequest, models: [any AssistantTextModel],
@@ -195,7 +215,8 @@ public struct AppleModelService: AppleModelServicing {
                 lastError = .noModelAvailable(reason: "The on-device model could not answer.")
             }
         }
-        throw lastError ?? AssistantModelError.noModelAvailable(reason: "No on-device model is available.")
+        throw lastError ?? AssistantModelError.noModelAvailable(
+            reason: models.isEmpty ? Self.primaryOffReason : "No on-device model is available.")
     }
 }
 

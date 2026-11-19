@@ -345,6 +345,77 @@ struct HangingToolbox: ChatToolbox, ChatToolboxProvider {
         #expect(service.requests[0].turns.map(\.role) == [.user])
     }
 
+    @Test func enabledMemoriesReachTheModelAsASystemTurn() async throws {
+        let service = ScriptedEngineService(replies: [.init(content: "Noted.")])
+        let container = try AppModelContainer.inMemory()
+        let memory = MemoryStore(container: container)
+        _ = try memory.add("I live in Lisbon.")
+        let off = try #require(try memory.add("I am vegetarian."))
+        try memory.setEnabled(off, false)
+        let chat = ChatViewModel(service: service, store: ConversationStore(container: container))
+        chat.draft = "Where should I eat tonight?"
+        chat.send()
+        await chat.waitUntilIdle()
+        let turns = service.requests[0].turns
+        #expect(turns.map(\.role) == [.system, .user])
+        #expect(turns[0].content?.contains("- I live in Lisbon.") == true)
+        #expect(turns[0].content?.contains("vegetarian") == false)
+    }
+
+    @Test func memoryJoinsTheToolPromptInOneSystemTurn() async throws {
+        let service = ScriptedEngineService(replies: [.init(content: "Answer.")])
+        let container = try AppModelContainer.inMemory()
+        _ = try MemoryStore(container: container).add("My name is Sam.")
+        let chat = ChatViewModel(service: service, store: ConversationStore(container: container), tools: StubToolbox())
+        chat.setWebEnabled(true)
+        chat.draft = "Q"
+        chat.send()
+        await chat.waitUntilIdle()
+        let turns = service.requests[0].turns
+        #expect(turns.map(\.role) == [.system, .user])
+        #expect(turns[0].content?.hasPrefix("Use the tools.") == true)
+        #expect(turns[0].content?.contains("- My name is Sam.") == true)
+    }
+
+    @Test func memoryPromptIsBounded() throws {
+        #expect(ChatMemoryPrompt.text(facts: []) == nil)
+        #expect(ChatMemoryPrompt.text(facts: ["  "]) == nil)
+        let many = (0..<200).map { "Fact number \($0) " + String(repeating: "x", count: 60) }
+        let text = try #require(ChatMemoryPrompt.text(facts: many))
+        let lines = text.split(separator: "\n").filter { $0.hasPrefix("- ") }
+        #expect(lines.count <= ChatMemoryPrompt.maxFacts)
+        #expect(lines.reduce(0) { $0 + $1.count + 1 } <= ChatMemoryPrompt.maxCharacters + 1)
+        #expect(lines.first?.contains("Fact number 0 ") == true)
+    }
+
+    @MainActor final class DefaultModelBox {
+        var model: AppModel
+        init(_ model: AppModel) { self.model = model }
+    }
+
+    @Test func newChatsStartWithTheDefaultModel() async throws {
+        let service = ScriptedEngineService(replies: [.init(content: "Hi.")])
+        let container = try AppModelContainer.inMemory()
+        let preferred = DefaultModelBox(.deep)
+        let chat = ChatViewModel(service: service, store: ConversationStore(container: container),
+                                 defaultModel: { preferred.model })
+        #expect(chat.model == .deep)
+        chat.start()
+        for _ in 0..<200 where chat.option(for: .maple)?.availability != .ready { await Task.yield() }
+        try #require(chat.option(for: .maple)?.availability == .ready)
+
+        chat.draft = "Hello"
+        chat.send()
+        await chat.waitUntilIdle()
+        #expect(service.requests[0].model == .deep)
+
+        // Settings changes the default; the next new chat uses it.
+        preferred.model = .maple
+        chat.newChat()
+        #expect(chat.model == .maple)
+        chat.stopObserving()
+    }
+
     @Test func toolRoundsAreBounded() async throws {
         let call = ToolCall(id: "c", name: "web_search", arguments: .object([:]), argumentsJSON: "{}")
         let service = ScriptedEngineService(fallback: .init(content: "", toolCalls: [call]))

@@ -42,6 +42,36 @@ import Testing
         await engine.shutdown()
     }
 
+    /// Settings > Models > Apple Intelligence model, flipped during a test.
+    actor AppleSwitch {
+        var isOn: Bool
+        init(_ isOn: Bool) { self.isOn = isOn }
+        func set(_ value: Bool) { isOn = value }
+    }
+
+    @Test func settingsSwitchOffSkipsAppleEvenWhenAvailable() async throws {
+        let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answer: "\"From Apple\"")
+        let quick = ScriptedAssistantTextModel(kind: .quick, answer: "\"From Quick\"")
+        let toggle = AppleSwitch(false)
+        let service = AppleModelService(primary: apple, fallback: quick, isPrimaryEnabled: { await toggle.isOn })
+
+        #expect(try await service.activeModel().get() == .quick)
+        #expect(try await service.title(for: "Some text").model == .quick)
+        #expect(apple.requests.isEmpty)
+
+        // Automatic jobs may not fall back, so with Apple off they do not run.
+        await #expect(throws: AssistantModelError.noModelAvailable(reason: AppleModelService.primaryOffReason)) {
+            try await service.suggestEvent(subject: "Lunch", body: "Lunch at noon?", received: .now,
+                                           timeZone: .current, allowFallback: false)
+        }
+        #expect(apple.requests.isEmpty)
+        #expect(quick.requests.count == 1)
+
+        // Switching it back on applies to the next job.
+        await toggle.set(true)
+        #expect(try await service.title(for: "Some text").model == .appleOnDevice)
+    }
+
     @Test func fallsBackToQuickWhenAppleDeclinesOrAnswersBadly() async throws {
         let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [
             .failure(.declined("Apple's on-device model declined this text.")),

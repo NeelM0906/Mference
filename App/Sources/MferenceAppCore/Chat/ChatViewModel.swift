@@ -66,6 +66,9 @@ public final class ChatViewModel {
     @ObservationIgnored public let service: any EngineServicing
     @ObservationIgnored public let store: ConversationStore
     @ObservationIgnored private let tools: (any ChatToolboxProvider)?
+    /// The model a new chat starts with (Settings' default model), read each
+    /// time a chat is started so a change applies to the next one.
+    @ObservationIgnored private let defaultModel: @MainActor () -> AppModel
     /// How often streamed text reaches the view.
     @ObservationIgnored public var flushInterval: Duration = .milliseconds(30)
     /// Tool rounds per answer before the model must answer without tools.
@@ -118,10 +121,13 @@ public final class ChatViewModel {
     @ObservationIgnored private var pendingReasoning = ""
 
     public init(service: any EngineServicing, store: ConversationStore,
-                tools: (any ChatToolboxProvider)? = nil) {
+                tools: (any ChatToolboxProvider)? = nil,
+                defaultModel: @escaping @MainActor () -> AppModel = { .quick }) {
         self.service = service
         self.store = store
         self.tools = tools
+        self.defaultModel = defaultModel
+        model = defaultModel()
     }
 
     /// Loads the sidebar and follows engine status. Call once when the
@@ -165,12 +171,15 @@ public final class ChatViewModel {
     }
 
     /// Starts an empty chat; it is stored when its first message is sent.
-    /// Web search starts off: each chat opts in on its own (L7), so one chat's
+    /// It uses the default model unless that one is not installed. Web
+    /// search starts off: each chat opts in on its own (L7), so one chat's
     /// opt-in never carries into another, private or not.
     public func newChat(isPrivate: Bool = false) {
         selectedID = nil
         messages = []
         errorMessage = nil
+        let preferred = defaultModel()
+        if case .notInstalled = option(for: preferred)?.availability {} else { model = preferred }
         webEnabled = false
         self.isPrivate = isPrivate
         title = Conversation.defaultTitle
@@ -343,10 +352,14 @@ public final class ChatViewModel {
         defer { finishGeneration(conversationID: conversation.id) }
 
         do {
+            // What the person asked Mference to remember (Settings > Memory),
+            // read once per answer.
+            let memory = ChatMemoryPrompt.text(facts: store.rememberedFacts())
             while true {
                 var turns = store.turns(for: conversation)
-                if let prompt = toolbox?.systemPrompt(now: now()) {
-                    turns.insert(ChatTurn(role: .system, content: prompt), at: 0)
+                let system = [toolbox?.systemPrompt(now: now()), memory].compactMap { $0 }
+                if !system.isEmpty {
+                    turns.insert(ChatTurn(role: .system, content: system.joined(separator: "\n\n")), at: 0)
                 }
                 let offerTools = toolbox != nil && round < maxToolRounds
                 let options = GenerationOptions(tools: offerTools ? toolbox?.definitions ?? [] : [])
@@ -530,5 +543,28 @@ enum ChatError: Error {
         switch self {
         case .endedEarly: "The answer ended before it was finished. Try again."
         }
+    }
+}
+
+/// The system-prompt section that carries the person's enabled memories.
+public enum ChatMemoryPrompt {
+    /// Facts beyond these limits are left out, newest changes kept, so
+    /// memory never crowds out the conversation.
+    public static let maxFacts = 50
+    public static let maxCharacters = 4_000
+
+    /// Nil when nothing is remembered.
+    public static func text(facts: [String]) -> String? {
+        var lines: [String] = []
+        var used = 0
+        for fact in facts.prefix(maxFacts) {
+            let line = "- " + fact.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.count > 2, used + line.count <= maxCharacters else { continue }
+            lines.append(line)
+            used += line.count + 1
+        }
+        guard !lines.isEmpty else { return nil }
+        return "Things the person asked you to remember about them. Use them when they are relevant; "
+            + "do not mention this list unless asked.\n" + lines.joined(separator: "\n")
     }
 }
