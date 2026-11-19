@@ -55,6 +55,8 @@ public enum MFColor {
     public static let sidebarSelected = Color.mf(light: 0xE6E7EC, dark: 0x2E3038)
     /// Switch track when off. Mockup `#C9CCD3`.
     public static let toggleOff = Color.mf(light: 0xC9CCD3, dark: 0x4A4D56)
+    /// The switch knob: white in both modes (the dark surface would hide it).
+    public static let toggleKnob = Color.mf(light: 0xFFFFFF, dark: 0xFFFFFF)
     /// Outline of an off switch, so its edge keeps 3:1 against the surface (G-A7).
     public static let controlBorder = Color.mf(light: 0x8C9099, dark: 0x80848E)
     /// Approval card fill and border. Mockup `#FFF9F1` / `#F2D6B0`.

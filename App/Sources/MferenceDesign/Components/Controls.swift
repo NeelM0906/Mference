@@ -215,7 +215,7 @@ public struct MFToggleStyle: ToggleStyle {
                         Capsule().strokeBorder(MFColor.controlBorder, lineWidth: MFLayout.hairline)
                     }
                     Circle()
-                        .fill(MFColor.surface)
+                        .fill(MFColor.toggleKnob)
                         .frame(width: MFMetrics.toggleKnob, height: MFMetrics.toggleKnob)
                         .shadow(color: .black.opacity(MFMetrics.toggleKnobShadow), radius: MFMetrics.toggleKnobShadowRadius,
                                 y: MFMetrics.toggleKnobShadowOffset)
