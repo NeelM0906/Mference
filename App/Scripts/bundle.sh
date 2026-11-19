@@ -210,18 +210,18 @@ check_accessor() {
     local pattern="$1" name="$2" needle="$3" found=0 file
     while IFS= read -r -d '' file; do
         found=1
-        if ! grep -qF "$needle" "$file"; then
+        if ! grep -qE "$needle" "$file"; then
             echo "bundle.sh: $file does not search $needle; the moved app would not find its resources" >&2
             exit 1
         fi
-    done < <(find "$APP_DIR/.build" -path "*Release*" -path "$pattern" -name "$name" -print0 2>/dev/null)
+    done < <(find "$APP_DIR/.build" -ipath "*release*" -path "$pattern" -name "$name" -print0 2>/dev/null)
     if [[ "$found" == 0 ]]; then
         echo "bundle.sh: no release resource accessor matching $pattern to check" >&2
         exit 1
     fi
 }
-check_accessor '*LlamaCpp*' 'resource_bundle_accessor.m' 'NSBundle.mainBundle.resourceURL'
-check_accessor '*/Mference-t*' 'resource_bundle_accessor.swift' 'Bundle.main.resourceURL'
+check_accessor '*LlamaCpp*' 'resource_bundle_accessor.m' 'mainBundle] (bundleURL|resourceURL)]'
+check_accessor '*/Mference.*' 'resource_bundle_accessor.swift' 'Bundle\.main\.(bundleURL|resourceURL)'
 
 # Moved-app check: a copy outside the build tree still finds every bundle.
 MOVED_DIR="$(mktemp -d)"
