@@ -160,6 +160,21 @@ import Testing
         #expect(model.todos.count == 1)
     }
 
+    /// Codex on #173: a to-do deleted while its first sync runs has no
+    /// reminder ID yet; the reminder that sync made must be deleted, not
+    /// imported back as a new to-do.
+    @Test @MainActor func aToDoDeletedDuringItsFirstSyncStaysDeleted() async throws {
+        let service = InMemoryCalendarService(remindersAccess: .granted)
+        let model = Self.model(service: service, defaults: Self.syncOn())
+        let todo = try #require(model.addTodo(text: "Book flights", due: nil, dueChosen: true))
+        await service.setOnOpenReminders { await MainActor.run { model.removeTodo(todo.id) } }
+        await model.syncReminders()
+        #expect(model.todos.isEmpty)
+        #expect(await service.reminders.isEmpty)
+        await model.syncReminders()
+        #expect(model.todos.isEmpty)
+    }
+
     @Test @MainActor func aSyncThatChangesNothingSavesNothing() async {
         let service = InMemoryCalendarService(remindersAccess: .granted)
         let model = Self.model(service: service, defaults: Self.syncOn())

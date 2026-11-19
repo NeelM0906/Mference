@@ -541,7 +541,15 @@ public final class CalendarWeekModel {
             let open = try await service.openReminders(in: RemindersSyncSetting.listIDs(defaults))
             let openIDs = Set(open.map(\.id))
             let stamp = now()
+            var orphaned: Set<String> = []
             persist {
+                // A to-do deleted here while this sync ran: the reminder the
+                // sync just made for it is deleted next, never imported back.
+                let present = Set($0.todos.map(\.id))
+                for (todoID, outcome) in outcomes where !present.contains(todoID) {
+                    if case .synced(let reminderID, _) = outcome { orphaned.insert(reminderID) }
+                }
+                $0.deletedReminderIDs.formUnion(orphaned)
                 var deletedThere: Set<UUID> = []
                 for index in $0.todos.indices {
                     switch outcomes[$0.todos[index].id] {
@@ -572,8 +580,8 @@ public final class CalendarWeekModel {
                             && todo.reminderID.map { !openIDs.contains($0) } == true)
                 }
                 // New in Reminders: a new to-do here.
-                let linked = Set($0.todos.compactMap(\.reminderID))
-                for reminder in open where !linked.contains(reminder.id) {
+                let skipped = Set($0.todos.compactMap(\.reminderID)).union($0.deletedReminderIDs)
+                for reminder in open where !skipped.contains(reminder.id) {
                     var todo = TodoItem(title: reminder.title, due: reminder.due,
                                         source: ItemSource(kind: .reminders, label: reminder.listTitle),
                                         reminderID: reminder.id, createdAt: reminder.created ?? stamp)
@@ -582,6 +590,7 @@ public final class CalendarWeekModel {
                 }
                 $0.lastReminderSync = stamp
             }
+            if !orphaned.isEmpty { syncAgain = true }
             errorMessage = nil
         } catch let error as CalendarServiceError {
             errorMessage = error.userMessage

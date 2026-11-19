@@ -120,8 +120,19 @@ public actor InMemoryCalendarService: CalendarServicing {
         return lists
     }
 
+    /// Tests: runs while a sync reads Reminders (a to-do deleted mid-sync).
+    private var onOpenReminders: (@Sendable () async -> Void)?
+
+    public func setOnOpenReminders(_ hook: (@Sendable () async -> Void)?) {
+        onOpenReminders = hook
+    }
+
     public func openReminders(in listIDs: Set<String>?) async throws -> [ReminderSnapshot] {
         guard remindersState == .granted else { throw CalendarServiceError.noAccess(remindersState) }
+        if let hook = onOpenReminders {
+            onOpenReminders = nil
+            await hook()
+        }
         return reminders.compactMap { id, item -> ReminderSnapshot? in
             let list = reminderListOf[id] ?? ""
             guard !item.isDone, listIDs?.contains(list) ?? true else { return nil }
