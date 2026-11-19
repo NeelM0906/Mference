@@ -185,42 +185,108 @@ public actor EventKitService: CalendarServicing {
 
     // MARK: Reminders
 
-    public func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: ReminderSyncOutcome] {
+    public func syncReminders(_ todos: [TodoItem], to listID: String?) async throws -> [UUID: ReminderSyncOutcome] {
         try requireAccess(.reminder)
         var outcomes: [UUID: ReminderSyncOutcome] = [:]
+        var saved = false
         do {
             for todo in todos where !todo.unlinkedFromReminders {
                 if let id = todo.reminderID {
                     guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else {
-                        // Deleted in Reminders: respect that, do not recreate.
+                        // Deleted in Reminders: the to-do goes too.
                         outcomes[todo.id] = .deletedInReminders
                         continue
                     }
                     // Push only what changed in Mference since the last sync,
                     // so edits made in Reminders survive; notes are left alone.
+                    // Nothing changed: nothing is saved, so no change notice
+                    // comes back to start another sync.
                     let last = todo.lastSynced
-                    if last?.title != todo.title { reminder.title = todo.title }
-                    if last?.isDone != todo.isDone { reminder.isCompleted = todo.isDone }
-                    if last?.due != todo.due { reminder.dueDateComponents = Self.dueComponents(todo.due) }
-                    try store.save(reminder, commit: false)
+                    var changed = false
+                    if last?.title != todo.title, reminder.title != todo.title {
+                        reminder.title = todo.title
+                        changed = true
+                    }
+                    if last?.isDone != todo.isDone, reminder.isCompleted != todo.isDone {
+                        reminder.isCompleted = todo.isDone
+                        changed = true
+                    }
+                    if last?.due != todo.due, Self.fields(reminder).due != todo.due {
+                        reminder.dueDateComponents = Self.dueComponents(todo.due)
+                        changed = true
+                    }
+                    if changed {
+                        try store.save(reminder, commit: false)
+                        saved = true
+                    }
                     outcomes[todo.id] = .synced(reminderID: id, fields: Self.fields(reminder))
                 } else {
                     let reminder = EKReminder(eventStore: store)
-                    reminder.calendar = try remindersList()
+                    reminder.calendar = try remindersList(listID)
                     reminder.title = todo.title
                     reminder.isCompleted = todo.isDone
                     reminder.dueDateComponents = Self.dueComponents(todo.due)
-                    reminder.notes = "From Mference · \(todo.source.kindLabel): \(todo.source.label)"
+                    if todo.source.kind != .manual {
+                        reminder.notes = "From Mference · \(todo.source.kindLabel): \(todo.source.label)"
+                    }
                     try store.save(reminder, commit: false)
+                    saved = true
                     outcomes[todo.id] = .synced(reminderID: reminder.calendarItemIdentifier, fields: Self.fields(reminder))
                 }
             }
-            try store.commit()
+            if saved { try store.commit() }
         } catch {
             store.reset()
             throw CalendarServiceError.saveFailed(error.localizedDescription)
         }
         return outcomes
+    }
+
+    public func reminderLists() async throws -> [ReminderList] {
+        try requireAccess(.reminder)
+        let defaultID = store.defaultCalendarForNewReminders()?.calendarIdentifier
+        return store.calendars(for: .reminder)
+            .map { ReminderList(id: $0.calendarIdentifier, title: $0.title, color: $0.color.flatMap(Self.hex),
+                                isDefault: $0.calendarIdentifier == defaultID) }
+            .sorted { ($0.isDefault ? 0 : 1, $0.title) < ($1.isDefault ? 0 : 1, $1.title) }
+    }
+
+    public func openReminders(in listIDs: Set<String>?) async throws -> [ReminderSnapshot] {
+        try requireAccess(.reminder)
+        var lists: [EKCalendar]?
+        if let listIDs {
+            lists = store.calendars(for: .reminder).filter { listIDs.contains($0.calendarIdentifier) }
+            if lists?.isEmpty == true { return [] }
+        }
+        let predicate = store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: lists)
+        return await withCheckedContinuation { continuation in
+            store.fetchReminders(matching: predicate) { reminders in
+                continuation.resume(returning: (reminders ?? []).map(Self.snapshot))
+            }
+        }
+    }
+
+    public func removeReminders(_ ids: [String]) async throws {
+        try requireAccess(.reminder)
+        var removed = false
+        do {
+            for id in ids {
+                guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder else { continue }
+                try store.remove(reminder, commit: false)
+                removed = true
+            }
+            if removed { try store.commit() }
+        } catch {
+            store.reset()
+            throw CalendarServiceError.saveFailed(error.localizedDescription)
+        }
+    }
+
+    static func snapshot(_ reminder: EKReminder) -> ReminderSnapshot {
+        let fields = fields(reminder)
+        return ReminderSnapshot(id: reminder.calendarItemIdentifier, title: fields.title, isDone: fields.isDone,
+                                due: fields.due, listID: reminder.calendar?.calendarIdentifier ?? "",
+                                listTitle: reminder.calendar?.title ?? "Reminders", created: reminder.creationDate)
     }
 
     static func dueComponents(_ due: Date?) -> DateComponents? {
@@ -232,13 +298,19 @@ public actor EventKitService: CalendarServicing {
                                 due: reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) })
     }
 
-    private func remindersList() throws -> EKCalendar {
+    /// The chosen list; else the default Reminders list; else a "Mference"
+    /// list made in the default account.
+    private func remindersList(_ listID: String?) throws -> EKCalendar {
+        if let listID, let chosen = store.calendar(withIdentifier: listID), chosen.allowsContentModifications {
+            return chosen
+        }
+        if let fallback = store.defaultCalendarForNewReminders() { return fallback }
         if let existing = store.calendars(for: .reminder).first(where: { $0.title == Self.remindersListName }) {
             return existing
         }
         let list = EKCalendar(for: .reminder, eventStore: store)
         list.title = Self.remindersListName
-        guard let source = store.defaultCalendarForNewReminders()?.source ?? store.sources.first(where: {
+        guard let source = store.sources.first(where: {
             $0.sourceType == .local || $0.sourceType == .calDAV
         }) else { throw CalendarServiceError.saveFailed("No Reminders account is set up on this Mac.") }
         list.source = source

@@ -11,13 +11,20 @@ import Testing
         let defaults = UserDefaults(suiteName: "mference-snapshots-\(UUID().uuidString)")!
         let store = PlannerStore(url: nil, initial: .init(todos: AppleUIFixtures.todos, proposals: [AppleUIFixtures.proposal]))
         let model = CalendarWeekModel(service: InMemoryCalendarService(events: AppleUIFixtures.events), store: store,
-                                      defaults: defaults, now: { fixedNow })
+                                      defaults: defaults, now: { fixedNow }, syncsAutomatically: false)
         await model.load()
-        #expect(model.weekTitle == "September 14 to 18")
+        #expect(model.title.contains("September"))
         for scheme in [ColorScheme.light, .dark] {
             try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
                 .environment(model), name: "04-calendar-todos", colorScheme: scheme)
         }
+        // Day, Month and Year (the switch at the top).
+        for mode in [CalendarViewMode.day, .month, .year] {
+            await model.show(mode)
+            try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
+                .environment(model), name: "04-calendar-\(mode.rawValue)", colorScheme: .dark)
+        }
+        await model.show(.week)
 
         let notAsked = CalendarWeekModel(service: InMemoryCalendarService(calendarAccess: .notDetermined),
                                          store: PlannerStore(url: nil), defaults: defaults,

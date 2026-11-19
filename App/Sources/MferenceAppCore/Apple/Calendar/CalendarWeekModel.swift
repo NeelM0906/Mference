@@ -1,8 +1,9 @@
 import Foundation
 import Observation
 
-/// The Calendar screen's state: the week's events, proposals waiting for one
-/// click, and the to-do list (mockup 04).
+/// The Calendar screen's state: the day, week, month or year shown, its
+/// events, proposals waiting for one click, and the dated to-do list kept in
+/// step with Apple Reminders.
 @MainActor @Observable
 public final class CalendarWeekModel {
     public enum Access: Sendable, Hashable {
@@ -17,76 +18,238 @@ public final class CalendarWeekModel {
     }
 
     public private(set) var access: Access = .notAsked
-    public private(set) var weekStart: Date
+    /// Day, week, month or year; remembered across launches.
+    public private(set) var mode: CalendarViewMode
+    /// The day in focus: the period shown contains it, the to-do panel's
+    /// date is it, and a typed to-do is dated to it.
+    public private(set) var selectedDate: Date
     public private(set) var events: [CalendarEvent] = []
     public private(set) var todos: [TodoItem] = []
     public private(set) var proposals: [ProposedEvent] = []
     /// One user-facing sentence after a failed action.
     public private(set) var errorMessage: String?
     public private(set) var isSyncingReminders = false
+    /// When the last Reminders sync finished.
+    public private(set) var lastReminderSync: Date?
+    /// The Reminders lists, read when Settings shows them.
+    public private(set) var reminderLists: [ReminderList] = []
     /// Opens Settings > Connections (the "Settings" link in the to-do panel);
     /// set by the app.
     @ObservationIgnored public var openSettings: (@MainActor () -> Void)?
     @ObservationIgnored private var loadGeneration = 0
+    @ObservationIgnored private var syncAgain = false
 
-    public let layout: WeekLayout
+    private let baseLayout: WeekLayout
     private let service: any CalendarServicing
     private let store: PlannerStore
     private let defaults: UserDefaults
     private let now: @Sendable () -> Date
+    /// Local to-do changes start a Reminders sync on their own (only when
+    /// sync is on and access was already given; never a prompt).
+    private let syncsAutomatically: Bool
+
+    static let modeKey = "calendarViewMode"
 
     public init(service: any CalendarServicing, store: PlannerStore, layout: WeekLayout = WeekLayout(),
-                defaults: UserDefaults = .standard, now: @escaping @Sendable () -> Date = { .now }) {
+                defaults: UserDefaults = .standard, now: @escaping @Sendable () -> Date = { .now },
+                syncsAutomatically: Bool = true) {
         self.service = service
         self.store = store
-        self.layout = layout
+        self.baseLayout = layout
         self.defaults = defaults
         self.now = now
-        self.weekStart = layout.weekStart(containing: now())
+        self.syncsAutomatically = syncsAutomatically
+        self.mode = defaults.string(forKey: Self.modeKey).flatMap(CalendarViewMode.init(rawValue:)) ?? .week
+        self.selectedDate = layout.calendar.startOfDay(for: now())
         let contents = store.snapshot
         todos = contents.todos
         proposals = contents.proposals
+        lastReminderSync = contents.lastReminderSync
     }
 
-    // MARK: Week
+    public var calendar: Calendar { baseLayout.calendar }
 
+    /// The hour grid's layout: one column in the day view, seven otherwise.
+    public var layout: WeekLayout {
+        var layout = baseLayout
+        layout.days = mode == .day ? 1 : 7
+        return layout
+    }
+
+    // MARK: Period
+
+    /// The first day of the period shown: the day, its week, its month or
+    /// its year.
+    public var periodStart: Date {
+        switch mode {
+        case .day: calendar.startOfDay(for: selectedDate)
+        case .week: layout.weekStart(containing: selectedDate)
+        case .month: calendar.dateInterval(of: .month, for: selectedDate)?.start ?? selectedDate
+        case .year: calendar.dateInterval(of: .year, for: selectedDate)?.start ?? selectedDate
+        }
+    }
+
+    /// Kept for the hour grid: the first column's day.
+    public var weekStart: Date { mode == .day || mode == .week ? periodStart : layout.weekStart(containing: selectedDate) }
+
+    /// The hour grid's columns (day and week views).
     public var days: [Date] { layout.dayDates(from: weekStart) }
+
+    /// The month view's cells: whole weeks from the one holding the 1st to
+    /// the one holding the last day.
+    public var monthGrid: [Date] { monthDays(containing: selectedDate) }
+
+    /// Whole weeks covering the month that contains `date` (month view,
+    /// mini months).
+    public func monthDays(containing date: Date) -> [Date] {
+        guard let month = calendar.dateInterval(of: .month, for: date) else { return [] }
+        let first = baseLayout.weekStart(containing: month.start)
+        let lastDay = calendar.date(byAdding: .day, value: -1, to: month.end) ?? month.start
+        let lastWeek = baseLayout.weekStart(containing: lastDay)
+        let weeks = (calendar.dateComponents([.day], from: first, to: lastWeek).day ?? 0) / 7 + 1
+        return (0..<(weeks * 7)).compactMap { calendar.date(byAdding: .day, value: $0, to: first) }
+    }
+
+    /// The window loaded from Calendar for the current view.
+    public var fetchInterval: DateInterval {
+        switch mode {
+        case .day, .week: return layout.interval(from: weekStart)
+        case .month:
+            let grid = monthGrid
+            guard let first = grid.first, let last = grid.last,
+                  let end = calendar.date(byAdding: .day, value: 1, to: last) else { return DateInterval(start: periodStart, duration: 0) }
+            return DateInterval(start: first, end: end)
+        case .year:
+            return calendar.dateInterval(of: .year, for: selectedDate) ?? DateInterval(start: periodStart, duration: 0)
+        }
+    }
 
     public var blocks: [WeekBlock] {
         layout.blocks(weekStart: weekStart, events: events, proposals: proposalsThisWeek)
     }
 
-    /// All-day and off-hours events by day (0 = first day shown).
+    /// All-day events by column (0 = first day shown).
     public var outsideGrid: [Int: [CalendarEvent]] {
         layout.outsideGrid(weekStart: weekStart, events: events)
+    }
+
+    /// One day's events: all-day first, then by start (month view).
+    public func events(on day: Date) -> [CalendarEvent] {
+        let start = calendar.startOfDay(for: day)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { return [] }
+        return events.filter { event in
+            event.start == event.end ? (event.start >= start && event.start < end) : (event.start < end && event.end > start)
+        }.sorted { ($0.isAllDay ? 0 : 1, $0.start, $0.title) < ($1.isAllDay ? 0 : 1, $1.start, $1.title) }
+    }
+
+    /// Days of the loaded period that have any event (year view's dots).
+    public var daysWithEvents: Set<Date> {
+        var days: Set<Date> = []
+        for event in events {
+            var day = calendar.startOfDay(for: event.start)
+            let last = event.end > event.start ? event.end.addingTimeInterval(-1) : event.start
+            while day <= last {
+                days.insert(day)
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                day = next
+            }
+        }
+        return days
     }
 
     /// Proposals being added right now: a second click does nothing.
     public private(set) var addingProposals: Set<UUID> = []
 
     public var proposalsThisWeek: [ProposedEvent] {
-        let interval = layout.interval(from: weekStart)
+        let interval = mode == .day || mode == .week ? layout.interval(from: weekStart) : fetchInterval
         return proposals.filter { interval.contains($0.start) }.sorted { $0.start < $1.start }
     }
 
-    /// "September 14 to 18", or "September 28 to October 2".
-    public var weekTitle: String {
-        guard let first = days.first, let last = days.last else { return "" }
-        let calendar = layout.calendar
+    /// The header, in this Mac's language and region: "Wednesday, November
+    /// 18, 2026", "November 2026" (or "November – December 2026"),
+    /// "November 2026", "2026".
+    public var title: String {
+        switch mode {
+        case .day: return format(selectedDate, template: "EEEEMMMMdy")
+        case .week:
+            guard let first = days.first, let last = days.last else { return "" }
+            if calendar.isDate(first, equalTo: last, toGranularity: .month) { return format(first, template: "MMMMy") }
+            let formatter = DateIntervalFormatter()
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.dateTemplate = "MMMMy"
+            return formatter.string(from: first, to: last)
+        case .month: return format(selectedDate, template: "MMMMy")
+        case .year: return format(selectedDate, template: "y")
+        }
+    }
+
+    private func format(_ date: Date, template: String) -> String {
         let formatter = DateFormatter()
         formatter.calendar = calendar
         formatter.timeZone = calendar.timeZone
-        formatter.setLocalizedDateFormatFromTemplate("MMMM")
-        let month = { (date: Date) in formatter.string(from: date) }
-        let day = { (date: Date) in String(calendar.component(.day, from: date)) }
-        if calendar.isDate(first, equalTo: last, toGranularity: .month) {
-            return "\(month(first)) \(day(first)) to \(day(last))"
-        }
-        return "\(month(first)) \(day(first)) to \(month(last)) \(day(last))"
+        formatter.locale = calendar.locale ?? .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter.string(from: date)
     }
 
     public func isToday(_ date: Date) -> Bool {
-        layout.calendar.isDate(date, inSameDayAs: now())
+        calendar.isDate(date, inSameDayAs: now())
+    }
+
+    public func isSelected(_ date: Date) -> Bool {
+        calendar.isDate(date, inSameDayAs: selectedDate)
+    }
+
+    /// Today's start, for grouping to-dos.
+    public var today: Date { calendar.startOfDay(for: now()) }
+
+    /// The current time, for the grid's now line.
+    public var currentTime: Date { now() }
+
+    // MARK: Navigation
+
+    /// Day, Week, Month or Year (⌘1 to ⌘4); the selected day stays.
+    public func show(_ mode: CalendarViewMode) async {
+        guard mode != self.mode else { return }
+        self.mode = mode
+        defaults.set(mode.rawValue, forKey: Self.modeKey)
+        await reload()
+    }
+
+    /// ‹ and ›: one day, week, month or year back or forward.
+    public func step(_ offset: Int) async {
+        let component: Calendar.Component = switch mode {
+        case .day: .day
+        case .week: .weekOfYear
+        case .month: .month
+        case .year: .year
+        }
+        selectedDate = calendar.date(byAdding: component, value: offset, to: selectedDate) ?? selectedDate
+        await reload()
+    }
+
+    /// Today (⌘T), in the view shown.
+    public func showToday() async {
+        selectedDate = today
+        await reload()
+    }
+
+    /// A day clicked in the mini month, a column header or a month cell:
+    /// it becomes the selected day; the period follows if needed.
+    public func select(_ date: Date) async {
+        let before = fetchInterval
+        selectedDate = calendar.startOfDay(for: date)
+        if fetchInterval != before { await reload() }
+    }
+
+    /// Open a day (or month) in another view: a month cell's "+2 more", a
+    /// date in the year view.
+    public func open(_ date: Date, in mode: CalendarViewMode) async {
+        selectedDate = calendar.startOfDay(for: date)
+        self.mode = mode
+        defaults.set(mode.rawValue, forKey: Self.modeKey)
+        await reload()
     }
 
     /// Checks access without asking, then loads the week if allowed.
@@ -104,13 +267,14 @@ public final class CalendarWeekModel {
     /// asking.
     public func calendarChanged() async {
         await load()
+        await syncRemindersQuietly()
     }
 
     /// The app became active again (back from System Settings, say):
     /// re-reads access while it is missing.
     public func recheckAccess() async {
-        guard access != .granted else { return }
-        await load()
+        if access != .granted { await load() }
+        await syncRemindersQuietly()
     }
 
     /// The person clicked "Show my calendar": the broker shows the reason,
@@ -131,23 +295,13 @@ public final class CalendarWeekModel {
         await service.openSystemSettings(for: .calendar)
     }
 
-    public func showWeek(offset: Int) async {
-        weekStart = layout.calendar.date(byAdding: .weekOfYear, value: offset, to: weekStart) ?? weekStart
-        await reload()
-    }
-
-    public func showToday() async {
-        weekStart = layout.weekStart(containing: now())
-        await reload()
-    }
-
     public func reload() async {
         guard access == .granted else { events = []; return }
         // A slower load for a week the person already left must not
         // overwrite the newer one.
         loadGeneration += 1
         let generation = loadGeneration
-        let interval = layout.interval(from: weekStart)
+        let interval = fetchInterval
         do {
             let loaded = try await service.events(from: interval.start, to: interval.end)
             guard generation == loadGeneration else { return }
@@ -259,6 +413,19 @@ public final class CalendarWeekModel {
 
     public var remindersSyncEnabled: Bool { RemindersSyncSetting.isEnabled(defaults) }
 
+    /// A to-do typed in the panel: dated to `due` (the selected day unless
+    /// the person changed the chip), or to a date written in the text
+    /// ("tomorrow", "fri", "11/24"), which is then taken out of the title.
+    @discardableResult
+    public func addTodo(text: String, due: Date?, dueChosen: Bool = false) -> TodoItem? {
+        var parsed = TodoInput.parse(text, calendar: calendar)
+        if dueChosen || parsed.due == nil { parsed.due = due.map(calendar.startOfDay) }
+        guard !parsed.title.isEmpty else { return nil }
+        let todo = TodoItem(title: parsed.title, due: parsed.due, createdAt: now())
+        addTodo(todo)
+        return todo
+    }
+
     public func addTodo(_ todo: TodoItem) {
         let key = todo.source.reference.map { "todo-\(todo.source.kind.rawValue):\($0)" }
         guard key.map({ !store.snapshot.handledSources.contains($0) }) ?? true else { return }
@@ -266,6 +433,7 @@ public final class CalendarWeekModel {
             $0.todos.append(todo)
             if let key { $0.handledSources.insert(key) }
         }
+        changedLocally()
     }
 
     public func setDone(_ done: Bool, for id: UUID) {
@@ -273,10 +441,28 @@ public final class CalendarWeekModel {
             guard let index = $0.todos.firstIndex(where: { $0.id == id }) else { return }
             $0.todos[index].isDone = done
         }
+        changedLocally()
     }
 
+    /// Moves a to-do to another day (nil: no date).
+    public func setDue(_ due: Date?, for id: UUID) {
+        persist {
+            guard let index = $0.todos.firstIndex(where: { $0.id == id }) else { return }
+            $0.todos[index].due = due.map(calendar.startOfDay)
+        }
+        changedLocally()
+    }
+
+    /// Deletes the to-do; its reminder goes too at the next sync (a delete
+    /// in one app deletes in both).
     public func removeTodo(_ id: UUID) {
-        persist { $0.todos.removeAll { $0.id == id } }
+        let deletesReminder = remindersSyncEnabled
+        persist {
+            guard let index = $0.todos.firstIndex(where: { $0.id == id }) else { return }
+            if deletesReminder, let reminderID = $0.todos[index].reminderID { $0.deletedReminderIDs.insert(reminderID) }
+            $0.todos.remove(at: index)
+        }
+        changedLocally()
     }
 
     /// Open first, then done ones.
@@ -292,22 +478,71 @@ public final class CalendarWeekModel {
         }
     }
 
-    /// The person clicked "Sync to Reminders" (each sync asks first, L9).
-    /// Does nothing unless the Settings switch is on.
+    /// The panel's groups: Overdue, Today, each later day, No date, then
+    /// Completed. A day group is shown for the selected day even when empty.
+    public var todoSections: [TodoSection] {
+        TodoSection.sections(todos, today: today, selected: calendar.startOfDay(for: selectedDate), calendar: calendar)
+    }
+
+    /// "Sync now": asks for Reminders access if needed (each step asks
+    /// first, L9). Does nothing unless the Settings switch is on.
     public func syncReminders() async {
+        await runSync(mayAsk: true)
+    }
+
+    /// Automatic sync (a local change, Reminders changed, the app came back):
+    /// only when the switch is on and access was already given.
+    public func syncRemindersQuietly() async {
+        guard remindersSyncEnabled, await service.remindersAccess() == .granted else { return }
+        await runSync(mayAsk: false)
+    }
+
+    private func changedLocally() {
+        guard syncsAutomatically, remindersSyncEnabled else { return }
+        Task { await syncRemindersQuietly() }
+    }
+
+    private func runSync(mayAsk: Bool) async {
         guard remindersSyncEnabled else { return }
+        // One sync at a time; a request during one runs once more after it.
+        guard !isSyncingReminders else { syncAgain = true; return }
         isSyncingReminders = true
         defer { isSyncingReminders = false }
+        var ask = mayAsk
+        repeat {
+            syncAgain = false
+            await syncOnce(mayAsk: ask)
+            ask = false
+        } while syncAgain
+    }
+
+    private func syncOnce(mayAsk: Bool) async {
         var state = await service.remindersAccess()
-        if state != .granted { state = await service.requestRemindersAccess() }
+        if state != .granted, mayAsk { state = await service.requestRemindersAccess() }
         guard state == .granted else {
-            errorMessage = "Mference cannot reach Reminders. Turn it on in System Settings > Privacy & Security."
+            if mayAsk {
+                errorMessage = "Mference can't see Reminders. Turn it on in System Settings > Privacy & Security > Reminders."
+            }
             return
         }
         do {
+            // 1. To-dos deleted here: delete their reminders.
+            let deletions = store.snapshot.deletedReminderIDs
+            if !deletions.isEmpty {
+                try await service.removeReminders(deletions.sorted())
+                persist { $0.deletedReminderIDs.subtract(deletions) }
+            }
+            // 2. Push changes made here; read back what Reminders has.
             let pushed = Dictionary(uniqueKeysWithValues: todos.map { ($0.id, $0.reminderFields) })
-            let outcomes = try await service.syncReminders(todos)
+            let target = RemindersSyncSetting.targetListID(defaults)
+            let outcomes = try await service.syncReminders(todos, to: target)
+            // 3. Open reminders in the lists the person chose. A to-do added
+            // here stays whatever list its reminder went to.
+            let open = try await service.openReminders(in: RemindersSyncSetting.listIDs(defaults))
+            let openIDs = Set(open.map(\.id))
+            let stamp = now()
             persist {
+                var deletedThere: Set<UUID> = []
                 for index in $0.todos.indices {
                     switch outcomes[$0.todos[index].id] {
                     case .synced(let reminderID, let fields)?:
@@ -323,13 +558,29 @@ public final class CalendarWeekModel {
                             $0.todos[index].due = fields.due
                         }
                     case .deletedInReminders?:
-                        $0.todos[index].reminderID = nil
-                        $0.todos[index].lastSynced = nil
-                        $0.todos[index].unlinkedFromReminders = true
+                        deletedThere.insert($0.todos[index].id)
                     case nil:
                         break
                     }
                 }
+                // Deleted in Reminders: deleted here too. A reminder that
+                // came from a list no longer shown leaves the panel (it stays
+                // in Reminders).
+                $0.todos.removeAll { todo in
+                    deletedThere.contains(todo.id)
+                        || (todo.source.kind == .reminders && !todo.isDone
+                            && todo.reminderID.map { !openIDs.contains($0) } == true)
+                }
+                // New in Reminders: a new to-do here.
+                let linked = Set($0.todos.compactMap(\.reminderID))
+                for reminder in open where !linked.contains(reminder.id) {
+                    var todo = TodoItem(title: reminder.title, due: reminder.due,
+                                        source: ItemSource(kind: .reminders, label: reminder.listTitle),
+                                        reminderID: reminder.id, createdAt: reminder.created ?? stamp)
+                    todo.lastSynced = reminder.fields
+                    $0.todos.append(todo)
+                }
+                $0.lastReminderSync = stamp
             }
             errorMessage = nil
         } catch let error as CalendarServiceError {
@@ -337,6 +588,32 @@ public final class CalendarWeekModel {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    // MARK: Reminders lists (Settings)
+
+    /// Reads the lists for Settings (only once access was given).
+    public func loadReminderLists() async {
+        guard await service.remindersAccess() == .granted else { reminderLists = []; return }
+        reminderLists = (try? await service.reminderLists()) ?? []
+    }
+
+    /// The lists shown as to-dos; nil means every list.
+    public var shownReminderListIDs: Set<String>? { RemindersSyncSetting.listIDs(defaults) }
+
+    public func setShown(_ shown: Bool, list id: String) {
+        var ids = shownReminderListIDs ?? Set(reminderLists.map(\.id))
+        if shown { ids.insert(id) } else { ids.remove(id) }
+        // Every list ticked: store "every list", so new lists show too.
+        RemindersSyncSetting.setListIDs(ids == Set(reminderLists.map(\.id)) ? nil : ids, defaults)
+        Task { await syncRemindersQuietly() }
+    }
+
+    /// The list new to-dos go to; nil means the default list.
+    public var targetReminderListID: String? { RemindersSyncSetting.targetListID(defaults) }
+
+    public func setTargetReminderList(_ id: String?) {
+        RemindersSyncSetting.setTargetListID(id, defaults)
     }
 
     public func clearError() { errorMessage = nil }
@@ -350,5 +627,6 @@ public final class CalendarWeekModel {
         let contents = store.snapshot
         todos = contents.todos
         proposals = contents.proposals
+        lastReminderSync = contents.lastReminderSync
     }
 }

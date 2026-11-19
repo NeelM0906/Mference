@@ -53,7 +53,7 @@ public struct CalendarEvent: Sendable, Hashable, Identifiable {
 
 /// Where a proposal or a to-do came from, for its source link.
 public struct ItemSource: Sendable, Hashable, Codable {
-    public enum Kind: String, Sendable, Hashable, Codable { case mail, meeting, scan, manual }
+    public enum Kind: String, Sendable, Hashable, Codable { case mail, meeting, scan, manual, reminders }
 
     public var kind: Kind
     /// "Northside Dental", "Weekly product sync".
@@ -74,6 +74,7 @@ public struct ItemSource: Sendable, Hashable, Codable {
         case .meeting: "Meeting"
         case .scan: "Scan"
         case .manual: "Added by you"
+        case .reminders: "Reminders"
         }
     }
 }
@@ -196,11 +197,61 @@ public protocol CalendarServicing: Sendable {
     /// Deletes this occurrence only.
     func remove(_ event: EventReference) async throws
 
-    /// Creates a Reminder for each new to-do in the "Mference" list and, for
-    /// linked ones, pushes only the fields Mference changed since the last
-    /// sync; never touches notes after creation, never recreates a reminder
-    /// deleted in Reminders.
-    func syncReminders(_ todos: [TodoItem]) async throws -> [UUID: ReminderSyncOutcome]
+    /// Creates a Reminder for each new to-do in `listID` (nil: the default
+    /// Reminders list) and, for linked ones, pushes only the fields Mference
+    /// changed since the last sync, saving nothing when nothing changed (a
+    /// save would fire `EKEventStoreChanged` and sync again); never touches
+    /// notes after creation, never recreates a reminder deleted in Reminders.
+    func syncReminders(_ todos: [TodoItem], to listID: String?) async throws -> [UUID: ReminderSyncOutcome]
+    /// The Reminders lists on this Mac, the default one first.
+    func reminderLists() async throws -> [ReminderList]
+    /// Open (not completed) reminders in these lists (nil: every list).
+    func openReminders(in listIDs: Set<String>?) async throws -> [ReminderSnapshot]
+    /// Deletes these reminders (a to-do deleted in Mference); ones already
+    /// gone are skipped.
+    func removeReminders(_ ids: [String]) async throws
+}
+
+/// One Reminders list, for the Settings choices.
+public struct ReminderList: Sendable, Hashable, Identifiable {
+    /// EventKit's `calendarIdentifier`.
+    public var id: String
+    public var title: String
+    /// 0xRRGGBB, if known.
+    public var color: UInt32?
+    public var isDefault: Bool
+
+    public init(id: String, title: String, color: UInt32? = nil, isDefault: Bool = false) {
+        self.id = id
+        self.title = title
+        self.color = color
+        self.isDefault = isDefault
+    }
+}
+
+/// One reminder as read from Reminders.
+public struct ReminderSnapshot: Sendable, Hashable, Identifiable {
+    /// EventKit's `calendarItemIdentifier`.
+    public var id: String
+    public var title: String
+    public var isDone: Bool
+    public var due: Date?
+    public var listID: String
+    public var listTitle: String
+    public var created: Date?
+
+    public init(id: String, title: String, isDone: Bool = false, due: Date? = nil, listID: String,
+                listTitle: String, created: Date? = nil) {
+        self.id = id
+        self.title = title
+        self.isDone = isDone
+        self.due = due
+        self.listID = listID
+        self.listTitle = listTitle
+        self.created = created
+    }
+
+    public var fields: TodoItem.ReminderFields { TodoItem.ReminderFields(title: title, isDone: isDone, due: due) }
 }
 
 /// What happened to one to-do in a Reminders sync.
