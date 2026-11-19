@@ -101,6 +101,35 @@ struct GoldenStoreTests {
         #expect(throws: GoldenError.notConfigured) { try GoldenStore.open("p", root: nil) }
     }
 
+    /// The slice check catches a changed tensor file even when the logits,
+    /// tokens and sizes are unchanged.
+    @Test func sliceVerifyCatchesAChangedTensorFile() throws {
+        let root = try Self.syntheticRun()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dir = root.appendingPathComponent("p")
+        func digest(_ rel: String) throws -> String { try GoldenSlice.sha256(dir.appendingPathComponent(rel)) }
+        var tokens: [Int32] = [5, 6, 7]
+        let lines = try ["tensors/Kcur-3.1.f32", "tensors/l_out-3.f32"].map { "\($0) \(try digest($0))\n" }.sorted()
+        let entry = GoldenSlice.Prompt(
+            promptTokenCount: 3, promptTokensSHA256: GoldenSlice.sha256(Data(bytes: &tokens, count: 12)),
+            renderedPromptSHA256: try digest("prompt.txt"), generatedTokens: [3, 0], stoppedOnEog: false,
+            logitsTop: [], files: ["logits.f32": try digest("logits.f32"), "prompt.txt": try digest("prompt.txt")],
+            tensorCount: 2, tensorsDigest: GoldenSlice.sha256(Data(lines.joined().utf8)))
+        #expect(try entry.verify(try GoldenStore.open("p", root: root)).isEmpty)
+
+        // same size, one value changed
+        var changed: [Float] = [10, 11, 20, 21, 40, 41.5]
+        try Data(bytes: &changed, count: 24).write(to: dir.appendingPathComponent("tensors/l_out-3.f32"))
+        #expect(try entry.verify(try GoldenStore.open("p", root: root)) == ["tensor files differ from the digest"])
+    }
+
+    @Test func convStateTransposesToRecurrentLayout() {
+        // ggml [channels=2][taps=3]: c0 = (1,2,3), c1 = (4,5,6)
+        let ggml: [Float] = [1, 2, 3, 4, 5, 6]
+        // RecurrentLayout [taps=3][channels=2]
+        #expect(GoldenPrompt.transposeConvState(ggml, taps: 3) == [1, 4, 2, 5, 3, 6])
+    }
+
     @Test func positionRanges() throws {
         #expect(try GoldenManifest.positions([[0, 2], [5, 7]]) == [0, 1, 5, 6])
         #expect(try GoldenManifest.positions([]) == [])
@@ -138,7 +167,7 @@ struct GoldenStoreTests {
     }
 
     @Test func sliceMatchesThePromptSet() throws {
-        guard let slice = try GoldenSlice.load() else { return }
+        let slice = try #require(try GoldenSlice.load(), "the committed slice quick-v1-metal-slice.json is missing")
         let set = try GoldenStore.promptSet()
         #expect(slice.promptSet == set.name)
         #expect(Set(slice.prompts.keys) == Set(set.prompts.map(\.id)))
@@ -194,6 +223,32 @@ struct GoldenSlice: Decodable {
             case stoppedOnEog = "stopped_on_eog"
             case logitsTop = "logits_top"
         }
+
+        /// Differences between a golden prompt on disk and this digest (empty
+        /// when they match): tokens, `logits.f32` and `prompt.txt`, and every
+        /// tensor file through the digest `make_slice.py` writes (sha256 of the
+        /// sorted `"<file> <sha256>\n"` lines).
+        func verify(_ g: GoldenPrompt) throws -> [String] {
+            var problems: [String] = []
+            if g.promptTokens.count != promptTokenCount { problems.append("prompt token count") }
+            var tokens = g.promptTokens
+            if GoldenSlice.sha256(Data(bytes: &tokens, count: tokens.count * 4)) != promptTokensSHA256 {
+                problems.append("prompt tokens")
+            }
+            if g.generatedTokens != generatedTokens { problems.append("generated tokens") }
+            for (file, expected) in files.sorted(by: { $0.key < $1.key }) {
+                if try GoldenSlice.sha256(g.directory.appendingPathComponent(file)) != expected { problems.append(file) }
+            }
+            if g.tensors.count != tensorCount { problems.append("tensor count \(g.tensors.count) vs \(tensorCount)") }
+            var lines: [String] = []
+            for t in g.tensors {
+                lines.append("\(t.file) \(try GoldenSlice.sha256(g.directory.appendingPathComponent(t.file)))\n")
+            }
+            if GoldenSlice.sha256(Data(lines.sorted().joined().utf8)) != tensorsDigest {
+                problems.append("tensor files differ from the digest")
+            }
+            return problems
+        }
     }
 
     var format: String
@@ -203,6 +258,14 @@ struct GoldenSlice: Decodable {
     enum CodingKeys: String, CodingKey {
         case format, run, prompts
         case promptSet = "prompt_set"
+    }
+
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func sha256(_ url: URL) throws -> String {
+        sha256(try Data(contentsOf: url, options: .alwaysMapped))
     }
 
     static func url(run: String = "metal") -> URL {
@@ -252,23 +315,43 @@ struct GoldenStoreRealTests {
         }
     }
 
-    @Test func goldensMatchTheCommittedSlice() throws {
-        guard let slice = try GoldenSlice.load() else { return }
-        let root = try #require(GoldenStore.root)
-        for (id, s) in slice.prompts {
-            let g = try GoldenStore.open(id)
-            #expect(g.promptTokens.count == s.promptTokenCount, "\(id)")
-            var tokens = g.promptTokens
-            let tokenDigest = SHA256.hash(data: Data(bytes: &tokens, count: tokens.count * 4))
-                .map { String(format: "%02x", $0) }.joined()
-            #expect(tokenDigest == s.promptTokensSHA256, "\(id)")
-            #expect(g.generatedTokens == s.generatedTokens, "\(id)")
-            // the logits file is the one the slice was made from
-            if let expected = s.files["logits.f32"] {
-                let data = try Data(contentsOf: root.appendingPathComponent("\(id)/logits.f32"), options: .alwaysMapped)
-                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-                #expect(digest == expected, "\(id) logits.f32")
+    /// Every op boundary the component tests feed or compare is present with
+    /// its shape at the last prompt position, and the GDN state at the first
+    /// decode step.
+    @Test func everyPromptHasItsOpBoundaries() throws {
+        let set = try GoldenStore.promptSet()
+        let config = GoldenStoreTests.quick
+        typealias B = GoldenTapMap.Boundary
+        let attention: [(B, Int)] = [(.attentionQGate, 8192), (.attentionK, 1024), (.attentionV, 1024), (.attentionOutput, 4096)]
+        let gdn: [(B, Int)] = [(.gdnQKV, config.ssmConvChannels), (.gdnZ, config.ssmInnerSize), (.gdnAlpha, 32),
+                               (.gdnBeta, 32), (.gdnOutput, config.ssmInnerSize)]
+        let ffn: [(B, Int)] = [(.ffnInput, 2560), (.ffnGate, 9216), (.ffnUp, 9216), (.ffnSwiGLU, 9216), (.ffnDown, 2560)]
+        for p in set.prompts {
+            let g = try GoldenStore.open(p.id)
+            guard g.manifest.mode == "golden" else { continue }
+            let last = g.promptTokens.count - 1
+            for l in 0..<config.blockCount {
+                let mixer = config.layerKind(l) == .fullAttention ? attention : gdn
+                for (b, cols) in mixer + ffn {
+                    let m = try g.tensor(b, layer: l)
+                    #expect(m.cols == cols, "\(p.id) \(b) layer \(l): \(m.cols) cols")
+                    #expect(m.rowIndex(ofPosition: last) != nil, "\(p.id) \(b) layer \(l) at \(last)")
+                }
+                guard config.layerKind(l) == .gatedDeltaNet, g.manifest.capture.decodeSteps > 0 else { continue }
+                let conv = try #require(try g.convState(layer: l, position: last + 1), "\(p.id) conv \(l)")
+                #expect(conv.count == (config.ssmConvKernel - 1) * config.ssmConvChannels)
+                let state = try #require(try g.ssmState(layer: l, position: last + 1), "\(p.id) S \(l)")
+                #expect(state.count == config.ssmTimeStepRank * config.ssmStateSize * config.ssmStateSize)
+                #expect(state.contains { $0 != 0 }, "\(p.id) S \(l) is all zero")
             }
+        }
+    }
+
+    @Test func goldensMatchTheCommittedSlice() throws {
+        let slice = try #require(try GoldenSlice.load(), "the committed slice quick-v1-metal-slice.json is missing")
+        for (id, s) in slice.prompts {
+            let problems = try s.verify(try GoldenStore.open(id))
+            #expect(problems.isEmpty, "\(id): \(problems)")
         }
     }
 }

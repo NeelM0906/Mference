@@ -355,7 +355,11 @@ enum GoldenTapMap {
         // Gated DeltaNet (GDNOp): inputs qkv, z, alpha, beta; output
         case gdnQKV, gdnZ, gdnAlpha, gdnBeta, gdnOutput
         // GDN recurrent state before a decode step (first decode step only):
-        // conv tail F32 [3 x 8192] (ggml layout ne [3, 8192]) and S [32 x 128 x 128]
+        // conv tail: F32 in ggml order ne [3, 8192], i.e. [8192][3] with
+        // element `c*3 + k` (NOT `RecurrentLayout`'s [3][8192]; use
+        // `GoldenPrompt.convState(layer:position:)` for that order).
+        // S: F32 ne [128, 128, 32], element `h*16384 + j*128 + i` = S[i][j]
+        // (key i, value j), the same order as `RecurrentLayout`.
         case gdnConvState, gdnState
         // FFN (QuantGEMM + GlueOps): input, gate, up, SwiGLU, down output
         case ffnInput, ffnGate, ffnUp, ffnSwiGLU, ffnDown
@@ -388,5 +392,34 @@ extension GoldenPrompt {
     func tensor(_ boundary: GoldenTapMap.Boundary, layer: Int) throws -> GoldenMatrix {
         let ref = GoldenTapMap.graphTensor(boundary, layer: layer)
         return try tensor(named: ref.name, occurrence: ref.occurrence)
+    }
+
+    /// GDN layer `layer`'s conv tail before the decode step at `position`, in
+    /// `RecurrentLayout` order: `[convKernel - 1][convChannels]`, element
+    /// `k * channels + c`. The golden stores ggml's `[channels][convKernel - 1]`
+    /// (`c * taps + k`); this transposes it. Nil when not captured there.
+    func convState(layer: Int, position: Int, taps: Int = 3) throws -> [Float]? {
+        let m = try tensor(.gdnConvState, layer: layer)
+        guard let row = m.row(atPosition: position) else { return nil }
+        return Self.transposeConvState(row, taps: taps)
+    }
+
+    /// ggml `[channels][taps]` (`c * taps + k`) to `[taps][channels]`
+    /// (`k * channels + c`).
+    static func transposeConvState(_ ggml: [Float], taps: Int) -> [Float] {
+        precondition(taps > 0 && ggml.count % taps == 0, "conv state of \(ggml.count) floats, \(taps) taps")
+        let channels = ggml.count / taps
+        var out = [Float](repeating: 0, count: ggml.count)
+        for c in 0..<channels {
+            for k in 0..<taps { out[k * channels + c] = ggml[c * taps + k] }
+        }
+        return out
+    }
+
+    /// GDN layer `layer`'s S before the decode step at `position`, already in
+    /// `RecurrentLayout` order (`[valueHeads][valueDim][keyDim]`, element
+    /// `h*dv*dk + j*dk + i` = S[i][j]); no transpose. Nil when not captured.
+    func ssmState(layer: Int, position: Int) throws -> [Float]? {
+        try tensor(.gdnState, layer: layer).row(atPosition: position)
     }
 }
