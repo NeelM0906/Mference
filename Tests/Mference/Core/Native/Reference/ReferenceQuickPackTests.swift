@@ -48,6 +48,9 @@ struct ReferenceQuickPackTests {
         #expect(tokenizer.eosTokenID == 248_046)
         // With the source GGUF, re-check every tensor against its GGUF bytes
         // and the template and tokenizer data against its metadata.
+        if Self.env["MFERENCE_NATIVE_QUICK_GGUF"] == nil {
+            print("reference quick pack: MFERENCE_NATIVE_QUICK_GGUF unset, skipping the check against the source GGUF")
+        }
         if let ggufPath = Self.env["MFERENCE_NATIVE_QUICK_GGUF"] {
             let gguf = try Native.ReferenceGGUFFile(url: URL(fileURLWithPath: ggufPath))
             #expect(gguf.tensors.map(\.name) == store.manifest.tensors.map(\.name))
@@ -59,7 +62,10 @@ struct ReferenceQuickPackTests {
             #expect(gguf.string("tokenizer.chat_template") == store.chatTemplate.template)
             #expect(try gguf.qwen35Config() == store.config)
         }
-        guard GoldenStore.root != nil else { return }
+        guard GoldenStore.root != nil else {
+            print("reference quick pack: MFERENCE_NATIVE_GOLDENS unset, skipping the tokenizer check against the goldens")
+            return
+        }
         var checked = 0
         for prompt in try GoldenStore.promptSet().prompts {
             let golden = try GoldenStore.open(prompt.id)

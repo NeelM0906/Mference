@@ -76,6 +76,10 @@ extension Native {
                 let key = try cursor.string()
                 let type = try cursor.u32()
                 guard metadata[key] == nil else { throw NativeError.integrity("GGUF key \(key) appears twice") }
+                // ggml reads general.alignment only as a u32.
+                if key == "general.alignment" && type != 4 {
+                    throw NativeError.integrity("general.alignment must be a u32, not GGUF type \(type)")
+                }
                 metadata[key] = try cursor.value(type: type)
                 keys.append(key)
             }
@@ -212,6 +216,23 @@ extension Native {
                 guard let i = Int(exactly: v) else { throw NativeError.integrity("GGUF value \(v) out of range") }
                 return i
             }
+            /// The smallest encoding of one element of GGUF value type `type`.
+            static func minimumElementSize(_ type: UInt32) -> Int {
+                switch type {
+                case 0, 1, 7: return 1
+                case 2, 3: return 2
+                case 4, 5, 6: return 4
+                case 8, 10, 11, 12: return 8  // a string is at least its u64 length
+                case 9: return 12             // u32 element type + u64 count
+                default: return 1
+                }
+            }
+
+            /// `count`, capped at what `remaining` bytes can encode.
+            static func reservableCount(_ count: Int, elementType: UInt32, remaining: Int) -> Int {
+                min(count, max(0, remaining) / minimumElementSize(elementType))
+            }
+
             mutating func string() throws -> String {
                 let n = try int(u64())
                 guard n < 1 << 26 else { throw NativeError.integrity("GGUF string of \(n) bytes") }
@@ -238,7 +259,9 @@ extension Native {
                     let count = try int(u64())
                     guard count < 1 << 26 else { throw NativeError.integrity("GGUF array of \(count)") }
                     var values: [Value] = []
-                    values.reserveCapacity(count)
+                    // Never reserve more elements than the remaining bytes can hold.
+                    values.reserveCapacity(Self.reservableCount(count, elementType: elementType,
+                                                                remaining: size - position))
                     for _ in 0..<count { values.append(try value(type: elementType, depth: depth + 1)) }
                     return .array(values)
                 case 10: return .uint(try u64())

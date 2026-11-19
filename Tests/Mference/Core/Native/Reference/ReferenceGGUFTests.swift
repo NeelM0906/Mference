@@ -100,6 +100,19 @@ struct ReferenceGGUFTests {
         b.offsetOverride[0] = UInt64.max - 31
         Self.expectRefused(b, "offset beyond Int")
 
+        // general.alignment must be a u32, as ggml reads it.
+        b = Self.builder([Self.q8("a")])
+        b.kv.append(("general.alignment", 10, RefSynthetic.GGUFBuilder.le(UInt64(64))))
+        Self.expectRefused(b, "u64 alignment")
+
+        // A huge array count in a tiny file is refused without reserving it.
+        #expect(Native.ReferenceGGUFFile.Cursor.reservableCount(1 << 25, elementType: 0, remaining: 100) == 100)
+        #expect(Native.ReferenceGGUFFile.Cursor.reservableCount(1 << 25, elementType: 8, remaining: 100) == 12)
+        #expect(Native.ReferenceGGUFFile.Cursor.reservableCount(5, elementType: 4, remaining: 1000) == 5)
+        b = Self.builder([Self.q8("a")])
+        b.kv.append(("big.array", 9, RefSynthetic.GGUFBuilder.le(UInt32(8)) + RefSynthetic.GGUFBuilder.le(UInt64((1 << 26) - 1))))
+        Self.expectRefused(b, "array count beyond the file")
+
         // A truncated header and an absurd string length.
         let good = Self.builder([Self.q8("a")]).data()
         for cut in [10, 30, 60] {

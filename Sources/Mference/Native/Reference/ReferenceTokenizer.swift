@@ -428,19 +428,39 @@ extension Native {
             if !attr.intersection([.unknown, .control, .userDefined]).isEmpty { return text }
             if attr.contains(.normal) { return ReferenceUnicode.decodeByteText(text) }
             if attr.contains(.byte) {
-                // `token_to_byte` for BPE: strtol(text.substr(3, 2), 16).
+                // `token_to_byte` for BPE: (char) strtol(text.substr(3, 2), NULL, 16).
+                // A text under 3 bytes makes substr throw at the pin; the
+                // reference returns no bytes for it.
                 guard text.count >= 3 else { return [] }
-                var value = 0
-                for b in text[3 ..< min(5, text.count)] {
-                    guard let digit = Int(String(UnicodeScalar(b)), radix: 16) else { break }
-                    value = value * 16 + digit
-                }
-                return [UInt8(truncatingIfNeeded: value)]
+                return [UInt8(truncatingIfNeeded: Self.strtol16(Array(text[3 ..< min(5, text.count)])))]
             }
             return []
         }
 
         public func attr(_ token: Int32) -> Attr { attrs[Int(token)] }
+
+        /// C `strtol(s, NULL, 16)`: leading isspace, an optional sign, an
+        /// optional 0x/0X prefix (only when a hex digit follows), then hex
+        /// digits; 0 when none.
+        static func strtol16(_ s: [UInt8]) -> Int {
+            var i = 0
+            while i < s.count, s[i] == 0x20 || (0x09...0x0D).contains(s[i]) { i += 1 }
+            var negative = false
+            if i < s.count, s[i] == 0x2B || s[i] == 0x2D {
+                negative = s[i] == 0x2D
+                i += 1
+            }
+            func digit(_ b: UInt8) -> Int? { Int(String(UnicodeScalar(b)), radix: 16) }
+            if i + 2 < s.count, s[i] == 0x30, s[i + 1] == 0x78 || s[i + 1] == 0x58, digit(s[i + 2]) != nil {
+                i += 2
+            }
+            var value = 0
+            while i < s.count, let d = digit(s[i]) {
+                value = value * 16 + d
+                i += 1
+            }
+            return negative ? -value : value
+        }
     }
 
     /// The pieces of llama.cpp's `unicode.cpp` the reference tokenizer uses.

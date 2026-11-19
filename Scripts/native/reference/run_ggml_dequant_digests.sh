@@ -13,3 +13,6 @@ clang -O1 -ffp-contract=off -w \
   -Wl,-undefined,dynamic_lookup -o "$out/digests"
 "$out/digests"
 echo "ggml-quants.c $(git -C "$root" rev-parse HEAD) $(shasum -a 256 "$root/Sources/LlamaCpp/ggml/src/ggml-quants.c" | cut -d" " -f1)"
+for f in "$here/ggml_dequant_digests.c" "$root/Sources/LlamaCpp/ggml/src/ggml-impl.h" "$root/Sources/LlamaCpp/ggml/src/ggml-common.h"; do
+  echo "$(basename "$f") $(shasum -a 256 "$f" | cut -d" " -f1)"
+done
