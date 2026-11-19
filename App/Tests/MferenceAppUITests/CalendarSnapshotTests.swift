@@ -15,16 +15,16 @@ import Testing
         await model.load()
         #expect(model.weekTitle == "September 14 to 18")
         for scheme in [ColorScheme.light, .dark] {
-            try AppleSnapshot.render(AppleSnapshot.board(.calendar) { CalendarView(model: model, loadsOnAppear: false) },
-                            name: "04-calendar-todos", colorScheme: scheme)
+            try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
+                .environment(model), name: "04-calendar-todos", colorScheme: scheme)
         }
 
         let notAsked = CalendarWeekModel(service: InMemoryCalendarService(calendarAccess: .notDetermined),
                                          store: PlannerStore(url: nil), defaults: defaults,
                                          now: { fixedNow })
         await notAsked.load()
-        try AppleSnapshot.render(AppleSnapshot.board(.calendar) { CalendarView(model: notAsked, loadsOnAppear: false) },
-                        name: "04-calendar-todos-access")
+        try Snapshot.render(RootView(model: ShellModel(selection: .calendar, defaults: nil), chrome: .inline)
+                .environment(notAsked), name: "04-calendar-todos-access")
     }
 
     @Test func shellSlotBuildsWithoutServices() {

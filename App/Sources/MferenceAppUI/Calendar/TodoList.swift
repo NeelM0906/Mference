@@ -21,7 +21,7 @@ struct TodoList: View {
                     .foregroundStyle(MFColor.tertiary)
             }
             syncCard
-            FitOrScroll {
+            MFScroll {
                 VStack(spacing: 0) {
                     ForEach(model.sortedTodos) { todo in
                         TodoRow(todo: todo) { model.setDone($0, for: todo.id) }
@@ -80,7 +80,7 @@ struct TodoList: View {
                     .disabled(model.isSyncingReminders || model.todos.isEmpty)
             } else {
                 Button("Settings") { model.openSettings?() }
-                    .buttonStyle(.link)
+                    .buttonStyle(.plain)
                     .font(MFFont.calloutEmphasis)
                     .foregroundStyle(MFColor.accent)
                     .accessibilityHint("Opens Settings > Connections, where Reminders sync is turned on")

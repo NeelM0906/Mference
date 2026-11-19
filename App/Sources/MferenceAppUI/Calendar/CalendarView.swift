@@ -155,7 +155,7 @@ struct WeekGrid: View {
             }
             Rectangle().fill(MFColor.hairline).frame(height: 1)
             GeometryReader { outer in
-                AppleScroll {
+                MFScroll {
                 ZStack(alignment: .topLeading) {
                     VStack(spacing: 0) {
                         ForEach(hours, id: \.self) { hour in

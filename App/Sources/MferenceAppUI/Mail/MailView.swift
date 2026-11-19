@@ -81,7 +81,9 @@ struct MailSidebar: View {
         VStack(alignment: .leading, spacing: MFSpacing.xs) {
             HStack {
                 AppleSectionHeader(text: "Sorted for you")
-                Spacer()
+                    .lineLimit(1)
+                    .fixedSize()
+                Spacer(minLength: MFSpacing.xs)
                 Button(model.isRenamingBuckets ? "Done" : "Rename") { model.isRenamingBuckets.toggle() }
                     .buttonStyle(.plain)
                     .font(MFFont.calloutEmphasis)
@@ -203,7 +205,7 @@ struct MailList: View {
             .padding(.horizontal, MFSpacing.l + MFSpacing.xs)
             .padding(.vertical, MFSpacing.l)
             Rectangle().fill(MFColor.hairlineFaint).frame(height: 1)
-            FitOrScroll {
+            MFScroll {
                 VStack(spacing: 0) {
                     ForEach(model.messages) { message in
                         MailRow(message: message, selected: model.selected?.messageID == message.messageID)
@@ -269,7 +271,7 @@ struct MailRow: View {
         VStack(alignment: .leading, spacing: MFSpacing.xxs) {
             HStack(alignment: .firstTextBaseline) {
                 Text(message.senderName.isEmpty ? message.senderAddress : message.senderName)
-                    .font(MFFont.callout.weight(message.isRead ? .medium : .semibold))
+                    .font(message.isRead ? MFFont.bodySmallEmphasis : MFFont.rowTitle)
                     .foregroundStyle(MFColor.ink)
                     .lineLimit(1)
                 Spacer()
@@ -282,9 +284,9 @@ struct MailRow: View {
                 .foregroundStyle(MFColor.ink)
                 .lineLimit(1)
             Text(message.snippet)
-                .font(MFFont.caption)
+                .font(MFFont.preview)
                 .foregroundStyle(MFColor.secondary)
-                .lineSpacing(MFSpacing.xxs)
+                .lineSpacing(MFLineSpacing.tight)
                 .lineLimit(2)
         }
         .padding(.horizontal, MFSpacing.l + MFSpacing.xs)
@@ -316,7 +318,7 @@ struct MailReader: View {
 
     var body: some View {
         if let message = model.selected {
-            FitOrScroll {
+            MFScroll {
                 VStack(alignment: .leading, spacing: MFSpacing.l) {
                     Text(message.subject)
                         .font(MFFont.title)
@@ -327,7 +329,7 @@ struct MailReader: View {
                         Text(body.text)
                             .font(MFFont.body)
                             .foregroundStyle(MFColor.ink)
-                            .lineSpacing(MFSpacing.xs + MFSpacing.xxs)
+                            .lineSpacing(MFLineSpacing.relaxed)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
@@ -474,7 +476,7 @@ struct DraftCard: View {
                 Text(model.draft)
                     .font(MFFont.body)
                     .foregroundStyle(MFColor.ink)
-                    .lineSpacing(MFSpacing.xs)
+                    .lineSpacing(MFLineSpacing.relaxed)
                     .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
                     .textSelection(.enabled)
             }

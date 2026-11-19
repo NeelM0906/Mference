@@ -14,7 +14,7 @@ struct AppleChip: View {
 
     var body: some View {
         Text(text)
-            .font(MFFont.calloutEmphasis)
+            .font(MFFont.chip)
             .foregroundStyle(foreground)
             .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
             .padding(.vertical, MFSpacing.xs)
@@ -73,7 +73,7 @@ struct AppleSectionHeader: View {
     var body: some View {
         Text(text.uppercased())
             .font(MFFont.sectionHeader)
-            .tracking(0.8)
+            .tracking(MFFont.sectionHeaderTracking)
             .foregroundStyle(MFColor.tertiary)
             .accessibilityAddTraits(.isHeader)
     }
@@ -114,6 +114,7 @@ struct AppleEmptyState: View {
             Text(message)
                 .font(MFFont.body)
                 .foregroundStyle(MFColor.secondary)
+                .lineSpacing(MFLineSpacing.normal)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
             if let actionTitle, let action {
@@ -147,31 +148,11 @@ struct StripedBackground: View {
     }
 }
 
-/// Shows the content whole when it fits, else in a scroll view (snapshots
-/// render only the first: `ImageRenderer` does not draw scroll contents).
-struct FitOrScroll<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        ViewThatFits(in: .vertical) {
-            content
-            ScrollView { content }.scrollIndicators(.never)
-        }
-        .frame(maxHeight: .infinity, alignment: .top)
-    }
-}
-
-extension EnvironmentValues {
-    /// Snapshot tests draw text fields as plain text (`ImageRenderer` cannot
-    /// draw AppKit-backed controls). Never set by the app.
-    @Entry var appleStaticRendering = false
-}
-
 /// A one-line text field that snapshots draw as its text.
 struct AppleTextField: View {
     var title: String
     @Binding var text: String
-    @Environment(\.appleStaticRendering) private var staticRendering
+    @Environment(\.mfRendersStatically) private var staticRendering
 
     var body: some View {
         if staticRendering {
@@ -180,25 +161,6 @@ struct AppleTextField: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             TextField(title, text: $text).textFieldStyle(.plain)
-        }
-    }
-}
-
-/// A vertical scroll view that snapshots draw: under `appleStaticRendering`
-/// the content is laid out at full height from the top and clipped, since
-/// `ImageRenderer` does not draw scroll contents. (U1's `MFScroll` does the
-/// same; this moves to it once MferenceDesign ships it.)
-struct AppleScroll<Content: View>: View {
-    @Environment(\.appleStaticRendering) private var staticRendering
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        if staticRendering {
-            Color.clear
-                .overlay(alignment: .top) { content.fixedSize(horizontal: false, vertical: true) }
-                .clipped()
-        } else {
-            ScrollView { content }.scrollIndicators(.never)
         }
     }
 }

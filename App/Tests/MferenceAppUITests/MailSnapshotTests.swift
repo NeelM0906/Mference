@@ -6,8 +6,13 @@ import SwiftUI
 import Testing
 
 @Suite(.serialized) @MainActor struct MailSnapshotTests {
+    /// Kept for the whole run: a screen rendered in the shell starts its own
+    /// load (`.task`), which can outlive the test; SwiftData traps if its
+    /// container is gone by then.
+    static let container = try! AppModelContainer.inMemory()
+
     @Test func mail() async throws {
-        let container = try AppModelContainer.inMemory()
+        let container = Self.container
         let source = AppleUIFixtures.FixedMailSource(status: .available(version: "V10"), inbox: AppleUIFixtures.inbox,
                                                      bodies: AppleUIFixtures.bodies)
         let assistant = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [
@@ -24,8 +29,8 @@ import Testing
         #expect(model.eventCard != nil)
         #expect(model.draftState == .ready)
         for scheme in [ColorScheme.light, .dark] {
-            try AppleSnapshot.render(AppleSnapshot.board(.mail) { MailView(model: model, loadsOnAppear: false) }, name: "03-mail",
-                            colorScheme: scheme)
+            try Snapshot.render(RootView(model: ShellModel(selection: .mail, defaults: nil), chrome: .inline)
+                .environment(model), name: "03-mail", colorScheme: scheme)
         }
 
         let blocked = MailInboxModel(source: AppleUIFixtures.FixedMailSource(status: .needsFullDiskAccess, inbox: [],
@@ -34,7 +39,8 @@ import Testing
                                      assistant: AppleModelService(primary: assistant, fallback: nil), drafter: nil,
                                      sender: RecordingMailSender(), broker: AppleUIFixtures.NoPromptBroker())
         await blocked.load()
-        try AppleSnapshot.render(AppleSnapshot.board(.mail) { MailView(model: blocked, loadsOnAppear: false) }, name: "03-mail-access")
+        try Snapshot.render(RootView(model: ShellModel(selection: .mail, defaults: nil), chrome: .inline)
+                .environment(blocked), name: "03-mail-access")
     }
 
     @Test func shellSlotBuildsWithoutServices() {

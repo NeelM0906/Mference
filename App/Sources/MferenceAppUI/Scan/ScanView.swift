@@ -176,7 +176,7 @@ struct ScanContent: View {
             AppleEmptyState(systemImage: "exclamationmark.triangle", title: "This scan could not be read",
                             message: message, actionTitle: "Open another file", action: openFile)
         case .review, .saved:
-            FitOrScroll { review.padding(.horizontal, MFSpacing.xl + MFSpacing.s).padding(.vertical, MFSpacing.xl) }
+            MFScroll { review.padding(.horizontal, MFSpacing.xl + MFSpacing.s).padding(.vertical, MFSpacing.xl) }
         }
     }
 
@@ -192,6 +192,7 @@ struct ScanContent: View {
             Text(explanation)
                 .font(MFFont.body)
                 .foregroundStyle(MFColor.secondary)
+                .lineSpacing(MFLineSpacing.normal)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 0) {
                 ForEach(ScanFieldKey.allCases) { key in
