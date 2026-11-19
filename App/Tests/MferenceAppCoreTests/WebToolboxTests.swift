@@ -373,23 +373,38 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
-    @Test func hostileHTMLIsBoundedAndQuick() throws {
-        let hostile = String(repeating: "<div class='", count: 300_000) + String(repeating: "<!--", count: 100_000)
-        let clock = ContinuousClock()
-        let elapsed = try clock.measure { _ = try HTMLText.extract(hostile, checkCancellation: false) }
-        #expect(elapsed < .seconds(2), "\(elapsed)")
-        let page = "<p>" + String(repeating: "a", count: 2_000_000) + "</p>"
-        let text = HTMLText.extract(page).text
+    /// Hostile shapes that once made (or could make) the scan quadratic.
+    /// Linearity is checked by counting byte look-ups, not by timing, so a
+    /// busy machine cannot fail it.
+    static let hostilePages: [(String, String)] = {
+        let n = HTMLText.maxInputBytes
+        func repeated(_ unit: String) -> String { String(repeating: unit, count: n / unit.utf8.count) }
+        return [
+            ("bare <", repeated("<")),
+            ("unterminated quotes", repeated("<div class='")),
+            ("comment openers", repeated("<!--")),
+            ("unclosed script", repeated("<script>")),
+            ("CDATA openers", repeated("<![CDATA[")),
+            ("DOCTYPE openers", repeated("<!DOCTYPE")),
+            ("processing openers", repeated("<?")),
+            ("tag soup", repeated("<a<a")),
+            ("oversize page", "<p>" + String(repeating: "a", count: 4 * n) + "</p>"),
+        ]
+    }()
+
+    @Test(arguments: hostilePages.map(\.0))
+    func scanStaysLinear(_ name: String) throws {
+        let page = try #require(Self.hostilePages.first { $0.0 == name }?.1)
+        let scanned = min(page.utf8.count, HTMLText.maxInputBytes)
+        var examined = 0
+        let text = try HTMLText.extract(page, checkCancellation: true, examined: &examined).text
+        #expect(examined <= 8 * scanned, "\(name): \(examined) look-ups for \(scanned) bytes")
         #expect(text.utf8.count <= HTMLText.maxInputBytes)
     }
 
-    @Test func bareAngleBracketsAreLinear() throws {
-        let page = String(repeating: "<", count: HTMLText.maxInputBytes)
-        let clock = ContinuousClock()
-        var text = ""
-        let elapsed = try clock.measure { text = try HTMLText.extract(page, checkCancellation: true).text }
-        #expect(elapsed < .seconds(1), "\(elapsed)")
-        #expect(text.count == HTMLText.maxInputBytes)
+    @Test func bareAngleBracketsStayText() throws {
+        let page = String(repeating: "<", count: 1000)
+        #expect(try HTMLText.extract(page, checkCancellation: true).text.count == 1000)
         #expect(HTMLText.extract("a < b").text == "a < b")
     }
 

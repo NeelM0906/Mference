@@ -144,6 +144,14 @@ public enum HTMLText {
     }
 
     public static func extract(_ html: String, checkCancellation: Bool) throws -> (title: String?, text: String) {
+        var examined = 0
+        return try extract(html, checkCancellation: checkCancellation, examined: &examined)
+    }
+
+    /// `examined` counts every byte look-up the scan makes, so tests can
+    /// check it stays linear in the input without timing it.
+    public static func extract(_ html: String, checkCancellation: Bool,
+                               examined: inout Int) throws -> (title: String?, text: String) {
         let bytes = Array(html.utf8.prefix(maxInputBytes))
         let count = bytes.count
         var output: [UInt8] = []
@@ -165,6 +173,7 @@ public enum HTMLText {
         // Every branch below advances `i` past what it examined, so the scan
         // is linear; cancellation is checked every 64 KB of progress.
         while i < count {
+            examined += 1
             if checkCancellation, i >= nextCheck {
                 try Task.checkCancellation()
                 nextCheck = i + 0x10000
@@ -178,21 +187,21 @@ public enum HTMLText {
             // Comment: skip to "-->".
             if i + 3 < count, bytes[i + 1] == 33, bytes[i + 2] == 45, bytes[i + 3] == 45 {
                 var j = i + 4
-                while j + 2 < count, !(bytes[j] == 45 && bytes[j + 1] == 45 && bytes[j + 2] == 62) { j += 1 }
+                while j + 2 < count, !(bytes[j] == 45 && bytes[j + 1] == 45 && bytes[j + 2] == 62) { j += 1; examined += 1 }
                 i = min(j + 3, count)
                 continue
             }
             // CDATA: skip to "]]>".
             if i + 8 < count, Array(bytes[(i + 1)...(i + 8)]) == Array("![CDATA[".utf8) {
                 var j = i + 9
-                while j + 2 < count, !(bytes[j] == 93 && bytes[j + 1] == 93 && bytes[j + 2] == 62) { j += 1 }
+                while j + 2 < count, !(bytes[j] == 93 && bytes[j + 1] == 93 && bytes[j + 2] == 62) { j += 1; examined += 1 }
                 i = min(j + 3, count)
                 continue
             }
             // <!DOCTYPE ...>, other declarations and <?...?>: skip to ">".
             if i + 1 < count, bytes[i + 1] == 33 || bytes[i + 1] == 63 {
                 var j = i + 2
-                while j < count, bytes[j] != 62 { j += 1 }
+                while j < count, bytes[j] != 62 { j += 1; examined += 1 }
                 i = min(j + 1, count)
                 continue
             }
@@ -201,6 +210,7 @@ public enum HTMLText {
             if closing { j += 1 }
             var name: [UInt8] = []
             while j < count, isNameByte(bytes[j]), name.count < 16 {
+                examined += 1
                 name.append(lower(bytes[j]))
                 j += 1
             }
@@ -214,6 +224,7 @@ public enum HTMLText {
             // Find the end of the tag, skipping quoted attribute values.
             var quote: UInt8 = 0
             while j < count {
+                examined += 1
                 let c = bytes[j]
                 if quote != 0 { if c == quote { quote = 0 } }
                 else if c == 34 || c == 39 { quote = c }
@@ -228,18 +239,22 @@ public enum HTMLText {
                 var k = tagEnd
                 var found = count
                 while k + close.count <= count {
+                    examined += 1
                     if bytes[k] == 60 {
                         var matches = true
-                        for (offset, expected) in close.enumerated() where lower(bytes[k + offset]) != expected {
-                            matches = false
-                            break
+                        for (offset, expected) in close.enumerated() {
+                            examined += 1
+                            if lower(bytes[k + offset]) != expected {
+                                matches = false
+                                break
+                            }
                         }
                         if matches { found = k; break }
                     }
                     k += 1
                 }
                 var after = found
-                while after < count, bytes[after] != 62 { after += 1 }
+                while after < count, bytes[after] != 62 { after += 1; examined += 1 }
                 i = min(after + 1, count)
                 output.append(32)
                 continue
