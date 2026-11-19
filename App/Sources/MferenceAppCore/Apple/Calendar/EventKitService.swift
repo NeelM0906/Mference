@@ -31,6 +31,10 @@ public actor EventKitService: CalendarServicing {
         await request(.calendar, entity: .event)
     }
 
+    public func openSystemSettings(for permission: AppPermission) async {
+        await broker.openSystemSettings(for: permission)
+    }
+
     public func remindersAccess() async -> PermissionState {
         Self.state(EKEventStore.authorizationStatus(for: .reminder))
     }

@@ -497,8 +497,19 @@ enum RangeDownload {
             let http = response as? HTTPURLResponse
             let code = http?.statusCode ?? 0
             let contentRange = http?.value(forHTTPHeaderField: "Content-Range")
+            let location = http?.value(forHTTPHeaderField: "Location").flatMap { URL(string: $0) }
+            let allowedHosts = self.allowedHosts
             let disposition: URLSession.ResponseDisposition = state.withLock { s in
                 switch code {
+                case 300..<400:
+                    // A redirect that reached us unfollowed is never content;
+                    // one pointing outside the allowed hosts is refused as such.
+                    if let location, !DownloadSource.isAllowed(host: location.host(), allowedHosts: allowedHosts) {
+                        s.failure = DownloadError.hostNotAllowed(location.host() ?? location.absoluteString)
+                    } else {
+                        s.failure = DownloadError.http(code)
+                    }
+                    return .cancel
                 case 206:
                     // The body must continue exactly where the file ends.
                     guard Self.rangeStart(contentRange) == s.length else {

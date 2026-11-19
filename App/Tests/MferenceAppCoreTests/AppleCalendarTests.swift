@@ -245,6 +245,8 @@ enum CalendarFixtures {
         let model = Self.model(service: service)
         await model.requestAccess()
         #expect(model.access == .blocked)
+        await model.openCalendarSettings()
+        #expect(await service.openedSettings == [.calendar])
     }
 
     @Test @MainActor func addingAProposalMovesTheEventWithOneClick() async {

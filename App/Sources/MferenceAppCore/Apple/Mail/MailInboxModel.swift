@@ -111,11 +111,11 @@ public final class MailInboxModel {
         await sortUnassigned(allowFallback: true)
     }
 
-    /// The person clicked the button under the reason: the broker opens the
-    /// Full Disk Access pane (it cannot be asked in a dialog).
+    /// The person clicked the button under the reason: the broker shows the
+    /// reason, then opens the Full Disk Access pane itself (it cannot be
+    /// asked in a dialog).
     public func requestAccess() async {
-        let state = await broker.request(.fullDiskAccess)
-        if state != .granted { await broker.openSystemSettings(for: .fullDiskAccess) }
+        _ = await broker.request(.fullDiskAccess)
         await load()
     }
 

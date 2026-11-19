@@ -93,15 +93,15 @@ public final class AppleConnections {
     }
 
     /// "Connect" on the Mail row: Full Disk Access cannot be granted in a
-    /// dialog, so after the reason the broker opens its System Settings pane.
+    /// dialog, so after the reason the broker opens its System Settings pane
+    /// (one request; this does not open it a second time).
     public func connectMail() async {
         if case .available = await mail.status() {
             await refresh()
             return
         }
-        if await broker.request(.fullDiskAccess) != .granted {
-            await broker.openSystemSettings(for: .fullDiskAccess)
-        }
+        // The broker shows the reason, then opens the Full Disk Access pane.
+        _ = await broker.request(.fullDiskAccess)
         await refresh()
     }
 
