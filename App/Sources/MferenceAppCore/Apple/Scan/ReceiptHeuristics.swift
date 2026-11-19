@@ -100,7 +100,10 @@ public enum ReceiptHeuristics {
         guard name.count >= 3 else { return nil }
         let priced = rows.compactMap { row -> (label: String, amount: Decimal)? in
             guard let amount = lastAmount(in: row) else { return nil }
-            let label = row.replacing(/\s*\(?-?[$€£¥]?-?\d+(?:[,.]\d{3})*[.,]\d{2}\)?-?\s*$/, with: "")
+            // The label is the row without its price and any currency mark
+            // printed after it ("Milk 2.00 €", "Milk 2.00 EUR").
+            let label = row.replacing(
+                /\s*\(?-?[$€£¥]?-?\d+(?:[,.]\d{3})*[.,]\d{2}\)?-?\s*(?:[$€£¥]|[A-Za-z]{3}\b)?\s*$/, with: "")
                 .lowercased().trimmingCharacters(in: .whitespaces)
             return (label, amount)
         }

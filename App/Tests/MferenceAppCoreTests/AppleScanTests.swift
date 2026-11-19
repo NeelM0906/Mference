@@ -260,6 +260,15 @@ struct GatedScanner: DocumentRecognizing {
         #expect(amount("Coffee", 999) == nil, "two prices and no match: not guessed")
         #expect(amount("Chocolate", 125) == Decimal(string: "1.25"))
         #expect(amount("Tea", 2) == nil)
+
+        // Codex on #168: a currency mark after the price does not hide the label.
+        let euro = ["Milk   2,00 €", "Oat milk   4,50 €", "Tea   1.80 EUR"]
+        let inEuro = { (name: String, model: Decimal?) in
+            ReceiptHeuristics.itemAmount(ReceiptLineItem(name: name, amount: model), rows: euro)
+        }
+        #expect(inEuro("Milk", 450) == 2)
+        #expect(inEuro("Oat milk", 450) == Decimal(string: "4.50"))
+        #expect(inEuro("Tea", 180) == Decimal(string: "1.80"))
     }
 
     @Test func aModelCardNameIsWrittenOut() throws {
