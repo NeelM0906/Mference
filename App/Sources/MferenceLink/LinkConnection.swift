@@ -12,8 +12,9 @@ import Foundation
 ///    versions). The highest common version wins.
 /// 2. Already paired: both derive this connection's keys from the hellos and
 ///    the saved pairing secret. The phone sends its `hello` again, sealed;
-///    when it opens on the Mac, the connection is established and the Mac
-///    answers with `capabilities`. A phone the Mac does not know gets
+///    when it opens on the Mac, the connection is established there and the
+///    Mac app must answer with `capabilities` (the Mac's first sealed frame is
+///    what confirms the keys on the phone). A phone the Mac does not know gets
 ///    `LinkError.notPaired`; a device without the right keys fails its first
 ///    sealed frame (`authenticationFailed`).
 /// 3. Pairing (the phone asked to pair, and the Mac has pairing on): the
@@ -319,7 +320,7 @@ public struct LinkConnection {
             }
             candidateKeys = nil
             pairRequestJSON = json
-            peerName = request.deviceName
+            peerName = LinkPeer.cleanName(request.deviceName, role: .phone)
             macNonce = random.bytes(LinkProtocol.keyBytes)
             commitment = try expectedCommitment(macNonce: macNonce)
             pairResponseJSON = try sendPlain(
@@ -331,7 +332,7 @@ public struct LinkConnection {
             guard response.commitment.count == LinkProtocol.keyBytes else { throw LinkFailure.malformedFrame }
             pairResponseJSON = json
             commitment = response.commitment
-            peerName = response.macName
+            peerName = LinkPeer.cleanName(response.macName, role: .mac)
             phoneNonceJSON = try sendPlain(.pairNonce(LinkPairNonce(nonce: random.bytes(LinkProtocol.keyBytes))),
                                            into: &events)
             state = .phoneAwaitingMacNonce
@@ -409,10 +410,14 @@ public struct LinkConnection {
             events.append(.established(peer, version: version ?? LinkProtocol.version))
 
         case .phoneAwaitingMac:
+            // The Mac's first sealed frame opened: the keys are confirmed.
+            // Check the message before reporting the connection as up.
             guard let peer else { throw LinkFailure.unexpectedMessage }
             state = .established
+            var first: [Event] = []
+            try handleEstablished(message, into: &first)
             events.append(.established(peer, version: version ?? LinkProtocol.version))
-            try handleEstablished(message, into: &events)
+            events += first
 
         case .comparingCodes(let localAccepted, false):
             guard case .pairConfirm(let confirm) = message else { throw LinkFailure.unexpectedMessage }

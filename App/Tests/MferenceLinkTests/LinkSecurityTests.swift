@@ -533,6 +533,52 @@ struct LinkSecurityTests {
         #expect(first.publicKey.count == 32)
     }
 
+    @Test func addIdentityKeepsTheFirstOne() throws {
+        let store = InMemoryLinkKeyStore()
+        let first = try LinkKeyPair.generate(using: SeededLinkRandom(seed: 82))
+        let second = try LinkKeyPair.generate(using: SeededLinkRandom(seed: 83))
+        #expect(try store.addIdentity(first) == first)
+        #expect(try store.addIdentity(second) == first)
+        #expect(try store.loadIdentity() == first)
+    }
+
+    @Test func peerNamesAreCleaned() {
+        #expect(LinkPeer.cleanName("  Zoe's iPhone \n", role: .phone) == "Zoe's iPhone")
+        // Bidi override and zero-width characters are dropped.
+        #expect(LinkPeer.cleanName("Mac\u{202E}koob\u{200B}", role: .mac) == "Mackoob")
+        #expect(LinkPeer.cleanName(String(repeating: "x", count: 500), role: .mac).count == LinkPeer.maxNameLength)
+        #expect(LinkPeer.cleanName("\u{0007}\u{200D}", role: .mac) == "Mac")
+        #expect(LinkPeer.cleanName("", role: .phone) == "iPhone")
+    }
+
+    @Test func pairingSavesTheCleanedName() throws {
+        let macStore = InMemoryLinkKeyStore()
+        let phone = try LinkConnection(
+            configuration: .init(role: .phone, deviceName: "Ph\u{202E}one\u{0000}", appVersion: "1", intent: .pair),
+            store: InMemoryLinkKeyStore(), random: SeededLinkRandom(seed: 84))
+        var pipe = LinkPipe(phone: phone, mac: try LinkFixture.mac(macStore, pairing: true, seed: 85))
+        pipe.start()
+        #expect(pipe.macEvents.contains { if case .pairingCode(_, "Phone") = $0 { true } else { false } })
+        pipe.confirm(phone: true, mac: true)
+        #expect(try macStore.peers().first?.name == "Phone")
+    }
+
+    @Test func printingAPeerNeverShowsItsSecret() throws {
+        let secret = Data(repeating: 0xA5, count: 32)
+        let peer = LinkPeer(role: .mac, name: "MacBook Pro", identityKey: Data(repeating: 4, count: 32),
+                            pairingSecret: secret, pairedAt: Date(timeIntervalSince1970: 1))
+        let event = LinkConnection.Event.paired(peer)
+        for text in [String(describing: peer), String(reflecting: peer), String(describing: event),
+                     String(reflecting: event), "\(peer)"] {
+            #expect(!text.contains("165"))  // 0xA5
+            #expect(!text.contains("a5a5"))
+            #expect(!text.lowercased().contains("pairingsecret"))
+        }
+        var dumped = ""
+        dump(event, to: &dumped)
+        #expect(!dumped.contains("165") && !dumped.lowercased().contains("pairingsecret"))
+    }
+
     /// The real Keychain, only when asked (it may prompt outside a signed app).
     @Test(.enabled(if: ProcessInfo.processInfo.environment["MFERENCE_KEYCHAIN_LIVE"] == "1"))
     func keychainStoreRoundTrips() throws {

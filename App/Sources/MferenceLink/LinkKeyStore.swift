@@ -41,6 +41,9 @@ public enum LinkFailure: Error, Equatable, Sendable {
 
 /// A device this one is paired with.
 public struct LinkPeer: Codable, Equatable, Sendable, Identifiable {
+    /// Longest name kept for a peer, in characters.
+    public static let maxNameLength = 64
+
     /// Hex of the first 16 bytes of SHA-256 of `identityKey`.
     public var id: String
     public var role: LinkRole
@@ -65,6 +68,35 @@ public struct LinkPeer: Codable, Equatable, Sendable, Identifiable {
     public static func id(for identityKey: Data) -> String {
         LinkKeySchedule.transcriptHash("peer id", [identityKey]).prefix(16).linkHex
     }
+
+    /// A name a peer sent, made safe to show: control and invisible format
+    /// characters (bidi overrides, zero-width) removed, whitespace trimmed, at
+    /// most `maxNameLength` characters, and a plain fallback when nothing is
+    /// left. The code comparison, not the name, is what proves the device.
+    public static func cleanName(_ name: String, role: LinkRole) -> String {
+        let kept = name.unicodeScalars.filter {
+            switch $0.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator, .surrogate, .privateUse, .unassigned:
+                false
+            default:
+                true
+            }
+        }
+        let cleaned = String(String.UnicodeScalarView(kept))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let short = String(cleaned.prefix(maxNameLength))
+        return short.isEmpty ? (role == .mac ? "Mac" : "iPhone") : short
+    }
+}
+
+/// Printing a peer (or an event that carries one) never shows its pairing
+/// secret.
+extension LinkPeer: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "LinkPeer(\(role) \"\(name)\" \(id))" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: ["id": id, "role": role, "name": name, "pairedAt": pairedAt])
+    }
 }
 
 /// Where a device keeps its link identity and its paired devices. The apps
@@ -72,7 +104,9 @@ public struct LinkPeer: Codable, Equatable, Sendable, Identifiable {
 public protocol LinkKeyStore: Sendable {
     /// This device's identity key, or nil before the first one is made.
     func loadIdentity() throws -> LinkKeyPair?
-    func saveIdentity(_ identity: LinkKeyPair) throws
+    /// Saves `identity` unless one is already saved, and returns the saved
+    /// one. Two first launches racing end with one identity, never two.
+    func addIdentity(_ identity: LinkKeyPair) throws -> LinkKeyPair
     func peer(id: String) throws -> LinkPeer?
     func peers() throws -> [LinkPeer]
     /// Adds the peer or replaces the one with the same id.
@@ -85,9 +119,7 @@ extension LinkKeyStore {
     /// The identity key, made and saved on first use.
     public func identity(using random: any LinkRandomSource = SystemLinkRandom()) throws -> LinkKeyPair {
         if let existing = try loadIdentity() { return existing }
-        let identity = try LinkKeyPair.generate(using: random)
-        try saveIdentity(identity)
-        return identity
+        return try addIdentity(try LinkKeyPair.generate(using: random))
     }
 }
 
@@ -106,8 +138,12 @@ public final class InMemoryLinkKeyStore: LinkKeyStore, @unchecked Sendable {
         lock.withLock { identityKey }
     }
 
-    public func saveIdentity(_ identity: LinkKeyPair) throws {
-        lock.withLock { identityKey = identity }
+    public func addIdentity(_ identity: LinkKeyPair) throws -> LinkKeyPair {
+        lock.withLock {
+            if let identityKey { return identityKey }
+            identityKey = identity
+            return identity
+        }
     }
 
     public func peer(id: String) throws -> LinkPeer? {

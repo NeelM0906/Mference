@@ -28,8 +28,17 @@ public struct KeychainLinkKeyStore: LinkKeyStore {
         }
     }
 
-    public func saveIdentity(_ identity: LinkKeyPair) throws {
-        try write(identity.privateKeyBytes, account: Self.identityAccount)
+    public func addIdentity(_ identity: LinkKeyPair) throws -> LinkKeyPair {
+        var query = baseQuery()
+        query[kSecAttrAccount as String] = Self.identityAccount
+        query[kSecValueData as String] = identity.privateKeyBytes
+        #if os(iOS)
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        #endif
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem, let existing = try loadIdentity() { return existing }
+        try check(status)
+        return identity
     }
 
     public func peer(id: String) throws -> LinkPeer? {
@@ -38,20 +47,20 @@ public struct KeychainLinkKeyStore: LinkKeyStore {
     }
 
     public func peers() throws -> [LinkPeer] {
+        // List the accounts first, then read each item: the file-based
+        // keychain on macOS does not return data for a match-all query.
         var query = baseQuery()
         query[kSecMatchLimit as String] = kSecMatchLimitAll
         query[kSecReturnAttributes as String] = true
-        query[kSecReturnData as String] = true
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return [] }
         try check(status)
-        let items = result as? [[String: Any]] ?? []
-        return try items.compactMap { item -> LinkPeer? in
-            guard let account = item[kSecAttrAccount as String] as? String,
-                  account.hasPrefix(Self.peerPrefix),
-                  let data = item[kSecValueData as String] as? Data
-            else { return nil }
+        let accounts = (result as? [[String: Any]] ?? [])
+            .compactMap { $0[kSecAttrAccount as String] as? String }
+            .filter { $0.hasPrefix(Self.peerPrefix) }
+        return try accounts.compactMap { account -> LinkPeer? in
+            guard let data = try read(account: account) else { return nil }
             return try decode(data)
         }
         .sorted { $0.pairedAt < $1.pairedAt }
@@ -99,12 +108,15 @@ public struct KeychainLinkKeyStore: LinkKeyStore {
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         #endif
         let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            query.merge(attributes) { _, new in new }
-            try check(SecItemAdd(query as CFDictionary, nil))
-        } else {
-            try check(status)
+        guard status == errSecItemNotFound else { return try check(status) }
+        var add = query
+        add.merge(attributes) { _, new in new }
+        let added = SecItemAdd(add as CFDictionary, nil)
+        // Another writer added it between the two calls: update that one.
+        if added == errSecDuplicateItem {
+            return try check(SecItemUpdate(query as CFDictionary, attributes as CFDictionary))
         }
+        try check(added)
     }
 
     private func decode(_ data: Data) throws -> LinkPeer {
