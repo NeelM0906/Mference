@@ -16,7 +16,7 @@ the CLI default.
 
 ## Prepare the Mac
 
-Install the model with the [README instructions](../README.md#the-engine-server-and-cli),
+Install the model with the [README instructions](../README.md#get-started),
 connect a laptop to power, turn off Low Power Mode, quit other demanding apps,
 and build the release CLI:
 
