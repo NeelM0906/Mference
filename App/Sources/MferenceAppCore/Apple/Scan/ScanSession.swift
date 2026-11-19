@@ -112,7 +112,7 @@ public final class ScanSession {
             let printed = ReceiptHeuristics.read(reading)
             var model: ReceiptDraft?
             var filledBy: AssistantModelKind?
-            if let result = try? await assistant.fillReceipt(from: reading.transcript) {
+            if let result = try? await assistant.fillReceipt(from: reading.modelText) {
                 model = result.value
                 filledBy = result.model
             }

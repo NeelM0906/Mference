@@ -21,6 +21,25 @@ import Testing
         var seconds: Double
         var filledBy: String?
         var fields: [String: FieldResult]
+        /// The model's whole answer, kept so a wrong amount can be traced to
+        /// the model or to the merge (the fixtures are invented data).
+        var modelAnswer: String?
+    }
+
+    /// Keeps the last answer of the model it wraps.
+    final class AnswerRecorder: AssistantTextModel, @unchecked Sendable {
+        let base: any AssistantTextModel
+        private let lock = NSLock()
+        private var answer: String?
+        init(_ base: any AssistantTextModel) { self.base = base }
+        var kind: AssistantModelKind { base.kind }
+        func availability() async -> AssistantAvailability { await base.availability() }
+        func complete(_ request: AssistantRequest) async throws -> String {
+            let text = try await base.complete(request)
+            lock.withLock { answer = text }
+            return text
+        }
+        func take() -> String? { lock.withLock { defer { answer = nil }; return answer } }
     }
 
     @Test(.enabled(if: outputDirectory != nil))
@@ -29,7 +48,8 @@ import Testing
         let images = output.appending(path: "images", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
         let useAppleModel = ProcessInfo.processInfo.environment["MFERENCE_SCAN_ACCURACY_APPLE_MODEL"] == "1"
-        let assistant = AppleModelService(primary: FoundationTextModel(), fallback: nil)
+        let recorder = AnswerRecorder(FoundationTextModel())
+        let assistant = AppleModelService(primary: recorder, fallback: nil)
         let appleAvailability = await FoundationTextModel().availability()
 
         var results: [ReceiptResult] = []
@@ -47,7 +67,7 @@ import Testing
             var model: ReceiptDraft?
             var filledBy: AssistantModelKind?
             if useAppleModel, appleAvailability.isAvailable,
-               let result = try? await assistant.fillReceipt(from: reading.transcript) {
+               let result = try? await assistant.fillReceipt(from: reading.modelText) {
                 model = result.value
                 filledBy = result.model
             }
@@ -68,7 +88,8 @@ import Testing
             results.append(ReceiptResult(name: fixture.name,
                                          seconds: Double(elapsed.components.attoseconds) / 1e18
                                              + Double(elapsed.components.seconds),
-                                         filledBy: filledBy?.rawValue, fields: fieldResults))
+                                         filledBy: filledBy?.rawValue, fields: fieldResults,
+                                         modelAnswer: recorder.take()))
         }
 
         let encoder = JSONEncoder()

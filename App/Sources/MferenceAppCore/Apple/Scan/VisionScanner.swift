@@ -37,6 +37,14 @@ public struct ScanReading: Sendable, Hashable, Codable {
 
     public var isEmpty: Bool { lines.isEmpty && transcript.isEmpty }
 
+    /// What a model reads: the printed rows, each label beside its amount.
+    /// Vision's transcript lists a right-aligned amount column after all the
+    /// labels, which made a model pair them wrongly.
+    public var modelText: String {
+        let rows = rows
+        return rows.isEmpty ? transcript : rows.joined(separator: "\n")
+    }
+
     /// The printed rows: Vision often returns a label ("TOTAL") and its
     /// amount ("44.49") as separate lines, so lines whose boxes share a
     /// baseline are joined left to right. Without boxes, the lines as given.
