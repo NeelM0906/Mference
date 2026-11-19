@@ -156,7 +156,13 @@ final class GatedEngine: EngineServicing, @unchecked Sendable {
         #expect(sent[0].counterpart == "Lena Fischer, +1")
         #expect(try await source.messages(in: [.important], limit: 10).map(\.messageID) == ["<g-inbox@example.com>"])
         #expect(try await source.messages(in: [.drafts], limit: 10).isEmpty)
-        #expect(try await source.messages(in: [.archive], limit: 10).count == 4)
+        // Opened from Archive (All Mail), the sent message is still the
+        // person's: recipients shown, no reply offered.
+        let archive = try await source.messages(in: [.archive], limit: 10)
+        #expect(archive.count == 4)
+        let sentInArchive = try #require(archive.first { $0.messageID == "<g-sent@example.com>" })
+        #expect(sentInArchive.isOutgoing && sentInArchive.counterpart == "Lena Fischer, +1")
+        #expect(archive.filter(\.isOutgoing).map(\.messageID) == ["<g-sent@example.com>"])
 
         let listing = try await source.mailboxes()
         let gmail = listing.mailboxes.filter { $0.ref.accountID == MailStoreFixture.gmailAccount }

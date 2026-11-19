@@ -22,12 +22,16 @@ public struct MailMessageSummary: Sendable, Hashable, Identifiable {
     /// The role of the list it was found in (Sent for a Gmail message stored
     /// in All Mail but labelled Sent); nil when it came from Flagged.
     public var listedKind: MailboxRef.Kind?
+    /// Stored in or labelled into a Sent or Drafts mailbox, whatever list
+    /// it was found in (a Gmail sent message opened from Archive).
+    public var isInSentOrDrafts: Bool
 
     public var id: String { messageID }
 
     public init(rowID: Int64, messageID: String, senderName: String, senderAddress: String, subject: String,
                 snippet: String, date: Date, isRead: Bool, mailbox: MailboxRef, isFlagged: Bool = false,
-                recipients: [MailParticipant] = [], listedKind: MailboxRef.Kind? = nil) {
+                recipients: [MailParticipant] = [], listedKind: MailboxRef.Kind? = nil,
+                isInSentOrDrafts: Bool = false) {
         self.rowID = rowID
         self.messageID = messageID
         self.senderName = senderName
@@ -40,11 +44,12 @@ public struct MailMessageSummary: Sendable, Hashable, Identifiable {
         self.isFlagged = isFlagged
         self.recipients = recipients
         self.listedKind = listedKind
+        self.isInSentOrDrafts = isInSentOrDrafts
     }
 
-    /// Mail the person wrote: listed in, or stored in, Sent or Drafts.
+    /// Mail the person wrote: in Sent or Drafts (stored, labelled or listed).
     public var isOutgoing: Bool {
-        [listedKind, mailbox.kind].contains { $0 == .sent || $0 == .drafts }
+        isInSentOrDrafts || [listedKind, mailbox.kind].contains { $0 == .sent || $0 == .drafts }
     }
 
     /// The sender's name or address.
@@ -428,13 +433,13 @@ public actor AppleMailSource: MailSource {
         let filter: String
         var parameters: [ReadOnlySQLite.Value] = []
         let listedKind: MailboxRef.Kind?
+        let classified = try classifiedMailboxes(database)
         switch selection {
         case .flagged:
             guard features.flagged else { return [] }
             filter = "m.flagged != 0"
             listedKind = nil
         case .kinds, .mailbox:
-            let classified = try classifiedMailboxes(database)
             let chosen = classified.filter { _, mailbox in
                 if case .kinds(let kinds) = selection { return kinds.contains(mailbox.kind) }
                 if case .mailbox(let url) = selection { return mailbox.ref.url == url }
@@ -458,7 +463,7 @@ public actor AppleMailSource: MailSource {
             }
         }
         let sql = """
-            SELECT m.ROWID AS rowid, m.date_received AS date_received, m.read AS read,
+            SELECT m.ROWID AS rowid, m.date_received AS date_received, m.read AS read, m.mailbox AS mailbox_id,
                    a.address AS address, a.comment AS comment, s.subject AS subject, mb.url AS url,
                    \(summaryColumn), \(idColumn), \(prefixColumn), \(flaggedColumn)
             FROM messages m
@@ -471,6 +476,23 @@ public actor AppleMailSource: MailSource {
             LIMIT ?
             """
         let rows = try database.query(sql, parameters + [.integer(Int64(max(limit, 1)))])
+        // Which messages the person wrote: stored in or labelled into a
+        // Sent or Drafts mailbox, whichever list they are shown in.
+        let outgoingBoxes = Set(classified.filter { $0.mailbox.kind == .sent || $0.mailbox.kind == .drafts }.map(\.id))
+        var outgoingRows = Set(rows.compactMap { row -> Int64? in
+            guard let box = row["mailbox_id"]?.int, outgoingBoxes.contains(box) else { return nil }
+            return row["rowid"]?.int
+        })
+        let rowIDs = rows.compactMap { $0["rowid"]?.int }
+        if features.labels, !outgoingBoxes.isEmpty, !rowIDs.isEmpty {
+            let messageMarks = Array(repeating: "?", count: rowIDs.count).joined(separator: ", ")
+            let boxMarks = Array(repeating: "?", count: outgoingBoxes.count).joined(separator: ", ")
+            let labelled = try database.query("""
+                SELECT DISTINCT message_id AS id FROM labels
+                WHERE message_id IN (\(messageMarks)) AND mailbox_id IN (\(boxMarks))
+                """, rowIDs.map { .integer($0) } + outgoingBoxes.sorted().map { .integer($0) })
+            outgoingRows.formUnion(labelled.compactMap { $0["id"]?.int })
+        }
         var result: [MailMessageSummary] = []
         for row in rows {
             let mailbox = MailboxRef(url: row["url"]?.string ?? "")
@@ -488,7 +510,8 @@ public actor AppleMailSource: MailSource {
                 isRead: (row["read"]?.int ?? 0) != 0,
                 mailbox: mailbox,
                 isFlagged: (row["flagged"]?.int ?? 0) != 0,
-                listedKind: listedKind))
+                listedKind: listedKind,
+                isInSentOrDrafts: outgoingRows.contains(rowID)))
             if result.count == limit { break }
         }
         let outgoing = result.indices.filter { result[$0].isOutgoing }
