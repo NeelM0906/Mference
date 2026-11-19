@@ -47,16 +47,41 @@ struct AppleButtonStyle: ButtonStyle {
     var kind: Kind = .secondary
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        AppleButtonBody(kind: kind, label: configuration.label, isPressed: configuration.isPressed)
+    }
+}
+
+/// The button's look; reads `isEnabled` so a disabled button looks disabled.
+private struct AppleButtonBody<Label: View>: View {
+    var kind: AppleButtonStyle.Kind
+    var label: Label
+    var isPressed: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        label
             .font(MFFont.bodyEmphasis)
-            .foregroundStyle(kind == .primary ? MFColor.onInk : MFColor.ink)
+            .foregroundStyle(foreground)
             .padding(.horizontal, MFSpacing.l)
             .padding(.vertical, MFSpacing.s)
-            .background(
-                Capsule().fill(kind == .primary ? MFColor.ink : (kind == .quiet ? MFColor.fill : MFColor.surface)))
-            .overlay(Capsule().strokeBorder(kind == .secondary ? MFColor.hairlineStrong : .clear))
-            .opacity(configuration.isPressed ? 0.8 : 1)
+            .background(Capsule().fill(fill))
+            .overlay(Capsule().strokeBorder(kind == .secondary ? MFColor.hairline : .clear))
+            .opacity(isPressed ? 0.8 : 1)
             .contentShape(Capsule())
+    }
+
+    private var foreground: Color {
+        guard isEnabled else { return MFColor.tertiary }
+        return kind == .primary ? MFColor.onInk : MFColor.ink
+    }
+
+    private var fill: Color {
+        guard isEnabled else { return kind == .primary ? MFColor.fill : MFColor.fillSubtle }
+        switch kind {
+        case .primary: return MFColor.ink
+        case .quiet: return MFColor.fill
+        case .secondary: return MFColor.surface
+        }
     }
 }
 

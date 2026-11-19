@@ -176,7 +176,8 @@ struct WeekGrid: View {
                         let laneWidth = (columnWidth - MFSpacing.s) / CGFloat(block.lanes)
                         EventBlockButton(block: block, model: model)
                             .frame(width: laneWidth - MFSpacing.xxs,
-                                   height: CGFloat(block.height) * hourHeight - MFSpacing.xs)
+                                   height: max(CGFloat(block.height) * hourHeight - MFSpacing.xs,
+                                               Self.minimumHeight(for: block)))
                             .offset(x: gutter + CGFloat(block.day) * columnWidth + MFSpacing.xs
                                         + CGFloat(block.lane) * laneWidth,
                                     y: CGFloat(block.top) * hourHeight + MFSpacing.xxs)
@@ -186,6 +187,13 @@ struct WeekGrid: View {
                 }
             }
         }
+    }
+
+    /// A proposal shows its title and a two-line "11:00 · proposed from
+    /// Mail" even when it is short (mockup 04).
+    static func minimumHeight(for block: WeekBlock) -> CGFloat {
+        if case .proposal = block.kind { return MFSpacing.xxl * 2 }
+        return 0
     }
 
     private func dayLabel(_ day: Date) -> some View {
@@ -229,6 +237,8 @@ struct EventBlockView: View {
                 Text(detail)
                     .font(MFFont.caption)
                     .strikethrough(isMoving)
+                    .lineLimit(isProposal ? 2 : 1)
+                    .fixedSize(horizontal: false, vertical: isProposal)
             }
         }
         .foregroundStyle(foreground)
@@ -341,6 +351,7 @@ struct NewEventToolbarButton: View {
         Button("New event") { showsForm = true }
             .buttonStyle(.applePrimary)
             .keyboardShortcut("n", modifiers: .command)
+            .disabled(model.access == .blocked)
             .popover(isPresented: $showsForm, arrowEdge: .bottom) {
                 NewEventForm(model: model) { showsForm = false }
             }
