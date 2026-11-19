@@ -41,3 +41,18 @@ through the lock (`scratch/program/lock.sh`, workstreams `app`, `a1`..`a4`):
 swift build -c release --package-path App
 swift test --package-path App
 ```
+
+## Bundle signing (P4, as changed 2026-11-19)
+
+`App/Scripts/bundle.sh` signs `Mference.app` with, in order:
+`MFERENCE_SIGN_IDENTITY` when set (`-` forces ad hoc); else the
+maintainer's self-signed **"Mference Local Signing"** code-signing identity,
+when `security find-identity -p codesigning` lists it; else ad hoc, with a
+notice. With the local identity, the designated requirement is
+certificate-based, so TCC grants (Full Disk Access, Calendar, Reminders,
+Camera) survive rebuilds. With ad hoc it is a cdhash, and every build is a new
+app to TCC. The bundle log prints the identity and the designated
+requirement. bundle.sh never creates or trusts a certificate: the maintainer
+makes that one in Keychain Access. `bundle.sh --copy-to DIR` also publishes
+the app to `DIR/Mference.app` with `DIR/COMMIT` (commit, dirty flag, time,
+identity), and refuses while a process runs from it.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Assemble App/build/Mference.app from the SwiftPM release build (spec 4.2).
 #
-#   App/Scripts/bundle.sh [--no-build]
+#   App/Scripts/bundle.sh [--no-build] [--copy-to DIR]
 #
 # 1. Builds `MferenceMac` in release with -j 4 (skipped with --no-build),
 #    directly. With MFERENCE_LOCK set to a lock.sh it builds only while that
@@ -19,10 +19,21 @@
 #                                              excluded
 #      Contents/Resources/Fonts                App/Resources/Fonts (Geist, OFL)
 #      Contents/Resources/SearXNG              App/Resources/SearXNG (see hook)
-# 3. Signs ad hoc (`codesign --sign -`, P4) with App/Resources/Mference.entitlements
-#    (no App Sandbox), verifies the signature, and runs
-#    `Mference --verify-bundle`, which loads both engine resource bundles the
-#    way their `Bundle.module` accessors do and checks their files.
+# 3. Signs with App/Resources/Mference.entitlements (no App Sandbox),
+#    verifies the signature, and runs `Mference --verify-bundle`, which loads
+#    both engine resource bundles the way their `Bundle.module` accessors do
+#    and checks their files. The signing identity (P4, as changed 2026-11-19):
+#      - MFERENCE_SIGN_IDENTITY when set ("-" forces ad hoc);
+#      - else "Mference Local Signing" when `security find-identity -p
+#        codesigning` lists it: a self-signed certificate the maintainer
+#        creates in their login keychain, so the designated requirement is
+#        certificate-based and TCC grants (Full Disk Access, Calendar, ...)
+#        survive rebuilds;
+#      - else ad hoc, with a notice (grants may not survive a rebuild).
+#    The identity and the designated requirement are printed to the log.
+#    bundle.sh never creates or trusts a certificate.
+# 4. With --copy-to DIR: copies the app to DIR/Mference.app (refusing while a
+#    process runs from there) and writes DIR/COMMIT with the source commit.
 #
 # SearXNG hook (team U3): when U3's App/Scripts/searxng/prepare.sh exists,
 # bundle.sh runs `prepare.sh --offline`, which builds the relocatable runtime
@@ -32,7 +43,7 @@
 # downloads, decision P10). It copies App/Resources/SearXNG (runtime, licence
 # texts, notices) verbatim (ditto,
 # so symlinks and modes survive) to Contents/Resources/SearXNG and signs every
-# Mach-O file inside it ad hoc before sealing the app, so nothing else is
+# Mach-O file inside it with the same identity before sealing the app, so nothing else is
 # needed here. Keep large or downloaded payloads gitignored inside that
 # directory and record their URL and SHA-256 next to them.
 set -euo pipefail
@@ -43,13 +54,31 @@ APP_BUNDLE="$OUT_DIR/Mference.app"
 RESOURCES_SRC="$APP_DIR/Resources"
 
 build=1
-for arg in "$@"; do
-    case "$arg" in
-        --no-build) build=0 ;;
+copy_to=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-build) build=0; shift ;;
+        --copy-to)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "bundle.sh: --copy-to needs a directory" >&2; exit 64; }
+            copy_to="$2"; shift 2 ;;
         -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
-        *) echo "bundle.sh: unknown argument: $arg" >&2; exit 64 ;;
+        *) echo "bundle.sh: unknown argument: $1" >&2; exit 64 ;;
     esac
 done
+
+# Signing identity (see the header). Decided before anything is built.
+LOCAL_IDENTITY="Mference Local Signing"
+SIGN_IDENTITY="${MFERENCE_SIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+    if security find-identity -p codesigning 2>/dev/null | grep -qF "\"$LOCAL_IDENTITY\""; then
+        SIGN_IDENTITY="$LOCAL_IDENTITY"
+    else
+        SIGN_IDENTITY="-"
+        echo "bundle.sh: notice: no \"$LOCAL_IDENTITY\" code-signing identity in the keychain; signing ad hoc," >&2
+        echo "bundle.sh: notice: so macOS may ask again for Full Disk Access, Calendar and the rest after a rebuild." >&2
+    fi
+fi
+echo "bundle.sh: signing identity: $([[ "$SIGN_IDENTITY" == "-" ]] && echo "ad hoc" || echo "$SIGN_IDENTITY")"
 
 # App builds run without the machine lock (TEAM_RULES "GO PARALLEL",
 # 2026-11-18). Set MFERENCE_LOCK to a lock.sh to build under its rules
@@ -137,17 +166,21 @@ if [[ -d "$RESOURCES_SRC/SearXNG" ]]; then
     ditto --norsrc --noextattr "$RESOURCES_SRC/SearXNG" "$STAGING/Contents/Resources/SearXNG"
     while IFS= read -r -d '' candidate; do
         if [[ "$(file -b "$candidate")" == *Mach-O* ]]; then
-            codesign --force --sign - --timestamp=none "$candidate"
+            codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$candidate"
         fi
     done < <(find "$STAGING/Contents/Resources/SearXNG" -type f -print0)
 fi
 
 # Extended attributes (quarantine, Finder info) break the seal.
 xattr -cr "$STAGING"
-codesign --force --sign - --timestamp=none \
+codesign --force --sign "$SIGN_IDENTITY" --timestamp=none \
     --entitlements "$RESOURCES_SRC/Mference.entitlements" \
     "$STAGING"
 codesign --verify --strict --verbose=1 "$STAGING"
+# The designated requirement TCC keys grants on: certificate-based with the
+# local identity, a cdhash when ad hoc.
+# (Ad hoc prints it as a comment: "# designated => cdhash ...".)
+echo "bundle.sh: designated requirement: $(codesign -dr - "$STAGING" 2>&1 | sed -n 's/^#* *designated => //p')"
 
 rm -rf "$APP_BUNDLE"
 mv "$STAGING" "$APP_BUNDLE"
@@ -183,3 +216,24 @@ ditto "$APP_BUNDLE" "$MOVED_DIR/Mference.app"
 rm -rf "${MOVED_DIR:?}"
 
 echo "bundle.sh: $APP_BUNDLE"
+
+if [[ -n "$copy_to" ]]; then
+    target="$copy_to/Mference.app"
+    if pgrep -f "$target/Contents/MacOS/" >/dev/null; then
+        echo "bundle.sh: $target is running; not replacing it (quit it, then run bundle.sh --no-build --copy-to again)" >&2
+        exit 75
+    fi
+    mkdir -p "$copy_to"
+    rm -rf "${target:?}.incoming"
+    ditto "$APP_BUNDLE" "$target.incoming"
+    codesign --verify --strict "$target.incoming"
+    rm -rf "${target:?}"
+    mv "$target.incoming" "$target"
+    {
+        echo "commit=$(git -C "$APP_DIR" rev-parse HEAD)"
+        echo "dirty=$([[ -z "$(git -C "$APP_DIR" status --porcelain -- . 2>/dev/null)" ]] && echo no || echo yes)"
+        echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "identity=$([[ "$SIGN_IDENTITY" == "-" ]] && echo "ad hoc" || echo "$SIGN_IDENTITY")"
+    } > "$copy_to/COMMIT"
+    echo "bundle.sh: copied to $target ($(sed -n 's/^commit=//p' "$copy_to/COMMIT" | cut -c1-8))"
+fi
