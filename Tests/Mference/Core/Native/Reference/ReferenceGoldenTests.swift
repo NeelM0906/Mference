@@ -199,7 +199,13 @@ struct ReferenceGoldenTests {
                 func record(_ component: String, _ layer: Int, _ ours: [Float], _ want: [Float]) {
                     var stats = ParityMetrics.ErrorStats()
                     stats.add(golden: want, candidate: ours)
-                    let cls = OpToleranceClass.of(base: Self.goldenBase[component] ?? component)
+                    // `attn_output` names two graph nodes: the full-attention
+                    // projection (MUL_MAT, gemm) and the GDN core view (mixer).
+                    let base = Self.goldenBase[component] ?? component
+                    guard let cls = OpToleranceClass.of(base: base, op: base == "attn_output" ? "MUL_MAT" : nil) else {
+                        failures.append("\(component): no tolerance class for golden tensor \(base)")
+                        return
+                    }
                     reports.append(ComponentReport(prompt: golden.id, component: component, layer: layer,
                                                    toleranceClass: cls.rawValue, relativeL2: stats.relativeL2,
                                                    maxAbsError: stats.maxAbs, meanAbsError: stats.meanAbs))

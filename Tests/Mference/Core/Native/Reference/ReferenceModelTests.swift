@@ -390,9 +390,13 @@ struct ReferenceModelTests {
         let m = try fx.model(verify: 1)
         try m.kv.beginStep(rows: 2, kind: .verify)
         try RefTest.run(fx.ctx) { enc in
-            #expect(throws: Native.NativeError.self) {
+            let error = #expect(throws: Native.NativeError.self) {
                 _ = try m.encodeStep(Native.StepPlan(kind: .verify, startPosition: 0, rows: 2, input: .host([1, 2]),
                                                      logits: .all), encoder: enc)
+            }
+            guard case .invalidShape? = error else {
+                Issue.record("expected invalidShape, got \(String(describing: error))")
+                return
             }
         }
     }

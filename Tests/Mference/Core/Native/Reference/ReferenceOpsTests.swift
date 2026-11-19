@@ -146,9 +146,13 @@ struct ReferenceOpsTests {
                 dtBias: ones, a: ones, norm: RefTest.f32Weight(ctx.device, [Float](repeating: 1, count: d)))
             let shifted = Native.RecurrentStateRef(layout: banks.input.layout, buffer: banks.input.buffer,
                                                    offset: banks.input.offset + 256)
-            #expect(throws: Native.NativeError.self) {
+            let error = #expect(throws: Native.NativeError.self) {
                 try op.encodeDecode(enc, weights: plain, qkv: zeros(C), z: zeros(H * d), alpha: zeros(H),
                                     beta: zeros(H), stateIn: banks.input, stateOut: shifted, output: zeros(H * d))
+            }
+            guard case .invalidShape? = error else {
+                Issue.record("expected invalidShape, got \(String(describing: error))")
+                return
             }
         }
     }

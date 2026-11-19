@@ -6,8 +6,10 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 root="$(cd "$here/../../.." && pwd -P)"
-objects="$root/.build/out/Intermediates.noindex/Mference.build/Release/LlamaCpp-t.build"
-[ -d "$objects" ] || { echo "run swift build -c release first (no $objects)" >&2; exit 2; }
+# The LlamaCpp objects of the release build, wherever this SwiftPM build
+# layout keeps them under .build.
+objects="$(find "$root/.build" -type d -name 'LlamaCpp*.build' -path '*Release*' 2>/dev/null | head -1)"
+[ -n "$objects" ] && [ -d "$objects" ] || { echo "run swift build -c release first (no LlamaCpp objects under .build)" >&2; exit 2; }
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 clang++ -std=c++17 -O1 -w -I "$root/Sources/LlamaCpp/include" -c "$here/llama_sampler_cases.cpp" -o "$out/cases.o"

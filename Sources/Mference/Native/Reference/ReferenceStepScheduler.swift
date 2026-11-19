@@ -164,7 +164,7 @@ extension Native {
                 let cb = try makeCommandBuffer()
                 try model.kv.beginStep(rows: plan.rows, kind: plan.kind)
                 guard let encoder = cb.makeComputeCommandEncoder() else {
-                    try undo(plan)
+                    undoOrReset(plan)
                     throw NativeError.resource("compute encoder")
                 }
                 let encodeStart = DispatchTime.now().uptimeNanoseconds
@@ -175,7 +175,7 @@ extension Native {
                     // beginStep already advanced the store: end the encoder
                     // without committing, then undo the step.
                     encoder.endEncoding()
-                    try undo(plan)
+                    undoOrReset(plan)
                     throw error
                 }
                 let encodeNanos = Double(DispatchTime.now().uptimeNanoseconds - encodeStart)
@@ -183,6 +183,21 @@ extension Native {
                 try commitAndWait(cb)
                 return StepResult(logits: logits, gpuStart: cb.gpuStartTime, gpuEnd: cb.gpuEndTime,
                                   encodeNanos: encodeNanos)
+            }
+        }
+
+        /// Undo `plan`'s uncommitted step; if that fails, clear the sequence
+        /// (its state can no longer be trusted). The caller rethrows the
+        /// original error either way.
+        private func undoOrReset(_ plan: StepPlan) {
+            do {
+                try undo(plan)
+            } catch {
+                if let cb = queue.makeCommandBuffer() {
+                    try? model.kv.reset(commandBuffer: cb)
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                }
             }
         }
 
