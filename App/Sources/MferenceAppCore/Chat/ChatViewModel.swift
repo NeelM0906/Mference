@@ -96,10 +96,13 @@ public final class ChatViewModel {
     }
     /// The error came from writing an answer, so "Try again" regenerates it.
     public private(set) var canRetryAfterError = false
-    public private(set) var modelOptions: [ModelOption] = AppModel.allCases.map {
+    public private(set) var modelOptions: [ModelOption] = AppModel.engineModels.map {
         ModelOption(model: $0, availability: .notInstalled(reason: "Looking for models…"))
     }
     public private(set) var engineStatus = EngineServiceStatus.empty
+    /// The last answer in this chat left out its oldest messages to fit the
+    /// model's context (Apple's model); the chat shows a notice.
+    public private(set) var historyTrimmed = false
     public private(set) var rememberedCount = 0
     /// The model for the selected chat (or the next new one).
     public private(set) var model: AppModel = .quick
@@ -141,12 +144,12 @@ public final class ChatViewModel {
             for await status in updates {
                 guard let self else { return }
                 self.engineStatus = status
-                self.modelOptions = await self.service.models()
+                self.applyOptions(await self.service.models())
             }
         }
         Task { [weak self] in
             guard let self else { return }
-            self.modelOptions = await self.service.models()
+            self.applyOptions(await self.service.models())
         }
     }
 
@@ -178,6 +181,7 @@ public final class ChatViewModel {
         selectedID = nil
         messages = []
         errorMessage = nil
+        historyTrimmed = false
         let preferred = defaultModel()
         if case .notInstalled = option(for: preferred)?.availability {} else { model = preferred }
         webEnabled = false
@@ -189,7 +193,9 @@ public final class ChatViewModel {
         guard let conversation = try? store.conversation(id: id) else { return }
         selectedID = id
         errorMessage = nil
+        historyTrimmed = false
         model = conversation.model
+        fallBackIfModelHidden()
         webEnabled = conversation.webEnabled
         isPrivate = conversation.isPrivate
         title = conversation.title
@@ -218,6 +224,8 @@ public final class ChatViewModel {
 
     public func selectModel(_ model: AppModel) {
         if case .notInstalled = option(for: model)?.availability { return }
+        guard option(for: model) != nil || model.isEngineModel else { return }
+        historyTrimmed = false
         self.model = model
         if let conversation = selectedConversation {
             try? store.update(conversation) { $0.model = model }
@@ -225,8 +233,61 @@ public final class ChatViewModel {
         warmUp(model)
     }
 
-    /// Why the Web toggle cannot turn on now (offline mode), if it cannot.
-    public var webBlockedReason: String? { tools?.webUnavailableReason }
+    /// Why the Web toggle cannot turn on now (offline mode, or Apple's model,
+    /// which answers without tools), if it cannot.
+    public var webBlockedReason: String? {
+        if model == .apple, tools != nil { return Self.appleWebReason }
+        return tools?.webUnavailableReason
+    }
+
+    /// The Web chip's text while Apple's model is chosen.
+    public static let appleWebReason = "Web needs Quick or Deep"
+
+    /// Web is off because of the chosen model, not offline mode.
+    public var webBlockedByModel: Bool { model == .apple && tools != nil }
+
+    /// The model the trimmed-chat notice offers: Deep where it can run, else
+    /// Quick; nil when neither can.
+    public var longChatModel: AppModel? {
+        [AppModel.deep, .quick].first { candidate in
+            guard let availability = option(for: candidate)?.availability else { return false }
+            if case .notInstalled = availability { return false }
+            return true
+        }
+    }
+
+    /// Re-reads the model list (the picker opening): Apple Intelligence may
+    /// have been turned on since.
+    public func refreshModels() {
+        Task { [weak self] in
+            guard let self else { return }
+            self.applyOptions(await self.service.models())
+        }
+    }
+
+    /// Takes the model list from the service. A chat on Apple's model whose
+    /// row is now hidden (the Settings switch went off) moves to the default
+    /// model.
+    private func applyOptions(_ options: [ModelOption]) {
+        modelOptions = options
+        hasLoadedOptions = true
+        fallBackIfModelHidden()
+    }
+
+    @ObservationIgnored private var hasLoadedOptions = false
+
+    private func fallBackIfModelHidden() {
+        guard hasLoadedOptions, !model.isEngineModel, option(for: model) == nil else { return }
+        historyTrimmed = false
+        let preferred = defaultModel()
+        model = preferred.isEngineModel ? preferred : .quick
+        // Saved at once, even mid-answer: the running answer keeps the model
+        // it started with, and the next send must not reach Apple's model.
+        if let conversation = selectedConversation {
+            let fallback = model
+            try? store.update(conversation) { $0.model = fallback }
+        }
+    }
 
     public func setWebEnabled(_ enabled: Bool) {
         if enabled, webBlockedReason != nil { return }
@@ -329,7 +390,9 @@ public final class ChatViewModel {
 
     private func answer(in conversation: Conversation) {
         let model = conversation.model
-        let toolbox = tools?.makeToolbox(webEnabled: conversation.webEnabled)
+        // Apple's model answers without tools (web needs Quick or Deep).
+        let toolbox = model.isEngineModel ? tools?.makeToolbox(webEnabled: conversation.webEnabled) : nil
+        historyTrimmed = false
         isGenerating = true
         generatingConversationID = conversation.id
         streaming = ChatMessageItem(role: .assistant, content: "", model: model, isStreaming: true)
@@ -419,6 +482,7 @@ public final class ChatViewModel {
                     $0.completionTokens = summary.completionTokens
                 }
                 appendFinished(saved, conversationID: conversation.id)
+                if summary.historyTrimmed, selectedID == conversation.id { historyTrimmed = true }
                 return
             }
         } catch {
@@ -532,6 +596,7 @@ public final class ChatViewModel {
     public static func message(for error: any Error) -> String {
         if let error = error as? EngineServiceError { return error.userMessage }
         if let error = error as? ChatError { return error.userMessage }
+        if let error = error as? AssistantModelError { return error.userMessage }
         return "Something went wrong while answering. \(error.localizedDescription)"
     }
 }

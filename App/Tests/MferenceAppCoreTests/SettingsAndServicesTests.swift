@@ -291,7 +291,9 @@ import Testing
     @Test @MainActor func previewWiresFakesAndAnInMemoryStore() async throws {
         let services = AppServices.preview(installed: [.quick, .minicpm5])
         let rows = await services.engine.models()
-        #expect(rows.count == AppModel.allCases.count)
+        #expect(rows.count == AppModel.engineModels.count)
+        // Previews have no Apple model: chat sees the engine alone.
+        #expect(await services.chatEngine.models().contains { $0.model == .apple } == false)
         #expect(rows.first { $0.model == .quick }?.availability == .ready)
         #expect(rows.first { $0.model == .quick }?.sizeBytes ?? 0 > 0)
         #expect(services.storeError == nil)

@@ -48,6 +48,7 @@ public struct MemoryFit: Sendable, Hashable {
         case .qwen36: (0.3, 2_048 << 20)
         case .minicpm5: (1.0, 1_024 << 20)
         case .maple: (1.0, 1_536 << 20)
+        case .apple: (0, 0)
         }
     }
 

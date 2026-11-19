@@ -19,7 +19,8 @@ final class AppRuntime {
 
     /// One composition root for the whole app: every engine use (chat, model
     /// library, Scan, Calendar, Mail) goes through `services.engine`, so only
-    /// one engine host can hold a model. Nothing here loads or warms a model;
+    /// one engine host can hold a model. Chat goes through
+    /// `services.chatEngine`, the same engine plus Apple's on-device model. Nothing here loads or warms a model;
     /// that happens only when the person picks a model or opens a chat.
     init(services: AppServices = .live(presentPermissionReason: PermissionReasonAlert.present),
          web: WebAnswers? = nil) {
@@ -27,7 +28,7 @@ final class AppRuntime {
         // Web search follows Settings > Privacy (services.settings).
         let web = web ?? WebAnswers(settings: services.settings)
         self.web = web
-        chat = ChatViewModel(service: services.engine,
+        chat = ChatViewModel(service: services.chatEngine,
                              store: ConversationStore(container: services.modelContainer),
                              tools: web,
                              defaultModel: { [settings = services.settings] in settings.defaultModel })

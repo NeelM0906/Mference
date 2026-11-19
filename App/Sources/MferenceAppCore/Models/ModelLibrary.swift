@@ -45,6 +45,7 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
         case .qwen36: "Qwen 3.6 · 35B-A3B"
         case .minicpm5: "MiniCPM5 · 2B"
         case .maple: "Maple · Preview"
+        case .apple: "Apple Intelligence"
         }
     }
 
@@ -141,7 +142,7 @@ public final class ModelLibrary {
 
     public func refresh() async {
         if let downloads {
-            for model in AppModel.allCases where downloads.source(for: model) != nil {
+            for model in AppModel.engineModels where downloads.source(for: model) != nil {
                 downloadStates[model] = await downloads.state(of: model)
             }
         }
@@ -155,7 +156,7 @@ public final class ModelLibrary {
     }
 
     private func rebuild() {
-        rows = AppModel.allCases.map { model in
+        rows = AppModel.engineModels.map { model in
             let option = options.first { $0.model == model }
             let source = downloads?.source(for: model)
             let isInstalled: Bool = if case .notInstalled? = option?.availability { false } else { option != nil }
@@ -221,7 +222,7 @@ public final class ModelLibrary {
         // temporary directory in tests and previews.
         guard let downloads else { throw ModelImportError.file("model files cannot be added here") }
         let destination = downloads.destination
-        let sources = AppModel.allCases.compactMap { downloads.source(for: $0) }
+        let sources = AppModel.engineModels.compactMap { downloads.source(for: $0) }
         let model = try await ModelFileImporter(destination: destination, sources: sources).importFile(at: url)
         await engine.refreshCatalog()
         await refreshOptions()

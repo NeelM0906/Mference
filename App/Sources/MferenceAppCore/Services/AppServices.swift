@@ -13,6 +13,10 @@ import SwiftData
 @Observable
 public final class AppServices {
     public let engine: any EngineServicing
+    /// What chat talks to: `engine`, plus Apple's on-device model as
+    /// `AppModel.apple` while Settings allows it (`AppleChatRouting`). Every
+    /// other surface uses `engine`.
+    public let chatEngine: any EngineServicing
     public let settings: AppSettings
     public let permissions: any PermissionBroker
     public let modelContainer: ModelContainer
@@ -35,9 +39,18 @@ public final class AppServices {
                 modelContainer: ModelContainer,
                 downloads: DownloadManager? = nil,
                 apple: AppleServices? = nil,
+                appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
         self.engine = engine
+        if let appleChat {
+            let routing = AppleChatRouting(engine: engine, apple: appleChat,
+                                           isEnabled: { await MainActor.run { settings.useAppleModel } })
+            chatEngine = routing
+            settings.onUseAppleModelChange = { _ in routing.appleModelChanged() }
+        } else {
+            chatEngine = engine
+        }
         self.downloads = downloads
         self.apple = apple
         self.settings = settings
@@ -86,6 +99,7 @@ public final class AppServices {
                            downloads: downloads,
                            apple: AppleServices.live(engine: engine, broker: permissions, container: container,
                                                      useAppleModel: { await MainActor.run { settings.useAppleModel } }),
+                           appleChat: FoundationChatModel(),
                            storeError: storeError,
                            idleUnload: idleUnload)
     }
@@ -93,7 +107,7 @@ public final class AppServices {
     /// Previews and tests: an in-memory store and settings, fake permissions,
     /// and the real `EngineService` over `FakeEngineBackend`s with `installed`
     /// discovered. Nothing touches the disk, the network, TCC or a model.
-    public static func preview(installed: [AppModel] = AppModel.allCases,
+    public static func preview(installed: [AppModel] = AppModel.engineModels,
                                scripts: [String: FakeEngineScript] = [:],
                                journal: FakeEngineJournal = FakeEngineJournal(),
                                settings: AppSettings? = nil,
@@ -116,7 +130,7 @@ public final class AppServices {
     }
 
     /// An `EngineService` over fake backends, for previews and tests.
-    public nonisolated static func fakeEngine(installed: [AppModel] = AppModel.allCases,
+    public nonisolated static func fakeEngine(installed: [AppModel] = AppModel.engineModels,
                                               scripts: [String: FakeEngineScript] = [:],
                                               journal: FakeEngineJournal = FakeEngineJournal(),
                                               idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil))
@@ -151,6 +165,7 @@ public final class AppServices {
         case .qwen36: 19_800_000_000
         case .minicpm5: 1_400_000_000
         case .maple: 7_600_000_000
+        case .apple: 0
         }
     }
 }

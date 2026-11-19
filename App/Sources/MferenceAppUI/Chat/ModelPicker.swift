@@ -3,12 +3,15 @@ import MferenceDesign
 import SwiftUI
 
 /// The per-chat model picker (mockup 02b, decisions L2/L3): Recommended
-/// (Quick, Deep, Auto "Coming later") and Also on this Mac (Qwen 3.6,
-/// MiniCPM5, Maple), each with its live state and, small under it, the engine.
+/// (Quick, Deep, Auto "Coming later"), Built into macOS (Apple's on-device
+/// model, only while Settings > Models > Apple Intelligence model is on and
+/// this Mac can run it) and Also on this Mac (Qwen 3.6, MiniCPM5, Maple),
+/// each with its live state and, small under it, the engine.
 struct ModelPicker: View {
     @Bindable var model: ChatViewModel
     @Binding var isOpen: Bool
     let actions: ChatActions
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ScrollView {
@@ -18,6 +21,11 @@ struct ModelPicker: View {
                     row(item)
                 }
                 AutoRow()
+                if let apple = model.option(for: .apple) {
+                    divider
+                    header("Built into macOS")
+                    appleRow(apple)
+                }
                 divider
                 header("Also on this Mac")
                 ForEach(AppModel.allCases.filter { $0.group == .alsoOnThisMac }) { item in
@@ -53,6 +61,33 @@ struct ModelPicker: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Model")
         .accessibilityAddTraits(.isModal)
+        // Apple Intelligence may have been turned on or finished preparing
+        // since the list was read.
+        .task { model.refreshModels() }
+    }
+
+    /// Apple's row: dimmed with its reason while Apple Intelligence is off or
+    /// getting ready, with a way to the System Settings pane when off.
+    @ViewBuilder
+    private func appleRow(_ option: ModelOption) -> some View {
+        let unavailableReason: String? = if case .notInstalled(let reason) = option.availability { reason } else { nil }
+        ModelRow(model: .apple, availability: option.availability, isSelected: model.model == .apple,
+                 statusOverride: unavailableReason.map(AppleChatRouting.status(forUnavailable:)),
+                 summaryOverride: unavailableReason) {
+            model.selectModel(.apple)
+            isOpen = false
+        }
+        if unavailableReason == AppleChatRouting.turnedOffReason {
+            Button("Open System Settings") {
+                openURL(AppleChatRouting.systemSettingsURL)
+            }
+            .buttonStyle(.plain)
+            .font(MFFont.caption.weight(.medium))
+            .foregroundStyle(MFColor.accent)
+            .padding(.leading, ChatMetrics.radioSize + 2 * (MFSpacing.s + MFSpacing.xxs))
+            .padding(.bottom, MFSpacing.s)
+            .accessibilityHint("Opens Apple Intelligence & Siri in System Settings")
+        }
     }
 
     private func header(_ title: String) -> some View {
@@ -87,6 +122,10 @@ struct ModelRow: View {
     let model: AppModel
     let availability: ModelAvailability
     let isSelected: Bool
+    /// Replaces "Not installed" (Apple's row: "Turned off", "Getting ready").
+    var statusOverride: String?
+    /// Replaces the summary line (Apple's row: why it cannot run).
+    var summaryOverride: String?
     let onPick: () -> Void
     @State private var isHovered = false
 
@@ -108,7 +147,7 @@ struct ModelRow: View {
                             .font(MFFont.chip)
                             .foregroundStyle(model.isPreview ? MFColor.preview : MFColor.tertiary)
                     }
-                    Text(model.summary)
+                    Text(summaryOverride ?? model.summary)
                         .font(MFFont.caption)
                         .foregroundStyle(MFColor.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -135,7 +174,7 @@ struct ModelRow: View {
         .help(helpText)
         .accessibilityLabel("\(model.name), \(model.detail)")
         .accessibilityValue(statusText)
-        .accessibilityHint(model.summary)
+        .accessibilityHint(summaryOverride ?? model.summary)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
@@ -145,7 +184,8 @@ struct ModelRow: View {
     }
 
     private var statusText: String {
-        switch availability {
+        if let statusOverride { return statusOverride }
+        return switch availability {
         case .loaded: "Loaded"
         case .ready: "Ready"
         case .loading: "Loading"

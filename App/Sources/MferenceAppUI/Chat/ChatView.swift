@@ -111,6 +111,9 @@ struct ChatDetail: View {
                         }
                     }
                     .padding(.bottom, -MFSpacing.m)
+                if model.historyTrimmed {
+                    LongChatNotice(model: model)
+                }
                 Composer(model: model, pickerOpen: $pickerOpen)
                 SuggestionChips(model: model, actions: actions)
             }
@@ -135,6 +138,33 @@ struct ChatDetail: View {
         }
         .padding(.horizontal, MFSpacing.xl)
         .padding(.vertical, MFSpacing.m)
+    }
+}
+
+/// Shown above the composer when Apple's model left out the oldest messages
+/// of a long chat to fit its context.
+struct LongChatNotice: View {
+    @Bindable var model: ChatViewModel
+
+    var body: some View {
+        HStack(spacing: MFSpacing.compact) {
+            Text("This chat is longer than Apple’s model can read at once, so it sees your latest messages only.")
+                .font(MFFont.preview)
+                .foregroundStyle(MFColor.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: MFSpacing.s)
+            if let target = model.longChatModel {
+                Button("Switch to \(target.name)") { model.selectModel(target) }
+                    .buttonStyle(.plain)
+                    .font(MFFont.preview.weight(.medium))
+                    .foregroundStyle(MFColor.accent)
+            }
+        }
+        .padding(.horizontal, MFSpacing.comfortable)
+        .padding(.vertical, MFSpacing.compact)
+        .background(MFColor.approvalFill, in: RoundedRectangle(cornerRadius: MFRadius.m))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.approvalBorder))
+        .accessibilityElement(children: .contain)
     }
 }
 

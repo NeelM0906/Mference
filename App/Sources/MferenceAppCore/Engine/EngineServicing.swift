@@ -12,11 +12,18 @@ public enum ModelGroup: String, Sendable, Hashable, Codable, CaseIterable {
     case recommended
     /// Qwen 3.6, MiniCPM5, Maple.
     case alsoOnThisMac
+    /// Apple's on-device model (FoundationModels), shown only while
+    /// Settings > Models > Apple Intelligence model is on.
+    case builtIntoMacOS
 }
 
 /// The product models the app offers (decision L1), in picker order.
 public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identifiable {
     case quick, deep, qwen36, minicpm5, maple
+    /// Apple's on-device model. Not an engine model: chat routes it to
+    /// FoundationModels (`AppleChatRouting`), and the engine, the model
+    /// library and downloads never list it (`engineModels`).
+    case apple
 
     /// The engine's model identifier (`EngineProductSlot.modelID`).
     public var modelID: String {
@@ -26,10 +33,17 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .qwen36: "qwen3.6-35b-a3b"
         case .minicpm5: "minicpm5-2b-int4g64"
         case .maple: "maple-preview-2bit-mlx"
+        case .apple: "apple-foundation-model"
         }
     }
 
     public var id: String { modelID }
+
+    /// Whether the in-process engine runs it (every model but `.apple`).
+    public var isEngineModel: Bool { self != .apple }
+
+    /// The models the engine, the model library and downloads list.
+    public static let engineModels: [AppModel] = allCases.filter(\.isEngineModel)
 
     public init?(modelID: String) {
         guard let model = Self.allCases.first(where: { $0.modelID == modelID }) else { return nil }
@@ -40,6 +54,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick, .deep: .recommended
         case .qwen36, .minicpm5, .maple: .alsoOnThisMac
+        case .apple: .builtIntoMacOS
         }
     }
 
@@ -51,6 +66,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .qwen36: "Qwen 3.6"
         case .minicpm5: "MiniCPM5"
         case .maple: "Maple"
+        case .apple: "Apple Intelligence"
         }
     }
 
@@ -62,6 +78,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .qwen36: "Qwen 3.6"
         case .minicpm5: "MiniCPM5"
         case .maple: "Maple"
+        case .apple: AppleModelLabels.current.shortName
         }
     }
 
@@ -73,6 +90,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .qwen36: "35B-A3B"
         case .minicpm5: "2B"
         case .maple: "Preview"
+        case .apple: AppleModelLabels.current.detail
         }
     }
 
@@ -84,6 +102,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         case .qwen36: "Large mixture-of-experts. Experts stream from the SSD."
         case .minicpm5: "Very small and quick. Good for short replies."
         case .maple: "Experimental model."
+        case .apple: "Apple’s on-device model. Short chats and quick rewrites. Nothing to download."
         }
     }
 
@@ -92,6 +111,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
         switch self {
         case .quick, .deep: "llama.cpp"
         case .qwen36, .minicpm5, .maple: "Mference"
+        case .apple: "Apple"
         }
     }
 
@@ -102,7 +122,7 @@ public enum AppModel: String, Sendable, Hashable, Codable, CaseIterable, Identif
     public var supportsThinking: Bool {
         switch self {
         case .quick, .deep, .qwen36: true
-        case .minicpm5, .maple: false
+        case .minicpm5, .maple, .apple: false
         }
     }
 }
@@ -288,10 +308,13 @@ public struct GenerationSummary: Sendable, Hashable {
     public var completionTokens: Int
     public var prefillSeconds: Double?
     public var decodeSeconds: Double?
+    /// The oldest turns were left out so the chat fits the model's context
+    /// (Apple's model, 4K tokens on most Macs); the chat shows a notice.
+    public var historyTrimmed: Bool
 
     public init(content: String, reasoning: String?, toolCalls: [ToolCall], finish: GenerationFinish,
                 promptTokens: Int, completionTokens: Int,
-                prefillSeconds: Double? = nil, decodeSeconds: Double? = nil) {
+                prefillSeconds: Double? = nil, decodeSeconds: Double? = nil, historyTrimmed: Bool = false) {
         self.content = content
         self.reasoning = reasoning
         self.toolCalls = toolCalls
@@ -300,6 +323,7 @@ public struct GenerationSummary: Sendable, Hashable {
         self.completionTokens = completionTokens
         self.prefillSeconds = prefillSeconds
         self.decodeSeconds = decodeSeconds
+        self.historyTrimmed = historyTrimmed
     }
 }
 

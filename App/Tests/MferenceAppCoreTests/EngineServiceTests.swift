@@ -25,19 +25,21 @@ import Testing
     }
 
     @Test func appModelsMatchEngineProductSlots() {
-        for model in AppModel.allCases {
+        // Apple's on-device model is chat-only and never an engine slot.
+        #expect(EngineProductSlot(modelID: AppModel.apple.modelID) == nil)
+        for model in AppModel.engineModels {
             let slot = EngineProductSlot(modelID: model.modelID)
             #expect(slot != nil, "\(model) has no engine product slot")
             let expected: EngineKind = model.engineLabel == "llama.cpp" ? .llamaCpp : .mference
             #expect(slot?.engine == expected)
         }
-        #expect(AppModel.allCases.count == EngineProductSlot.allCases.count)
+        #expect(AppModel.engineModels.count == EngineProductSlot.allCases.count)
     }
 
     @Test func pickerRowsShowInstalledAndMissingModels() async {
         let (service, _) = Self.service(installed: [.quick, .maple])
         let rows = await service.models()
-        #expect(rows.map(\.model) == AppModel.allCases)
+        #expect(rows.map(\.model) == AppModel.engineModels)
         #expect(rows.first { $0.model == .quick }?.availability == .ready)
         if case .notInstalled = rows.first(where: { $0.model == .deep })?.availability {} else {
             Issue.record("Deep should be not installed")

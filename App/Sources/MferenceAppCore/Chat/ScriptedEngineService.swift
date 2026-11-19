@@ -61,7 +61,7 @@ public final class ScriptedEngineService: EngineServicing {
     /// `fallback` repeats.
     public init(options: [ModelOption]? = nil, status: EngineServiceStatus = .empty,
                 replies: [Reply] = [], fallback: Reply = Reply(content: "Hello from a scripted model.")) {
-        let rows = options ?? AppModel.allCases.map { ModelOption(model: $0, availability: .ready) }
+        let rows = options ?? AppModel.engineModels.map { ModelOption(model: $0, availability: .ready) }
         state = Mutex(State(options: rows, status: status, replies: replies, fallback: fallback))
     }
 

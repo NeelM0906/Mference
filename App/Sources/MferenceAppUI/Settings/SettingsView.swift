@@ -254,13 +254,20 @@ public struct SettingsView: View {
                           subtitle: "Built into macOS. Reads receipts, documents and tables for Scan. Nothing to download.") {
                     MFBadge(.custom("Built in", .neutral))
                 }
-                MFListRow("Apple Intelligence model",
-                          subtitle: "Apple's on-device model sorts mail, writes titles and short summaries, and fills scan fields when Apple Intelligence is on. Quick does these jobs when it is off.") {
-                    MFBadge(.custom("For small jobs", .success))
+                MFListRow("Apple Intelligence model", subtitle: Self.appleModelSubtitle) {
+                    MFBadge(.custom("Chats and small jobs", .success))
                     settingToggle("Apple Intelligence model", .useAppleModel)
                 }
             }
         }
+    }
+
+    /// Names the model this Mac runs once the chat has asked macOS for it.
+    static var appleModelSubtitle: String {
+        let labels = AppleModelLabels.current
+        let onThisMac = labels == .fallback ? ""
+            : ", \(labels.variantName) on this Mac (\(labels.contextLabel) context)"
+        return "Apple's on-device model\(onThisMac). When on, you can pick it for chats, and it sorts mail, writes titles and short summaries, and fills scan fields. Quick does those jobs when it is off."
     }
 
     private var modelsSubtitle: String {
