@@ -387,7 +387,10 @@ candidate the native Quick entry. The server renders the chat template and
 parses tool calls identically for both, so only the backend differs. A task
 whose prompt renders to a different token count on the two sides is a setup
 error. It is reported apart (`render_mismatch`), fails the comparison, and is
-never counted as a parity result.
+never counted as a parity result. A request, HTTP or server error on either
+side is also a setup error (`setup_errors`): that task measured nothing, so
+the comparison fails until it is re-run, and an unreachable golden server can
+never certify a candidate.
 
 Parity holds when at most one task regresses (passes on the golden, fails on
 the candidate), no task is missing and no prompt rendered differently. Tasks

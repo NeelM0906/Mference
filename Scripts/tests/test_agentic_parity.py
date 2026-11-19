@@ -169,6 +169,21 @@ class CompareTests(unittest.TestCase):
         del c["exact-math"]
         self.assertFalse(ap.compare(self.report(), c)["parity"])
 
+    def test_request_errors_are_setup_errors_never_parity(self):
+        # golden server down: every golden task errored, so nothing was measured
+        down = {t["id"]: {"passed": False, "result": {"error": "request failed: ConnectionRefusedError()"}}
+                for t in ap.TASKS}
+        v = ap.compare(down, down)
+        self.assertFalse(v["parity"])
+        self.assertEqual(len(v["setup_errors"]["golden"]), 32)
+        # a single HTTP error on the candidate side also blocks the verdict
+        c = self.report()
+        c["exact-math"] = {"passed": False, "result": {"error": "HTTP 500"}}
+        v = ap.compare(self.report(), c)
+        self.assertEqual(v["setup_errors"], {"golden": [], "candidate": ["exact-math"]})
+        self.assertEqual(v["regressions"], [])
+        self.assertFalse(v["parity"])
+
     def test_render_mismatch_is_a_setup_error_not_a_flip(self):
         v = ap.compare(self.report(), self.report(["json-bool"], tokens={"json-bool": 101}))
         self.assertEqual(v["render_mismatch"], ["json-bool"])

@@ -18,7 +18,9 @@ golden is the llama.cpp Quick entry (LlamaBackend at the pin), the candidate
 the native Quick entry. The server renders the chat template and parses tool
 calls the same way for both, so only the backend differs. A task whose prompt
 renders to a different token count on the two sides is a setup error,
-reported apart and never counted as a parity result. Parity holds when at
+reported apart and never counted as a parity result. A request, HTTP or server
+error on either side is a setup error too: the run measured nothing for that
+task, so the comparison fails until it is re-run. Parity holds when at
 most PARITY_SLACK tasks regress (pass on the golden, fail on the candidate),
 no task is missing and no prompt rendered differently; tasks the candidate
 newly passes are listed, never counted against it.
@@ -334,18 +336,25 @@ def compare(golden, candidate, slack=PARITY_SLACK):
     ids = [t["id"] for t in TASKS]
     missing = [i for i in ids if i not in golden or i not in candidate]
     both = [i for i in ids if i in golden and i in candidate]
+    # a request, HTTP or server error measured nothing: on either side it is a
+    # setup error that blocks the verdict, never a scored failure
+    errored = lambda run: [i for i in both if ((run[i].get("result") or {}).get("error"))]
+    setup_errors = {"golden": errored(golden), "candidate": errored(candidate)}
     render_mismatch = [i for i in both
                        if _prompt_tokens(golden[i]) is not None and _prompt_tokens(candidate[i]) is not None
                        and _prompt_tokens(golden[i]) != _prompt_tokens(candidate[i])]
-    scored = [i for i in both if i not in render_mismatch]
+    scored = [i for i in both if i not in render_mismatch
+              and i not in setup_errors["golden"] and i not in setup_errors["candidate"]]
     regressions = [i for i in scored if golden[i]["passed"] and not candidate[i]["passed"]]
     improvements = [i for i in scored if candidate[i]["passed"] and not golden[i]["passed"]]
     g = sum(1 for i in scored if golden[i]["passed"])
     c = sum(1 for i in scored if candidate[i]["passed"])
-    passed = not missing and not render_mismatch and len(regressions) <= slack
+    passed = (not missing and not render_mismatch and not setup_errors["golden"]
+              and not setup_errors["candidate"] and len(regressions) <= slack)
     return {"suite": SUITE, "tasks": len(ids), "golden_passed": g, "candidate_passed": c,
             "slack": slack, "regressions": regressions, "improvements": improvements,
-            "render_mismatch": render_mismatch, "missing": missing, "parity": passed}
+            "render_mismatch": render_mismatch, "setup_errors": setup_errors, "missing": missing,
+            "parity": passed}
 
 
 def body_for(task, model):
