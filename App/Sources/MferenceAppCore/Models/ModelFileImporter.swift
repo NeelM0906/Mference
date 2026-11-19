@@ -40,8 +40,9 @@ public enum ModelImportError: Error, Sendable, Hashable, LocalizedError {
 /// product files (Quick or Deep), so the engine never sees a file Mference
 /// did not validate. It is copied into the destination (the app passes
 /// `~/llm-models/gguf`; tests pass a temporary directory) under the product
-/// file name: first to a temporary name in that directory, then renamed
-/// atomically without replacing anything, so a half-copied file is never
+/// file name: first to a temporary name in that directory, where the copy
+/// itself is hashed against the pinned digest, then renamed atomically
+/// without replacing anything, so a half-copied or changed file is never
 /// visible and an existing file is never overwritten. On APFS the copy is a
 /// clone and takes no extra space on the same volume. The person's original
 /// is only read, never moved or deleted.
@@ -76,21 +77,8 @@ public struct ModelFileImporter: Sendable {
         guard try Self.hasGGUFMagic(url) else { throw ModelImportError.notGGUF }
         let candidates = sources.filter { $0.sizeBytes == size }
         guard !candidates.isEmpty else { throw ModelImportError.notAProductModel }
-        let digest = try Self.sha256(of: url, length: size)
-        guard let source = candidates.first(where: { $0.sha256 == digest }) else {
-            throw ModelImportError.notAProductModel
-        }
 
         let manager = FileManager.default
-        let final = destination.appending(path: source.fileName)
-        if manager.fileExists(atPath: final.path) {
-            // Already there and identical: nothing to copy.
-            if (try? Self.size(of: final)) == size, (try? Self.sha256(of: final, length: size)) == digest {
-                return source.model
-            }
-            // Anything else under that name is never replaced.
-            throw ModelImportError.nameTaken(existing: final)
-        }
         do {
             try manager.createDirectory(at: destination, withIntermediateDirectories: true)
         } catch {
@@ -101,26 +89,39 @@ public struct ModelFileImporter: Sendable {
             throw ModelImportError.insufficientDisk(neededBytes: size + DownloadManager.diskMarginBytes,
                                                     availableBytes: available)
         }
-        let staging = destination.appending(path: ".\(source.fileName).import-\(UUID().uuidString)")
+        // Copy first and validate the copy: the bytes that are published are
+        // the bytes that were hashed, even if the original changes meanwhile.
+        let staging = destination.appending(path: ".import-\(UUID().uuidString).gguf")
         defer { try? manager.removeItem(at: staging) }
         do {
             try Task.checkCancellation()
             try manager.copyItem(at: url, to: staging)
             try Task.checkCancellation()
-            // The copy must be the file that was validated.
-            guard try Self.size(of: staging) == size else { throw ModelImportError.file("the copy is incomplete") }
-            // Exclusive rename: fails rather than replace a file that
-            // appeared under the name while copying.
-            if renamex_np(staging.path, final.path, UInt32(RENAME_EXCL)) != 0 {
-                if errno == EEXIST { throw ModelImportError.nameTaken(existing: final) }
-                throw ModelImportError.file(String(cString: strerror(errno)))
-            }
-        } catch let error as ModelImportError {
-            throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             throw ModelImportError.file(error.localizedDescription)
+        }
+        guard try Self.size(of: staging) == size else { throw ModelImportError.file("the copy is incomplete") }
+        let digest = try Self.sha256(of: staging, length: size)
+        guard let source = candidates.first(where: { $0.sha256 == digest }) else {
+            throw ModelImportError.notAProductModel
+        }
+
+        let final = destination.appending(path: source.fileName)
+        if manager.fileExists(atPath: final.path) {
+            // Already there and identical: nothing to publish.
+            if (try? Self.size(of: final)) == size, (try? Self.sha256(of: final, length: size)) == digest {
+                return source.model
+            }
+            // Anything else under that name is never replaced.
+            throw ModelImportError.nameTaken(existing: final)
+        }
+        // Exclusive rename: fails rather than replace a file that appeared
+        // under the name meanwhile.
+        if renamex_np(staging.path, final.path, UInt32(RENAME_EXCL)) != 0 {
+            if errno == EEXIST { throw ModelImportError.nameTaken(existing: final) }
+            throw ModelImportError.file(String(cString: strerror(errno)))
         }
         return source.model
     }

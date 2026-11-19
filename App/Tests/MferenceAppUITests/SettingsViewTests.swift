@@ -71,6 +71,11 @@ import Testing
         #expect(SettingsView.connectionDisplay(.notConnected) == .connectButton)
         #expect(SettingsView.connectionDisplay(.needsSystemSettings) == .openSystemSettings)
         #expect(SettingsView.connectionDisplay(nil) == .notConnected, "unwired reads Not connected, never Later")
+        let detail = "This version of Apple Mail stores mail in a way Mference cannot read yet."
+        let unsupported = SettingsView.connectionDisplay(.unsupported(detail: detail))
+        #expect(unsupported == .unsupported(detail), "no Connect or System Settings button can fix it")
+        #expect(SettingsView.connectionSubtitle("Read from Mail.", unsupported).hasSuffix("\n" + detail))
+        #expect(SettingsView.connectionSubtitle("Read from Mail.", .connected) == "Read from Mail.")
     }
 
     @Test func modelRowsSayWhyTheyFailed() throws {

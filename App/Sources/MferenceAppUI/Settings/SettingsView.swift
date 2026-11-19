@@ -432,6 +432,8 @@ public struct SettingsView: View {
     /// What a connection row shows on the right.
     enum ConnectionDisplay: Equatable {
         case connected, connectButton, openSystemSettings, notConnected
+        /// Nothing the person can switch on fixes it; the reason is shown.
+        case unsupported(String)
     }
 
     /// Without a wired settings model the row says "Not connected" (honest:
@@ -441,13 +443,15 @@ public struct SettingsView: View {
         case .connected: .connected
         case .notConnected: .connectButton
         case .needsSystemSettings: .openSystemSettings
+        case .unsupported(let detail): .unsupported(detail)
         case nil: .notConnected
         }
     }
 
     private func connectionRow(_ kind: ConnectionKind, title: String, subtitle: String) -> some View {
-        MFListRow(title, subtitle: subtitle) {
-            switch Self.connectionDisplay(settings?.connectionState(kind)) {
+        let display = Self.connectionDisplay(settings?.connectionState(kind))
+        return MFListRow(title, subtitle: Self.connectionSubtitle(subtitle, display)) {
+            switch display {
             case .connected:
                 MFBadge(.custom("Connected", .success))
             case .connectButton:
@@ -460,8 +464,17 @@ public struct SettingsView: View {
                     .accessibilityLabel("Open System Settings for \(title)")
             case .notConnected:
                 MFBadge(.custom("Not connected", .neutral))
+            case .unsupported:
+                MFBadge(.custom("Not supported", .preview))
+                    .accessibilityLabel("\(title) is not supported on this Mac")
             }
         }
+    }
+
+    /// The row's description, plus the reason when the source is unsupported.
+    static func connectionSubtitle(_ subtitle: String, _ display: ConnectionDisplay) -> String {
+        if case .unsupported(let detail) = display { return subtitle + "\n" + detail }
+        return subtitle
     }
 
     // MARK: Later sections
