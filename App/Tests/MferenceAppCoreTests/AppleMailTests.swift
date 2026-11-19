@@ -495,6 +495,15 @@ struct GatedSorter: AppleModelServicing {
         #expect(model.isEditingText)
     }
 
+    @Test func sendingNeedsAGrantedAutomationPermission() async {
+        let draft = MailDraft(to: "a@example.com", subject: "Hi", body: "Hello")
+        for state in [PermissionState.notDetermined, .denied, .needsSystemSettings] {
+            let broker = RecordingPermissionBroker([.mailAutomation: state])
+            await #expect(throws: MailSendError.notAllowed) { try await AppleMailSender(broker: broker).send(draft) }
+            #expect(broker.requests == [.mailAutomation])
+        }
+    }
+
     @Test func appleScriptEscapesAndRefusesOddAddresses() {
         let draft = MailDraft(to: "priya@example.com", from: "me@example.com", subject: "Re: \"Q3\" plan",
                               body: "Line \\ one\nLine two\u{0}\" & do shell script \"x", inReplyTo: "<q\"@example.com>")
