@@ -1,3 +1,4 @@
+import CoreGraphics
 import EventKit
 import Foundation
 @testable import MferenceAppCore
@@ -380,6 +381,31 @@ enum CalendarFixtures {
         let lagging = EventKitService(broker: RecordingPermissionBroker([.calendar: .granted]),
                                       eventStore: EventStoreBox(), authorization: undetermined)
         #expect(await lagging.requestCalendarAccess() == .granted)
+    }
+
+    /// The iPhone reads calendar colors through `CGColor` (EventKit has no
+    /// `NSColor` there); out-of-gamut channels clamp instead of trapping.
+    @Test func calendarColorsReadThroughCGColor() throws {
+        let orange = CGColor(srgbRed: 1, green: 0.5, blue: 0, alpha: 1)
+        #expect(EventKitService.hex(orange) == 0xFF8000)
+        let grey = CGColor(srgbRed: 0.2, green: 0.2, blue: 0.2, alpha: 0.5)
+        #expect(EventKitService.hex(grey) == 0x333333)
+        let wide = try #require(CGColor(colorSpace: #require(CGColorSpace(name: CGColorSpace.extendedSRGB)),
+                                        components: [1.4, -0.2, 0.5, 1]))
+        #expect(EventKitService.hex(wide) == 0xFF0080)
+    }
+
+    /// The iPhone's broker opens the app's Settings page through
+    /// `openSettings`, whatever the permission.
+    @Test func settingsOpenThroughTheInjectedHook() async {
+        let opened = Mutex<[AppPermission]>([])
+        let broker = LivePermissionBroker(
+            presentReason: { _ in false },
+            system: .init(state: { _ in .needsSystemSettings }, prompt: { _ in },
+                          openSettings: { permission in opened.withLock { $0.append(permission) } }))
+        await broker.openSystemSettings(for: .camera)
+        await broker.openSystemSettings(for: .reminders)
+        #expect(opened.withLock { $0 } == [.camera, .reminders])
     }
 
     /// The broker surfaces a refused request: one reason, the error logged,

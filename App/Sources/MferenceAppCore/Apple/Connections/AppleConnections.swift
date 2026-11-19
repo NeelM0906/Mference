@@ -18,6 +18,7 @@ public struct AppleConnectionStatus: Sendable, Hashable {
     public var calendar: Access
     /// Reminders access; asked only when the person turns sync on (L9).
     public var reminders: Access
+    /// Apple Mail on this Mac; always `.notConnected` on the iPhone.
     public var mail: Access
 
     public init(calendar: Access, reminders: Access, mail: Access) {
@@ -38,6 +39,7 @@ public struct AppleConnectionStatus: Sendable, Hashable {
         }
     }
 
+    #if os(macOS)
     public static func access(_ status: MailStoreStatus) -> Access {
         switch status {
         case .available: .connected
@@ -46,19 +48,24 @@ public struct AppleConnectionStatus: Sendable, Hashable {
         case .unsupported(let detail): .unsupported(detail: detail)
         }
     }
+    #endif
 }
 
 /// The connection state and actions for Calendar, Reminders and Mail. Reading
 /// never prompts; each `connect…` asks through the `PermissionBroker` (reason
-/// first) and falls back to the matching System Settings pane.
+/// first) and falls back to the matching System Settings pane. On the iPhone
+/// there is no Mail: Calendar and Reminders only.
 @MainActor @Observable
 public final class AppleConnections {
     public private(set) var status = AppleConnectionStatus.unknown
 
     @ObservationIgnored private let calendar: any CalendarServicing
+    #if os(macOS)
     @ObservationIgnored private let mail: any MailSource
+    #endif
     @ObservationIgnored private let broker: any PermissionBroker
 
+    #if os(macOS)
     public init(calendar: any CalendarServicing, mail: any MailSource, broker: any PermissionBroker) {
         self.calendar = calendar
         self.mail = mail
@@ -82,6 +89,27 @@ public final class AppleConnections {
                                        reminders: AppleConnectionStatus.access(await remindersState),
                                        mail: AppleConnectionStatus.access(await mailStatus))
     }
+    #else
+    public init(calendar: any CalendarServicing, broker: any PermissionBroker) {
+        self.calendar = calendar
+        self.broker = broker
+    }
+
+    /// The app's connections: EventKit.
+    public static func live(broker: any PermissionBroker) -> AppleConnections {
+        AppleConnections(calendar: EventKitService(broker: broker), broker: broker)
+    }
+
+    /// Reads every state without prompting.
+    public func refresh() async {
+        let calendar = self.calendar
+        async let calendarState = calendar.calendarAccess()
+        async let remindersState = calendar.remindersAccess()
+        status = AppleConnectionStatus(calendar: AppleConnectionStatus.access(await calendarState),
+                                       reminders: AppleConnectionStatus.access(await remindersState),
+                                       mail: .notConnected)
+    }
+    #endif
 
     /// "Connect" on the Calendar row.
     public func connectCalendar() async {
@@ -92,6 +120,7 @@ public final class AppleConnections {
         await refresh()
     }
 
+    #if os(macOS)
     /// "Connect" on the Mail row: Full Disk Access cannot be granted in a
     /// dialog, so after the reason the broker opens its System Settings pane
     /// (one request; this does not open it a second time).
@@ -121,6 +150,7 @@ public final class AppleConnections {
     public var mailNeedsRelaunch: Bool {
         status.mail == .needsSystemSettings && settingsVisit.happened
     }
+    #endif
 
     /// The Reminders sync switch changed (the switch itself is the
     /// `remindersSyncEnabled` setting). Turning it on asks for Reminders.
