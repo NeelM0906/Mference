@@ -71,9 +71,12 @@ struct LinkProtocolTests {
         #expect(Set(Self.samples.map(\.type)) == Self.allTypes)
     }
 
+    /// `Data` travels as base64 (4/3 larger); a full chunk or a full set of
+    /// attachments plus 1 MiB of headroom must still fit one envelope.
     @Test func limitsStayInsideTheEnvelope() {
-        #expect(LinkProtocol.maxChunkBytes < LinkProtocol.maxEnvelopeBytes / 2)
-        #expect(LinkProtocol.maxAttachmentBytes < LinkProtocol.maxEnvelopeBytes / 2)
+        let headroom = 1_048_576
+        #expect(LinkProtocol.maxChunkBytes * 4 / 3 + headroom <= LinkProtocol.maxEnvelopeBytes)
+        #expect(LinkProtocol.maxAttachmentBytes * 4 / 3 + headroom <= LinkProtocol.maxEnvelopeBytes)
         #expect(LinkProtocol.maxSearchResults >= LinkWebSearchRequest(query: "q").maxResults)
     }
 
