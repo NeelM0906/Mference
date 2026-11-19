@@ -425,7 +425,7 @@ struct GatedSorter: AppleModelServicing {
         #expect(broker.requests.isEmpty)
         await model.requestAccess()
         #expect(broker.requests == [.fullDiskAccess])
-        #expect(broker.openedSettings == [.fullDiskAccess])
+        #expect(broker.openedSettings.isEmpty)  // the broker's request opens the pane itself
     }
 
     @Test @MainActor func composeSendsOnlyAValidMessage() async throws {

@@ -184,6 +184,9 @@ public protocol CalendarServicing: Sendable {
     /// Asks for Reminders access through the broker; only after the person
     /// turned Reminders sync on.
     func requestRemindersAccess() async -> PermissionState
+    /// Opens the Calendars (or Reminders) pane of System Settings, after a
+    /// denial.
+    func openSystemSettings(for permission: AppPermission) async
 
     func events(from start: Date, to end: Date) async throws -> [CalendarEvent]
     /// Creates the event (and removes the one it replaces, if any).

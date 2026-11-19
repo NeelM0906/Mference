@@ -52,7 +52,8 @@ struct CalendarContent: View {
                                     actionTitle: "Show my calendar") { Task { await model.requestAccess() } }
                 case .blocked:
                     AppleEmptyState(systemImage: "lock", title: "Calendar is turned off for Mference",
-                                    message: "Turn on Mference under System Settings > Privacy & Security > Calendars.")
+                                    message: "Turn on Mference under System Settings > Privacy & Security > Calendars.",
+                                    actionTitle: "Open System Settings") { Task { await model.openCalendarSettings() } }
                 }
                 if let message = model.errorMessage {
                     Text(message)
