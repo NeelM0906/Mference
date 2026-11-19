@@ -41,7 +41,7 @@ enum AppleUIFixtures {
     static func receipt() throws -> (url: URL, lines: [ScanLine]) {
         let scale: CGFloat = 2
         let fontSize: CGFloat = 12 * scale, lineHeight = fontSize * 1.7
-        let width: CGFloat = 230 * scale, margin: CGFloat = 18 * scale
+        let width: CGFloat = 306 * scale, margin: CGFloat = 24 * scale
         let regular = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let bold = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .semibold)
         let ink = NSColor(srgbRed: 0x17 / 255, green: 0x18 / 255, blue: 0x1C / 255, alpha: 1)
@@ -50,7 +50,7 @@ enum AppleUIFixtures {
         struct Item { var text: String; var font: NSFont; var color: NSColor; var align: Align; var row: Double }
         var items: [Item] = [
             Item(text: "CORNER HARDWARE", font: bold, color: ink, align: .center, row: 0),
-            Item(text: "412 Valencia St · SF", font: regular, color: secondary, align: .center, row: 1),
+            Item(text: "412 Valencia St · San Francisco", font: regular, color: secondary, align: .center, row: 1),
             Item(text: "09/12/2026 14:32", font: regular, color: secondary, align: .center, row: 2),
         ]
         var row = 3.6

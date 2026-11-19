@@ -86,8 +86,10 @@ struct MailSidebar: View {
                 Spacer(minLength: MFSpacing.xs)
                 Button(model.isRenamingBuckets ? "Done" : "Rename") { model.isRenamingBuckets.toggle() }
                     .buttonStyle(.plain)
-                    .font(MFFont.calloutEmphasis)
+                    .font(MFFont.caption.weight(.medium))
                     .foregroundStyle(MFColor.accent)
+                    .lineLimit(1)
+                    .fixedSize()
             }
             .padding(.horizontal, MFSpacing.s)
             .padding(.bottom, MFSpacing.xs)
@@ -476,7 +478,7 @@ struct DraftCard: View {
                 Text(model.draft)
                     .font(MFFont.body)
                     .foregroundStyle(MFColor.ink)
-                    .lineSpacing(MFLineSpacing.relaxed)
+                    .lineSpacing(MFLineSpacing.normal)
                     .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
                     .textSelection(.enabled)
             }

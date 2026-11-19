@@ -144,7 +144,7 @@ struct ScanContent: View {
                 let inset = MFSpacing.xxs
                 RoundedRectangle(cornerRadius: MFRadius.xs)
                     .fill(MFColor.accent.opacity(0.12))
-                    .overlay(RoundedRectangle(cornerRadius: MFRadius.xs).strokeBorder(MFColor.accent, lineWidth: 1.5))
+                    .overlay(RoundedRectangle(cornerRadius: MFRadius.xs).strokeBorder(MFColor.accent.opacity(0.55), lineWidth: 1.5))
                     .frame(width: box.width * proxy.size.width + inset * 2,
                            height: box.height * proxy.size.height + inset * 2)
                     .offset(x: box.minX * proxy.size.width - inset, y: box.minY * proxy.size.height - inset)
@@ -161,8 +161,7 @@ struct ScanContent: View {
         case .empty:
             AppleEmptyState(systemImage: "receipt", title: "Scan a receipt",
                             message: "Apple's built-in text recognition reads it on this Mac and fills the fields. "
-                                + "You check them before anything is saved.",
-                            actionTitle: "Open file", action: openFile)
+                                + "You check them before anything is saved.")
         case .reading:
             VStack(spacing: MFSpacing.m) {
                 ProgressView().controlSize(.regular)
