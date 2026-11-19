@@ -1,3 +1,4 @@
+#if os(macOS)
 import Darwin
 import Foundation
 import Synchronization
@@ -366,3 +367,4 @@ public actor SearXNGProcess {
         (error as? WebError)?.message ?? error.localizedDescription
     }
 }
+#endif

@@ -53,7 +53,7 @@ public struct ModelPickerRow: Sendable, Hashable, Identifiable {
     }
 
     init(_ option: ModelOption, selected: AppModel?, physicalMemory: UInt64) {
-        if let reason = EngineService.memoryGateReason(option.model, physicalMemory: physicalMemory) {
+        if let reason = EngineMemoryGate.reason(option.model, physicalMemory: physicalMemory) {
             self.init(model: option.model, state: .needsMoreMemory(reason: reason), sizeBytes: option.sizeBytes,
                       isSelected: option.model == selected)
             return

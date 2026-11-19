@@ -236,6 +236,7 @@ public final class WebToolbox: ChatToolbox {
     }
 }
 
+#if os(macOS)
 /// Gives the chat its web tools and runs SearXNG only while web search is on.
 /// One per app; `shutdown()` on quit.
 ///
@@ -338,3 +339,4 @@ public final class WebAnswers: ChatToolboxProvider {
         await process?.stop()
     }
 }
+#endif
