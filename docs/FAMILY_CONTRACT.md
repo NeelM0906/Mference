@@ -17,14 +17,11 @@ if any of them is missing from this file. Adding an axis without a row here
 breaks the suite; the failure names the undocumented fields.
 
 The enumeration is of axes, not of behavior. What a kernel does with an
-axis lives in the family's own page —
-[Qwen 3.6](QWEN36_PERFORMANCE.md), [Qwen 3.8](QWEN38_LONG_CONTEXT.md),
-[MiniCPM5](families/MINICPM5.md) —
-and in [System design](SYSTEM_DESIGN.md).
+axis lives in the family's runner and kernels.
 
 **Retired families.** Gemma 4 (with its QAT install), DeepSeek-V4-Flash,
 Inkling-Small, Flint, Qwen3.8-Flash-Next (base and Unsloth GGUF) and GLM-5.3-Flash
-were retired on 2026-11-18 ([Retired families](RETIRED_FAMILIES.md)): their
+were retired on 2026-11-18: their
 baselines, `ModelFamily` cases and runners are gone. Their axes stay in the
 manifest schema, so the tables below keep their columns (G4, DSV4, INK, FLT,
 FNX, FNU, G53) as the values those baselines had at `mference-app` 8ff588c.
@@ -69,7 +66,7 @@ FNX's except `family` and the two storage-shaped PLE fields,
 `pleNgramShardCount` (1: the GGUF stores the n-gram table as one merged
 tensor) and `pleNgramVocabSizeBase` (0: the GGUF carries the explicit per-head
 vocab sizes instead of the base). MC5 never entered the gate: its baseline and `MiniCPM5ForwardRunner`
-arrived together ([MiniCPM5](families/MINICPM5.md)). Keep the two facts
+arrived together. Keep the two facts
 separate — a new
 port earns its `ArchConfig` baseline, `ModelFamily` case, tensor accessors and
 manifest validation well before its kernels do, and it belongs in the gate for

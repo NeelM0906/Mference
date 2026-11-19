@@ -21,7 +21,7 @@ qwen36original reads the model vendor's original BF16 repo and quantizes to
 INT4 affine group-64 during the install. It is the same checkpoint qwen36
 installs from mlx-community's pre-quantized conversion, put through our own
 quantizer instead; installing both and comparing them is the W2.1b
-quantizer-quality gate (docs/QUANTIZER_QUALITY.md).
+quantizer-quality gate.
 
 minicpm5 reads openbmb/MiniCPM5-2B's BF16 upload and quantizes to INT4 affine
 group-64 during the install (~5 GB read, ~1.4 GB written); minicpm5mlx is the

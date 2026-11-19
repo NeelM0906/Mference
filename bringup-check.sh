@@ -2,7 +2,7 @@
 # Family bring-up conformance check: one command to decide whether a model
 # family port is trustworthy. It automates steps 1-6 of docs/FAMILY_GATE.md for
 # a single family. Design:
-# docs/superpowers/specs/2026-08-08-family-bringup-kit-design.md, Workstream 3.
+# the family bring-up kit design (in git history), Workstream 3.
 #
 # Stage contract. Stages run in order; a FAILED stage stops the script, a
 # SKIPPED stage does not. Each stage prints one result line and the script ends
@@ -98,8 +98,7 @@ Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
   --dry-run     print every command each stage would execute and run nothing.
   --help, -h    this text.
 
-See docs/FAMILY_GATE.md for the gate this automates and
-docs/families/TEMPLATE.md for the page to fill in afterwards.
+See docs/FAMILY_GATE.md for the gate this automates.
 EOF
 }
 
@@ -282,8 +281,8 @@ Next, on a quiet machine, run the community protocol (docs/COMMUNITY_BENCHMARKS.
 
     ./run-benchmark.sh ${family}-bringup ${model_dir:-<gturbo-dir>} 3
 
-Then fill in the family page from the template docs/families/TEMPLATE.md, and
-add the MFERENCE_PHASES=1 attribution run that docs/FAMILY_GATE.md step 6 wants.
+Then record the results in the family PR, with the MFERENCE_PHASES=1
+attribution run that docs/FAMILY_GATE.md step 6 wants.
 EOF
 
 write_report "PASS (${family}, ${skipped} stage(s) skipped)"

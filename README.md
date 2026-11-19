@@ -2,289 +2,181 @@
   <a href="https://neelm0906.github.io/Mference/"><img src="site/assets/icon.png" alt="Mference logo" width="140"></a>
 </p>
 
-**Mference** lets you run mixture-of-experts models that are much bigger than
-your Mac's memory, on Apple Silicon, at usable speeds. A MoE model only uses a
-few of its experts for each token, so Mference keeps the shared weights and the
-KV cache in RAM and reads just the experts the current token needs from SSD.
-The whole model never has to fit in memory: Qwen 3.6 35B-A3B, a 19.6 GB
-install, decodes in about 1.45 GB. It is a native Swift and Metal engine that
-you use from the command line, through a local OpenAI-compatible server, or
-from the browser with Open WebUI.
+**Mference** is a private AI assistant that runs entirely on your Mac. It is a
+native SwiftUI app built on its own inference engine. Models run on the Mac's
+GPU, and your chats, files, mail and calendar never leave the machine.
 
-The engine is deliberately narrow. It is not a general model loader and not a
-wrapper around MLX or llama.cpp: every supported model is a pinned checkpoint
-with its own installer path, kernels and tests, and you use the installs that
-Mference itself produces. Installer, runtime, server and UI are built and
-tested together.
+The engine, `MferenceEngine`, serves every model through one API, with two
+backends underneath:
+
+* **Mference's native Swift and Metal runtime** for pinned `.gturbo` installs.
+  Mixture-of-experts models keep their shared weights and KV cache in memory
+  and read only the experts each token needs from the SSD. This is how
+  Qwen 3.6 35B-A3B (a 19.6 GB install) runs in about 1.5 GB of memory.
+* **llama.cpp, linked in-process,** for GGUF files.
+
+The same engine also powers an OpenAI-compatible local server and a
+command-line tool.
 
 Website: **https://neelm0906.github.io/Mference/**
 
-## Models
-
-These are the models you can install today, with the memory they use while
-running and the decode speeds reported in this repository.
-
-| Model | Total / active params | Installed | Memory while running | Reported decode |
-| --- | --- | ---: | --- | --- |
-| [Qwen 3.6](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) | 35B / 3B | 19.6 GB | 1.45 GB (16 slots) | 23.5–29.3 tok/s (M5 24 GB) · 36.1–42.2 (M3 Ultra)¹ |
-| [Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) | 20B / 1B | 6.6 GB | 491–1,211 MiB | 18.9–24.6 tok/s (M4 16 GB) · 38.5 (M3 Ultra) |
-| [Qwen 3.8 27B](https://huggingface.co/mlx-community/Qwen3.8-27B-4bit) (dense) | 27B / 27B | 15 GB | 15 GB (fully resident) | 15.0 tok/s with MTP, 7.9 plain (M5 24 GB) · 38.4–39.4 (M3 Ultra) |
-| [MiniCPM5-2B](docs/families/MINICPM5.md) (dense) | 2B / 2B | 1.43 GB | 123 MiB | 65.56 tok/s (M5 24 GB) |
-
-Sizes and memory are approximate, as reported in the docs. Speeds follow the
-[community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) unless a note
-says otherwise. They are measurements on specific Macs, not promises for yours.
-
-1. A later change (PR #47) measured 29.6–32.5 tok/s on a 24 GB M4 Pro with a
-   506-token prompt and greedy decoding. That was not a protocol run.
-
-Two dense models (Qwen 3.8 27B and MiniCPM5-2B) are in the list too. They do not
-stream, but they share the same runtime, installer and server.
-
-**Model support is intentionally selective.** A family is added when it
-exercises an important new architecture, strengthens the "bigger than memory"
-idea, or is a useful calibration point for the porting process. The goal is not
-a long model list. Earlier families that have since been removed are listed in
-[retired model families](docs/RETIRED_FAMILIES.md).
-
-## Supported hardware
-
-* **Apple Silicon Macs only** (arm64), macOS 26 or later.
-* How much RAM you need depends on the model. Qwen 3.6 uses about 1.45 GB in
-  its 16-slot memory-first mode and MiniCPM5-2B about 123 MiB; the dense
-  Qwen 3.8 27B needs a 24 GB-class Mac.
-* A fast local SSD matters, because that is where the experts come from.
-* The shaders compile at MSL 4.0 and use the Metal 4 tensor-ops prefill
-  kernels where their pipelines build (some need an Apple10 GPU); elsewhere
-  the non-tensor kernels run. Both paths run everything and agree within
-  kernel tolerance, not bit for bit, so expect the same quality but not
-  identical sampled tokens across GPUs.
-
-# So, what can I do with this software?
-
-* Run a capable everyday model on the Mac you already have: Qwen 3.6 decodes at
-  23.5–29.3 tok/s on a 24 GB M5 while using ~1.45 GB in its memory-first mode.
-* Point any OpenAI-compatible client at a local Chat Completions server, or
-  reach it from your own devices over Tailscale.
-* Use a normal chat UI in the browser (Open WebUI) with a model picker that
-  swaps models in place, one resident at a time.
-* Go past RAM on context too: Qwen 3.8 27B pages its KV cache to SSD for long
-  contexts, up to the model's 262k tokens.
-
-## Motivations
-
-* Mixture-of-experts models touch only a small part of their weights per token,
-  so the full model does not need to sit in RAM.
-* Apple Silicon Macs have fast SSDs and unified memory, which makes reading
-  experts on demand practical.
-* An engine specialized for a few pinned checkpoints can fuse, schedule and
-  size everything for exactly those models, instead of carrying generic
-  dispatch for every model.
-* Running where another engine cannot is not enough. Each port should also
-  reach the best throughput we can measure on its target Mac.
-
 ## Status
 
-This is a **source release for Apple Silicon Macs**, not a signed Mac app and
-not a bundle of model weights. The code changes quickly. Tagged source bundles
-with provenance and checksums are on
-[GitHub Releases](https://github.com/NeelM0906/Mference/releases); the
-[0.1.0 release gate](docs/RELEASE_GATE_0.1.0.md) records exactly what was
-checked. Cloning `main` gets you the latest development source, which may be
-less stable than a tag.
+Mference is **pre-release and under active development**. There is no signed
+or notarized download yet: you build the app from source, and it is signed
+with your local identity or ad hoc. Work lands on the `mference-app` branch
+first and reaches `main` when the maintainer merges it. The native engine
+work (running the product models without llama.cpp) is on `mference-engine`.
 
-# How to use this project
+## The Mac app
 
-## Start here
+* **Chat** with the model of your choice. Answers can draw on a web search
+  through a bundled, local [SearXNG](https://github.com/searxng/searxng), with
+  numbered citations. An offline mode turns all network use off.
+* **Models:** a model library that downloads the product models, shows how much
+  memory each one needs on your Mac, and keeps one model loaded at a time.
+* **Scan** receipts and documents with on-device Vision.
+* **Calendar and Reminders** through EventKit: propose, create and edit events.
+* **Mail:** read Apple Mail and draft replies. The app never sends anything
+  without your click.
 
-You need macOS 26+, Swift 6.2+ (Xcode 26+ or the matching Command Line
-Tools), and [`uv`](https://github.com/astral-sh/uv) if you want the browser UI
-(`brew install uv`). The CLI and the server do not need Python.
+Notes, Errands and the iPhone app are planned and not built yet.
+
+## Models
+
+The product offers five models. Speeds are indicative readings from one
+32 GB M1 Max (512-token prompt), not protocol benchmarks. Expect different
+numbers on your Mac.
+
+| Slot | Model | Engine | On disk | Prefill / decode (tok/s) | Peak memory |
+| --- | --- | --- | ---: | --- | ---: |
+| Quick | [Qwen3.5-4B](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) UD-Q4_K_XL | llama.cpp | 2.9 GB | 599 / 50 | 1.3 GB |
+| Deep | [Qwen3.8-27B GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) IQ3_S, MTP | llama.cpp | 12.1 GB | 85 / 17 | 3.1 GB + 12.1 GB mapped |
+| | [Qwen 3.6 35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (MoE) | Mference | 19.6 GB | 258 / 29 | 8.3 GB |
+| | [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | Mference | 1.4 GB | 422 / 72 | 0.8 GB |
+| | [Maple Preview](https://huggingface.co/deepgrove/maple-preview-2bit-mlx) 20B-A1B (MoE) | Mference | 6.6 GB | 44 / 33 | 0.7 GB |
+
+Qwen 3.6's peak reflects the automatic 96-slot expert cache on a 24 GiB+ Mac.
+In its 16-slot memory-first setting it runs in about 1.45 GB. Deep decodes
+with its multi-token-prediction (MTP) head. Its output matches plain decoding
+in substance but is not guaranteed byte-identical. Qwen 3.8 27B (dense, 4-bit
+MLX) also runs natively, but only behind the server's `--catalog all`.
+
+Nine earlier families were retired on 2026-11-18: Gemma 4 and its QAT
+install, DeepSeek-V4-Flash, Inkling-Small, GLM-5.3-Flash, Flint,
+Qwen3.8-Flash-Next and its Unsloth GGUF, and Swift-Qwen3.8. Their code and
+dossiers are in git history at `mference-app` commit `8ff588c`. This runtime
+no longer loads their installs.
+
+## Requirements
+
+* An Apple Silicon Mac with macOS 26 or later.
+* Xcode 26 or the matching Command Line Tools (Swift 6.2 or later).
+* Enough free disk for the models you want (table above), and a fast internal
+  SSD for the MoE models.
+
+## Quick start
+
+### The app
 
 ```sh
 git clone https://github.com/NeelM0906/Mference.git
 cd Mference
-./mference-ui.sh doctor          # checks prerequisites; downloads nothing
+App/Scripts/searxng/prepare.sh --fetch   # once: downloads and verifies the pinned SearXNG runtime
+App/Scripts/run.sh                       # builds, bundles and opens App/build/Mference.app
+```
+
+On first run the app walks you through picking a model. Quick and Deep
+download from Hugging Face into `~/llm-models/gguf/`. For the native models,
+install them with `MferenceRepack` (below); the app finds them in the library
+folders. Calendar, Reminders, Mail and Full Disk Access are asked for only when
+you first use the feature that needs them.
+
+### The engine, server and CLI
+
+```sh
 swift build -c release
-./mference-ui.sh install qwen36  # streams and repacks the pinned checkpoint (~20 GB)
-./mference-ui.sh                 # starts the server and the UI at http://127.0.0.1:3000
-```
 
-Qwen 3.6 is the established general-purpose choice; on a small Mac, MiniCPM5-2B
-is the lightest install. The first run is slow: the build, the
-pinned Open WebUI install, the model download and its integrity checks all take
-time. Later launches reuse everything. If a download is interrupted, run the
-same command with `--resume` instead of starting over.
-
-Install more models the same way and they show up in the UI's model picker:
-
-```sh
-./mference-ui.sh install maple    # also: qwen38, minicpm5
-./mference-ui.sh models           # what the server would expose, without loading anything
-```
-
-Pick the way you want to use it:
-
-| You want | Guide | Entry point |
-| --- | --- | --- |
-| A chat UI in the browser | [The Mference UI (Open WebUI)](docs/OPEN_WEBUI.md) | `./mference-ui.sh` |
-| An API for your own clients | [OpenAI-compatible server](docs/OPENAI_SERVER.md) | `MferenceServer` |
-| A terminal, scripts, or diagnostics | [Runtime controls](docs/RUNTIME_CONTROLS.md) | `MferenceCLI` |
-
-Installed sizes, release roles and known limits for every checkpoint are in
-[checkpoint choices and limits](docs/RELEASE_SUPPORT.md).
-
-## Everyday use
-
-### Browser UI
-
-`./mference-ui.sh` starts `MferenceServer` in library mode and opens Open WebUI.
-The server lists every install it finds (in the checkout's `scratch/`,
-`~/llm-models`, or `~/Library/Application Support/Mference`) and swaps the
-loaded model in place when you pick another one. Only one model is ever
-resident. The launcher turns off Open WebUI's builtin tool schemas for Mference
-models, because otherwise a one-line question costs thousands of prompt
-tokens. Chats and settings stay in Open WebUI's local data directory.
-
-### Command line
-
-```sh
-# Install a model without the UI (streams and repacks; never holds the full checkpoint)
+# Install a native model. This streams and repacks the pinned checkpoint,
+# never holding the whole thing in memory or on disk.
 swift run -c release MferenceRepack --model qwen36 --output scratch/qwen36.gturbo
+#   other labels: minicpm5, maple, qwen38; resume an interrupted install with --resume
 
-# Chat, using the checkpoint's own template
+# Chat in the terminal
 swift run -c release MferenceCLI --model scratch/qwen36.gturbo --chat
 
-# Raw completion
-swift run -c release MferenceCLI --model scratch/qwen36.gturbo \
-  --prompt "The capital of France is" --max-new 64
+# Serve every installed product model (native and GGUF) on 127.0.0.1:8080
+.build/release/MferenceServer --library --port 8080
 ```
 
-`--prompt` is raw completion input, not a chat message. For instruction models
-use `--chat`, or `--messages-file` with a JSON message history. Every flag is
-in [runtime controls](docs/RUNTIME_CONTROLS.md).
-
-### Server
-
-```sh
-swift build -c release --product MferenceServer
-.build/release/MferenceServer --model scratch/qwen36.gturbo --port 8080 --max-context 16384
-```
-
-Wait for `MferenceServer ready`, then use any OpenAI-compatible client.
-`--library` serves every installed model from one process, and
-`--bind tailnet` binds only your Tailscale IPv4 address. The server picks each
-model's native chat and tool-call format automatically. See the
-[server guide](docs/OPENAI_SERVER.md).
-
-> The server and Open WebUI bind to loopback, the server has no authentication
-> or TLS, and Open WebUI runs with authentication off. Do not expose either port.
-
-Run one model-owning process at a time.
-
-### Model extras
-
-* **Qwen 3.8 27B** ships MTP speculative decoding with byte-identical greedy
-  output (2.35× mlx-vlm on the same checkpoint), an opt-in
-  [DFlash2 drafter](docs/QWEN38_DFLASH2.md), and
-  [long context past RAM](docs/QWEN38_LONG_CONTEXT.md).
-* **Maple** has an opt-in approximate FlashHead decode head (`--flash-head`).
-* Maple, Qwen 3.8 and MiniCPM5 open a `<think>` block by default, so give them
-  a generous max-token allowance. Thinking is opt-in for Qwen 3.6.
+The server speaks OpenAI Chat Completions, including streaming, tool calls and
+prompt-prefix reuse. In library mode it swaps the resident model in place when
+a request names another one. It binds to loopback by default and has no
+authentication or TLS, so do not expose it. Run one model-owning process at a
+time.
 
 ## How it works
 
-The installer, `MferenceRepack`, streams bounded byte ranges from the pinned
-Hugging Face revision and writes a `.gturbo` install: the shared tensors in one
-mapped file, and each layer's routed experts as fixed-stride, page-aligned
-blobs, so one expert is one read. Vendor BF16 checkpoints are quantized in
-flight, so the full-precision download never exists whole on disk.
+* **Installer.** `MferenceRepack` reads bounded byte ranges from a pinned
+  Hugging Face revision and writes a `.gturbo` install. Shared tensors go into
+  one memory-mapped file, and each layer's routed experts go into fixed-stride,
+  page-aligned blobs, so one expert is one read. Vendor BF16 checkpoints are
+  quantized in flight.
+* **Native runtime.** Shared weights stay mapped read-only. Each MoE layer
+  keeps an LFU cache of expert slots, and the runtime `pread`s only the
+  experts the router picks for the current token. The automatic setting sizes
+  the cache to the Mac's memory.
+* **Engine.** `EngineCatalog` lists the models it finds, by stable ID.
+  `EngineHost` keeps exactly one loaded and releases it before loading the
+  next, so peak memory is one model. The app and the server both run on it.
+* **Correctness.** The installer's quantizer is bit-identical to the
+  runtime's reference. Every kernel is tested against a CPU reference.
+  Optimizations that should be exact must keep output byte-identical to their
+  control, and approximate features stay opt-in.
 
-At run time the shared weights stay mapped read-only. Each layer keeps a small
-LFU cache of expert slots, and the runtime reads only the experts the router
-picks for the current token (8 for Qwen 3.6 and Maple). The memory-first
-setting is 16 slots. On bigger Macs the automatic setting picks larger,
-measured rungs: Qwen 3.6 uses 96 slots on 24 GiB+ hosts and 32 on 16 GiB+.
-More slots means fewer reads from SSD at the cost of RAM.
+## Repository layout
 
-The same idea covers other large tensors: long-context KV pages spill to SSD.
+| Path | What it is |
+| --- | --- |
+| `Sources/Mference` | Native runtime, Metal kernels, tokenizers |
+| `Sources/MferenceEngine` | The engine API over the native and llama.cpp backends |
+| `Sources/LlamaCpp` | Vendored llama.cpp and ggml |
+| `Sources/MferenceRepack` | Streaming installer |
+| `Sources/MferenceServer`, `Sources/MferenceCLI` | OpenAI-compatible server and CLI |
+| `App/` | The SwiftUI Mac app (its own Swift package) |
+| `Tests/`, `App/Tests/` | Swift Testing suites; none of them downloads or loads a model |
 
-The full design and the experiments behind it are in
-[system design](docs/SYSTEM_DESIGN.md) and the
-[optimization journey](docs/OPTIMIZATION_JOURNEY.md).
+## Documentation
 
-## Correctness
-
-A model that loads and writes fluent text can still be wrong, so every install
-and port is treated as a measurement with stated gates:
-
-* The installer's quantizer is bit-identical to the runtime's reference
-  quantizer, enforced in CI.
-* Installs quantized in flight are compared with an independent conversion,
-  per tensor and end to end. On Qwen 3.6 this caught two defects in an install
-  that had verified and loaded ([details](docs/QUANTIZER_QUALITY.md)).
-* Every new kernel is checked against a CPU reference and, where available,
-  committed goldens.
-* Exact optimizations must keep output byte-identical to the control;
-  approximate features stay opt-in.
-* Every new family passes the same [acceptance gate](docs/FAMILY_GATE.md).
-  `./bringup-check.sh <family> <gturbo>` automates the mechanical steps.
-
-## Speed
-
-The speeds in the [Models](#models) table come from the frozen
-[community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md): three fixed
-prompts and seeds, one discarded warmup, each measured run in a fresh process,
-and every run reaching a natural end of turn. Diagnostic and first-light runs
-are labeled as such. Speeds were recorded on specific Macs at specific commits;
-they are not re-measured for every commit.
-
-To measure your own Mac and contribute the result:
-
-```sh
-./run-benchmark.sh <label> <gturbo-dir> [reps]
-```
-
-See [benchmarks](docs/BENCHMARKS.md) for every measured row, plus the
-[M3 Ultra report](docs/BENCHMARKS_M3_ULTRA.md).
-
-## Detailed guides
-
-- [Checkpoint choices and limits](docs/RELEASE_SUPPORT.md): what each install is for and its known limits.
-- [The Mference UI (Open WebUI)](docs/OPEN_WEBUI.md): first launch, model picker, library mode, troubleshooting.
-- [OpenAI-compatible server](docs/OPENAI_SERVER.md): API, Tailscale binding, queueing.
-- [Runtime controls](docs/RUNTIME_CONTROLS.md): CLI modes, generation flags, expert-cache slots, prefetch.
-- [System design](docs/SYSTEM_DESIGN.md): the `.gturbo` format, memory split, prefill and decode.
-- [Optimization journey](docs/OPTIMIZATION_JOURNEY.md): the experiment record that shaped the engine.
-- [Benchmarks](docs/BENCHMARKS.md) and the [community protocol](docs/COMMUNITY_BENCHMARKS.md): measured numbers and how to add yours.
-- [Quantizer quality](docs/QUANTIZER_QUALITY.md): how in-flight quantization is checked.
-- [Family gate](docs/FAMILY_GATE.md) and [family contract](docs/FAMILY_CONTRACT.md): how to add a model family.
-- Per-family pages: [MiniCPM5](docs/families/MINICPM5.md), [Qwen 3.6 performance](docs/QWEN36_PERFORMANCE.md), [Qwen 3.8 performance](docs/QWEN38_PERFORMANCE.md); [retired families](docs/RETIRED_FAMILIES.md).
+* [Engine API](docs/ENGINE.md): models, identifiers, request lifecycle.
+* [OpenAI-compatible server](docs/OPENAI_SERVER.md): launch, library mode,
+  API behavior, errors.
+* [Runtime controls](docs/RUNTIME_CONTROLS.md): CLI and server flags.
+* [Community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md): how to measure
+  your Mac (`./run-benchmark.sh`).
+* [Family contract](docs/FAMILY_CONTRACT.md) and
+  [family gate](docs/FAMILY_GATE.md): what a new model family must provide.
+* [CLAUDE.md](CLAUDE.md): architecture notes, commands and invariants for
+  contributors.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before sending a pull request, and
 [SECURITY.md](SECURITY.md) to report a security issue.
-
-## Roadmap
-
-* **Product hardening:** keep model switching, OpenAI behavior, installation and
-  the Open WebUI path reproducible across the supported hardware.
-* **Longer context and multimodality:** extend the same design before adding
-  vision towers or more families.
 
 ## License
 
 New Mference code is [MIT-licensed](LICENSE). Mference's foundation is derived
 from [TurboFieldfare](https://github.com/drumih/turbo-fieldfare) by Andrey
-Mikhaylov, which first ran Gemma 4 26B in ~2 GB on Apple Silicon; those portions
-are under the [Apache License 2.0](LICENSE-APACHE). Maple's MLX-derived kernel
-work is covered by [LICENSE-MLX](LICENSE-MLX), and the vendored llama.cpp
-and ggml sources by [LICENSE-GGML](LICENSE-GGML). See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Mikhaylov, which first ran Gemma 4 26B in ~2 GB on Apple Silicon. Those
+portions are under the [Apache License 2.0](LICENSE-APACHE). Maple's
+MLX-derived kernel work is covered by [LICENSE-MLX](LICENSE-MLX), and the
+vendored llama.cpp and ggml sources by [LICENSE-GGML](LICENSE-GGML). The app
+bundles SearXNG (AGPL-3.0, shipped with its source) and the Geist font (OFL).
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
+`App/Resources/*/SOURCES.md`.
 
-Model weights keep their own terms: the
-[Qwen license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE)
-for Qwen 3.6 and Qwen 3.8;
-[Apache-2.0](https://github.com/OpenBMB/MiniCPM/blob/main/LICENSE) for
-MiniCPM5-2B. Maple's pinned
-checkpoint declares no license; establish the necessary rights before
-downloading, using or redistributing it.
+Model weights are not part of this repository and keep their own terms. Quick,
+Deep and MiniCPM5-2B are published under Apache-2.0, and Qwen 3.6 and Qwen 3.8
+under the
+[Qwen license](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/LICENSE).
+Maple's pinned checkpoint declares no license, so establish the necessary
+rights before you download, use or redistribute it.

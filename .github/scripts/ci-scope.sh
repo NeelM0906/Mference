@@ -26,7 +26,7 @@ set -euo pipefail
 
 # Paths whose files the test job executes or reads. .github is left out: a
 # change there is always full, and the docs job runs on every pull request.
-reference_roots=(Tests Scripts Sources Vendor Package.swift bringup-check.sh mference-ui.sh)
+reference_roots=(Tests Scripts Sources Vendor Package.swift bringup-check.sh)
 
 # True when CI code names the path, or one of its parent directories below the
 # top level (docs/ alone is named everywhere and says nothing). A failed search
@@ -66,8 +66,7 @@ while IFS= read -r path || [[ -n "$path" ]]; do
   case "$path" in
     Sources/MferenceEngine/*|Tests/MferenceEngine/*|\
     Sources/LlamaCpp/*|Tests/LlamaCpp/*|\
-    Sources/MferenceServer/*|Tests/MferenceServer/*|\
-    mference-ui.sh)
+    Sources/MferenceServer/*|Tests/MferenceServer/*)
       kind=t0 ;;
     Scripts/test.sh)
       kind=full ;;

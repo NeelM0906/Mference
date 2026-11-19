@@ -19,8 +19,7 @@ MferenceServer (OpenAI API)   ·   app (later)
 ```
 
 This page covers the public API, the identifiers, and the lifecycle. Server
-behaviour is in [OPENAI_SERVER.md](OPENAI_SERVER.md), and the runtime itself
-is in [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md).
+behaviour is in [OPENAI_SERVER.md](OPENAI_SERVER.md).
 
 ## Models and identifiers
 
