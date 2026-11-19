@@ -34,6 +34,19 @@ final class RecordingPermissionBroker: PermissionBroker, @unchecked Sendable {
     }
 }
 
+/// Sends once `gate` opens.
+actor GatedSender: MailSending {
+    let gate: ScanTestLatch
+    private(set) var sent: [MailDraft] = []
+
+    init(gate: ScanTestLatch) { self.gate = gate }
+
+    func send(_ draft: MailDraft) async throws {
+        await gate.wait()
+        sent.append(draft)
+    }
+}
+
 /// Answers every generation with `answer` once `gate` opens.
 final class GatedEngine: EngineServicing, @unchecked Sendable {
     let gate: ScanTestLatch
@@ -239,6 +252,33 @@ struct GatedSorter: AppleModelServicing {
         #expect(!model.canReply && model.replyDraft == nil)
     }
 
+    @Test @MainActor func aSendFinishingAfterAnotherMessageOpensLeavesThatOneAlone() async throws {
+        let fixture = try MailStoreFixture.make()
+        defer { fixture.remove() }
+        let container = try AppModelContainer.inMemory()
+        let gate = ScanTestLatch()
+        let sender = GatedSender(gate: gate)
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
+                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+                                                                                                    answer: "{}"),
+                                                                fallback: nil),
+                                   drafter: nil, sender: sender, broker: RecordingPermissionBroker())
+        await model.load()
+        let first = try #require(model.selected)
+        model.draft = "Sounds good."
+        let sending = Task { await model.send() }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while model.draftState != .sending, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        let other = try #require(model.messages(in: .bucket("other")).first { $0.messageID != first.messageID })
+        await model.open(other)
+        await gate.open()
+        await sending.value
+        #expect(model.selected?.messageID == other.messageID)
+        #expect(model.draftState == .idle)
+        await model.open(first)
+        #expect(model.draftState == .sent)  // reopening the replied message shows it sent
+    }
+
     @Test @MainActor func backgroundSortingUsesAppleOnlyAndOffersQuick() async throws {
         let fixture = try MailStoreFixture.make()
         defer { fixture.remove() }
@@ -426,6 +466,24 @@ struct GatedSorter: AppleModelServicing {
         await model.requestAccess()
         #expect(broker.requests == [.fullDiskAccess])
         #expect(broker.openedSettings == [.fullDiskAccess])
+    }
+
+    @Test @MainActor func composeSendsOnlyAValidMessage() async throws {
+        let container = try AppModelContainer.inMemory()
+        let sender = RecordingMailSender()
+        let empty = URL.temporaryDirectory.appending(path: "no-mail-\(UUID().uuidString)")
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: empty), context: container.mainContext,
+                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+                                                                                                    answer: "{}"),
+                                                                fallback: nil),
+                                   drafter: nil, sender: sender, broker: RecordingPermissionBroker())
+        #expect(await model.sendNewMessage(to: "nobody", subject: "Hi", body: "Hello") != nil)
+        #expect(await model.sendNewMessage(to: "a@example.com", subject: "Hi", body: "  ") != nil)
+        #expect(await sender.sent.isEmpty)
+        #expect(await model.sendNewMessage(to: " a@example.com ", subject: "Hi", body: "Hello") == nil)
+        #expect(await sender.sent == [MailDraft(to: "a@example.com", subject: "Hi", body: "Hello")])
+        model.isComposing = true
+        #expect(model.isEditingText)
     }
 
     @Test func appleScriptEscapesAndRefusesOddAddresses() {

@@ -66,6 +66,29 @@ struct MailContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .shellToolbar(id: "mail.compose") {
+            Button { model.isComposing = true } label: {
+                HStack(spacing: MFSpacing.s) {
+                    Text("Compose")
+                    Text("C")
+                        .font(MFFont.caption)
+                        .padding(.horizontal, MFSpacing.xs + MFSpacing.xxs)
+                        .padding(.vertical, MFSpacing.xxs)
+                        .background(RoundedRectangle(cornerRadius: MFRadius.xs).fill(MFColor.onInk.opacity(0.18)))
+                        .accessibilityHidden(true)
+                }
+            }
+            .buttonStyle(.applePrimary)
+            .keyboardShortcut("c", modifiers: [])
+            .disabled(model.isEditingText || !isMailAvailable)
+            .sheet(isPresented: $model.isComposing) { ComposeSheet(model: model) }
+            .accessibilityLabel("Compose a new message")
+        }
+    }
+
+    private var isMailAvailable: Bool {
+        if case .available = model.status { return true }
+        return false
     }
 
     private var divider: some View { Rectangle().fill(MFColor.hairline).frame(width: 1) }
@@ -502,5 +525,51 @@ struct DraftCard: View {
         case .failed(let message): message
         default: "Not sent until you press Send."
         }
+    }
+}
+
+/// Compose (C): a new message, sent through Mail only on Send.
+struct ComposeSheet: View {
+    var model: MailInboxModel
+    @State private var to = ""
+    @State private var subject = ""
+    @State private var message = ""
+    @State private var error: String?
+    @State private var isSending = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MFSpacing.m) {
+            Text("New message")
+                .font(MFFont.headline)
+                .foregroundStyle(MFColor.ink)
+            TextField("To", text: $to).textFieldStyle(.roundedBorder)
+            TextField("Subject", text: $subject).textFieldStyle(.roundedBorder)
+            TextEditor(text: $message)
+                .font(MFFont.body)
+                .frame(minHeight: 160)
+                .overlay(RoundedRectangle(cornerRadius: MFRadius.s).strokeBorder(MFColor.hairlineStrong))
+                .accessibilityLabel("Message")
+            HStack(spacing: MFSpacing.m) {
+                Text(error ?? "Not sent until you press Send.")
+                    .font(MFFont.callout)
+                    .foregroundStyle(error == nil ? MFColor.secondary : MFColor.danger)
+                Spacer()
+                Button("Cancel") { model.isComposing = false }
+                    .buttonStyle(.appleSecondary)
+                    .keyboardShortcut(.cancelAction)
+                Button(isSending ? "Sending…" : "Send") {
+                    isSending = true
+                    Task {
+                        error = await model.sendNewMessage(to: to, subject: subject, body: message)
+                        isSending = false
+                        if error == nil { model.isComposing = false }
+                    }
+                }
+                .buttonStyle(.applePrimary)
+                .disabled(isSending)
+            }
+        }
+        .padding(MFSpacing.l)
+        .frame(width: 520)
     }
 }

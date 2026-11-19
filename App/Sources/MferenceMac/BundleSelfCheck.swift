@@ -10,20 +10,24 @@ enum BundleSelfCheck {
         let bundleName: String
         /// Paths inside the bundle's resources that must exist.
         let paths: [String]
-        /// A directory inside the bundle that must hold at least one file with this extension.
-        let nonEmpty: (directory: String, fileExtension: String)?
+        /// Directories inside the bundle that must each hold at least one file
+        /// with this extension.
+        let nonEmpty: [(directory: String, fileExtension: String)]
     }
 
     static let requirements: [Requirement] = [
+        // The engine's only resource folder since the retired families
+        // (Gemma 4 included) were removed in 5655b3d0.
         Requirement(bundleName: "Mference_Mference", paths: ["Metal"],
-                    nonEmpty: ("Metal", "metal")),
+                    nonEmpty: [("Metal", "metal")]),
         Requirement(bundleName: "Mference_LlamaCpp",
                     paths: ["kernels", "ggml-metal-impl.h", "ggml-common.h"],
-                    nonEmpty: nil),
+                    nonEmpty: [("kernels", "metal")]),
     ]
 
     /// Returns the failures (empty when every bundle loads).
-    static func run(resourceURL: URL? = Bundle.main.resourceURL) -> [String] {
+    static func run(resourceURL: URL? = Bundle.main.resourceURL,
+                    requirements: [Requirement] = requirements) -> [String] {
         guard let resourceURL else { return ["Bundle.main.resourceURL is nil"] }
         var failures: [String] = []
         let files = FileManager.default
@@ -36,7 +40,7 @@ enum BundleSelfCheck {
             for path in requirement.paths where !files.fileExists(atPath: root.appendingPathComponent(path).path) {
                 failures.append("\(requirement.bundleName).bundle is missing \(path)")
             }
-            if let (directory, fileExtension) = requirement.nonEmpty {
+            for (directory, fileExtension) in requirement.nonEmpty {
                 let found = files.enumerator(at: root.appendingPathComponent(directory),
                                              includingPropertiesForKeys: nil)?
                     .contains { ($0 as? URL)?.pathExtension == fileExtension } ?? false

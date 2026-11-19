@@ -34,6 +34,7 @@ public struct CalendarView: View {
 
 struct CalendarContent: View {
     @Bindable var model: CalendarWeekModel
+    @State private var showsNewEvent = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -69,6 +70,14 @@ struct CalendarContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .shellToolbar(id: "calendar.new-event") {
+            Button("New event") { showsNewEvent = true }
+                .buttonStyle(.applePrimary)
+                .keyboardShortcut("n", modifiers: .command)
+                .popover(isPresented: $showsNewEvent, arrowEdge: .bottom) {
+                    NewEventForm(model: model) { showsNewEvent = false }
+                }
+        }
     }
 
     private var header: some View {
@@ -326,5 +335,72 @@ struct ProposalCard: View {
         return proposal.replacesEventID == nil
             ? "Add \(proposal.title) on \(when)?"
             : "Move the \(proposal.title.lowercased()) to \(when)?"
+    }
+}
+
+/// "New event": title, start and length; added to Calendar on Add.
+struct NewEventForm: View {
+    var model: CalendarWeekModel
+    var close: () -> Void
+    @State private var title = ""
+    @State private var start = NewEventForm.nextHalfHour()
+    @State private var minutes = 30
+    @State private var isAdding = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MFSpacing.m) {
+            Text("New event")
+                .font(MFFont.headline)
+                .foregroundStyle(MFColor.ink)
+            TextField("Title", text: $title)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(add)
+            DatePicker("Starts", selection: $start)
+            Picker("Length", selection: $minutes) {
+                ForEach([15, 30, 45, 60, 90, 120], id: \.self) { value in
+                    Text(Self.lengthLabel(value)).tag(value)
+                }
+            }
+            if let message = model.errorMessage {
+                Text(message).font(MFFont.callout).foregroundStyle(MFColor.danger)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: close)
+                    .buttonStyle(.appleSecondary)
+                    .keyboardShortcut(.cancelAction)
+                Button("Add", action: add)
+                    .buttonStyle(.applePrimary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || isAdding)
+            }
+        }
+        .padding(MFSpacing.l)
+        .frame(width: 320)
+    }
+
+    private func add() {
+        isAdding = true
+        Task {
+            let added = await model.createEvent(title: title, start: start,
+                                                end: start.addingTimeInterval(Double(minutes) * 60))
+            isAdding = false
+            if added { close() }
+        }
+    }
+
+    static func lengthLabel(_ minutes: Int) -> String {
+        switch minutes {
+        case ..<60: "\(minutes) min"
+        case 60: "1 hour"
+        default: String(format: "%g hours", Double(minutes) / 60)
+        }
+    }
+
+    static func nextHalfHour(after date: Date = .now) -> Date {
+        let calendar = Calendar.current
+        let minute = calendar.component(.minute, from: date)
+        let rounded = calendar.date(byAdding: .minute, value: minute < 30 ? 30 - minute : 60 - minute, to: date) ?? date
+        return calendar.date(bySetting: .second, value: 0, of: rounded) ?? rounded
     }
 }

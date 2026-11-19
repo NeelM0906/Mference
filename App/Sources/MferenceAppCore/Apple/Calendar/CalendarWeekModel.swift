@@ -167,6 +167,31 @@ public final class CalendarWeekModel {
         }
     }
 
+    /// "New event" in the toolbar: the person typed it, so it is added at
+    /// once (Calendar access asked first if needed). Returns whether it was
+    /// added; `errorMessage` says why not.
+    @discardableResult
+    public func createEvent(title: String, start: Date, end: Date) async -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, end > start else {
+            errorMessage = "An event needs a title and an end after its start."
+            return false
+        }
+        if access != .granted { await requestAccess() }
+        guard access == .granted else { return false }
+        do {
+            _ = try await service.add(ProposedEvent(title: trimmed, start: start, end: end,
+                                                    source: ItemSource(kind: .manual, label: "Added by you")))
+            await reload()
+            return true
+        } catch let error as CalendarServiceError {
+            errorMessage = error.userMessage
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        return false
+    }
+
     public func dismiss(_ proposal: ProposedEvent) {
         persist { $0.proposals.removeAll { $0.id == proposal.id } }
     }
@@ -221,6 +246,7 @@ public final class CalendarWeekModel {
             return
         }
         do {
+            let pushed = Dictionary(uniqueKeysWithValues: todos.map { ($0.id, $0.reminderFields) })
             let outcomes = try await service.syncReminders(todos)
             persist {
                 for index in $0.todos.indices {
@@ -228,6 +254,15 @@ public final class CalendarWeekModel {
                     case .synced(let reminderID, let fields)?:
                         $0.todos[index].reminderID = reminderID
                         $0.todos[index].lastSynced = fields
+                        // Edits made in Reminders become the to-do's own, so
+                        // the next sync does not mistake the old local values
+                        // for changes and revert them. A to-do edited here
+                        // during the sync keeps its edit (pushed next time).
+                        if $0.todos[index].reminderFields == pushed[$0.todos[index].id] {
+                            $0.todos[index].title = fields.title
+                            $0.todos[index].isDone = fields.isDone
+                            $0.todos[index].due = fields.due
+                        }
                     case .deletedInReminders?:
                         $0.todos[index].reminderID = nil
                         $0.todos[index].lastSynced = nil

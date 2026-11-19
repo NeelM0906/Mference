@@ -20,11 +20,12 @@ public struct WeekBlock: Sendable, Hashable, Identifiable {
     public var lane: Int
     public var lanes: Int
 
+    /// Unique per day too: an event crossing midnight has a block each day.
     public var id: String {
         switch kind {
-        case .event(let event): "event-\(event.id)"
-        case .proposal(let proposal): "proposal-\(proposal.id)"
-        case .moving(let event): "moving-\(event.id)"
+        case .event(let event): "event-\(event.id)-d\(day)"
+        case .proposal(let proposal): "proposal-\(proposal.id)-d\(day)"
+        case .moving(let event): "moving-\(event.id)-d\(day)"
         }
     }
 
@@ -74,12 +75,10 @@ public struct WeekLayout: Sendable {
         var blocks: [WeekBlock] = []
         for event in events where !event.isAllDay {
             let kind: WeekBlock.Kind = moving.contains(event.reference) ? .moving(event) : .event(event)
-            if let block = place(kind, start: event.start, end: event.end, weekStart: weekStart) { blocks.append(block) }
+            blocks += segments(event.start, event.end, weekStart: weekStart).compactMap { place(kind, $0) }
         }
         for proposal in proposals {
-            if let block = place(.proposal(proposal), start: proposal.start, end: proposal.end, weekStart: weekStart) {
-                blocks.append(block)
-            }
+            blocks += segments(proposal.start, proposal.end, weekStart: weekStart).compactMap { place(.proposal(proposal), $0) }
         }
         return assignLanes(blocks)
     }
@@ -101,27 +100,47 @@ public struct WeekLayout: Sendable {
     public func outsideGrid(weekStart: Date, events: [CalendarEvent]) -> [Int: [CalendarEvent]] {
         var result = allDayEvents(weekStart: weekStart, events: events)
         for event in events where !event.isAllDay {
-            let block = place(.event(event), start: event.start, end: event.end, weekStart: weekStart)
-            guard block == nil else { continue }
-            let day = calendar.dateComponents([.day], from: calendar.startOfDay(for: weekStart),
-                                              to: calendar.startOfDay(for: event.start)).day ?? -1
-            if (0..<days).contains(day) { result[day, default: []].append(event) }
+            // Each day the event touches whose part falls outside the hours.
+            for segment in segments(event.start, event.end, weekStart: weekStart)
+            where place(.event(event), segment) == nil {
+                result[segment.day, default: []].append(event)
+            }
         }
         return result.mapValues { $0.sorted { ($0.isAllDay ? 0 : 1, $0.start) < ($1.isAllDay ? 0 : 1, $1.start) } }
     }
 
-    private func place(_ kind: WeekBlock.Kind, start: Date, end: Date, weekStart: Date) -> WeekBlock? {
-        let day = calendar.dateComponents([.day], from: calendar.startOfDay(for: weekStart),
-                                          to: calendar.startOfDay(for: start)).day ?? -1
-        guard (0..<days).contains(day) else { return nil }
-        let dayStart = calendar.startOfDay(for: start)
-        let startHours = start.timeIntervalSince(dayStart) / 3_600
-        let endHours = min(end.timeIntervalSince(dayStart) / 3_600, 24)
+    /// One displayed day's part of a span.
+    struct Segment {
+        var day: Int
+        var dayStart: Date
+        var start: Date
+        var end: Date
+    }
+
+    /// The span clipped to each displayed day it touches (an event from
+    /// Sunday 10 PM to Monday 2 AM shows on Monday from midnight).
+    func segments(_ start: Date, _ end: Date, weekStart: Date) -> [Segment] {
+        let first = calendar.startOfDay(for: weekStart)
+        var result: [Segment] = []
+        for day in 0..<days {
+            guard let dayStart = calendar.date(byAdding: .day, value: day, to: first),
+                  let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { continue }
+            let touches = start == end ? (start >= dayStart && start < dayEnd) : (start < dayEnd && end > dayStart)
+            if touches {
+                result.append(Segment(day: day, dayStart: dayStart, start: max(start, dayStart), end: min(end, dayEnd)))
+            }
+        }
+        return result
+    }
+
+    private func place(_ kind: WeekBlock.Kind, _ segment: Segment) -> WeekBlock? {
+        let startHours = segment.start.timeIntervalSince(segment.dayStart) / 3_600
+        let endHours = min(segment.end.timeIntervalSince(segment.dayStart) / 3_600, 24)
         let top = max(startHours, Double(firstHour)) - Double(firstHour)
         let bottom = min(endHours, Double(lastHour)) - Double(firstHour)
         guard bottom > top || (bottom == top && startHours >= Double(firstHour) && startHours < Double(lastHour))
         else { return nil }
-        return WeekBlock(kind: kind, day: day, top: top, height: max(bottom - top, 0.5), lane: 0, lanes: 1)
+        return WeekBlock(kind: kind, day: segment.day, top: top, height: max(bottom - top, 0.5), lane: 0, lanes: 1)
     }
 
     /// Overlapping blocks in one day share the column side by side.

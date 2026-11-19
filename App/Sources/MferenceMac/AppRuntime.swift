@@ -1,44 +1,40 @@
 import AppKit
 import MferenceAppCore
-import SwiftData
+import MferenceAppUI
 
 /// The app's long-lived objects, built once at launch and kept for the app's
-/// lifetime: the engine and the one chat model (U3's notes: switching pills
-/// must not drop a running answer).
-///
-/// When U2's `AppServices.live()` lands (#102), the engine and store come
-/// from it; when U3's `WebAnswers` lands (#112), it becomes the chat's
-/// `tools` and its shutdown is added before the engine's (see `init`).
+/// lifetime: U2's composition root (`AppServices.live`), U3's web answers,
+/// the one chat model (switching pills must not drop a running answer) and
+/// the screen models U1's Settings, model library and first run read.
 @MainActor
 final class AppRuntime {
-    let engine: EngineService
+    let services: AppServices
+    let web: WebAnswers
     let chat: ChatViewModel
-    /// Set when the on-disk store could not be opened (nothing is saved).
-    let storeError: String?
+    let screenModels: ScreenModels
 
-    /// Quit steps, run in order. Web answers (SearXNG) must stop before the
-    /// engine shuts down.
-    private var shutdownSteps: [@MainActor () async -> Void] = []
+    /// Quit steps, run in order: web answers (SearXNG) stop before the engine
+    /// shuts down (U3's notes).
+    private let shutdownSteps: [@MainActor () async -> Void]
 
-    init() {
-        engine = EngineService.live()
-        var storeError: String?
-        let container: ModelContainer
-        do {
-            container = try AppModelContainer.make()
-        } catch {
-            // Run on an in-memory store this session; the UI can say nothing is saved.
-            storeError = String(describing: error)
-            do {
-                container = try AppModelContainer.inMemory()
-            } catch {
-                fatalError("The in-memory store did not open (a schema bug the tests catch): \(error)")
-            }
-        }
-        self.storeError = storeError
-        chat = ChatViewModel(service: engine, store: ConversationStore(container: container), tools: nil)
-        let engine = engine
-        shutdownSteps.append { await engine.shutdown() }
+    /// One composition root for the whole app: every engine use (chat, model
+    /// library, Scan, Calendar, Mail) goes through `services.engine`, so only
+    /// one engine host can hold a model. Nothing here loads or warms a model;
+    /// that happens only when the person picks a model or opens a chat.
+    init(services: AppServices = .live(presentPermissionReason: PermissionReasonAlert.present),
+         web: WebAnswers = WebAnswers()) {
+        self.services = services
+        self.web = web
+        chat = ChatViewModel(service: services.engine,
+                             store: ConversationStore(container: services.modelContainer),
+                             tools: web)
+        screenModels = ScreenModels.live(services: services)
+        let web = web
+        let engine = services.engine
+        shutdownSteps = [
+            { await web.shutdown() },
+            { await engine.shutdown() },
+        ]
     }
 
     /// Runs every quit step in order.
@@ -49,20 +45,63 @@ final class AppRuntime {
     }
 }
 
+/// Shows a permission's one-line reason before macOS asks (L6). Returns
+/// whether the person chose to continue to the system prompt.
+enum PermissionReasonAlert {
+    static let present: LivePermissionBroker.ReasonPresenter = { permission in
+        await MainActor.run {
+            let alert = NSAlert()
+            alert.messageText = title(for: permission)
+            alert.informativeText = permission.reason
+            alert.addButton(withTitle: "Continue")
+            alert.addButton(withTitle: "Not now")
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+    }
+
+    static func title(for permission: AppPermission) -> String {
+        switch permission {
+        case .calendar: "Mference would like to use Calendar"
+        case .reminders: "Mference would like to use Reminders"
+        case .camera: "Mference would like to use the camera"
+        case .fullDiskAccess: "Mference needs Full Disk Access to read Mail"
+        case .mailAutomation: "Mference would like to send through Mail"
+        case .microphone: "Mference would like to use the microphone"
+        }
+    }
+}
+
 /// Quit waits for the shutdown sequence (`applicationShouldTerminate`
-/// returns `.terminateLater` and replies when it is done).
+/// returns `.terminateLater` and replies when it is done), but never longer
+/// than `shutdownDeadline`: a stalled step must not keep the app from
+/// quitting.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let runtime = AppRuntime()
+    static let shutdownDeadline: Duration = .seconds(10)
     private var terminating = false
+    private var replied = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !terminating {
             terminating = true
             Task {
                 await runtime.shutdown()
-                sender.reply(toApplicationShouldTerminate: true)
+                reply(to: sender)
+            }
+            Task {
+                try? await Task.sleep(for: Self.shutdownDeadline)
+                if !replied {
+                    FileHandle.standardError.write(Data("quit: shutdown passed its deadline; quitting anyway\n".utf8))
+                }
+                reply(to: sender)
             }
         }
         return .terminateLater
+    }
+
+    private func reply(to sender: NSApplication) {
+        guard !replied else { return }
+        replied = true
+        sender.reply(toApplicationShouldTerminate: true)
     }
 }
