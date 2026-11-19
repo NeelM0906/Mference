@@ -443,6 +443,8 @@ struct EventEditForm: View {
     @State private var title: String
     @State private var start: Date
     @State private var minutes: Int
+    /// The length stays exactly the event's own until the person changes it.
+    @State private var lengthEdited = false
     @State private var isWorking = false
 
     init(event: CalendarEvent, model: CalendarWeekModel, close: @escaping () -> Void) {
@@ -454,6 +456,13 @@ struct EventEditForm: View {
         _minutes = State(initialValue: max(5, Int(event.end.timeIntervalSince(event.start) / 60)))
     }
 
+    /// The new end: the original duration (to the second) unless the length
+    /// was edited.
+    static func end(for event: CalendarEvent, start: Date, minutes: Int?) -> Date {
+        if let minutes { return start.addingTimeInterval(Double(minutes) * 60) }
+        return start.addingTimeInterval(event.end.timeIntervalSince(event.start))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.m) {
             Text(event.occurrenceDate == nil ? "Edit event" : "Edit this occurrence")
@@ -462,7 +471,9 @@ struct EventEditForm: View {
             TextField("Title", text: $title)
                 .textFieldStyle(.roundedBorder)
             DatePicker("Starts", selection: $start)
-            Stepper("Length: \(minutes) min", value: $minutes, in: 5...(24 * 60), step: 15)
+            Stepper("Length: \(minutes) min", value: Binding(
+                get: { minutes },
+                set: { minutes = $0; lengthEdited = true }), in: 5...(24 * 60), step: 15)
             if let message = model.errorMessage {
                 Text(message).font(MFFont.callout).foregroundStyle(MFColor.danger)
             }
@@ -485,7 +496,8 @@ struct EventEditForm: View {
                     isWorking = true
                     Task {
                         let done = await model.updateEvent(event, title: title, start: start,
-                                                           end: start.addingTimeInterval(Double(minutes) * 60))
+                                                           end: EventEditForm.end(for: event, start: start,
+                                                                                  minutes: lengthEdited ? minutes : nil))
                         isWorking = false
                         if done { close() }
                     }
