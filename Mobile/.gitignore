@@ -9,3 +9,6 @@ xcuserdata/
 MferenceMobile.xcodeproj/project.xcworkspace/
 .swiftpm/
 .build/
+
+# The maintainer's signing team (Config/Signing.local.xcconfig.example shows the shape).
+Config/Signing.local.xcconfig
