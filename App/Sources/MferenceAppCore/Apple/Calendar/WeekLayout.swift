@@ -139,13 +139,18 @@ public struct WeekLayout: Sendable {
     private func place(_ kind: WeekBlock.Kind, _ segment: Segment) -> WeekBlock? {
         let startHours = segment.start.timeIntervalSince(segment.dayStart) / 3_600
         let endHours = min(segment.end.timeIntervalSince(segment.dayStart) / 3_600, 24)
-        let top = max(startHours, Double(firstHour)) - Double(firstHour)
+        var top = max(startHours, Double(firstHour)) - Double(firstHour)
         let bottom = min(endHours, Double(lastHour)) - Double(firstHour)
         guard bottom > top || (bottom == top && startHours >= Double(firstHour) && startHours < Double(lastHour))
         else { return nil }
         var height = max(bottom - top, 0.5)
         if case .proposal = kind {
-            height = min(max(height, minimumProposalHours), Double(lastHour - firstHour) - top)
+            // A proposal keeps its room even at the grid's lower edge: it
+            // rises instead of shrinking, so it never gets a tiny or negative
+            // frame, and lanes use the same geometry.
+            let span = Double(lastHour - firstHour)
+            height = min(max(height, minimumProposalHours), span)
+            top = min(top, span - height)
         }
         return WeekBlock(kind: kind, day: segment.day, top: top, height: height, lane: 0, lanes: 1)
     }
