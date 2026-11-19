@@ -22,14 +22,15 @@ final class AppRuntime {
     /// one engine host can hold a model. Nothing here loads or warms a model;
     /// that happens only when the person picks a model or opens a chat.
     init(services: AppServices = .live(presentPermissionReason: PermissionReasonAlert.present),
-         web: WebAnswers = WebAnswers()) {
+         web: WebAnswers? = nil) {
         self.services = services
+        // Web search follows Settings > Privacy (services.settings).
+        let web = web ?? WebAnswers(settings: services.settings)
         self.web = web
         chat = ChatViewModel(service: services.engine,
                              store: ConversationStore(container: services.modelContainer),
                              tools: web)
         screenModels = ScreenModels.live(services: services)
-        let web = web
         let engine = services.engine
         shutdownSteps = [
             { await web.shutdown() },
