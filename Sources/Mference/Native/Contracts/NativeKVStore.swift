@@ -177,7 +177,7 @@ extension Native {
     /// batching is out of scope).
     ///
     /// Positions: the sequence holds tokens `0..<length`. A step with `n`
-    /// rows calls `beginStep(rows: n)`, which reserves positions
+    /// rows calls `beginStep(rows: n, kind:)`, which reserves positions
     /// `length ..< length + n`, grows `length` and makes this step's state
     /// views current (`pageTable()`, `recurrentState(gdnLayer:)`); then the
     /// step is encoded and committed.
@@ -218,9 +218,16 @@ extension Native {
         /// Maximum tokens (the resolved context of the `MemoryPlan`).
         var capacity: Int { get }
 
-        /// Begin a step of `rows` tokens at position `length` (pages allocated,
-        /// `length += rows`, state views switched to this step). Throws
-        /// `NativeError.stateOutOfRange` past `capacity`.
+        /// Begin a step of `rows` tokens of `kind` at position `length` (pages
+        /// allocated, `length += rows`, state views switched to this step).
+        /// The store records `kind`: `rollback(to: start + r + 1)` is legal
+        /// only after a `.verify` step (whose verify arena holds the per-row
+        /// states) and throws `stateOutOfRange` after `.prefill` or `.decode`.
+        /// Throws `NativeError.stateOutOfRange` past `capacity`.
+        func beginStep(rows: Int, kind: StepKind) throws
+        /// Deprecated form without the step kind, kept only until every
+        /// implementation and caller moves to `beginStep(rows:kind:)`; removed
+        /// at the contract freeze. New code must not call it.
         func beginStep(rows: Int) throws
         /// The page table covering `0..<length` for the current step.
         func pageTable() -> KVPageTable
@@ -230,8 +237,8 @@ extension Native {
         /// Verify arena for GDN layer `gdnLayer`, `slots` >= the verify rows.
         func verifyArena(gdnLayer: Int) -> RecurrentVerifyArena
         /// Drop tokens `position..<length`. `position` must be the start of
-        /// the most recent step, or `start + r + 1` for a verify step whose
-        /// rows start at `start` (keeps rows `0...r`).
+        /// the most recent step, or, only when that step was `.verify`,
+        /// `start + r + 1` for its rows starting at `start` (keeps rows `0...r`).
         func rollback(to position: Int, commandBuffer: MTLCommandBuffer) throws
         /// Clear the sequence (length 0, zero recurrent state); prefix cache kept.
         func reset(commandBuffer: MTLCommandBuffer) throws
@@ -250,6 +257,18 @@ extension Native {
         var footprint: MemoryPlan.Footprint { get }
     }
 
+    // Transitional default (removed at the freeze): stores that predate the
+    // step kind keep their old behaviour. Every store must implement
+    // `beginStep(rows:kind:)` itself before the freeze.
+}
+
+extension Native.KVStore {
+    public func beginStep(rows: Int, kind: Native.StepKind) throws {
+        try beginStep(rows: rows)
+    }
+}
+
+extension Native {
     /// Footprint plan for one resident model at a resolved context.
     public struct MemoryPlan: Sendable {
         public struct Footprint: Sendable, Equatable {
