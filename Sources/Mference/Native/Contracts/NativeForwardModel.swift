@@ -82,7 +82,7 @@ extension Native {
         /// Optional per-op capture; nil in production.
         var tap: (any TensorTap)? { get set }
         /// Encode `plan` into `encoder`. The caller has already called
-        /// `kv.beginStep(rows: plan.rows)`. Returns the logits (F32,
+        /// `kv.beginStep(rows: plan.rows, kind: plan.kind)`. Returns the logits (F32,
         /// `[n x vocabSize]`, n = 0, 1 or rows per `plan.logits`); nil for
         /// `.none`. Host tokens are staged before it returns, so the caller
         /// may commit right away.

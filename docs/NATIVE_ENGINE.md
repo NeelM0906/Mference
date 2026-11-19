@@ -115,7 +115,7 @@ has `rows == 1`, a verify step has 2 to 16 rows, and a prefill chunk has up to
 `QuantGEMM`, `AttentionOp` and `GDNOp` entry points differ
 (`encodeGEMV`/`encodeDecode`, `encodeVerify`, `encodePrefill`).
 
-1. The scheduler calls `kv.beginStep(rows:)`. It opens
+1. The scheduler calls `kv.beginStep(rows:kind:)`. It opens
    one command buffer with one compute encoder and calls
    `ForwardModel.encodeStep`.
 2. **Embedding.** `QuantGEMM.encodeGetRows(token_embd, tokens)` writes the
