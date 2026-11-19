@@ -18,14 +18,19 @@ enum WindowCapture {
 
     static func captureAndQuit(to path: String) async {
         do {
+            // Settle, then wait (up to about 10 s) for the window to be on
+            // screen: a cold launch can take longer than a warm one.
+            // No activation: a background check must not take the keyboard
+            // from whatever the person is typing in.
             try await Task.sleep(for: .seconds(2))
-            let content = try await SCShareableContent.currentProcess
-            let pid = ProcessInfo.processInfo.processIdentifier
-            guard let window = content.windows.first(where: {
-                $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.isOnScreen
-            }) else {
-                FileHandle.standardError.write(Data("capture: no on-screen window\n".utf8))
-                NSApp.terminate(nil)
+            var window: SCWindow?
+            for _ in 0..<16 where window == nil {
+                window = try await ownWindow()
+                if window == nil { try await Task.sleep(for: .milliseconds(500)) }
+            }
+            guard let window else {
+                FileHandle.standardError.write(Data("capture: no window of this app\n".utf8))
+                quit()
                 return
             }
             let filter = SCContentFilter(desktopIndependentWindow: window)
@@ -43,6 +48,25 @@ enum WindowCapture {
         } catch {
             FileHandle.standardError.write(Data("capture: \(error)\n".utf8))
         }
-        NSApp.terminate(nil)
+        quit()
+    }
+
+    private static func ownWindow() async throws -> SCWindow? {
+        let content = try await SCShareableContent.currentProcess
+        let pid = ProcessInfo.processInfo.processIdentifier
+        // The app's own main window (layer 0); a desktop-independent capture
+        // works even when the window is on another Space or not reported on
+        // screen. Prefer an on-screen one, then the largest.
+        let own = content.windows.filter { $0.owningApplication?.processID == pid && $0.windowLayer == 0 }
+        return own.first(where: \.isOnScreen)
+            ?? own.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+    }
+
+    /// Quits from the run loop, not from inside this main-actor job: the
+    /// app delegate's shutdown (`.terminateLater`) replies from another
+    /// main-actor job, which could never run while this one sat in
+    /// `terminate`.
+    private static func quit() {
+        NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
     }
 }

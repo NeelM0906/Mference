@@ -50,19 +50,36 @@ final class AppRuntime {
 }
 
 /// Quit waits for the shutdown sequence (`applicationShouldTerminate`
-/// returns `.terminateLater` and replies when it is done).
+/// returns `.terminateLater` and replies when it is done), but never longer
+/// than `shutdownDeadline`: a stalled step must not keep the app from
+/// quitting.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let runtime = AppRuntime()
+    static let shutdownDeadline: Duration = .seconds(10)
     private var terminating = false
+    private var replied = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !terminating {
             terminating = true
             Task {
                 await runtime.shutdown()
-                sender.reply(toApplicationShouldTerminate: true)
+                reply(to: sender)
+            }
+            Task {
+                try? await Task.sleep(for: Self.shutdownDeadline)
+                if !replied {
+                    FileHandle.standardError.write(Data("quit: shutdown passed its deadline; quitting anyway\n".utf8))
+                }
+                reply(to: sender)
             }
         }
         return .terminateLater
+    }
+
+    private func reply(to sender: NSApplication) {
+        guard !replied else { return }
+        replied = true
+        sender.reply(toApplicationShouldTerminate: true)
     }
 }

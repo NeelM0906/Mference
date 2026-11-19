@@ -72,6 +72,11 @@ import Testing
             let ratio = Contrast.ratio(foreground, background, appearance: appearance)
             #expect(ratio >= 3, "\(name) is \(ratio):1 in \(appearanceName.rawValue)")
         }
+        // The knob stays visible on the off track in both modes (it vanished
+        // in dark when it used the surface color); the mockup's light pair is
+        // white on #C9CCD3, about 1.6:1, with a shadow for its edge.
+        let knob = Contrast.ratio(MFColor.toggleKnob, MFColor.toggleOff, appearance: appearance)
+        #expect(knob >= 1.5, "knob/off track is \(knob):1 in \(appearanceName.rawValue)")
     }
 }
 
