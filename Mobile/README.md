@@ -51,14 +51,15 @@ The app is signed with a free Apple ID (a personal team). Once:
    Computer?".
 4. Turn on Developer Mode: on the iPhone, Settings › Privacy & Security ›
    Developer Mode (it appears after the phone has been connected to Xcode
-   once). The phone restarts; confirm Turn On after it unlocks.
+   once, or after the first install attempt). The phone restarts; confirm
+   Turn On after it unlocks.
 
-Build and install:
+Build and install, from the repository root (`scratch/` is gitignored):
 
 ```bash
 xcodebuild -project Mobile/MferenceMobile.xcodeproj -scheme MferenceMobile \
   -configuration Debug -destination 'generic/platform=iOS' \
-  -allowProvisioningUpdates build
+  -derivedDataPath scratch/dd-device -allowProvisioningUpdates build
 ```
 
 ```bash
@@ -67,7 +68,7 @@ xcrun devicectl list devices
 
 ```bash
 xcrun devicectl device install app --device <iPhone identifier> \
-  <derived data>/Build/Products/Debug-iphoneos/Mference.app
+  scratch/dd-device/Build/Products/Debug-iphoneos/Mference.app
 ```
 
 The first launch says "Untrusted Developer". On the iPhone, Settings ›
@@ -80,7 +81,9 @@ What a free team means:
   opens; build and install again (installing over the top keeps the app's
   data).
 - At most **3 apps** signed by a free team can be installed on the phone at
-  once. Remove one to make room.
+  once (the limit Xcode enforces today; Apple does not document it). Remove
+  one to make room. A free team can also register only about 10 new app IDs
+  in 7 days.
 - No TestFlight, no App Store, no iCloud, and no entitlements that need a
   paid team.
 
