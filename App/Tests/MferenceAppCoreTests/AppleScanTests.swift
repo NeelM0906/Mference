@@ -208,6 +208,12 @@ struct GatedScanner: DocumentRecognizing {
         #expect(refused.value(.total) == nil && refused.value(.tax) == nil)
         #expect(ReceiptHeuristics.amounts(in: "Total 1200").contains(1200))
         #expect(ReceiptHeuristics.amounts(in: "Order 55102").isEmpty)
+        // Codex on #156: a sign before an amount with cents yields only that
+        // amount, never a prefix of it.
+        #expect(ReceiptHeuristics.amounts(in: "$44.49") == [Decimal(string: "44.49")!])
+        #expect(ReceiptHeuristics.amounts(in: "HST $13.00") == [13])
+        #expect(ReceiptHeuristics.amounts(in: "CAD 100.00") == [100])
+        #expect(ReceiptHeuristics.amounts(in: "¥1,200") == [1200])
     }
 
     /// Codex on #153: Canadian HST (and PST, QST) is a tax line.
