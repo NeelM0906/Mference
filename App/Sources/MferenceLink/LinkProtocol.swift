@@ -9,8 +9,9 @@ import Foundation
 // "contract: …" PR the mobile coordinator approves, and it bumps
 // `LinkProtocol.version` when an old peer could misread the new shape.
 // Discovery, key agreement, encryption and framing live with the link
-// implementation (team mobile-link), not here: every `LinkEnvelope` travels
-// authenticated and encrypted, and its `sequence` makes a replay fail.
+// implementation (team mobile-link), not here: after the plaintext hello and
+// pairing handshake every `LinkEnvelope` travels authenticated and encrypted,
+// and its `sequence` makes a replay fail.
 
 /// Protocol constants shared by both sides.
 public enum LinkProtocol {
@@ -34,6 +35,10 @@ public enum LinkProtocol {
     public static let maxAttachmentBytes = 8 * 1_048_576
     /// Largest `LinkWebSearchRequest.maxResults`.
     public static let maxSearchResults = 20
+
+    /// Length of an X25519 public key, a pairing nonce and a pairing
+    /// commitment, in bytes.
+    public static let keyBytes = 32
 }
 
 /// One message on the link. `sequence` starts at 1 for each direction of a
@@ -64,6 +69,7 @@ public enum LinkMessage: Equatable, Sendable {
     // Pairing (X25519; both screens show the code derived from the secret)
     case pairRequest(LinkPairRequest)
     case pairResponse(LinkPairResponse)
+    case pairNonce(LinkPairNonce)
     case pairConfirm(LinkPairConfirm)
     case forget
 
@@ -91,6 +97,7 @@ public enum LinkMessage: Equatable, Sendable {
         case .error: "error"
         case .pairRequest: "pairRequest"
         case .pairResponse: "pairResponse"
+        case .pairNonce: "pairNonce"
         case .pairConfirm: "pairConfirm"
         case .forget: "forget"
         case .webSearch: "webSearch"
@@ -119,6 +126,7 @@ extension LinkMessage: Codable {
         case "error": self = .error(try c.decode(LinkError.self, forKey: .body))
         case "pairRequest": self = .pairRequest(try c.decode(LinkPairRequest.self, forKey: .body))
         case "pairResponse": self = .pairResponse(try c.decode(LinkPairResponse.self, forKey: .body))
+        case "pairNonce": self = .pairNonce(try c.decode(LinkPairNonce.self, forKey: .body))
         case "pairConfirm": self = .pairConfirm(try c.decode(LinkPairConfirm.self, forKey: .body))
         case "forget": self = .forget
         case "webSearch": self = .webSearch(try c.decode(LinkWebSearchRequest.self, forKey: .body))
@@ -146,6 +154,7 @@ extension LinkMessage: Codable {
         case .error(let body): try c.encode(body, forKey: .body)
         case .pairRequest(let body): try c.encode(body, forKey: .body)
         case .pairResponse(let body): try c.encode(body, forKey: .body)
+        case .pairNonce(let body): try c.encode(body, forKey: .body)
         case .pairConfirm(let body): try c.encode(body, forKey: .body)
         case .forget: break
         case .webSearch(let body): try c.encode(body, forKey: .body)
@@ -169,7 +178,10 @@ public enum LinkRole: String, Codable, Sendable {
     case mac, phone
 }
 
-/// First message from each side after the connection opens.
+/// First message from each side after the connection opens, sent in the
+/// clear. It carries the keys every later frame is protected with: a paired
+/// peer recognizes `identityKey`, and both sides mix the two `ephemeralKey`s
+/// into this connection's keys.
 public struct LinkHello: Codable, Equatable, Sendable {
     public var role: LinkRole
     /// The name the other side shows ("MacBook Pro", "iPhone").
@@ -177,13 +189,22 @@ public struct LinkHello: Codable, Equatable, Sendable {
     /// Every protocol version this peer speaks; the highest common one wins.
     public var protocolVersions: [Int]
     public var appVersion: String
+    /// This device's long-term X25519 public key (raw 32 bytes, base64 on the
+    /// wire). Pairing ties it to the other device; it stays the same until the
+    /// app's link keys are reset.
+    public var identityKey: Data
+    /// A fresh X25519 public key for this connection only (raw 32 bytes).
+    public var ephemeralKey: Data
 
     public init(role: LinkRole, deviceName: String,
-                protocolVersions: [Int] = [LinkProtocol.version], appVersion: String) {
+                protocolVersions: [Int] = [LinkProtocol.version], appVersion: String,
+                identityKey: Data, ephemeralKey: Data) {
         self.role = role
         self.deviceName = deviceName
         self.protocolVersions = protocolVersions
         self.appVersion = appVersion
+        self.identityKey = identityKey
+        self.ephemeralKey = ephemeralKey
     }
 }
 
@@ -253,32 +274,58 @@ public struct LinkError: Codable, Equatable, Sendable, Error {
 
 // MARK: - Pairing
 
-/// Phone to Mac: start pairing with this ephemeral X25519 public key.
+// Pairing runs after the hello exchange (which carried both identity and
+// ephemeral keys), in the clear up to `pairNonce`, then sealed:
+//
+//   phone → Mac  pairRequest   {deviceName}
+//   Mac → phone  pairResponse  {macName, commitment = SHA-256 over the Mac's
+//                               ephemeral key, the phone's ephemeral key and
+//                               the Mac's nonce, bound to everything sent so far}
+//   phone → Mac  pairNonce     {the phone's nonce}
+//   Mac → phone  pairNonce     {the Mac's nonce; the phone checks the commitment
+//                               and on a mismatch sends `error` and stops}
+//   both         show the 6-digit code (HKDF over the ephemeral-key secret and
+//                the whole transcript), the person compares and confirms
+//   both         pairConfirm   (sealed)
+//
+// The Mac commits to its nonce before it sees the phone's, and the phone
+// reveals its nonce before it sees the Mac's, so a device in the middle cannot
+// choose keys or nonces that make the two codes match: each attempt matches
+// with probability one in a million, and every attempt needs the person.
+
+/// Phone to Mac: start pairing (the keys are the ones in the hellos).
 public struct LinkPairRequest: Codable, Equatable, Sendable {
     public var deviceName: String
-    /// Raw 32-byte X25519 public key (base64 on the wire).
-    public var publicKey: Data
 
-    public init(deviceName: String, publicKey: Data) {
+    public init(deviceName: String) {
         self.deviceName = deviceName
-        self.publicKey = publicKey
     }
 }
 
-/// Mac to phone: its X25519 public key. Both sides now derive the shared
-/// secret and show the same short code.
+/// Mac to phone: the Mac's commitment to its pairing nonce (32 bytes).
 public struct LinkPairResponse: Codable, Equatable, Sendable {
     public var macName: String
-    public var publicKey: Data
+    public var commitment: Data
 
-    public init(macName: String, publicKey: Data) {
+    public init(macName: String, commitment: Data) {
         self.macName = macName
-        self.publicKey = publicKey
+        self.commitment = commitment
     }
 }
 
-/// Either side: the person confirmed (or rejected) that both screens show the
-/// same code. Pairing completes only when both sides sent `accepted: true`.
+/// Either side: its 32 random pairing bytes. The phone sends first; the Mac
+/// answers with the nonce it committed to in `LinkPairResponse`.
+public struct LinkPairNonce: Codable, Equatable, Sendable {
+    public var nonce: Data
+
+    public init(nonce: Data) {
+        self.nonce = nonce
+    }
+}
+
+/// Either side, sealed: the person confirmed (or rejected) that both screens
+/// show the same code. Pairing completes only when both sides sent
+/// `accepted: true`.
 public struct LinkPairConfirm: Codable, Equatable, Sendable {
     public var accepted: Bool
 
@@ -418,7 +465,11 @@ public struct LinkJobResult: Codable, Equatable, Sendable {
 
 /// Mac to phone: progress of a running job, streamed in order.
 public struct LinkJobEvent: Codable, Equatable, Sendable {
-    public enum Kind: Codable, Equatable, Sendable {
+    /// Wire shape: `{"type": "<case name>", "body": {…}}`, like `LinkMessage`.
+    /// `body` is omitted for `started` and `cancelled`, is `{"text": …}` for
+    /// `token` and `step`, a `LinkJobResult` for `finished` and a `LinkError`
+    /// for `failed`.
+    public enum Kind: Equatable, Sendable {
         /// The job started on the Mac (it may have waited behind another).
         case started
         /// The next piece of answer text.
@@ -436,6 +487,50 @@ public struct LinkJobEvent: Codable, Equatable, Sendable {
     public init(jobID: UUID, kind: Kind) {
         self.jobID = jobID
         self.kind = kind
+    }
+}
+
+extension LinkJobEvent.Kind: Codable {
+    private enum CodingKeys: String, CodingKey { case type, body }
+    private struct TextBody: Codable { var text: String }
+
+    /// The `type` string on the wire.
+    public var type: String {
+        switch self {
+        case .started: "started"
+        case .token: "token"
+        case .step: "step"
+        case .finished: "finished"
+        case .failed: "failed"
+        case .cancelled: "cancelled"
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try c.decode(String.self, forKey: .type)
+        switch type {
+        case "started": self = .started
+        case "token": self = .token(text: try c.decode(TextBody.self, forKey: .body).text)
+        case "step": self = .step(text: try c.decode(TextBody.self, forKey: .body).text)
+        case "finished": self = .finished(result: try c.decode(LinkJobResult.self, forKey: .body))
+        case "failed": self = .failed(error: try c.decode(LinkError.self, forKey: .body))
+        case "cancelled": self = .cancelled
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type, in: c, debugDescription: "Unknown job event type \(type)")
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        switch self {
+        case .started, .cancelled: break
+        case .token(let text), .step(let text): try c.encode(TextBody(text: text), forKey: .body)
+        case .finished(let result): try c.encode(result, forKey: .body)
+        case .failed(let error): try c.encode(error, forKey: .body)
+        }
     }
 }
 
