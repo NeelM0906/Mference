@@ -60,7 +60,7 @@ enum CalendarFixtures {
         let proposal = blocks.first { if case .proposal = $0.kind { true } else { false } }
         #expect(proposal?.day == 2)
         #expect(proposal?.top == 2)
-        #expect(proposal?.height == 0.75)
+        #expect(proposal?.height == Self.layout.minimumProposalHours)  // 45 min, drawn at the minimum
         let focusFriday = blocks.first { $0.id == "event-focus-fri-d4" }
         #expect(focusFriday?.top == 0 && focusFriday?.height == 2)
         #expect(Self.layout.allDayEvents(weekStart: start, events: CalendarFixtures.events)[3]?.map(\.title) == ["Offsite"])
@@ -223,6 +223,21 @@ enum CalendarFixtures {
         #expect(model.todos.first?.title == "Send copy decisions to Priya")
         await model.syncReminders()  // a third sync must not revert the Reminders edit
         #expect(await service.reminders[id]?.title == "Send copy decisions to Priya")
+    }
+
+    @Test func aShortProposalKeepsItsRoomAndItsOwnLane() {
+        let start = Self.layout.weekStart(containing: CalendarFixtures.now)
+        let proposal = ProposedEvent(title: "Quick sync", start: CalendarFixtures.date(16, 11),
+                                     end: CalendarFixtures.date(16, 11, 30),
+                                     source: ItemSource(kind: .mail, label: "Priya", reference: "<s@example.com>"))
+        let next = CalendarEvent(id: "next", title: "Next", start: CalendarFixtures.date(16, 11, 30),
+                                 end: CalendarFixtures.date(16, 12))
+        let blocks = Self.layout.blocks(weekStart: start, events: [next], proposals: [proposal])
+        let drawn = blocks.first { $0.title == "Quick sync" }
+        #expect(drawn?.height == Self.layout.minimumProposalHours)
+        // The taller proposal now overlaps 11:30, so the two share the column.
+        #expect(blocks.allSatisfy { $0.lanes == 2 })
+        #expect(Set(blocks.map(\.lane)) == [0, 1])
     }
 
     @Test func overlappingEventsShareTheColumn() {
