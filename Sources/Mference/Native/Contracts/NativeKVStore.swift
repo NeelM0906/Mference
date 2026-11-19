@@ -20,7 +20,8 @@ extension Native {
     ///   type F16 (`.f16`) or Int8 (`.int8`)
     /// - `.int8` only, after all values: scales
     ///   `[attnLayer][kv][kvHead][token]` F16, symmetric per (token, head):
-    ///   `s = Float16(max|x| / 127)` (computed in F32, then rounded to F16),
+    ///   `s = Float16(min(max|x| / 127, 65504))` (computed in F32, saturated
+    ///   at the largest finite F16, then rounded to F16),
     ///   `q = clamp(rint(x / Float(s)), -127, 127)` with `rint` rounding half
     ///   to even, dequantized as `Float(s) * q`; whenever `s == 0` (an
     ///   all-zero row, or one so small that the scale underflows F16) every
@@ -225,10 +226,6 @@ extension Native {
         /// states) and throws `stateOutOfRange` after `.prefill` or `.decode`.
         /// Throws `NativeError.stateOutOfRange` past `capacity`.
         func beginStep(rows: Int, kind: StepKind) throws
-        /// Deprecated form without the step kind, kept only until every
-        /// implementation and caller moves to `beginStep(rows:kind:)`; removed
-        /// at the contract freeze. New code must not call it.
-        func beginStep(rows: Int) throws
         /// The page table covering `0..<length` for the current step.
         func pageTable() -> KVPageTable
         /// Recurrent state banks of GDN layer `gdnLayer` (index among GDN
@@ -239,6 +236,8 @@ extension Native {
         /// Drop tokens `position..<length`. `position` must be the start of
         /// the most recent step, or, only when that step was `.verify`,
         /// `start + r + 1` for its rows starting at `start` (keeps rows `0...r`).
+        /// `position == length` (keep everything) is accepted after any step
+        /// as a no-op.
         func rollback(to position: Int, commandBuffer: MTLCommandBuffer) throws
         /// Clear the sequence (length 0, zero recurrent state); prefix cache kept.
         func reset(commandBuffer: MTLCommandBuffer) throws
@@ -257,18 +256,6 @@ extension Native {
         var footprint: MemoryPlan.Footprint { get }
     }
 
-    // Transitional default (removed at the freeze): stores that predate the
-    // step kind keep their old behaviour. Every store must implement
-    // `beginStep(rows:kind:)` itself before the freeze.
-}
-
-extension Native.KVStore {
-    public func beginStep(rows: Int, kind: Native.StepKind) throws {
-        try beginStep(rows: rows)
-    }
-}
-
-extension Native {
     /// Footprint plan for one resident model at a resolved context.
     public struct MemoryPlan: Sendable {
         public struct Footprint: Sendable, Equatable {
