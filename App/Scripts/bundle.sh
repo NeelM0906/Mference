@@ -218,12 +218,20 @@ rm -rf "${MOVED_DIR:?}"
 echo "bundle.sh: $APP_BUNDLE"
 
 if [[ -n "$copy_to" ]]; then
-    target="$copy_to/Mference.app"
-    if pgrep -f "$target/Contents/MacOS/" >/dev/null; then
-        echo "bundle.sh: $target is running; not replacing it (quit it, then run bundle.sh --no-build --copy-to again)" >&2
-        exit 75
-    fi
     mkdir -p "$copy_to"
+    # Canonical spellings, so "dir/", "dir//" or a symlinked path cannot slip
+    # past the running-app check: the logical path (as a launch from Finder or
+    # a shell would show it) and the physical one (symlinks resolved).
+    copy_to_logical="$(cd "$copy_to" && pwd)"
+    copy_to_physical="$(cd "$copy_to" && pwd -P)"
+    for candidate in "$copy_to_logical" "$copy_to_physical"; do
+        if pgrep -f "$candidate/Mference.app/Contents/MacOS/" >/dev/null; then
+            echo "bundle.sh: $candidate/Mference.app is running; not replacing it (quit it, then run bundle.sh --no-build --copy-to again)" >&2
+            exit 75
+        fi
+    done
+    copy_to="$copy_to_physical"
+    target="$copy_to/Mference.app"
     rm -rf "${target:?}.incoming"
     ditto "$APP_BUNDLE" "$target.incoming"
     codesign --verify --strict "$target.incoming"
@@ -231,7 +239,8 @@ if [[ -n "$copy_to" ]]; then
     mv "$target.incoming" "$target"
     {
         echo "commit=$(git -C "$APP_DIR" rev-parse HEAD)"
-        echo "dirty=$([[ -z "$(git -C "$APP_DIR" status --porcelain -- . 2>/dev/null)" ]] && echo no || echo yes)"
+        # The whole repository: App links the engine from the repository root.
+        echo "dirty=$([[ -z "$(git -C "$APP_DIR" status --porcelain 2>/dev/null)" ]] && echo no || echo yes)"
         echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "identity=$([[ "$SIGN_IDENTITY" == "-" ]] && echo "ad hoc" || echo "$SIGN_IDENTITY")"
     } > "$copy_to/COMMIT"
