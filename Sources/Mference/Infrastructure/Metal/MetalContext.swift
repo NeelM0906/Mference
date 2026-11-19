@@ -104,10 +104,12 @@ public final class MetalContext: @unchecked Sendable {
         var constants: [MetalFunctionConstant]
         var maxTotalThreadsPerThreadgroup: Int?
         var safeMathModule: String?
+        var module: String?
     }
 
     private var pipelineCache: [PipelineCacheKey: MTLComputePipelineState] = [:]
     private var safeMathLibraries: [String: MTLLibrary] = [:]
+    private var onDemandLibraries: [String: MTLLibrary] = [:]
     private let pipelineCacheLock = NSLock()
 
     private static func relaxInteractivityWatchdog() {
@@ -171,6 +173,17 @@ public final class MetalContext: @unchecked Sendable {
         "maple_ternary": "Metal/Quant",
         "maple_moe": "Metal/MoE",
         "moe": "Metal/MoE",
+        // Native engine modules (docs/NATIVE_ENGINE.md). Compiled on demand
+        // through `moduleLibrary`, never into the shared library, so their
+        // function names do not share its namespace. One file per module:
+        // `<subdirectory>/<module>.metal`.
+        "native_attention": "Metal/Native/Attention",
+        "native_gdn": "Metal/Native/Attention",
+        "native_gemm": "Metal/Native/GEMM",
+        "native_gemm_iq": "Metal/Native/GEMM",
+        "native_glue": "Metal/Native/Glue",
+        "native_reference": "Metal/Native/Reference",
+        "native_sampling": "Metal/Native/Sampling",
         "prefill": "Metal/Prefill",
         "prefill_simd_grouped_moe": "Metal/Prefill",
         "rmsnorm": "Metal/Primitives",
@@ -244,6 +257,26 @@ public final class MetalContext: @unchecked Sendable {
                          constants: [MetalFunctionConstant],
                          maxTotalThreadsPerThreadgroup hint: Int?,
                          safeMathModule: String? = nil) throws -> MTLComputePipelineState {
+        try pipeline(name, constants: constants, maxTotalThreadsPerThreadgroup: hint,
+                     safeMathModule: safeMathModule, module: nil)
+    }
+
+    /// A cached pipeline for function `name` of an on-demand module (one not
+    /// in `shaderModules`, such as the native engine's `native_*` modules).
+    /// The module compiles once per context; pipelines cache like shared ones.
+    public func modulePipeline(module: String,
+                               name: String,
+                               constants: [MetalFunctionConstant] = [],
+                               maxTotalThreadsPerThreadgroup hint: Int? = nil) throws -> MTLComputePipelineState {
+        try pipeline(name, constants: constants, maxTotalThreadsPerThreadgroup: hint,
+                     safeMathModule: nil, module: module)
+    }
+
+    private func pipeline(_ name: String,
+                          constants: [MetalFunctionConstant],
+                          maxTotalThreadsPerThreadgroup hint: Int?,
+                          safeMathModule: String?,
+                          module: String?) throws -> MTLComputePipelineState {
         if let hint {
             precondition(hint > 0, "maxTotalThreadsPerThreadgroup must be positive")
         }
@@ -254,13 +287,19 @@ public final class MetalContext: @unchecked Sendable {
         let key = PipelineCacheKey(name: name,
                                    constants: sortedConstants,
                                    maxTotalThreadsPerThreadgroup: hint,
-                                   safeMathModule: safeMathModule)
+                                   safeMathModule: safeMathModule,
+                                   module: module)
         pipelineCacheLock.lock()
         let cached = pipelineCache[key]
         pipelineCacheLock.unlock()
         if let cached { return cached }
 
-        let selectedLibrary = try safeMathModule.map { try safeMathLibrary(module: $0) } ?? library
+        let selectedLibrary: MTLLibrary
+        if let module {
+            selectedLibrary = try onDemandLibrary(module: module)
+        } else {
+            selectedLibrary = try safeMathModule.map { try safeMathLibrary(module: $0) } ?? library
+        }
         guard selectedLibrary.functionNames.contains(name) else {
             throw MetalError.missingFunction(name)
         }
@@ -308,6 +347,15 @@ public final class MetalContext: @unchecked Sendable {
         if let cached = safeMathLibraries[module] { return cached }
         let compiled = try Self.moduleLibrary(device: device, module: module, safeMath: true)
         safeMathLibraries[module] = compiled
+        return compiled
+    }
+
+    private func onDemandLibrary(module: String) throws -> MTLLibrary {
+        pipelineCacheLock.lock()
+        defer { pipelineCacheLock.unlock() }
+        if let cached = onDemandLibraries[module] { return cached }
+        let compiled = try Self.moduleLibrary(device: device, module: module)
+        onDemandLibraries[module] = compiled
         return compiled
     }
 
