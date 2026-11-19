@@ -107,6 +107,11 @@ public final class CalendarWeekModel {
         await reload()
     }
 
+    /// "Open System Settings" when Calendar access was denied.
+    public func openCalendarSettings() async {
+        await service.openSystemSettings(for: .calendar)
+    }
+
     public func showWeek(offset: Int) async {
         weekStart = layout.calendar.date(byAdding: .weekOfYear, value: offset, to: weekStart) ?? weekStart
         await reload()

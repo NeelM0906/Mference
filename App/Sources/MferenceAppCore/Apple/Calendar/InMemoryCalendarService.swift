@@ -29,6 +29,12 @@ public actor InMemoryCalendarService: CalendarServicing {
 
     public func remindersAccess() async -> PermissionState { remindersState }
 
+    public private(set) var openedSettings: [AppPermission] = []
+
+    public func openSystemSettings(for permission: AppPermission) async {
+        openedSettings.append(permission)
+    }
+
     public func requestRemindersAccess() async -> PermissionState {
         requests.append(.reminders)
         if remindersState == .notDetermined { remindersState = grantOnRequest ? .granted : .denied }

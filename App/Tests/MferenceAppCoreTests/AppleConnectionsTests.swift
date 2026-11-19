@@ -47,7 +47,7 @@ import Testing
                                            mail: AppleMailSource(mailRoot: fixture.root), broker: broker)
         await connections.connectMail()
         #expect(broker.requests == [.fullDiskAccess])
-        #expect(broker.openedSettings == [.fullDiskAccess])
+        #expect(broker.openedSettings.isEmpty)  // the broker's request opens the pane itself
         #expect(connections.status.mail == .needsSystemSettings)
     }
 
