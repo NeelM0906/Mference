@@ -116,6 +116,24 @@ public final class MailInboxModel {
     /// asked in a dialog).
     public func requestAccess() async {
         _ = await broker.request(.fullDiskAccess)
+        hasOpenedFullDiskAccessSettings = true
+        await load()
+    }
+
+    /// The person opened the Full Disk Access pane from here at least once.
+    public private(set) var hasOpenedFullDiskAccessSettings = false
+
+    /// Full Disk Access was opened but Mail is still not readable: macOS
+    /// applies the grant only from the next launch (and an ad hoc rebuild is
+    /// a new app to it), so the screen offers Quit and Reopen.
+    public var needsRelaunchForAccess: Bool {
+        status == .needsFullDiskAccess && hasOpenedFullDiskAccessSettings
+    }
+
+    /// The app became active again, or "Check again": re-reads the store
+    /// while access is missing.
+    public func recheckAccess() async {
+        guard status == .needsFullDiskAccess || status == nil else { return }
         await load()
     }
 

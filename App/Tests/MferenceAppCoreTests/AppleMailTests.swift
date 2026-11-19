@@ -504,6 +504,47 @@ struct GatedSorter: AppleModelServicing {
         }
     }
 
+    /// macOS applies Full Disk Access only from the next launch: the screen
+    /// re-checks when the app becomes active, and after System Settings was
+    /// opened and access still fails, it offers Quit and Reopen.
+    @Test @MainActor func fullDiskAccessIsRecheckedAndOffersARelaunch() async throws {
+        let container = try AppModelContainer.inMemory()
+        let source = InMemoryMailSource(status: .needsFullDiskAccess)
+        let broker = RecordingPermissionBroker([.fullDiskAccess: .needsSystemSettings])
+        let model = MailInboxModel(source: source, context: container.mainContext,
+                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+                                                                                                    answer: "{}"),
+                                                                fallback: nil),
+                                   drafter: nil, sender: RecordingMailSender(), broker: broker)
+        await model.load()
+        #expect(model.status == .needsFullDiskAccess)
+        #expect(!model.needsRelaunchForAccess)
+
+        // Opened System Settings, but the grant is not applied yet.
+        await model.requestAccess()
+        #expect(model.status == .needsFullDiskAccess)
+        #expect(model.needsRelaunchForAccess)
+
+        // Granted and applied: the next activation (or Check again) loads Mail.
+        await source.setStatus(.available(version: "V10"))
+        await model.recheckAccess()
+        #expect(model.status == .available(version: "V10"))
+        #expect(!model.needsRelaunchForAccess)
+    }
+
+    @Test @MainActor func connectionsOfferARelaunchWhenAccessIsStillMissing() async {
+        let source = InMemoryMailSource(status: .needsFullDiskAccess)
+        let connections = AppleConnections(calendar: InMemoryCalendarService(), mail: source,
+                                           broker: RecordingPermissionBroker([.fullDiskAccess: .needsSystemSettings]))
+        await connections.refresh()
+        #expect(!connections.mailNeedsRelaunch)
+        await connections.connectMail()
+        #expect(connections.mailNeedsRelaunch)
+        await source.setStatus(.available(version: "V10"))
+        await connections.refresh()
+        #expect(!connections.mailNeedsRelaunch && connections.status.mail == .connected)
+    }
+
     @Test func appleScriptEscapesAndRefusesOddAddresses() {
         let draft = MailDraft(to: "priya@example.com", from: "me@example.com", subject: "Re: \"Q3\" plan",
                               body: "Line \\ one\nLine two\u{0}\" & do shell script \"x", inReplyTo: "<q\"@example.com>")

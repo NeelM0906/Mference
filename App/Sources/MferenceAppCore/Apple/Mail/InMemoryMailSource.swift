@@ -19,6 +19,11 @@ public actor InMemoryMailSource: MailSource {
 
     public func status() async -> MailStoreStatus { storeStatus }
 
+    /// Tests: the store becomes readable (Full Disk Access applied) or not.
+    public func setStatus(_ status: MailStoreStatus) {
+        storeStatus = status
+    }
+
     public func messages(in kinds: Set<MailboxRef.Kind>, limit: Int) async throws -> [MailMessageSummary] {
         guard case .available = storeStatus else { throw MailSourceError.unavailable(storeStatus) }
         return Array(stored.filter { kinds.contains($0.mailbox.kind) }.sorted { $0.date > $1.date }.prefix(limit))

@@ -1,3 +1,4 @@
+import AppKit
 import MferenceAppCore
 import MferenceDesign
 import SwiftUI
@@ -52,10 +53,7 @@ struct MailContent: View {
                     }
                 }
             case .needsFullDiskAccess:
-                AppleEmptyState(systemImage: "lock.shield", title: "Read Apple Mail on this Mac",
-                                message: AppPermission.fullDiskAccess.reason
-                                    + " Turn on Mference under Privacy & Security > Full Disk Access.",
-                                actionTitle: "Open System Settings") { Task { await model.requestAccess() } }
+                MailAccessState(model: model)
             case .notFound:
                 AppleEmptyState(systemImage: "envelope", title: "Apple Mail is not set up",
                                 message: "Add an account in Apple Mail first. Mference reads it here, on this Mac.")
@@ -66,6 +64,10 @@ struct MailContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Coming back from System Settings: look again while access is missing.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.recheckAccess() }
+        }
         .shellToolbar(id: "mail.compose") { ComposeToolbarButton(model: model) }
     }
 
@@ -583,5 +585,54 @@ struct ComposeToolbarButton: View {
         .disabled(model.isEditingText || !isMailAvailable)
         .sheet(isPresented: $model.isComposing) { ComposeSheet(model: model) }
         .accessibilityLabel("Compose a new message")
+    }
+}
+
+/// Full Disk Access is missing: the reason and System Settings first; once
+/// the pane was opened and access still fails, Quit and Reopen (macOS applies
+/// the grant only from the next launch).
+struct MailAccessState: View {
+    var model: MailInboxModel
+
+    var body: some View {
+        VStack(spacing: MFSpacing.m) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 30, weight: .regular))
+                .foregroundStyle(MFColor.tertiary)
+                .accessibilityHidden(true)
+            Text("Read Apple Mail on this Mac")
+                .font(MFFont.headline)
+                .foregroundStyle(MFColor.ink)
+            Text(message)
+                .font(MFFont.body)
+                .foregroundStyle(MFColor.secondary)
+                .lineSpacing(MFLineSpacing.normal)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 440)
+            HStack(spacing: MFSpacing.s) {
+                if model.needsRelaunchForAccess {
+                    Button("Quit and Reopen") { AppRelaunch.quitAndReopen() }
+                        .buttonStyle(.applePrimary)
+                    Button("Open System Settings") { Task { await model.requestAccess() } }
+                        .buttonStyle(.appleSecondary)
+                } else {
+                    Button("Open System Settings") { Task { await model.requestAccess() } }
+                        .buttonStyle(.applePrimary)
+                }
+                Button("Check again") { Task { await model.recheckAccess() } }
+                    .buttonStyle(.appleSecondary)
+            }
+            .padding(.top, MFSpacing.xs)
+        }
+        .padding(MFSpacing.xxl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var message: String {
+        if model.needsRelaunchForAccess {
+            return "If Mference is already on in Full Disk Access, quit and reopen Mference so macOS applies it."
+        }
+        return AppPermission.fullDiskAccess.reason + " Turn on Mference under Privacy & Security > Full Disk Access."
     }
 }
