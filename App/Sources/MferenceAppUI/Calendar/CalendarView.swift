@@ -1,4 +1,5 @@
 import AppKit
+import EventKit
 import MferenceAppCore
 import MferenceDesign
 import SwiftUI
@@ -80,6 +81,11 @@ struct CalendarContent: View {
         // Back from System Settings: look again while access is missing.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.recheckAccess() }
+        }
+        // Access granted in the prompt or System Settings, or events edited
+        // in Calendar: show them now, not after a relaunch.
+        .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
+            Task { await model.calendarChanged() }
         }
         .shellToolbar(id: "calendar.new-event") { NewEventToolbarButton(model: model) }
     }

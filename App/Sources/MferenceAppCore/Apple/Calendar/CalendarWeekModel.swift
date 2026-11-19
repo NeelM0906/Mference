@@ -99,6 +99,13 @@ public final class CalendarWeekModel {
         await reload()
     }
 
+    /// EventKit changed (`EKEventStoreChanged`: access just granted, or
+    /// events edited in Calendar): re-reads access and the week, without
+    /// asking.
+    public func calendarChanged() async {
+        await load()
+    }
+
     /// The app became active again (back from System Settings, say):
     /// re-reads access while it is missing.
     public func recheckAccess() async {

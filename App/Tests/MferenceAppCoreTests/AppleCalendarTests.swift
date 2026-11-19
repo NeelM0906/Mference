@@ -1,3 +1,4 @@
+import EventKit
 import Foundation
 @testable import MferenceAppCore
 import Synchronization
@@ -322,6 +323,43 @@ enum CalendarFixtures {
         #expect(model.access == .granted)
         #expect(model.events.count == 10)
         #expect(await service.requests == [.calendar])
+    }
+
+    /// The maintainer granted Full Access in the macOS prompt and the week
+    /// stayed empty until a relaunch: a grant (or EventKit's change notice)
+    /// now shows the events at once.
+    @Test @MainActor func aGrantShowsTheWeekWithoutARelaunch() async {
+        let granted = InMemoryCalendarService(events: CalendarFixtures.events, calendarAccess: .notDetermined)
+        let model = Self.model(service: granted)
+        await model.load()
+        await model.requestAccess()
+        #expect(model.access == .granted && model.events.count == 10)
+
+        // Turned on outside the prompt: EventKit's change notice reloads.
+        let later = InMemoryCalendarService(events: CalendarFixtures.events, calendarAccess: .notDetermined,
+                                            promptShown: false)
+        let waiting = Self.model(service: later)
+        await waiting.requestAccess()
+        #expect(waiting.access == .promptNotShown && waiting.events.isEmpty)
+        await later.setCalendarAccess(.granted)
+        await waiting.calendarChanged()
+        #expect(waiting.access == .granted && waiting.events.count == 10)
+    }
+
+    /// Codex on #163: the live service passes the broker's answer on while
+    /// EventKit still reads "not determined", and trusts a grant even if the
+    /// status read lags it.
+    @Test func theEventKitServicePassesTheBrokersAnswerOn() async {
+        let undetermined: @Sendable (EKEntityType) -> EKAuthorizationStatus = { _ in .notDetermined }
+        let noPrompt = EventKitService(broker: RecordingPermissionBroker([.calendar: .needsSystemSettings]),
+                                       eventStore: EventStoreBox(), authorization: undetermined)
+        #expect(await noPrompt.requestCalendarAccess() == .needsSystemSettings)
+        let declined = EventKitService(broker: RecordingPermissionBroker([.calendar: .notDetermined]),
+                                       eventStore: EventStoreBox(), authorization: undetermined)
+        #expect(await declined.requestCalendarAccess() == .notDetermined)
+        let lagging = EventKitService(broker: RecordingPermissionBroker([.calendar: .granted]),
+                                      eventStore: EventStoreBox(), authorization: undetermined)
+        #expect(await lagging.requestCalendarAccess() == .granted)
     }
 
     /// The broker surfaces a refused request: one reason, the error logged,

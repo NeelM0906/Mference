@@ -10,21 +10,32 @@ public actor EventKitService: CalendarServicing {
 
     private let broker: any PermissionBroker
     private var store: EKEventStore
-    /// Entity types that were already allowed when `store` was made.
+    /// True when `store` is the broker's (the one that asked): it sees a
+    /// grant at once and is reset, never replaced.
+    private let sharesBrokerStore: Bool
+    /// Entity types that were already allowed when `store` was last made or reset.
     private var storeHasAccess: [EKEntityType] = []
+    private let authorization: @Sendable (EKEntityType) -> EKAuthorizationStatus
 
-    public init(broker: any PermissionBroker) {
+    /// Uses the live broker's event store (`LivePermissionBroker.eventStore`)
+    /// when there is one, so the store that asked is the store that reads.
+    /// `authorization` reads EventKit's status; tests pass their own.
+    public init(broker: any PermissionBroker, eventStore: EventStoreBox? = nil,
+                authorization: @escaping @Sendable (EKEntityType) -> EKAuthorizationStatus = {
+                    EKEventStore.authorizationStatus(for: $0)
+                }) {
         self.broker = broker
-        self.store = EKEventStore()
-        self.storeHasAccess = [.event, .reminder].filter {
-            Self.state(EKEventStore.authorizationStatus(for: $0)) == .granted
-        }
+        self.authorization = authorization
+        let shared = eventStore?.store ?? (broker as? LivePermissionBroker)?.eventStore
+        self.store = shared ?? EKEventStore()
+        self.sharesBrokerStore = shared != nil
+        self.storeHasAccess = [.event, .reminder].filter { Self.state(authorization($0)) == .granted }
     }
 
     // MARK: Access
 
     public func calendarAccess() async -> PermissionState {
-        Self.state(EKEventStore.authorizationStatus(for: .event))
+        Self.state(authorization(.event))
     }
 
     public func requestCalendarAccess() async -> PermissionState {
@@ -36,29 +47,33 @@ public actor EventKitService: CalendarServicing {
     }
 
     public func remindersAccess() async -> PermissionState {
-        Self.state(EKEventStore.authorizationStatus(for: .reminder))
+        Self.state(authorization(.reminder))
     }
 
     public func requestRemindersAccess() async -> PermissionState {
         await request(.reminders, entity: .reminder)
     }
 
-    private func request(_ permission: AppPermission, entity: EKEntityType) async -> PermissionState {
-        let before = Self.state(EKEventStore.authorizationStatus(for: entity))
+    func request(_ permission: AppPermission, entity: EKEntityType) async -> PermissionState {
+        let before = Self.state(authorization(entity))
         guard before != .granted else { return .granted }
         let answer = await broker.request(permission)
-        let after = Self.state(EKEventStore.authorizationStatus(for: entity))
-        // macOS showed no prompt: still undecided, but only System Settings
-        // can change it now (the caller tells the person so).
-        if after == .notDetermined, answer == .needsSystemSettings { return .needsSystemSettings }
-        // A store made before access was granted does not see the data.
-        if after == .granted, !storeHasAccess.contains(entity) {
-            store = EKEventStore()
-            storeHasAccess = [.event, .reminder].filter {
-                Self.state(EKEventStore.authorizationStatus(for: $0)) == .granted
-            }
-        }
+        // The prompt's own answer counts even if the status read lags it.
+        let after = answer == .granted ? .granted : Self.state(authorization(entity))
+        // Still undecided: the broker's answer stands (.needsSystemSettings
+        // when macOS showed no prompt, .notDetermined when the person
+        // declined the reason), so the caller points to System Settings.
+        if after == .notDetermined { return answer }
+        if after == .granted { refreshAfterGrant(entity) }
         return after
+    }
+
+    /// A store made before access was granted does not see the data: the
+    /// broker's store is reset, a private one replaced.
+    private func refreshAfterGrant(_ entity: EKEntityType) {
+        guard !storeHasAccess.contains(entity) else { return }
+        if sharesBrokerStore { store.reset() } else { store = EKEventStore() }
+        storeHasAccess = [.event, .reminder].filter { $0 == entity || Self.state(authorization($0)) == .granted }
     }
 
     static func state(_ status: EKAuthorizationStatus) -> PermissionState {
@@ -71,16 +86,11 @@ public actor EventKitService: CalendarServicing {
     }
 
     private func requireAccess(_ entity: EKEntityType) throws {
-        let state = Self.state(EKEventStore.authorizationStatus(for: entity))
+        let state = Self.state(authorization(entity))
         guard state == .granted else { throw CalendarServiceError.noAccess(state) }
         // Access granted later (in System Settings, or by another part of
         // the app): a store made before that does not see the data.
-        if !storeHasAccess.contains(entity) {
-            store = EKEventStore()
-            storeHasAccess = [.event, .reminder].filter {
-                Self.state(EKEventStore.authorizationStatus(for: $0)) == .granted
-            }
-        }
+        refreshAfterGrant(entity)
     }
 
     // MARK: Events
