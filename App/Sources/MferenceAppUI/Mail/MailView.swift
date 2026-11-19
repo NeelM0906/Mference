@@ -3,8 +3,9 @@ import MferenceAppCore
 import MferenceDesign
 import SwiftUI
 
-/// Mail (mockup 03): Apple Mail on this Mac, sorted into renamable buckets,
-/// read as text with trackers removed, a reply draft sent only on click.
+/// Mail (mockup 03): Apple Mail on this Mac with Mail's own mailboxes,
+/// followed as Mail saves changes, read as text with trackers removed, a
+/// reply draft sent only on click.
 public struct MailView: View {
     @Environment(MailInboxModel.self) private var environmentModel: MailInboxModel?
     private let injected: MailInboxModel?
@@ -25,7 +26,11 @@ public struct MailView: View {
     public var body: some View {
         if let model = injected ?? environmentModel {
             MailContent(model: model)
-                .task { if loadsOnAppear { await model.load() } }
+                .task {
+                    guard loadsOnAppear else { return }
+                    await model.load()
+                    await model.watch()
+                }
         } else {
             AppleEmptyState(systemImage: "envelope", title: "Mail", message: "Mail is starting. Try again in a moment.")
         }
@@ -64,9 +69,10 @@ struct MailContent: View {
         }
         .background(MFColor.surface)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Coming back from System Settings: look again while access is missing.
+        // Coming back from System Settings: look again while access is
+        // missing; otherwise look for new mail at once.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await model.recheckAccess() }
+            Task { await model.appBecameActive() }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             model.appResignedActive()
@@ -79,113 +85,194 @@ struct MailContent: View {
 
 // MARK: Sidebar
 
+/// Layout sizes of the Mail screen.
+enum MailMetrics {
+    /// The mailbox icon's column in the sidebar.
+    static let iconWidth: CGFloat = 16
+    /// The unread dot in the sidebar's sync note and the message list.
+    static let dot: CGFloat = 7
+}
+
 struct MailSidebar: View {
     @Bindable var model: MailInboxModel
 
     var body: some View {
-        // Scrolls when many accounts or a tall window's text size need it.
-        MFScroll {
-        VStack(alignment: .leading, spacing: MFSpacing.xs) {
-            // Mail's standard mailboxes: fixed names, Inbox first.
-            AppleSectionHeader(text: "Mailboxes")
-                .padding(.horizontal, MFSpacing.s)
-                .padding(.bottom, MFSpacing.xs)
-            folderRow("Inbox", folder: .inbox)
-            folderRow("Sent", folder: .sent, showsCount: false)
-            folderRow("Drafts", folder: .drafts)
-            folderRow("Spam", folder: .junk)
-            folderRow("Trash", folder: .trash, showsCount: false)
-            HStack {
-                AppleSectionHeader(text: "Sorted for you")
-                    .lineLimit(1)
-                    .fixedSize()
-                Spacer(minLength: MFSpacing.xs)
-                Button(model.isRenamingBuckets ? "Done" : "Rename") { model.isRenamingBuckets.toggle() }
-                    .buttonStyle(.plain)
-                    .font(MFFont.caption.weight(.medium))
-                    .foregroundStyle(MFColor.accent)
-                    .lineLimit(1)
-                    .fixedSize()
-            }
-            .padding(.horizontal, MFSpacing.s)
-            .padding(.top, MFSpacing.l)
-            .padding(.bottom, MFSpacing.xs)
-            ForEach(model.buckets, id: \.key) { bucket in
-                if model.isRenamingBuckets {
-                    BucketNameField(name: bucket.name) { model.rename(bucket: bucket.key, to: $0) }
-                } else {
-                    folderRow(bucket.name, folder: .bucket(bucket.key))
-                }
-            }
-            folderRow("Done", folder: .done, showsZero: false)
-            if !model.accounts.isEmpty {
-                AppleSectionHeader(text: "Accounts")
-                    .padding(.horizontal, MFSpacing.s)
-                    .padding(.top, MFSpacing.l)
-                    .padding(.bottom, MFSpacing.xs)
-                ForEach(Array(model.accounts.enumerated()), id: \.element.id) { index, account in
-                    HStack(spacing: MFSpacing.s) {
-                        Circle().fill(index.isMultiple(of: 2) ? MFColor.accent : MFColor.preview)
-                            .frame(width: MFSpacing.s, height: MFSpacing.s)
-                            .accessibilityHidden(true)
-                        Text(account.name)
-                            .font(MFFont.body)
-                            .foregroundStyle(MFColor.ink)
-                            .lineLimit(1)
+        VStack(spacing: 0) {
+            // Scrolls when many accounts or a tall window's text size need it.
+            MFScroll {
+                VStack(alignment: .leading, spacing: MFSpacing.l) {
+                    section("Favorites") {
+                        folderRow("Inbox", icon: icon(for: .inbox), folder: .favorite(.inbox))
+                        if model.offersFlagged {
+                            folderRow("Flagged", icon: "flag", folder: .flagged)
+                        }
+                        folderRow("Drafts", icon: icon(for: .drafts), folder: .favorite(.drafts))
+                        folderRow("Sent", icon: icon(for: .sent), folder: .favorite(.sent))
                     }
-                    .padding(.horizontal, MFSpacing.s)
-                    .padding(.vertical, MFSpacing.xs + MFSpacing.xxs)
+                    if !model.localMailboxes.isEmpty {
+                        section("On My Mac") {
+                            ForEach(model.localMailboxes) { mailbox in mailboxRow(mailbox) }
+                        }
+                    }
+                    ForEach(model.accountSections) { section in accountSection(section) }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(MFSpacing.m + MFSpacing.xs)
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(MFSpacing.m + MFSpacing.xs)
+            MailSyncNote(model: model)
+                .padding(.horizontal, MFSpacing.m)
+                .padding(.bottom, MFSpacing.m)
         }
         .background(MFColor.canvas)
     }
 
-    private func folderRow(_ title: String, folder: MailInboxModel.Folder, showsCount: Bool = true,
-                           showsZero: Bool = true) -> some View {
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+            AppleSectionHeader(text: title)
+                .padding(.horizontal, MFSpacing.s)
+                .padding(.bottom, MFSpacing.xs)
+            content()
+        }
+    }
+
+    private func accountSection(_ section: MailInboxModel.AccountSection) -> some View {
+        let collapsed = model.collapsedAccounts.contains(section.id)
+        return VStack(alignment: .leading, spacing: MFSpacing.xxs) {
+            Button {
+                if collapsed { model.collapsedAccounts.remove(section.id) } else { model.collapsedAccounts.insert(section.id) }
+            } label: {
+                HStack(spacing: MFSpacing.xs) {
+                    AppleSectionHeader(text: section.account.title)
+                        .lineLimit(1)
+                    Spacer(minLength: MFSpacing.xs)
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, MFSpacing.s)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(section.account.title), \(collapsed ? "collapsed" : "expanded")")
+            .accessibilityHint(collapsed ? "Shows this account's mailboxes" : "Hides this account's mailboxes")
+            if let subtitle = accountSubtitle(section, collapsed: collapsed) {
+                Text(subtitle)
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.tertiary)
+                    .lineLimit(1)
+                    .padding(.horizontal, MFSpacing.s)
+                    .padding(.bottom, MFSpacing.xs)
+            }
+            if !collapsed {
+                ForEach(section.mailboxes) { mailbox in mailboxRow(mailbox) }
+            }
+        }
+    }
+
+    private func accountSubtitle(_ section: MailInboxModel.AccountSection, collapsed: Bool) -> String? {
+        let count = section.mailboxes.count
+        let mailboxes = count == 1 ? "1 mailbox" : "\(count) mailboxes"
+        switch (section.account.subtitle, collapsed) {
+        case (let address?, true): return "\(address) · \(mailboxes)"
+        case (let address?, false): return address
+        case (nil, true): return mailboxes
+        case (nil, false): return nil
+        }
+    }
+
+    private func mailboxRow(_ mailbox: Mailbox) -> some View {
+        folderRow(mailbox.name, icon: mailbox.kind == .other && mailbox.isLocal && mailbox.name == "Send Later"
+                      ? "clock" : icon(for: mailbox.kind),
+                  folder: .mailbox(mailbox.ref.url))
+    }
+
+    private func icon(for kind: MailboxRef.Kind) -> String {
+        switch kind {
+        case .inbox: "tray"
+        case .important: "tag"
+        case .drafts: "doc"
+        case .sent: "paperplane"
+        case .junk: "xmark.bin"
+        case .trash: "trash"
+        case .archive: "archivebox"
+        case .other: "folder"
+        }
+    }
+
+    private func folderRow(_ title: String, icon: String, folder: MailInboxModel.Folder) -> some View {
         let selected = model.folder == folder
         let count = model.count(in: folder)
         return Button { Task { await model.select(folder) } } label: {
-            HStack {
+            HStack(spacing: MFSpacing.s) {
+                Image(systemName: icon)
+                    .font(MFFont.callout)
+                    .foregroundStyle(selected ? MFColor.ink : MFColor.tertiary)
+                    .frame(width: MailMetrics.iconWidth)
+                    .accessibilityHidden(true)
                 Text(title)
-                    .font(MFFont.body)
+                    .font(selected ? MFFont.calloutEmphasis : MFFont.callout)
                     .foregroundStyle(MFColor.ink)
-                Spacer()
-                if showsCount, count > 0 || !showsZero {
-                    if count > 0 {
-                        Text("\(count)")
-                            .font(MFFont.callout)
-                            .foregroundStyle(MFColor.secondary)
-                    }
+                    .lineLimit(1)
+                Spacer(minLength: MFSpacing.xs)
+                if count > 0 {
+                    Text(count.formatted())
+                        .font(MFFont.caption)
+                        .foregroundStyle(selected ? MFColor.ink : MFColor.secondary)
                 }
             }
             .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
-            .padding(.vertical, MFSpacing.s)
-            .background(RoundedRectangle(cornerRadius: MFRadius.m).fill(selected ? MFColor.fill : .clear))
+            .padding(.vertical, MFSpacing.xs + MFSpacing.xxs)
+            .background(RoundedRectangle(cornerRadius: MFRadius.s).fill(selected ? MFColor.sidebarSelected : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(title), \(count) messages")
+        .accessibilityLabel(count > 0 ? "\(title), \(count)" : title)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
-struct BucketNameField: View {
-    @State var name: String
-    var commit: (String) -> Void
+/// The bottom of the sidebar: whether new mail is still coming in.
+struct MailSyncNote: View {
+    var model: MailInboxModel
+
+    private var closed: Bool { model.syncState == .mailClosed }
 
     var body: some View {
-        AppleTextField(title: "Bucket name", text: $name)
-            .font(MFFont.body)
-            .padding(.horizontal, MFSpacing.s + MFSpacing.xxs)
-            .padding(.vertical, MFSpacing.s)
-            .background(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairlineStrong))
-            .onSubmit { commit(name) }
-            .onDisappear { commit(name) }
-            .accessibilityLabel("Bucket name")
+        HStack(alignment: .top, spacing: MFSpacing.s) {
+            Circle()
+                .fill(closed ? MFColor.preview : MFColor.success)
+                .frame(width: MailMetrics.dot, height: MailMetrics.dot)
+                .padding(.top, MFSpacing.xs + MFSpacing.xxs)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: MFSpacing.xs) {
+                Text(closed ? "Apple Mail is closed" : "Up to date with Apple Mail")
+                    .font(MFFont.calloutSemibold)
+                    .foregroundStyle(MFColor.ink)
+                Text(detail)
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.secondary)
+                    .lineSpacing(MFLineSpacing.tight)
+                    .fixedSize(horizontal: false, vertical: true)
+                if closed {
+                    Button("Open Mail") { model.openMail() }
+                        .buttonStyle(.appleSecondary)
+                        .padding(.top, MFSpacing.xxs)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(MFSpacing.m)
+        .background(RoundedRectangle(cornerRadius: MFRadius.m).fill(closed ? MFColor.approvalFill : MFColor.surface))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.m)
+            .strokeBorder(closed ? MFColor.approvalBorder : MFColor.hairline))
+        .accessibilityElement(children: .contain)
+    }
+
+    private var detail: String {
+        guard closed else { return "New mail shows here a few seconds after Mail gets it." }
+        let time = model.lastRefreshed.map { " as of \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+        return "Showing mail\(time). New mail arrives when Mail is open."
     }
 }
 
@@ -201,20 +288,20 @@ struct MailList: View {
                     .font(MFFont.headline)
                     .foregroundStyle(MFColor.ink)
                     .accessibilityAddTraits(.isHeader)
-                Text("\(model.messages.count)")
-                    .font(MFFont.calloutEmphasis)
-                    .foregroundStyle(MFColor.secondary)
-                    .padding(.horizontal, MFSpacing.s)
-                    .padding(.vertical, MFSpacing.xxs)
-                    .background(Capsule().fill(MFColor.fill))
-                if model.isSorting {
-                    ProgressView().controlSize(.small).accessibilityLabel("Sorting")
-                } else if model.needsManualSort {
-                    Button("Sort with Quick") { Task { await model.sortWithQuick() } }
-                        .buttonStyle(.appleQuiet)
-                        .help("Apple Intelligence is off. Quick sorts on this Mac; it may replace the model loaded for chat.")
+                if model.unreadInFolder > 0 {
+                    Text("\(model.unreadInFolder.formatted()) unread")
+                        .font(MFFont.chip)
+                        .foregroundStyle(MFColor.secondary)
+                        .padding(.horizontal, MFSpacing.s)
+                        .padding(.vertical, MFSpacing.xxs)
+                        .background(Capsule().fill(MFColor.fill))
+                        .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: MFSpacing.xs)
+                Text(model.folderScope)
+                    .font(MFFont.caption)
+                    .foregroundStyle(MFColor.secondary)
+                    .lineLimit(1)
             }
             .padding(.horizontal, MFSpacing.l + MFSpacing.xs)
             .padding(.vertical, MFSpacing.l)
@@ -243,13 +330,6 @@ struct MailList: View {
 
     private var shortcuts: some View {
         HStack(spacing: MFSpacing.m) {
-            // Bare E and Z type letters while a text field is being edited.
-            shortcut("E", "Done") { if let message = model.selected { model.markDone(message) } }
-                .keyboardShortcut("e", modifiers: [])
-                .disabled(model.isEditingText || model.selected == nil)
-            shortcut("Z", "Undo") { model.undo() }
-                .keyboardShortcut("z", modifiers: [])
-                .disabled(model.isEditingText)
             shortcut("⌘J", "Draft") { Task { await model.writeDraft() } }
                 .keyboardShortcut("j", modifiers: .command)
             Spacer()
@@ -283,18 +363,30 @@ struct MailRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.xxs) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(message.senderName.isEmpty ? message.senderAddress : message.senderName)
-                    .font(message.isRead ? MFFont.bodySmallEmphasis : MFFont.rowTitle)
-                    .foregroundStyle(MFColor.ink)
-                    .lineLimit(1)
-                Spacer()
+            HStack(alignment: .firstTextBaseline, spacing: MFSpacing.xs) {
+                Group {
+                    if message.isOutgoing {
+                        Text("\(Text("To:").foregroundStyle(MFColor.secondary).font(MFFont.callout)) \(message.counterpart)")
+                    } else {
+                        Text(message.counterpart)
+                    }
+                }
+                .font(message.isRead ? MFFont.bodySmallEmphasis : MFFont.rowTitle)
+                .foregroundStyle(MFColor.ink)
+                .lineLimit(1)
+                Spacer(minLength: MFSpacing.xs)
+                if message.isFlagged {
+                    Image(systemName: "flag.fill")
+                        .font(MFFont.caption)
+                        .foregroundStyle(MFColor.preview)
+                        .accessibilityLabel("Flagged")
+                }
                 Text(Self.timeLabel(message.date))
                     .font(MFFont.caption)
                     .foregroundStyle(MFColor.secondary)
             }
             Text(message.subject)
-                .font(MFFont.calloutEmphasis)
+                .font(message.isRead ? MFFont.callout : MFFont.calloutEmphasis)
                 .foregroundStyle(MFColor.ink)
                 .lineLimit(1)
             Text(message.snippet)
@@ -307,6 +399,15 @@ struct MailRow: View {
         .padding(.vertical, MFSpacing.m + MFSpacing.xxs)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? MFColor.accentFillFaint : .clear)
+        .overlay(alignment: .topLeading) {
+            if !message.isRead {
+                Circle().fill(MFColor.accent)
+                    .frame(width: MailMetrics.dot, height: MailMetrics.dot)
+                    .padding(.leading, MFSpacing.s)
+                    .padding(.top, MFSpacing.m + MFSpacing.s)
+                    .accessibilityLabel("Unread")
+            }
+        }
         .overlay(alignment: .leading) {
             Rectangle().fill(selected ? MFColor.accent : .clear).frame(width: MFSpacing.xs)
         }
@@ -369,7 +470,7 @@ struct MailReader: View {
                 .frame(width: MFSpacing.xxl, height: MFSpacing.xxl)
                 .background(Circle().fill(MFColor.accentFill))
                 .accessibilityHidden(true)
-            Text("\(Text(message.senderName.isEmpty ? message.senderAddress : message.senderName).font(MFFont.bodyEmphasis).foregroundStyle(MFColor.ink)) \(Text("to you · \(MailRow.timeLabel(message.date))").foregroundStyle(MFColor.secondary))")
+            Text("\(Text(from(message)).font(MFFont.bodyEmphasis).foregroundStyle(MFColor.ink)) \(Text("to \(to(message)) · \(MailRow.timeLabel(message.date)) · \(model.location(of: message))").foregroundStyle(MFColor.secondary))")
                 .font(MFFont.body)
             if let trackers = model.body?.trackersRemoved, trackers > 0 {
                 AppleChip(text: trackers == 1 ? "1 tracker removed" : "\(trackers) trackers removed", tone: .success)
@@ -378,6 +479,14 @@ struct MailReader: View {
                 AppleChip(text: blocked == 1 ? "1 remote image not loaded" : "\(blocked) remote images not loaded")
             }
         }
+    }
+
+    private func from(_ message: MailMessageSummary) -> String {
+        message.isOutgoing ? "You" : message.senderDisplay
+    }
+
+    private func to(_ message: MailMessageSummary) -> String {
+        message.isOutgoing && !message.recipients.isEmpty ? message.counterpart : "you"
     }
 
     private func eventCard(_ card: ProposedEvent) -> some View {
