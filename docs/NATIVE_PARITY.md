@@ -31,6 +31,13 @@ cases from [`Scripts/engine_validate.py`](../Scripts/engine_validate.py), the
 | `long-32k` | long-context-v1/long-32k.json (~32K tokens) | 31,480 | off | 128 | 128 (limit) | first 16, last 32, stride 2048, + 8 decode steps |
 | **all** | | | | | **2,354** | |
 
+**The 8K cap.** No evaluation goes above 8K tokens (maintainer decision,
+2026-11-19). D1 runs, per-op comparisons and benchmarks of a native backend
+from now on use the ten prompts up to `doc-4k`: 2,226 golden positions.
+`long-32k` stays in the frozen set and its golden, and the results already
+recorded with it (the noise floor below) stand as they are. The harness lets
+the caller pick the prompts, so this is a protocol change only.
+
 Every prompt is chat-templated by llama.cpp's own renderer
 (`common_chat_templates_apply`, as `llama-server` renders it, Jinja on,
 `add_generation_prompt`), with `enable_thinking` as listed, then tokenized
@@ -206,8 +213,9 @@ then S `[valueHeads][valueDim][keyDim]`):
   layout's `[h][j][i]`. `GoldenPrompt.ssmState(layer:position:)` returns it as
   stored.
 
-Together the decode-step state goldens let a GDN decode step at 512, 4K or
-32K context be tested on its own: start from `convState` / `ssmState` at
+Together the decode-step state goldens let a GDN decode step at 512 or 4K
+context be tested on its own (`long-32k` has them too, but no new evaluation
+goes above 8K): start from `convState` / `ssmState` at
 `n_prompt`, feed the step's `gdnQKV`, `gdnZ`, `gdnAlpha`, `gdnBeta`, and
 compare `gdnOutput`.
 
@@ -220,7 +228,7 @@ tokens:
 
 | Check | Bar | Set by |
 |---|---|---|
-| Greedy agreement: the candidate's argmax equals the golden token | ≥ 99% of 2,354 positions | D1 (maintainer) |
+| Greedy agreement: the candidate's argmax equals the golden token | ≥ 99% of the 2,226 positions of the prompts up to `doc-4k` (the 8K cap) | D1 (maintainer) |
 | Per-token KL(golden ‖ candidate) of the logits, every position | ≤ ε = 0.01 nats | this page |
 | Mean per-token KL over the set | ≤ 0.001 nats | this page; an extra gate beyond D1, **pending maintainer sign-off** at the Phase 0 exit |
 | Agentic parity (`agentic-v1`) | at most 1 of 32 tasks regresses (golden passes, candidate fails); no setup errors | this page |

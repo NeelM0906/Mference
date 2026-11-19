@@ -1,7 +1,7 @@
 // mfe-bench: end-to-end llama.cpp baseline at the pin (b1b770d9) for the
 // native engine's benchmark protocol (docs/NATIVE_BENCHMARKS.md).
 //
-//   mfe-bench --model <gguf> --tokens <golden.json> [--ctx 512,4096,32768]
+//   mfe-bench --model <gguf> --tokens <golden.json> [--ctx 512,4096,8192]
 //             [--gen 128] [--suffix 64] [--reps 3] [--json <file>]
 //
 // Settings are the product LlamaBackend's: every layer on Metal, n_batch 2048,
@@ -59,7 +59,7 @@ static bool decode_all(llama_context * ctx, llama_batch & b, const std::vector<l
 
 int main(int argc, char ** argv) {
     std::string model_path, tokens_path, json_path;
-    std::vector<int> ctxs = {512, 4096, 32768};
+    std::vector<int> ctxs = {512, 4096, 8192};
     int gen = 128, suffix = 64, reps = 3;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];

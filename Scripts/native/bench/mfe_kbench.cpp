@@ -2,7 +2,7 @@
 // native engine's benchmark gates (docs/NATIVE_BENCHMARKS.md).
 //
 //   mfe-kbench [--suite dispatch,copy,gemm,attn,gdn] [--types q4_K,...] [--rows 1,4,8,16,512]
-//              [--shapes K:N,...] [--ctx 512,4096,32768] [--reps 20] [--min-mib 256] [--max-mib 2048]
+//              [--shapes K:N,...] [--ctx 512,4096,8192] [--reps 20] [--min-mib 256] [--max-mib 2048]
 //              [--json <file>]
 //
 // Every measurement builds one ggml graph of M independent copies of the op
@@ -57,7 +57,7 @@ struct Options {
     std::vector<std::string> types;   // empty: Quick's
     std::vector<int> rows = {1, 2, 4, 8, 16, 512};
     std::vector<std::pair<int, int>> shapes;  // empty: per type, Quick's
-    std::vector<int> ctx = {512, 4096, 32768};
+    std::vector<int> ctx = {512, 4096, 8192};
     int reps = 20;
     double min_mib = 256;   // per-graph distinct working set, past the system cache
     double max_mib = 2048;  // cap on a graph's total allocation (bounded memory)
