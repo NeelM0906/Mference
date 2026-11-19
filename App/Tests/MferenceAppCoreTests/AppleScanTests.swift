@@ -193,6 +193,33 @@ struct GatedScanner: DocumentRecognizing {
         #expect(untaxed.value(.tax) == nil)
     }
 
+    /// Codex on #153: a whole printed amount (yen, or a total without cents)
+    /// still vouches for the model's equal amount; an address number or a
+    /// card's last four digits does not.
+    @Test func wholePrintedAmountsVouchOnlyBesideASignOrALabel() {
+        let reading = ScanReading(lines: ["SAKURA MART", "4-12 Ginza", "VISA ****4096", "Tax ¥109",
+                                          "TOTAL ¥1,200"].map { ScanLine(text: $0, confidence: 0.95, box: .zero) })
+        let taken = ReceiptFieldMerger.merge(model: ReceiptDraft(total: 1200, tax: 109, currency: "JPY"),
+                                             text: ReceiptDraft(), reading: reading, filledBy: .appleOnDevice)
+        #expect(AppleScanAccuracyTests.normalized(.total, taken.value(.total)) == "1200.00")
+        #expect(AppleScanAccuracyTests.normalized(.tax, taken.value(.tax)) == "109.00")
+        let refused = ReceiptFieldMerger.merge(model: ReceiptDraft(total: 4096, tax: 12, currency: "JPY"),
+                                               text: ReceiptDraft(), reading: reading, filledBy: .appleOnDevice)
+        #expect(refused.value(.total) == nil && refused.value(.tax) == nil)
+        #expect(ReceiptHeuristics.amounts(in: "Total 1200").contains(1200))
+        #expect(ReceiptHeuristics.amounts(in: "Order 55102").isEmpty)
+    }
+
+    /// Codex on #153: Canadian HST (and PST, QST) is a tax line.
+    @Test func canadianTaxLinesCount() {
+        let reading = ScanReading(lines: ["MAPLE GOODS", "Subtotal $100.00", "HST $13.00", "Total $113.00"]
+            .map { ScanLine(text: $0, confidence: 0.95, box: .zero) })
+        #expect(ReceiptHeuristics.read(reading).tax == 13)
+        let fields = ReceiptFieldMerger.merge(model: ReceiptDraft(total: 113, tax: 13, currency: "CAD"),
+                                              text: ReceiptDraft(), reading: reading, filledBy: .appleOnDevice)
+        #expect(AppleScanAccuracyTests.normalized(.tax, fields.value(.tax)) == "13.00")
+    }
+
     @Test func aModelCardNameIsWrittenOut() throws {
         let books = Self.reading(try #require(ReceiptFixtures.all.first { $0.name == "04-books" }))
         let fields = ReceiptFieldMerger.merge(model: ReceiptDraft(paidWith: "AMEX"), text: ReceiptDraft(),
