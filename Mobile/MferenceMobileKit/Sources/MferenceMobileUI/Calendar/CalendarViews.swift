@@ -269,10 +269,9 @@ struct SuggestionBanner: View {
 struct MonthGridView: View {
     @Bindable var model: MobileAppModel
     var switchesToDay = false
-    @State private var monthOffset = 0
 
     var body: some View {
-        let month = model.calendar.date(byAdding: .month, value: monthOffset, to: model.selectedDay) ?? model.selectedDay
+        let month = model.calendar.date(byAdding: .month, value: model.monthOffset, to: model.selectedDay) ?? model.selectedDay
         let grid = MonthGrid(month: month, calendar: model.calendar)
         VStack(spacing: MFSpacing.s) {
             HStack {
@@ -280,10 +279,10 @@ struct MonthGridView: View {
                     .font(MFPhoneFont.headline)
                     .foregroundStyle(MFColor.ink)
                 Spacer()
-                Button { monthOffset -= 1 } label: { Image(systemName: "chevron.left") }
+                Button { model.monthOffset -= 1 } label: { Image(systemName: "chevron.left") }
                     .accessibilityLabel("Previous month")
                     .frame(width: MFPhoneMetrics.touchTarget, height: MFPhoneMetrics.touchTarget)
-                Button { monthOffset += 1 } label: { Image(systemName: "chevron.right") }
+                Button { model.monthOffset += 1 } label: { Image(systemName: "chevron.right") }
                     .accessibilityLabel("Next month")
                     .frame(width: MFPhoneMetrics.touchTarget, height: MFPhoneMetrics.touchTarget)
             }
@@ -302,7 +301,6 @@ struct MonthGridView: View {
                 }
             }
         }
-        .onChange(of: model.selectedDay) { monthOffset = 0 }
     }
 
     private func dayCell(_ day: Date) -> some View {

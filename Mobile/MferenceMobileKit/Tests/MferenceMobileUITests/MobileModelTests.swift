@@ -139,6 +139,21 @@ struct MobileAppModelTests {
         #expect(model.currentMessages.first { $0.id == offer.id }?.handoff?.state == .returnedFromMac)
     }
 
+    @Test func aLateHandoffAnswersItsOwnRequest() async throws {
+        let model = MobileAppModel(wordDelay: .zero)
+        model.send("Go through the 40 board PDFs and pull every revenue figure into one table.")
+        let offer = try #require(model.currentMessages.last)
+        #expect(offer.handoff?.state == .offered)
+        model.send("What did Priya ask for in her email?")
+        await settle(model)
+        model.resolveHandoff(offer.id, sendToMac: true)
+        await settle(model)
+        let last = try #require(model.currentMessages.last)
+        #expect(last.engineLabel == "Deep 27B · on your Mac")
+        #expect(last.text.contains("Revenue"))
+        #expect(!last.text.contains("Priya"))
+    }
+
     @Test func withoutAPairedMacBigJobsStayOnTheIPhone() async {
         let model = MobileAppModel(pairedMac: nil, wordDelay: .zero)
         #expect(model.macModels.isEmpty)
@@ -154,6 +169,17 @@ struct MobileAppModelTests {
         #expect(model.suggestion == nil)
         let moved = try #require(model.events.first { $0.id == suggestion.event.id })
         #expect(Calendar.current.component(.hour, from: moved.start) == 11)
+    }
+
+    @Test func todayBringsTheMonthGridBack() {
+        let model = MobileAppModel(wordDelay: .zero)
+        model.goToToday()
+        model.monthOffset = 3
+        model.goToToday()
+        #expect(model.monthOffset == 0)
+        model.monthOffset = -2
+        model.select(day: .now)
+        #expect(model.monthOffset == 0)
     }
 
     @Test func todosToggleAndAdd() throws {

@@ -128,7 +128,7 @@ public final class MobileAppModel {
     /// The person chose on the hand-off card.
     public func resolveHandoff(_ messageID: UUID, sendToMac: Bool) {
         guard let conversationID = conversationContaining(messageID),
-              let request = conversation(conversationID)?.messages.last(where: { $0.role == .user })?.text
+              let request = request(answeredBy: messageID, in: conversationID)
         else { return }
         update(messageID, in: conversationID) { $0.handoff?.state = sendToMac ? .sentToMac : .keptOnIPhone }
         let model: PhoneModel = sendToMac ? (pairedMac?.models.first ?? .deep) : selectedModel
@@ -146,12 +146,21 @@ public final class MobileAppModel {
 
     public func hasEvents(on day: Date) -> Bool { !events(on: day).isEmpty }
 
+    /// Months away from `selectedDay` that the month grid shows (the arrows).
+    public var monthOffset = 0
+
     public func select(day: Date, switchToDay: Bool = false) {
+        monthOffset = 0
         selectedDay = calendar.startOfDay(for: day)
         if switchToDay { calendarMode = .day }
     }
 
-    public func goToToday() { selectedDay = calendar.startOfDay(for: .now) }
+    /// Today: selects today and brings the month grid back to its month,
+    /// even when today was already selected.
+    public func goToToday() {
+        selectedDay = calendar.startOfDay(for: .now)
+        monthOffset = 0
+    }
 
     public func acceptSuggestion() {
         guard let suggestion else { return }
@@ -239,6 +248,16 @@ public final class MobileAppModel {
     }
 
     private func conversation(_ id: UUID) -> Conversation? { conversations.first { $0.id == id } }
+
+    /// The user message the given answer (or hand-off card) replies to: the
+    /// nearest user message before it, not the newest one, since the person
+    /// may keep chatting while an offer waits.
+    private func request(answeredBy messageID: UUID, in conversationID: UUID) -> String? {
+        guard let messages = conversation(conversationID)?.messages,
+              let index = messages.firstIndex(where: { $0.id == messageID })
+        else { return nil }
+        return messages[..<index].last(where: { $0.role == .user })?.text
+    }
 
     private func conversationContaining(_ messageID: UUID) -> UUID? {
         conversations.first { $0.messages.contains { $0.id == messageID } }?.id
