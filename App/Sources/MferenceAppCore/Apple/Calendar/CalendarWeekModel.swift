@@ -197,6 +197,41 @@ public final class CalendarWeekModel {
         return false
     }
 
+    /// Edit from the event's popover: this occurrence only.
+    @discardableResult
+    public func updateEvent(_ event: CalendarEvent, title: String, start: Date, end: Date) async -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, end > start else {
+            errorMessage = "An event needs a title and an end after its start."
+            return false
+        }
+        do {
+            _ = try await service.update(event.reference, title: trimmed, start: start, end: end)
+            await reload()
+            return true
+        } catch let error as CalendarServiceError {
+            errorMessage = error.userMessage
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        return false
+    }
+
+    /// Delete from the event's popover: this occurrence only.
+    @discardableResult
+    public func deleteEvent(_ event: CalendarEvent) async -> Bool {
+        do {
+            try await service.remove(event.reference)
+            await reload()
+            return true
+        } catch let error as CalendarServiceError {
+            errorMessage = error.userMessage
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        return false
+    }
+
     public func dismiss(_ proposal: ProposedEvent) {
         persist { $0.proposals.removeAll { $0.id == proposal.id } }
     }
