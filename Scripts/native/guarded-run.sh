@@ -32,7 +32,9 @@ swap_mb() { sysctl -n vm.swapusage | sed -E 's/.*used = ([0-9.]+)M.*/\1/'; }
 if ! pmset -g batt | grep -q "AC Power"; then note "REFUSED: not on AC power ($(pmset -g batt | head -1))"; exit 71; fi
 if [ ! -f "$GGUF" ]; then note "REFUSED: no GGUF at $GGUF"; exit 71; fi
 if ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
-others=$(pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm|llama-server|llama-cli|llama-bench|mfe-golden|mfe-kbench' | grep -v "guarded-run" || true)
+# Processes by exact name (a shell whose command line merely mentions a tool
+# must not count); lock.sh preflight already checks the Mference processes.
+others=$(pgrep -lx 'llama-server|llama-cli|llama-bench|mfe-golden|mfe-kbench|mfe-bench|MferenceServer|MferenceCLI' || true)
 if [ -n "$others" ]; then note "REFUSED: another model process runs: $others"; exit 71; fi
 
 s0=$(swap_mb)
