@@ -135,6 +135,53 @@ import Testing
         #expect(refused, "SearXNG still startable after Settings turned web search off")
     }
 
+    /// Codex P1 on #140: an answer already running keeps its toolbox, so the
+    /// toolbox re-reads Settings before every search or page fetch.
+    @Test func aRunningAnswerLosesWebWhenSettingsTurnOff() async throws {
+        for turnOff in ["switch", "offline"] {
+            let settings = Self.settings(webOn: true)
+            let web = Self.web(settings)
+            let toolbox = try #require(web.makeToolbox(webEnabled: true))
+            if turnOff == "switch" { settings.webSearchEnabled = false } else { settings.offlineMode = true }
+            for (name, arguments) in [("web_search", ["query": "q"]), ("open_page", ["url": "https://a.example/"])] {
+                let call = ToolCall(id: name, name: name, arguments: .object(arguments.mapValues(ToolJSON.string)),
+                                    argumentsJSON: "{}")
+                let outcome = await toolbox.run(call)
+                #expect(outcome.steps.first?.kind == .failed, "\(turnOff): \(name) still ran")
+                #expect(outcome.content.contains("turned off"), "\(turnOff): \(outcome.content)")
+            }
+        }
+    }
+
+    /// Codex P2 on #140: off (or offline) and then on again, a chat whose Web
+    /// toggle stayed on can search again without toggling it.
+    @Test func searchResumesWhenSettingsTurnBackOn() async throws {
+        for turnOff in ["switch", "offline"] {
+            let settings = Self.settings(webOn: true)
+            let web = Self.web(settings)
+            let process = try #require(web.process)
+            if turnOff == "switch" { settings.webSearchEnabled = false } else { settings.offlineMode = true }
+            // Wait until the stop has happened.
+            let off = WebError.searchUnavailable("web search is off for now.")
+            var stopped = false
+            for _ in 0..<200 where !stopped {
+                do { _ = try await process.ensureRunning() } catch let error as WebError where error == off {
+                    stopped = true
+                } catch {}
+                if !stopped { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            #expect(stopped)
+            if turnOff == "switch" { settings.webSearchEnabled = true } else { settings.offlineMode = false }
+            let toolbox = try #require(web.makeToolbox(webEnabled: true))
+            let call = ToolCall(id: "s", name: "web_search", arguments: .object(["query": .string("q")]), argumentsJSON: "{}")
+            let outcome = await toolbox.run(call)
+            // The runtime here does not exist, so the start fails, but it is
+            // attempted: not refused as "off".
+            #expect(!outcome.content.contains("off for now"), "\(turnOff): \(outcome.content)")
+            #expect(!outcome.content.contains("turned off"), "\(turnOff): \(outcome.content)")
+        }
+    }
+
     @Test func legacySwitchMigratesOnceThenGoes() {
         let legacy = InMemorySettingsStore([WebAnswers.legacyEnabledKey: true])
         let settings = Self.settings(webOn: false)

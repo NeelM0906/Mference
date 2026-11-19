@@ -66,6 +66,9 @@ extension ToolJSON {
 public final class WebToolbox: ChatToolbox {
     public let spec: WebAnswersSpec
     private let searchBase: (@Sendable () async throws -> URL)?
+    /// Re-read before every tool call: Settings or offline mode may have
+    /// turned web search off while this answer was being written.
+    private let isAllowed: (@Sendable () async -> Bool)?
     private let http: WebHTTP
     private let client: SearXNGClient
     private let reader: PageReader
@@ -90,7 +93,9 @@ public final class WebToolbox: ChatToolbox {
 
     /// `searchBase` returns the running SearXNG's base URL (starting it if
     /// needed); nil when this build has no SearXNG, and the tools say so.
-    public init(spec: WebAnswersSpec, http: WebHTTP, searchBase: (@Sendable () async throws -> URL)?) {
+    public init(spec: WebAnswersSpec, http: WebHTTP, searchBase: (@Sendable () async throws -> URL)?,
+                isAllowed: (@Sendable () async -> Bool)? = nil) {
+        self.isAllowed = isAllowed
         self.spec = spec
         self.searchBase = searchBase
         self.http = http
@@ -103,6 +108,9 @@ public final class WebToolbox: ChatToolbox {
     public var definitions: [ToolDefinition] { spec.tools }
 
     public func run(_ call: ToolCall) async -> ToolOutcome {
+        if let isAllowed, !(await isAllowed()) {
+            return failure("Web search was turned off (Settings or offline mode); answer without the web.")
+        }
         switch call.name {
         case "web_search":
             guard let raw = call.arguments[string: "query"]?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -290,11 +298,15 @@ public final class WebAnswers: ChatToolboxProvider {
     public func makeToolbox(webEnabled: Bool) -> (any ChatToolbox)? {
         guard webEnabled, settings.isWebSearchActive, let spec else { return nil }
         let http = WebHTTP(allowlist: WebAllowlist(), protocolClasses: protocolClasses)
+        let settings = self.settings
+        let isAllowed: @Sendable () async -> Bool = { await MainActor.run { settings.isWebSearchActive } }
         var searchBase: (@Sendable () async throws -> URL)?
         if let process {
-            searchBase = { try await process.ensureRunning() }
+            // Allowed by the check above (run() re-reads Settings first), so
+            // a stop from an earlier off/offline phase does not block it.
+            searchBase = { try await process.ensureRunning(resumingAfterStop: true) }
         }
-        return WebToolbox(spec: spec, http: http, searchBase: searchBase)
+        return WebToolbox(spec: spec, http: http, searchBase: searchBase, isAllowed: isAllowed)
     }
 
     public func webUsageChanged(enabled: Bool) {
