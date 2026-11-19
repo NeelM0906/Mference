@@ -346,11 +346,15 @@ struct ReferenceModelTests {
         var kv: (any Native.KVStore)?
     }
 
-    /// A model whose encode throws on the first decode step.
+    /// A model whose encode throws on the first decode step. With
+    /// `breakUndo` it first begins a second step, so the scheduler's undo
+    /// (`rollback(to: plan.startPosition)`) is refused too.
     final class FailingDecode: Native.ForwardModel {
         let inner: Native.ReferenceForwardModel
-        init(_ inner: Native.ReferenceForwardModel, probe: StoreProbe) {
+        let breakUndo: Bool
+        init(_ inner: Native.ReferenceForwardModel, probe: StoreProbe, breakUndo: Bool = false) {
             self.inner = inner
+            self.breakUndo = breakUndo
             probe.kv = inner.kv
         }
         var config: Native.Qwen35Config { inner.config }
@@ -362,7 +366,10 @@ struct ReferenceModelTests {
             set { inner.tap = newValue }
         }
         func encodeStep(_ plan: Native.StepPlan, encoder: MTLComputeCommandEncoder) throws -> Native.TensorRef? {
-            if plan.kind == .decode { throw Native.NativeError.invalidShape("injected") }
+            if plan.kind == .decode {
+                if breakUndo { try inner.kv.beginStep(rows: 1, kind: .decode) }
+                throw Native.NativeError.invalidShape("injected")
+            }
             return try inner.encodeStep(plan, encoder: encoder)
         }
     }
@@ -382,6 +389,28 @@ struct ReferenceModelTests {
             Issue.record("the injected encode failure did not surface")
         } catch Native.NativeError.invalidShape {}
         #expect(probe.kv?.length == prompt.count)
+    }
+
+    /// When the undo itself fails, the scheduler clears the sequence and the
+    /// encode's own error is the one thrown.
+    @Test func aFailedUndoResetsAndKeepsTheOriginalError() async throws {
+        let fx = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+        let probe = StoreProbe()
+        let scheduler = try Native.ReferenceStepSchedulerFactory().make(
+            model: FailingDecode(try fx.model(chunk: 8), probe: probe, breakUndo: true),
+            sampler: try Native.ReferenceSampler(context: nil),
+            strategy: Native.ReferencePlainDecoding(), queue: fx.ctx.queue)
+        let prompt: [Int32] = [262, 104, 101, 108]
+        do {
+            _ = try await scheduler.run(Native.GenerationJob(
+                promptTokens: prompt, params: Self.greedy, maxNewTokens: 4, stopTokens: [], reusePrefix: false,
+                prefillChunk: 8)) { _ in }
+            Issue.record("the injected encode failure did not surface")
+        } catch Native.NativeError.invalidShape(let message) {
+            #expect(message == "injected")
+        }
+        #expect(probe.kv?.length == 0)
     }
 
     @Test func verifyStepsNeedVerifyRows() throws {
