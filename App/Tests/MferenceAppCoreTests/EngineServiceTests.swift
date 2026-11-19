@@ -150,17 +150,21 @@ import Testing
         withExtendedLifetime(stream) {}
     }
 
+    /// Driven explicitly: the host's idle clock is a `TestSleeper` fired by
+    /// the test, and only published statuses are asserted (the synchronous
+    /// snapshot may lag a published `.empty` by one host step).
     @Test func idleUnloadPublishesEmpty() async throws {
-        let (service, _) = Self.service(idleUnloadAfter: .milliseconds(20))
-        var updates = service.statusUpdates().makeAsyncIterator()
-        try await service.load(.quick)
-        var sawEmptyAfterLoad = false
-        var sawReady = false
-        while let status = await updates.next() {
-            if status.phase == .ready { sawReady = true }
-            if sawReady, status.phase == .empty { sawEmptyAfterLoad = true; break }
-        }
-        #expect(sawEmptyAfterLoad)
-        #expect(service.status.phase == .empty)
+        let sleeper = TestSleeper()
+        let harness = Harness(idleUnload: IdleUnloadControl(delay: .seconds(600), sleep: sleeper.sleep))
+        try await harness.service.load(.quick)
+        #expect(await waitForStatus(harness.service) { $0.phase == .ready && $0.residentModel == .quick } != nil)
+        // The idle timer is armed; nothing unloads until it fires.
+        while sleeper.calls == 0 { await Task.yield() }
+        #expect(!harness.journal.entries.contains(.unloaded(AppModel.quick.modelID)))
+        sleeper.fire()
+        let empty = await waitForStatus(harness.service) { $0.phase == .empty }
+        #expect(empty?.residentModel == nil)
+        #expect(empty?.targetModel == nil)
+        #expect(harness.journal.entries.contains(.unloaded(AppModel.quick.modelID)))
     }
 }
