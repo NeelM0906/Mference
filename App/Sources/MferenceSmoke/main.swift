@@ -17,6 +17,11 @@ import MferenceAppCore
 // App/Resources/SearXNG/runtime provides); it passes when the model searched
 // and the answer cites sources. The result's `web` field has the details.
 //
+// Warm decode: add `--warmup` to send a short request on the loaded model
+// first, so the main request's decode is warm; `--temperature 0` is greedy,
+// as the engine's own speed runs use (default: the checkpoint's sampling).
+// Each result records decode tok/s.
+//
 // Exit 0 pass, 1 the request failed, 2 bad arguments, 4 swap grew during
 // the run (stop all model runs and report), 5 not on AC power at the start
 // (nothing loaded) or at the end, 6 MFERENCE_APP_SMOKE=1 not set (nothing
@@ -56,6 +61,14 @@ struct SmokeResult: Codable {
     var powerSourceAtEnd: String?
     /// `--web` runs: what the web answer searched, read and cited.
     var web: WebCheckpointOutcome?
+    /// `--warmup`: the short request sent first on the loaded model.
+    var warmupCompletionTokens: Int?
+    var warmupPrefillSeconds: Double?
+    var warmupDecodeSeconds: Double?
+    /// completionTokens / decodeSeconds of the main request.
+    var decodeTokensPerSecond: Double?
+    /// Nil: the checkpoint's sampling defaults; 0 is greedy.
+    var temperature: Float?
     var error: String?
     var passed = false
 }
@@ -86,6 +99,8 @@ var prompt = "Answer in one short sentence: what is the capital of France?"
 var maxTokens = 64
 var commit: String?
 var webMode = false
+var warmup = false
+var temperature: Float?
 var promptGiven = false
 while let argument = arguments.popFirst() {
     switch argument {
@@ -95,6 +110,8 @@ while let argument = arguments.popFirst() {
         prompt = arguments.popFirst() ?? prompt
         promptGiven = true
     case "--web": webMode = true
+    case "--warmup": warmup = true
+    case "--temperature": temperature = arguments.popFirst().flatMap(Float.init)
     case "--max-tokens": maxTokens = arguments.popFirst().flatMap(Int.init) ?? maxTokens
     case "--commit": commit = arguments.popFirst()
     default: fail("unknown argument \(argument)", code: 2)
@@ -117,6 +134,8 @@ let option = await engine.models().first { $0.model == model }
 var result = SmokeResult(commit: commit, model: model.name, modelID: model.modelID, engine: model.engineLabel,
                          location: option?.location?.path, sizeBytes: option?.sizeBytes ?? 0,
                          startedUTC: startedUTC, prompt: prompt, swapUsedBeforeBytes: swapBefore)
+
+result.temperature = temperature
 
 do {
     if case .notInstalled(let reason)? = option?.availability {
@@ -146,8 +165,21 @@ do {
         result.passed = outcome.passed
         if !outcome.passed { result.error = outcome.error ?? "web answer failed" }
     } else {
+        if warmup {
+            let short = GenerationOptions(thinking: model.supportsThinking ? false : nil,
+                                          maximumCompletionTokens: 16, temperature: temperature)
+            for try await update in engine.generate(model: model,
+                                                    turns: [ChatTurn(role: .user, content: "Say hello.")],
+                                                    options: short) {
+                if case .completed(let summary) = update {
+                    result.warmupCompletionTokens = summary.completionTokens
+                    result.warmupPrefillSeconds = summary.prefillSeconds
+                    result.warmupDecodeSeconds = summary.decodeSeconds
+                }
+            }
+        }
         let options = GenerationOptions(thinking: model.supportsThinking ? false : nil,
-                                        maximumCompletionTokens: maxTokens)
+                                        maximumCompletionTokens: maxTokens, temperature: temperature)
         for try await update in engine.generate(model: model, turns: [ChatTurn(role: .user, content: prompt)],
                                                 options: options) {
             switch update {
@@ -159,6 +191,9 @@ do {
                 result.completionTokens = summary.completionTokens
                 result.prefillSeconds = summary.prefillSeconds
                 result.decodeSeconds = summary.decodeSeconds
+                if let seconds = summary.decodeSeconds, seconds > 0 {
+                    result.decodeTokensPerSecond = Double(summary.completionTokens) / seconds
+                }
             case .prepared, .toolCall: break
             }
         }
