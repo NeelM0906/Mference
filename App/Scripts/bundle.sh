@@ -203,9 +203,12 @@ mv "$STAGING" "$APP_BUNDLE"
 
 # The engine finds its resource bundles through SwiftPM's generated
 # accessors: Swift `Bundle.module` (Mference) and the Objective-C
-# SWIFTPM_MODULE_BUNDLE that ggml-metal uses (LlamaCpp). Check that this
-# toolchain's accessors search the app's Contents/Resources first, where the
-# bundles are placed, rather than relying on a build-directory fallback.
+# SWIFTPM_MODULE_BUNDLE that ggml-metal uses (LlamaCpp). Older toolchains
+# search `resourceURL` (Contents/Resources); newer ones search `bundleURL`
+# (the app root — where a signed bundle may not place content, so the
+# call sites check Contents/Resources explicitly first). Check that this
+# toolchain's accessors search inside the app bundle at all rather than
+# only a build-directory path that does not exist on a clean machine.
 check_accessor() {
     local pattern="$1" name="$2" needle="$3" found=0 file
     while IFS= read -r -d '' file; do
@@ -222,6 +225,15 @@ check_accessor() {
 }
 check_accessor '*LlamaCpp*' 'resource_bundle_accessor.m' 'mainBundle] (bundleURL|resourceURL)]'
 check_accessor '*/Mference.*' 'resource_bundle_accessor.swift' 'Bundle\.main\.(bundleURL|resourceURL)'
+
+# Placement check: the required bundles must sit in Contents/Resources,
+# the only sealed location a packaged app can load them from.
+for required in Mference_Mference Mference_LlamaCpp; do
+    if [[ ! -d "$APP_BUNDLE/Contents/Resources/$required.bundle" ]]; then
+        echo "bundle.sh: $required.bundle is missing from Contents/Resources" >&2
+        exit 1
+    fi
+done
 
 # Moved-app check: a copy outside the build tree still finds every bundle.
 MOVED_DIR="$(mktemp -d)"

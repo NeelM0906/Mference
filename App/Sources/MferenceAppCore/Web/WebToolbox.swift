@@ -11,8 +11,23 @@ public struct WebAnswersSpec: Sendable {
     public let systemPromptTemplate: String
     public let tools: [ToolDefinition]
 
+    /// This target's SwiftPM resource bundle. The generated `Bundle.module`
+    /// accessor searches `Bundle.main.bundleURL` — the root of a packaged
+    /// .app, where code signing forbids content — and then a build-directory
+    /// path that does not exist on a clean machine, so check the app's
+    /// Contents/Resources explicitly first.
+    private static var resourceBundle: Bundle {
+        if let resources = Bundle.main.resourceURL {
+            let packaged = resources.appendingPathComponent("MferenceApp_MferenceAppCore.bundle")
+            if FileManager.default.fileExists(atPath: packaged.path), let bundle = Bundle(url: packaged) {
+                return bundle
+            }
+        }
+        return .module
+    }
+
     public static func load(version: Int = currentVersion) throws -> WebAnswersSpec {
-        guard let url = Bundle.module.url(forResource: "web-answers.v\(version)", withExtension: "json") else {
+        guard let url = resourceBundle.url(forResource: "web-answers.v\(version)", withExtension: "json") else {
             throw CocoaError(.fileNoSuchFile)
         }
         return try parse(Data(contentsOf: url))
