@@ -85,8 +85,7 @@ public final class BrokerConnections: AppleConnectionsProviding {
 }
 
 /// U4's connections behind the settings adapter. An unsupported Mail store
-/// shows as not connected: System Settings cannot fix it, so sending the
-/// person there would mislead.
+/// shows as Not supported with U4's reason and no button: no setting fixes it.
 extension AppleConnections: AppleConnectionsProviding {
     public func connectionState(_ kind: ConnectionKind) -> ConnectionState {
         switch kind {
@@ -113,7 +112,7 @@ extension AppleConnections: AppleConnectionsProviding {
         case .notConnected: .notConnected
         case .connected: .connected
         case .needsSystemSettings: .needsSystemSettings
-        case .unsupported: .notConnected
+        case .unsupported(let detail): .unsupported(detail: detail)
         }
     }
 }
