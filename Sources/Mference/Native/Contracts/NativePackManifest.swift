@@ -28,6 +28,8 @@ extension Native {
         public var source: Source
         /// Architecture hyperparameters, decoded from GGUF metadata.
         public var config: Qwen35Config
+        /// `PackLayoutTable.version` the writer used.
+        public var layoutTableVersion: Int
         /// Every GGUF tensor, in GGUF tensor-info order.
         public var tensors: [Tensor]
         /// GGUF metadata needed at runtime that is not in `config`, as strings
@@ -36,13 +38,14 @@ extension Native {
 
         public init(format: String = "mfpack", formatVersion: Int = 1, architecture: String,
                     label: String, source: Source, config: Qwen35Config,
-                    tensors: [Tensor], metadata: [String: String]) {
+                    layoutTableVersion: Int, tensors: [Tensor], metadata: [String: String]) {
             self.format = format
             self.formatVersion = formatVersion
             self.architecture = architecture
             self.label = label
             self.source = source
             self.config = config
+            self.layoutTableVersion = layoutTableVersion
             self.tensors = tensors
             self.metadata = metadata
         }

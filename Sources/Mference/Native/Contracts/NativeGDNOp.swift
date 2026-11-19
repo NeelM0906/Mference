@@ -48,8 +48,8 @@ extension Native {
     ///
     /// Output: F32 [rows x ssmInnerSize], the input of `ssm_out`. The op reads
     /// state bank `stateIn` and writes the state after all rows to `stateOut`
-    /// (the two may alias; the `KVStore` passes distinct banks so the step
-    /// can be undone without a copy). `encodeVerify` also writes the state
+    /// (always distinct banks, never aliased, so the step can be undone
+    /// without a copy). `encodeVerify` also writes the state
     /// after each row `r` into `arena` slot `r`.
     public protocol GDNOp: AnyObject {
         func prepare(config: Qwen35Config, layout: RecurrentLayout) throws

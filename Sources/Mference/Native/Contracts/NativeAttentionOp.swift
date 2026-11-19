@@ -33,8 +33,10 @@ extension Native {
     ///    row's position p. llama.cpp uses IMROPE with `ropeSections`; for text
     ///    the t/h/w positions are all p, which reduces to NEOX pairing: rotate
     ///    pairs `(i, i + n/2)` for `i < n/2` by `p * ropeFreqBase^(-2i/n)`.
-    ///    `prepare` throws `unsupported` if `ropeSections[3] != 0` (a fourth
-    ///    section would not reduce this way)
+    ///    `prepare` throws `unsupported` unless every one of the n/2 pairs maps
+    ///    to the t, h or w section under llama.cpp's IMROPE rule (true for
+    ///    [11, 11, 10, 0]); a pair falling to the fourth section would see
+    ///    position 0 and not reduce this way
     /// 3. append k (after 1-2) and v to the KV pages at the rows' positions
     ///    (F16, or INT8 + scale when the geometry says so)
     /// 4. causal GQA attention of each row over positions `0...its own`,

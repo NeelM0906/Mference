@@ -78,7 +78,7 @@ tokens. The LM head is tied to `token_embd.weight` (Q6_K), and Quick has no
 |---|---|---|---|
 | `attn_norm`, `post_attention_norm` | F32 | 2560 | `GlueOps.encodeRMSNorm` |
 | `attn_q` (full) | Q4_K, Q5_K | 2560 → 8192 (q and gate) | `QuantGEMM` |
-| `attn_k`, `attn_v` (full) | Q5_K, Q6_K | 2560 → 1024 | `QuantGEMM` |
+| `attn_k`, `attn_v` (full) | Q4_K or Q5_K; Q6_K | 2560 → 1024 | `QuantGEMM` |
 | `attn_q_norm`, `attn_k_norm` (full) | F32 | 256 | `AttentionOp` |
 | `attn_output` (full) | Q4_K | 4096 → 2560 | `QuantGEMM` (accumulate into the residual) |
 | `attn_qkv` (GDN) | Q5_K | 2560 → 8192 | `QuantGEMM` |
@@ -152,8 +152,8 @@ has `rows == 1`, a verify step has 2 to 16 rows, and a prefill chunk has up to
 
 A **prefill chunk** is one step with `rows = chunk` and `LogitRows.none`. The
 prompt's last chunk uses `.last`. Long prompts are processed as several
-chunks in sequence. GDN prefill is a chunked scan that ends with the live
-state advanced past the chunk. Attention prefill reads the pages that
+chunks in sequence. GDN prefill is a chunked scan that reads the step's input
+bank and leaves the state after the chunk in its output bank. Attention prefill reads the pages that
 earlier chunks and this chunk wrote.
 
 **Taps.** When `ForwardModel.tap` is set, the model copies each `TapPoint`
@@ -175,7 +175,7 @@ This is how per-op parity against the llama.cpp tensor dumps runs.
 | Recurrent state | `KVStore` | Same | Two banks per GDN layer, each laid out per `RecurrentLayout`: F32 conv tail `[3][8192]`, then F32 S `[32][128][128]`. Quick uses 2 x 24 x ~2.1 MiB. A step reads one bank and writes the other (`GDNOp` `stateIn` / `stateOut`), so undoing the most recent step needs no copy. |
 | Verify arena | `KVStore` | Same | `maxVerifyRows` slots per GDN layer. In this program `maxVerifyRows` is 1 (plain decoding), so the arena exists but is unused. |
 | Prefix cache | `KVStore` | Across requests, bounded by the plan | A radix tree over token ids. Each node holds shared, ref-counted KV pages and a recurrent snapshot, in RAM or on the SSD tier. |
-| Activations and scratch | `ForwardModel` | Model lifetime, reused every step | Sized for `maxPrefillChunk` rows and ring-buffered (depth >= 2) so two steps can be in flight. Logits returned by `encodeStep` stay valid until the second `encodeStep` after it. |
+| Activations and scratch | `ForwardModel` | Model lifetime, reused every step | Sized for `maxPrefillChunk` rows. Host-token staging and returned logits are ring-buffered (depth >= 2) so two steps can be in flight; logits stay valid until the second `encodeStep` after the one that returned them. |
 | Token slots | Scheduler | Model lifetime | Shared-storage `u32` ring used by pipelined decode. |
 | Pipelines | Each op | Built in `prepare`, never while encoding | |
 
@@ -183,8 +183,8 @@ A queued command buffer owns every buffer region it touches until it
 completes. The CPU must not rewrite a staging buffer, a token slot, a page table or a
 page a pending command buffer reads. This is the same slot-ownership
 invariant as the rest of Mference. Up to two steps may be in flight, so each
-owner ring-buffers the CPU-written regions it owns: the model its staging,
-activations and logits, the store its page table and step parameters, the
+owner ring-buffers the CPU-written regions it owns: the model its token
+staging and logits, the store its page table and step parameters, the
 scheduler its token slots.
 
 `MemoryPlanner.resolve` runs before any allocation. It accounts for the
@@ -314,9 +314,10 @@ coordinator assigns it to a Phase 1 worker thread.
 
 ## Contract change rule
 
-The contracts were frozen by the commit
+The contracts are frozen at the Phase 0 exit by the commit
 `contracts: freeze native engine interfaces v1` (tag
-`native-contracts-v1`). After the freeze, a contract changes only through a
+`native-contracts-v1`). Until then they change only through the
+coordinator, as the reference implementation proves them. After the freeze, a contract changes only through a
 coordinator PR that names every affected worker. Workers that need a change
 send the exact request to the coordinator and keep working against the frozen
 contract in the meantime.

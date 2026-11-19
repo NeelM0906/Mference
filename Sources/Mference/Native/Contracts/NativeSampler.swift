@@ -42,21 +42,19 @@ extension Native {
                       repeatLastN: config.repeatLastN, seed: config.seed)
         }
 
-        /// llama.cpp ends the chain with greedy instead of a seeded draw only
-        /// when temperature is exactly 0 (see `docs/LLAMA_SAMPLING.md`).
-        public var isGreedy: Bool { temperature == 0 }
+        /// Greedy at temperature <= 0, as the engine's llama.cpp sampler.
+        public var isGreedy: Bool { temperature <= 0 }
     }
 
-    /// The sampler chain exactly as llama.cpp `common_sampler` builds it at
-    /// the pin (`common/sampling.cpp`): logit bias, penalties, then the
-    /// truncation samplers in its order (top-k, top-p, min-p for the settings
-    /// `SamplingParams` carries; the others at their neutral defaults),
-    /// temperature, and finally greedy (temperature 0: the first maximum in
-    /// the chain's candidate order) or the seeded draw.
+    /// The D1 sampler reference is the chain the engine's llama.cpp backend
+    /// builds on the pinned llama.cpp (`MferenceEngine/LlamaSampler.swift`,
+    /// in `common_sampler` order, `common/sampling.cpp`): logit bias,
+    /// penalties, top-k, top-p, min-p, temperature, seeded draw. At
+    /// temperature <= 0 it skips truncation and takes the greedy argmax of the
+    /// biased, penalized logits, ties to the lowest token id.
     ///
-    /// Token choices must equal llama.cpp's on the same logits, history and
-    /// seed for every setting. The existing `MferenceEngine/LlamaSampler.swift`
-    /// shows the chain llama.cpp builds.
+    /// Token choices must equal that chain's on the same logits, history and
+    /// seed for every setting.
     public protocol Sampler: AnyObject {
         /// Start a generation: set params, clear history, seed the RNG.
         func reset(params: SamplingParams)

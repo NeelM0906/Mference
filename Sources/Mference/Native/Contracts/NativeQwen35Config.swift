@@ -25,8 +25,8 @@ extension Native {
         public var ropeFreqBase: Float
         /// `rope.dimension_count`: rotated dims per head [64].
         public var ropeDimensionCount: Int
-        /// `rope.dimension_sections` (multi-section rope; text positions are
-        /// identical in every section) [11, 11, 10, 0].
+        /// `rope.dimension_sections` (IMROPE; llama.cpp gives a text token at
+        /// position p the section positions [p, p, p, 0]) [11, 11, 10, 0].
         public var ropeSections: [Int]
         /// `full_attention_interval`: layer `i` is full attention iff
         /// `(i + 1) % interval == 0`, otherwise Gated DeltaNet [4].

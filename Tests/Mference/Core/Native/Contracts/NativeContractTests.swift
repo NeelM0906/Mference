@@ -87,12 +87,15 @@ struct NativeContractTests {
         #expect(deep.fullAttentionLayers.last == 63)
     }
 
-    @Test func packLayoutTableV1IsIdentityAndFallsBack() {
+    @Test func packLayoutTableV1IsIdentity() {
         for type in Native.GGMLType.allCases {
             #expect(Native.PackLayoutTable.layout(for: type) == .gguf)
             #expect(Native.PackLayoutTable.layout(for: type, rows: 32, blocksPerRow: 10) == .gguf)
         }
         #expect(Native.PackLayoutTable.version == 1)
+        // The fallback rule rests on `fits`: a tile that does not divide falls back.
+        #expect(!Native.TileLayout(rowsPerTile: 4, blocksPerTile: 4, planes: false)
+            .fits(rows: 32, blocksPerRow: 10))
     }
 
     @Test func quickKVPageGeometry() {
@@ -118,7 +121,7 @@ struct NativeContractTests {
         let manifest = Native.PackManifest(
             architecture: "qwen35", label: "quick",
             source: .init(fileName: "x.gguf", byteCount: 1, sha256: "00", ggufVersion: 3),
-            config: Self.quick,
+            config: Self.quick, layoutTableVersion: Native.PackLayoutTable.version,
             tensors: [.init(name: "blk.0.attn_qkv.weight", type: .q5_K, shape: [2560, 8192],
                             layout: .init(rowsPerTile: 8, blocksPerTile: 2, planes: true),
                             offset: 4096, byteCount: 8192 * 10 * 176,

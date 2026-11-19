@@ -22,8 +22,9 @@ extension Native {
     ///   `[attnLayer][kv][kvHead][token]` F16, symmetric per (token, head):
     ///   `s = Float16(max|x| / 127)` (computed in F32, then rounded to F16),
     ///   `q = clamp(rint(x / Float(s)), -127, 127)` with `rint` rounding half
-    ///   to even, dequantized as `Float(s) * q`; `s = 0` and `q = 0` for an
-    ///   all-zero row
+    ///   to even, dequantized as `Float(s) * q`; whenever `s == 0` (an
+    ///   all-zero row, or one so small that the scale underflows F16) every
+    ///   `q` is 0
     ///
     /// `attnLayer` is the index among full-attention layers (0..<8 for Quick),
     /// not the block index. K is stored after q/k norm and RoPE; V as projected.
@@ -181,18 +182,26 @@ extension Native {
     /// views current (`pageTable()`, `recurrentState(gdnLayer:)`); then the
     /// step is encoded and committed.
     ///
-    /// Recurrent state is double-banked so no step copies it: a step reads
-    /// bank `input` and writes bank `output`, and `beginStep` makes the
-    /// previous step's `output` the next step's `input` (optimistic: the step
-    /// is assumed kept). Only the most recent step can be undone:
-    /// `rollback(to:)` with the last step's start restores its `input` bank
-    /// as live; with `start + r + 1` after a verify step it copies verify-arena
-    /// slot `r` into the live bank. That covers verify rejection and the one
-    /// pipelined step that runs past a stop.
+    /// Recurrent state is double-banked so no step copies it. The store keeps
+    /// a live bank index L. `beginStep` sets the step's `input = L` and
+    /// `output = 1 - L`, then `L = output` (optimistic: the step is assumed
+    /// kept). Only the most recent step can be undone: `rollback(to:)` with
+    /// that step's start sets `L` back to its `input`; with `start + r + 1`
+    /// after a verify step it copies verify-arena slot `r` into the step's
+    /// `output` bank, which stays live. That covers verify rejection and the
+    /// one pipelined step that runs past a stop. `insertPrefix` snapshots bank
+    /// L, `attachPrefix` restores into bank L and `reset` zeroes bank L; all
+    /// three require no step in flight, and after any of them `rollback`
+    /// throws `stateOutOfRange` until the next `beginStep`.
     ///
     /// Pipelining: up to two steps may be in flight. Every CPU-written region a
     /// step reads (page table, step parameters) is ring-buffered, so
     /// `beginStep` for step t+1 never rewrites what step t reads.
+    ///
+    /// Prefix cache memory: cached pages live in the same arena. `kvArena` in
+    /// the plan covers `contextLength` tokens; pages and recurrent snapshots
+    /// held only by the cache are `prefixCacheRAM`, capped by the planner's
+    /// `prefixCacheRAMBudget`.
     ///
     /// Methods that take a command buffer encode their own blit/compute work
     /// (no compute encoder may be open on it); the scheduler orders them with
