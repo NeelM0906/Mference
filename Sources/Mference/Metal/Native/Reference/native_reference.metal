@@ -20,8 +20,9 @@ using namespace metal;
 #pragma METAL fp contract(off)
 
 // ---------------------------------------------------------------------------
-// ggml lookup tables, generated from the vendored ggml-common.h
-// (`ReferenceQuantTablesTests` pins the Swift copies to the header).
+// ggml lookup tables, copied from the vendored ggml-common.h
+// (`ReferenceFormatPinTests` pins the Swift copies to the header and
+// `ReferenceKernelPinTests` pins these to the Swift copies).
 // ---------------------------------------------------------------------------
 
 constant uchar ref_kmask_iq2xs[8] = {
@@ -389,6 +390,8 @@ static ulong ref_packed_offset(constant RefLayout & L, uint row, uint block, uin
     return 0;
 }
 
+// The GGUF-order bytes of one block, byte by byte through ref_packed_offset
+// (the Metal twin of ReferenceDequant.gatherBlock).
 static void ref_gather_block(device const uchar * W, constant RefLayout & L, uint row, uint block,
                              thread uchar * out) {
     for (uint i = 0; i < L.blockBytes; ++i) {

@@ -100,6 +100,10 @@ struct ReferenceTokenizerTests {
         let t = try Native.ReferenceTokenizer(data: data)
         #expect(t.piece(12, special: false) == [0x41])
         #expect(t.piece(13, special: false) == [0])
+        // strtol(_, 16) on text[3..<5]: whitespace, sign and a bare 0x as C does.
+        for (text, byte) in [("ab<0", 0), ("<0x 7", 7), ("<0x-1", 0xFF), ("<0x+f", 0x0F), ("<0x0x", 0), ("<0xzz", 0)] {
+            #expect(Native.ReferenceTokenizer.strtol16(Array(Array(text.utf8)[3...])) & 0xFF == byte, "\(text)")
+        }
         #expect(t.ranks[.init(left: Array("t".utf8), right: Array("1".utf8))] == 0)
         #expect(t.bosTokenID == 11 && t.eosTokenID == 11)
         #expect(t.endOfGenerationTokenIDs.contains(11))
