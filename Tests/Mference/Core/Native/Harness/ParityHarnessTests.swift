@@ -64,12 +64,13 @@ struct ParityHarnessTests {
         #expect(OpToleranceClass.of(base: "Qcur_reshaped") == nil)
         #expect(OpToleranceClass.of(Native.TapPoint.mixerOutput(layer: 2)) == .gemm)
         #expect(OpToleranceClass.of(Native.TapPoint.layerOutput(layer: 2)) == .glue)
+        #expect(OpToleranceClass.of(Native.TapPoint.layerOutput(layer: 2), fusedGEMM: true) == .gemm)
         #expect(OpToleranceClass.of(GoldenTapMap.Boundary.gdnOutput) == .mixer)
         // every boundary and tap point has a class
         for b in GoldenTapMap.Boundary.allCases { _ = OpToleranceClass.of(b) }
         #expect(ParityTolerances.d1 == ParityTolerances(minimumAgreement: 0.99, maxTokenKLD: 0.01, meanKLD: 0.001))
         var s = ParityMetrics.ErrorStats()
-        s.add(golden: [1, 0], candidate: [1.0005, 0])  // rel L2 5e-4: within gemm, not norm
+        s.add(golden: [1, 0], candidate: [1.01, 0])  // rel L2 1e-2: within gemm (2e-2), not norm
         #expect(ParityHarness.localVerdict(s, class: .gemm, name: "x") == nil)
         #expect(ParityHarness.localVerdict(s, class: .norm, name: "x") != nil)
         #expect(ParityHarness.localVerdict(ParityMetrics.ErrorStats(), class: .gemm, name: "x") != nil)

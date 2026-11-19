@@ -53,28 +53,30 @@ enum OpToleranceClass: String, CaseIterable {
     case state
 
     /// Largest allowed `||c - g|| / ||g||` for a component fed golden inputs.
-    /// PROVISIONAL until the perturbation runs confirm them
-    /// (`mfe-golden --perturb`); the derivation is in `docs/NATIVE_PARITY.md`.
+    /// PROVISIONAL: set from measured data, and confirmed by the perturbation
+    /// runs (`mfe-golden --perturb`) and by R's exact relative-L2 component
+    /// run (`docs/NATIVE_PARITY.md`, "Per-op bounds").
     ///
-    /// The bounds are chosen so that meeting them makes D1 likely, not from a
-    /// backend that fails it. llama.cpp's CPU backend has a local GEMM error
-    /// of about 4.5e-3 (block 0, input bit-exact) and misses D1 (98.17%
-    /// agreement, max per-token KL 0.29, mean 2.4e-3). With KL scaling as the
-    /// square of the per-op error and flips linearly, every one of its
-    /// differences attributed to the GEMMs (conservative), a GEMM error of
-    /// 1e-3 predicts:
-    /// - flips 0.41% (agreement 99.6%)
-    /// - mean KL 1.2e-4
-    /// - max KL 0.014, borderline, which the perturbation runs must settle
-    /// The golden's own half-precision staging in ggml-metal's prefill GEMM
-    /// is about 3e-4, so a bound much below 1e-3 would fail correct F32
-    /// kernels. The mixer and state bounds are 2e-3 (fewer, larger ops); the
-    /// lossless ops keep float rounding.
+    /// The bounds come from an implementation that passes D1. R's naive
+    /// reference passes it: 10 prompts, 99.69% agreement, max KL 1.7e-3, mean
+    /// 5.3e-5. Its local GEMM error against the golden is largest on
+    /// `attn_output` and the FFN GEMMs: worst estimate 1.03e-2, hard lower
+    /// bound 8.2e-3, loose upper bound 3.2e-2. gemm 2e-2 is about two times
+    /// that estimate, so the D1-passing reference passes.
+    ///
+    /// Local error size alone does not predict D1. llama.cpp's CPU backend
+    /// has a smaller GEMM error on `attn_qkv` and `attn_gate` (about 4.5e-3)
+    /// yet fails D1, because its error is systematic (Q8_K-quantized
+    /// activations, correlated across every GEMM), not rounding noise.
+    ///
+    /// mixer and state (2e-3) are not derived. R's attention core is about
+    /// 1e-4 and its GDN core about 2e-7, far inside them, so they stay as
+    /// provisional bounds. The lossless ops keep float rounding.
     var maxLocalRelativeL2: Double {
         switch self {
         case .exact: return 1e-6
         case .norm: return 1e-5
-        case .gemm: return 1e-3
+        case .gemm: return 2e-2
         case .mixer: return 2e-3
         case .glue: return 1e-5
         case .state: return 2e-3
@@ -111,15 +113,18 @@ enum OpToleranceClass: String, CaseIterable {
         of(base: tensor.base, op: tensor.op)
     }
 
-    /// The class a component's output at a `Native.TapPoint` is held to. A
-    /// fused kernel is held to the class of its last contracted op: a GEMM
-    /// fused with the residual add is `gemm`; a fused RMSNorm+GEMM is `gemm`.
-    static func of(_ point: Native.TapPoint) -> OpToleranceClass {
+    /// The class a component's output at a `Native.TapPoint` is held to.
+    /// A fused kernel is held to the loosest contracted op it contains. A
+    /// caller whose kernel writes `layerOutput` with the residual add fused
+    /// into the `attn_output`/`ssm_out` or `ffn_down` GEMM passes
+    /// `fusedGEMM: true`, which gives `gemm`; the unfused residual add is
+    /// `glue`. A fused RMSNorm+GEMM is checked at the GEMM's output: `gemm`.
+    static func of(_ point: Native.TapPoint, fusedGEMM: Bool = false) -> OpToleranceClass {
         switch point {
         case .embedding: return .exact
         case .mixerInput, .finalNorm: return .norm
         case .mixerOutput, .ffnOutput, .logits: return .gemm
-        case .layerOutput: return .glue
+        case .layerOutput: return fusedGEMM ? .gemm : .glue
         }
     }
 

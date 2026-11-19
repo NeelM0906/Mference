@@ -338,7 +338,8 @@ def compare(golden, candidate, slack=PARITY_SLACK):
     both = [i for i in ids if i in golden and i in candidate]
     # a request, HTTP or server error measured nothing: on either side it is a
     # setup error that blocks the verdict, never a scored failure
-    errored = lambda run: [i for i in both if ((run[i].get("result") or {}).get("error"))]
+    # any "error" key counts, even a null one: the result is not a model answer
+    errored = lambda run: [i for i in both if "error" in (run[i].get("result") or {})]
     setup_errors = {"golden": errored(golden), "candidate": errored(candidate)}
     render_mismatch = [i for i in both
                        if _prompt_tokens(golden[i]) is not None and _prompt_tokens(candidate[i]) is not None

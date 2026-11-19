@@ -66,5 +66,33 @@ class GuardedRunTests(unittest.TestCase):
         self.assertIn("SWAP_GUARD_MB must be 0", proc.stderr)
 
 
+class XCTestPatternTests(unittest.TestCase):
+    """The command-line pattern guarded-run.sh passes to pgrep -f for a bare
+    xctest run of the test bundle (pgrep uses extended regular expressions;
+    this pattern means the same in Python's re)."""
+
+    def pattern(self):
+        import re
+        text = SCRIPT.read_text(encoding="utf-8")
+        m = re.search(r"pgrep -lf '([^']+)'", text)
+        self.assertIsNotNone(m)
+        return re.compile(m.group(1).replace("\\\\", "\\"))
+
+    def test_matches_a_bare_xctest_run(self):
+        p = self.pattern()
+        for cmd in ["/Applications/Xcode.app/Contents/Developer/usr/bin/xctest "
+                    "/x/.build/debug/MferencePackageTests.xctest",
+                    "xctest -XCTest Suite/test /x/MferencePackageTests.xctest"]:
+            self.assertTrue(p.search(cmd), cmd)
+
+    def test_ignores_shells_and_other_bundles(self):
+        p = self.pattern()
+        for cmd in ["/bin/zsh -c xctest /x/MferencePackageTests.xctest",
+                    "bash run.sh xctest /x/MferencePackageTests.xctest",
+                    "/usr/bin/xctest /x/OtherTests.xctest",
+                    "swift-build --build-tests MferencePackageTests.xctest"]:
+            self.assertFalse(p.search(cmd), cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

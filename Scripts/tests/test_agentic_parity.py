@@ -183,6 +183,9 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(v["setup_errors"], {"golden": [], "candidate": ["exact-math"]})
         self.assertEqual(v["regressions"], [])
         self.assertFalse(v["parity"])
+        # an "error" key, even null, is not a model answer
+        c["exact-math"] = {"passed": False, "result": {"error": None}}
+        self.assertEqual(ap.compare(self.report(), c)["setup_errors"]["candidate"], ["exact-math"])
 
     def test_render_mismatch_is_a_setup_error_not_a_flip(self):
         v = ap.compare(self.report(), self.report(["json-bool"], tokens={"json-bool": 101}))
