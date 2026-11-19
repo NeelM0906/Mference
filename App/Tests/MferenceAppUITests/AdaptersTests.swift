@@ -1,11 +1,13 @@
 import Foundation
 import MferenceAppCore
 @testable import MferenceAppUI
+import SwiftUI
 import Testing
 
-/// Polls `condition` for up to five seconds.
+/// Polls `condition` for up to twenty seconds: the UI suite shares the main
+/// actor with snapshot renders that can hold it for seconds at a time.
 func eventually(_ condition: () -> Bool) async -> Bool {
-    let deadline = ContinuousClock.now + .seconds(5)
+    let deadline = ContinuousClock.now + .seconds(20)
     while !condition(), ContinuousClock.now < deadline {
         try? await Task.sleep(for: .milliseconds(5))
     }
@@ -153,12 +155,47 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         #expect(await eventually { broker.calls.contains(.request(.reminders)) })
     }
 
+    @Test func connectionsAreReReadWhenTheAppBecomesActive() async {
+        let broker = FakePermissionBroker()
+        let services = AppServices.preview(permissions: broker)
+        let connections = BrokerConnections(broker: broker)
+        let activation = Notification.Name("test-activation-\(UUID().uuidString)")
+        let settings = LiveAppSettingsModel(settings: services.settings, connections: connections,
+                                            refreshOn: activation)
+        #expect(await eventually { settings.connectionState(.appleMail) == .notConnected })
+        // Full Disk Access granted in System Settings while the app was away.
+        broker.setState(.granted, for: .fullDiskAccess)
+        NotificationCenter.default.post(name: activation, object: nil)
+        #expect(await eventually { settings.connectionState(.appleMail) == .connected })
+        #expect(!broker.calls.contains { if case .request = $0 { true } else { false } })
+    }
+
     @Test func nothingIsRequestedUntilAsked() async {
         let broker = FakePermissionBroker()
         let connections = BrokerConnections(broker: broker)
         await connections.refresh()
         #expect(!broker.calls.contains { if case .request = $0 { true } else { false } })
         #expect(connections.connectionState(.appleCalendar) == .notConnected)
+    }
+
+    @Test func appleConnectionStatesMapForSettings() async {
+        #expect(AppleConnections.connectionState(.connected) == .connected)
+        #expect(AppleConnections.connectionState(.notConnected) == .notConnected)
+        #expect(AppleConnections.connectionState(.needsSystemSettings) == .needsSystemSettings)
+        #expect(AppleConnections.connectionState(.unsupported(detail: "new Mail format")) == .notConnected)
+        // The preview's Apple services read nothing and ask nothing.
+        let services = AppServices.preview()
+        let connections = try? #require(services.apple?.connections)
+        await connections?.refresh()
+        #expect(connections?.connectionState(.appleCalendar) == .notConnected)
+    }
+
+    @Test func environmentHelperInjectsEverything() {
+        let services = AppServices.preview()
+        let screens = ScreenModels.live(services: services)
+        // Builds the modifier chain; the screens read these from the environment.
+        _ = Text("root").mferenceEnvironment(services: services, screens: screens)
+        #expect(services.apple != nil)
     }
 
     @Test func liveScreenModelsFillEverySlot() {
