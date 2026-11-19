@@ -390,8 +390,8 @@ enum CalendarFixtures {
         #expect(EventKitService.hex(orange) == 0xFF8000)
         let grey = CGColor(srgbRed: 0.2, green: 0.2, blue: 0.2, alpha: 0.5)
         #expect(EventKitService.hex(grey) == 0x333333)
-        let wide = try #require(CGColor(colorSpace: #require(CGColorSpace(name: CGColorSpace.extendedSRGB)),
-                                        components: [1.4, -0.2, 0.5, 1]))
+        let extended = try #require(CGColorSpace(name: CGColorSpace.extendedSRGB))
+        let wide = try #require(CGColor(colorSpace: extended, components: [1.4, -0.2, 0.5, 1]))
         #expect(EventKitService.hex(wide) == 0xFF0080)
     }
 
