@@ -46,6 +46,9 @@ class ScoreTests(unittest.TestCase):
         self.assertFalse(ap.score(t, say("about 3700 yen"))[0])
         bad = {"content": "", "tool_calls": [{"name": "convert_currency", "arguments": "{oops"}]}
         self.assertEqual(ap.score(t, bad), (False, "arguments are not JSON"))
+        for not_object in ['["GBP"]', "null", "3"]:
+            r = {"content": "", "tool_calls": [{"name": "convert_currency", "arguments": not_object}]}
+            self.assertEqual(ap.score(t, r), (False, "arguments are not a JSON object"))
 
     def test_optional_arguments_and_contains(self):
         self.assertTrue(ap.score(TASK["weather-plain"], call("get_weather", city="Oslo"))[0])
@@ -90,6 +93,39 @@ class ScoreTests(unittest.TestCase):
 
     def test_error(self):
         self.assertEqual(ap.score(TASK["exact-math"], {"error": "boom"}), (False, "error: boom"))
+
+
+class RunTests(unittest.TestCase):
+    """run_tasks against a fake post_chat with engine_validate's real shape."""
+
+    def test_unpacks_post_chat_and_scores_every_task(self):
+        ev_spec = importlib.util.spec_from_file_location("engine_validate", SCRIPTS / "engine_validate.py")
+        ev = importlib.util.module_from_spec(ev_spec)
+        ev_spec.loader.exec_module(ev)
+        body = {"choices": [{"message": {"content": "12", "tool_calls": []}, "finish_reason": "stop"}]}
+
+        def post(_body):
+            return 200, body, json.dumps(body), 0.01  # (status, parsed, raw, elapsed)
+
+        report = ap.run_tasks(post, ev.canonical_from_message, "quick")
+        self.assertEqual(len(report), 32)
+        self.assertTrue(report["exact-math"]["passed"])
+        self.assertFalse(report["weather-plain"]["passed"])
+
+    def test_http_error_and_bad_arguments_fail_their_task_only(self):
+        def post(b):
+            if b["messages"][0]["content"].startswith("What's the weather in Oslo"):
+                return 500, None, "", 0.0
+            return 200, {"choices": [{"message": {"content": "", "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": '["Oslo"]'}}]}}]}, "", 0.0
+
+        canonical = lambda parsed: {"content": "", "tool_calls": [
+            {"name": c["function"]["name"], "arguments": c["function"]["arguments"]}
+            for c in parsed["choices"][0]["message"]["tool_calls"]]}
+        report = ap.run_tasks(post, canonical, "quick")
+        self.assertEqual(report["weather-plain"]["reason"], "error: HTTP 500")
+        self.assertEqual(report["weather-unit"]["reason"], "arguments are not a JSON object")
+        self.assertEqual(len(report), 32)
 
 
 class CompareTests(unittest.TestCase):

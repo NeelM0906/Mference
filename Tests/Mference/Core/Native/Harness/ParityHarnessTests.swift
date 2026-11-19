@@ -93,6 +93,37 @@ struct ParityHarnessTests {
         #expect(throws: GoldenError.self) { try ParityHarness.compareLogits(golden: g) { _ in [1, 2] } }
     }
 
+    /// A candidate that skips rows, or is shorter than the golden, fails:
+    /// missing positions never count as agreement.
+    @Test func incompleteCoverageFails() throws {
+        let root = try GoldenStoreTests.syntheticRun()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let g = try GoldenStore.open("p", root: root)
+        let none = try ParityHarness.compareLogits(golden: g) { _ in nil }
+        #expect(none.positions == 0 && none.missing == [0, 1] && none.expectedPositions == 2)
+        let v = ParityHarness.LogitReport(results: [none]).verdict()
+        #expect(!v.passed && v.failures.contains { $0.hasPrefix("incomplete coverage") })
+
+        let prefix = try ParityHarness.compareLogits(golden: g, rows: 1) { try g.logits().row($0) }
+        #expect(prefix.missing == [1])
+        #expect(!ParityHarness.LogitReport(results: [prefix]).verdict().passed)
+        #expect(!ParityHarness.LogitReport(results: []).verdict().passed)
+    }
+
+    /// A NaN or infinite candidate logit is never a perfect score, even when
+    /// the argmax still agrees.
+    @Test func nonFiniteLogitsFail() throws {
+        #expect(ParityMetrics.klDivergence(golden: [0, 1, 2, 3], candidate: [0, .nan, 2, 3]) == .infinity)
+        #expect(ParityMetrics.klDivergence(golden: [0, 1, 2, 3], candidate: [0, 1, .infinity, 3]) == .infinity)
+        let root = try GoldenStoreTests.syntheticRun()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let g = try GoldenStore.open("p", root: root)
+        let r = try ParityHarness.compareLogits(golden: g) { row in row == 0 ? [0, .nan, 2, 3] : [3, 2, 1, 0] }
+        #expect(r.agreements == 2)
+        let v = ParityHarness.LogitReport(results: [r]).verdict()
+        #expect(!v.passed && v.failures.contains { $0.hasPrefix("non-finite KL") })
+    }
+
     @Test func comparesTensors() throws {
         let root = try GoldenStoreTests.syntheticRun()
         defer { try? FileManager.default.removeItem(at: root) }

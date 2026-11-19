@@ -278,6 +278,8 @@ def score(task, result):
             args = json.loads(call.get("arguments") or "{}") if isinstance(call.get("arguments"), str) else call.get("arguments") or {}
         except ValueError:
             return False, "arguments are not JSON"
+        if not isinstance(args, dict):
+            return False, "arguments are not a JSON object"
         args = _norm(args)
         for k, v in (check.get("arguments") or {}).items():
             if args.get(k.lower()) != _norm(v):
@@ -336,17 +338,30 @@ def body_for(task, model):
     return body
 
 
+def run_tasks(post, canonical, model):
+    """Score every task. `post(body)` returns engine_validate.post_chat's
+    `(status, parsed, raw, elapsed)`; `canonical(parsed)` its canonical
+    result. A task whose scoring raises is recorded as failed, never aborts
+    the suite."""
+    report = {}
+    for task in TASKS:
+        status, parsed, *_ = post(body_for(task, model))
+        result = canonical(parsed) if status == 200 else {"error": f"HTTP {status}"}
+        try:
+            passed, reason = score(task, result)
+        except Exception as error:  # a malformed response fails its task only
+            passed, reason = False, f"scoring error: {error!r}"
+        report[task["id"]] = {"passed": passed, "reason": reason, "result": result}
+        print(f"{task['id']}: {'PASS' if passed else 'FAIL'} {reason}", file=sys.stderr)
+    return report
+
+
 def cmd_run(args):
     ev = _ev()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    report = {}
-    for task in TASKS:
-        status, body = ev.post_chat(args.host, args.port, body_for(task, args.model), args.timeout)
-        result = ev.canonical_from_message(body) if status == 200 else {"error": f"HTTP {status}"}
-        passed, reason = score(task, result)
-        report[task["id"]] = {"passed": passed, "reason": reason, "result": result}
-        print(f"{task['id']}: {'PASS' if passed else 'FAIL'} {reason}", file=sys.stderr)
+    report = run_tasks(lambda body: ev.post_chat(args.host, args.port, body, args.timeout),
+                       ev.canonical_from_message, args.model)
     (out / "agentic.json").write_text(json.dumps({"suite": SUITE, "model": args.model, "tasks": report},
                                                  indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"{sum(r['passed'] for r in report.values())}/{len(report)} passed")

@@ -29,10 +29,13 @@ enum ParityMetrics {
     static func logSoftmax(_ x: [Float]) -> [Double] { x.withUnsafeBufferPointer { logSoftmax($0) } }
 
     /// `KL(P || Q) = sum p (log p - log q)` with P the golden (reference)
-    /// distribution and Q the candidate, both given as logits. Never negative
-    /// (clamped at 0 against rounding).
+    /// distribution and Q the candidate, both given as logits. A small
+    /// negative value from rounding is clamped to 0. A NaN or infinite logit
+    /// on either side gives `.infinity`, never a score, so it always fails the
+    /// bar.
     static func klDivergence(golden: UnsafeBufferPointer<Float>, candidate: UnsafeBufferPointer<Float>) -> Double {
         precondition(golden.count == candidate.count, "vocabulary sizes differ")
+        if !allFinite(golden) || !allFinite(candidate) { return .infinity }
         let lp = logSoftmax(golden)
         let lq = logSoftmax(candidate)
         let n = lp.count
@@ -43,7 +46,16 @@ enum ParityMetrics {
         vDSP_vsubD(lq, 1, lp, 1, &diff, 1, vDSP_Length(n))  // lp - lq
         var kl = 0.0
         vDSP_dotprD(p, 1, diff, 1, &kl, vDSP_Length(n))
-        return max(0, kl)
+        return kl.isFinite ? max(0, kl) : .infinity
+    }
+
+    /// True when every element is finite (no NaN, no ±inf).
+    static func allFinite(_ x: UnsafeBufferPointer<Float>) -> Bool {
+        var sum: Float = 0
+        vDSP_sve(x.baseAddress!, 1, &sum, vDSP_Length(x.count))
+        if sum.isFinite { return true }
+        // a finite sum can overflow only from huge finite values: check each
+        return x.allSatisfy(\.isFinite)
     }
 
     static func klDivergence(golden: [Float], candidate: [Float]) -> Double {

@@ -15,7 +15,13 @@ enum ParityHarness {
     /// golden generated tokens.
     struct LogitResult {
         var promptID: String
-        /// Positions compared (one per golden generated token).
+        /// Positions the golden has (one per generated token). A candidate
+        /// must cover every one of them.
+        var expectedPositions: Int = 0
+        /// Rows (index into the generated tokens) the candidate did not
+        /// supply. Any missing row fails the bar.
+        var missing: [Int] = []
+        /// Positions compared.
         var positions: Int
         /// Positions where the candidate's argmax equals the golden token.
         var agreements: Int
@@ -39,8 +45,14 @@ enum ParityHarness {
         let n = min(rows ?? logits.rows, logits.rows)
         var result = LogitResult(promptID: golden.id, positions: 0, agreements: 0, kld: [],
                                  disagreements: [], disagreementMargins: [])
+        result.expectedPositions = logits.rows
+        // rows past `n` (a shorter candidate) are missing too
+        result.missing = Array(n..<logits.rows)
         for g in 0..<n {
-            guard let c = try candidate(g) else { continue }
+            guard let c = try candidate(g) else {
+                result.missing.append(g)
+                continue
+            }
             try logits.withRow(g) { gold in
                 guard c.count == gold.count else {
                     throw GoldenError.sizeMismatch("\(golden.id) row \(g): candidate \(c.count) vs golden \(gold.count)")
@@ -89,6 +101,8 @@ enum ParityHarness {
     struct LogitReport {
         var results: [LogitResult]
         var positions: Int { results.reduce(0) { $0 + $1.positions } }
+        var expectedPositions: Int { results.reduce(0) { $0 + $1.expectedPositions } }
+        var missing: Int { results.reduce(0) { $0 + $1.missing.count } }
         var agreements: Int { results.reduce(0) { $0 + $1.agreements } }
         var agreement: Double { positions == 0 ? 1 : Double(agreements) / Double(positions) }
         var kld: ParityMetrics.Distribution { ParityMetrics.Distribution(results.flatMap(\.kld)) }
@@ -96,11 +110,17 @@ enum ParityHarness {
         /// D1: agreement and per-token KL against `tolerances`.
         func verdict(_ tolerances: ParityTolerances = .d1) -> Verdict {
             var failures: [String] = []
+            if missing > 0 || positions < expectedPositions || results.isEmpty {
+                failures.append("incomplete coverage: \(positions) of \(expectedPositions) positions compared, \(missing) missing")
+            }
             if agreement < tolerances.minimumAgreement {
                 failures.append(String(format: "greedy agreement %.4f < %.4f (%ld of %ld)", agreement,
                                        tolerances.minimumAgreement, agreements, positions))
             }
             let d = kld
+            if results.contains(where: { $0.kld.contains { !$0.isFinite } }) {
+                failures.append("non-finite KL (NaN or infinite candidate logits)")
+            }
             if d.max > tolerances.maxTokenKLD {
                 failures.append(String(format: "max per-token KL %.3g > ε %.3g", d.max, tolerances.maxTokenKLD))
             }
