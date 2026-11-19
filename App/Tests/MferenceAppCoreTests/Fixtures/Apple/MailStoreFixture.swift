@@ -184,7 +184,7 @@ struct MailStoreFixture {
         var recipientRow = 0
         for (index, message) in all.enumerated() {
             let n = index + 1
-            let mailboxID = try mailboxID(message.mailbox)
+            let storedIn = try mailboxID(message.mailbox)
             for label in message.labels {
                 try exec("INSERT INTO labels VALUES (\(message.rowID), \(try mailboxID(label)))")
             }
@@ -202,7 +202,7 @@ struct MailStoreFixture {
             let flagged = schema == .missingDeleted ? "" : ", \(message.flagged ? 1 : 0)"
             try exec("""
                 INSERT INTO messages VALUES (\(message.rowID), \(n), \(n), '', \(n), \(Int(message.date.timeIntervalSince1970)), \
-                \(mailboxID), \(message.read ? 1 : 0)\(deleted), \(n)\(flagged))
+                \(storedIn), \(message.read ? 1 : 0)\(deleted), \(n)\(flagged))
                 """)
             let mailbox = MailboxRef(url: message.mailbox)
             var directory = root.appending(path: "\(version)/\(mailbox.accountID)")
