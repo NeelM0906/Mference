@@ -314,10 +314,10 @@ coordinator assigns it to a Phase 1 worker thread.
 
 ## Contract change rule
 
-The contracts are frozen at the Phase 0 exit by the commit
+The contracts were frozen at the Phase 0 exit by the commit
 `contracts: freeze native engine interfaces v1` (tag
-`native-contracts-v1`). Until then they change only through the
-coordinator, as the reference implementation proves them. After the freeze, a contract changes only through a
+`native-contracts-v1`), after the all-reference Quick path passed D1 and
+every reference passed its per-component golden tests. After the freeze, a contract changes only through a
 coordinator PR that names every affected worker. Workers that need a change
 send the exact request to the coordinator and keep working against the frozen
 contract in the meantime.
