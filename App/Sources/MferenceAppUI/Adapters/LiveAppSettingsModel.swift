@@ -85,13 +85,12 @@ public final class BrokerConnections: AppleConnectionsProviding {
 }
 
 /// U4's connections behind the settings adapter. An unsupported Mail store
-/// shows as not connected: System Settings cannot fix it, so sending the
-/// person there would mislead.
+/// shows as Not supported with U4's reason and no button: no setting fixes it.
 extension AppleConnections: AppleConnectionsProviding {
     public func connectionState(_ kind: ConnectionKind) -> ConnectionState {
         switch kind {
         case .appleCalendar: Self.connectionState(status.calendar)
-        case .appleMail: Self.connectionState(status.mail)
+        case .appleMail: Self.connectionState(status.mail, kind: .appleMail)
         }
     }
 
@@ -108,12 +107,18 @@ extension AppleConnections: AppleConnectionsProviding {
         Task { await remindersSyncChanged(enabled) }
     }
 
-    static func connectionState(_ access: AppleConnectionStatus.Access) -> ConnectionState {
+    /// The row shows the person-facing sentence, not the store diagnostic:
+    /// for Mail that is `MailStoreStatus`'s own wording.
+    static func connectionState(_ access: AppleConnectionStatus.Access,
+                                kind: ConnectionKind = .appleCalendar) -> ConnectionState {
         switch access {
         case .notConnected: .notConnected
         case .connected: .connected
         case .needsSystemSettings: .needsSystemSettings
-        case .unsupported: .notConnected
+        case .unsupported(let detail):
+            .unsupported(detail: kind == .appleMail
+                ? MailStoreStatus.unsupported(detail: detail).userMessage ?? detail
+                : detail)
         }
     }
 }
