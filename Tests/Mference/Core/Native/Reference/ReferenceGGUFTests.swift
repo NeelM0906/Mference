@@ -41,6 +41,19 @@ struct ReferenceGGUFTests {
         }
     }
 
+    @Test func readsSpecialTokenKeys() throws {
+        var b = Self.builder([Self.q8("a")])
+        b.strings("tokenizer.ggml.tokens", ["a", "b", "c"])
+        b.u32("tokenizer.ggml.eos_token_id", 1)
+        b.u32("tokenizer.ggml.eot_token_id", 2)
+        b.u32("tokenizer.ggml.fim_pad_token_id", 0)
+        let data = try Self.open(b).tokenizerData()
+        #expect(data.eosTokenID == 1)
+        #expect(data.specialTokenIDs == ["eot": 2, "fim_pad": 0])
+        let none = try Self.open(Self.builder([Self.q8("a")]).withTokens()).tokenizerData()
+        #expect(none.specialTokenIDs == nil)
+    }
+
     static func expectRefused(_ b: RefSynthetic.GGUFBuilder, _ what: String) {
         #expect(throws: Native.NativeError.self, "\(what)") { _ = try Self.open(b) }
     }
@@ -102,5 +115,13 @@ struct ReferenceGGUFTests {
             try Data(bytes).write(to: url)
             #expect(throws: Native.NativeError.self, "cut \(cut)") { _ = try Native.ReferenceGGUFFile(url: url) }
         }
+    }
+}
+
+extension RefSynthetic.GGUFBuilder {
+    func withTokens() -> Self {
+        var b = self
+        b.strings("tokenizer.ggml.tokens", ["a", "b", "c"])
+        return b
     }
 }

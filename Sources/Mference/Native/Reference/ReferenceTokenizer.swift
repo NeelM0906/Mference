@@ -132,26 +132,45 @@ extension Native {
             func promote(_ t: Int32) { attrs[Int(t)].insert(.control) }
             func first(_ candidates: [String]) -> Int32? {
                 // llama.cpp takes the first match in hash-map order; with a
-                // single present candidate (true for the Qwen vocabularies)
-                // the order does not matter.
+                // single present candidate the order does not matter. (Qwen
+                // has two EOT candidates, <|im_end|> and <|endoftext|>, both
+                // EOG either way.)
                 candidates.lazy.compactMap { id($0) }.first
             }
-            let eot = first(["<|eot_id|>", "<|im_end|>", "<|end|>", "<end_of_turn>", "<|endoftext|>",
-                             "<|end_of_text|>", "<EOT>", "_<EOT>", "[EOT]", "<｜end▁of▁sentence｜>",
-                             "<end_of_utterance>"])
-            let eom = first(["<|eom_id|>"])
-            let fimPre = first(["<|fim_prefix|>", "<fim-prefix>", "<fim_prefix>", "<｜fim▁begin｜>", "<PRE>",
-                                "▁<PRE>", "<|code_prefix|>", "<|prefix|>", "<|plamo:fim_prefix|>"])
-            let fimSuf = first(["<|fim_suffix|>", "<fim-suffix>", "<fim_suffix>", "<｜fim▁hole｜>", "<SUF>",
-                                "▁<SUF>", "<|code_suffix|>", "<|suffix|>", "<|plamo:fim_suffix|>"])
-            let fimMid = first(["<|fim_middle|>", "<fim-middle>", "<fim_middle>", "<｜fim▁end｜>", "<MID>",
-                                "▁<MID>", "<|code_middle|>", "<|middle|>", "<|plamo:fim_middle|>"])
-            let fimPad = first(["<|fim_pad|>", "<fim-pad>", "<fim_pad>", "<PAD>", "[PAD]"])
-            let fimRep = first(["<|fim_repo|>", "<|repo_name|>", "<fim-repo>", "<REPO>", "<reponame>"])
-            let fimSep = first(["<|file_sep|>", "<|plamo:file_separator|>"])
-            for t in [eot, eom, fimPre, fimSuf, fimMid, fimPad, fimRep, fimSep].compactMap({ $0 }) {
-                promote(t)
+            // An id from a GGUF `tokenizer.ggml.<name>_token_id` key (in range;
+            // the deprecated prefix/suffix/middle keys are read after the
+            // fim_* ones, so they win) is used as is; otherwise the token is
+            // detected by text and promoted to control, as llama.cpp does.
+            let keyed = data.specialTokenIDs ?? [:]
+            func fromKeys(_ names: [String]) -> Int32? {
+                var found: Int32?
+                for name in names {
+                    if let v = keyed[name], v >= 0, Int(v) < texts.count { found = v }
+                }
+                return found
             }
+            func resolve(_ names: [String], _ candidates: [String]) -> Int32? {
+                if let k = fromKeys(names) { return k }
+                guard let t = first(candidates) else { return nil }
+                promote(t)
+                return t
+            }
+            let eot = resolve(["eot"], ["<|eot_id|>", "<|im_end|>", "<|end|>", "<end_of_turn>", "<|endoftext|>",
+                                        "<|end_of_text|>", "<EOT>", "_<EOT>", "[EOT]", "<｜end▁of▁sentence｜>",
+                                        "<end_of_utterance>"])
+            let eom = resolve(["eom"], ["<|eom_id|>"])
+            _ = resolve(["fim_pre", "prefix"], ["<|fim_prefix|>", "<fim-prefix>", "<fim_prefix>", "<｜fim▁begin｜>",
+                                                "<PRE>", "▁<PRE>", "<|code_prefix|>", "<|prefix|>",
+                                                "<|plamo:fim_prefix|>"])
+            _ = resolve(["fim_suf", "suffix"], ["<|fim_suffix|>", "<fim-suffix>", "<fim_suffix>", "<｜fim▁hole｜>",
+                                                "<SUF>", "▁<SUF>", "<|code_suffix|>", "<|suffix|>",
+                                                "<|plamo:fim_suffix|>"])
+            _ = resolve(["fim_mid", "middle"], ["<|fim_middle|>", "<fim-middle>", "<fim_middle>", "<｜fim▁end｜>",
+                                                "<MID>", "▁<MID>", "<|code_middle|>", "<|middle|>",
+                                                "<|plamo:fim_middle|>"])
+            let fimPad = resolve(["fim_pad"], ["<|fim_pad|>", "<fim-pad>", "<fim_pad>", "<PAD>", "[PAD]"])
+            let fimRep = resolve(["fim_rep"], ["<|fim_repo|>", "<|repo_name|>", "<fim-repo>", "<REPO>", "<reponame>"])
+            let fimSep = resolve(["fim_sep"], ["<|file_sep|>", "<|plamo:file_separator|>"])
             // Control tokens whose text contains "unused" are marked unused.
             for (i, text) in texts.enumerated() where attrs[i].contains(.control) {
                 if text.windowsContain(Array("unused".utf8)) { attrs[i].insert(.unused) }

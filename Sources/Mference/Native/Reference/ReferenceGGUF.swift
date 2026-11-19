@@ -331,7 +331,21 @@ extension Native.ReferenceGGUFFile {
             eosTokenID: id("tokenizer.ggml.eos_token_id"),
             paddingTokenID: id("tokenizer.ggml.padding_token_id"),
             addBOS: bool("tokenizer.ggml.add_bos_token"),
-            addEOS: bool("tokenizer.ggml.add_eos_token"))
+            addEOS: bool("tokenizer.ggml.add_eos_token"),
+            specialTokenIDs: specialTokenIDs())
+    }
+
+    /// Every `tokenizer.ggml.<name>_token_id` key other than bos, eos and
+    /// padding, by `<name>` as spelled in the key; nil when there are none.
+    func specialTokenIDs() -> [String: Int32]? {
+        var out: [String: Int32] = [:]
+        let prefix = "tokenizer.ggml.", suffix = "_token_id"
+        for key in keys where key.hasPrefix(prefix) && key.hasSuffix(suffix) {
+            let name = String(key.dropFirst(prefix.count).dropLast(suffix.count))
+            guard !["bos", "eos", "padding"].contains(name), let v = int(key), let id = Int32(exactly: v) else { continue }
+            out[name] = id
+        }
+        return out.isEmpty ? nil : out
     }
 
     /// Scalar metadata (strings, numbers, booleans) as strings, for

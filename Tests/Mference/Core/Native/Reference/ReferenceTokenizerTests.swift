@@ -111,6 +111,13 @@ struct ReferenceTokenizerTests {
         withIDs.bosTokenID = 99
         let ids = Native.ReferenceTokenizer.specialIDs(withIDs)
         #expect(ids.eos == 5 && ids.bos == 11)
+        // GGUF special-token keys replace text detection and join EOG as
+        // llama.cpp's fim_pad/fim_rep/fim_sep/eot/eom do; out-of-range ids are ignored.
+        var keyed = data
+        keyed.specialTokenIDs = ["eot": 7, "fim_pad": 8, "fim_rep": 999, "unknown": 3]
+        let k = try Native.ReferenceTokenizer(data: keyed)
+        #expect(k.endOfGenerationTokenIDs == [7, 8, 11])
+        #expect(k.attr(7) == .normal)
     }
 
     @Test func refusesOtherTokenizers() {
