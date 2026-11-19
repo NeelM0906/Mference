@@ -174,6 +174,22 @@ enum CalendarFixtures {
         #expect(model.events.map(\.title) == ["Dentist"])
     }
 
+    @Test @MainActor func editAndDeleteFromTheWeek() async throws {
+        let service = InMemoryCalendarService(events: CalendarFixtures.events)
+        let model = Self.model(service: service)
+        await model.load()
+        let lunch = try #require(model.events.first { $0.title == "Lunch" })
+        #expect(await model.updateEvent(lunch, title: "Lunch with Lena", start: CalendarFixtures.date(15, 12, 30),
+                                        end: CalendarFixtures.date(15, 13, 30)))
+        #expect(model.events.contains { $0.title == "Lunch with Lena" && $0.start == CalendarFixtures.date(15, 12, 30) })
+        #expect(await model.updateEvent(lunch, title: " ", start: lunch.start, end: lunch.end) == false)
+        let edited = try #require(model.events.first { $0.title == "Lunch with Lena" })
+        #expect(await model.deleteEvent(edited))
+        #expect(!model.events.contains { $0.title.hasPrefix("Lunch") })
+        #expect(await model.deleteEvent(edited) == false)  // already gone
+        #expect(model.errorMessage != nil)
+    }
+
     @Test func eventsCrossingMidnightShowOnEveryDayTheyTouch() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         let overnight = CalendarEvent(id: "deploy", title: "Deploy", start: CalendarFixtures.date(15, 16),

@@ -174,7 +174,7 @@ struct WeekGrid: View {
                     let columnWidth = (outer.size.width - gutter) / CGFloat(max(model.days.count, 1))
                     ForEach(model.blocks) { block in
                         let laneWidth = (columnWidth - MFSpacing.s) / CGFloat(block.lanes)
-                        EventBlockView(block: block)
+                        EventBlockButton(block: block, model: model)
                             .frame(width: laneWidth - MFSpacing.xxs,
                                    height: CGFloat(block.height) * hourHeight - MFSpacing.xs)
                             .offset(x: gutter + CGFloat(block.day) * columnWidth + MFSpacing.xs
@@ -411,5 +411,92 @@ struct NewEventForm: View {
         let minute = calendar.component(.minute, from: date)
         let rounded = calendar.date(byAdding: .minute, value: minute < 30 ? 30 - minute : 60 - minute, to: date) ?? date
         return calendar.date(bySetting: .second, value: 0, of: rounded) ?? rounded
+    }
+}
+
+/// An event block that opens its editor on click; proposals and moving
+/// events are plain (their actions are on the proposal card).
+struct EventBlockButton: View {
+    var block: WeekBlock
+    var model: CalendarWeekModel
+    @State private var editing = false
+
+    var body: some View {
+        if case .event(let event) = block.kind {
+            Button { editing = true } label: { EventBlockView(block: block) }
+                .buttonStyle(.plain)
+                .accessibilityHint("Edit or delete this event")
+                .popover(isPresented: $editing, arrowEdge: .trailing) {
+                    EventEditForm(event: event, model: model) { editing = false }
+                }
+        } else {
+            EventBlockView(block: block)
+        }
+    }
+}
+
+/// Edit or delete one event (this occurrence only, for repeating events).
+struct EventEditForm: View {
+    var event: CalendarEvent
+    var model: CalendarWeekModel
+    var close: () -> Void
+    @State private var title: String
+    @State private var start: Date
+    @State private var minutes: Int
+    @State private var isWorking = false
+
+    init(event: CalendarEvent, model: CalendarWeekModel, close: @escaping () -> Void) {
+        self.event = event
+        self.model = model
+        self.close = close
+        _title = State(initialValue: event.title)
+        _start = State(initialValue: event.start)
+        _minutes = State(initialValue: max(5, Int(event.end.timeIntervalSince(event.start) / 60)))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MFSpacing.m) {
+            Text(event.occurrenceDate == nil ? "Edit event" : "Edit this occurrence")
+                .font(MFFont.headline)
+                .foregroundStyle(MFColor.ink)
+            TextField("Title", text: $title)
+                .textFieldStyle(.roundedBorder)
+            DatePicker("Starts", selection: $start)
+            Stepper("Length: \(minutes) min", value: $minutes, in: 5...(24 * 60), step: 15)
+            if let message = model.errorMessage {
+                Text(message).font(MFFont.callout).foregroundStyle(MFColor.danger)
+            }
+            HStack {
+                Button("Delete", role: .destructive) {
+                    isWorking = true
+                    Task {
+                        let done = await model.deleteEvent(event)
+                        isWorking = false
+                        if done { close() }
+                    }
+                }
+                .buttonStyle(.appleSecondary)
+                .foregroundStyle(MFColor.danger)
+                Spacer()
+                Button("Cancel", action: close)
+                    .buttonStyle(.appleSecondary)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    isWorking = true
+                    Task {
+                        let done = await model.updateEvent(event, title: title, start: start,
+                                                           end: start.addingTimeInterval(Double(minutes) * 60))
+                        isWorking = false
+                        if done { close() }
+                    }
+                }
+                .buttonStyle(.applePrimary)
+                .keyboardShortcut(.defaultAction)
+                .disabled(isWorking || title.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .disabled(isWorking)
+        }
+        .padding(MFSpacing.l)
+        .frame(width: 340)
     }
 }

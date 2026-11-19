@@ -145,8 +145,9 @@ public struct AppleMailSender: MailSending {
 
     public func send(_ draft: MailDraft) async throws {
         guard Self.isPlausibleAddress(draft.to) else { throw MailSendError.invalidRecipient }
-        let state = await broker.request(.mailAutomation)
-        guard state == .granted || state == .notDetermined else { throw MailSendError.notAllowed }
+        // Only a granted Automation permission runs the script: a declined
+        // reason (still not determined) must not reach Mail's own prompt.
+        guard await broker.request(.mailAutomation) == .granted else { throw MailSendError.notAllowed }
         let source = Self.script(for: draft)
         try await MainActor.run {
             var error: NSDictionary?
