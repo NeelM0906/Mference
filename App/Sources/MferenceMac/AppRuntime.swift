@@ -17,9 +17,14 @@ final class AppRuntime {
     /// shuts down (U3's notes).
     private let shutdownSteps: [@MainActor () async -> Void]
 
-    init() {
-        services = AppServices.live(presentPermissionReason: PermissionReasonAlert.present)
-        web = WebAnswers()
+    /// One composition root for the whole app: every engine use (chat, model
+    /// library, Scan, Calendar, Mail) goes through `services.engine`, so only
+    /// one engine host can hold a model. Nothing here loads or warms a model;
+    /// that happens only when the person picks a model or opens a chat.
+    init(services: AppServices = .live(presentPermissionReason: PermissionReasonAlert.present),
+         web: WebAnswers = WebAnswers()) {
+        self.services = services
+        self.web = web
         chat = ChatViewModel(service: services.engine,
                              store: ConversationStore(container: services.modelContainer),
                              tools: web)
