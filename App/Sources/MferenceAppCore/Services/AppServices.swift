@@ -1,3 +1,4 @@
+#if canImport(MferenceEngine)
 import Foundation
 import MferenceEngine
 import Observation
@@ -169,3 +170,4 @@ public final class AppServices {
         }
     }
 }
+#endif

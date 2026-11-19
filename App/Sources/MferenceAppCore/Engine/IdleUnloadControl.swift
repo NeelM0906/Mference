@@ -1,3 +1,4 @@
+#if canImport(MferenceEngine)
 import Foundation
 import MferenceEngine
 import Synchronization
@@ -101,3 +102,4 @@ public final class IdleUnloadControl: Sendable {
         }
     }
 }
+#endif

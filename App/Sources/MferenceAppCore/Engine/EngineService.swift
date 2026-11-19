@@ -1,3 +1,4 @@
+#if canImport(MferenceEngine)
 import Foundation
 import Mference
 import MferenceEngine
@@ -74,9 +75,10 @@ public actor EngineService: EngineServicing {
     }
 
     /// Deep needs more than 16 GB of memory (L4); the reason when `model`
-    /// may not run on a Mac with `physicalMemory`, else nil.
+    /// may not run on a Mac with `physicalMemory`, else nil. The rule itself
+    /// is `EngineMemoryGate`, which also builds where the engine does not.
     public static func memoryGateReason(_ model: AppModel, physicalMemory: UInt64) -> String? {
-        model == .deep && physicalMemory <= 16 << 30 ? "Needs a Mac with more than 16 GB of memory." : nil
+        EngineMemoryGate.reason(model, physicalMemory: physicalMemory)
     }
 
     // MARK: Catalog
@@ -579,3 +581,4 @@ final class StatusBroadcaster: Sendable {
         for continuation in subscribers { continuation.finish() }
     }
 }
+#endif

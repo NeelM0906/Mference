@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import Foundation
 
 /// A reply the person reviews; sent only when they click Send.
@@ -148,6 +150,7 @@ public struct AppleMailSender: MailSending {
         // Only a granted Automation permission runs the script: a declined
         // reason (still not determined) must not reach Mail's own prompt.
         guard await broker.request(.mailAutomation) == .granted else { throw MailSendError.notAllowed }
+        #if os(macOS)
         let source = Self.script(for: draft)
         try await MainActor.run {
             var error: NSDictionary?
@@ -159,6 +162,10 @@ public struct AppleMailSender: MailSending {
                 throw MailSendError.scriptFailed(error[NSAppleScript.errorMessage] as? String ?? "unknown error")
             }
         }
+        #else
+        // Mail is a Mac surface (phone decision D1).
+        throw MailSendError.notAllowed
+        #endif
     }
 
     static func isPlausibleAddress(_ address: String) -> Bool {

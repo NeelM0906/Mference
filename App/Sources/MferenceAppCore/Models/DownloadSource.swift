@@ -51,11 +51,18 @@ public struct DownloadSource: Sendable, Hashable {
     /// subdomains.
     public static let allowedHosts = ["huggingface.co", "hf.co"]
 
-    /// Where the app puts downloads: `~/llm-models/gguf`, a directory the
-    /// engine's discovery already scans.
+    /// Where the app puts downloads: on the Mac `~/llm-models/gguf`, a
+    /// directory the engine's discovery already scans; on the iPhone
+    /// `Application Support/Mference/Models` in the app's container (mobile
+    /// spec 5.4; the phone's download manager excludes it from backup).
     public static var defaultDestination: URL {
+        #if os(macOS)
         FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "llm-models/gguf", directoryHint: .isDirectory)
+        #else
+        URL.applicationSupportDirectory
+            .appending(path: "Mference/Models", directoryHint: .isDirectory)
+        #endif
     }
 
     static func isAllowed(host: String?, allowedHosts: [String]) -> Bool {
