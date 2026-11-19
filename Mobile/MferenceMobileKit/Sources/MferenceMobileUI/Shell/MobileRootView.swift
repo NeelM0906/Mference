@@ -29,17 +29,15 @@ public struct MobileRootView: View {
                     Color.clear
                 } else if model.isFirstRunPresented {
                     FirstRunView(model: model)
+                } else if layout == .twoPane {
+                    TwoPaneShell(model: model, shell: shell,
+                                 fold: FoldGeometry(width: geometry.size.width,
+                                                    foldX: full.width / 2 - contentMinX))
                 } else {
-                    switch layout {
-                    case .twoPane:
-                        TwoPaneShell(model: model, shell: shell,
-                                     fold: FoldGeometry(width: geometry.size.width,
-                                                        foldX: full.width / 2 - contentMinX))
-                    case .turned(let turned):
-                        CompactShell(model: model, columnWidth: turned.columnWidth)
-                    case .tabs:
-                        CompactShell(model: model)
-                    }
+                    // One branch for tabs and the turned column, so moving
+                    // between them keeps CompactShell's identity and every
+                    // screen's state (navigation, drafts, open sheets).
+                    CompactShell(model: model, columnWidth: layout.columnWidth)
                 }
             }
             .sheet(isPresented: $shell.isAddingEvent) {

@@ -31,6 +31,11 @@ enum ShellLayout: Equatable {
         }
     }
 
+    /// The turned column's width, or nil for full-width tabs and two panes.
+    var columnWidth: CGFloat? {
+        if case .turned(let turned) = self { turned.columnWidth } else { nil }
+    }
+
     /// Whether sheets must stay below a fold that runs across the window.
     var sheetsBelowFold: Bool {
         if case .turned = self { true } else { false }

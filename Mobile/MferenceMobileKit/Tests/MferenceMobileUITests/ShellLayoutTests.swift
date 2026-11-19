@@ -53,6 +53,12 @@ struct ShellLayoutTests {
         #expect(tiny.columnWidth == 0)
     }
 
+    @Test func onlyTheTurnedLayoutHasAColumn() {
+        #expect(ShellLayout(windowSize: CGSize(width: 669, height: 951)).columnWidth == 560)
+        #expect(ShellLayout(windowSize: CGSize(width: 466, height: 678)).columnWidth == nil)
+        #expect(ShellLayout(windowSize: CGSize(width: 951, height: 669)).columnWidth == nil)
+    }
+
     @Test func aWideButShortWindowIsNotTurned() {
         // Below the two-pane width but landscape: tabs, not the turned column.
         #expect(ShellLayout(windowSize: CGSize(width: 680, height: 500)) == .tabs)
