@@ -240,6 +240,19 @@ enum CalendarFixtures {
         #expect(Set(blocks.map(\.lane)) == [0, 1])
     }
 
+    /// Codex on #157: a proposal just before the grid's last hour rises to
+    /// keep its room instead of getting a tiny or negative height.
+    @Test func aProposalAtTheBottomEdgeKeepsItsRoom() throws {
+        let start = Self.layout.weekStart(containing: CalendarFixtures.now)
+        let late = ProposedEvent(title: "Late call", start: CalendarFixtures.date(16, 17, 59),
+                                 end: CalendarFixtures.date(16, 18),
+                                 source: ItemSource(kind: .mail, label: "Priya", reference: "<l@example.com>"))
+        let drawn = try #require(Self.layout.blocks(weekStart: start, events: [], proposals: [late]).first)
+        let span = Double(Self.layout.lastHour - Self.layout.firstHour)
+        #expect(drawn.height == Self.layout.minimumProposalHours)
+        #expect(drawn.top >= 0 && abs(drawn.top + drawn.height - span) < 1e-9)
+    }
+
     @Test func overlappingEventsShareTheColumn() {
         let start = Self.layout.weekStart(containing: CalendarFixtures.now)
         let events = [
