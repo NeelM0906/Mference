@@ -17,23 +17,48 @@ extension AppleUIFixtures {
 
         func reload() async {}
         func status() async -> MailStoreStatus { status }
-        func messages(in kinds: Set<MailboxRef.Kind>, limit: Int) async throws -> [MailMessageSummary] {
-            kinds.contains(.inbox) ? Array(inbox.prefix(limit)) : []
+        func messages(in selection: MailSelection, limit: Int) async throws -> [MailMessageSummary] {
+            guard case .kinds(let kinds) = selection, kinds.contains(.inbox) else { return [] }
+            return Array(inbox.prefix(limit)).map { message in
+                var message = message
+                message.listedKind = .inbox
+                return message
+            }
+        }
+        /// The account in the mockup: Mail's Gmail mailboxes with their counts.
+        func mailboxes() async throws -> MailboxListing {
+            func box(_ path: String, _ kind: MailboxRef.Kind, _ name: String, unread: Int = 0, total: Int = 0) -> Mailbox {
+                Mailbox(ref: MailboxRef(url: "imap://work/\(path)"), kind: kind, name: name, unreadCount: unread,
+                        totalCount: total)
+            }
+            return MailboxListing(mailboxes: [
+                box("%5BGmail%5D/Important", .important, "Important", unread: 2_180, total: 2_400),
+                box("INBOX", .inbox, "Inbox", unread: 43_330, total: 45_000),
+                box("%5BGmail%5D/Drafts", .drafts, "Drafts", total: 6),
+                box("%5BGmail%5D/Sent%20Mail", .sent, "Sent", unread: 3, total: 400),
+                box("%5BGmail%5D/Spam", .junk, "Junk", unread: 194, total: 200),
+                box("%5BGmail%5D/Trash", .trash, "Trash", unread: 14, total: 30),
+                box("%5BGmail%5D/All%20Mail", .archive, "Archive", unread: 43_335, total: 46_000),
+                box("archinve", .other, "archinve"),
+                box("Drafts", .other, "Drafts"),
+                Mailbox(ref: MailboxRef(url: "local:///Send%20Later"), kind: .other, name: "Send Later"),
+            ], flaggedCount: 4)
         }
         func body(of message: MailMessageSummary) async throws -> MailBody {
             bodies[message.messageID] ?? MailBody(text: message.snippet)
         }
         func accounts() async throws -> [MailAccount] {
-            [MailAccount(id: "work", name: "work@example.com"), MailAccount(id: "home", name: "me@example.com")]
+            [MailAccount(id: "work", name: "me@example.com", label: "Google")]
         }
+        func changeToken() async -> String? { "1" }
     }
 
     static func message(_ row: Int64, _ id: String, _ name: String, _ subject: String, _ snippet: String,
                         _ date: Date) -> MailMessageSummary {
         MailMessageSummary(rowID: row, messageID: id, senderName: name,
                            senderAddress: "\(name.split(separator: " ").first!.lowercased())@example.com",
-                           subject: subject, snippet: snippet, date: date, isRead: false,
-                           mailbox: MailboxRef(url: "imap://work/INBOX"))
+                           subject: subject, snippet: snippet, date: date, isRead: row > 2,
+                           mailbox: MailboxRef(url: "imap://work/INBOX"), isFlagged: row == 2)
     }
 
     static var mailNow: Date { Calendar.current.date(bySettingHour: 10, minute: 0, second: 0, of: .now)! }
@@ -62,7 +87,6 @@ extension AppleUIFixtures {
             trackersRemoved: 2),
     ]
 
-    static let sortAnswer = #"{"1": "important", "2": "important", "3": "important", "4": "important", "5": "reading"}"#
     static var eventAnswer: String {
         let wednesday = Calendar.current.nextDate(after: .now, matching: DateComponents(weekday: 4),
                                                   matchingPolicy: .nextTime)!

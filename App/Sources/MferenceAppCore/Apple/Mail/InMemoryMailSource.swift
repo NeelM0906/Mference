@@ -24,9 +24,54 @@ public actor InMemoryMailSource: MailSource {
         storeStatus = status
     }
 
-    public func messages(in kinds: Set<MailboxRef.Kind>, limit: Int) async throws -> [MailMessageSummary] {
+    /// Tests: Mail saved a change (new mail arrives).
+    public func setMessages(_ messages: [MailMessageSummary]) {
+        stored = messages
+        revision += 1
+    }
+
+    private var revision = 0
+
+    public func messages(in selection: MailSelection, limit: Int) async throws -> [MailMessageSummary] {
         guard case .available = storeStatus else { throw MailSourceError.unavailable(storeStatus) }
-        return Array(stored.filter { kinds.contains($0.mailbox.kind) }.sorted { $0.date > $1.date }.prefix(limit))
+        let chosen = stored.filter { message in
+            switch selection {
+            case .kinds(let kinds): kinds.contains(message.mailbox.kind)
+            case .flagged: message.isFlagged
+            case .mailbox(let url): message.mailbox.url == url
+            }
+        }
+        let listed: MailboxRef.Kind? = switch selection {
+        case .kinds(let kinds): kinds.count == 1 ? kinds.first : nil
+        case .flagged: nil
+        case .mailbox: chosen.first?.mailbox.kind
+        }
+        return Array(chosen.sorted { $0.date > $1.date }.prefix(limit)).map { message in
+            var message = message
+            message.listedKind = listed
+            return message
+        }
+    }
+
+    /// One mailbox per distinct mailbox of the stored messages.
+    public func mailboxes() async throws -> MailboxListing {
+        guard case .available = storeStatus else { throw MailSourceError.unavailable(storeStatus) }
+        var urls: [String] = []
+        for message in stored where !urls.contains(message.mailbox.url) { urls.append(message.mailbox.url) }
+        let classified = MailboxClassifier.classify(urls.enumerated().map { (id: Int64($0.offset), url: $0.element) })
+        let mailboxes = classified.map { _, mailbox in
+            var mailbox = mailbox
+            let inside = stored.filter { $0.mailbox.url == mailbox.ref.url }
+            mailbox.totalCount = inside.count
+            mailbox.unreadCount = inside.filter { !$0.isRead }.count
+            return mailbox
+        }
+        return MailboxListing(mailboxes: mailboxes, flaggedCount: stored.filter(\.isFlagged).count)
+    }
+
+    public func changeToken() async -> String? {
+        guard case .available = storeStatus else { return nil }
+        return "\(revision)"
     }
 
     public func body(of message: MailMessageSummary) async throws -> MailBody {

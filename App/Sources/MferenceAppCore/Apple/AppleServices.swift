@@ -7,7 +7,7 @@ import SwiftData
 /// Settings > Connections reads `connections`. U2's `AppServices` holds one.
 @MainActor
 public final class AppleServices {
-    /// Titles, summaries, mail sorting, scan fields (L12).
+    /// Titles, summaries, event suggestions, scan fields (L12).
     public let assistant: AppleModelService
     public let scan: ScanSession
     public let calendar: CalendarWeekModel
@@ -32,7 +32,7 @@ public final class AppleServices {
         let calendarService = EventKitService(broker: broker)
         let mailSource = AppleMailSource()
         let calendar = CalendarWeekModel(service: calendarService, store: plannerStore)
-        let mail = MailInboxModel(source: mailSource, context: container.mainContext, assistant: assistant,
+        let mail = MailInboxModel(source: mailSource, assistant: assistant,
                                   drafter: MailReplyDrafter(engine: engine), sender: AppleMailSender(broker: broker),
                                   broker: broker,
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
@@ -58,9 +58,9 @@ public final class AppleServices {
                                                 answer: ""),
             fallback: QuickTextModel(engine: engine))
         let calendar = CalendarWeekModel(service: calendarService, store: PlannerStore(url: nil))
-        let mail = MailInboxModel(source: mailSource, context: container.mainContext, assistant: assistant,
+        let mail = MailInboxModel(source: mailSource, assistant: assistant,
                                   drafter: MailReplyDrafter(engine: engine), sender: RecordingMailSender(),
-                                  broker: broker,
+                                  broker: broker, mailApp: FixedMailApp(),
                                   onEventSuggested: { [weak calendar] proposal in calendar?.propose(proposal) })
         return AppleServices(assistant: assistant,
                              scan: ScanSession(scanner: PreviewScanner(), assistant: assistant,

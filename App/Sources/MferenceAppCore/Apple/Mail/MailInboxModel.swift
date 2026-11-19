@@ -1,21 +1,34 @@
 import Foundation
 import Observation
-import SwiftData
 
-/// The Mail screen's state (mockup 03): buckets, the list, the open message,
-/// its event card and the reply draft.
+/// The Mail screen's state (mockup 03): Apple Mail's own mailboxes, the
+/// list, the open message, its event card and the reply draft. Mail's store
+/// is read, never written; the screen follows it as Mail saves changes.
 @MainActor @Observable
 public final class MailInboxModel {
-    /// What the left column selects: Mail's standard mailboxes (fixed
-    /// names), the "Sorted for you" buckets (renamable, L8) and Done.
+    /// What the left column selects.
     public enum Folder: Hashable, Sendable {
-        case inbox
-        case drafts
-        case sent
-        case junk
-        case trash
-        case bucket(String)
-        case done
+        /// Favorites: every account's mailbox with this role (Inbox, Drafts, Sent).
+        case favorite(MailboxRef.Kind)
+        /// Flagged mail anywhere.
+        case flagged
+        /// One mailbox, by its URL.
+        case mailbox(String)
+    }
+
+    /// The line at the bottom of the sidebar.
+    public enum SyncState: Sendable, Hashable {
+        /// Mail is running: what it downloads shows up here within seconds.
+        case upToDate
+        /// Mail is not running, so nothing new arrives.
+        case mailClosed
+    }
+
+    /// One account's mailboxes in the sidebar.
+    public struct AccountSection: Identifiable, Sendable, Hashable {
+        public var account: MailAccount
+        public var mailboxes: [Mailbox]
+        public var id: String { account.id }
     }
 
     public enum DraftState: Sendable, Hashable {
@@ -27,97 +40,139 @@ public final class MailInboxModel {
         case failed(String)
     }
 
+    /// Favorites, in Mail's order (Flagged sits after Inbox when the store
+    /// records flags).
+    public static let favoriteKinds: [MailboxRef.Kind] = [.inbox, .drafts, .sent]
+
     public private(set) var status: MailStoreStatus?
-    public private(set) var buckets: [MailBucketDefaults.Bucket] = []
-    public var folder: Folder = .inbox
+    public private(set) var folder: Folder = .favorite(.inbox)
     public private(set) var accounts: [MailAccount] = []
+    public private(set) var listing = MailboxListing()
+    /// The selected folder's messages, newest first.
+    public private(set) var messages: [MailMessageSummary] = []
     public private(set) var selected: MailMessageSummary?
     public private(set) var body: MailBody?
     public private(set) var eventCard: ProposedEvent?
     public var draft: String = ""
     public private(set) var draftState: DraftState = .idle
     public private(set) var draftModelLabel: String?
-    public private(set) var isSorting = false
-    /// Some mail is unsorted because Apple's model is off; the list offers
-    /// "Sort with Quick".
-    public private(set) var needsManualSort = false
-    /// A text field is being edited (draft or bucket names): E and Z type
-    /// letters then, they do not mark Done or undo.
+    public private(set) var syncState: SyncState = .upToDate
+    /// When the lists were last read from Mail's store.
+    public private(set) var lastRefreshed: Date?
+    /// Accounts whose mailboxes are folded away in the sidebar.
+    public var collapsedAccounts: Set<String> = []
+    /// A text field is being edited: bare-letter shortcuts type letters then.
     public var isEditingDraft = false
-    public var isRenamingBuckets = false
-    public var isEditingText: Bool { isEditingDraft || isRenamingBuckets || isComposing }
+    public var isEditingText: Bool { isEditingDraft || isComposing }
     public private(set) var errorMessage: String?
 
-    private var inbox: [MailMessageSummary] = []
-    private var drafts: [MailMessageSummary] = []
-    private var sent: [MailMessageSummary] = []
-    private var junk: [MailMessageSummary] = []
-    private var trash: [MailMessageSummary] = []
-    private var assignment: [String: String] = [:]
-    @ObservationIgnored private var lastMoved: (messageID: String, previous: String?)?
+    @ObservationIgnored private var changeToken: String?
     /// Replies being sent and already sent, per message: reopening one shows
     /// its real state, and it cannot be sent twice.
     @ObservationIgnored private var sendingMessageIDs: Set<String> = []
     @ObservationIgnored private var sentMessageIDs: Set<String> = []
 
     private let source: any MailSource
-    private let store: MailBucketStore
     private let assistant: any AppleModelServicing
     private let drafter: MailReplyDrafter?
     private let sender: any MailSending
     private let broker: any PermissionBroker
+    private let mailApp: any MailAppControlling
     private let onEventSuggested: @MainActor (ProposedEvent) -> Void
     private let timeZone: TimeZone
+    private let limit: Int
+    private let pollInterval: Duration
+    private let now: @MainActor () -> Date
 
-    public init(source: any MailSource, context: ModelContext, assistant: any AppleModelServicing,
+    public init(source: any MailSource, assistant: any AppleModelServicing,
                 drafter: MailReplyDrafter?, sender: any MailSending, broker: any PermissionBroker,
-                timeZone: TimeZone = .current,
+                mailApp: any MailAppControlling = SystemMailApp(), timeZone: TimeZone = .current, limit: Int = 300,
+                pollInterval: Duration = .seconds(3), now: @escaping @MainActor () -> Date = { .now },
                 onEventSuggested: @escaping @MainActor (ProposedEvent) -> Void = { _ in }) {
         self.source = source
-        self.store = MailBucketStore(context: context)
         self.assistant = assistant
         self.drafter = drafter
         self.sender = sender
         self.broker = broker
+        self.mailApp = mailApp
         self.timeZone = timeZone
+        self.limit = limit
+        self.pollInterval = pollInterval
+        self.now = now
         self.onEventSuggested = onEventSuggested
     }
 
-    // MARK: Loading
+    // MARK: Loading and following Mail
 
     /// Reads without asking; the screen shows the reason and a button when
     /// Full Disk Access is missing.
-    public func load(limit: Int = 300) async {
+    public func load() async {
         await source.reload()
         let status = await source.status()
         self.status = status
-        refreshBuckets()
         guard case .available = status else { return }
+        changeToken = await source.changeToken()
+        await refreshLists()
+        if selected == nil, let first = messages.first { await open(first) }
+    }
+
+    /// Follows Mail while the screen is shown: every `pollInterval` it looks
+    /// whether Mail saved anything and re-reads the lists if so. Ends when
+    /// the calling task is cancelled.
+    public func watch() async {
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: pollInterval) } catch { return }
+            await refreshIfChanged()
+        }
+    }
+
+    /// Re-reads the mailboxes and the open list when Mail's store changed;
+    /// keeps the folder and the open message.
+    public func refreshIfChanged() async {
+        guard case .available = status else { return }
+        let token = await source.changeToken()
+        guard token != changeToken else {
+            syncState = mailApp.isRunning() ? .upToDate : .mailClosed
+            return
+        }
+        changeToken = token
+        await source.reload()
+        await refreshLists()
+    }
+
+    /// Mference came back to the front: look again for access, or for mail.
+    public func appBecameActive() async {
+        if status == .needsFullDiskAccess || status == nil {
+            await recheckAccess()
+        } else {
+            await refreshIfChanged()
+        }
+    }
+
+    /// "Open Mail" under "Apple Mail is closed".
+    public func openMail() {
+        mailApp.open()
+    }
+
+    private func refreshLists() async {
+        let shown = folder
         do {
-            async let inboxMessages = source.messages(in: [.inbox], limit: limit)
-            async let draftMessages = source.messages(in: [.drafts], limit: 50)
-            async let sentMessages = source.messages(in: [.sent], limit: 50)
-            async let junkMessages = source.messages(in: [.junk], limit: 50)
-            async let trashMessages = source.messages(in: [.trash], limit: 50)
+            async let listing = source.mailboxes()
             async let accountList = source.accounts()
-            (inbox, drafts, sent, accounts) = try await (inboxMessages, draftMessages, sentMessages, accountList)
-            (junk, trash) = try await (junkMessages, trashMessages)
-            let stored = try store.assignments(for: inbox.map(\.messageID))
-            assignment = stored.mapValues(\.bucketKey)
+            (self.listing, accounts) = try await (listing, accountList)
+            if !exists(folder) { folder = .favorite(.inbox) }
+            let fresh = try await source.messages(in: selection(for: folder), limit: limit)
+            // The person picked another folder meanwhile: that load wins.
+            if folder == shown || !exists(shown) { messages = fresh }
+            if let open = selected, let updated = fresh.first(where: { $0.messageID == open.messageID }) {
+                selected = updated
+            }
             errorMessage = nil
         } catch {
             errorMessage = "Mail could not be read: \(error)"
         }
-        // Show the newest message first, then sort in the background with
-        // Apple's model only: Quick would replace the person's chat model,
-        // so sorting with it waits for a click (`sortWithQuick`).
-        if selected == nil, let first = messages.first { await open(first) }
-        await sortUnassigned(allowFallback: false)
-    }
-
-    /// The person clicked "Sort with Quick" (Apple Intelligence is off).
-    public func sortWithQuick() async {
-        await sortUnassigned(allowFallback: true)
+        lastRefreshed = now()
+        syncState = mailApp.isRunning() ? .upToDate : .mailClosed
     }
 
     /// The person clicked the button under the reason: the broker shows the
@@ -149,118 +204,112 @@ public final class MailInboxModel {
         status == .needsFullDiskAccess && hasOpenedFullDiskAccessSettings
     }
 
-    /// The app became active again, or "Check again": re-reads the store
-    /// while access is missing.
+    /// "Check again": re-reads the store while access is missing.
     public func recheckAccess() async {
         guard status == .needsFullDiskAccess || status == nil else { return }
         await load()
     }
 
-    private func refreshBuckets() {
-        do {
-            let stored = try store.buckets()
-            buckets = stored.map { model in
-                let fixed = MailBucketDefaults.all.first { $0.key == model.key }
-                return MailBucketDefaults.Bucket(key: model.key, name: model.name, description: fixed?.description ?? "")
+    // MARK: Mailboxes
+
+    /// On My Mac.
+    public var localMailboxes: [Mailbox] { listing.mailboxes.filter(\.isLocal) }
+
+    /// Each account with its mailboxes, in the store's order.
+    public var accountSections: [AccountSection] {
+        var sections: [AccountSection] = []
+        for mailbox in listing.mailboxes where !mailbox.isLocal {
+            let id = mailbox.ref.accountID
+            if let index = sections.firstIndex(where: { $0.id == id }) {
+                sections[index].mailboxes.append(mailbox)
+            } else {
+                let account = accounts.first { $0.id == id } ?? MailAccount(id: id, name: MailAccount.unnamed)
+                sections.append(AccountSection(account: account, mailboxes: [mailbox]))
             }
-        } catch {
-            buckets = MailBucketDefaults.all
         }
+        return sections
     }
 
-    /// Sorts messages no one placed yet. The person's own moves stick.
-    public func sortUnassigned(allowFallback: Bool) async {
-        let unsorted = inbox.filter { assignment[$0.messageID] == nil }
-        guard !unsorted.isEmpty else { needsManualSort = false; return }
-        isSorting = true
-        defer { isSorting = false }
-        let items = unsorted.map {
-            MailSortItem(messageID: $0.messageID, sender: $0.senderName.isEmpty ? $0.senderAddress : $0.senderName,
-                         subject: $0.subject, snippet: $0.snippet)
-        }
-        let choices = MailBucketDefaults.all.map { MailSortBucket(key: $0.key, description: $0.description) }
-        let result: AssistantResult<[String: String]>
-        do {
-            result = try await assistant.sortMail(items, into: choices, allowFallback: allowFallback)
-        } catch {
-            // Apple's model is off: offer Quick on a click instead.
-            needsManualSort = !allowFallback
-            return
-        }
-        needsManualSort = false
-        for (messageID, key) in result.value {
-            // The person may have moved it while the sorter ran: theirs wins.
-            guard assignment[messageID] == nil else { continue }
-            assignment[messageID] = key
-            try? store.assign(messageID, to: key, manual: false)
-        }
+    /// Flagged is offered only when Mail's store records flags.
+    public var offersFlagged: Bool { listing.flaggedCount != nil }
+
+    public func mailbox(_ url: String) -> Mailbox? {
+        listing.mailboxes.first { $0.ref.url == url }
     }
 
-    // MARK: Lists
-
-    public var messages: [MailMessageSummary] { messages(in: folder) }
-
-    public func messages(in folder: Folder) -> [MailMessageSummary] {
+    /// The sidebar's number: unread mail (every draft for Drafts, every
+    /// flagged message for Flagged), as Mail shows it.
+    public func count(in folder: Folder) -> Int {
         switch folder {
-        // Every inbox message but the ones marked Done (they are in Done).
-        case .inbox: return inbox.filter { assignment[$0.messageID] != MailBucketDefaults.doneKey }
-        case .bucket(let key):
-            let fallback = MailBucketDefaults.all.last?.key
-            return inbox.filter { (assignment[$0.messageID] ?? fallback) == key }
-        case .done: return inbox.filter { assignment[$0.messageID] == MailBucketDefaults.doneKey }
-        case .drafts: return drafts
-        case .sent: return sent
-        case .junk: return junk
-        case .trash: return trash
+        case .favorite(let kind): listing.mailboxes.filter { $0.kind == kind }.reduce(0) { $0 + $1.badgeCount }
+        case .flagged: listing.flaggedCount ?? 0
+        case .mailbox(let url): mailbox(url)?.badgeCount ?? 0
         }
     }
 
-    public func count(in folder: Folder) -> Int { messages(in: folder).count }
+    /// Unread mail in the open folder, for the list header.
+    public var unreadInFolder: Int {
+        switch folder {
+        case .favorite(let kind): listing.mailboxes.filter { $0.kind == kind }.reduce(0) { $0 + $1.unreadCount }
+        case .flagged: 0
+        case .mailbox(let url): mailbox(url)?.unreadCount ?? 0
+        }
+    }
 
     public var folderTitle: String {
         switch folder {
-        case .inbox: "Inbox"
-        case .bucket(let key): buckets.first { $0.key == key }?.name ?? key
-        case .done: "Done"
-        case .drafts: "Drafts"
-        case .sent: "Sent"
-        case .junk: "Spam"
-        case .trash: "Trash"
+        case .favorite(let kind): MailboxClassifier.standardName(kind) ?? "Mail"
+        case .flagged: "Flagged"
+        case .mailbox(let url): mailbox(url)?.name ?? "Mail"
         }
+    }
+
+    /// Where the open list comes from: "All accounts", an account, or On My Mac.
+    public var folderScope: String {
+        switch folder {
+        case .favorite, .flagged: return "All accounts"
+        case .mailbox(let url):
+            guard let mailbox = mailbox(url) else { return "" }
+            if mailbox.isLocal { return "On My Mac" }
+            return accounts.first { $0.id == mailbox.ref.accountID }?.title ?? MailAccount.unnamed
+        }
+    }
+
+    /// "Google · Inbox": where the open message is, for the reader.
+    public func location(of message: MailMessageSummary) -> String {
+        let place = message.mailbox.isLocal ? "On My Mac"
+            : accounts.first { $0.id == message.mailbox.accountID }?.title ?? MailAccount.unnamed
+        return "\(place) · \(folderTitle)"
     }
 
     public func select(_ folder: Folder) async {
         self.folder = folder
+        guard case .available = status else { return }
+        do {
+            let fresh = try await source.messages(in: selection(for: folder), limit: limit)
+            guard self.folder == folder else { return }
+            messages = fresh
+        } catch {
+            guard self.folder == folder else { return }
+            messages = []
+            errorMessage = "Mail could not be read: \(error)"
+        }
         if let first = messages.first { await open(first) } else { clearSelection() }
     }
 
-    public func rename(bucket key: String, to name: String) {
-        do { try store.rename(key: key, to: name) } catch { errorMessage = "The bucket could not be renamed." }
-        refreshBuckets()
+    private func selection(for folder: Folder) -> MailSelection {
+        switch folder {
+        case .favorite(let kind): .kinds([kind])
+        case .flagged: .flagged
+        case .mailbox(let url): .mailbox(url)
+        }
     }
 
-    /// The person moved a message (sticks), or marked it done (E).
-    public func move(_ message: MailMessageSummary, to key: String) {
-        lastMoved = (message.messageID, assignment[message.messageID])
-        assignment[message.messageID] = key
-        try? store.assign(message.messageID, to: key, manual: true)
-        if selected?.messageID == message.messageID { clearSelection() }
-    }
-
-    public func markDone(_ message: MailMessageSummary) {
-        move(message, to: MailBucketDefaults.doneKey)
-    }
-
-    /// Z: undoes the last move.
-    public func undo() {
-        guard let (messageID, previous) = lastMoved else { return }
-        lastMoved = nil
-        if let previous {
-            assignment[messageID] = previous
-            try? store.assign(messageID, to: previous, manual: true)
-        } else {
-            assignment[messageID] = nil
-            try? store.removeAssignment(messageID)
+    private func exists(_ folder: Folder) -> Bool {
+        switch folder {
+        case .favorite: true
+        case .flagged: offersFlagged
+        case .mailbox(let url): mailbox(url) != nil
         }
     }
 
@@ -316,10 +365,11 @@ public final class MailInboxModel {
 
     // MARK: Draft and send
 
-    /// Replies are offered for received mail only, not for Drafts or Sent.
+    /// Replies are offered for received mail only: not for Drafts or Sent
+    /// (where it is listed or stored), nor for Junk or Trash.
     public var canReply: Bool {
-        guard let selected else { return false }
-        return ![.drafts, .sent, .junk, .trash].contains(selected.mailbox.kind)
+        guard let selected, !selected.isOutgoing else { return false }
+        return ![selected.listedKind, selected.mailbox.kind].contains { $0 == .junk || $0 == .trash }
     }
 
     /// Who the reply goes to and from, and its subject, for the draft card.

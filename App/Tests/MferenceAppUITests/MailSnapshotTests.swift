@@ -1,31 +1,23 @@
 import MferenceAppCore
 @testable import MferenceAppUI
 import MferenceDesign
-import SwiftData
 import SwiftUI
 import Testing
 
 @Suite(.serialized) @MainActor struct MailSnapshotTests {
-    /// Kept for the whole run: a screen rendered in the shell starts its own
-    /// load (`.task`), which can outlive the test; SwiftData traps if its
-    /// container is gone by then.
-    static let container = try! AppModelContainer.inMemory()
-
     @Test func mail() async throws {
-        let container = Self.container
         let source = AppleUIFixtures.FixedMailSource(status: .available(version: "V10"), inbox: AppleUIFixtures.inbox,
                                                      bodies: AppleUIFixtures.bodies)
-        let assistant = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [
-            .success(AppleUIFixtures.eventAnswer), .success(AppleUIFixtures.sortAnswer),
-        ])
+        let assistant = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [.success(AppleUIFixtures.eventAnswer)])
         let draft = "Hi Priya, 11 works. I’ve moved it on my side. I’ll have the copy decisions written up by Tuesday so we can spend the time on the screens. See you Wednesday!"
-        let model = MailInboxModel(source: source, context: container.mainContext,
-                                   assistant: AppleModelService(primary: assistant, fallback: nil),
+        let model = MailInboxModel(source: source, assistant: AppleModelService(primary: assistant, fallback: nil),
                                    drafter: MailReplyDrafter(engine: AppleUIFixtures.FixedEngine(answer: draft)),
-                                   sender: RecordingMailSender(), broker: AppleUIFixtures.NoPromptBroker())
+                                   sender: RecordingMailSender(), broker: AppleUIFixtures.NoPromptBroker(),
+                                   mailApp: FixedMailApp())
         await model.load()
         await model.writeDraft()
-        #expect(model.count(in: .bucket("important")) == 4)
+        #expect(model.count(in: .favorite(.inbox)) == 43_330)
+        #expect(model.accountSections.map(\.account.title) == ["Google"] && model.localMailboxes.count == 1)
         #expect(model.eventCard != nil)
         #expect(model.draftState == .ready)
         for scheme in [ColorScheme.light, .dark] {
@@ -35,12 +27,22 @@ import Testing
 
         let blocked = MailInboxModel(source: AppleUIFixtures.FixedMailSource(status: .needsFullDiskAccess, inbox: [],
                                                                              bodies: [:]),
-                                     context: container.mainContext,
                                      assistant: AppleModelService(primary: assistant, fallback: nil), drafter: nil,
-                                     sender: RecordingMailSender(), broker: AppleUIFixtures.NoPromptBroker())
+                                     sender: RecordingMailSender(), broker: AppleUIFixtures.NoPromptBroker(),
+                                     mailApp: FixedMailApp())
         await blocked.load()
+
         try Snapshot.render(RootView(model: ShellModel(selection: .mail, defaults: nil), chrome: .inline)
                 .environment(blocked), name: "03-mail-access")
+
+        // Mail is not running: the sidebar says so and offers to open it.
+        let closed = MailInboxModel(source: source, assistant: AppleModelService(primary: assistant, fallback: nil),
+                                    drafter: nil, sender: RecordingMailSender(),
+                                    broker: AppleUIFixtures.NoPromptBroker(), mailApp: FixedMailApp(running: false))
+        await closed.load()
+        #expect(closed.syncState == .mailClosed)
+        try Snapshot.render(RootView(model: ShellModel(selection: .mail, defaults: nil), chrome: .inline)
+                .environment(closed), name: "03-mail-closed")
     }
 
     @Test func shellSlotBuildsWithoutServices() {

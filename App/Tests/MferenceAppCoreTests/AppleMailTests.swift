@@ -79,26 +79,6 @@ final class GatedEngine: EngineServicing, @unchecked Sendable {
     func shutdown() async {}
 }
 
-/// Sorts every message into "important" once `gate` opens.
-struct GatedSorter: AppleModelServicing {
-    var gate: ScanTestLatch
-
-    func activeModel() async -> Result<AssistantModelKind, AssistantModelError> { .success(.appleOnDevice) }
-    func title(for text: String) async throws -> AssistantResult<String> { .init(value: "", model: .appleOnDevice) }
-    func summary(of text: String) async throws -> AssistantResult<String> { .init(value: "", model: .appleOnDevice) }
-    func sortMail(_ messages: [MailSortItem], into buckets: [MailSortBucket], allowFallback: Bool) async throws
-        -> AssistantResult<[String: String]> {
-        await gate.wait()
-        return AssistantResult(value: Dictionary(uniqueKeysWithValues: messages.map { ($0.messageID, "important") }),
-                               model: .appleOnDevice)
-    }
-    func fillReceipt(from recognizedText: String) async throws -> AssistantResult<ReceiptDraft> {
-        throw AssistantModelError.unreadableAnswer
-    }
-    func suggestEvent(subject: String, body: String, received: Date, timeZone: TimeZone, allowFallback: Bool)
-        async throws -> AssistantResult<MailEventSuggestion?> { .init(value: nil, model: .appleOnDevice) }
-}
-
 @Suite struct AppleMailTests {
     @Test func readsTheSyntheticStoreNewestFirstWithoutDeletedMail() async throws {
         let fixture = try MailStoreFixture.make()
@@ -118,39 +98,149 @@ struct GatedSorter: AppleModelServicing {
         #expect(try await source.accounts().map(\.id) == [MailStoreFixture.account, MailStoreFixture.secondAccount])
     }
 
-    /// The maintainer's decision: Mail's standard mailboxes, fixed and not
-    /// renamable, with Inbox selected and listing every inbox message; the
-    /// sorted buckets and Done stay a section of their own.
-    @Test @MainActor func standardMailboxesAreFixedAndInboxComesFirst() async throws {
+    /// The sidebar is Mail's own: Favorites across accounts, then each
+    /// account's mailboxes in Mail's order, with Mail's counts. Inbox opens
+    /// first; nothing is sorted or hidden.
+    @Test @MainActor func sidebarListsMailsOwnMailboxes() async throws {
         let fixture = try MailStoreFixture.make()
         defer { fixture.remove() }
-        let container = try AppModelContainer.inMemory()
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root),
                                    assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
                                                                                                     answer: "{}"),
                                                                 fallback: nil),
-                                   drafter: nil, sender: RecordingMailSender(), broker: RecordingPermissionBroker())
+                                   drafter: nil, sender: RecordingMailSender(), broker: RecordingPermissionBroker(),
+                                   mailApp: FixedMailApp())
         await model.load()
-        #expect(model.folder == .inbox)
+        #expect(model.folder == .favorite(.inbox) && model.folderTitle == "Inbox" && model.folderScope == "All accounts")
         #expect(model.messages.map(\.messageID) == ["<review@example.com>", "<redlines@example.com>",
                                                     "<dental@example.com>"])
         #expect(model.selected?.messageID == "<review@example.com>")
-        #expect(model.messages(in: .sent).map(\.subject) == ["Re: Lisbon flights"])
-        #expect(model.messages(in: .junk).map(\.subject) == ["You won!"])
-        #expect(model.messages(in: .trash).map(\.subject) == ["Old thread"])
-        #expect(model.messages(in: .drafts).isEmpty)
-        await model.select(.junk)
-        #expect(model.folderTitle == "Spam" && !model.canReply)
-        await model.select(.trash)
-        #expect(model.folderTitle == "Trash")
+        #expect(model.count(in: .favorite(.inbox)) == 2 && model.unreadInFolder == 2)
+        #expect(model.offersFlagged && model.count(in: .flagged) == 1)
+        #expect(model.localMailboxes.isEmpty)
+        #expect(model.accountSections.map { $0.mailboxes.map(\.name) } == [["Inbox", "Sent", "Trash"], ["Junk"]])
+        #expect(model.accountSections.map(\.account.title) == ["me@example.com", MailAccount.unnamed])
 
-        // Renaming a bucket never renames a mailbox; Done leaves the Inbox.
-        model.rename(bucket: "important", to: "Needs me")
-        await model.select(.inbox)
-        #expect(model.folderTitle == "Inbox")
-        let first = try #require(model.messages.first)
-        model.markDone(first)
-        #expect(model.count(in: .inbox) == 2 && model.count(in: .done) == 1)
+        await model.select(.favorite(.sent))
+        #expect(model.messages.map(\.subject) == ["Re: Lisbon flights"])
+        #expect(model.messages.first?.counterpart == "Lena Fischer" && !model.canReply)
+        await model.select(.flagged)
+        #expect(model.folderTitle == "Flagged" && model.messages.map(\.messageID) == ["<redlines@example.com>"])
+        #expect(model.messages.first?.isFlagged == true && model.canReply)
+        let junk = try #require(model.accountSections.last?.mailboxes.first)
+        await model.select(.mailbox(junk.id))
+        #expect(model.folderTitle == "Junk" && model.folderScope == MailAccount.unnamed)
+        #expect(model.messages.map(\.subject) == ["You won!"] && !model.canReply)
+        await model.select(.favorite(.drafts))
+        #expect(model.messages.isEmpty && model.selected == nil)
+    }
+
+    /// Gmail stores each message once, in All Mail, and labels it into
+    /// Inbox, Sent and Important: those lists come from the labels. Its
+    /// standard mailboxes are the "[Gmail]" ones; a folder of the person's
+    /// own called "Drafts" is not Drafts.
+    @Test func gmailLabelsFillInboxSentAndImportant() async throws {
+        let fixture = try MailStoreFixture.make(gmail: true)
+        defer { fixture.remove() }
+        let source = AppleMailSource(mailRoot: fixture.root)
+        let inbox = try await source.messages(in: [.inbox], limit: 10)
+        #expect(inbox.map(\.messageID) == ["<g-inbox@example.com>", "<review@example.com>", "<redlines@example.com>",
+                                           "<dental@example.com>"])
+        #expect(inbox[0].mailbox.url == MailStoreFixture.allMail && inbox[0].listedKind == .inbox)
+        #expect(inbox[0].isFlagged && !inbox[0].isOutgoing)
+        #expect(try await source.body(of: inbox[0]).text == "Noon at the usual place?")
+
+        let sent = try await source.messages(in: [.sent], limit: 10)
+        #expect(sent.map(\.messageID) == ["<g-sent@example.com>", "<sent@example.com>"])
+        #expect(sent[0].isOutgoing && sent[0].recipients.map(\.display) == ["Lena Fischer", "tom@example.com"])
+        #expect(sent[0].counterpart == "Lena Fischer, +1")
+        #expect(try await source.messages(in: [.important], limit: 10).map(\.messageID) == ["<g-inbox@example.com>"])
+        #expect(try await source.messages(in: [.drafts], limit: 10).isEmpty)
+        // Opened from Archive (All Mail), the sent message is still the
+        // person's: recipients shown, no reply offered.
+        let archive = try await source.messages(in: [.archive], limit: 10)
+        #expect(archive.count == 4)
+        let sentInArchive = try #require(archive.first { $0.messageID == "<g-sent@example.com>" })
+        #expect(sentInArchive.isOutgoing && sentInArchive.counterpart == "Lena Fischer, +1")
+        #expect(archive.filter(\.isOutgoing).map(\.messageID) == ["<g-sent@example.com>"])
+
+        let listing = try await source.mailboxes()
+        let gmail = listing.mailboxes.filter { $0.ref.accountID == MailStoreFixture.gmailAccount }
+        #expect(gmail.map(\.name) == ["Important", "Inbox", "Sent", "Archive", "archinve", "Drafts"])
+        #expect(gmail.map(\.kind) == [.important, .inbox, .sent, .archive, .other, .other])
+        let counts = Dictionary(uniqueKeysWithValues: gmail.map { ($0.name, ($0.unreadCount, $0.totalCount)) })
+        #expect(counts["Inbox"]! == (1, 1) && counts["Sent"]! == (0, 1) && counts["Archive"]! == (2, 4))
+        #expect(counts["Drafts"]! == (1, 1) && counts["archinve"]! == (0, 0))
+        #expect(listing.flaggedCount == 2)
+        let folder = try #require(gmail.first { $0.name == "Drafts" })
+        #expect(try await source.messages(in: .mailbox(folder.id), limit: 10).map(\.messageID)
+                == ["<g-label@example.com>"])
+    }
+
+    @Test func mailboxClassifierFollowsMailsSidebar() {
+        let rows: [(id: Int64, url: String)] = [
+            (1, "imap://A/Sent%20Messages"), (2, "imap://A/INBOX"), (3, "imap://A/Sent"), (4, "imap://A/Zeta"),
+            (5, "imap://A/alpha"), (6, "local:///Send%20Later"), (7, "imap://B/%5BGoogle%20Mail%5D/Bin"),
+            (8, "imap://B/%5BGoogle%20Mail%5D"), (9, "imap://B/Work/Clients"), (10, "imap://A"),
+        ]
+        let classified = MailboxClassifier.classify(rows).map(\.mailbox)
+        #expect(classified.map(\.name) == ["Inbox", "Sent", "alpha", "Sent", "Zeta", "Send Later", "Trash",
+                                           "Work / Clients"])
+        #expect(classified.map(\.kind) == [.inbox, .sent, .other, .other, .other, .other, .trash, .other])
+        #expect(classified[5].isLocal && !classified[0].isLocal)
+        #expect(Mailbox(ref: MailboxRef(url: "imap://A/Drafts"), kind: .drafts, name: "Drafts", unreadCount: 0,
+                        totalCount: 6).badgeCount == 6)
+    }
+
+    /// While the screen is shown it follows Mail: a change Mail saves is
+    /// read within one poll, the folder and open message stay, and the
+    /// sidebar says when Mail is closed.
+    @Test @MainActor func followsMailAsItSavesChanges() async throws {
+        let inbox = MailboxRef(url: "imap://A/INBOX")
+        func message(_ id: String, minutes: Double) -> MailMessageSummary {
+            MailMessageSummary(rowID: 1, messageID: id, senderName: "Ana", senderAddress: "ana@example.com",
+                               subject: id, snippet: "", date: MailStoreFixture.received.addingTimeInterval(minutes * 60),
+                               isRead: false, mailbox: inbox)
+        }
+        let source = InMemoryMailSource(messages: [message("<a>", minutes: 0)])
+        let refreshed = MailStoreFixture.received
+        let model = MailInboxModel(source: source,
+                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+                                                                                                    answer: "{}"),
+                                                                fallback: nil),
+                                   drafter: nil, sender: RecordingMailSender(), broker: RecordingPermissionBroker(),
+                                   mailApp: FixedMailApp(running: false), pollInterval: .milliseconds(10),
+                                   now: { refreshed })
+        await model.load()
+        #expect(model.messages.map(\.messageID) == ["<a>"] && model.selected?.messageID == "<a>")
+        #expect(model.syncState == .mailClosed && model.lastRefreshed == refreshed)
+
+        await source.setMessages([message("<a>", minutes: 0), message("<b>", minutes: 5)])
+        let watching = Task { await model.watch() }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while model.messages.count < 2, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        watching.cancel()
+        await watching.value
+        #expect(model.messages.map(\.messageID) == ["<b>", "<a>"])
+        #expect(model.selected?.messageID == "<a>")
+        #expect(model.count(in: .favorite(.inbox)) == 2)
+    }
+
+    /// Mail's own writes change the token the screen polls.
+    @Test func changeTokenMovesWhenMailSaves() async throws {
+        let fixture = try MailStoreFixture.make()
+        defer { fixture.remove() }
+        let source = AppleMailSource(mailRoot: fixture.root)
+        let before = try #require(await source.changeToken())
+        let writer = try MailStoreFixture.WALWriter(index: fixture.root.appending(path: "V10/MailData/Envelope Index"))
+        try writer.insertInboxMessage(rowID: 900, messageID: "<fresh@example.com>", subject: "New")
+        let after = try #require(await source.changeToken())
+        #expect(before != after)
+        await source.reload()
+        #expect(try await source.messages(in: [.inbox], limit: 1).first?.subject == "New")
+        writer.close()
+        #expect(await AppleMailSource(mailRoot: URL.temporaryDirectory.appending(path: "none-\(UUID())")).changeToken()
+                == nil)
     }
 
     @Test func mailboxKindsCoverCommonProviderNames() {
@@ -190,27 +280,6 @@ struct GatedSorter: AppleModelServicing {
         let source = AppleMailSource(mailRoot: fixture.root)
         #expect(try await source.messages(in: [.sent], limit: 50).map(\.subject) == ["Re: Lisbon flights"])
         #expect(try await source.messages(in: [.inbox], limit: 10).count == 10)
-    }
-
-    @Test @MainActor func aMoveDuringSortingSticks() async throws {
-        let fixture = try MailStoreFixture.make()
-        defer { fixture.remove() }
-        let container = try AppModelContainer.inMemory()
-        let gate = ScanTestLatch()
-        let sorter = GatedSorter(gate: gate)
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
-                                   assistant: sorter, drafter: nil, sender: RecordingMailSender(),
-                                   broker: RecordingPermissionBroker())
-        let loading = Task { await model.load() }
-        let deadline = ContinuousClock.now + .seconds(10)
-        while !model.isSorting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
-        try #require(model.isSorting)
-        let review = try #require(model.messages(in: .bucket("other")).first { $0.messageID == "<review@example.com>" })
-        model.markDone(review)
-        await gate.open()
-        await loading.value
-        #expect(model.count(in: .done) == 1)
-        #expect(model.messages(in: .bucket("important")).allSatisfy { $0.messageID != "<review@example.com>" })
     }
 
     /// Mail's live index, write-ahead log and shared memory are only ever
@@ -287,12 +356,10 @@ struct GatedSorter: AppleModelServicing {
     @Test @MainActor func sendIsOffWhileARewriteRunsAndForDraftsOrSent() async throws {
         let fixture = try MailStoreFixture.make()
         defer { fixture.remove() }
-        let container = try AppModelContainer.inMemory()
         let gate = ScanTestLatch()
         let engine = GatedEngine(gate: gate, answer: "A shorter reply.")
         let sender = RecordingMailSender()
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
-                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
                                                                                                     answer: "{}"),
                                                                 fallback: nil),
                                    drafter: MailReplyDrafter(engine: engine), sender: sender,
@@ -313,7 +380,7 @@ struct GatedSorter: AppleModelServicing {
         #expect(await sender.sent.count == 1)
         #expect(!model.canSend)
 
-        await model.select(.sent)
+        await model.select(.favorite(.sent))
         #expect(model.selected?.mailbox.kind == .sent)
         #expect(!model.canReply && model.replyDraft == nil)
     }
@@ -321,11 +388,9 @@ struct GatedSorter: AppleModelServicing {
     @Test @MainActor func aSendFinishingAfterAnotherMessageOpensLeavesThatOneAlone() async throws {
         let fixture = try MailStoreFixture.make()
         defer { fixture.remove() }
-        let container = try AppModelContainer.inMemory()
         let gate = ScanTestLatch()
         let sender = GatedSender(gate: gate)
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
-                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
                                                                                                     answer: "{}"),
                                                                 fallback: nil),
                                    drafter: nil, sender: sender, broker: RecordingPermissionBroker())
@@ -335,7 +400,7 @@ struct GatedSorter: AppleModelServicing {
         let sending = Task { await model.send() }
         let deadline = ContinuousClock.now + .seconds(10)
         while model.draftState != .sending, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
-        let other = try #require(model.messages(in: .bucket("other")).first { $0.messageID != first.messageID })
+        let other = try #require(model.messages.first { $0.messageID != first.messageID })
         await model.open(other)
         #expect(model.draftState == .idle)
         // Back to the first while its reply is still sending: it says so and
@@ -354,21 +419,19 @@ struct GatedSorter: AppleModelServicing {
         #expect(model.draftState == .sent)
     }
 
-    @Test @MainActor func backgroundSortingUsesAppleOnlyAndOffersQuick() async throws {
+    /// Loading Mail asks no model to sort it: Quick is never loaded over
+    /// the chat model just by opening the screen.
+    @Test @MainActor func loadingAsksNoModelToSortMail() async throws {
         let fixture = try MailStoreFixture.make()
         defer { fixture.remove() }
-        let container = try AppModelContainer.inMemory()
         let apple = ScriptedAssistantTextModel(kind: .appleOnDevice, availability: .unavailable(reason: "off"), answer: "")
-        let quick = ScriptedAssistantTextModel(kind: .quick, answers: [.success(#"{"1": "important", "2": "reading", "3": "other"}"#)])
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
+        let quick = ScriptedAssistantTextModel(kind: .quick, answer: "{}")
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root),
                                    assistant: AppleModelService(primary: apple, fallback: quick), drafter: nil,
                                    sender: RecordingMailSender(), broker: RecordingPermissionBroker())
         await model.load()
-        #expect(model.needsManualSort)
-        #expect(quick.requests.isEmpty)  // opening the first message asks nothing of Quick either
-        await model.sortWithQuick()
-        #expect(!model.needsManualSort)
-        #expect(model.count(in: .bucket("important")) == 1)
+        #expect(model.messages.count == 3)
+        #expect(quick.requests.isEmpty)
     }
 
     @Test func bodiesComeFromEMLXAsTextWithTrackersCounted() async throws {
@@ -445,46 +508,25 @@ struct GatedSorter: AppleModelServicing {
         #expect(MailMessageParser.decodeHeader("=?UTF-8?Q?Caf=C3=A9?= =?UTF-8?Q?_ouvert?=") == "Café ouvert")
     }
 
-    @Test @MainActor func bucketsAreCreatedRenamedAndAssignmentsStick() throws {
-        let container = try AppModelContainer.inMemory()
-        let store = MailBucketStore(context: container.mainContext)
-        #expect(try store.buckets().map(\.name) == ["Important", "Calendar", "Reading", "Other"])
-        try store.rename(key: "reading", to: "  Later  ")
-        try store.rename(key: "other", to: "   ")
-        #expect(try store.buckets().map(\.name) == ["Important", "Calendar", "Later", "Other"])
-
-        try store.assign("<a@example.com>", to: "other", manual: false)
-        try store.assign("<a@example.com>", to: "important", manual: true)
-        try store.assign("<a@example.com>", to: "reading", manual: false)  // sorter cannot undo a person's move
-        #expect(try store.assignments(for: ["<a@example.com>"])["<a@example.com>"]?.bucketKey == "important")
-        try store.removeAssignment("<a@example.com>")
-        #expect(try store.assignments(for: ["<a@example.com>"]).isEmpty)
-    }
-
-    @Test @MainActor func inboxSortsReadsProposesDraftsAndSendsOnlyOnClick() async throws {
+    @Test @MainActor func inboxReadsProposesDraftsAndSendsOnlyOnClick() async throws {
         let fixture = try MailStoreFixture.make()
         defer { fixture.remove() }
-        let container = try AppModelContainer.inMemory()
-        // The newest message opens (event card) before sorting runs.
+        // The newest message opens with its event card.
         let sorter = ScriptedAssistantTextModel(kind: .appleOnDevice, answers: [
             .success(#"{"title": "Design review", "start": "2026-09-16T11:00", "end": "2026-09-16T11:45"}"#),
-            .success(#"{"1": "important", "2": "important", "3": "calendar"}"#),
         ])
         let engine = AppleModelServiceTests.quickEngine(answer: "Hi Priya, 11 works. See you Wednesday!")
         let sender = RecordingMailSender()
         var proposed: [ProposedEvent] = []
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), context: container.mainContext,
-                                   assistant: AppleModelService(primary: sorter, fallback: nil),
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: fixture.root), assistant: AppleModelService(primary: sorter, fallback: nil),
                                    drafter: MailReplyDrafter(engine: engine), sender: sender,
                                    broker: RecordingPermissionBroker(),
                                    timeZone: TimeZone(identifier: "UTC")!,
                                    onEventSuggested: { proposed.append($0) })
         await model.load()
         #expect(model.status == .available(version: "V10"))
-        #expect(model.count(in: .bucket("important")) == 2)
-        #expect(model.count(in: .bucket("calendar")) == 1)
-        #expect(model.folder == .inbox && model.folderTitle == "Inbox")
-        #expect(model.count(in: .inbox) == 3)
+        #expect(model.folder == .favorite(.inbox) && model.folderTitle == "Inbox")
+        #expect(model.messages.count == 3)
         #expect(model.selected?.messageID == "<review@example.com>")
         #expect(model.body?.trackersRemoved == 2)
         let card = try #require(model.eventCard)
@@ -511,31 +553,22 @@ struct GatedSorter: AppleModelServicing {
         #expect(proposed.map(\.title) == ["Design review"])
         #expect(model.eventCard == nil)
 
-        let review = try #require(model.messages.first)
-        model.markDone(review)
-        #expect(model.count(in: .done) == 1)
-        #expect(model.count(in: .bucket("important")) == 1)
-        model.undo()
-        #expect(model.count(in: .done) == 0)
-        #expect(model.count(in: .bucket("important")) == 2)
-
-        // Assignments persist: a second load does not ask the sorter again.
+        // Loading again keeps the open message and asks the model nothing.
         let before = sorter.requests.count
         await model.load()
-        #expect(sorter.requests.count == before + 1)  // only the event card of the reopened message
+        #expect(model.selected?.messageID == "<review@example.com>")
+        #expect(sorter.requests.count == before)
         await engine.shutdown()
     }
 
     @Test @MainActor func missingAccessAsksThroughTheBroker() async throws {
-        let container = try AppModelContainer.inMemory()
         let broker = RecordingPermissionBroker([.fullDiskAccess: .needsSystemSettings])
         let unreadable = try MailStoreFixture.make()
         defer { unreadable.remove() }
         let index = unreadable.root.appending(path: "V10/MailData/Envelope Index")
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: index.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: index.path) }
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: unreadable.root), context: container.mainContext,
-                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .quick, answer: "{}"),
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: unreadable.root), assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .quick, answer: "{}"),
                                                                 fallback: nil),
                                    drafter: nil, sender: RecordingMailSender(), broker: broker)
         await model.load()
@@ -547,11 +580,9 @@ struct GatedSorter: AppleModelServicing {
     }
 
     @Test @MainActor func composeSendsOnlyAValidMessage() async throws {
-        let container = try AppModelContainer.inMemory()
         let sender = RecordingMailSender()
         let empty = URL.temporaryDirectory.appending(path: "no-mail-\(UUID().uuidString)")
-        let model = MailInboxModel(source: AppleMailSource(mailRoot: empty), context: container.mainContext,
-                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+        let model = MailInboxModel(source: AppleMailSource(mailRoot: empty), assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
                                                                                                     answer: "{}"),
                                                                 fallback: nil),
                                    drafter: nil, sender: sender, broker: RecordingPermissionBroker())
@@ -577,11 +608,9 @@ struct GatedSorter: AppleModelServicing {
     /// re-checks when the app becomes active, and after System Settings was
     /// opened and access still fails, it offers Quit and Reopen.
     @Test @MainActor func fullDiskAccessIsRecheckedAndOffersARelaunch() async throws {
-        let container = try AppModelContainer.inMemory()
         let source = InMemoryMailSource(status: .needsFullDiskAccess)
         let broker = RecordingPermissionBroker([.fullDiskAccess: .needsSystemSettings])
-        let model = MailInboxModel(source: source, context: container.mainContext,
-                                   assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
+        let model = MailInboxModel(source: source, assistant: AppleModelService(primary: ScriptedAssistantTextModel(kind: .appleOnDevice,
                                                                                                     answer: "{}"),
                                                                 fallback: nil),
                                    drafter: nil, sender: RecordingMailSender(), broker: broker)
