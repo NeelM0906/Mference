@@ -41,51 +41,41 @@ struct ReferenceGoldenTests {
         var prompt: String
         var promptTokens: Int
         var positions: Int
+        var expectedPositions: Int
         var agreements: Int
         var greedyAgreement: Double
         var meanKL: Double
         var p99KL: Double
         var maxKL: Double
-        var firstDisagreement: Int?
+        var disagreements: [Int]
+        var disagreementMargins: [Double]
         var seconds: Double
     }
 
-    /// KL(golden ‖ ours) in F64 and our argmax (ties to the lowest id).
-    static func klAndArgmax(golden: UnsafeBufferPointer<Float>, ours: UnsafeBufferPointer<Float>) -> (Double, Int) {
-        var gMax = -Double.infinity, oMax = -Double.infinity
-        var arg = 0
-        for i in 0..<ours.count {
-            gMax = max(gMax, Double(golden[i]))
-            if Double(ours[i]) > oMax { oMax = Double(ours[i]); arg = i }
-        }
-        var gSum = 0.0, oSum = 0.0
-        for i in 0..<ours.count {
-            gSum += exp(Double(golden[i]) - gMax)
-            oSum += exp(Double(ours[i]) - oMax)
-        }
-        let gLog = log(gSum), oLog = log(oSum)
-        var kl = 0.0
-        for i in 0..<ours.count {
-            let lg = Double(golden[i]) - gMax - gLog
-            let lo = Double(ours[i]) - oMax - oLog
-            kl += exp(lg) * (lg - lo)
-        }
-        return (max(kl, 0), arg)
+    struct D1Summary: Codable {
+        var head: String
+        var positions: Int
+        var expectedPositions: Int
+        var agreements: Int
+        var greedyAgreement: Double
+        var meanKL: Double
+        var p99KL: Double
+        var maxKL: Double
+        var bar: String
+        var failures: [String]
+        var passed: Bool
     }
 
-    /// Proposed D1 epsilon (nats per token) until the harness's parity PR.
-    static let maxKLBar = 0.01
-    static let meanKLBar = 0.001
-
+    /// D1 scored by the harness (`ParityHarness`, `ParityTolerances.d1`):
+    /// teacher-forced, greedy agreement over every golden position and
+    /// per-token KL(golden ‖ reference) max and mean.
     @Test(.enabled(if: enabled))
     func teacherForcedD1() throws {
         let ctx = try MetalContext()
         let pack = URL(fileURLWithPath: try #require(Self.env["MFERENCE_NATIVE_QUICK_PACK"]))
         let chunk = Int(Self.env["MFERENCE_NATIVE_PREFILL_CHUNK"] ?? "") ?? 256
         var reports: [PromptReport] = []
-        var skipped: [String] = []
-        var agree = 0, total = 0
-        var allKL: [Double] = []
+        var results: [ParityHarness.LogitResult] = []
         for golden in try Self.prompts() {
             // Every model and KV arena is freed before the next prompt: buffers
             // from makeBuffer are autoreleased and would otherwise accumulate.
@@ -93,91 +83,64 @@ struct ReferenceGoldenTests {
                 let start = Date()
                 let prompt = golden.promptTokens
                 let generated = golden.generatedTokens
-                let argmax = golden.manifest.argmaxTokens ?? generated
-                guard !generated.isEmpty else {
-                    print("reference D1 \(golden.id): no generated tokens, no positions to score")
-                    skipped.append(golden.id)
-                    return
-                }
-                let logits = try golden.logits()
-                #expect(logits.rows == generated.count && logits.positions.first == prompt.count - 1)
                 let positions = prompt.count + generated.count
                 let model = try ReferenceQuickTests.makeModel(ctx: ctx, packURL: pack,
                                                               context: (positions + 63) / 64 * 64 + 64, chunk: chunk)
-                var kls: [Double] = []
-                var agreements = 0
-                var firstMiss: Int?
-                func compare(_ ours: Native.TensorRef, row: Int) {
-                    let p = ours.buffer.contents().advanced(by: ours.offset).assumingMemoryBound(to: Float.self)
-                    let (kl, arg) = logits.withRow(row) {
-                        Self.klAndArgmax(golden: $0, ours: UnsafeBufferPointer(start: p, count: ours.cols))
-                    }
-                    kls.append(kl)
-                    if Int32(arg) == argmax[row] { agreements += 1 } else if firstMiss == nil { firstMiss = row }
-                }
                 func step(_ kind: Native.StepKind, _ tokens: [Int32], at position: Int,
                           logits: Native.LogitRows) throws -> Native.TensorRef? {
                     try model.kv.beginStep(rows: tokens.count, kind: kind)
                     var out: Native.TensorRef?
                     try RefTest.run(ctx) { enc in
-                        out = try model.encodeStep(Native.StepPlan(kind: kind, startPosition: position, rows: tokens.count,
-                                                                   input: .host(tokens), logits: logits), encoder: enc)
+                        out = try model.encodeStep(Native.StepPlan(kind: kind, startPosition: position,
+                                                                   rows: tokens.count, input: .host(tokens),
+                                                                   logits: logits), encoder: enc)
                     }
                     return out
                 }
                 var position = 0
-                while position < prompt.count {
-                    let n = min(chunk, prompt.count - position)
-                    let last = position + n == prompt.count
-                    let out = try step(.prefill, Array(prompt[position ..< position + n]), at: position,
-                                       logits: last ? .last : .none)
-                    if last { compare(try #require(out), row: 0) }
-                    position += n
+                // Row g: logits after the prompt and the first g golden tokens.
+                let result = try ParityHarness.compareLogits(golden: golden) { g in
+                    var out: Native.TensorRef?
+                    if g == 0 {
+                        while position < prompt.count {
+                            let n = min(chunk, prompt.count - position)
+                            let last = position + n == prompt.count
+                            out = try step(.prefill, Array(prompt[position ..< position + n]), at: position,
+                                           logits: last ? .last : .none)
+                            position += n
+                        }
+                    } else {
+                        out = try step(.decode, [generated[g - 1]], at: position, logits: .last)
+                        position += 1
+                    }
+                    return out.map(RefTest.floats)
                 }
-                for g in 1 ..< generated.count {
-                    compare(try #require(try step(.decode, [generated[g - 1]], at: position, logits: .last)), row: g)
-                    position += 1
-                }
-                let sorted = kls.sorted()
+                let d = ParityMetrics.Distribution(result.kld)
                 let report = PromptReport(
-                    prompt: golden.id, promptTokens: prompt.count, positions: kls.count, agreements: agreements,
-                    greedyAgreement: Double(agreements) / Double(kls.count),
-                    meanKL: kls.reduce(0, +) / Double(kls.count),
-                    p99KL: sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.99))], maxKL: sorted.last ?? 0,
-                    firstDisagreement: firstMiss, seconds: Date().timeIntervalSince(start))
-                print("reference D1 \(report.prompt): agreement \(agreements)/\(kls.count) mean KL \(report.meanKL) "
-                      + "p99 KL \(report.p99KL) max KL \(report.maxKL) first miss \(String(describing: firstMiss)) "
-                      + "(\(Int(report.seconds)) s)")
+                    prompt: golden.id, promptTokens: prompt.count, positions: result.positions,
+                    expectedPositions: result.expectedPositions, agreements: result.agreements,
+                    greedyAgreement: result.agreement, meanKL: d.mean, p99KL: d.p99, maxKL: d.max,
+                    disagreements: result.disagreements, disagreementMargins: result.disagreementMargins,
+                    seconds: Date().timeIntervalSince(start))
+                print("reference D1 \(golden.id): agreement \(result.agreements)/\(result.positions) mean KL "
+                      + "\(d.mean) p99 KL \(d.p99) max KL \(d.max) disagreements \(result.disagreements) "
+                      + "margins \(result.disagreementMargins) (\(Int(report.seconds)) s)")
                 reports.append(report)
+                results.append(result)
                 try Self.writeReport(reports, name: "d1-teacher-forced.json")
-                agree += agreements
-                total += kls.count
-                allKL += kls
             }
         }
-        let overall = Double(agree) / Double(max(total, 1))
-        let meanKL = allKL.reduce(0, +) / Double(max(allKL.count, 1))
-        let maxKL = allKL.max() ?? 0
-        print("reference D1 overall: greedy agreement \(agree)/\(total) = \(overall), "
-              + "per-token KL mean \(meanKL) max \(maxKL)")
-        struct Summary: Codable {
-            var positions: Int
-            var agreements: Int
-            var greedyAgreement: Double
-            var meanKL: Double
-            var maxKL: Double
-            var skippedPrompts: [String]
-            var bar: String
-        }
-        try Self.writeReport(Summary(positions: total, agreements: agree, greedyAgreement: overall, meanKL: meanKL,
-                                     maxKL: maxKL, skippedPrompts: skipped,
-                                     bar: "agreement >= 0.99, per-token KL max <= \(Self.maxKLBar), mean <= \(Self.meanKLBar)"),
-                             name: "d1-summary.json")
-        #expect(total > 0)
-        #expect(overall >= 0.99)
-        // H's proposed epsilon until the parity harness sets it (docs/NATIVE_PARITY.md).
-        #expect(maxKL <= Self.maxKLBar, "per-token KL max \(maxKL)")
-        #expect(meanKL <= Self.meanKLBar, "per-token KL mean \(meanKL)")
+        let report = ParityHarness.LogitReport(results: results)
+        let verdict = report.verdict(.d1)
+        let d = report.kld
+        print(report.table(title: "reference vs quick-v1/metal"))
+        try Self.writeReport(D1Summary(
+            head: Self.env["MFERENCE_NATIVE_HEAD"] ?? "", positions: report.positions,
+            expectedPositions: report.expectedPositions, agreements: report.agreements,
+            greedyAgreement: report.agreement, meanKL: d.mean, p99KL: d.p99, maxKL: d.max,
+            bar: "ParityTolerances.d1: agreement >= 0.99, per-token KL max <= 0.01, mean <= 0.001",
+            failures: verdict.failures, passed: verdict.passed), name: "d1-summary.json")
+        #expect(verdict.passed, "\(verdict.failures)")
     }
 
     // MARK: Per-component goldens
@@ -186,21 +149,22 @@ struct ReferenceGoldenTests {
         var prompt: String
         var component: String
         var layer: Int
+        var toleranceClass: String
+        var relativeL2: Double
         var maxAbsError: Double
-        var maxRelativeError: Double
         var meanAbsError: Double
     }
 
-    static func errors(_ ours: [Float], _ golden: [Float]) -> (Double, Double, Double) {
-        var maxAbs = 0.0, sumAbs = 0.0, scale = 0.0
-        for (a, b) in zip(ours, golden) {
-            let e = abs(Double(a) - Double(b))
-            maxAbs = max(maxAbs, e)
-            sumAbs += e
-            scale = max(scale, abs(Double(b)))
-        }
-        return (maxAbs, maxAbs / max(scale, 1e-12), sumAbs / Double(max(ours.count, 1)))
-    }
+    /// The golden graph tensor each component's output is compared with,
+    /// which picks its `OpToleranceClass`.
+    static let goldenBase: [String: String] = [
+        "get_rows": "model.input_embed", "rms_norm": "attn_norm", "swiglu": "ffn_swiglu",
+        "gemm.attn_q": "Qcur_full", "gemm.attn_k": "Kcur", "gemm.attn_v": "Vcur", "attention": "attn_gated",
+        "gemm.attn_output": "attn_output", "gemm.attn_qkv": "linear_attn_qkv_mixed", "gemm.attn_gate": "z",
+        "gemm.ssm_alpha": "alpha", "gemm.ssm_beta": "beta", "gdn": "final_output", "gdn.conv_state": "conv_states",
+        "gdn.ssm_state": "state_predelta", "gemm.ssm_out": "linear_attn_out", "gemm.ffn_gate": "ffn_gate",
+        "gemm.ffn_up": "ffn_up", "gemm.ffn_down": "ffn_out",
+    ]
 
     /// Each reference component fed the golden's own inputs at the op
     /// boundaries (`GoldenTapMap`), compared with the golden's outputs, on
@@ -219,6 +183,7 @@ struct ReferenceGoldenTests {
         var reports: [ComponentReport] = []
         var worst: [String: Double] = [:]
         var notFullyCaptured: [String] = []
+        var failures: [String] = []
         for golden in try Self.prompts() {
             let embed = try golden.tensor(for: .embedding, config: c)
             let rows = embed.rows
@@ -232,10 +197,17 @@ struct ReferenceGoldenTests {
                 func load(_ b: GoldenTapMap.Boundary, _ layer: Int) throws -> [Float] { all(try golden.tensor(b, layer: layer)) }
                 func tap(_ p: Native.TapPoint) throws -> [Float] { all(try golden.tensor(for: p, config: c)) }
                 func record(_ component: String, _ layer: Int, _ ours: [Float], _ want: [Float]) {
-                    let (a, r, m) = Self.errors(ours, want)
+                    var stats = ParityMetrics.ErrorStats()
+                    stats.add(golden: want, candidate: ours)
+                    let cls = OpToleranceClass.of(base: Self.goldenBase[component] ?? component)
                     reports.append(ComponentReport(prompt: golden.id, component: component, layer: layer,
-                                                   maxAbsError: a, maxRelativeError: r, meanAbsError: m))
-                    worst[component] = max(worst[component] ?? 0, r)
+                                                   toleranceClass: cls.rawValue, relativeL2: stats.relativeL2,
+                                                   maxAbsError: stats.maxAbs, meanAbsError: stats.meanAbs))
+                    worst[component] = max(worst[component] ?? 0, stats.relativeL2)
+                    if let failure = ParityHarness.localVerdict(stats, class: cls,
+                                                                name: "\(golden.id) \(component) layer \(layer)") {
+                        failures.append(failure)
+                    }
                 }
                 func zeros(_ n: Int, _ cols: Int) -> Native.TensorRef {
                     RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: n * cols), rows: n, cols: cols)
@@ -328,7 +300,13 @@ struct ReferenceGoldenTests {
                                 return RefTest.floats(out)
                             }
                             // State before a captured decode step = state after its position's rows.
-                            for position in try golden.tensor(.gdnState, layer: layer).positions where position <= rows {
+                            // A capture with no state steps has no state tensors:
+                            // skip only those comparisons (coverage is asserted
+                            // across the prompt set below).
+                            let stateRef = GoldenTapMap.graphTensor(.gdnState, layer: layer)
+                            let statePositions = golden.entry(named: stateRef.name, occurrence: stateRef.occurrence) == nil
+                                ? [] : try golden.tensor(.gdnState, layer: layer).positions
+                            for position in statePositions where position <= rows {
                                 _ = try runGDN(position)
                                 let layout = kv.recurrentLayout
                                 let base = banks.output.buffer.contents().advanced(by: banks.output.offset)
@@ -369,7 +347,7 @@ struct ReferenceGoldenTests {
             }
         }
         for (component, value) in worst.sorted(by: { $0.key < $1.key }) {
-            print("reference component worst relative error \(component): \(value)")
+            print("reference component worst relative L2 \(component): \(value)")
         }
         try Self.writeReport(reports, name: "components.json")
         print("reference components: prompts not captured from position 0 (skipped): \(notFullyCaptured)")
@@ -389,6 +367,8 @@ struct ReferenceGoldenTests {
             #expect(covered[component] == layers, "\(component) covered \(covered[component].map { $0.sorted() } ?? [])")
         }
         #expect(!reports.isEmpty)
-        for (component, value) in worst { #expect(value < 2e-2, "\(component) worst relative error \(value)") }
+        // Each component within its class's local relative-L2 bound
+        // (ParityHarness.localVerdict, docs/NATIVE_PARITY.md).
+        #expect(failures.isEmpty, "\(failures)")
     }
 }

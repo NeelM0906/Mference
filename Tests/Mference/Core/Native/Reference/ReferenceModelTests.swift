@@ -340,10 +340,19 @@ struct ReferenceModelTests {
         #expect(next.stopReason == .maxTokens && next.tokens.count == 2)
     }
 
+    /// Lets the test read the store after the model was sent to the scheduler
+    /// (read only once the scheduler's job has finished).
+    final class StoreProbe: @unchecked Sendable {
+        var kv: (any Native.KVStore)?
+    }
+
     /// A model whose encode throws on the first decode step.
     final class FailingDecode: Native.ForwardModel {
         let inner: Native.ReferenceForwardModel
-        init(_ inner: Native.ReferenceForwardModel) { self.inner = inner }
+        init(_ inner: Native.ReferenceForwardModel, probe: StoreProbe) {
+            self.inner = inner
+            probe.kv = inner.kv
+        }
         var config: Native.Qwen35Config { inner.config }
         var kv: any Native.KVStore { inner.kv }
         var maxPrefillChunk: Int { inner.maxPrefillChunk }
@@ -361,10 +370,9 @@ struct ReferenceModelTests {
     @Test func aFailedEncodeUndoesTheStep() async throws {
         let fx = try Self.fixture()
         defer { try? FileManager.default.removeItem(at: fx.dir) }
-        let inner = try fx.model(chunk: 8)
-        nonisolated(unsafe) let kv = inner.kv
+        let probe = StoreProbe()
         let scheduler = try Native.ReferenceStepSchedulerFactory().make(
-            model: FailingDecode(inner), sampler: try Native.ReferenceSampler(context: nil),
+            model: FailingDecode(try fx.model(chunk: 8), probe: probe), sampler: try Native.ReferenceSampler(context: nil),
             strategy: Native.ReferencePlainDecoding(), queue: fx.ctx.queue)
         let prompt: [Int32] = [262, 104, 101, 108]
         do {
@@ -373,7 +381,7 @@ struct ReferenceModelTests {
                 prefillChunk: 8)) { _ in }
             Issue.record("the injected encode failure did not surface")
         } catch Native.NativeError.invalidShape {}
-        #expect(kv.length == prompt.count)
+        #expect(probe.kv?.length == prompt.count)
     }
 
     @Test func verifyStepsNeedVerifyRows() throws {

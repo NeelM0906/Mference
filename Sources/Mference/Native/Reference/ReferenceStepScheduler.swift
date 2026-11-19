@@ -34,7 +34,9 @@ extension Native {
                     }
                     let next = state.work.removeFirst()
                     state.condition.unlock()
-                    next()
+                    // A long-lived thread never drains its implicit pool:
+                    // drain one per job.
+                    autoreleasepool { next() }
                 }
             }
             thread.name = name
@@ -212,14 +214,17 @@ extension Native {
 
             sampler.reset(params: job.params)
             strategy.reset(prompt: prompt)
-            var reused = 0
-            let setup = try makeCommandBuffer()
-            try kv.reset(commandBuffer: setup)
-            if job.reusePrefix, prompt.count > 1, let match = kv.lookupPrefix(Array(prompt.dropLast())) {
-                try kv.attachPrefix(match, commandBuffer: setup)
-                reused = match.length
+            let reused: Int = try autoreleasepool {
+                var reused = 0
+                let setup = try makeCommandBuffer()
+                try kv.reset(commandBuffer: setup)
+                if job.reusePrefix, prompt.count > 1, let match = kv.lookupPrefix(Array(prompt.dropLast())) {
+                    try kv.attachPrefix(match, commandBuffer: setup)
+                    reused = match.length
+                }
+                try commitAndWait(setup)
+                return reused
             }
-            try commitAndWait(setup)
             for t in prompt { sampler.accept(t) }
 
             var timings = StepTimings()

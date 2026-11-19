@@ -212,12 +212,12 @@ struct ReferenceKVStoreTests {
         let cols = 1 << 18  // 1 MiB of F32 per buffer
         func loop() throws {
             for _ in 0..<192 {
-                // makeBuffer returns autoreleased buffers: long loops pool each
-                // iteration (as the golden tests and the scheduler do).
-                try autoreleasepool {
+                // No pool of its own: buffers made inside RefTest.run's body
+                // are drained by RefTest.run's pool (the production pattern).
+                try RefTest.run(ctx) { enc in
                     let a = RefTest.tensor(ctx.device, floats: [Float](repeating: 1, count: cols), rows: 1, cols: cols)
                     let b = RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: cols), rows: 1, cols: cols)
-                    try RefTest.run(ctx) { try glue.encodeCopy($0, source: a, destination: b) }
+                    try glue.encodeCopy(enc, source: a, destination: b)
                 }
             }
         }
