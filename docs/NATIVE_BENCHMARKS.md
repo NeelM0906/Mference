@@ -28,11 +28,21 @@ through [`Scripts/native/guarded-run.sh`](../Scripts/native/guarded-run.sh)
 with `--timing`. The wrapper:
 - refuses unless it is on AC power, so every compared number shares a power
   source;
-- refuses without a passing `lock.sh preflight`, or while another model
-  process runs;
+- waits for running build and test jobs to finish
+  (`pgrep -f '/usr/bin/swift-(build|test) '`), since no new one can start
+  inside the quiet hold, and refuses if they are still running after 30
+  minutes;
+- refuses without a passing `lock.sh preflight --gating` (no Low Power Mode,
+  thermal state recorded), or while another model process or a bare `xctest`
+  test bundle runs;
 - stops the command and exits 70 on any swap growth;
 - records swap, wall time, peak footprint and the power source in
-  `<log-dir>/run.json`.
+  `<log-dir>/run.json`, with `"valid": true` only for a clean run.
+
+The driver also waits for zero build and test jobs before it takes each hold,
+and writes each step's `host.txt` (Mference commit, chip, GPU, macOS,
+toolchain, power and thermal state, the tools' `BUILD_INFO`) into that step's
+directory.
 
 Build the tools from a clean checkout at the pin:
 
@@ -69,7 +79,8 @@ There are two sources:
     the first token (prefix reuse);
   - **decode tok/s:** at that depth.
 
-The model load time is reported separately.
+The model load time is reported separately, and each context gets one untimed
+warm-up before the measured repetitions.
 
 **Baseline: pending.** Model and timing runs are held after the program's
 swap-guard trips. The numbers are recorded with `run_baselines.sh` on the
@@ -82,10 +93,19 @@ their `run.json` evidence.
 own kernels at the pin, the way llama.cpp's graph calls them:
 - Each measurement builds one graph of M independent copies of the op on the
   Metal backend, with concurrent dispatch off.
-- The copies use distinct weight or KV buffers totalling at least 256 MiB, so
-  the system cache cannot serve them.
-- The time per op is the median graph time divided by M, over 20 runs, after
-  3 warm-ups.
+- The copies use distinct weight, KV or state buffers. M comes from each
+  copy's own working set: enough that the graph's distinct bytes pass 256 MiB
+  (`--min-mib`), so the system cache cannot serve them, and never more than
+  2 GiB allocated in all (`--max-mib`). A GEMM's activation is one buffer
+  shared by every copy.
+- **Timing is host wall-clock** around ggml's synchronous graph compute;
+  ggml-metal exposes no GPU timestamps. The time per op is the median graph
+  time divided by M, over 20 runs, after 3 warm-ups. Each op therefore
+  carries its share of dispatch cost, and the `dispatch` suite reports that
+  floor (a one-element op, 1,024 copies).
+- **W2 and W3 time their kernels the same way:** M copies in one synchronous
+  submission, timed on the host clock, divided by M. Only then does a
+  "≥ ggml-metal" gate compare like with like.
 
 For each op the table reports:
 - the bytes it must read;
@@ -136,16 +156,16 @@ The harness is
   scheduler's own `StepTimings.medianSchedulerCPUMicroseconds`.
 
 `SchedulerBenchTests` checks the recorder with two reference loops, one
-sequential and one pipelined (two steps in flight). With
-`MFERENCE_NATIVE_BENCH=1` it prints both at the bound's 10 ms step. That is a
-timing run: AC power, in a quiet lock hold
-(`lock.sh run --quiet ws2 "mfe sched bench" -- Scripts/test.sh ...`). Builds
-and model-free tests otherwise run outside the lock (`lock.sh build -- ...`,
-at most two machine-wide).
+sequential and one pipelined (two steps in flight). The recorder waits for
+every completion before it reads, and `GapStats` takes a window (the decode
+steps alone) and measures each gap from the latest earlier end, so
+overlapping buffers never count as idle.
 
-```bash
-MFERENCE_NATIVE_BENCH=1 Scripts/test.sh --filter SchedulerBenchTests
-```
+With `MFERENCE_NATIVE_BENCH=1` it prints both loops at the bound's 10 ms
+step. That is a timing run: the `sched-bench` step of `run_baselines.sh`
+builds the test bundle first, outside the lock, then runs
+`Scripts/test.sh --skip-build` inside a quiet hold through
+`guarded-run.sh --timing`.
 
 **Reference loops: pending** (a timing run). The bound's 10 ms measurement
 of the sequential and pipelined reference loops is recorded with the

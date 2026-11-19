@@ -19,6 +19,18 @@ struct SchedulerBenchTests {
         #expect(SchedulerBench.GapStats(intervals: [], skip: 2).count == 0)
     }
 
+    @Test func gapsUseARunningMaxAndAWindow() {
+        // buffer 0 runs long; 1 and 2 start inside it: no idle time at all
+        let overlap = SchedulerBench.GapStats(intervals: [(0, 0.010), (0.001, 0.002), (0.003, 0.004)], skip: 0)
+        #expect(overlap.count == 2 && overlap.maxMicroseconds == 0)
+        // a window measures only the chosen buffers (by start order), each
+        // gap still taken from every earlier buffer's end
+        let w = SchedulerBench.GapStats(intervals: [(0, 0.001), (0.002, 0.003), (0.0031, 0.004), (0.0045, 0.005)],
+                                        window: 1..<3)
+        #expect(w.count == 1)
+        #expect(abs(w.medianMicroseconds - 100) < 1e-6)
+    }
+
     @Test func verdict() {
         var s = SchedulerBench.GapStats(intervals: [], skip: 0)
         s.medianMicroseconds = 20; s.p99Microseconds = 100
@@ -87,6 +99,7 @@ struct SchedulerBenchTests {
                 #expect(argmax(logits) == SyntheticForwardModel.choice(after: p))
             }
         }
+        #expect(rig.queue.waitForIntervals(steps), "recorder missed completions")
         let sequential = SchedulerBench.GapStats(intervals: rig.queue.intervals)
 
         rig.queue.reset()
@@ -99,6 +112,7 @@ struct SchedulerBenchTests {
             }
         }
         pending?.waitUntilCompleted()
+        #expect(rig.queue.waitForIntervals(steps), "recorder missed completions")
         let pipelined = SchedulerBench.GapStats(intervals: rig.queue.intervals)
         return (sequential, pipelined)
     }
