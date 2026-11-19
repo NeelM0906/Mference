@@ -280,8 +280,13 @@ static void bench_gdn(ggml_backend_t be, const Options & o) {
         g_results.push_back(r);
         fprintf(stderr, "gdn  rows=%3d: %9.1f us  %6.1f GB/s\n", rows, us, r.bytes / us / 1e3);
 
+        // the convolution's own working set sets its copy count (input, weights
+        // and output of each copy are distinct buffers), so it too reaches
+        // --min-mib and cannot stay cache-resident
+        const double cbytes = 4.0 * C * (KC - 1 + rows) + 4.0 * C * KC + 4.0 * C * rows;
+        const int ccopies = std::max(1, (int) std::ceil(o.min_mib * (1 << 20) / cbytes));
         std::vector<ggml_tensor *> cv;
-        const double cus = time_graph(be, copies, o.reps, 3,
+        const double cus = time_graph(be, ccopies, o.reps, 3,
             [&](ggml_context * ctx, int) {
                 ggml_tensor * x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, KC - 1 + rows, C, 1);
                 ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, KC, C);
@@ -289,8 +294,8 @@ static void bench_gdn(ggml_backend_t be, const Options & o) {
                 return ggml_ssm_conv(ctx, x, w);
             },
             [&](ggml_context *) { for (auto * t : cv) set_random(t, 0.1f); });
-        Result c; c.suite = "gdn"; c.type = "f32"; c.rows = rows; c.copies = copies; c.us = cus;
-        c.bytes = 4.0 * C * (KC - 1 + rows) + 4.0 * C * KC + 4.0 * C * rows;
+        Result c; c.suite = "gdn"; c.type = "f32"; c.rows = rows; c.copies = ccopies; c.us = cus;
+        c.bytes = cbytes;
         c.name = "ssm_conv K4 C8192";
         g_results.push_back(c);
         fprintf(stderr, "conv rows=%3d: %9.1f us\n", rows, cus);

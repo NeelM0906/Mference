@@ -28,7 +28,9 @@ steps=("$@")
 
 run_step() {
     local name=$1; shift
-    if [ -f "$OUT/$name/run.json" ] && grep -q '"exit": 0' "$OUT/$name/run.json"; then echo "$name: done"; return 0; fi
+    # done only when the wrapper judged the run valid (exit 0, no swap growth
+    # during or by the end); a void or older record is re-run
+    if [ -f "$OUT/$name/run.json" ] && grep -q '"valid": true' "$OUT/$name/run.json"; then echo "$name: done"; return 0; fi
     rm -rf "${OUT:?}/$name"
     "$LOCK" run --wait 7200 "$WS" "mfe bench $name" -- "$GR" --timing "$OUT/$name" "$GGUF" -- "$@"
     local rc=$?

@@ -15,7 +15,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "native/guarded-run.sh"
 
 
 class GuardedRunTests(unittest.TestCase):
-    def run_script(self, args, power, extra_env=None):
+    def run_script(self, args, power, extra_env=None, swap_grows=False):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         bin_dir = tmp / "bin"
@@ -29,6 +29,15 @@ class GuardedRunTests(unittest.TestCase):
         pgrep.write_text("#!/bin/sh\ncase \"$1\" in -lx|-lf) exit 1 ;; esac\nexec /usr/bin/pgrep \"$@\"\n",
                          encoding="utf-8")
         pgrep.chmod(0o755)
+        if swap_grows:
+            # the first reading is the run's start; every later one shows growth
+            sysctl = bin_dir / "sysctl"
+            sysctl.write_text(
+                "#!/bin/sh\n"
+                f"f={tmp}/swap-count; n=$(cat \"$f\" 2>/dev/null || echo 0); echo $((n + 1)) > \"$f\"\n"
+                "if [ \"$n\" -eq 0 ]; then u=100.00; else u=164.00; fi\n"
+                "echo \"total = 2048.00M  used = ${u}M  free = 1000.00M  (encrypted)\"\n", encoding="utf-8")
+            sysctl.chmod(0o755)
         env = dict(os.environ, LOCK="/usr/bin/true", PATH=f"{bin_dir}:{os.environ['PATH']}")
         env.pop("SWAP_GUARD_MB", None)
         env.update(extra_env or {})
@@ -51,7 +60,15 @@ class GuardedRunTests(unittest.TestCase):
         run = json.loads((log / "run.json").read_text())
         self.assertEqual(run["power_source"], "Battery Power")
         self.assertFalse(run["timing_run"])
-        self.assertEqual(run["exit"], 0)
+        self.assertEqual((run["exit"], run["status"], run["valid"]), (0, 0, True))
+
+    def test_swap_growth_voids_a_run_whose_command_succeeded(self):
+        proc, log = self.run_script([], "AC Power", swap_grows=True)
+        self.assertEqual(proc.returncode, 70, proc.stderr)
+        run = json.loads((log / "run.json").read_text())
+        self.assertEqual(run["exit"], 0)  # the command itself succeeded
+        self.assertEqual((run["status"], run["valid"], run["swap_guard_tripped"]), (70, False, True))
+        self.assertGreater(run["swap_delta_mb"], 0)
 
     def test_timing_run_on_ac(self):
         proc, log = self.run_script(["--timing"], "AC Power")
