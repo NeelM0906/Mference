@@ -131,14 +131,31 @@ enum RefTest {
                           gguf: randomBlocks(type, blocks: blocks, seed: seed))
     }
 
+    /// One command buffer, committed and waited on, inside its own
+    /// autorelease pool: an autoreleased command buffer keeps every buffer it
+    /// used alive until its pool drains, which in a long test loop is never.
     static func run(_ ctx: MetalContext, _ body: (MTLComputeCommandEncoder) throws -> Void) throws {
-        let cb = ctx.queue.makeCommandBuffer()!
-        let enc = cb.makeComputeCommandEncoder()!
-        try body(enc)
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
-        if let error = cb.error { throw error }
+        try autoreleasepool {
+            let cb = ctx.queue.makeCommandBuffer()!
+            let enc = cb.makeComputeCommandEncoder()!
+            try body(enc)
+            enc.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+            if let error = cb.error { throw error }
+        }
+    }
+
+    /// This process's physical footprint (what the swap guard ultimately pays for).
+    static func physicalFootprint() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? UInt64(info.phys_footprint) : 0
     }
 
     static func maxRelativeError(_ a: [Float], _ b: [Float]) -> Float {

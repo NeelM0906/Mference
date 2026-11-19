@@ -154,4 +154,37 @@ struct ReferenceKVStoreTests {
         cb.waitUntilCompleted()
         return v
     }
+
+    /// Regression for the swap growth seen in the long golden runs: buffers
+    /// from `makeBuffer` (and command buffers) are autoreleased, so a loop
+    /// that does not drain a pool per iteration keeps every one alive (this
+    /// loop then grows ~384 MiB per pass). With a pool per iteration, passes
+    /// after the first must not grow.
+    @Test func longEncodeLoopsDoNotRetainBuffers() throws {
+        let ctx = try MetalContext()
+        let glue = Native.ReferenceGlueOps(context: ctx)
+        try glue.prepare(config: RefTest.tiny)
+        let cols = 1 << 18  // 1 MiB of F32 per buffer
+        func loop() throws {
+            for _ in 0..<192 {
+                // makeBuffer returns autoreleased buffers: long loops pool each
+                // iteration (as the golden tests and the scheduler do).
+                try autoreleasepool {
+                    let a = RefTest.tensor(ctx.device, floats: [Float](repeating: 1, count: cols), rows: 1, cols: cols)
+                    let b = RefTest.tensor(ctx.device, floats: [Float](repeating: 0, count: cols), rows: 1, cols: cols)
+                    try RefTest.run(ctx) { try glue.encodeCopy($0, source: a, destination: b) }
+                }
+            }
+        }
+        let start = RefTest.physicalFootprint()
+        try loop()
+        let warm = RefTest.physicalFootprint()
+        try loop()
+        try loop()
+        let end = RefTest.physicalFootprint()
+        let growth = Int64(end) - Int64(warm)
+        print("footprint: start \(start >> 20) MiB, after one loop \(warm >> 20) MiB, after three \(end >> 20) MiB")
+        // Each loop allocates ~384 MiB; retained buffers would add that twice.
+        #expect(growth < 96 << 20, "footprint grew by \(growth >> 20) MiB after warm-up")
+    }
 }
