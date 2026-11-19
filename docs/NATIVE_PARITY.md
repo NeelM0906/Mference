@@ -84,10 +84,12 @@ make -f Scripts/native/llama/Makefile LL=<llama.cpp> OUT=<build> -j8 all
 
 Run it as one model command under the machine lock.
 [`Scripts/native/guarded-run.sh`](../Scripts/native/guarded-run.sh) refuses
-without AC power, a passing `lock.sh preflight`, the GGUF, or with another
-model process running; it stops the command and exits 70 on any swap growth,
-and records swap at start and end, wall time and peak footprint in
-`<log-dir>/run.json`:
+without a passing `lock.sh preflight` or the GGUF, or with another model
+process running. It stops the command and exits 70 on any swap growth, and it
+records the power source, swap at start and end, wall time and peak footprint
+in `<log-dir>/run.json`. Capture and parity runs may run on battery. Timing
+runs pass `--timing`, which refuses unless on AC power
+(the benchmark protocol):
 
 ```bash
 export LOCK=<program>/lock.sh GGML_METAL_PATH_RESOURCES=<llama.cpp>/ggml/src/ggml-metal
@@ -110,7 +112,11 @@ Goldens are large and are not committed. The program keeps them under
 
 | Run | What |
 |---|---|
-| `metal` | **The golden.** Pass A and pass B as above. |
+| `metal` | **The golden.** Pass A and pass B as above. Re-captured from a clean tools build and byte-identical. |
+| `metal-rerun` | Noise floor: the same settings again, teacher-forced on `metal` (`--mode logits`). |
+| `metal-ub128` | Noise floor: `n_ubatch` 128. |
+| `metal-fa-off` | Noise floor: flash attention off. |
+| `cpu` | Noise floor: every layer on llama.cpp's CPU backend (`--mode golden`, `--threads 8`), per-op tensors included. |
 
 The committed digest
 [`Tests/Mference/Fixtures/native/goldens/quick-v1-metal-slice.json`](../Tests/Mference/Fixtures/native/goldens/quick-v1-metal-slice.json)
@@ -204,3 +210,145 @@ Together the decode-step state goldens let a GDN decode step at 512, 4K or
 32K context be tested on its own: start from `convState` / `ssmState` at
 `n_prompt`, feed the step's `gdnQKV`, `gdnZ`, `gdnAlpha`, `gdnBeta`, and
 compare `gdnOutput`.
+
+## The bar (D1)
+
+A native backend (or the all-reference path, or a path with one fast
+component swapped in) passes against the Metal golden when, over every
+generated position of the fixed prompt set, teacher-forced on the golden
+tokens:
+
+| Check | Bar | Set by |
+|---|---|---|
+| Greedy agreement: the candidate's argmax equals the golden token | ≥ 99% of 2,354 positions | D1 (maintainer) |
+| Per-token KL(golden ‖ candidate) of the logits, every position | ≤ ε = 0.01 nats | this page |
+| Mean per-token KL over the set | ≤ 0.001 nats | this page |
+| Agentic parity (`agentic-v1`) | candidate passes ≥ golden − 1 of 32 tasks | this page |
+
+Teacher forcing: the candidate prefills the prompt, then is fed the golden's
+generated tokens one per decode step; row `g` of its logits is compared with
+the golden's row `g`. Agreement and KL therefore never compound after a
+disagreement. Each disagreement is reported with the golden's top-1 minus
+top-2 logit margin, so near-ties are visible.
+
+Inside Mference the rule stays byte identity (a change against its own
+control, a speculative path against plain greedy decode); this bar is only
+for a native backend against llama.cpp.
+
+### Metrics
+
+[`ParityMetrics`](../Tests/Mference/Core/Native/Harness/ParityMetrics.swift)
+computes log-softmax in F64 from the F32 logits (Accelerate), KL as
+`sum p (log p - log q)` with P the golden, argmax with ties to the lowest id
+(as `mfe-golden` and llama.cpp's greedy sampler choose), and element-wise
+error statistics (max and mean absolute error, relative L2 `‖c - g‖ / ‖g‖`).
+[`ParityHarness`](../Tests/Mference/Core/Native/Harness/ParityHarness.swift)
+runs them over a golden: `compareLogits(golden:candidate:)` takes a closure
+returning the candidate's logits row `g`; `compareTensor(_:candidate:)` takes
+the candidate's row at a position for any golden tensor;
+`LogitReport.verdict()` applies the bar
+([`ParityTolerances`](../Tests/Mference/Core/Native/Harness/ParityTolerances.swift)).
+
+```swift
+let golden = try GoldenStore.open("doc-4k")
+let result = try ParityHarness.compareLogits(golden: golden) { g in myBackendLogits(row: g) }
+let report = ParityHarness.LogitReport(results: [result /*, every prompt */])
+#expect(report.verdict().passed, "\(report.verdict().failures)")
+```
+
+## ε and tolerances
+
+llama.cpp's own noise floor sets them. Each noise run is teacher-forced on
+the golden, so every position compares like for like. All runs are on the
+M1 Max, at b1b770d9, over 2,354 positions. KL is in nats, per token.
+
+| Run | Agreement | Mean KL | p99 KL | Max KL | Under the bar |
+|---|---:|---:|---:|---:|---|
+| `metal-rerun` | 100% | 0 (bit-identical) | 0 | 0 | passes |
+| `metal-ub128` | 100% | 0 (bit-identical) | 0 | 0 | passes |
+| `metal-fa-off` | 99.96% (1 flip) | 1.9e-7 | 2.0e-6 | 5.8e-6 | passes |
+| `cpu` | 98.17% (43 flips) | 2.4e-3 | 1.7e-2 | 0.29 | **fails** (agreement, max, mean) |
+
+llama.cpp on Metal is deterministic: the rerun and the ubatch change are bit
+for bit identical. A different attention kernel moves the logits by at most
+6e-6. The CPU backend quantizes activations to Q8_K for its dot products,
+which is a much larger perturbation. It flips 43 greedy choices, all at
+near-ties where the golden's top-1/top-2 logit margin is under 0.28. 42 of
+them fall in the four 512-token continuations, where small differences
+compound. llama.cpp's own CPU backend therefore does not meet D1 on this set.
+A native engine must stay much closer to ggml-metal's numerics, as the Metal
+variants do.
+
+- **ε = 0.01 nats per token, and a mean of at most 0.001.** That is more
+  than 1,000 times the Metal configuration noise, which leaves room for
+  another accumulation order, F32 versus half staging, and different kernel
+  tiling. It is also below the CPU backend's p99 (1.7e-2) and mean (2.4e-3),
+  so a path as far from ggml-metal as the CPU backend fails.
+  `ParityNoiseFloorTests` asserts both directions (the Metal runs pass, the
+  CPU run fails); if that ever changes, ε is revisited.
+- **Per-op, local.** A component fed the golden's inputs at an op boundary
+  must match the golden output within the class's relative L2 bound
+  (`OpToleranceClass.maxLocalRelativeL2`).
+  `ParityHarness.localVerdict` applies it. The bounds are about two times
+  llama.cpp's own local spread, measured at block 0 of the CPU run, whose
+  input (the embedding) is bit-exact against the golden:
+
+  | Class | Ops | CPU-backend local rel L2 | Bound |
+  |---|---|---:|---:|
+  | `exact` | embedding (`get_rows`) | 0 | 1e-6 |
+  | `norm` | RMSNorms | 6.7e-8 | 1e-5 |
+  | `gemm` | every quantized projection, FFN, LM head | 3.6e-3 to 5.4e-3 | 1e-2 |
+  | `mixer` | attention and GDN core (`attn_gated`, `final_output`) | 4.9e-3 to 8.2e-3 | 2e-2 |
+  | `residual` | residual adds | (lossless) | 1e-5 |
+  | `state` | GDN conv and S state after a step | (follows `mixer`) | 2e-2 |
+
+- **Per-op, accumulated (diagnostic).** At the tap points of an end-to-end
+  run, each block's input already carries the earlier blocks' differences.
+  llama.cpp's CPU backend reaches relative L2 4.7e-2 to 5.0e-2 at the last
+  block, final norm and logits, and 0.06 is the diagnostic bound there.
+  The gate for an end-to-end run is the D1 logits bar, not this.
+
+Reproduce (reads files only, no model; about 13 minutes):
+
+```bash
+MFERENCE_NATIVE_GOLDENS=<goldens>/quick-v1/metal \
+MFERENCE_NATIVE_NOISE_RUNS=<goldens>/quick-v1/metal-rerun:<goldens>/quick-v1/metal-ub128:<goldens>/quick-v1/metal-fa-off:<goldens>/quick-v1/cpu \
+MFERENCE_PARITY_REPORT=<file> Scripts/test.sh --filter ParityNoiseFloorTests
+```
+
+## Agentic parity
+
+[`Scripts/native/agentic/agentic_parity.py`](../Scripts/native/agentic/agentic_parity.py)
+holds `agentic-v1`: 32 tool-use and structured-output tasks:
+- choosing among six tools and extracting their arguments (numbers, currency
+  codes, dates and 24-hour times, units, paths, recipients)
+- knowing when no tool is needed
+- using a tool result in the final answer across turns, including a
+  follow-up call
+- answering in a required JSON shape
+- exact short answers
+
+Each task goes to an OpenAI-compatible server on loopback (`MferenceServer`)
+at temperature 0. A model-free checker scores the parsed tool calls or
+content: it compares arguments after normalization, evaluates calculator
+expressions with a safe parser, and strips `<think>` blocks. Parity holds when
+the candidate passes at least as many tasks as the llama.cpp golden minus one,
+with every flipped task listed. The checker and the verdict are unit-tested
+without a model (`Scripts/tests/test_agentic_parity.py`). Real runs are model
+runs: one server per lock hold, through the normal server rules.
+
+```bash
+python3 Scripts/native/agentic/agentic_parity.py run --port <port> --model <golden-id> --out <dir>/golden
+```
+
+```bash
+python3 Scripts/native/agentic/agentic_parity.py run --port <port> --model <native-id> --out <dir>/native
+```
+
+```bash
+python3 Scripts/native/agentic/agentic_parity.py compare <dir>/golden <dir>/native
+```
+
+Larger agent benchmarks (Terminal-Bench, SWE-bench) need downloads and an
+agent harness. They are held for the maintainer, and this suite does not
+replace them.

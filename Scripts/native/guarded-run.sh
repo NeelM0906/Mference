@@ -3,12 +3,17 @@
 # capture, llama.cpp baselines, kernel benchmarks), with the program's machine
 # rules (scratch/mference-engine-program spec, section 10) applied around it.
 #
-#   guarded-run.sh <log-dir> <gguf> -- <command> [args...]
+#   guarded-run.sh [--timing] <log-dir> <gguf> -- <command> [args...]
 #
 # Run it as the single command of its own lock hold:
 #   lock.sh run --wait 3600 ws2 "mfe <purpose>" -- Scripts/native/guarded-run.sh <log-dir> <gguf> -- ...
 #
-# Before: refuses unless `pmset -g batt` shows AC Power, `lock.sh preflight`
+# Power: every run records its power source in run.json. --timing marks a
+# timing run (benchmark baselines, kernel benchmarks, L5 gates, any tok/s,
+# TTFT or kernel figure that is compared or published): it refuses unless on
+# AC Power, so every compared number shares a power source. Correctness,
+# parity and capture runs may run on battery (program spec section 10).
+# Before: refuses unless `lock.sh preflight`
 # passes (no --model: a GGUF is not an install directory), the GGUF exists and
 # no other model process runs. During: samples swap every 5 s; any growth
 # (the program's swap guard; SWAP_GUARD_MB may only be 0) stops the command
@@ -23,13 +28,17 @@ SWAP_GUARD_MB=${SWAP_GUARD_MB:-0}
 # The program's guard is "any growth": refuse anything looser.
 case "$SWAP_GUARD_MB" in 0|0.0) ;; *) echo "guarded-run.sh: SWAP_GUARD_MB must be 0 (any swap growth stops the run)" >&2; exit 71 ;; esac
 
-[ $# -ge 4 ] && [ "$3" = "--" ] || { echo "usage: guarded-run.sh <log-dir> <gguf> -- <command> [args...]" >&2; exit 2; }
+timing=0
+if [ "${1:-}" = "--timing" ]; then timing=1; shift; fi
+[ $# -ge 4 ] && [ "$3" = "--" ] || { echo "usage: guarded-run.sh [--timing] <log-dir> <gguf> -- <command> [args...]" >&2; exit 2; }
 LOG=$1; GGUF=$2; shift 3
 mkdir -p "$LOG"
 note() { echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG/run.log" >&2; }
 swap_mb() { sysctl -n vm.swapusage | sed -E 's/.*used = ([0-9.]+)M.*/\1/'; }
 
-if ! pmset -g batt | grep -q "AC Power"; then note "REFUSED: not on AC power ($(pmset -g batt | head -1))"; exit 71; fi
+power=$(pmset -g batt | head -1 | sed -E "s/.*'(.*)'.*/\1/")
+if [ $timing = 1 ] && [ "$power" != "AC Power" ]; then note "REFUSED: timing run not on AC power ($power)"; exit 71; fi
+note "power source: $power$([ $timing = 1 ] && echo ' (timing run)')"
 if [ ! -f "$GGUF" ]; then note "REFUSED: no GGUF at $GGUF"; exit 71; fi
 if ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
 # Processes by exact name (a shell whose command line merely mentions a tool
@@ -69,7 +78,7 @@ rss=$(grep -E 'maximum resident set size' "$LOG/stderr.log" | awk '{print $1}' |
 delta=$(awk -v a="$s1" -v b="$s0" 'BEGIN { printf "%.2f", a - b }')
 note "exit $rc; wall $((t1 - t0)) s; swap delta ${delta} MB; peak footprint ${peak:-?} B; max RSS ${rss:-?} B"
 cat > "$LOG/run.json" <<EOF
-{"command": "$(echo "$*" | sed 's/"/\\"/g')", "exit": $rc, "wall_s": $((t1 - t0)), "swap_start_mb": $s0, "swap_end_mb": $s1, "swap_delta_mb": $delta, "swap_guard_tripped": $([ $tripped = 1 ] && echo true || echo false), "peak_footprint_bytes": ${peak:-null}, "max_rss_bytes": ${rss:-null}}
+{"command": "$(echo "$*" | sed 's/"/\\"/g')", "exit": $rc, "power_source": "$power", "timing_run": $([ $timing = 1 ] && echo true || echo false), "wall_s": $((t1 - t0)), "swap_start_mb": $s0, "swap_end_mb": $s1, "swap_delta_mb": $delta, "swap_guard_tripped": $([ $tripped = 1 ] && echo true || echo false), "peak_footprint_bytes": ${peak:-null}, "max_rss_bytes": ${rss:-null}}
 EOF
 if [ $tripped = 1 ]; then exit 70; fi
 if awk -v d="$delta" -v g="$SWAP_GUARD_MB" 'BEGIN { exit !(d > g) }'; then
