@@ -6,14 +6,13 @@ import Testing
 @testable import MferenceServerCore
 
 private actor ScriptedServerBackend: ServerInferenceBackend {
-    nonisolated let usesSwiftQwenTemplate: Bool
     nonisolated let supportsQwenReasoningEffort: Bool
     let delayNanoseconds: UInt64
     let diagnostics: RuntimeDiagnostics?
 
-    init(delayNanoseconds: UInt64 = 0, includeDiagnostics: Bool = false, includeReasoning: Bool = false,
-         baseQwen: Bool = false) {
-        self.usesSwiftQwenTemplate = includeReasoning && !baseQwen
+    /// `includeReasoning` stands in for base Qwen 3.8: it accepts
+    /// `reasoning_effort` and streams a thought before the answer.
+    init(delayNanoseconds: UInt64 = 0, includeDiagnostics: Bool = false, includeReasoning: Bool = false) {
         self.supportsQwenReasoningEffort = includeReasoning
         self.delayNanoseconds = delayNanoseconds
         if includeDiagnostics {
@@ -451,10 +450,12 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
-    @Test(arguments: [false, true], [false, true])
-    func swiftQwenReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool, base: Bool) async throws {
+    /// Base Qwen 3.8 with `reasoning_effort`: the thought arrives in its own
+    /// response field under any model alias.
+    @Test(arguments: [false, true])
+    func qwen38ReasoningUsesSeparateResponseFieldWithCustomModelAlias(stream: Bool) async throws {
         let server = MferenceHTTPServer(modelID: "custom-alias", queueLimit: 1,
-                                        backend: ScriptedServerBackend(includeReasoning: true, baseQwen: base))
+                                        backend: ScriptedServerBackend(includeReasoning: true))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)

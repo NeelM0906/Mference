@@ -98,7 +98,7 @@ import Testing
     @Test func layoutsWithoutAFullRowImageAreUnsupported() throws {
         let device = try MetalContext().device
         // Gemma 4 keeps sliding-window rings.
-        let gemma = try KVCacheManager(device: device, config: .gemma4_26B_A4B, maxContext: 64,
+        let gemma = try KVCacheManager(device: device, config: .retiredGemma4Shape, maxContext: 64,
                                        fp16RingEnabled: true)
         #expect(!gemma.supportsPrefixSnapshots)
         // Paged full attention keeps its rows in a KVPageStore.

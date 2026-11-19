@@ -1,11 +1,14 @@
 # Mference
 
-Swift and Metal inference for pinned checkpoints on Apple Silicon: Gemma 4
-26B-A4B, Qwen 3.6 35B-A3B, DeepSeek-V4-Flash 284B-A13B, Inkling-Small
-276B-A12B, Maple Preview, Qwen 3.8 27B, Qwen3.8-Flash-Next 180B-A3.5B (also
-as Unsloth's UD-IQ3_XXS GGUF quantization), and MiniCPM5-2B. The shared core and KV cache stay resident; routed experts stream
-from SSD per token. Qwen 3.8 27B and MiniCPM5-2B are dense and fully
-resident.
+A private on-device assistant for the Mac (the SwiftUI app in `App/`) on its own
+Swift and Metal inference engine. Native pinned checkpoints: Qwen 3.6
+35B-A3B, Maple Preview, Qwen 3.8 27B, and MiniCPM5-2B. The shared core and KV
+cache stay resident; routed experts stream from SSD per token. Qwen 3.8 27B
+and MiniCPM5-2B are dense and fully resident. Through the `MferenceEngine` library, the app and `MferenceServer --library`
+run GGUF models with llama.cpp linked in-process: Qwen3.5-4B (Unsloth
+UD-Q4_K_XL, the product's Quick model) and Qwen3.8-27B (ISTA-DASLab
+GSQ-RCO IQ3_S, Deep) with MTP draft decoding. The product offers five models: Quick,
+Deep, Qwen 3.6, MiniCPM5 and Maple; see [the engine](docs/ENGINE.md).
 
 ## Scope
 
@@ -17,14 +20,15 @@ model-run safety rules below always apply, whatever the task.
 
 `Sources/Mference/` is the runtime and kernels; `Sources/MferenceRepack/`,
 `Sources/MferenceCLI/`, and `Sources/MferenceServer/` contain the installer,
-CLI, and loopback server. The four products are `Mference`, `MferenceRepack`,
-`MferenceCLI`, and `MferenceServer`. `Tests/` contains focused public tests;
-`docs/` contains design, benchmark, and experiment notes.
+CLI, and loopback server; `Sources/MferenceEngine/` is the engine API and
+`Sources/LlamaCpp/` the vendored llama.cpp. The root products are `Mference`,
+`MferenceEngine`, `MferenceRepack`, `MferenceCLI`, and `MferenceServer`; the
+Mac app is its own package in `App/`. `Tests/` contains focused public tests;
+`docs/` contains the engine, server, runtime-control, benchmark-protocol and
+family-contract references.
 
 ```bash
 swift build -c release
-./mference-ui.sh
-./mference-ui.sh install qwen36
 swift run -c release MferenceRepack --model qwen36 --output scratch/qwen36.gturbo
 swift run -c release MferenceRepack --model qwen36 --output scratch/qwen36.gturbo --resume
 swift run -c release MferenceCLI \
@@ -34,24 +38,27 @@ swift run -c release MferenceCLI \
 ```
 
 The installer streams each pinned checkpoint without staging the full source.
-Set `HF_TOKEN` only if requested. Source reads range from ~5 GB (MiniCPM5) to
-~360 GB (Flash-Next), producing installs from ~1.4 GB to ~175 GB; check disk
-before installing, and read
-[docs/DEEPSEEK_V4_FLASH.md](docs/DEEPSEEK_V4_FLASH.md) or
-[docs/INKLING_SMALL.md](docs/INKLING_SMALL.md) before touching those two.
+Set `HF_TOKEN` only if requested. Source reads range from ~5 GB (MiniCPM5) up
+to the vendor BF16 repo that the `qwen36original` control install reads,
+producing installs from ~1.4 GB to ~20 GB; check disk before installing.
+Retired families (Gemma 4 and its QAT install, DeepSeek-V4-Flash,
+Inkling-Small, GLM-5.3-Flash, Flint, Qwen3.8-Flash-Next and its Unsloth GGUF,
+Swift-Qwen3.8) live only in git history at `mference-app` `8ff588c`; this
+runtime no longer loads their installs.
 Cancellation preserves verified completed ranges; continue with `--resume` or
 remove them with `--discard-partial`.
 
 ## Models and the library
 
-Install directories take the family's own label (`gemma4.gturbo`,
-`qwen36.gturbo`, `minicpm5.gturbo`, and so on for the labels
+Install directories take the family's own label (`qwen36.gturbo`,
+`qwen38.gturbo`, `minicpm5.gturbo`, and so on for the labels
 `MferenceRepack --help` lists), but detection goes by each directory's own
 manifest, not its name. `MferenceServer --library`
 scans the library roots — the `Mference.libraryRoot` default if set,
 `~/llm-models`, the package checkout's `scratch/`, and
-`~/Library/Application Support/Mference` —
-and serves every runnable model it finds there to the UI. The CLI and a non-library
+`~/Library/Application Support/Mference` — plus `~/llm-models/gguf` for GGUF
+files, and serves the product models it finds there (every runnable
+install with `--catalog all`). The CLI and a non-library
 server take an explicit `--model` path; that selection also persists via
 `defaults write Mference model qwen36` (or `MFERENCE_MODEL` in the
 environment). By default the CLI and the server check the expert pool against
@@ -63,9 +70,8 @@ touch otherwise; `--verify full-sha256` always hashes, and
 
 Follow the [server guide](docs/OPENAI_SERVER.md) for launch commands, health
 checks, client setup, prompt reuse, tool loops, and supported API behavior.
-Its opt-in `--library` mode serves every installed model from that one process,
-swapping the resident model in place; see the
-[Open WebUI guide](docs/OPEN_WEBUI.md).
+Its opt-in `--library` mode serves every installed product model from that one
+process, swapping the resident model in place.
 Apply the model-process checks below first; never start a second model process
 or terminate an existing one.
 
@@ -79,21 +85,19 @@ you launched.
 
 ## Test rules
 
-Before a model run, require macOS 15+, Swift 6.1+, enough disk, acceptable
+Before a model run, require macOS 26+, Swift 6.2+, enough disk, acceptable
 `memory_pressure -Q`, a completed install of the model the run needs, and no
 process from `pgrep -fl 'MferenceServer|MferenceCLI|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`.
 If a check fails, inform the user and stop; do not terminate apps or delete or
 reinstall a model.
 
 Run package tests through `Scripts/test.sh`. Real-model regression suites are
-env-gated (for example `MFERENCE_INKLING_GTURBO`) and skip without the gate.
+env-gated (for example `MFERENCE_QWEN36_GTURBO`) and skip without the gate.
 Run only one server, CLI, or model-using test at a time.
 
 For performance results, build release once and follow the [community
 benchmark guide](docs/COMMUNITY_BENCHMARKS.md) exactly. Do not enable
-experimental controls or profiling. Measured baselines are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and each family's own page under
-[docs/families/](docs/families/) carries its bring-up numbers.
+experimental controls or profiling.
 
 Do not download a full checkpoint, duplicate a `.gturbo` model, create a
 worktree, or purge caches just to run tests.
@@ -104,9 +108,9 @@ results as measurements, not performance ceilings.
 
 ## UI
 
-Open WebUI, started by `./mference-ui.sh`, is the only Mference UI. The script
-launches `MferenceServer` in library mode and points Open WebUI at it;
-`./mference-ui.sh install <family>` runs an install. The server is the only
-model owner behind the UI — never start a second model process alongside it.
-Generation and runtime controls, and their defaults, are documented in
-[The Mference UI](docs/OPEN_WEBUI.md) and [Runtime controls](docs/RUNTIME_CONTROLS.md).
+The SwiftUI Mac app in `App/` is the only Mference UI; Open WebUI support was
+removed. The app links the engine in-process and owns the one resident model,
+so never run a server or CLI model alongside it. App-specific rules (including
+that app work never loads a real model) are in [CLAUDE.md](CLAUDE.md).
+Runtime controls and their defaults are in
+[Runtime controls](docs/RUNTIME_CONTROLS.md).

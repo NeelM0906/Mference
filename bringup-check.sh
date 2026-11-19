@@ -2,13 +2,13 @@
 # Family bring-up conformance check: one command to decide whether a model
 # family port is trustworthy. It automates steps 1-6 of docs/FAMILY_GATE.md for
 # a single family. Design:
-# docs/superpowers/specs/2026-08-08-family-bringup-kit-design.md, Workstream 3.
+# the family bring-up kit design (in git history), Workstream 3.
 #
 # Stage contract. Stages run in order; a FAILED stage stops the script, a
 # SKIPPED stage does not. Each stage prints one result line and the script ends
 # with a single verdict line.
 #
-#   0  preflight          macOS 15+, Swift 6.1+, memory headroom, free disk on
+#   0  preflight          macOS 26+, Swift 6.2+, memory headroom, free disk on
 #                         the results volume (and the model volume when a
 #                         gturbo-dir is given), no other model or installer
 #                         process, release MferenceCLI and MferenceRepack
@@ -92,16 +92,13 @@ Runs the family bring-up conformance stages in order and prints a verdict.
 Stages: 0 preflight, 1 toy suite, 2 install verify, 3 ladder smoke,
 4 protocol scaffold.
 
-  <family>      one of: gemma4 qwen36 qwen38 deepseekv4flash inklingsmall maple
-                qwen38flashnext qwen38flashnextudiq3xxs minicpm5 glm53flash
-                flint
+  <family>      one of: qwen36 qwen38 maple minicpm5
   [gturbo-dir]  an installed .gturbo directory. Without it, stages 2 and 3
                 (install verify, ladder smoke) are SKIPPED.
   --dry-run     print every command each stage would execute and run nothing.
   --help, -h    this text.
 
-See docs/FAMILY_GATE.md for the gate this automates and
-docs/families/TEMPLATE.md for the page to fill in afterwards.
+See docs/FAMILY_GATE.md for the gate this automates.
 EOF
 }
 
@@ -120,30 +117,14 @@ for arg in "$@"; do
 done
 [ -n "${family}" ] || { usage >&2; exit 1; }
 
-# Per-family toy/parity suite filter. Empty means "none registered yet".
+# Per-family toy/parity suite filter. Empty means "none registered".
 case "${family}" in
-  # Gemma 4 has no family-named toy or parity suite: its coverage currently
-  # lives inside shared kernel suites (attention scale 1.0, router k8, tied
-  # INT4 embedding, INT8 shared expert), which no family filter can isolate.
-  gemma4)          suite_filter="" ;;
   qwen36)          suite_filter='Qwen(Runner|ResidentParity|SlotMapParity|RepackPlanner|ToolCallParser|Install)' ;;
   qwen38)          suite_filter='Qwen38' ;;
-  deepseekv4flash) suite_filter='(DSV4|Deepseek)' ;;
-  inklingsmall)    suite_filter='Inkling' ;;
   maple)           suite_filter='Maple' ;;
-  flint)           suite_filter='Flint' ;;
-  qwen38flashnext) suite_filter='FlashNext' ;;
-  # Unsloth UD-IQ3_XXS GGUF install: GGUF quant tables, LUT4 expansion and MoE,
-  # INT8-2L, the family/manifest and installer suites, the lower-case gguf*
-  # install tests in RemotePayloadCopyTests, the IQ4_NL PLE rows, the raw
-  # streamer path and the forced-routes parser. Its real-install suites are
-  # env-gated (MFERENCE_UNSLOTH_GTURBO) and skip here.
-  qwen38flashnextudiq3xxs) suite_filter='GGUF|gguf|PleRowPoolIQ4NL|PreadExpertStreamerRaw|FlashNextForcedRoutes' ;;
   # Runner, reference parity, paged KV, tokenizer/decoder, repack planner and
   # the fake-remote installs (test names start lower-case in the remote suite).
   minicpm5)        suite_filter='[Mm]iniCPM5' ;;
-  # Day-0 contract suites (baseline, gate, manifest validation, planner).
-  glm53flash)      suite_filter='Glm53' ;;
   *) usage >&2; fail "unknown family: ${family}" ;;
 esac
 
@@ -161,8 +142,8 @@ echo "bringup-check ${family}${model_dir:+ ${model_dir}}"
 pgrep_pattern='(\.build/release/|/)(MferenceServer|MferenceCLI|MferenceRepack)( |$)|MferencePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 
 if [ "${dry_run}" -eq 1 ]; then
-  show "sw_vers -productVersion   # require 15+"
-  show "swift --version           # require 6.1+"
+  show "sw_vers -productVersion   # require 26+"
+  show "swift --version           # require 6.2+"
   show "memory_pressure -Q        # require \${MIN_FREE_PCT:-20}% free"
   show "df -g .                   # require \${MIN_FREE_GB:-5} GiB free for run output"
   [ -n "${model_dir}" ] && show "df -g ${model_dir}          # require 1 GiB free beside the model (verify receipt)"
@@ -171,8 +152,8 @@ if [ "${dry_run}" -eq 1 ]; then
   ok 0 "preflight (dry run)"
 else
   os_version=$(sw_vers -productVersion) || fail "could not read macOS version"
-  [ "${os_version%%.*}" -ge 15 ] 2>/dev/null \
-    || bad 0 "macOS 15 or later required; found ${os_version}"
+  [ "${os_version%%.*}" -ge 26 ] 2>/dev/null \
+    || bad 0 "macOS 26 or later required; found ${os_version}"
 
   swift_version=$(swift --version 2>&1 |
     sed -n 's/.*Apple Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)
@@ -181,8 +162,8 @@ else
   swift_tail=${swift_version#*.}
   swift_minor=${swift_tail%%.*}
   [ "${swift_major}" -gt 6 ] 2>/dev/null ||
-    { [ "${swift_major}" -eq 6 ] && [ "${swift_minor}" -ge 1 ]; } 2>/dev/null ||
-    bad 0 "Swift 6.1 or later required; found ${swift_version}"
+    { [ "${swift_major}" -eq 6 ] && [ "${swift_minor}" -ge 2 ]; } 2>/dev/null ||
+    bad 0 "Swift 6.2 or later required; found ${swift_version}"
 
   free_pct=$(memory_pressure -Q 2>/dev/null |
     sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p' | head -1)
@@ -300,8 +281,8 @@ Next, on a quiet machine, run the community protocol (docs/COMMUNITY_BENCHMARKS.
 
     ./run-benchmark.sh ${family}-bringup ${model_dir:-<gturbo-dir>} 3
 
-Then fill in the family page from the template docs/families/TEMPLATE.md, and
-add the MFERENCE_PHASES=1 attribution run that docs/FAMILY_GATE.md step 6 wants.
+Then record the results in the family PR, with the MFERENCE_PHASES=1
+attribution run that docs/FAMILY_GATE.md step 6 wants.
 EOF
 
 write_report "PASS (${family}, ${skipped} stage(s) skipped)"

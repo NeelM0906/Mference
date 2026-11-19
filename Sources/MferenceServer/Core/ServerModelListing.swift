@@ -1,16 +1,18 @@
 import Foundation
 import Mference
+import MferenceEngine
 
 /// Renders what library mode would serve, without loading anything.
 ///
-/// `MferenceServer --library --list-models` and `./mference-ui.sh models` both
-/// print this, so the launcher never has its own idea of what is installed:
-/// discovery answers, and the script only relays the answer.
+/// `MferenceServer --library --list-models` prints this, so the listing never
+/// has its own idea of what is installed: discovery answers.
 public enum ServerLibraryListing {
     /// Printed alone when discovery found nothing. Library mode still starts in
     /// that state — `/v1/models` is simply empty — so this is a normal result
     /// and not an error.
     public static let emptyListing = "no models installed"
+    /// Printed, with a count, when installs exist but none is a product model.
+    public static let noProductModelsListing = "no product models installed"
 
     private static let headers = ["MODEL", "FAMILY", "BYTES", "PATH"]
 
@@ -41,6 +43,37 @@ public enum ServerLibraryListing {
                 let padding = String(repeating: " ", count: widths[column] - value.count)
                 // Byte counts read as a column of numbers only when they line
                 // up on the right.
+                return column == 2 ? padding + value : value + padding
+            }.joined(separator: "  ")
+        }.joined(separator: "\n")
+    }
+
+    /// What library mode serves: one header row and one row per catalog model,
+    /// in `/v1/models` order. `BYTES` is the size on disk the catalog recorded
+    /// (`-` when unknown).
+    public static func text(for catalog: EngineCatalog) -> String {
+        guard !catalog.models.isEmpty else {
+            let declined = ServerEngineCatalog.declinedRunnableInstalls(catalog)
+            return declined == 0 ? emptyListing
+                : "\(noProductModelsListing) (\(declined) other install\(declined == 1 ? "" : "s"); --catalog all lists them)"
+        }
+        return table(header: ["MODEL", "ENGINE", "BYTES", "PATH"],
+                     rows: catalog.models.map {
+                         [$0.id, $0.engine.rawValue,
+                          $0.sizeBytes > 0 ? String($0.sizeBytes) : "-",
+                          $0.location.path]
+                     })
+    }
+
+    private static func table(header: [String], rows body: [[String]]) -> String {
+        let rows = [header] + body
+        let widths = (0..<header.count).map { column in
+            rows.map { $0[column].count }.max() ?? 0
+        }
+        return rows.map { row in
+            row.enumerated().map { column, value in
+                if column == row.count - 1 { return value }
+                let padding = String(repeating: " ", count: widths[column] - value.count)
                 return column == 2 ? padding + value : value + padding
             }.joined(separator: "  ")
         }.joined(separator: "\n")

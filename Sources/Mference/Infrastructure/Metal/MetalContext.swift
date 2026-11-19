@@ -151,39 +151,19 @@ public final class MetalContext: @unchecked Sendable {
         "prefill",
         "prefill_simd_grouped_moe",
         "gdn",
-        "dsv4",
         "inkling",
         "dflash2",
-        "flint",
-        "flashnext",
-        "flashnext_moe",
-        "flashnext_indexer",
-        "flashnext_gdn",
-        "glm53",
-        "glm53_prefill",
     ]
 
     /// Bundle locations for runtime shader modules.
     private static let shaderSubdirectories: [String: String] = [
         "attention": "Metal/Attention",
-        "gemma_qat_attention": "Metal/Attention",
-        "gemma_qat_prefill_attention": "Metal/Attention",
         "dequant_int4": "Metal/Quant",
         "dequant_int8": "Metal/Quant",
         "dflash2": "Metal/DFlash2",
-        "dsv4": "Metal/DSV4",
-        "flashnext": "Metal/FlashNext",
-        "flashnext_gdn": "Metal/FlashNext",
-        "flashnext_indexer": "Metal/FlashNext",
-        "flashnext_moe": "Metal/FlashNext",
-        "glm53": "Metal/Glm53",
-        "glm53_prefill": "Metal/Glm53",
-        "gguf_int8_2l": "Metal/GGUF",
-        "gguf_lut4": "Metal/GGUF",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
         "inkling": "Metal/Inkling",
-        "flint": "Metal/Attention",
         "logit": "Metal/Sampling",
         "maple_add_rmsnorm": "Metal/Primitives",
         "maple_attention": "Metal/Attention",
@@ -205,25 +185,15 @@ public final class MetalContext: @unchecked Sendable {
                                  subdirectory: subdirectory)
     }
 
-    /// MSL version used for every runtime shader compile.
-    ///
-    /// The MPP prefill path requires MSL 4.0 tensor operations, which the Metal
-    /// compiler only accepts on macOS 26. `MTLLanguageVersion.msl4_0` is built
-    /// from a raw value and is non-nil on every SDK, so the `#available` check
-    /// is what actually keeps MSL 4.0 away from older systems — do not remove
-    /// it. Below macOS 26 we compile at 3.2; the shader sources guard their
-    /// tensor-ops kernels behind `__HAVE_TENSOR__`, so those kernels drop out of
-    /// the library and their Swift callers take the non-tensor path.
-    static var shaderLanguageVersion: MTLLanguageVersion {
-        if #available(macOS 26.0, iOS 26.0, *), let version4 = MTLLanguageVersion.msl4_0 {
-            return version4
-        }
-        return .version3_2
-    }
+    /// MSL version used for every runtime shader compile: 4.0, the version the
+    /// MPP tensor-ops prefill kernels need, on every supported OS (the floor is
+    /// macOS 26). The shader sources still guard their tensor-ops kernels behind
+    /// `__HAVE_TENSOR__`, which also needs a GPU with tensor support, so on such
+    /// GPUs those kernels drop out of the library and their Swift callers take
+    /// the non-tensor path.
+    static let shaderLanguageVersion: MTLLanguageVersion = .version4_0
 
-    static func compileShaderLibrary(
-        device: MTLDevice,
-        languageVersion: MTLLanguageVersion = shaderLanguageVersion) throws -> MTLLibrary {
+    static func compileShaderLibrary(device: MTLDevice) throws -> MTLLibrary {
         var combined = ""
         for name in shaderModules {
             guard let url = shaderURL(module: name) else {
@@ -234,7 +204,7 @@ public final class MetalContext: @unchecked Sendable {
         }
         do {
             let opts = MTLCompileOptions()
-            opts.languageVersion = languageVersion
+            opts.languageVersion = shaderLanguageVersion
             return try device.makeLibrary(source: combined, options: opts)
         } catch {
             throw MetalError.libraryCompileFailed("\(error)")
@@ -348,4 +318,10 @@ public final class MetalContext: @unchecked Sendable {
         case .float(let v):  return "f:\(v.bitPattern)"
         }
     }
+}
+
+extension MTLDevice {
+    /// Whether this device supports the Apple10 MPP tensor operations that back
+    /// the TensorOps prefill kernels.
+    var supportsApple10TensorOps: Bool { supportsFamily(.apple10) }
 }

@@ -1,8 +1,8 @@
-/* Experts grid: every cell is one expert of one layer (Qwen3.8-Flash-Next: 512 experts, 10 called per token).
+/* Experts grid: every cell is one expert of one layer (Qwen 3.6: 256 experts, 8 called per token).
    sparse = only the called experts are lit (in memory); full = every cell lit (the whole model loaded). */
 window.MFlux=(function(){
   function mount(cv,o){
-    var cols=o.cols,rows=o.rows,N=cols*rows,TOP=o.top||10,gap=o.gap||3;
+    var cols=o.cols,rows=o.rows,N=cols*rows,TOP=o.top||8,gap=o.gap||3;
     var on=o.on,off=o.off,mode=o.mode||"sparse";
     var reduce=false; /* owner override: the animation always plays, even with Reduce Motion on */
     var w=cv.clientWidth||o.width||600,dpr=Math.min(window.devicePixelRatio||1,2);

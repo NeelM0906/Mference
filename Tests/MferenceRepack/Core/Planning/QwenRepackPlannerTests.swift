@@ -86,9 +86,6 @@ struct QwenRepackPlannerTests {
         #expect(SourceFingerprint.modelID(forIndexSha256:
             "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea")
             == "qwen3.6-35b-a3b-4bit")
-        #expect(SourceFingerprint.modelID(forIndexSha256:
-            "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
-            == "mlx-community/gemma-4-26b-a4b-it-4bit")
     }
 
     @Test func qwenClassificationBucketsNames() {
@@ -225,14 +222,17 @@ struct QwenRepackPlannerTests {
         #expect(!names.contains { $0.hasPrefix("vision_tower.") })
     }
 
-    @Test func gemmaManifestOmitsFamilyFields() throws {
-        let snapshotDir = temporaryRoot("gemma-manifest")
-        let outputDir = temporaryRoot("gemma-manifest-out")
+    /// Shared `GTurboJSON` manifest emission writes none of the compressed-
+    /// attention, hyper-connection or router extension keys for a Qwen 3.6
+    /// install; the runtime reader treats their absence as the defaults.
+    @Test func qwenManifestOmitsCompressedAttentionExtensionFields() throws {
+        let snapshotDir = temporaryRoot("qwen-manifest-no-ca")
+        let outputDir = temporaryRoot("qwen-manifest-no-ca-out")
         defer {
             try? FileManager.default.removeItem(atPath: snapshotDir)
             try? FileManager.default.removeItem(atPath: outputDir)
         }
-        let snapshot = try SyntheticSnapshot.build(at: snapshotDir)
+        let snapshot = try SyntheticSnapshot.buildQwen(at: snapshotDir)
         let metadata = try IndexLoader.load(snapshotDir: snapshotDir)
         let arch = try ArchInfo.load(
             configPath: (snapshotDir as NSString).appendingPathComponent("config.json"))
@@ -242,7 +242,7 @@ struct QwenRepackPlannerTests {
 
         let data = try GTurboJSON.encodeManifest(
             plan: plan,
-            modelID: "unknown/snapshot",
+            modelID: "qwen3.6-35b-a3b-4bit",
             sourceSnapshotHash: "sha256:0",
             files: [],
             expertsPerLayer: 2,
@@ -250,15 +250,17 @@ struct QwenRepackPlannerTests {
             expertStride: 16_384,
             bitWidths: GTurboJSON.QuantBitWidths(
                 embedding: 4, attention: 4, router: 8,
-                sharedExpert: 8, routedExpert: 4))
+                sharedExpert: 4, routedExpert: 4))
         let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let archDict = obj["arch"] as! [String: Any]
-        for key in ["family", "attnOutputGate", "attentionScale",
-                    "embeddingScaledBySqrtHidden", "routerScaled",
-                    "ffnSandwichNorms", "sharedExpertGated", "ropeNeoxSubdim",
-                    "linearNumKHeads", "linearNumVHeads", "linearKeyHeadDim",
-                    "linearValueHeadDim", "linearConvKernelSize"] {
-            #expect(archDict[key] == nil, "gemma manifest must omit \(key)")
+        #expect(archDict["family"] as? String == "qwen36")
+        for key in ["caQLoraRank", "caOLoraRank", "caOGroups", "caRopeHeadDim",
+                    "caIndexNHeads", "caIndexHeadDim", "caIndexTopK",
+                    "caCSACompressRate", "caHCACompressRate",
+                    "caCompressRopeTheta", "hcMult", "hcSinkhornIters", "hcEps",
+                    "numHashRoutedLayers", "routerScoringFunc",
+                    "routedScalingFactor", "swigluLimit"] {
+            #expect(archDict[key] == nil, "qwen manifest must omit \(key)")
         }
     }
 

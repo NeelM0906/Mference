@@ -73,8 +73,8 @@ footer{border-top:1px solid var(--hair);margin-top:48px;padding:24px 0 40px;font
     <h1>Run the models you couldn't before.</h1>
     <p class="sub">Frontier models, on your Mac.</p>
     <div class="cmp">
-      <figure><canvas id="g1" role="img" aria-label="All 512 experts loaded in memory"></canvas><figcaption><span class="k">All 512 experts loaded</span><span class="v old">175 GB</span></figcaption></figure>
-      <figure><canvas id="g2" role="img" aria-label="Only the 10 experts a token calls are in memory"></canvas><figcaption><span class="k">Only the 10 it calls</span><span class="v new">2.36 GB</span></figcaption></figure>
+      <figure><canvas id="g1" role="img" aria-label="All 256 experts loaded in memory"></canvas><figcaption><span class="k">All 256 experts loaded</span><span class="v old">19.6 GB</span></figcaption></figure>
+      <figure><canvas id="g2" role="img" aria-label="Only the 8 experts a token calls are in memory"></canvas><figcaption><span class="k">Only the 8 it calls</span><span class="v new">1.45 GB</span></figcaption></figure>
     </div>
     <h2 class="ask">See what your Mac can run now that it couldn't before.</h2>
     <div class="pick"><span class="lab" id="lab">Memory</span><div class="seg" id="seg" role="group" aria-labelledby="lab"></div></div>
@@ -82,14 +82,14 @@ footer{border-top:1px solid var(--hair);margin-top:48px;padding:24px 0 40px;font
   <section class="verdict" aria-live="polite"><div class="big" id="verdict"></div></section>
   <div class="cols"><span>Model</span><span>Memory, before → now</span><span>Speed</span></div>
   <div id="rows" role="list"></div>
-  <footer><span>Apple Silicon · macOS 15+ · MIT license</span><span><a href="https://github.com/NeelM0906/Mference">GitHub</a></span></footer>
+  <footer><span>Apple Silicon · macOS 26+ · MIT license</span><span><a href="https://github.com/NeelM0906/Mference">GitHub</a></span></footer>
 </div>
 <script src="data.js"></script>
 <script src="flux.js"></script>
 <script>
 (function(){
-  window.MFlux.mount(document.getElementById("g1"),{cols:32,rows:16,gap:2,mode:"full",on:"#9a9ca4",off:"rgba(14,15,18,.12)"});
-  window.MFlux.mount(document.getElementById("g2"),{cols:32,rows:16,gap:2,on:"#4f4ee0",off:"rgba(14,15,18,.12)",every:1500});
+  window.MFlux.mount(document.getElementById("g1"),{cols:32,rows:8,gap:2,mode:"full",on:"#9a9ca4",off:"rgba(14,15,18,.12)"});
+  window.MFlux.mount(document.getElementById("g2"),{cols:32,rows:8,gap:2,on:"#4f4ee0",off:"rgba(14,15,18,.12)",every:1500});
   var M=window.MF, cur=M.pickHost(), seg=document.getElementById("seg");
   M.HOSTS.forEach(function(h){
     var b=document.createElement("button");b.type="button";b.dataset.id=h.id;b.textContent=h.label;b.title=h.mac;

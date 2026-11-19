@@ -4,7 +4,7 @@
 # the single table generator; run-benchmark.sh delegates to it.
 #
 # Every statistic is the median across the measured repetitions, matching what
-# docs/BENCHMARKS_M3_ULTRA.md states. Peak RSS is the maximum across runs.
+# the M3 Ultra report stated. Peak RSS is the maximum across runs.
 #
 # usage: ./summarize-benchmarks.sh [label ...]     (no label = every model)
 set -uo pipefail

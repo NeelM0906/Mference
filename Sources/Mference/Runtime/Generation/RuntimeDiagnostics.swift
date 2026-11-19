@@ -32,7 +32,6 @@ public struct RuntimeMemorySnapshot: Sendable, Equatable, Encodable {
         let reporting = producer as? any RuntimeMemoryReporting
         var metrics = model.diagnosticMemoryBytes
         metrics["targetKVStateBuffers"] = .some(reporting?.diagnosticKVStateBytes)
-        metrics["gemmaPrefixRecoveryBuffers"] = .some((producer as? any GemmaPrefixRecovering)?.gemmaRecoveryBytes)
         metrics["runnerScratchBuffers"] = .some(reporting?.diagnosticScratchBytes)
         metrics["completionScratchBuffers"] = scratch.diagnosticBufferBytes
         metrics["metalAllocated"] = UInt64(model.device.currentAllocatedSize)
@@ -52,18 +51,6 @@ public struct RuntimeMemorySnapshot: Sendable, Equatable, Encodable {
         metrics["processRSS"] = .some(result == KERN_SUCCESS
                                       ? UInt64(info.resident_size) : nil)
         return Self(bytes: metrics)
-    }
-}
-
-public struct GemmaPrefixRecoveryDiagnostics: Sendable, Equatable, Encodable {
-    public let outcome: String
-    public let capture: String?
-    public let allocatedBytes: UInt64
-
-    public init(outcome: String, capture: String?, allocatedBytes: UInt64) {
-        self.outcome = outcome
-        self.capture = capture
-        self.allocatedBytes = allocatedBytes
     }
 }
 
@@ -107,14 +94,10 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
     public let computedPrefillTokens: Int
     public let prefill: PrefillExecutionReport?
     public let memory: RuntimeMemorySnapshot
-
-    public let gemmaRecovery: GemmaPrefixRecoveryDiagnostics?
     public let prefixCache: PrefixCacheDiagnostics?
 
     public init(result: RawDecodeResult, memory: RuntimeMemorySnapshot,
-                gemmaRecovery: GemmaPrefixRecoveryDiagnostics? = nil,
                 prefixCache: PrefixCacheDiagnostics? = nil) {
-        self.gemmaRecovery = gemmaRecovery
         self.prefixCache = prefixCache
         cachedPromptTokens = result.cachedPromptTokens
         computedPrefillTokens = result.computedPrefillTokens
@@ -130,12 +113,11 @@ public struct RuntimeDiagnostics: Sendable, Equatable, Encodable {
         try c.encode(computedPrefillTokens, forKey: .computedPrefillTokens)
         try c.encode(prefill, forKey: .prefill)
         try c.encode(memory, forKey: .memory)
-        try c.encodeIfPresent(gemmaRecovery, forKey: .gemmaRecovery)
         try c.encodeIfPresent(prefixCache, forKey: .prefixCache)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, cachedPromptTokens, computedPrefillTokens, prefill, memory, gemmaRecovery
+        case schemaVersion, cachedPromptTokens, computedPrefillTokens, prefill, memory
         case prefixCache
     }
 

@@ -20,12 +20,12 @@ import Mference
 
     @Test func theChoiceReachesTheRuntime() {
         let growing = ServerModelSession.runtimeConfiguration(
-            family: .gemma4, expertCacheSlots: 16, reserveFullKV: false,
+            family: .qwen36, expertCacheSlots: 16, reserveFullKV: false,
             physicalMemoryBytes: Self.sixteenGiB, environment: [:])
         #expect(growing.kvGrowthTokens == RuntimeConfiguration.defaultKVGrowthTokens)
         #expect(RuntimeConfiguration.defaultKVGrowthTokens == 16_384)
         let reserved = ServerModelSession.runtimeConfiguration(
-            family: .gemma4, expertCacheSlots: 16, reserveFullKV: true,
+            family: .qwen36, expertCacheSlots: 16, reserveFullKV: true,
             physicalMemoryBytes: Self.sixteenGiB, environment: [:])
         #expect(reserved.kvGrowthTokens == nil)
     }

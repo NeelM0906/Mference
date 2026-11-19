@@ -17,14 +17,17 @@ Google's bundled template is unmodified.
 else (undefined) from explicit null, and provides a scoped null-output policy.
 Gemma QAT uses that policy to emit Python Jinja2's `None` for null tool
 arguments. Other checkpoints retain the existing empty null output. The QAT
-source template is unmodified and its bytes and token IDs are compared against
-an independent Python oracle in `GemmaQATChatTests`.
+source template is unmodified.
 
 `Sources/Jinja/Lexer.swift` and `Sources/Jinja/Interpreter.swift` differ from the upstream source snapshot.
-Mference's `GemmaJinjaWhitespaceTests` covers the defect, and
-`GemmaThinkingTests` compares all canonical prompt bytes and IDs against an
-independent Python oracle. The root package's `JinjaCompatibilityTests` target
-runs the unmodified upstream tests through `Scripts/test.sh`.
+Mference's `JinjaPatchTests` covers both changes with inline templates. The
+Gemma template-oracle suites that also compared canonical prompt bytes and IDs
+were removed with the rest of the Gemma tests. The root package's
+`JinjaCompatibilityTests` target runs the unmodified upstream tests through
+`Scripts/test.sh`.
 
 When an upstream release fixes this defect, replace the local package only
-after the same oracle, dependency tests, and model-family template tests pass.
+after `JinjaPatchTests`, the dependency tests, and the remaining template
+fixture tests (`ChatMLTemplateTests`, `MiniCPM5TemplateTests`, and
+`Qwen38ChatTests`, whose Qwen 3.8 renders are compared against an independent
+Python Jinja2 oracle) pass.

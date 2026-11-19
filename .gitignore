@@ -27,6 +27,8 @@ xcuserdata/
 *.pdf
 weights/
 models/
+# The vendored llama.cpp graph builders are source, not weights.
+!Sources/LlamaCpp/src/models/
 Model/
 !Tests/**/Model/
 # Committed parity goldens are small (KiB-scale) .safetensors test fixtures, not weights.
@@ -61,7 +63,3 @@ notes/
 __pycache__/
 *.pyc
 .venv/
-
-# Open WebUI writes its session-signing secret into the working directory when
-# WEBUI_SECRET_KEY is not set; the launcher sets it from the data directory.
-.webui_secret_key

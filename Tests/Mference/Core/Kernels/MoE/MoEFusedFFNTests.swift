@@ -35,12 +35,6 @@ import MferenceValidationSupport
                                seedKey: "production-routed-moe-top8")
     }
 
-    @Test func inklingTop6PipelineAndHitSplitMatchReference() throws {
-        try Self.checkPipeline(topK: 6,
-                               splitSlots: [[0, 2, 4], [1, 3, 5]],
-                               seedKey: "inkling-routed-moe-top6")
-    }
-
     private static func checkPipeline(topK: Int,
                                       splitSlots: [[UInt32]],
                                       seedKey: String) throws {

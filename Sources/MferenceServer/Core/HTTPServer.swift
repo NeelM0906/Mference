@@ -32,7 +32,7 @@ public actor MferenceHTTPServer {
     public init(modelID: String,
                 queueLimit: Int,
                 backend: any ServerInferenceBackend,
-                chatDialect: ChatDialect = .gemma,
+                chatDialect: ChatDialect = .chatml,
                 maxModelLen: Int = ServerArguments.defaultMaxContext,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
@@ -91,6 +91,7 @@ public actor MferenceHTTPServer {
         let childChannels = self.childChannels
         let coordinator = self.coordinator
         let group = self.group
+        let mode = self.mode
         let task = Task { @Sendable in
             var firstError: (any Error)?
             await coordinator.shutdown()
@@ -103,6 +104,11 @@ public actor MferenceHTTPServer {
                 }
             }
             await childChannels.closeAll()
+            // Library mode: release the resident model through the engine
+            // host, which logs `model released ... reason=shutdown`.
+            if case .library(let library) = mode {
+                await library.shutdown()
+            }
             do {
                 try await group.shutdownGracefully()
             } catch {
@@ -197,9 +203,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             case .single:
                 writeJSON(context, status: .ok, object: ["status": "ok"])
             case .library(let library):
-                // Answered off a lock-protected snapshot, so the probe stays
-                // responsive through a load that holds the library actor for
-                // minutes.
+                // Answered off the engine host's lock-protected status, so the
+                // probe stays responsive through a load that runs for minutes.
                 let health = library.snapshot.health
                 writeJSON(context, status: .ok, object: [
                     "status": health.status,
@@ -259,7 +264,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
             let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
                                                               dialect: chatDialect,
-                                                              swiftQwen: backend.usesSwiftQwenTemplate,
                                                               acceptsReasoningEffort: backend.acceptsReasoningEffort,
                                                               qwenReasoning: backend.supportsQwenReasoningEffort,
                                                               generationDefaults: backend.generationDefaults)
@@ -389,13 +393,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
-            guard let entry = library.snapshot.entry(for: decoded.model) else {
-                if let reason = library.snapshot.index.unavailableReason(for: decoded.model) {
+            guard let descriptor = library.snapshot.descriptor(for: decoded.model) else {
+                if let reason = library.snapshot.unavailableReason(for: decoded.model) {
                     throw ServerRequestError.invalid(message: reason, param: "model", code: "model_not_runnable")
                 }
                 throw ServerRequestError.unknownModel
             }
-            let requestedModelID = entry.modelID
+            let requestedModelID = descriptor.id
             let streaming = decoded.stream ?? false
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
@@ -426,45 +430,49 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         // Inside the turn: the generation that was running when
                         // this request arrived has drained, and nothing else can
                         // start until this request releases, so the swap sees no
-                        // live KV or expert cache belonging to the old model.
-                        let resolved = try await library.resolve(modelID: requestedModelID)
-                        let request = try OpenAIRequestValidator.validate(
-                            decoded,
-                            modelID: resolved.modelID,
-                            dialect: resolved.backend.chatDialect,
-                            swiftQwen: resolved.backend.usesSwiftQwenTemplate,
-                            acceptsReasoningEffort: resolved.backend.acceptsReasoningEffort,
-                            qwenReasoning: resolved.backend.supportsQwenReasoningEffort,
-                            generationDefaults: resolved.backend.generationDefaults)
-                        let prepared = try await resolved.backend.prepare(request)
-                        startStream()
-                        let completion = try await resolved.backend
-                            .generate(prepared) { event in
-                                guard request.stream else { return }
-                                switch event {
-                                case .reasoning(let text):
-                                    self.writeStreamChunk(contextBox.value,
-                                        self.chunk(id: responseID, created: created, model: resolved.modelID,
-                                                   delta: ["reasoning_content": text], finishReason: nil))
-                                case .content(let text):
-                                    self.writeStreamChunk(
-                                        contextBox.value,
-                                        self.chunk(id: responseID, created: created,
-                                                   model: resolved.modelID,
-                                                   delta: ["content": text],
-                                                   finishReason: nil))
-                                case .toolCall(let call):
-                                    self.writeToolCall(contextBox.value,
-                                                       id: responseID,
-                                                       created: created,
+                        // live KV or expert cache belonging to the old model. The
+                        // engine host holds the model for the whole body, so no
+                        // swap or idle unload can come between validation and
+                        // the end of generation.
+                        try await library.withModel(requestedModelID) { resolvedModelID, backend in
+                            let resolved = (modelID: resolvedModelID, backend: backend)
+                            let request = try OpenAIRequestValidator.validate(
+                                decoded,
+                                modelID: resolved.modelID,
+                                dialect: resolved.backend.chatDialect,
+                                acceptsReasoningEffort: resolved.backend.acceptsReasoningEffort,
+                                qwenReasoning: resolved.backend.supportsQwenReasoningEffort,
+                                generationDefaults: resolved.backend.generationDefaults)
+                            let prepared = try await resolved.backend.prepare(request)
+                            startStream()
+                            let completion = try await resolved.backend
+                                .generate(prepared) { event in
+                                    guard request.stream else { return }
+                                    switch event {
+                                    case .reasoning(let text):
+                                        self.writeStreamChunk(contextBox.value,
+                                            self.chunk(id: responseID, created: created, model: resolved.modelID,
+                                                       delta: ["reasoning_content": text], finishReason: nil))
+                                    case .content(let text):
+                                        self.writeStreamChunk(
+                                            contextBox.value,
+                                            self.chunk(id: responseID, created: created,
                                                        model: resolved.modelID,
-                                                       toolIndex: streamState.nextToolIndex(),
-                                                       call: call)
+                                                       delta: ["content": text],
+                                                       finishReason: nil))
+                                    case .toolCall(let call):
+                                        self.writeToolCall(contextBox.value,
+                                                           id: responseID,
+                                                           created: created,
+                                                           model: resolved.modelID,
+                                                           toolIndex: streamState.nextToolIndex(),
+                                                           call: call)
+                                    }
                                 }
-                            }
-                        return LibraryOutcome(modelID: resolved.modelID,
-                                              completion: completion,
-                                              includeUsage: request.includeUsage)
+                            return LibraryOutcome(modelID: resolved.modelID,
+                                                  completion: completion,
+                                                  includeUsage: request.includeUsage)
+                        }
                     }
                     ServerLog.requestCompleted(id: responseID,
                                                duration: started.duration(to: .now),

@@ -9,24 +9,11 @@ import Mference
 /// their own identity while using the same architecture and runner.
 public enum ServerFamilyModelID {
     public static func modelID(for family: ModelFamily, checkpointID: String? = nil) -> String {
-        if family == .gemma4, checkpointID == CheckpointIdentity.gemma4QAT {
-            return CheckpointIdentity.gemma4QAT
-        }
-        if family == .qwen38, checkpointID == CheckpointIdentity.swiftQwen38 {
-            return CheckpointIdentity.swiftQwen38
-        }
         return switch family {
-        case .gemma4: "gemma-4-26b-a4b-it"
         case .qwen36: "qwen3.6-35b-a3b"
         case .qwen38: "qwen3.8-27b-4bit"
-        case .deepseekV4Flash: "deepseek-v4-flash-2bit-dq"
-        case .inklingSmall: "inkling-small-4bit"
         case .maple: "maple-preview-2bit-mlx"
-        case .flint: "flint-40b-a2.5b-jang-4m"
-        case .qwen38flashnext: "qwen3.8-flash-next-int4g64"
-        case .qwen38flashnextudiq3xxs: "unsloth-qwen3.8-flash-next-ud-iq3_xxs"
         case .minicpm5: "minicpm5-2b-int4g64"
-        case .glm53Flash: "glm-5.3-flash-mlx-mixed-4-8bit"
         }
     }
 
@@ -84,6 +71,11 @@ public enum ServerLibraryProbe {
             return .notAModelDirectory
         }
 
+        // A retired install (by checkpoint ID, a family-less Gemma 4 manifest,
+        // or a retired family) is listed as not runnable, not as broken.
+        if let retired = ManifestReader.retiredInstall(manifestURL: manifestURL) {
+            return .notRunnable(family: retired.identifier, detail: retired.detail)
+        }
         // A gated family has to be told apart from a broken install, and
         // `peekFamily` reports both by throwing. Asking the runner table first
         // keeps the two apart without matching on error text, and the moment a

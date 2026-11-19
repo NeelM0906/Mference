@@ -66,7 +66,7 @@ extension RawCompletionLoopTests {
     @Test(arguments: [false, true], [false, true])
     func presenceUsesCachedNewPromptAndGeneratedHistory(resume: Bool, chunked: Bool) async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let ids = try ["a", "b", "c", "d"].map {
             try #require(tokenizer.encode($0, addBOS: false).first)
         }
@@ -102,7 +102,7 @@ extension RawCompletionLoopTests {
     @Test(arguments: [false, true])
     func presenceExcludesFusedGreedyBeforeProducerMutation(chunked: Bool) async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let token = try #require(tokenizer.encode("a", addBOS: false).first)
         let scratch = try RawCompletionScratch(context: context, vocab: tokenizer.vocabSize)
         for presence: Float in [-1.5, 1.5] {
@@ -140,7 +140,7 @@ extension RawCompletionLoopTests {
 
     @Test func presenceRejectsGreedyChunkedSeedOnLogitsPath() async throws {
         let context = try MetalContext()
-        let tokenizer = try await MFTokenizer.load()
+        let tokenizer = try await MFTokenizer.chatMLFixture()
         let token = try #require(tokenizer.encode("a", addBOS: false).first)
         let producer = ChunkedTestProducer(vocabSize: tokenizer.vocabSize, firstToken: token,
                                            seed: .greedyToken(UInt32(token)))

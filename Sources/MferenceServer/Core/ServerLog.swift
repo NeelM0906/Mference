@@ -1,4 +1,5 @@
 import Foundation
+import MferenceEngine
 
 /// Request lifecycle logging. Responses stay deliberately generic so runtime
 /// details never reach a client; the operator needs the opposite, so the log
@@ -57,23 +58,40 @@ enum ServerLog {
         write("request \(id) stream aborted: \(reason)")
     }
 
-    /// Library mode only. A load emits nothing for as long as first-touch
-    /// SHA-256 verification takes, so the start line is what distinguishes a
-    /// swap in progress from a stalled request.
-    static func modelLoadStarted(_ modelID: String) {
-        write("swap started to=\(modelID)")
+    /// Library mode: the engine host's lifecycle in the server's log format.
+    /// A swap from A to B reads
+    ///
+    ///     swap started from=A to=B
+    ///     model released model=A reason=swap
+    ///     swap finished model=B in 12.3s
+    ///
+    /// The release line comes once A's memory is gone and before B's load
+    /// begins, which is the order memory validation checks. A cold load is
+    /// `swap started to=B` then `swap finished` (or `swap failed`). A load emits
+    /// nothing for as long as first-touch SHA-256 verification takes, so the
+    /// start line is what distinguishes a swap in progress from a stalled
+    /// request.
+    static func hostEventMessage(_ event: EngineHostEvent) -> String? {
+        switch event {
+        case .unloadStarted(let modelID, .swap(let target)):
+            "swap started from=\(modelID) to=\(target)"
+        case .unloadStarted:
+            nil
+        case .unloadFinished(let modelID, let reason):
+            "model released model=\(modelID) reason=\(reason.logName)"
+        case .loadStarted(let modelID, nil):
+            "swap started to=\(modelID)"
+        case .loadStarted:
+            nil
+        case .loadFinished(let modelID, let seconds):
+            "swap finished model=\(modelID) in \(String(format: "%.1fs", seconds))"
+        case .loadFailed(let modelID, let message):
+            "swap failed model=\(modelID) error=\(message)"
+        }
     }
 
-    static func modelSwapStarted(from: String, to: String) {
-        write("swap started from=\(from) to=\(to)")
-    }
-
-    static func modelSwapFinished(model: String, duration: Duration) {
-        write("swap finished model=\(model) in \(format(duration))")
-    }
-
-    static func modelSwapFailed(model: String, error: any Error) {
-        write("swap failed model=\(model) error=\(String(describing: error))")
+    static func hostEvent(_ event: EngineHostEvent) {
+        if let message = hostEventMessage(event) { write(message) }
     }
 
     /// Reported once per candidate the library declined, so a partial or gated
@@ -92,6 +110,17 @@ enum ServerLog {
         write(notice)
     }
 
+    /// The engine's native backend reports what the server's own session
+    /// used to log itself, in the same lines.
+    static func nativeBackendNotice(_ notice: NativeBackendNotice) {
+        switch notice {
+        case .verifyAutoFallback(let text):
+            verifyAutoFallback(text)
+        case .promptCacheShed(let reason, let releasedBytes):
+            promptCacheShed(reason: reason, releasedBytes: releasedBytes)
+        }
+    }
+
     private static func format(_ duration: Duration) -> String {
         let seconds = Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18
@@ -106,5 +135,16 @@ enum ServerLog {
     private static func write(_ message: String) {
         let line = "[\(Date().formatted(.iso8601))] \(message)\n"
         FileHandle.standardError.write(Data(line.utf8))
+    }
+}
+
+extension EngineUnloadReason {
+    var logName: String {
+        switch self {
+        case .swap: "swap"
+        case .idle: "idle"
+        case .requested: "requested"
+        case .shutdown: "shutdown"
+        }
     }
 }

@@ -18,14 +18,14 @@ prints.
 Both prompts quote this repository's own public documentation at commit
 `06c13ee`, unchanged, each document wrapped in a `<document path="...">` tag:
 
-- `long-32k.json`: [System design](../../SYSTEM_DESIGN.md),
+- `long-32k.json`: System design (`docs/SYSTEM_DESIGN.md`),
   [Family contract](../../FAMILY_CONTRACT.md),
   [Runtime controls](../../RUNTIME_CONTROLS.md),
   [Local OpenAI-compatible server](../../OPENAI_SERVER.md), and
-  [llama.cpp sampling](../../LLAMA_SAMPLING.md) up to its section
+  llama.cpp sampling (`docs/LLAMA_SAMPLING.md`) up to its section
   "Real Gemma entry-point checks", followed by a task asking for a sourced
   briefing under 600 words.
-- `followup-1500.json`: [Runtime diagnostics](../../RUNTIME_DIAGNOSTICS.md) up
+- `followup-1500.json`: Runtime diagnostics (`docs/RUNTIME_DIAGNOSTICS.md`) up
   to its section "Gemma prefix recovery", followed by a task asking for an
   answer under 300 words.
 
