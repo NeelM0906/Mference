@@ -75,7 +75,9 @@ public enum ReceiptHeuristics {
         let whole = { (text: Substring) in
             Decimal(string: String(text.filter(\.isNumber)), locale: Locale(identifier: "en_US_POSIX"))
         }
-        let signed = /(?:[$€£¥]|\b(?:USD|EUR|GBP|JPY|CAD|AUD)\b)\s?(\d{1,3}(?:[,.]\d{3})+|\d+)(?![\d.,]\d)/
+        // The lookahead refuses any further digit after separators, so the
+        // match cannot back off into a prefix of "$44.49" ("4") or "1,200".
+        let signed = /(?:[$€£¥]|\b(?:USD|EUR|GBP|JPY|CAD|AUD)\b)\s?(\d{1,3}(?:[,.]\d{3})+|\d+)(?![\d.,]*\d)/
         let trailing = /(?:^|[^\d.,])(\d{1,3}(?:[,.]\d{3})+|\d+)\s?(?:[€¥£円]|\b(?:USD|EUR|GBP|JPY|CAD|AUD)\b)/
         found += line.matches(of: signed).compactMap { whole($0.output.1) }
         found += line.matches(of: trailing).compactMap { whole($0.output.1) }
