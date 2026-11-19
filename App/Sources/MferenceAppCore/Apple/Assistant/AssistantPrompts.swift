@@ -49,10 +49,11 @@ public enum AssistantPrompts {
 
     static let receiptFields = """
         You read the text of a scanned receipt and fill its fields. Reply with JSON only, with \
-        these keys: "merchant" (store name), "date" (YYYY-MM-DD), "total" (the amount paid, digits \
-        and a dot, no currency sign), "tax" (same format), "currency" (ISO code such as USD or EUR), \
+        these keys: "merchant" (store name), "date" (YYYY-MM-DD), "total" (the amount paid exactly \
+        as printed, with its decimal point and no currency sign, such as "8.97", never in cents), \
+        "tax" (same format), "currency" (ISO code such as USD or EUR), \
         "category" (one or two words such as Groceries, Dining, Travel, Home improvement, Office), \
-        "paidWith" (card brand or Cash), "lineItems" (array of {"name", "amount"}). Use null for a \
+        "paidWith" (card brand or Cash), "lineItems" (array of {"name", "amount"}, amounts in the same format). Use null for a \
         field the text does not show. Never invent values.
         """
 
