@@ -46,8 +46,9 @@ swift test --package-path App
 
 `App/Scripts/bundle.sh` signs `Mference.app` with, in order:
 `MFERENCE_SIGN_IDENTITY` when set (`-` forces ad hoc); else the
-maintainer's self-signed **"Mference Local Signing"** code-signing identity,
-when `security find-identity -p codesigning` lists it; else ad hoc, with a
+maintainer's self-signed code-signing identity whose name starts with
+**"Mference Local Signing"** (any case, trailing punctuation ignored; used by
+its SHA-1), when `security find-identity -p codesigning` lists it; else ad hoc, with a
 notice. With the local identity, the designated requirement is
 certificate-based, so TCC grants (Full Disk Access, Calendar, Reminders,
 Camera) survive rebuilds. With ad hoc it is a cdhash, and every build is a new

@@ -24,8 +24,9 @@
 #    both engine resource bundles the way their `Bundle.module` accessors do
 #    and checks their files. The signing identity (P4, as changed 2026-11-19):
 #      - MFERENCE_SIGN_IDENTITY when set ("-" forces ad hoc);
-#      - else "Mference Local Signing" when `security find-identity -p
-#        codesigning` lists it: a self-signed certificate the maintainer
+#      - else the first identity `security find-identity -p codesigning`
+#        lists whose name starts with "Mference Local Signing" (any case,
+#        trailing punctuation ignored), used by its SHA-1: a self-signed certificate the maintainer
 #        creates in their login keychain, so the designated requirement is
 #        certificate-based and TCC grants (Full Disk Access, Calendar, ...)
 #        survive rebuilds;
@@ -68,10 +69,23 @@ done
 
 # Signing identity (see the header). Decided before anything is built.
 LOCAL_IDENTITY="Mference Local Signing"
+# The first code-signing identity whose name starts with LOCAL_IDENTITY,
+# ignoring case and trailing punctuation or spaces (so "Mference Local
+# signing." matches), as its SHA-1 (unambiguous for codesign). Reads
+# `security find-identity -p codesigning` lines: `  1) <SHA-1> "<name>" ...`.
+find_local_identity() {
+    awk -v want="$(tr '[:upper:]' '[:lower:]' <<<"$LOCAL_IDENTITY")" '
+        match($0, /"[^"]*"/) {
+            name = tolower(substr($0, RSTART + 1, RLENGTH - 2))
+            sub(/[[:space:][:punct:]]+$/, "", name)
+            if (index(name, want) == 1) { print $2; exit }
+        }'
+}
 SIGN_IDENTITY="${MFERENCE_SIGN_IDENTITY:-}"
 if [[ -z "$SIGN_IDENTITY" ]]; then
-    if security find-identity -p codesigning 2>/dev/null | grep -qF "\"$LOCAL_IDENTITY\""; then
-        SIGN_IDENTITY="$LOCAL_IDENTITY"
+    LOCAL_SHA="$(security find-identity -p codesigning 2>/dev/null | find_local_identity || true)"
+    if [[ -n "$LOCAL_SHA" ]]; then
+        SIGN_IDENTITY="$LOCAL_SHA"
     else
         SIGN_IDENTITY="-"
         echo "bundle.sh: notice: no \"$LOCAL_IDENTITY\" code-signing identity in the keychain; signing ad hoc," >&2
