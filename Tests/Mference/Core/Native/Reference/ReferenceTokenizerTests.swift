@@ -4,8 +4,8 @@ import Testing
 
 /// The reference tokenizer on a small synthetic byte-level vocabulary: the
 /// qwen35 pre-tokenizer split, BPE merge order, special-token partition and
-/// pieces. Real-vocabulary checks against llama.cpp are env-gated in
-/// `ReferenceQuickTests`.
+/// pieces. The check against llama.cpp's token ids on the real vocabulary is
+/// env-gated in `ReferenceQuickPackTests`.
 @Suite("ReferenceTokenizerTests")
 struct ReferenceTokenizerTests {
     static func split(_ s: String) -> [String] {
@@ -77,6 +77,47 @@ struct ReferenceTokenizerTests {
         #expect(t.piece(imEnd, special: true) == Array("<|im_end|>".utf8))
         #expect(t.piece(toolCall, special: false) == Array("<tool_call>".utf8))
         #expect(t.specialTokens.first.map { t.piece($0, special: true).count } == 13)
+    }
+
+    /// Divergences from the pin found in review, each pinned here:
+    /// `llama_decode_text`'s unknown-byte text, BPE `token_to_byte`,
+    /// first-wins merge ranks, and gpt2's default BOS/EOS of 11.
+    @Test func llamaCppEdgeCases() throws {
+        // An unmapped code point: "[UNK_BYTE_0x" + its UTF-8 hex + the whole text + "]".
+        let text = Array("a€".utf8)
+        #expect(Native.ReferenceUnicode.decodeByteText(text)
+                == Array("a[UNK_BYTE_0xe282aca€]".utf8))
+
+        var tokens = (0..<20).map { "t\($0)" }
+        tokens[12] = "<0x41>"
+        tokens[13] = "<0x"
+        var types = [Int32](repeating: 1, count: tokens.count)
+        types[12] = 6
+        types[13] = 6
+        let data = Native.TokenizerData(model: "gpt2", pre: "qwen35", tokens: tokens, tokenTypes: types,
+                                        merges: ["t 1", "t 2", "t 1"], bosTokenID: nil, eosTokenID: nil,
+                                        paddingTokenID: nil, addBOS: nil, addEOS: nil)
+        let t = try Native.ReferenceTokenizer(data: data)
+        #expect(t.piece(12, special: false) == [0x41])
+        #expect(t.piece(13, special: false) == [0])
+        #expect(t.ranks[.init(left: Array("t".utf8), right: Array("1".utf8))] == 0)
+        #expect(t.bosTokenID == 11 && t.eosTokenID == 11)
+        #expect(t.endOfGenerationTokenIDs.contains(11))
+        let template = Native.ReferenceChatTemplateSource(template: "", data: data)
+        #expect(template.bosToken == "t11" && template.eosToken == "t11")
+        // An id from the GGUF replaces the default; an out-of-range id does not.
+        var withIDs = data
+        withIDs.eosTokenID = 5
+        withIDs.bosTokenID = 99
+        let ids = Native.ReferenceTokenizer.specialIDs(withIDs)
+        #expect(ids.eos == 5 && ids.bos == 11)
+        // GGUF special-token keys replace text detection and join EOG as
+        // llama.cpp's fim_pad/fim_rep/fim_sep/eot/eom do; out-of-range ids are ignored.
+        var keyed = data
+        keyed.specialTokenIDs = ["eot": 7, "fim_pad": 8, "fim_rep": 999, "unknown": 3]
+        let k = try Native.ReferenceTokenizer(data: keyed)
+        #expect(k.endOfGenerationTokenIDs == [7, 8, 11])
+        #expect(k.attr(7) == .normal)
     }
 
     @Test func refusesOtherTokenizers() {

@@ -92,23 +92,22 @@ extension Native {
             ranks.reserveCapacity(data.merges.count)
             for (i, merge) in data.merges.enumerated() {
                 let bytes = Array(merge.utf8)
-                // llama.cpp splits at the first space after the first byte.
-                guard bytes.count > 1, let sep = bytes[1...].firstIndex(of: 0x20) else {
-                    ranks[BytePair(left: [], right: [])] = i
-                    continue
+                // llama.cpp splits at the first space after the first byte
+                // (no space: an empty pair) and keeps the first rank of a
+                // repeated pair (`bpe_ranks.emplace`).
+                var pair = BytePair(left: [], right: [])
+                if bytes.count > 1, let sep = bytes[1...].firstIndex(of: 0x20) {
+                    pair = BytePair(left: Array(bytes[..<sep]), right: Array(bytes[(sep + 1)...]))
                 }
-                ranks[BytePair(left: Array(bytes[..<sep]), right: Array(bytes[(sep + 1)...]))] = i
+                if ranks[pair] == nil { ranks[pair] = i }
             }
             self.texts = texts
             self.textToID = textToID
             self.ranks = ranks
             self.attrs = attrs
-            func valid(_ id: Int32?) -> Int32? {
-                guard let id, id >= 0, Int(id) < texts.count else { return nil }
-                return id
-            }
-            bosTokenID = valid(data.bosTokenID)
-            eosTokenID = valid(data.eosTokenID)
+            let ids = Self.specialIDs(data)
+            bosTokenID = ids.bos
+            eosTokenID = ids.eos
             addBOS = data.addBOS ?? false
             addEOS = data.addEOS ?? false
             applySpecialTokenRules()
@@ -116,31 +115,62 @@ extension Native {
 
         // MARK: llama.cpp special-token rules (llama_vocab::impl::load)
 
+        /// BOS and EOS as llama.cpp resolves them for a gpt2 vocabulary: both
+        /// default to id 11; a GGUF id replaces the default when it is in
+        /// range; a default out of range is disabled.
+        public static func specialIDs(_ data: TokenizerData) -> (bos: Int32?, eos: Int32?) {
+            let n = data.tokens.count
+            func resolve(_ key: Int32?) -> Int32? {
+                if let key, key >= 0, Int(key) < n { return key }
+                return 11 < n ? 11 : nil
+            }
+            return (resolve(data.bosTokenID), resolve(data.eosTokenID))
+        }
+
         private func applySpecialTokenRules() {
             func id(_ text: String) -> Int32? { textToID[Array(text.utf8)] }
             func promote(_ t: Int32) { attrs[Int(t)].insert(.control) }
             func first(_ candidates: [String]) -> Int32? {
                 // llama.cpp takes the first match in hash-map order; with a
-                // single present candidate (true for the Qwen vocabularies)
-                // the order does not matter.
+                // single present candidate the order does not matter. (Qwen
+                // has two EOT candidates, <|im_end|> and <|endoftext|>, both
+                // EOG either way.)
                 candidates.lazy.compactMap { id($0) }.first
             }
-            let eot = first(["<|eot_id|>", "<|im_end|>", "<|end|>", "<end_of_turn>", "<|endoftext|>",
-                             "<|end_of_text|>", "<EOT>", "_<EOT>", "[EOT]", "<｜end▁of▁sentence｜>",
-                             "<end_of_utterance>"])
-            let eom = first(["<|eom_id|>"])
-            let fimPre = first(["<|fim_prefix|>", "<fim-prefix>", "<fim_prefix>", "<｜fim▁begin｜>", "<PRE>",
-                                "▁<PRE>", "<|code_prefix|>", "<|prefix|>", "<|plamo:fim_prefix|>"])
-            let fimSuf = first(["<|fim_suffix|>", "<fim-suffix>", "<fim_suffix>", "<｜fim▁hole｜>", "<SUF>",
-                                "▁<SUF>", "<|code_suffix|>", "<|suffix|>", "<|plamo:fim_suffix|>"])
-            let fimMid = first(["<|fim_middle|>", "<fim-middle>", "<fim_middle>", "<｜fim▁end｜>", "<MID>",
-                                "▁<MID>", "<|code_middle|>", "<|middle|>", "<|plamo:fim_middle|>"])
-            let fimPad = first(["<|fim_pad|>", "<fim-pad>", "<fim_pad>", "<PAD>", "[PAD]"])
-            let fimRep = first(["<|fim_repo|>", "<|repo_name|>", "<fim-repo>", "<REPO>", "<reponame>"])
-            let fimSep = first(["<|file_sep|>", "<|plamo:file_separator|>"])
-            for t in [eot, eom, fimPre, fimSuf, fimMid, fimPad, fimRep, fimSep].compactMap({ $0 }) {
-                promote(t)
+            // An id from a GGUF `tokenizer.ggml.<name>_token_id` key (in range;
+            // the deprecated prefix/suffix/middle keys are read after the
+            // fim_* ones, so they win) is used as is; otherwise the token is
+            // detected by text and promoted to control, as llama.cpp does.
+            let keyed = data.specialTokenIDs ?? [:]
+            func fromKeys(_ names: [String]) -> Int32? {
+                var found: Int32?
+                for name in names {
+                    if let v = keyed[name], v >= 0, Int(v) < texts.count { found = v }
+                }
+                return found
             }
+            func resolve(_ names: [String], _ candidates: [String]) -> Int32? {
+                if let k = fromKeys(names) { return k }
+                guard let t = first(candidates) else { return nil }
+                promote(t)
+                return t
+            }
+            let eot = resolve(["eot"], ["<|eot_id|>", "<|im_end|>", "<|end|>", "<end_of_turn>", "<|endoftext|>",
+                                        "<|end_of_text|>", "<EOT>", "_<EOT>", "[EOT]", "<｜end▁of▁sentence｜>",
+                                        "<end_of_utterance>"])
+            let eom = resolve(["eom"], ["<|eom_id|>"])
+            _ = resolve(["fim_pre", "prefix"], ["<|fim_prefix|>", "<fim-prefix>", "<fim_prefix>", "<｜fim▁begin｜>",
+                                                "<PRE>", "▁<PRE>", "<|code_prefix|>", "<|prefix|>",
+                                                "<|plamo:fim_prefix|>"])
+            _ = resolve(["fim_suf", "suffix"], ["<|fim_suffix|>", "<fim-suffix>", "<fim_suffix>", "<｜fim▁hole｜>",
+                                                "<SUF>", "▁<SUF>", "<|code_suffix|>", "<|suffix|>",
+                                                "<|plamo:fim_suffix|>"])
+            _ = resolve(["fim_mid", "middle"], ["<|fim_middle|>", "<fim-middle>", "<fim_middle>", "<｜fim▁end｜>",
+                                                "<MID>", "▁<MID>", "<|code_middle|>", "<|middle|>",
+                                                "<|plamo:fim_middle|>"])
+            let fimPad = resolve(["fim_pad"], ["<|fim_pad|>", "<fim-pad>", "<fim_pad>", "<PAD>", "[PAD]"])
+            let fimRep = resolve(["fim_rep"], ["<|fim_repo|>", "<|repo_name|>", "<fim-repo>", "<REPO>", "<reponame>"])
+            let fimSep = resolve(["fim_sep"], ["<|file_sep|>", "<|plamo:file_separator|>"])
             // Control tokens whose text contains "unused" are marked unused.
             for (i, text) in texts.enumerated() where attrs[i].contains(.control) {
                 if text.windowsContain(Array("unused".utf8)) { attrs[i].insert(.unused) }
@@ -398,9 +428,14 @@ extension Native {
             if !attr.intersection([.unknown, .control, .userDefined]).isEmpty { return text }
             if attr.contains(.normal) { return ReferenceUnicode.decodeByteText(text) }
             if attr.contains(.byte) {
-                let cpts = String(decoding: text, as: UTF8.self).unicodeScalars.map { $0.value }
-                if cpts.count == 1, let b = ReferenceUnicode.utf8ToByte[cpts[0]] { return [b] }
-                return []
+                // `token_to_byte` for BPE: strtol(text.substr(3, 2), 16).
+                guard text.count >= 3 else { return [] }
+                var value = 0
+                for b in text[3 ..< min(5, text.count)] {
+                    guard let digit = Int(String(UnicodeScalar(b)), radix: 16) else { break }
+                    value = value * 16 + digit
+                }
+                return [UInt8(truncatingIfNeeded: value)]
             }
             return []
         }
@@ -585,7 +620,8 @@ extension Native {
                 } else {
                     out += Array("[UNK_BYTE_0x".utf8)
                     for b in utf8(scalar.value) { out += Array(String(format: "%02x", b).utf8) }
-                    out += Array("]".utf8)
+                    // llama.cpp appends the whole token text, then "]".
+                    out += text + Array("]".utf8)
                 }
             }
             return out

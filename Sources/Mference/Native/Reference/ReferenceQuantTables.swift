@@ -1,6 +1,6 @@
 // Generated from the vendored Sources/LlamaCpp/ggml/src/ggml-common.h (pin
-// b1b770d9); `ReferenceQuantTablesTests` checks every entry against the
-// header text, and the same values are inlined in native_reference.metal.
+// b1b770d9); `ReferenceFormatPinTests` checks every entry against the
+// header text.
 
 extension Native {
     /// ggml lookup tables used by the IQ dequantizers.

@@ -8,8 +8,10 @@ import Testing
 /// - `MFERENCE_NATIVE_WRITE_PACK=<gguf>|<output.mfpack>`: write the pack with
 ///   the reference writer (reads the GGUF, writes a new directory; a model run).
 /// - `MFERENCE_NATIVE_QUICK_PACK=<quick.mfpack>`: open it with every hash
-///   checked; with `MFERENCE_NATIVE_GOLDENS=<goldens/<set>/<backend>>` also
-///   tokenize each golden's rendered prompt and compare with llama.cpp's ids.
+///   checked. With `MFERENCE_NATIVE_QUICK_GGUF=<gguf>` also re-check every
+///   tensor, the tokenizer data and the template against the source GGUF;
+///   with `MFERENCE_NATIVE_GOLDENS` (H's `GoldenStore`) tokenize each golden's
+///   rendered prompt and compare with llama.cpp's ids.
 @Suite("ReferenceQuickPackTests", .serialized)
 struct ReferenceQuickPackTests {
     static let env = ProcessInfo.processInfo.environment
@@ -44,27 +46,31 @@ struct ReferenceQuickPackTests {
         let tokenizer = try store.tokenizer.makeTokenizer()
         #expect(tokenizer.vocabSize == 248_320)
         #expect(tokenizer.eosTokenID == 248_046)
-        guard let goldens = Self.env["MFERENCE_NATIVE_GOLDENS"] else { return }
-        struct Golden: Decodable {
-            var prompt_id: String
-            var rendered_prompt_file: String
-            var prompt_tokens: [Int32]
+        // With the source GGUF, re-check every tensor against its GGUF bytes
+        // and the template and tokenizer data against its metadata.
+        if let ggufPath = Self.env["MFERENCE_NATIVE_QUICK_GGUF"] {
+            let gguf = try Native.ReferenceGGUFFile(url: URL(fileURLWithPath: ggufPath))
+            #expect(gguf.tensors.map(\.name) == store.manifest.tensors.map(\.name))
+            for (info, t) in zip(gguf.tensors, store.manifest.tensors) {
+                #expect(Native.ReferencePackWriter.sha256Hex(gguf.bytes(of: info)) == t.sourceSHA256, "\(t.name)")
+                #expect(info.type == t.type && info.shape == t.shape, "\(t.name)")
+            }
+            #expect(try gguf.tokenizerData() == store.tokenizer.data)
+            #expect(gguf.string("tokenizer.chat_template") == store.chatTemplate.template)
+            #expect(try gguf.qwen35Config() == store.config)
         }
-        let root = URL(fileURLWithPath: goldens)
+        guard GoldenStore.root != nil else { return }
         var checked = 0
-        for name in try FileManager.default.contentsOfDirectory(atPath: root.path).sorted() {
-            let json = root.appendingPathComponent(name).appendingPathComponent("golden.json")
-            guard FileManager.default.fileExists(atPath: json.path) else { continue }
-            let g = try JSONDecoder().decode(Golden.self, from: Data(contentsOf: json))
-            let text = try String(contentsOf: root.appendingPathComponent(name)
-                .appendingPathComponent(g.rendered_prompt_file), encoding: .utf8)
+        for prompt in try GoldenStore.promptSet().prompts {
+            let golden = try GoldenStore.open(prompt.id)
+            let text = try golden.renderedPrompt()
             let ids = try tokenizer.encode(text, addSpecial: true, parseSpecial: true)
-            #expect(ids == g.prompt_tokens, "\(g.prompt_id): \(ids.count) vs \(g.prompt_tokens.count) tokens")
+            #expect(ids == golden.promptTokens, "\(golden.id): \(ids.count) vs \(golden.promptTokens.count) tokens")
             let pieces = ids.flatMap { tokenizer.piece($0, special: true) }
-            #expect(pieces == Array(text.utf8), "\(g.prompt_id): pieces do not reproduce the prompt")
+            #expect(pieces == Array(text.utf8), "\(golden.id): pieces do not reproduce the prompt")
             checked += 1
         }
         print("reference tokenizer: \(checked) golden prompts checked")
-        #expect(checked > 0)
+        #expect(checked == 11)
     }
 }

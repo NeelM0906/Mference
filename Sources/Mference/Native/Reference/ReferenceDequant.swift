@@ -3,7 +3,7 @@ import Foundation
 extension Native {
     /// CPU twins of the reference dequantizers: direct ports of ggml's
     /// `dequantize_row_<type>` at the pin (`ggml-quants.c`), one block at a
-    /// time, with the same expression order as `native_reference.metal`.
+    /// time, in the same expression order as the reference Metal kernels.
     /// Swift does not contract `a * b - c` into an FMA, so these match ggml's
     /// C code compiled with `-ffp-contract=off` bit for bit
     /// (`ReferenceDequantTests` checks digests produced that way).
@@ -188,8 +188,8 @@ extension Native {
         }
 
         /// Gather the GGUF-order bytes of block `block` of row `row` of a
-        /// tensor stored in `layout` at `base` (the CPU twin of
-        /// `ref_gather_block`).
+        /// tensor stored in `layout` at `base`, through
+        /// `TileLayout.packedOffset`.
         public static func gatherBlock(base: UnsafeRawPointer, layout: TileLayout, format: QuantBlockFormat,
                                        row: Int, block: Int, blocksPerRow: Int,
                                        into out: UnsafeMutablePointer<UInt8>) {
