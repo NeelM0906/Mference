@@ -182,8 +182,8 @@ func eventually(_ condition: () -> Bool) async -> Bool {
         #expect(AppleConnections.connectionState(.connected) == .connected)
         #expect(AppleConnections.connectionState(.notConnected) == .notConnected)
         #expect(AppleConnections.connectionState(.needsSystemSettings) == .needsSystemSettings)
-        #expect(AppleConnections.connectionState(.unsupported(detail: "new Mail format"))
-                == .unsupported(detail: "new Mail format"))
+        #expect(AppleConnections.connectionState(.unsupported(detail: "V11 layout, no Envelope Index"), kind: .appleMail)
+                == .unsupported(detail: "This version of Apple Mail stores mail in a way Mference cannot read yet."))
         // The preview's Apple services read nothing and ask nothing.
         let services = AppServices.preview()
         let connections = try? #require(services.apple?.connections)
