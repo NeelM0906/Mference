@@ -10,7 +10,7 @@ public enum ReceiptHeuristics {
         draft.merchant = merchant(in: lines)
         draft.total = amount(in: lines, labelled: ["grand total", "total due", "amount due", "total", "balance due"],
                              excluding: ["subtotal", "sub total", "sub-total", "total tax", "tax total"])
-        draft.tax = amount(in: lines, labelled: ["sales tax", "tax", "vat", "gst", "mwst", "ust", "tva", "iva"],
+        draft.tax = amount(in: lines, labelled: taxLabels,
                            excluding: ["before tax", "pre-tax", "excl", "incl. tax total"])
         draft.date = date(in: lines)
         draft.paidWith = payment(in: lines)
@@ -61,6 +61,21 @@ public enum ReceiptHeuristics {
         let output = match.output
         let negative = (output.1 != nil && output.5 != nil) || output.2 != nil || output.3 != nil || output.6 != nil
         return negative ? -magnitude : magnitude
+    }
+
+    /// Every amount printed on a line, without its sign: what a model's
+    /// amount must match to be taken.
+    static func amounts(in line: String) -> [Decimal] {
+        line.matches(of: /\d+(?:[,.]\d{3})*[.,]\d{2}(?!\d)/).compactMap {
+            ReceiptValueParser.decimal(String($0.output))
+        }
+    }
+
+    static let taxLabels = ["sales tax", "tax", "vat", "gst", "mwst", "ust", "tva", "iva"]
+
+    /// Whether the receipt prints a tax line at all.
+    static func printsTax(in lines: [String]) -> Bool {
+        lines.contains { line in taxLabels.contains { containsWord($0, in: line.lowercased()) } }
     }
 
     static func date(in lines: [String]) -> String? {

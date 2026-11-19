@@ -111,9 +111,10 @@ public enum ReceiptFieldMerger {
                              filledBy: AssistantModelKind?) -> ScanFields {
         let currency = model?.currency ?? text.currency
         let lowConfidence = reading.lines.contains { $0.confidence < lowRecognitionConfidence }
+        let rows = reading.rows
         func field(_ key: ScanFieldKey, model modelValue: String?, text textValue: String?,
-                   inferred: Bool = false) -> ScanField {
-            let value = modelValue ?? textValue ?? ""
+                   inferred: Bool = false, preferText: Bool = false) -> ScanField {
+            let value = (preferText ? textValue ?? modelValue : modelValue ?? textValue) ?? ""
             var agree = false
             if let modelValue, let textValue {
                 agree = modelValue.caseInsensitiveCompare(textValue) == .orderedSame
@@ -122,16 +123,30 @@ public enum ReceiptFieldMerger {
             let sure = !value.isEmpty && !inferred && !lowConfidence && (agree || (textValue == nil && printed))
             return ScanField(key: key, value: value, confidence: sure ? .sure : .check)
         }
+        // Money is never the model's alone: an amount read from a labelled
+        // printed line wins, and a model amount is taken only when that exact
+        // amount is printed (a model that drops the point, reads cents or
+        // takes the subtotal is caught). Tax stays empty when none is printed.
+        // Keyed by canonical text: 6 and 6.00 are the same amount.
+        let key = { (amount: Decimal) in NSDecimalNumber(decimal: amount < 0 ? -amount : amount).stringValue }
+        let printedAmounts = Set(rows.flatMap(ReceiptHeuristics.amounts(in:)).map(key))
+        let printsTax = ReceiptHeuristics.printsTax(in: rows)
+        func vetted(_ amount: Decimal?, allowed: Bool = true) -> Decimal? {
+            guard allowed, let amount else { return nil }
+            return printedAmounts.contains(key(amount)) ? amount : nil
+        }
         let money = { (amount: Decimal?) in amount.map { ScanFormat.amount($0, currency: currency) } }
         let date = { (iso: String?) in iso.flatMap(ScanFormat.displayDate) }
+        let paidWith = model?.paidWith.map { ReceiptHeuristics.payment(in: [$0]) ?? $0 }
         return ScanFields(
             fields: [
                 field(.merchant, model: model?.merchant, text: text.merchant),
                 field(.date, model: date(model?.date), text: date(text.date)),
-                field(.total, model: money(model?.total), text: money(text.total)),
-                field(.tax, model: money(model?.tax), text: money(text.tax)),
+                field(.total, model: money(vetted(model?.total)), text: money(text.total), preferText: true),
+                field(.tax, model: money(vetted(model?.tax, allowed: printsTax)), text: money(text.tax),
+                      preferText: true),
                 field(.category, model: model?.category, text: nil, inferred: true),
-                field(.paidWith, model: model?.paidWith, text: text.paidWith),
+                field(.paidWith, model: paidWith, text: text.paidWith, preferText: true),
             ],
             lineItems: model?.lineItems ?? [],
             currency: currency,

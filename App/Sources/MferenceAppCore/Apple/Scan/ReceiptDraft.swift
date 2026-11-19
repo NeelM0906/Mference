@@ -57,23 +57,39 @@ public struct ReceiptDraft: Sendable, Hashable, Codable {
 
 /// Parses amounts and dates as receipts and models write them.
 public enum ReceiptValueParser {
-    /// "44.49", "$44.49", "1,234.50", "44,49 €" -> Decimal.
+    /// "44.49", "$44.49", "1,330.55", "1.330,55", "44,49 €" -> Decimal.
+    /// The last separator is the decimal point when the other one also
+    /// appears, when one or two digits follow it, or when it is the only dot;
+    /// otherwise ("1,234", "1.234.567") separators group thousands.
+    /// Look-alike separators a model or OCR may write ("٫", "．", "，")
+    /// count as their ASCII forms, so the point is never silently dropped.
     public static func decimal(_ text: String) -> Decimal? {
-        var digits = text.filter { $0.isNumber || $0 == "." || $0 == "," || $0 == "-" }
-        guard digits.contains(where: \.isNumber) else { return nil }
-        if let comma = digits.lastIndex(of: ","), let dot = digits.lastIndex(of: ".") {
-            // Whichever comes last is the decimal separator.
-            if comma > dot {
-                digits = digits.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
-            } else {
-                digits = digits.replacingOccurrences(of: ",", with: "")
+        var cleaned = ""
+        for character in text {
+            switch character {
+            case "0"..."9", ".", ",", "-": cleaned.append(character)
+            case "\u{066B}", "\u{FF0E}", "\u{2024}": cleaned.append(".")
+            case "\u{FF0C}", "\u{066C}": cleaned.append(",")
+            default: continue
             }
-        } else if let comma = digits.lastIndex(of: ",") {
-            // "44,5" and "44,49" are decimal commas; "1,234" groups thousands.
-            let decimals = digits.distance(from: comma, to: digits.endIndex) - 1
-            digits = decimals == 1 || decimals == 2
-                ? digits.replacingOccurrences(of: ",", with: ".")
-                : digits.replacingOccurrences(of: ",", with: "")
+        }
+        guard cleaned.contains(where: \.isNumber) else { return nil }
+        let separators = cleaned.indices.filter { cleaned[$0] == "." || cleaned[$0] == "," }
+        var digits = cleaned
+        if let last = separators.last {
+            let decimals = cleaned.distance(from: last, to: cleaned.endIndex) - 1
+            let mixed = Set(separators.map { cleaned[$0] }).count > 1
+            let onlyDot = separators.count == 1 && cleaned[last] == "."
+            let isPoint = mixed || (1...2).contains(decimals) || onlyDot
+            digits = ""
+            for index in cleaned.indices {
+                let character = cleaned[index]
+                if character == "." || character == "," {
+                    if isPoint && index == last { digits.append(".") }
+                } else {
+                    digits.append(character)
+                }
+            }
         }
         return Decimal(string: digits, locale: Locale(identifier: "en_US_POSIX"))
     }

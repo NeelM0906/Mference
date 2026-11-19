@@ -241,6 +241,16 @@ import Testing
     @Test func decimalCommasWithOneDigit() {
         #expect(ReceiptValueParser.decimal("44,5") == Decimal(string: "44.5"))
         #expect(ReceiptValueParser.decimal("1,234") == Decimal(string: "1234"))
+        // C-B1: the point is never dropped, whichever separators are used.
+        #expect(ReceiptValueParser.decimal("44.49") == Decimal(string: "44.49"))
+        #expect(ReceiptValueParser.decimal("44,49") == Decimal(string: "44.49"))
+        #expect(ReceiptValueParser.decimal("1,330.55") == Decimal(string: "1330.55"))
+        #expect(ReceiptValueParser.decimal("1.330,55") == Decimal(string: "1330.55"))
+        #expect(ReceiptValueParser.decimal("$1,330.55") == Decimal(string: "1330.55"))
+        #expect(ReceiptValueParser.decimal("1.234.567") == Decimal(string: "1234567"))
+        #expect(ReceiptValueParser.decimal("44\u{066B}49") == Decimal(string: "44.49"))
+        #expect(ReceiptValueParser.decimal("44\u{FF0E}49") == Decimal(string: "44.49"))
+        #expect(ReceiptValueParser.decimal("-44.49") == Decimal(string: "-44.49"))
     }
 
     @Test func clipsLongInputAtAWord() {

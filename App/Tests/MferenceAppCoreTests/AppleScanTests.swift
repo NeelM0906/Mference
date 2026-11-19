@@ -122,14 +122,14 @@ struct GatedScanner: DocumentRecognizing {
         let reading = Self.reading(ReceiptFixtures.all[0])
         let printed = ReceiptHeuristics.read(reading)
         var model = printed
-        model.total = Decimal(string: "45.49")  // disagrees with the print
+        model.total = Decimal(string: "45.49")  // disagrees with the print, which wins
         model.category = "Home improvement"
         model.currency = "USD"
         let fields = ReceiptFieldMerger.merge(model: model, text: printed, reading: reading, filledBy: .appleOnDevice)
         #expect(fields[.merchant] == ScanField(key: .merchant, value: "Corner Hardware", confidence: .sure))
         #expect(fields[.date] == ScanField(key: .date, value: "Sep 12, 2026", confidence: .sure))
         #expect(fields[.tax] == ScanField(key: .tax, value: "$3.53", confidence: .sure))
-        #expect(fields[.total] == ScanField(key: .total, value: "$45.49", confidence: .check))
+        #expect(fields[.total] == ScanField(key: .total, value: "$44.49", confidence: .check))
         #expect(fields[.category]?.confidence == .check)
         #expect(fields[.paidWith]?.value == "Visa")
         #expect(fields.filledBy == .appleOnDevice)
@@ -142,6 +142,76 @@ struct GatedScanner: DocumentRecognizing {
         let blurry = ScanReading(lines: reading.lines.map { ScanLine(text: $0.text, confidence: 0.3, box: .zero) })
         let lowConfidence = ReceiptFieldMerger.merge(model: printed, text: printed, reading: blurry, filledBy: .quick)
         #expect(lowConfidence.needsChecking == ScanFieldKey.allCases)
+    }
+
+    /// C-B1 (2026-11-19): Apple's model returned amounts without their point,
+    /// the subtotal or an item as the tax, and a tax where none is printed.
+    /// Each case is that run's model answer on that fixture; the amount read
+    /// from the printed line wins, and tax stays empty when none is printed.
+    @Test(arguments: [
+        ("01-hardware", "4449", "4096"),
+        ("02-cafe", "897", "375"),
+        ("04-books", "2440", "191"),
+        ("05-fuel", "4637", "0.00"),
+        ("06-office", "75.45", "3.10"),
+        ("07-restaurant", "5155", "355"),
+        ("08-pharmacy", "1944", "948"),
+        ("09-garden", "133055", "9856"),
+        ("10-bakery-small", "6.00", "6.00"),
+    ])
+    func printedAmountsWinOverTheModel(name: String, modelTotal: String, modelTax: String) throws {
+        let fixture = try #require(ReceiptFixtures.all.first { $0.name == name })
+        let reading = Self.reading(fixture)
+        let model = ReceiptDraft(merchant: fixture.merchant, date: fixture.date, total: Decimal(string: modelTotal),
+                                 tax: Decimal(string: modelTax), currency: fixture.currency)
+        let fields = ReceiptFieldMerger.merge(model: model, text: ReceiptHeuristics.read(reading), reading: reading,
+                                              filledBy: .appleOnDevice)
+        #expect(AppleScanAccuracyTests.normalized(.total, fields.value(.total)) == ScanCSVExporter.plain(fixture.total))
+        #expect(AppleScanAccuracyTests.normalized(.tax, fields.value(.tax)) == fixture.tax.map(ScanCSVExporter.plain))
+        #expect(fields[.total]?.confidence == (Decimal(string: modelTotal) == fixture.total ? .sure : .check))
+    }
+
+    /// Without a printed reading, a model amount is taken only when that exact
+    /// amount is printed, and a tax only when the receipt prints a tax line.
+    @Test func aModelAmountMustBePrinted() throws {
+        let hardware = Self.reading(ReceiptFixtures.all[0])
+        let noPrintedReading = ReceiptDraft()
+        let printedTotal = ReceiptDraft(total: Decimal(string: "44.49"), tax: Decimal(string: "3.53"), currency: "USD")
+        let taken = ReceiptFieldMerger.merge(model: printedTotal, text: noPrintedReading, reading: hardware,
+                                             filledBy: .appleOnDevice)
+        #expect(taken.value(.total) == "$44.49")
+        #expect(taken.value(.tax) == "$3.53")
+        let cents = ReceiptDraft(total: 4449, tax: 353, currency: "USD")
+        let dropped = ReceiptFieldMerger.merge(model: cents, text: noPrintedReading, reading: hardware,
+                                               filledBy: .appleOnDevice)
+        #expect(dropped.value(.total) == nil && dropped.value(.tax) == nil)
+
+        let bakery = Self.reading(try #require(ReceiptFixtures.all.first { $0.name == "10-bakery-small" }))
+        let untaxed = ReceiptFieldMerger.merge(model: ReceiptDraft(total: 6, tax: 6, currency: "USD"),
+                                               text: noPrintedReading, reading: bakery, filledBy: .appleOnDevice)
+        #expect(untaxed.value(.total) == "$6.00")
+        #expect(untaxed.value(.tax) == nil)
+    }
+
+    @Test func aModelCardNameIsWrittenOut() throws {
+        let books = Self.reading(try #require(ReceiptFixtures.all.first { $0.name == "04-books" }))
+        let fields = ReceiptFieldMerger.merge(model: ReceiptDraft(paidWith: "AMEX"), text: ReceiptDraft(),
+                                              reading: books, filledBy: .appleOnDevice)
+        #expect(fields.value(.paidWith) == "American Express")
+    }
+
+    /// The model reads the printed rows, each label beside its amount, not
+    /// Vision's transcript with the amount column after the labels.
+    @Test func theModelReadsLabelAndAmountOnOneRow() {
+        let box = { (x: Double, y: Double, w: Double) in CGRect(x: x, y: y, width: w, height: 0.03) }
+        let reading = ScanReading(lines: [
+            ScanLine(text: "Subtotal", confidence: 1, box: box(0.1, 0.60, 0.15)),
+            ScanLine(text: "TOTAL", confidence: 1, box: box(0.1, 0.70, 0.10)),
+            ScanLine(text: "40.96", confidence: 1, box: box(0.7, 0.60, 0.09)),
+            ScanLine(text: "44.49", confidence: 1, box: box(0.7, 0.70, 0.09)),
+        ], transcript: "Subtotal\nTOTAL\n40.96\n44.49")
+        #expect(reading.modelText.contains("TOTAL   44.49"))
+        #expect(reading.modelText.contains("Subtotal   40.96"))
     }
 
     @Test func fieldsRoundTripThroughJSON() throws {
