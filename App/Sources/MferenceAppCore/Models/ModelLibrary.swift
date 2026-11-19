@@ -26,6 +26,14 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
     public var fit: MemoryFit.Verdict
     /// Licence of a downloadable model ("Apache 2.0"); nil when unknown.
     public var licence: String?
+    /// The engine's state for an installed model (loaded, ready, loading,
+    /// unloading); nil when not installed.
+    public var availability: ModelAvailability?
+    /// Install location; nil when not installed.
+    public var location: URL?
+    /// The engine's message when the last load of this installed model
+    /// failed; cleared by the next successful load.
+    public var loadFailure: String?
 
     public var id: String { model.modelID }
 
@@ -55,13 +63,16 @@ public struct ModelLibraryRow: Sendable, Hashable, Identifiable {
     }
 
     public init(model: AppModel, state: State, sizeBytes: UInt64, isDefault: Bool,
-                fit: MemoryFit.Verdict, licence: String? = nil) {
+                fit: MemoryFit.Verdict, licence: String? = nil,
+                availability: ModelAvailability? = nil, location: URL? = nil) {
         self.model = model
         self.state = state
         self.sizeBytes = sizeBytes
         self.isDefault = isDefault
         self.fit = fit
         self.licence = licence
+        self.availability = availability
+        self.location = location
     }
 }
 
@@ -80,6 +91,7 @@ public final class ModelLibrary {
     @ObservationIgnored private let downloads: DownloadManager?
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private var options: [ModelOption] = []
+    @ObservationIgnored private var engineStatus = EngineServiceStatus.empty
     @ObservationIgnored private var downloadStates: [AppModel: DownloadState] = [:]
 
     public init(engine: any EngineServicing, downloads: DownloadManager?, settings: AppSettings,
@@ -138,6 +150,7 @@ public final class ModelLibrary {
 
     private func refreshOptions() async {
         options = await engine.models()
+        engineStatus = engine.status
         rebuild()
     }
 
@@ -159,10 +172,16 @@ public final class ModelLibrary {
             } else {
                 state = .notInstalled(reason: "Not installed on this Mac.")
             }
-            return ModelLibraryRow(model: model, state: state, sizeBytes: size,
+            var row = ModelLibraryRow(model: model, state: state, sizeBytes: size,
                                    isDefault: settings.defaultModel == model,
                                    fit: memoryFit.verdict(for: model, sizeBytes: size),
-                                   licence: source?.licence)
+                                   licence: source?.licence,
+                                   availability: isInstalled ? option?.availability : nil,
+                                   location: isInstalled ? option?.location : nil)
+            if isInstalled, engineStatus.lastLoadFailureModel == model, option?.availability == .ready {
+                row.loadFailure = engineStatus.lastLoadFailure
+            }
+            return row
         }
     }
 
@@ -190,6 +209,38 @@ public final class ModelLibrary {
     public func startDownload(_ approval: DownloadApproval) {
         guard let downloads else { return }
         Task { try? await downloads.download(approval) }
+    }
+
+    /// Adds a model file the person picked: validated against the pinned
+    /// product files, copied into the downloads folder, then the engine's
+    /// catalog is refreshed so the row shows it installed. The original is
+    /// never moved or deleted.
+    @discardableResult
+    public func importModelFile(at url: URL) async throws -> AppModel {
+        // The download manager's folder: ~/llm-models/gguf in the app, a
+        // temporary directory in tests and previews.
+        guard let downloads else { throw ModelImportError.file("model files cannot be added here") }
+        let destination = downloads.destination
+        let sources = AppModel.allCases.compactMap { downloads.source(for: $0) }
+        let model = try await ModelFileImporter(destination: destination, sources: sources).importFile(at: url)
+        await engine.refreshCatalog()
+        await refreshOptions()
+        return model
+    }
+
+    /// Retry after a failed load: loads an installed model again (the Deep
+    /// gate still applies; a local load needs no network, so offline mode
+    /// does not block it). It never starts or continues a download: those
+    /// go only through the approval paths (`startDownload`), so this is not a
+    /// second way to fetch Deep (L4). For anything not installed it does
+    /// nothing.
+    public func retryLoad(_ model: AppModel) {
+        guard memoryFit.isOffered(model), row(for: model)?.state == .installed else { return }
+        let engine = self.engine
+        Task {
+            try? await engine.load(model)
+            await refreshOptions()
+        }
     }
 
     public func pauseDownload(_ model: AppModel) {
