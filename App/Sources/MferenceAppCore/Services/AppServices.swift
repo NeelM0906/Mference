@@ -84,7 +84,8 @@ public final class AppServices {
                            permissions: permissions,
                            modelContainer: container,
                            downloads: downloads,
-                           apple: AppleServices.live(engine: engine, broker: permissions, container: container),
+                           apple: AppleServices.live(engine: engine, broker: permissions, container: container,
+                                                     useAppleModel: { await MainActor.run { settings.useAppleModel } }),
                            storeError: storeError,
                            idleUnload: idleUnload)
     }

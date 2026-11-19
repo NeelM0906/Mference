@@ -29,7 +29,8 @@ final class AppRuntime {
         self.web = web
         chat = ChatViewModel(service: services.engine,
                              store: ConversationStore(container: services.modelContainer),
-                             tools: web)
+                             tools: web,
+                             defaultModel: { [settings = services.settings] in settings.defaultModel })
         screenModels = ScreenModels.live(services: services)
         let engine = services.engine
         shutdownSteps = [

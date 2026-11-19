@@ -120,6 +120,11 @@ public final class ConversationStore {
     }
 
     /// Enabled memory items, for the sidebar card.
+    /// The enabled memories, newest change first, for the model's context.
+    public func rememberedFacts() -> [String] {
+        (try? MemoryStore(context: context).enabledFacts()) ?? []
+    }
+
     public func rememberedCount() -> Int {
         (try? context.fetchCount(FetchDescriptor<MemoryItem>(predicate: #Predicate { $0.isEnabled == true }))) ?? 0
     }

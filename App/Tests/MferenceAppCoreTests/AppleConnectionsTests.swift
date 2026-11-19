@@ -79,7 +79,7 @@ import Testing
         let broker = RecordingPermissionBroker()
         let engine = GatedEngine(gate: ScanTestLatch(), answer: "")
         let services = AppleServices.live(engine: engine, broker: broker, container: container,
-                                          plannerStore: PlannerStore(url: nil))
+                                          plannerStore: PlannerStore(url: nil), useAppleModel: { true })
         #expect(services.scan.phase == .empty)
         #expect(services.calendar.access == .notAsked)
         #expect(services.mail.status == nil)
