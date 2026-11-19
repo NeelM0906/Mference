@@ -41,7 +41,7 @@ public final class MailInboxModel {
     /// letters then, they do not mark Done or undo.
     public var isEditingDraft = false
     public var isRenamingBuckets = false
-    public var isEditingText: Bool { isEditingDraft || isRenamingBuckets }
+    public var isEditingText: Bool { isEditingDraft || isRenamingBuckets || isComposing }
     public private(set) var errorMessage: String?
 
     private var inbox: [MailMessageSummary] = []
@@ -316,6 +316,27 @@ public final class MailInboxModel {
             }
         }
     }
+
+    /// Compose (C): a new message, sent through Mail only when the person
+    /// clicks Send. Returns nil when sent, else the reason it was not.
+    public func sendNewMessage(to: String, subject: String, body: String) async -> String? {
+        let recipient = to.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AppleMailSender.isPlausibleAddress(recipient) else { return MailSendError.invalidRecipient.userMessage }
+        let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "Write the message first." }
+        do {
+            try await sender.send(MailDraft(to: recipient, subject: subject.trimmingCharacters(in: .whitespaces),
+                                            body: text))
+            return nil
+        } catch let error as MailSendError {
+            return error.userMessage
+        } catch {
+            return "Mail could not send the message."
+        }
+    }
+
+    /// A compose window is open: C and E/Z type letters.
+    public var isComposing = false
 
     /// Only the Send button calls this.
     public func send() async {

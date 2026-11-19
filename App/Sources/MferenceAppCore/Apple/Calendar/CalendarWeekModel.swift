@@ -167,6 +167,31 @@ public final class CalendarWeekModel {
         }
     }
 
+    /// "New event" in the toolbar: the person typed it, so it is added at
+    /// once (Calendar access asked first if needed). Returns whether it was
+    /// added; `errorMessage` says why not.
+    @discardableResult
+    public func createEvent(title: String, start: Date, end: Date) async -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, end > start else {
+            errorMessage = "An event needs a title and an end after its start."
+            return false
+        }
+        if access != .granted { await requestAccess() }
+        guard access == .granted else { return false }
+        do {
+            _ = try await service.add(ProposedEvent(title: trimmed, start: start, end: end,
+                                                    source: ItemSource(kind: .manual, label: "Added by you")))
+            await reload()
+            return true
+        } catch let error as CalendarServiceError {
+            errorMessage = error.userMessage
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        return false
+    }
+
     public func dismiss(_ proposal: ProposedEvent) {
         persist { $0.proposals.removeAll { $0.id == proposal.id } }
     }
