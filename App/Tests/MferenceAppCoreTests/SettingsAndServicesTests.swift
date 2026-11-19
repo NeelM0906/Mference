@@ -175,7 +175,11 @@ import Testing
         func set(_ state: PermissionState, _ permission: AppPermission) { states.withLock { $0[permission] = state } }
         func state(_ permission: AppPermission) -> PermissionState { states.withLock { $0[permission] ?? .notDetermined } }
 
-        func broker(goOn: Bool, grant: PermissionState = .granted) -> LivePermissionBroker {
+        struct PromptFailed: Error {}
+
+        /// `grant` is what the system prompt leaves; `fails` makes it throw
+        /// (the error a temporary or broken store would report).
+        func broker(goOn: Bool, grant: PermissionState = .granted, fails: Bool = false) -> LivePermissionBroker {
             LivePermissionBroker(
                 presentReason: { permission in
                     self.record("reason:\(permission.rawValue)")
@@ -185,10 +189,47 @@ import Testing
                     state: { self.state($0) },
                     prompt: { permission in
                         self.record("prompt:\(permission.rawValue)")
+                        if fails { throw PromptFailed() }
                         self.set(grant, permission)
                     },
                     openURL: { url in self.record("open:\(url.query ?? "")") }))
         }
+    }
+
+    @Test func aPromptThatChangesNothingNeverLoops() async {
+        // The maintainer's Calendar bug: the system prompt neither showed nor
+        // settled the state, and the app asked with its reason again and again.
+        let log = CallLog()
+        let broker = log.broker(goOn: true, grant: .notDetermined)
+        #expect(await broker.request(.calendar) == .needsSystemSettings)
+        #expect(await broker.request(.calendar) == .needsSystemSettings)
+        #expect(await broker.request(.calendar) == .needsSystemSettings)
+        #expect(log.calls == ["reason:calendar", "prompt:calendar"], "the reason is shown once per session")
+    }
+
+    @Test func aFailingPromptIsReportedNotSwallowed() async {
+        let log = CallLog()
+        let broker = log.broker(goOn: true, fails: true)
+        #expect(await broker.request(.reminders) == .needsSystemSettings)
+        #expect(await broker.request(.reminders) == .needsSystemSettings)
+        #expect(log.calls == ["reason:reminders", "prompt:reminders"])
+    }
+
+    @Test func aDeclinedReasonCanBeAskedAgainLater() async {
+        // Declining our own reason is the person's choice, not a failed
+        // prompt: a later request may show the reason again.
+        let log = CallLog()
+        let broker = log.broker(goOn: false)
+        #expect(await broker.request(.camera) == .notDetermined)
+        #expect(await broker.request(.camera) == .notDetermined)
+        #expect(log.calls == ["reason:camera", "reason:camera"])
+    }
+
+    @Test func requestsUseOneRetainedEventStore() {
+        let box = EventStoreBox()
+        let broker = LivePermissionBroker(presentReason: { _ in false }, eventStore: box)
+        #expect(broker.eventStore === box.store)
+        #expect(broker.eventStore === broker.eventStore)
     }
 
     @Test func reasonComesBeforeThePrompt() async {

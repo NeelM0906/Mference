@@ -4,11 +4,20 @@ import CoreServices
 import EventKit
 import Foundation
 import os
+import Synchronization
 
 /// The real `PermissionBroker` (decision L6). It never prompts on its own:
 /// `state(of:)` only reads, and `request(_:)` runs only when a feature asks,
 /// first showing the one-line reason through `presentReason`, then the
 /// system prompt.
+///
+/// EventKit requests go through one `EKEventStore` the broker keeps for its
+/// lifetime (`eventStore`, which the Calendar service should share), not a
+/// temporary store that can be released before the system answers. A system
+/// prompt that fails, or leaves the state undetermined, is logged
+/// (subsystem `ai.mference.app`, category `permissions`) and answered with
+/// `.needsSystemSettings`; for the rest of the session the reason is not
+/// shown again for that permission, so a broken prompt can never loop.
 ///
 /// The bundle's `Info.plist` must carry the usage strings
 /// (`NSCalendarsFullAccessUsageDescription`,
@@ -26,7 +35,7 @@ public struct LivePermissionBroker: PermissionBroker {
         public var state: @Sendable (AppPermission) async -> PermissionState
         /// Shows the system prompt (or, for Full Disk Access, nothing: the
         /// person switches it on in System Settings). Throws what the system
-        /// answered when it refused to ask.
+        /// reports, so it is logged rather than swallowed.
         public var prompt: @Sendable (AppPermission) async throws -> Void
         public var openURL: @Sendable (URL) async -> Void
 
@@ -38,11 +47,11 @@ public struct LivePermissionBroker: PermissionBroker {
             self.openURL = openURL
         }
 
-        public static func live(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> System {
-            // One event store for every Calendar and Reminders request, kept
-            // as long as the broker, not a temporary per request.
-            let events = EventStoreBox()
-            return System(
+        /// The real calls. EventKit requests go through `eventStore`, which
+        /// must outlive the request (the broker keeps it).
+        public static func live(eventStore: EventStoreBox = EventStoreBox(),
+                                homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> System {
+            System(
                 state: { permission in
                     switch permission {
                     case .calendar: LivePermissionBroker.state(EKEventStore.authorizationStatus(for: .event))
@@ -55,8 +64,8 @@ public struct LivePermissionBroker: PermissionBroker {
                 },
                 prompt: { permission in
                     switch permission {
-                    case .calendar: _ = try await events.store.requestFullAccessToEvents()
-                    case .reminders: _ = try await events.store.requestFullAccessToReminders()
+                    case .calendar: _ = try await eventStore.store.requestFullAccessToEvents()
+                    case .reminders: _ = try await eventStore.store.requestFullAccessToReminders()
                     case .camera: _ = await AVCaptureDevice.requestAccess(for: .video)
                     case .microphone: _ = await AVCaptureDevice.requestAccess(for: .audio)
                     case .mailAutomation: _ = await LivePermissionBroker.mailAutomationState(ask: true)
@@ -69,21 +78,27 @@ public struct LivePermissionBroker: PermissionBroker {
         }
     }
 
-    /// EventKit's store is not `Sendable`; its request methods are safe to
-    /// call from any thread.
-    final class EventStoreBox: @unchecked Sendable {
-        let store = EKEventStore()
-    }
+    private let presentReason: ReasonPresenter
+    private let system: System
+    private let storeBox: EventStoreBox
+    /// Permissions whose system prompt already ran this session.
+    private let prompted = PromptedPermissions()
 
     static let log = Logger(subsystem: "ai.mference.app", category: "permissions")
 
-    private let presentReason: ReasonPresenter
-    private let system: System
-
-    public init(presentReason: @escaping ReasonPresenter, system: System = .live()) {
+    /// - Parameters:
+    ///   - eventStore: the one EventKit store used for requests; share it
+    ///     with the Calendar service.
+    ///   - system: nil uses the live calls over `eventStore`.
+    public init(presentReason: @escaping ReasonPresenter, eventStore: EventStoreBox = EventStoreBox(),
+                system: System? = nil) {
         self.presentReason = presentReason
-        self.system = system
+        self.storeBox = eventStore
+        self.system = system ?? .live(eventStore: eventStore)
     }
+
+    /// The EventKit store requests go through.
+    public var eventStore: EKEventStore { storeBox.store }
 
     // MARK: PermissionBroker
 
@@ -92,32 +107,36 @@ public struct LivePermissionBroker: PermissionBroker {
     }
 
     /// Reason first; the system prompt only if the person goes on. A
-    /// declined reason leaves the state as it was and prompts nothing.
+    /// declined reason leaves the state as it was and prompts nothing. A
+    /// system prompt that did not settle the state answers
+    /// `.needsSystemSettings`, and the reason is not shown again this session.
     public func request(_ permission: AppPermission) async -> PermissionState {
         let current = await state(of: permission)
         let mayAsk = current == .notDetermined || (permission == .fullDiskAccess && current != .granted)
         guard mayAsk else { return current }
-        guard await presentReason(permission) else { return current }
         if permission == .fullDiskAccess {
+            guard await presentReason(permission) else { return current }
             // There is no prompt for Full Disk Access: the person switches it
             // on in System Settings, and the app sees it on its next check.
             await openSystemSettings(for: .fullDiskAccess)
-        } else {
-            do {
-                try await system.prompt(permission)
-            } catch {
-                Self.log.error("""
-                    \(permission.rawValue, privacy: .public) request failed: \
-                    \(String(describing: error), privacy: .public)
-                    """)
-            }
+            return await state(of: permission)
+        }
+        // The system prompt already ran this session and left it open: send
+        // the person to System Settings instead of asking again.
+        if prompted.contains(permission) {
+            Self.log.notice("\(permission.rawValue, privacy: .public): prompt already shown this session; not asking again")
+            return .needsSystemSettings
+        }
+        guard await presentReason(permission) else { return current }
+        prompted.insert(permission)
+        do {
+            try await system.prompt(permission)
+        } catch {
+            Self.log.error("\(permission.rawValue, privacy: .public): system prompt failed: \(String(describing: error), privacy: .public)")
         }
         let after = await state(of: permission)
-        if after == .notDetermined, permission == .calendar || permission == .reminders {
-            // macOS showed no prompt (it refused the request, or keeps a
-            // decision from an earlier build of the app). Asking again would
-            // only repeat the reason, so the caller is sent to System Settings.
-            Self.log.error("\(permission.rawValue, privacy: .public): no system prompt was shown; still not determined")
+        if after == .notDetermined {
+            Self.log.error("\(permission.rawValue, privacy: .public): system prompt left the permission undetermined")
             return .needsSystemSettings
         }
         return after
@@ -222,4 +241,23 @@ public struct LivePermissionBroker: PermissionBroker {
         configuration.hides = true
         _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
+}
+
+/// The broker's EventKit store, kept for the broker's lifetime. EventKit
+/// stores are not `Sendable`; the broker and the Calendar service only use it
+/// to request access and read on EventKit's own terms.
+public final class EventStoreBox: @unchecked Sendable {
+    public let store: EKEventStore
+
+    public init(_ store: EKEventStore = EKEventStore()) {
+        self.store = store
+    }
+}
+
+/// Permissions whose system prompt already ran this session.
+final class PromptedPermissions: Sendable {
+    private let set = Mutex<Set<AppPermission>>([])
+
+    func contains(_ permission: AppPermission) -> Bool { set.withLock { $0.contains(permission) } }
+    func insert(_ permission: AppPermission) { set.withLock { _ = $0.insert(permission) } }
 }
