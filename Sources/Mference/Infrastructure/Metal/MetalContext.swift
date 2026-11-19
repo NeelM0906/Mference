@@ -171,6 +171,17 @@ public final class MetalContext: @unchecked Sendable {
         "maple_ternary": "Metal/Quant",
         "maple_moe": "Metal/MoE",
         "moe": "Metal/MoE",
+        // Native engine modules (docs/NATIVE_ENGINE.md). Compiled on demand
+        // through `moduleLibrary`, never into the shared library, so their
+        // function names do not share its namespace. One file per module:
+        // `<subdirectory>/<module>.metal`.
+        "native_attention": "Metal/Native/Attention",
+        "native_gdn": "Metal/Native/Attention",
+        "native_gemm": "Metal/Native/GEMM",
+        "native_gemm_iq": "Metal/Native/GEMM",
+        "native_glue": "Metal/Native/Glue",
+        "native_reference": "Metal/Native/Reference",
+        "native_sampling": "Metal/Native/Sampling",
         "prefill": "Metal/Prefill",
         "prefill_simd_grouped_moe": "Metal/Prefill",
         "rmsnorm": "Metal/Primitives",
