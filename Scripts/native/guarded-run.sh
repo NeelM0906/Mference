@@ -42,8 +42,12 @@ note "power source: $power$([ $timing = 1 ] && echo ' (timing run)')"
 if [ ! -f "$GGUF" ]; then note "REFUSED: no GGUF at $GGUF"; exit 71; fi
 if ! "$LOCK" preflight >> "$LOG/run.log" 2>&1; then note "REFUSED: lock.sh preflight failed (see run.log)"; exit 71; fi
 # Processes by exact name (a shell whose command line merely mentions a tool
-# must not count); lock.sh preflight already checks the Mference processes.
-others=$(pgrep -lx 'llama-server|llama-cli|llama-bench|mfe-golden|mfe-kbench|mfe-bench|MferenceServer|MferenceCLI' || true)
+# must not count). lock.sh preflight matches process names too, so a test
+# bundle run by a bare `xctest .../MferencePackageTests.xctest` (process name
+# "xctest") escapes both name checks: it is caught here by its command line,
+# anchored at the start so a shell naming the bundle does not match.
+others=$( { pgrep -lx 'llama-server|llama-cli|llama-bench|mfe-golden|mfe-kbench|mfe-bench|MferenceServer|MferenceCLI'
+            pgrep -lf '^[^ ]*xctest .*MferencePackageTests\.xctest'; } || true)
 if [ -n "$others" ]; then note "REFUSED: another model process runs: $others"; exit 71; fi
 
 s0=$(swap_mb)

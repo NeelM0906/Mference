@@ -110,7 +110,7 @@ enum ParityHarness {
         /// D1: agreement and per-token KL against `tolerances`.
         func verdict(_ tolerances: ParityTolerances = .d1) -> Verdict {
             var failures: [String] = []
-            if missing > 0 || positions < expectedPositions || results.isEmpty {
+            if missing > 0 || positions < expectedPositions || expectedPositions == 0 {
                 failures.append("incomplete coverage: \(positions) of \(expectedPositions) positions compared, \(missing) missing")
             }
             if agreement < tolerances.minimumAgreement {

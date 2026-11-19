@@ -122,27 +122,45 @@ class RunTests(unittest.TestCase):
         canonical = lambda parsed: {"content": "", "tool_calls": [
             {"name": c["function"]["name"], "arguments": c["function"]["arguments"]}
             for c in parsed["choices"][0]["message"]["tool_calls"]]}
-        report = ap.run_tasks(post, canonical, "quick")
+        saved = []
+        report = ap.run_tasks(post, canonical, "quick", on_task=lambda r: saved.append(len(r)))
+        self.assertEqual(saved, list(range(1, 33)))  # a partial report after every task
         self.assertEqual(report["weather-plain"]["reason"], "error: HTTP 500")
         self.assertEqual(report["weather-unit"]["reason"], "arguments are not a JSON object")
         self.assertEqual(len(report), 32)
 
 
+    def test_a_request_error_fails_its_task_only(self):
+        def post(b):
+            if b["messages"][0]["content"].startswith("What's the weather in Oslo"):
+                raise TimeoutError("timed out")
+            return 200, {"choices": [{"message": {"content": "12", "tool_calls": []}}]}, "", 0.0
+
+        report = ap.run_tasks(post, lambda p: {"content": "12", "tool_calls": []}, "quick")
+        self.assertTrue(report["weather-plain"]["reason"].startswith("error: request failed"))
+        self.assertTrue(report["exact-math"]["passed"])
+
+
 class CompareTests(unittest.TestCase):
-    def report(self, failing=()):
-        return {t["id"]: {"passed": t["id"] not in failing} for t in ap.TASKS}
+    def report(self, failing=(), tokens=None):
+        return {t["id"]: {"passed": t["id"] not in failing,
+                          "result": {"prompt_tokens": (tokens or {}).get(t["id"], 100)}} for t in ap.TASKS}
 
     def test_identical(self):
         v = ap.compare(self.report(["exact-math"]), self.report(["exact-math"]))
         self.assertTrue(v["parity"])
-        self.assertEqual(v["flips"], [])
+        self.assertEqual((v["regressions"], v["improvements"]), ([], []))
 
-    def test_slack(self):
-        v = ap.compare(self.report(), self.report(["exact-math"]))
-        self.assertTrue(v["parity"])
-        self.assertEqual(len(v["flips"]), 1)
+    def test_regressions_are_bounded_not_net(self):
+        self.assertTrue(ap.compare(self.report(), self.report(["exact-math"]))["parity"])
         v = ap.compare(self.report(), self.report(["exact-math", "json-bool"]))
         self.assertFalse(v["parity"])
+        self.assertEqual(sorted(v["regressions"]), ["exact-math", "json-bool"])
+        # two regressions are not cancelled by two improvements
+        v = ap.compare(self.report(["calc-basic", "email-basic"]), self.report(["exact-math", "json-bool"]))
+        self.assertEqual(v["golden_passed"], v["candidate_passed"])
+        self.assertFalse(v["parity"])
+        self.assertEqual(sorted(v["improvements"]), ["calc-basic", "email-basic"])
         # the candidate doing better is never a failure
         self.assertTrue(ap.compare(self.report(["exact-math", "json-bool"]), self.report())["parity"])
 
@@ -150,6 +168,12 @@ class CompareTests(unittest.TestCase):
         c = self.report()
         del c["exact-math"]
         self.assertFalse(ap.compare(self.report(), c)["parity"])
+
+    def test_render_mismatch_is_a_setup_error_not_a_flip(self):
+        v = ap.compare(self.report(), self.report(["json-bool"], tokens={"json-bool": 101}))
+        self.assertEqual(v["render_mismatch"], ["json-bool"])
+        self.assertEqual(v["regressions"], [])
+        self.assertFalse(v["parity"])
 
 
 if __name__ == "__main__":

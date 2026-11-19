@@ -44,6 +44,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <vector>
+#include <random>
 
 // ---------------------------------------------------------------- utilities
 
@@ -279,6 +280,47 @@ static bool eval_cb(struct ggml_tensor * t, bool ask, void * user) {
     return true;
 }
 
+// ---------------------------------------------------------------- perturbation
+
+// --perturb: a controlled per-op error. In pass A, every F32 contiguous graph
+// tensor whose base name is listed gets Gaussian noise of relative size
+// `scale` added in place (x += scale * rms(row) * N(0, 1), so the tensor's
+// relative L2 error is about `scale`), before the ops that read it run. Used
+// to measure which per-op error level the D1 bar tolerates
+// (docs/NATIVE_PARITY.md, "Per-op bounds").
+struct Perturb {
+    std::set<std::string> bases;   // "*" matches every name
+    std::string op;                // optional: only nodes of this ggml op (e.g. MUL_MAT)
+    double scale = 0;
+    std::mt19937_64 rng{20261119};
+    int64_t tensors = 0;
+};
+
+static bool perturb_cb(struct ggml_tensor * t, bool ask, void * user) {
+    Perturb * pt = (Perturb *) user;
+    std::string base; int layer;
+    parse_name(t->name, base, layer);
+    const bool named = pt->bases.count("*") || pt->bases.count(base);
+    const bool want = named && (pt->op.empty() || pt->op == ggml_op_name(t->op)) &&
+                      t->type == GGML_TYPE_F32 && ggml_is_contiguous(t);
+    if (ask) return want;
+    if (!want) return true;
+    const int64_t cols = t->ne[0], rows = ggml_nelements(t) / cols;
+    std::vector<float> v(ggml_nelements(t));
+    ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
+    std::normal_distribution<double> n01(0.0, 1.0);
+    for (int64_t r = 0; r < rows; ++r) {
+        float * x = v.data() + r * cols;
+        double ss = 0;
+        for (int64_t i = 0; i < cols; ++i) ss += (double) x[i] * x[i];
+        const double sigma = pt->scale * std::sqrt(ss / cols);
+        for (int64_t i = 0; i < cols; ++i) x[i] = (float) (x[i] + sigma * n01(pt->rng));
+    }
+    ggml_backend_tensor_set(t, v.data(), 0, ggml_nbytes(t));
+    pt->tensors++;
+    return true;
+}
+
 // ---------------------------------------------------------------- prompts
 
 struct Prompt {
@@ -296,7 +338,8 @@ struct Options {
     std::string model, prompts, out, mode = "golden", backend = "metal";
     std::set<std::string> only;
     int n_batch = 2048, n_ubatch = 512, threads = 0, state_steps = 1;
-    std::string kv = "f16", fa = "auto", teacher;
+    std::string kv = "f16", fa = "auto", teacher, perturb, perturb_op;
+    double perturb_scale = 0;
     int max_new_override = -1;
     std::vector<NameSpec> specs;
 };
@@ -328,7 +371,8 @@ static int usage() {
         "         [--mode golden|logits] [--backend metal|cpu] [--only id,id]\n"
         "         [--batch 2048] [--ubatch 512] [--kv f16|f32] [--fa auto|on|off]\n"
         "         [--threads N] [--max-new N] [--sel names] [--all names] [--state names]\n"
-        "         [--state-steps 1] [--teacher <golden run dir>]\n");
+        "         [--state-steps 1] [--teacher <golden run dir>]\n"
+        "         [--perturb names|'*' --perturb-scale s [--perturb-op MUL_MAT]]  (pass A; with --mode logits --teacher)\n");
     return 2;
 }
 
@@ -361,6 +405,9 @@ int main(int argc, char ** argv) {
         else if (a == "--state") state = next();
         else if (a == "--state-steps") o.state_steps = atoi(next().c_str());
         else if (a == "--teacher") o.teacher = next();
+        else if (a == "--perturb") o.perturb = next();
+        else if (a == "--perturb-scale") o.perturb_scale = atof(next().c_str());
+        else if (a == "--perturb-op") o.perturb_op = next();
         else { fprintf(stderr, "mfe-golden: unknown argument %s\n", a.c_str()); return usage(); }
     }
     if (o.model.empty() || o.prompts.empty() || o.out.empty()) return usage();
@@ -454,6 +501,10 @@ int main(int argc, char ** argv) {
         const int max_new = teacher.empty() ? q.max_new : (int) teacher.size();
         const int n_ctx = ((n_prompt + max_new + 1 + 255) / 256) * 256;
 
+        Perturb perturb;
+        for (const auto & b : split(o.perturb, ',')) perturb.bases.insert(b);
+        perturb.scale = o.perturb_scale;
+        perturb.op = o.perturb_op;
         auto make_ctx = [&](int n_batch, int n_ubatch, Capture * cap) {
             llama_context_params p = llama_context_default_params();
             p.n_ctx = n_ctx; p.n_batch = n_batch; p.n_ubatch = n_ubatch; p.n_seq_max = 1;
@@ -463,6 +514,7 @@ int main(int argc, char ** argv) {
             p.flash_attn_type = o.fa == "on" ? LLAMA_FLASH_ATTN_TYPE_ENABLED
                               : o.fa == "off" ? LLAMA_FLASH_ATTN_TYPE_DISABLED : LLAMA_FLASH_ATTN_TYPE_AUTO;
             if (cap) { p.cb_eval = eval_cb; p.cb_eval_user_data = cap; }
+            else if (!perturb.bases.empty()) { p.cb_eval = perturb_cb; p.cb_eval_user_data = &perturb; }
             llama_context * c = llama_init_from_model(model, p);
             if (!c) { fprintf(stderr, "mfe-golden: context failed\n"); exit(1); }
             return c;
@@ -586,6 +638,9 @@ int main(int argc, char ** argv) {
         m += "  \"generated_tokens\": " + json_ints(gen) + ",\n";
         m += "  \"argmax_tokens\": " + json_ints(own) + ",\n";
         m += "  \"teacher\": " + json_str(o.teacher) + ",\n";
+        m += "  \"perturb\": {\"names\": " + json_str(o.perturb) + ", \"op\": " + json_str(o.perturb_op) +
+             ", \"scale\": " + std::to_string(o.perturb_scale) +
+             ", \"tensors\": " + std::to_string(perturb.tensors) + "},\n";
         m += "  \"stopped_on_eog\": " + std::string(stopped_eog ? "true" : "false") + ",\n";
         m += "  \"logits\": {\"file\": \"logits.f32\", \"dtype\": \"f32\", \"rows\": " + std::to_string(gen.size()) +
              ", \"cols\": " + std::to_string(n_vocab) + ", \"position_ranges\": " + json_ranges(logit_pos) + "},\n";

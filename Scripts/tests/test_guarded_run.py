@@ -23,10 +23,11 @@ class GuardedRunTests(unittest.TestCase):
         stub = bin_dir / "pmset"
         stub.write_text(f"#!/bin/sh\necho \"Now drawing from '{power}'\"\n", encoding="utf-8")
         stub.chmod(0o755)
-        # the "other model process" check (pgrep -lx) sees none, whatever runs
-        # on this machine; the wrapper's child lookup uses the real pgrep
+        # the "other model process" checks (pgrep -lx, -lf) see none, whatever
+        # runs on this machine; the wrapper's child lookup uses the real pgrep
         pgrep = bin_dir / "pgrep"
-        pgrep.write_text("#!/bin/sh\n[ \"$1\" = \"-lx\" ] && exit 1\nexec /usr/bin/pgrep \"$@\"\n", encoding="utf-8")
+        pgrep.write_text("#!/bin/sh\ncase \"$1\" in -lx|-lf) exit 1 ;; esac\nexec /usr/bin/pgrep \"$@\"\n",
+                         encoding="utf-8")
         pgrep.chmod(0o755)
         env = dict(os.environ, LOCK="/usr/bin/true", PATH=f"{bin_dir}:{os.environ['PATH']}")
         env.pop("SWAP_GUARD_MB", None)
