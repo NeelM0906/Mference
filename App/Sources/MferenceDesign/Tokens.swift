@@ -194,6 +194,9 @@ public enum MFLayout {
     public static let contentMaxWidth: CGFloat = 960
 }
 
+#if canImport(AppKit)
+import AppKit
+
 extension Color {
     /// A color that resolves to `light` or `dark` with the appearance.
     public static func mf(light: UInt32, dark: UInt32) -> Color {
@@ -212,3 +215,25 @@ extension NSColor {
                   alpha: 1)
     }
 }
+#elseif canImport(UIKit)
+import UIKit
+
+extension Color {
+    /// A color that resolves to `light` or `dark` with the trait collection
+    /// (iPhone and iPhone Duo; same hex pairs as the Mac).
+    public static func mf(light: UInt32, dark: UInt32) -> Color {
+        Color(uiColor: UIColor { traits in
+            UIColor(mfHex: traits.userInterfaceStyle == .dark ? dark : light)
+        })
+    }
+}
+
+extension UIColor {
+    convenience init(mfHex hex: UInt32) {
+        self.init(red: CGFloat((hex >> 16) & 0xFF) / 255,
+                  green: CGFloat((hex >> 8) & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255,
+                  alpha: 1)
+    }
+}
+#endif

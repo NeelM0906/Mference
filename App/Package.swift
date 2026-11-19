@@ -26,6 +26,9 @@ let package = Package(
     name: "MferenceApp",
     platforms: [
         .macOS(.v26),
+        // MferenceDesign also builds for the iPhone app (Mobile/); the other
+        // targets stay Mac only.
+        .iOS(.v26),
     ],
     products: [
         .executable(name: "MferenceMac", targets: ["MferenceMac"]),
