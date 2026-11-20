@@ -61,10 +61,15 @@ struct SpeechLiveCheckpointTests {
         // (4) Diarization: the file path with speaker labels, then LS-EEND live.
         try await fileDiarization(service, fixtures: fixtures, timeline: timeline)
         if let seconds = loader.speakerLabelsLoad { Self.metric("load_speaker_labels", ["seconds": seconds]) }
-        try await liveDiarization(loader, models: models, fixtures: fixtures, timeline: timeline)
+        // A failed step is recorded and reported, and the rest still runs.
+        await Self.step("diarization_live") {
+            try await liveDiarization(loader, models: models, fixtures: fixtures, timeline: timeline)
+        }
 
         // (5) The two-track meeting at real-time pace.
-        try await twoTrackMeeting(service, sources: sources, fixtures: fixtures, timeline: timeline)
+        await Self.step("meeting") {
+            try await twoTrackMeeting(service, sources: sources, fixtures: fixtures, timeline: timeline)
+        }
 
         await service.shutdown()
         // (6) Peak memory.
@@ -381,6 +386,17 @@ struct SpeechLiveCheckpointTests {
     }
 
     // MARK: Output
+
+    /// Runs one step; a failure prints `step_failed` and is recorded as an
+    /// issue without stopping the checkpoint.
+    static func step(_ name: String, _ body: () async throws -> Void) async {
+        do {
+            try await body()
+        } catch {
+            metric("step_failed", ["step": name, "error": (error as? SpeechError)?.message ?? String(describing: error)])
+            Issue.record(error, "\(name) failed")
+        }
+    }
 
     static func metric(_ name: String, _ fields: [String: Any]) {
         var line = fields

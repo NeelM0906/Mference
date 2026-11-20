@@ -86,9 +86,69 @@ import Testing
         #expect(installed.contains { $0.contains("/\(FluidModelLoader.vadModelName)/") })
         let labels = Set(SpeechModelPins.speakerLabels.sources.flatMap(\.files).map(\.installPath))
         for name in ["Segmentation.mlmodelc", "FBank.mlmodelc", "Embedding.mlmodelc", "PldaRho.mlmodelc",
-                     "plda-parameters.json", FluidModelLoader.liveDiarizerModel] {
+                     "plda-parameters.json"] {
             #expect(labels.contains { $0.contains("/\(name)") }, "speaker labels need \(name)")
         }
+    }
+
+    /// An LS-EEND source with one compiled model at `model` (repo path).
+    static func lseendPackage(_ model: String) -> SpeechModelPackage {
+        let files = ["coremldata.bin", "metadata.json", "model.mil", "weights/weight.bin"].map { name in
+            SpeechModelFile(repoPath: "\(model)/\(name)", installPath: "ls-eend-coreml/rev/\(model)/\(name)", size: 1,
+                            sha256: String(repeating: "0", count: 64))
+        }
+        return SpeechModelPackage(id: .speakerLabels, sources: [
+            SpeechModelSource(repo: "FluidInference/ls-eend-coreml", revision: "rev", license: "MIT", files: files)])
+    }
+
+    @Test func theLiveDiarizerFollowsFluidAudiosLayout() {
+        // C-N1: FluidAudio 0.18.4 loads `optimized/ami/<step>/ls_eend_ami_<step>.mlmodelc`.
+        let root = URL(fileURLWithPath: "/tmp/speech")
+        var loader = FluidModelLoader()
+        loader.speakerLabels = Self.lseendPackage("optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc")
+        #expect(loader.liveDiarizerModel(root)?.path
+                == "/tmp/speech/ls-eend-coreml/rev/optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc")
+        loader.speakerLabels = Self.lseendPackage("optimized/ami/500ms/ls_eend_ami_500ms.mlmodelc")
+        #expect(loader.liveDiarizerModel(root)?.lastPathComponent == "ls_eend_ami_500ms.mlmodelc")
+        // The older export (no embedded config, other state tensors) is not used.
+        loader.speakerLabels = Self.lseendPackage("AMI/ls_eend_ami_step.mlmodelc")
+        #expect(loader.liveDiarizerModel(root) == nil)
+    }
+
+    @Test func thePinnedLiveDiarizerIsOneFluidAudioLoads() {
+        // The pin (28ce1b1f) holds the older export; this marks it until the
+        // coordinator repins, and fails once the repin lands so it is removed.
+        withKnownIssue("LS-EEND pin predates FluidAudio 0.18.4's layout (C-N1 run 1)") {
+            #expect(FluidModelLoader().liveDiarizerModel(URL(fileURLWithPath: "/tmp/speech")) != nil)
+        }
+    }
+
+    @Test func theLiveDiarizerNeedsItsEmbeddedConfig() throws {
+        let model = FileManager.default.temporaryDirectory.appending(path: "lseend-\(UUID().uuidString).mlmodelc")
+        defer { try? FileManager.default.removeItem(at: model) }
+        try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
+        let metadata = model.appending(path: "metadata.json")
+        func write(_ user: [String: String]) throws {
+            try JSONSerialization.data(withJSONObject: [["userDefinedMetadata": user, "modelType": ["name": "MLModelType_mlProgram"]]])
+                .write(to: metadata)
+        }
+        // No metadata.json at all.
+        #expect(throws: SpeechError.self) { _ = try FluidModelLoader.liveDiarizerConfig(model) }
+        // The older export: only coremltools' own keys.
+        try write(["com.github.apple.coremltools.version": "8.3.0"])
+        #expect(throws: SpeechError.self) { _ = try FluidModelLoader.liveDiarizerConfig(model) }
+        // A config of another shape (the older sidecar's keys).
+        try write(["config": #"{"max_speakers": 4, "sample_rate": 8000}"#])
+        #expect(throws: SpeechError.self) { _ = try FluidModelLoader.liveDiarizerConfig(model) }
+        // The config FluidAudio reads, snake-cased as exported.
+        let config: [String: Any] = [
+            "chunk_size": 100, "frame_duration_seconds": 0.1, "max_speakers": 4, "sample_rate": 8000, "max_nspks": 6,
+            "hop_length": 80, "win_length": 200, "n_mels": 23, "context_size": 7, "subsampling": 10, "conv_delay": 9,
+            "n_units": 256, "n_heads": 4, "enc_n_layers": 4, "dec_n_layers": 2, "conv_kernel_size": 15,
+        ]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: config), as: UTF8.self)
+        try write(["config": json, "com.github.apple.coremltools.version": "9.0"])
+        _ = try FluidModelLoader.liveDiarizerConfig(model)
     }
 
     @Test func pldaParametersDecode() throws {
