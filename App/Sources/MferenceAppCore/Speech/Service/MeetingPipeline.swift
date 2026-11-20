@@ -60,6 +60,9 @@ actor MeetingPipeline {
     private var quitting = false
     private var quitWaiters: [any QuitWaiter] = []
     private var finishTask: Task<Void, Never>?
+    /// Capture chunks being handled, which pause waits for.
+    private var chunksInFlight = 0
+    private var chunkWaiters: [CheckedContinuation<Void, Never>] = []
     /// Whether the call track has carried a non-zero sample (a refused tap
     /// delivers exact zeros), and whether the hint went out.
     private var callHeard = false
@@ -171,6 +174,8 @@ actor MeetingPipeline {
     private func consume(_ kind: TrackKind, _ stream: AsyncThrowingStream<AudioChunk, Error>) async {
         do {
             for try await chunk in stream {
+                chunksInFlight += 1
+                defer { chunkHandled() }
                 try await handle(kind, chunk)
             }
         } catch {
@@ -337,11 +342,23 @@ actor MeetingPipeline {
     func pause() async {
         guard phase == .running, !paused else { return }
         paused = true
+        // Chunks recorded before the pause are still being handled (the live
+        // diarizer, the detector): they reach the segmenters first.
+        while chunksInFlight > 0 { await withCheckedContinuation { chunkWaiters.append($0) } }
+        guard phase == .running else { return }
         pausedAt = recordedTime
         // The phrase being spoken ends at the pause.
         for (kind, segmenter) in segmenters { await handle(kind, segmenter: await segmenter.flush()) }
         continuation.yield(.paused)
         publishStatus()
+    }
+
+    private func chunkHandled() {
+        chunksInFlight -= 1
+        guard chunksInFlight == 0 else { return }
+        let waiters = chunkWaiters
+        chunkWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 
     func resume() {
@@ -364,6 +381,8 @@ actor MeetingPipeline {
     func willSleep() async {
         guard phase == .running else { return }
         await stopCapture()
+        // Stop may have run meanwhile: sleep never takes its place.
+        guard phase == .running else { return }
         try? recording.closeAll()
         sleptAt = now()
         phase = .asleep
@@ -381,6 +400,11 @@ actor MeetingPipeline {
         phase = .running
         do {
             try await startTrack(.microphone, source: try sources.microphone(deviceID: options.microphoneID), at: offset)
+            // Stop may have run meanwhile: let go of what just started.
+            guard phase == .running else {
+                await stopCapture()
+                return
+            }
         } catch {
             continuation.yield(.failed(error as? SpeechError ?? .failed(String(describing: error))))
             await stop()
@@ -395,6 +419,10 @@ actor MeetingPipeline {
                 await onCallAudioFailure(reason)
                 continuation.yield(.callAudioUnavailable(reason))
             }
+        }
+        guard phase == .running else {
+            await stopCapture()
+            return
         }
         readStartedTracks()
         publishStatus()
