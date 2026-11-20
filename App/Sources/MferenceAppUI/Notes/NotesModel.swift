@@ -158,6 +158,11 @@ public final class NotesModel {
                 .map { ListSection(id: "\($0.group)", title: $0.title, items: $0.items) }
         }
         cachedList = (key, notes, sections)
+        // Forget rows of notes no longer shown or gone.
+        if rowCache.count > notes.count * 2 + 64 {
+            let shown = Set(notes.map(\.id))
+            rowCache = rowCache.filter { shown.contains($0.key) }
+        }
         return (notes, sections)
     }
 
@@ -357,10 +362,15 @@ public final class NotesModel {
 
     /// Asks before emptying Recently deleted.
     public func requestEmptyTrash() {
-        let count = counts.recentlyDeleted
-        guard count > 0 else { return }
-        pendingDeletion = .trash(count: count)
+        let ids = ((try? store.notes(in: .recentlyDeleted)) ?? []).map(\.id)
+        guard !ids.isEmpty else { return }
+        pendingTrashIDs = ids
+        pendingDeletion = .trash(count: ids.count)
     }
+
+    /// The notes Empty asked about: only those are deleted, even if more
+    /// arrive in Recently deleted while the question is open.
+    @ObservationIgnored private var pendingTrashIDs: [UUID] = []
 
     public func cancelDeletion() { pendingDeletion = nil }
 
@@ -372,7 +382,14 @@ public final class NotesModel {
         case .note(let id, _):
             if let note = try? store.note(id: id) { await deletePermanently(note) }
         case .trash:
-            await emptyTrash()
+            var failed = 0
+            for id in pendingTrashIDs {
+                guard let note = try? store.note(id: id), note.deletedAt != nil else { continue }
+                do { try await store.deletePermanently(note) } catch { failed += 1 }
+            }
+            pendingTrashIDs = []
+            if failed > 0 { errorMessage = Self.message(for: NoteStoreError.someNotDeleted(failed)) }
+            selectFirstIfNeeded()
         }
     }
 

@@ -128,15 +128,26 @@ nonisolated enum NoteTextMapping {
                 ? text.attribute(.noteBlock, at: nextStart, effectiveRange: nil) as? NoteBlockStyle ?? .body
                 : nil
             let target = clip ? NSIntersectionRange(line, range) : line
+            // A line holding an object with text joined onto it keeps each
+            // piece's own block style (it is read back as separate blocks).
+            var holdsObject = false
             if target.length > 0 {
+                text.enumerateAttribute(.attachment, in: line) { value, _, stop in
+                    if value is NoteBlockAttachment { holdsObject = true; stop.pointee = true }
+                }
+            }
+            if target.length > 0, !holdsObject {
                 text.addAttribute(.noteBlock, value: style, range: target)
+            }
+            if target.length > 0 {
                 text.addAttribute(.paragraphStyle, value: NoteEditorStyle.paragraphStyle(for: style, next: next), range: target)
             }
             text.enumerateAttributes(in: target) { attributes, subrange, _ in
                 guard attributes[.attachment] == nil else { return }
                 let run = TextRun("", bold: attributes[.noteBold] != nil, italic: attributes[.noteItalic] != nil,
                                   link: link(attributes[.link]))
-                var display = NoteEditorStyle.attributes(block: style, next: next, run: run)
+                let own = holdsObject ? (attributes[.noteBlock] as? NoteBlockStyle ?? style) : style
+                var display = NoteEditorStyle.attributes(block: own, next: next, run: run)
                 display[.noteBlock] = nil
                 display[.paragraphStyle] = nil
                 text.addAttributes(display, range: subrange)
@@ -185,16 +196,22 @@ nonisolated enum NoteTextMapping {
         for object in objects {
             let before = NSRange(location: cursor, length: object.range.location - cursor)
             if before.length > 0, !runs(in: text, range: before).isEmpty {
-                blocks.append(block(in: text, range: before, style: style))
+                blocks.append(block(in: text, range: before, style: segmentStyle(text, before, fallback: style)))
             }
             blocks.append(object.block)
             cursor = NSMaxRange(object.range)
         }
         let after = NSRange(location: cursor, length: NSMaxRange(range) - cursor)
         if after.length > 0, !runs(in: text, range: after).isEmpty {
-            blocks.append(block(in: text, range: after, style: style))
+            blocks.append(block(in: text, range: after, style: segmentStyle(text, after, fallback: style)))
         }
         return blocks
+    }
+
+    /// Text joined onto an object line keeps the style it had (a checklist
+    /// item stays one), not the object line's.
+    private static func segmentStyle(_ text: NSAttributedString, _ range: NSRange, fallback: NoteBlockStyle) -> NoteBlockStyle {
+        text.attribute(.noteBlock, at: range.location, effectiveRange: nil) as? NoteBlockStyle ?? fallback
     }
 
     private static func block(in text: NSAttributedString, range: NSRange, style: NoteBlockStyle) -> NoteDocument.Block {
