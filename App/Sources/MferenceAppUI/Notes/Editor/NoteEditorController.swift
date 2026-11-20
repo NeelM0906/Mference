@@ -18,6 +18,11 @@ public final class NoteEditorController {
     @ObservationIgnored private var autosave: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var segmentTimes: [UUID: TimeInterval] = [:]
+    /// The stored body the editor shows (as loaded or last saved). When the
+    /// store's copy differs, something else wrote the note (a meeting
+    /// summary, a marker, a title): the editor takes that in instead of
+    /// saving over it.
+    @ObservationIgnored private var loadedBody: Data?
     /// A ⌘K transcript hit waiting for the editor to show its note.
     @ObservationIgnored private var pendingReveal: UUID?
     /// Phrases still being transcribed when their note left the editor
@@ -59,6 +64,51 @@ public final class NoteEditorController {
                 MainActor.assumeIsolated { self?.saveNow(force: true) }
             })
         }
+        watchStore()
+    }
+
+    /// Follows the store's revision: a write to the open note from
+    /// elsewhere is taken in at once.
+    private func watchStore() {
+        withObservationTracking {
+            _ = store.revision
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.absorbExternalChanges()
+                self?.watchStore()
+            }
+        }
+    }
+
+    /// When the open note's stored body changed underneath the editor:
+    /// with nothing unsaved, show the stored body; with unsaved edits, merge
+    /// them into it block by block and save the result. Caret, selection and
+    /// pending phrases keep their places. Returns whether anything changed.
+    @discardableResult
+    func absorbExternalChanges() -> Bool {
+        guard let note, let textView, note.modelContext != nil, !note.isDeleted,
+              note.bodyJSON != loadedBody else { return false }
+        let theirs = store.document(of: note)
+        guard theirs.readOnlyReason == nil else { return false }
+        if saveState == .saved {
+            textView.reload(theirs)
+            loadedBody = note.bodyJSON
+        } else {
+            let base = NoteDocument.decode(loadedBody)
+            let merged = NoteDocument(blocks: NoteDocumentMerge.merge(base: base.blocks, ours: textView.document.blocks,
+                                                                      theirs: theirs.blocks))
+            textView.reload(merged)
+            do {
+                try store.save(merged, to: note)
+                loadedBody = note.bodyJSON
+                saveState = .saved
+                autosave?.cancel()
+            } catch {
+                saveState = .failed(String(describing: error))
+            }
+        }
+        wordCount = textView.document.wordCount
+        return true
     }
 
     isolated deinit {
@@ -92,6 +142,7 @@ public final class NoteEditorController {
         }
         self.textView = textView
         textView.onTextChange = { [weak self] in self?.textDidChange() }
+        textView.onTimeChipClick = onTimeChipClick
         textView.importImage = { [weak self] data, ext in
             guard let self, let id = note?.id else { return nil }
             return try? store.attachments.write(data, fileExtension: ext, into: id)
@@ -189,6 +240,7 @@ public final class NoteEditorController {
         textView.isEditable = note != nil && note?.deletedAt == nil && document.readOnlyReason == nil
         textView.noteID = note?.id
         textView.load(document)
+        loadedBody = note?.bodyJSON
         textView.notice = Self.notice(for: document.readOnlyReason)
         if let pendingReveal, note != nil {
             textView.reveal(segmentID: pendingReveal)
@@ -229,10 +281,13 @@ public final class NoteEditorController {
         }
         autosave?.cancel()
         autosave = nil
+        // A write from elsewhere not yet taken in is merged first.
+        if absorbExternalChanges(), saveState == .saved { return }
         let document = textView.document
         wordCount = document.wordCount
         do {
             try store.save(document, to: note)
+            loadedBody = note.bodyJSON
             saveState = .saved
         } catch {
             saveState = .failed(String(describing: error))
@@ -337,7 +392,40 @@ public final class NoteEditorController {
     }
 
     /// "Mark moment" in a meeting note.
-    public func insertMarker(time: TimeInterval) { textView?.insertMarker(time: time) }
+    /// Adds the marker when `noteID` is the open note; returns false
+    /// otherwise (the caller writes to that note through the store).
+    @discardableResult
+    public func insertMarker(time: TimeInterval, in noteID: UUID) -> Bool {
+        guard let textView, note?.id == noteID, textView.isEditable else { return false }
+        textView.insertMarker(time: time)
+        return true
+    }
+
+    /// A time chip for a transcript segment, after the caret's line.
+    @discardableResult
+    public func insertTranscriptAnchor(segmentID: UUID, in noteID: UUID) -> Bool {
+        guard let textView, note?.id == noteID, textView.isEditable else { return false }
+        if let note, segmentTimes[segmentID] == nil,
+           let segment = NoteSearch.transcript(note.recording?.transcriptJSON).first(where: { $0.id == segmentID }) {
+            segmentTimes[segmentID] = segment.start
+            let times = segmentTimes
+            textView.mappingContext.segmentTime = { times[$0] }
+        }
+        textView.insertAttachment(.transcriptAnchor(segmentID: segmentID))
+        return true
+    }
+
+    /// Called with the recording time of a clicked time chip or marker
+    /// (the meeting player seeks there).
+    public var onTimeChipClick: ((TimeInterval) -> Void)? {
+        didSet { textView?.onTimeChipClick = onTimeChipClick }
+    }
+}
+
+extension NoteEditorController: DictationInsertionTarget, MeetingNoteTarget {
+    /// The open note; a fixed nil UUID while none is open (dictation is only
+    /// offered with a note open).
+    public var noteID: UUID { note?.id ?? UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) }
 }
 
 /// The text style menu's choices.
