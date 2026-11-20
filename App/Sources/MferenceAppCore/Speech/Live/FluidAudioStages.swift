@@ -53,14 +53,16 @@ struct FluidModelLoader: SpeechModelLoading {
     /// The pinned LS-EEND compiled model, in the layout FluidAudio 0.18.4's
     /// `LSEENDModel` loads: `<repo subpath>/<step>/<name>_<step>.mlmodelc`
     /// (`optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc`), its config
-    /// embedded in the model's metadata. The shortest pinned step wins. Nil
+    /// embedded in the model's metadata. FluidAudio's default step (100 ms,
+    /// the one pinned) wins, then the shortest other pinned step. Nil
     /// when the pins hold another export (the older `AMI/ls_eend_ami_step`
     /// one has no embedded config and other state tensors): live labels are
     /// then unavailable, and the final speaker pass still runs.
     func liveDiarizerModel(_ root: URL) -> URL? {
         guard let source = speakerLabels.sources.first(where: { $0.repo.hasSuffix("/ls-eend-coreml") }) else { return nil }
         let prefix = Self.liveVariant.repo.subPath.map { "\($0)/" } ?? ""
-        for step in ModelNames.LSEEND.StepSize.allCases {
+        let preferred = ModelNames.LSEEND.defaultStep
+        for step in [preferred] + ModelNames.LSEEND.StepSize.allCases.filter({ $0 != preferred }) {
             let model = prefix + Self.liveVariant.fileName(forStep: step)
             if source.files.contains(where: { $0.repoPath.hasPrefix(model + "/") }) {
                 return root.appending(path: SpeechModelInstaller.installPrefix(of: source), directoryHint: .isDirectory)

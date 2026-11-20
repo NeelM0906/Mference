@@ -110,17 +110,28 @@ import Testing
                 == "/tmp/speech/ls-eend-coreml/rev/optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc")
         loader.speakerLabels = Self.lseendPackage("optimized/ami/500ms/ls_eend_ami_500ms.mlmodelc")
         #expect(loader.liveDiarizerModel(root)?.lastPathComponent == "ls_eend_ami_500ms.mlmodelc")
+        // With several steps pinned, FluidAudio's default (100 ms) wins.
+        var both = Self.lseendPackage("optimized/ami/200ms/ls_eend_ami_200ms.mlmodelc")
+        let hundred = Self.lseendPackage("optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc")
+        both = SpeechModelPackage(id: .speakerLabels, sources: [SpeechModelSource(
+            repo: both.sources[0].repo, revision: "rev", license: "MIT",
+            files: both.sources[0].files + hundred.sources[0].files)])
+        loader.speakerLabels = both
+        #expect(loader.liveDiarizerModel(root)?.lastPathComponent == "ls_eend_ami_100ms.mlmodelc")
         // The older export (no embedded config, other state tensors) is not used.
         loader.speakerLabels = Self.lseendPackage("AMI/ls_eend_ami_step.mlmodelc")
         #expect(loader.liveDiarizerModel(root) == nil)
     }
 
     @Test func thePinnedLiveDiarizerIsOneFluidAudioLoads() {
-        // The pin (28ce1b1f) holds the older export; this marks it until the
-        // coordinator repins, and fails once the repin lands so it is removed.
-        withKnownIssue("LS-EEND pin predates FluidAudio 0.18.4's layout (C-N1 run 1)") {
-            #expect(FluidModelLoader().liveDiarizerModel(URL(fileURLWithPath: "/tmp/speech")) != nil)
-        }
+        // Repinned after C-N1 run 1 to FluidAudio's default 100 ms export.
+        let model = FluidModelLoader().liveDiarizerModel(URL(fileURLWithPath: "/tmp/speech"))
+        #expect(model?.path == "/tmp/speech/ls-eend-coreml/28ce1b1f8ef186729df63b3886fbaae7bc10c4a1"
+                + "/optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc")
+        let lseend = SpeechModelPins.speakerLabels.sources.filter { $0.repo.hasSuffix("/ls-eend-coreml") }
+        let files = lseend.flatMap(\.files).map(\.repoPath)
+        #expect(files.contains("optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc/metadata.json"), "the embedded config")
+        #expect(files.contains("LICENSE"))
     }
 
     @Test func theLiveDiarizerNeedsItsEmbeddedConfig() throws {
