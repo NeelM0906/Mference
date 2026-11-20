@@ -383,6 +383,19 @@ import Testing
         #expect(h.engine.requests.count == 1)
     }
 
+    @Test func aSummaryTheAppDiesInIsNotRetriedByItselfAtLaunch() async throws {
+        let h = try harness(replies: [.init(content: Self.good, delay: .milliseconds(20))])
+        let id = try meeting(h)
+        h.note(id)?.recording?.summaryState = .pending
+        h.summaries.resumePending()
+        for _ in 0..<200 where h.engine.requests.isEmpty { await Task.yield() }
+        // While Quick runs, the store says failed: dying now leaves Retry, not a loop.
+        #expect(h.note(id)?.recording?.summaryState == .failed)
+        #expect(h.summaries.resumePending().isEmpty)
+        await h.summaries.waitUntilIdle()
+        #expect(h.note(id)?.recording?.summaryState == .written)
+    }
+
     @Test func typedNotesGoWithTheTranscript() async throws {
         let h = try harness()
         let id = try meeting(h)

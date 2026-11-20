@@ -155,6 +155,57 @@ import Testing
         #expect(queue.rows.isEmpty)
     }
 
+    @Test func quitLeavesQueuedFilesForTheNextLaunch() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "n4-quit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let speech = FakeSpeechService(recordingsRoot: root, stepped: true)
+        let container = try AppModelContainer.inMemory()
+        let notes = NoteStore(container: container, attachments: .temporary(), speech: speech)
+        let queue = FileTranscriptionQueue(speech: speech, writer: notes)
+        let ids = await queue.add([URL(filePath: "/tmp/a.m4a"), URL(filePath: "/tmp/b.m4a")],
+                                  options: FileImportOptions(summarize: true))
+        speech.advance() // a: queued
+        speech.advance() // a: started
+        for _ in 0..<50 { await Task.yield() }
+        // The copies the speech service made when the files were added.
+        for (id, name) in zip(ids, ["a.m4a", "b.m4a"]) {
+            let folder = speech.recordingsDirectory(for: id)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data([0]).write(to: folder.appending(path: name))
+        }
+        // Quit: the speech service cancels every job.
+        await speech.shutdown()
+        await queue.waitUntilIdle()
+        for _ in 0..<100 { await Task.yield() }
+        for id in ids {
+            let record = try #require(try notes.note(id: id)?.recording)
+            #expect([TranscriptionState.queued, .running].contains(record.transcriptionState))
+            #expect(record.summaryState == .pending)
+        }
+        #expect(!speech.calls.contains { if case .deleteRecordings = $0 { true } else { false } })
+        // Next launch: both start again.
+        let relaunched = FileTranscriptionQueue(speech: FakeSpeechService(recordingsRoot: root), writer: notes)
+        #expect(Set(await relaunched.recoverInterruptedJobs()) == Set(ids))
+    }
+
+    @Test func cancelDuringAStartThatFailsStillDiscards() async throws {
+        let fake = FakeSpeechService(stepped: true)
+        fake.failNextStart(with: .failed("no"))
+        let speech = GatedFileSpeech(fake)
+        let container = try AppModelContainer.inMemory()
+        let notes = NoteStore(container: container, attachments: .temporary(), speech: speech)
+        let queue = FileTranscriptionQueue(speech: speech, writer: notes)
+        let adding = Task { await queue.add([URL(filePath: "/tmp/x.m4a")], options: FileImportOptions()) }
+        for _ in 0..<500 where queue.rows.isEmpty || !speech.isWaiting { await Task.yield() }
+        let id = try #require(queue.rows.first?.noteID)
+        await queue.cancel(id)
+        speech.open()
+        #expect(await adding.value.isEmpty)
+        for _ in 0..<500 where (try? notes.note(id: id)) != nil { await Task.yield() }
+        #expect(try notes.note(id: id) == nil)
+        #expect(queue.rows.isEmpty)
+    }
+
     @Test func filesWaitWhileAMeetingRecords() async throws {
         let speech = FakeSpeechService(stepped: true)
         let h = try harness(speech)

@@ -69,6 +69,9 @@ public final class FileTranscriptionQueue {
     /// Files whose job is being created right now, and those cancelled meanwhile.
     @ObservationIgnored private var starting: Set<UUID> = []
     @ObservationIgnored private var cancelledWhileStarting: Set<UUID> = []
+    /// Files the person cancelled. Any other `.cancelled` (quit: the speech
+    /// service cancels every job) leaves the note queued for the next launch.
+    @ObservationIgnored private var cancelledByPerson: Set<UUID> = []
 
     /// Recordings are read and saved on `writer.context` (the Notes store's).
     public init(speech: any SpeechServicing, writer: any MeetingNoteWriting,
@@ -108,6 +111,8 @@ public final class FileTranscriptionQueue {
 
     /// Removes a file from the queue; its unfinished note goes too.
     public func cancel(_ noteID: UUID) async {
+        guard jobs[noteID] != nil || starting.contains(noteID) else { return }
+        cancelledByPerson.insert(noteID)
         guard let job = jobs[noteID] else {
             // The job is still being created: cancel it as soon as it exists.
             if starting.contains(noteID) { cancelledWhileStarting.insert(noteID) }
@@ -158,7 +163,12 @@ public final class FileTranscriptionQueue {
                 noteID: noteID, language: options.language, speakerLabels: options.speakerLabels,
                 keepAudio: options.keepAudio))
         } catch {
-            cancelledWhileStarting.remove(noteID)
+            if cancelledWhileStarting.remove(noteID) != nil {
+                // Cancelled while starting, and the start failed anyway: still a cancel.
+                cancelledByPerson.remove(noteID)
+                discard(noteID)
+                return nil
+            }
             let message = (error as? SpeechError)?.message ?? SpeechError.failed("").message
             fail(noteID, message: message)
             return createNote ? noteID : nil
@@ -202,17 +212,28 @@ public final class FileTranscriptionQueue {
         case .failed(let error):
             fail(noteID, message: error.message)
         case .cancelled:
-            rows.removeAll { $0.noteID == noteID }
-            // Never left "running": if the note can't be deleted for good
-            // it stays in Recently deleted as failed, and is not re-queued.
-            if let record = fetchNote(noteID)?.recording {
-                record.transcriptionState = .failed
-                record.summaryState = .none
-                try? context.save()
+            // The person's Cancel discards the file. Otherwise the speech
+            // service stopped the job (quit): the note stays queued, and
+            // `recoverInterruptedJobs()` starts it again at the next launch.
+            guard cancelledByPerson.remove(noteID) != nil else {
+                updateRow(noteID) { $0.phase = .queued }
+                return
             }
-            // Through the Notes store: the note and its recordings go together.
-            Task { [writer] in await writer.discardNote(noteID) }
+            discard(noteID)
         }
+    }
+
+    /// Removes a cancelled file: its row, then its note and recordings
+    /// through the Notes store. Never left "running": if the note can't be
+    /// deleted for good it stays in Recently deleted as failed, not re-queued.
+    private func discard(_ noteID: UUID) {
+        rows.removeAll { $0.noteID == noteID }
+        if let record = fetchNote(noteID)?.recording {
+            record.transcriptionState = .failed
+            record.summaryState = .none
+            try? context.save()
+        }
+        Task { [writer] in await writer.discardNote(noteID) }
     }
 
     private func finish(_ noteID: UUID, result: TranscriptResult) {
