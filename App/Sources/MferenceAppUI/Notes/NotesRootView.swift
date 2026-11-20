@@ -82,6 +82,15 @@ struct NotesScreen: View {
             model.selectFirstIfNeeded()
         }
         .shellToolbar(id: "notes.actions") { NotesToolbarActions(model: model) }
+        .confirmationDialog(model.pendingDeletion?.title ?? "",
+                            isPresented: Binding(get: { model.pendingDeletion != nil },
+                                                 set: { if !$0 { model.cancelDeletion() } }),
+                            titleVisibility: .visible) {
+            Button("Delete Forever", role: .destructive) { Task { await model.confirmDeletion() } }
+            Button("Cancel", role: .cancel) { model.cancelDeletion() }
+        } message: {
+            Text(model.pendingDeletion?.message ?? "")
+        }
         .alert("Notes", isPresented: Binding(get: { model.errorMessage != nil },
                                              set: { if !$0 { model.dismissError() } })) {
             Button("OK") { model.dismissError() }
@@ -97,42 +106,57 @@ struct NotesToolbarActions: View {
 
     var body: some View {
         HStack(spacing: MFSpacing.s) {
-            Button {
-                model.voice.transcribeFile?()
-            } label: {
-                Label("Transcribe file", systemImage: "text.document")
+            if let toolbar = model.voice.toolbar {
+                // N3's toolbar: Transcribe file and Record meeting with its popover.
+                toolbar()
+            } else {
+                ownVoiceButtons
             }
-            .buttonStyle(.mfSecondary)
-            .disabled(model.voice.transcribeFile == nil)
-            .help("Turn an audio or video file into a note")
-
-            Button {
-                model.voice.recordMeeting?()
-            } label: {
-                HStack(spacing: MFSpacing.s - MFSpacing.xxs) {
-                    Circle().fill(MFColor.danger)
-                        .frame(width: NotesMetrics.recordDot, height: NotesMetrics.recordDot)
-                        .accessibilityHidden(true)
-                    Text("Record meeting")
-                }
-            }
-            .buttonStyle(.mfSecondary)
-            .disabled(model.voice.recordMeeting == nil)
-            .help("Record a meeting with a live transcript")
-
-            Button {
-                model.newNote()
-            } label: {
-                Image(systemName: "square.and.pencil")
-                    .frame(width: NotesMetrics.iconButton, height: NotesMetrics.iconButton)
-            }
-            .buttonStyle(.plain)
-            .background(MFColor.surface, in: RoundedRectangle(cornerRadius: MFRadius.m))
-            .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairline, lineWidth: MFLayout.hairline))
-            .keyboardShortcut("n", modifiers: .command)
-            .accessibilityLabel("New note")
-            .help("New note (⌘N)")
+            newNoteButton
         }
+    }
+
+    /// Until N3's toolbar is wired: the same two buttons, disabled without
+    /// their actions.
+    @ViewBuilder
+    private var ownVoiceButtons: some View {
+        Button {
+            model.voice.transcribeFile?()
+        } label: {
+            Label("Transcribe file", systemImage: "text.document")
+        }
+        .buttonStyle(.mfSecondary)
+        .disabled(model.voice.transcribeFile == nil)
+        .help("Turn an audio or video file into a note")
+
+        Button {
+            model.voice.recordMeeting?()
+        } label: {
+            HStack(spacing: MFSpacing.s - MFSpacing.xxs) {
+                Circle().fill(MFColor.danger)
+                    .frame(width: NotesMetrics.recordDot, height: NotesMetrics.recordDot)
+                    .accessibilityHidden(true)
+                Text("Record meeting")
+            }
+        }
+        .buttonStyle(.mfSecondary)
+        .disabled(model.voice.recordMeeting == nil)
+        .help("Record a meeting with a live transcript")
+    }
+
+    private var newNoteButton: some View {
+        Button {
+            model.newNote()
+        } label: {
+            Image(systemName: "square.and.pencil")
+                .frame(width: NotesMetrics.iconButton, height: NotesMetrics.iconButton)
+        }
+        .buttonStyle(.plain)
+        .background(MFColor.surface, in: RoundedRectangle(cornerRadius: MFRadius.m))
+        .overlay(RoundedRectangle(cornerRadius: MFRadius.m).strokeBorder(MFColor.hairline, lineWidth: MFLayout.hairline))
+        .keyboardShortcut("n", modifiers: .command)
+        .accessibilityLabel("New note")
+        .help("New note (⌘N)")
     }
 }
 

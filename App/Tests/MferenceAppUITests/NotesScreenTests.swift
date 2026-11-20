@@ -204,10 +204,118 @@ enum NotesFixtures {
     @Test func searchFiltersAndSaysSoWhenNothingMatches() throws {
         let model = try NotesFixtures.model()
         model.query = "alfama"
+        // The list follows the field after a short pause, or on Return.
+        #expect(model.notes.count == 24)
+        model.commitQuery()
         #expect(model.notes.map(model.title(of:)) == ["Lisbon trip, March"])
         model.query = "nothing like this"
+        model.commitQuery()
         #expect(model.isSearching)
         #expect(model.sections.isEmpty)
+    }
+
+    @Test func searchFollowsTheFieldAfterAPause() async throws {
+        let model = try NotesFixtures.model()
+        model.query = "dentist"
+        #expect(await eventually { model.notes.count == 1 })
+        #expect(model.selectedNote.map(model.title(of:)) == "Dentist questions")
+    }
+
+    @Test func permanentDeletionsAskFirst() async throws {
+        let speech = FakeSpeechService()
+        let model = try NotesFixtures.model(speech: speech)
+        model.scope = .recentlyDeleted
+        let first = try #require(model.notes.first)
+        model.requestDeleteForever(first)
+        #expect(model.pendingDeletion == .note(first.id, title: "Old draft 2"))
+        #expect(model.pendingDeletion?.message == "Their recordings are deleted too. This can't be undone.")
+        model.cancelDeletion()
+        #expect(model.counts.recentlyDeleted == 2)
+        model.requestEmptyTrash()
+        #expect(model.pendingDeletion == .trash(count: 2))
+        #expect(model.pendingDeletion?.title == "Delete 2 notes forever?")
+        await model.confirmDeletion()
+        #expect(model.counts.recentlyDeleted == 0)
+        #expect(speech.calls.contains(.deleteRecordings(first.id)))
+    }
+
+    @Test func deletingTheSelectedNoteForeverSelectsAnother() async throws {
+        let model = try NotesFixtures.model()
+        model.scope = .recentlyDeleted
+        let selected = try #require(model.selectedNote)
+        model.requestDeleteForever(selected)
+        await model.confirmDeletion()
+        #expect(model.selectedNote != nil)
+        #expect(model.selectedNote?.id != selected.id)
+    }
+
+    @Test func selectionStaysOnAVisibleNote() throws {
+        let model = try NotesFixtures.model()
+        // A search that hides the selected note selects the first match.
+        model.query = "kitchen"
+        model.commitQuery()
+        #expect(model.selectedNote.map(model.title(of:)) == "Kitchen shelf measurements")
+        model.query = ""
+        model.commitQuery()
+        // Moving the selected note out of the open folder selects another.
+        let personal = try #require(model.folders.first)
+        model.scope = .folder(personal.id)
+        let note = try #require(model.selectedNote)
+        model.move(note, to: model.folders.last)
+        #expect(model.selectedNote?.folder?.id == personal.id)
+        // Deleting a note no longer in the list still selects one.
+        model.scope = .all
+        let lisbon = try #require(model.notes.first { model.title(of: $0) == "Lisbon trip, March" })
+        model.select(lisbon)
+        model.query = "groceries"
+        model.commitQuery()
+        model.select(lisbon)
+        model.delete(lisbon)
+        #expect(model.selectedNote.map(model.title(of:)) == "Weekly groceries")
+    }
+
+    @Test func theKeyboardMovesThroughTheListAndDeletes() throws {
+        let model = try NotesFixtures.model()
+        #expect(model.selectedNote.map(model.title(of:)) == "Lisbon trip, March")
+        model.selectAdjacent(-1)
+        #expect(model.selectedNote.map(model.title(of:)) == "Weekly groceries")
+        model.selectAdjacent(-1)
+        #expect(model.selectedNote.map(model.title(of:)) == "Weekly groceries")
+        model.selectAdjacent(2)
+        #expect(model.selectedNote.map(model.title(of:)) == "Design review: Notes")
+        model.deleteSelected()
+        #expect(model.counts.recentlyDeleted == 3)
+        model.scope = .recentlyDeleted
+        model.deleteSelected()
+        #expect(model.pendingDeletion != nil)
+    }
+
+    @Test func foldersMoveByKeyboardAndByDrop() throws {
+        let model = try NotesFixtures.model()
+        let names = { model.folders.map(\.name) }
+        let ideas = try #require(model.folders.last)
+        model.moveFolder(ideas, by: -1)
+        #expect(names() == ["Personal", "Ideas", "Work"])
+        model.moveFolder(ideas, by: -5)
+        #expect(names() == ["Ideas", "Personal", "Work"])
+        // Dragged down onto Work: after it. Dragged up onto Ideas: before it.
+        let personal = try #require(model.folders.first { $0.name == "Personal" })
+        let work = try #require(model.folders.first { $0.name == "Work" })
+        #expect(model.dropFolder(personal.id, onto: work.id))
+        #expect(names() == ["Ideas", "Work", "Personal"])
+        #expect(model.dropFolder(personal.id, onto: ideas.id))
+        #expect(names() == ["Personal", "Ideas", "Work"])
+        #expect(!model.dropFolder(work.id, onto: work.id))
+    }
+
+    @Test func duplicateSelectsTheCopy() throws {
+        let model = try NotesFixtures.model()
+        let lisbon = try #require(model.selectedNote)
+        model.duplicate(lisbon)
+        let copy = try #require(model.selectedNote)
+        #expect(copy.id != lisbon.id)
+        #expect(model.title(of: copy) == "Lisbon trip, March")
+        #expect(model.counts.all == 25)
     }
 
     @Test func speechStatusCardFollowsTheService() async throws {
