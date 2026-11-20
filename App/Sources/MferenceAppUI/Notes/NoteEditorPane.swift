@@ -15,7 +15,11 @@ struct NoteEditorPane: View {
             VStack(spacing: 0) {
                 toolbar(note)
                 Divider().overlay(MFColor.chromeDivider)
-                if note.deletedAt != nil { deletedBanner(note) }
+                if note.deletedAt != nil {
+                    deletedBanner(note)
+                } else if let reason = model.editor.readOnlyReason {
+                    readOnlyBanner(reason)
+                }
                 NoteEditorView(controller: model.editor,
                                dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar))
                     .accessibilityLabel("Note text")
@@ -100,7 +104,7 @@ struct NoteEditorPane: View {
                 }
             }
             .buttonStyle(.mfSecondary)
-            .keyboardShortcut("d", modifiers: [.command, .shift])
+            // ⇧⌘D is N3's menu command; the keycap only shows it.
             .disabled(model.voice.toggleDictation == nil)
             .accessibilityLabel("Dictate")
             .accessibilityHint("Shift Command D")
@@ -110,7 +114,9 @@ struct NoteEditorPane: View {
             iconButton(note.isPinned ? "pin.fill" : "pin", label: note.isPinned ? "Unpin" : "Pin",
                        help: note.isPinned ? "Unpin" : "Pin") { model.togglePin(note) }
             Menu {
-                ShareLink("Share…", item: model.editor.shareText)
+                // The Markdown is made only when something is shared.
+                ShareLink("Share…", item: NoteShareItem(editor: model.editor),
+                          preview: SharePreview(model.title(of: note)))
                 Divider()
                 Section("Export as") {
                     ForEach(NoteExportFormat.allCases, id: \.self) { format in
@@ -163,6 +169,19 @@ struct NoteEditorPane: View {
         .background(MFColor.fillSubtle)
     }
 
+    private func readOnlyBanner(_ reason: NoteDocument.ReadOnlyReason) -> some View {
+        Text(reason == .newerVersion
+             ? "This note was saved by a newer version of Mference. You can read it here; update Mference to edit it."
+             : "Part of this note couldn't be read, so it can't be changed here. Nothing in it has been deleted.")
+            .font(MFFont.callout)
+            .foregroundStyle(MFColor.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, MFSpacing.l)
+            .padding(.vertical, MFSpacing.s)
+            .background(MFColor.previewFill)
+            .accessibilityAddTraits(.isStaticText)
+    }
+
     // MARK: Footer
 
     private func footer(_ note: Note) -> some View {
@@ -189,5 +208,22 @@ struct NoteEditorPane: View {
         case .editing: "Editing"
         case .failed: "Not saved"
         }
+    }
+}
+
+/// The note's text for the share sheet, made only when something is shared
+/// (not on every keystroke).
+nonisolated struct NoteShareItem: Transferable {
+    let editor: NoteEditorController
+
+    static var transferRepresentation: some TransferRepresentation {
+        ProxyRepresentation { item in item.text() }
+    }
+
+    /// The editor lives on the main thread; the share sheet may ask from
+    /// another one.
+    private func text() -> String {
+        if Thread.isMainThread { return MainActor.assumeIsolated { editor.shareText } }
+        return DispatchQueue.main.sync { MainActor.assumeIsolated { editor.shareText } }
     }
 }

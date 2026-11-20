@@ -96,19 +96,21 @@ struct NotesSidebar: View {
         }
         .contextMenu {
             Button("Rename") { model.renamingFolderID = folder.id }
+            Button("Move Up") { model.moveFolder(folder, by: -1) }
+                .disabled(model.folders.first?.id == folder.id)
+            Button("Move Down") { model.moveFolder(folder, by: 1) }
+                .disabled(model.folders.last?.id == folder.id)
+            Divider()
             Button("Delete folder", role: .destructive) { model.delete(folder) }
         }
+        .accessibilityAction(named: "Move up") { model.moveFolder(folder, by: -1) }
+        .accessibilityAction(named: "Move down") { model.moveFolder(folder, by: 1) }
         .draggable(NotesDragItem.folder(folder.id))
         .dropDestination(for: String.self) { items, _ in
             let notes = NotesDragItem.ids(items, prefix: NotesDragItem.notePrefix)
             if !notes.isEmpty { return model.moveNotes(notes, to: folder) }
-            let folders = NotesDragItem.ids(items, prefix: NotesDragItem.folderPrefix)
-            guard let moving = folders.first, moving != folder.id else { return false }
-            let all = model.folders
-            guard let from = all.firstIndex(where: { $0.id == moving }),
-                  let to = all.firstIndex(where: { $0.id == folder.id }) else { return false }
-            model.moveFolders(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
-            return true
+            guard let moving = NotesDragItem.ids(items, prefix: NotesDragItem.folderPrefix).first else { return false }
+            return model.dropFolder(moving, onto: folder.id)
         }
     }
 
@@ -153,6 +155,8 @@ private struct FolderNameField: View {
             .onSubmit { onCommit(name) }
             .onExitCommand { onCommit("") }
             .onAppear { focused = true }
+            // Clicking away keeps what was typed.
+            .onChange(of: focused) { _, isFocused in if !isFocused { onCommit(name) } }
             .accessibilityLabel("Folder name")
     }
 }

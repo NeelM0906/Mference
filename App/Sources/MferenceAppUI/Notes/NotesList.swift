@@ -27,6 +27,18 @@ struct NotesList: View {
                     .padding(.bottom, MFSpacing.m)
                 }
                 .scrollIndicators(.automatic)
+                // Keyboard: ↑ / ↓ move the selection, ⌫ deletes (G-A7).
+                .focusable()
+                .focusEffectDisabled()
+                .onMoveCommand { direction in
+                    switch direction {
+                    case .up: model.selectAdjacent(-1)
+                    case .down: model.selectAdjacent(1)
+                    default: break
+                    }
+                }
+                .onDeleteCommand { model.deleteSelected() }
+                .accessibilityHint("Use the up and down arrows to choose a note")
             }
         }
         .background(MFColor.surface)
@@ -41,12 +53,16 @@ struct NotesList: View {
                 .foregroundStyle(MFColor.tertiary)
                 .accessibilityHidden(true)
             TextField("Search notes and transcripts", text: $model.query)
+                .onSubmit { model.commitQuery() }
                 .textFieldStyle(.plain)
                 .font(MFFont.callout)
                 .foregroundStyle(MFColor.ink)
                 .accessibilityLabel("Search notes and transcripts")
             if !model.query.isEmpty {
-                Button { model.query = "" } label: {
+                Button {
+                    model.query = ""
+                    model.commitQuery()
+                } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(MFColor.tertiary)
                 }
                 .buttonStyle(.plain)
@@ -79,7 +95,7 @@ struct NotesList: View {
                 .foregroundStyle(MFColor.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: MFSpacing.s)
-            Button("Empty") { Task { await model.emptyTrash() } }
+            Button("Empty…") { model.requestEmptyTrash() }
                 .buttonStyle(.mfSecondary)
                 .accessibilityLabel("Empty Recently deleted")
         }
@@ -91,7 +107,7 @@ struct NotesList: View {
     private var emptyState: some View {
         if model.isSearching {
             NotesEmptyState(systemImage: "magnifyingglass", title: "No results",
-                            message: "Nothing matches “\(model.query.trimmingCharacters(in: .whitespaces))”. Search looks at titles, text and transcripts.")
+                            message: "Nothing matches “\(model.appliedQuery.trimmingCharacters(in: .whitespaces))”. Search looks at titles, text and transcripts.")
         } else {
             switch model.scope {
             case .all:
@@ -174,9 +190,6 @@ struct NoteRow: View {
                         .font(MFFont.rowTitle)
                         .foregroundStyle(MFColor.ink)
                         .lineLimit(1)
-                    if note.isPinned, model.scope != .recentlyDeleted {
-                        Spacer(minLength: 0)
-                    }
                 }
                 HStack(spacing: NotesMetrics.timeGap) {
                     Text(model.timeLabel(of: note))
@@ -239,7 +252,7 @@ struct NoteRow: View {
     private var menu: some View {
         if note.deletedAt != nil {
             Button("Restore") { model.restore(note) }
-            Button("Delete now", role: .destructive) { Task { await model.deletePermanently(note) } }
+            Button("Delete Forever…", role: .destructive) { model.requestDeleteForever(note) }
         } else {
             Button(note.isPinned ? "Unpin" : "Pin") { model.togglePin(note) }
             Menu("Move to") {

@@ -60,7 +60,8 @@ nonisolated enum NoteTextMapping {
         repeat {
             let lineRange = string.lineRange(for: NSRange(location: location, length: 0))
             var contentRange = lineRange
-            if contentRange.length > 0, string.character(at: NSMaxRange(contentRange) - 1) == 0x0A {
+            // Any line terminator ends the line: \n, \r, U+2028, U+2029.
+            while contentRange.length > 0, isLineTerminator(string.character(at: NSMaxRange(contentRange) - 1)) {
                 contentRange.length -= 1
             }
             let style: NoteBlockStyle
@@ -69,12 +70,13 @@ nonisolated enum NoteTextMapping {
             } else {
                 style = lastLineStyle
             }
-            blocks.append(block(in: text, range: contentRange, style: style))
+            blocks.append(contentsOf: lineBlocks(in: text, range: contentRange, style: style))
             location = NSMaxRange(lineRange)
         } while location < string.length
         // A text ending in a line break has an empty last line after it.
-        if string.length > 0, string.character(at: string.length - 1) == 0x0A {
-            blocks.append(block(in: text, range: NSRange(location: string.length, length: 0), style: lastLineStyle))
+        if string.length > 0, isLineTerminator(string.character(at: string.length - 1)) {
+            blocks.append(contentsOf: lineBlocks(in: text, range: NSRange(location: string.length, length: 0),
+                                                 style: lastLineStyle))
         }
         return NoteDocument(blocks: blocks)
     }
@@ -86,6 +88,9 @@ nonisolated enum NoteTextMapping {
         text.enumerateAttributes(in: range) { attributes, subrange, _ in
             guard attributes[.attachment] == nil else { return }
             let piece = string.substring(with: subrange)
+                .replacingOccurrences(of: "\u{2028}", with: " ").replacingOccurrences(of: "\u{2029}", with: " ")
+                .replacingOccurrences(of: "\r", with: "")
+            guard !piece.isEmpty else { return }
             runs.append(TextRun(piece,
                                 bold: attributes[.noteBold] != nil,
                                 italic: attributes[.noteItalic] != nil,
@@ -151,24 +156,48 @@ nonisolated enum NoteTextMapping {
             case .heading: NoteBlockStyle(.heading)
             case .subheading: NoteBlockStyle(.subheading)
             }
-        case .paragraph, .image, .audio, .transcriptAnchor, .marker: .body
+        case .paragraph, .image, .audio, .transcriptAnchor, .marker, .unknown: .body
         case .bullet(_, let indent): NoteBlockStyle(.bullet, indent: indent)
         case .numbered(_, let indent): NoteBlockStyle(.numbered, indent: indent)
         case .check(_, let done, let indent): NoteBlockStyle(.check, indent: indent, done: done)
         }
     }
 
-    private static func block(in text: NSAttributedString, range: NSRange, style: NoteBlockStyle) -> NoteDocument.Block {
+    static func isLineTerminator(_ character: unichar) -> Bool {
+        character == 0x0A || character == 0x0D || character == 0x2028 || character == 0x2029
+    }
+
+    /// The blocks of one line. A line is normally one block; if text was
+    /// joined onto an object line (Backspace after an image, typing beside
+    /// a chip), the objects and the text around them each become a block,
+    /// in order, so nothing is lost.
+    private static func lineBlocks(in text: NSAttributedString, range: NSRange,
+                                   style: NoteBlockStyle) -> [NoteDocument.Block] {
+        var objects: [(range: NSRange, block: NoteDocument.Block)] = []
         if range.length > 0 {
-            var objectBlock: NoteDocument.Block?
-            text.enumerateAttribute(.attachment, in: range) { value, _, stop in
-                if let attachment = value as? NoteBlockAttachment {
-                    objectBlock = attachment.block
-                    stop.pointee = true
-                }
+            text.enumerateAttribute(.attachment, in: range) { value, subrange, _ in
+                if let attachment = value as? NoteBlockAttachment { objects.append((subrange, attachment.block)) }
             }
-            if let objectBlock { return objectBlock }
         }
+        guard !objects.isEmpty else { return [block(in: text, range: range, style: style)] }
+        var blocks: [NoteDocument.Block] = []
+        var cursor = range.location
+        for object in objects {
+            let before = NSRange(location: cursor, length: object.range.location - cursor)
+            if before.length > 0, !runs(in: text, range: before).isEmpty {
+                blocks.append(block(in: text, range: before, style: style))
+            }
+            blocks.append(object.block)
+            cursor = NSMaxRange(object.range)
+        }
+        let after = NSRange(location: cursor, length: NSMaxRange(range) - cursor)
+        if after.length > 0, !runs(in: text, range: after).isEmpty {
+            blocks.append(block(in: text, range: after, style: style))
+        }
+        return blocks
+    }
+
+    private static func block(in text: NSAttributedString, range: NSRange, style: NoteBlockStyle) -> NoteDocument.Block {
         let runs = runs(in: text, range: range)
         switch style.kind {
         case .title: return .heading(level: .title, runs: runs)
@@ -189,6 +218,8 @@ nonisolated enum NoteTextMapping {
             NoteBlockAttachment(block: block, fileURL: nil, time: context.segmentTime(id))
         case .marker(let time):
             NoteBlockAttachment(block: block, fileURL: nil, time: time)
+        case .unknown:
+            NoteBlockAttachment(block: block, fileURL: nil, time: nil)
         default:
             nil
         }

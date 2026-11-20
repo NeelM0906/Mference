@@ -49,6 +49,9 @@ public enum NoteExport {
                 lines.append("[\(clock(segmentTimes[id]))]")
             case .marker(let time):
                 lines.append("> Marked at \(clock(time))")
+            case .unknown:
+                // Content from a newer version: its text, if it has any.
+                if !block.text.isEmpty { lines.append(escape(block.text)) }
             }
         }
         // Drop blank lines a left-out attachment leaves behind.
@@ -103,6 +106,8 @@ public enum NoteExport {
                 lines.append("[\(clock(segmentTimes[id]))]")
             case .marker(let time):
                 lines.append("Marked at \(clock(time))")
+            case .unknown:
+                if !block.text.isEmpty { lines.append(block.text) }
             }
         }
         return lines.joined(separator: "\n") + "\n"

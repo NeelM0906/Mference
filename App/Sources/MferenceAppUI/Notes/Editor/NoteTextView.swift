@@ -20,12 +20,21 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
     var onTextChange: (() -> Void)?
     /// Stores pasted or dropped image data as an attachment; returns its id.
     var importImage: ((Data, String) -> String?)?
+    /// Copies a dropped or pasted image or audio file into the note; returns
+    /// its block.
+    var importFile: ((URL) -> NoteDocument.Block?)?
+    /// Copies another note's attachment into this one (pasting blocks
+    /// between notes); returns the new id.
+    var copyAttachment: ((String, UUID) -> String?)?
+    /// The note shown, stamped on copied blocks.
+    var noteID: UUID?
     var mappingContext = NoteTextMapping.Context()
 
     /// The block style of an empty last line (it has no character to carry it).
     var emptyLastLineStyle: NoteBlockStyle = .title
 
     private var isRestyling = false
+    private var isLoading = false
 
     /// The date line centered above the title; it scrolls with the text.
     var dateLine = "" {
@@ -85,8 +94,13 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
     func load(_ document: NoteDocument) {
         let (text, lastStyle) = NoteTextMapping.attributedString(from: document, context: mappingContext)
         isRestyling = true
+        isLoading = true
         textStorage?.setAttributedString(text)
+        isLoading = false
         isRestyling = false
+        // Phrases kept across a reload stay where they were.
+        let length = (string as NSString).length
+        for index in pendingPhrases.indices { pendingPhrases[index].location = min(pendingPhrases[index].location, length) }
         emptyLastLineStyle = lastStyle
         undoManager?.removeAllActions(withTarget: self)
         undoManager?.removeAllActions()
@@ -165,7 +179,7 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     /// Sets the style of every line in `ranges` as one undoable change.
     func setBlockStyle(_ make: (NoteBlockStyle) -> NoteBlockStyle, lines ranges: [NSRange]) {
-        guard let storage = textStorage else { return }
+        guard isEditable, let storage = textStorage else { return }
         var changed = false
         for line in ranges {
             if line.length == 0 {
@@ -201,7 +215,46 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     func toggleDone(lineAt location: Int) {
         let line = nsString.lineRange(for: NSRange(location: location, length: 0))
+        guard blockStyle(at: line.location).kind == .check else { return }
         setBlockStyle({ $0.kind == .check ? $0.with(done: !$0.done) : $0 }, lines: [line])
+        announceCheck(at: line.location)
+    }
+
+    /// ⇧⌘U ("Mark as checked"): ticks or unticks the checklist items the
+    /// selection touches, from the keyboard.
+    func toggleDoneForSelection() {
+        let lines = selectedLineRanges.filter { blockStyle(at: $0.location).kind == .check }
+        guard let first = lines.first else { return }
+        let tick = !blockStyle(at: first.location).done
+        setBlockStyle({ $0.kind == .check ? $0.with(done: tick) : $0 }, lines: lines)
+        announceCheck(at: first.location)
+    }
+
+    /// VoiceOver hears the new state (the box is drawn, not text).
+    private func announceCheck(at location: Int) {
+        let done = blockStyle(at: location).done
+        NSAccessibility.post(element: self, notification: .announcementRequested,
+                             userInfo: [.announcement: done ? "Checked" : "Unchecked",
+                                        .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        var actions = super.accessibilityCustomActions() ?? []
+        let style = currentBlockStyle
+        if style.kind == .check {
+            actions.append(NSAccessibilityCustomAction(name: style.done ? "Uncheck item" : "Check item") { [weak self] in
+                self?.toggleDoneForSelection()
+                return true
+            })
+        }
+        return actions
+    }
+
+    override func accessibilityValue() -> String? {
+        // Read the caret line's checklist state with the text.
+        let style = currentBlockStyle
+        guard style.kind == .check, let value = super.accessibilityValue() else { return super.accessibilityValue() }
+        return (style.done ? "Checked item. " : "Unchecked item. ") + value
     }
 
     private func indentLists(by delta: Int) -> Bool {
@@ -225,6 +278,7 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         case .underline: key = .underlineStyle; on = NSUnderlineStyle.single.rawValue
         case .strikethrough: key = .strikethroughStyle; on = NSUnderlineStyle.single.rawValue
         }
+        guard isEditable else { return }
         let selection = selectedRange()
         guard selection.length > 0, let storage = textStorage else {
             var typing = typingAttributes
@@ -277,6 +331,7 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         case ([.command], "u"): toggle(.underline); return true
         case ([.command, .shift], "x"): toggle(.strikethrough); return true
         case ([.command, .shift], "l"): toggleChecklist(); return true
+        case ([.command, .shift], "u"): toggleDoneForSelection(); return true
         default: return super.performKeyEquivalent(with: event)
         }
     }
@@ -285,6 +340,11 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         typingAttributes[.link] = nil
+        // One kind of line break in the text: \n.
+        if let text = insertString as? String, text.contains(where: { "\r\u{2028}\u{2029}".contains($0) }) {
+            insertText(Self.normalizingBreaks(text), replacementRange: replacementRange)
+            return
+        }
         if let text = insertString as? String, text == " ", replacementRange.location == NSNotFound,
            applyMarkdownShortcut() {
             return
@@ -292,11 +352,23 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         super.insertText(insertString, replacementRange: replacementRange)
     }
 
+    /// The line whose shortcut was just undone: its next space stays a space.
+    private var suppressedShortcutLine: Int?
+
+    private func suppressShortcut(onLineAt location: Int) {
+        suppressedShortcutLine = location
+        undoManager?.registerUndo(withTarget: self) { view in view.suppressedShortcutLine = nil }
+    }
+
     /// `# `, `- `, `* `, `1. `, `[] ` at the start of a body line.
     private func applyMarkdownShortcut() -> Bool {
         let selection = selectedRange()
         guard selection.length == 0, let storage = textStorage else { return false }
         let line = nsString.lineRange(for: NSRange(location: selection.location, length: 0))
+        if let suppressed = suppressedShortcutLine {
+            suppressedShortcutLine = nil
+            if suppressed == line.location { return false }
+        }
         let prefixRange = NSRange(location: line.location, length: selection.location - line.location)
         guard prefixRange.length > 0, prefixRange.length <= 3 else { return false }
         let style = blockStyle(at: line.location)
@@ -315,10 +387,14 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         guard shouldChangeText(in: prefixRange, replacementString: "") else { return false }
         storage.replaceCharacters(in: prefixRange, with: "")
         didChangeText()
+        // ⌘Z brings the typed "-" back, and then the next space on that line
+        // is just a space: a literal "- " can always be typed.
+        undoManager?.registerUndo(withTarget: self) { view in view.suppressShortcut(onLineAt: line.location) }
         let newLine = nsString.lineRange(for: NSRange(location: line.location, length: 0))
         setBlockStyle({ _ in NoteBlockStyle(kind) }, lines: [newLine])
         setSelectedRange(NSRange(location: line.location, length: 0))
         typingAttributes = typingAttributesForCaret()
+        undoManager?.setActionName("Format")
         return true
     }
 
@@ -345,6 +421,14 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         }
         typingAttributes = typingAttributesForCaret()
     }
+
+    static func normalizingBreaks(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n").replacingOccurrences(of: "\u{2029}", with: "\n")
+    }
+
+    /// Shift-Return makes a new line too (no line separators in notes).
+    override func insertLineBreak(_ sender: Any?) { insertNewline(sender) }
 
     override func insertTab(_ sender: Any?) {
         if !indentLists(by: 1) { super.insertTab(sender) }
@@ -397,9 +481,15 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
 
     // MARK: Paste and copy
 
-    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
-        [Self.blocksPasteboardType] + super.readablePasteboardTypes
-    }
+    /// What paste and drop accept; anything else is refused rather than
+    /// handed to AppKit (which would keep formats a note cannot store).
+    static let acceptedPasteboardTypes: [NSPasteboard.PasteboardType] = [
+        blocksPasteboardType, .fileURL, .png, .tiff, .rtfd, .rtf, .html, .string,
+    ]
+
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] { Self.acceptedPasteboardTypes }
+
+    override var acceptableDragTypes: [NSPasteboard.PasteboardType] { Self.acceptedPasteboardTypes }
 
     override var writablePasteboardTypes: [NSPasteboard.PasteboardType] {
         [Self.blocksPasteboardType, .string]
@@ -413,35 +503,76 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         switch type {
         case Self.blocksPasteboardType:
             let style = blockStyle(at: NSMaxRange(selection))
-            pboard.setData(NoteTextMapping.document(from: piece, lastLineStyle: style).encoded(), forType: type)
+            let payload = NoteBlocksPayload(noteID: noteID, document: NoteTextMapping.document(from: piece, lastLineStyle: style))
+            guard let data = try? JSONEncoder().encode(payload) else { return false }
+            pboard.setData(data, forType: type)
             return true
         case .string:
             pboard.setString(piece.string.replacingOccurrences(of: "\u{FFFC}", with: ""), forType: .string)
             return true
         default:
-            return super.writeSelection(to: pboard, type: type)
+            return false
         }
     }
 
     override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
-        let incoming: NSAttributedString?
-        if type == Self.blocksPasteboardType, let data = pboard.data(forType: type) {
-            incoming = NoteTextMapping.attributedString(from: NoteDocument.decode(data), context: mappingContext).text
-        } else if let image = imageData(from: pboard, type: type), let id = importImage?(image.data, image.fileExtension) {
-            incoming = NoteTextMapping.attributedString(
-                from: NoteDocument(blocks: [.image(attachmentID: id)]), context: mappingContext).text
-        } else if [.rtf, .rtfd, .html, .string].contains(type) {
-            incoming = NotePasteSanitizer.sanitize(pboard, type: type, base: blockStyle(at: selectedRange().location))
-        } else {
-            incoming = nil
-        }
-        guard let incoming, incoming.length > 0 else { return super.readSelection(from: pboard, type: type) }
+        guard isEditable, let incoming = pasted(from: pboard, type: type), incoming.length > 0 else { return false }
         let selection = selectedRange()
         guard shouldChangeText(in: selection, replacementString: incoming.string) else { return false }
         textStorage?.replaceCharacters(in: selection, with: incoming)
         didChangeText()
         setSelectedRange(NSRange(location: selection.location + incoming.length, length: 0))
         return true
+    }
+
+    /// The text a paste of `type` inserts, in the editor's canonical form;
+    /// nil refuses the paste.
+    private func pasted(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> NSAttributedString? {
+        let base = blockStyle(at: selectedRange().location)
+        switch type {
+        case Self.blocksPasteboardType:
+            guard let data = pboard.data(forType: type) else { return nil }
+            return objects(blocksFromPasteboard(data))
+        case .fileURL:
+            let urls = pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+            let blocks = urls.compactMap { importFile?($0) }
+            return blocks.isEmpty ? nil : objects(NoteDocument(blocks: blocks))
+        case .png, .tiff:
+            guard let image = imageData(from: pboard, type: type), let id = importImage?(image.data, image.fileExtension) else {
+                return nil
+            }
+            return objects(NoteDocument(blocks: [.image(attachmentID: id)]))
+        case .rtfd, .rtf, .html, .string:
+            return NotePasteSanitizer.sanitize(pboard, type: type, base: base, importImage: importImage,
+                                               context: mappingContext)
+        default:
+            return nil
+        }
+    }
+
+    /// Blocks copied from a note. Attachments from another note are copied
+    /// into this one; ids that are not plain file names are dropped.
+    private func blocksFromPasteboard(_ data: Data) -> NoteDocument {
+        let payload = (try? JSONDecoder().decode(NoteBlocksPayload.self, from: data))
+            ?? NoteBlocksPayload(noteID: nil, document: NoteDocument.decode(data))
+        var document = payload.document
+        document.blocks = document.blocks.compactMap { block in
+            switch block {
+            case .image(let id), .audio(let id):
+                guard NoteAttachments.isValidID(id) else { return nil }
+                guard let source = payload.noteID, source != noteID else { return block }
+                guard let copied = copyAttachment?(id, source) else { return nil }
+                if case .image = block { return .image(attachmentID: copied) }
+                return .audio(attachmentID: copied)
+            default:
+                return block
+            }
+        }
+        return document
+    }
+
+    private func objects(_ document: NoteDocument) -> NSAttributedString {
+        NoteTextMapping.attributedString(from: document, context: mappingContext).text
     }
 
     private func imageData(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> (data: Data, fileExtension: String)? {
@@ -459,9 +590,10 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
     /// with every edit (see `shiftPendingPhrases`); nothing is put in the
     /// text, so undo and saving never see a pending phrase.
     private(set) var pendingPhrases: [(id: UUID, location: Int)] = []
-    /// Set while a finished phrase is inserted, so later phrases waiting at
-    /// the same spot move after it.
+    /// Set while a finished phrase is inserted: its spot, and the phrases
+    /// started after it (only those move after its text when waiting there).
     private var insertingPhraseAt: Int?
+    private var phrasesStartedLater: Set<UUID> = []
 
     /// Holds the caret's place for a phrase; an accent-tinted marker shows it.
     func beginPhrase(_ id: UUID) {
@@ -476,7 +608,10 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
     @discardableResult
     func finishPhrase(_ id: UUID, text: String) -> Bool {
         guard let storage = textStorage else { return false }
-        let location = min(pendingPhrases.first { $0.id == id }?.location ?? selectedRange().location, nsString.length)
+        if hasMarkedText() { unmarkText() }
+        let index = pendingPhrases.firstIndex { $0.id == id }
+        let location = min(index.map { pendingPhrases[$0].location } ?? selectedRange().location, nsString.length)
+        phrasesStartedLater = Set(index.map { pendingPhrases[($0 + 1)...].map(\.id) } ?? [])
         pendingPhrases.removeAll { $0.id == id }
         defer { needsDisplay = true }
         let line = nsString.lineRange(for: NSRange(location: location, length: 0))
@@ -509,6 +644,13 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         return true
     }
 
+    /// Takes over another view's waiting phrases (same text, same places):
+    /// they finish into the note they began in after it is switched away.
+    func adoptPendingPhrases(_ phrases: [(id: UUID, location: Int)]) {
+        let length = nsString.length
+        pendingPhrases = phrases.map { ($0.id, min($0.location, length)) }
+    }
+
     /// Forgets a phrase that had no words.
     func dropPhrase(_ id: UUID) {
         pendingPhrases.removeAll { $0.id == id }
@@ -532,7 +674,11 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         for index in pendingPhrases.indices {
             let p = pendingPhrases[index].location
             if let at = insertingPhraseAt, p == at {
-                pendingPhrases[index].location = p + newLength
+                // Started later: lands after this phrase. Started earlier:
+                // stays before it.
+                if phrasesStartedLater.contains(pendingPhrases[index].id) {
+                    pendingPhrases[index].location = p + newLength
+                }
             } else if p > location, p >= location + oldLength {
                 pendingPhrases[index].location = p + delta
             } else if p > location {
@@ -614,7 +760,7 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         // Text storage edits arrive on the main thread, from this view.
         nonisolated(unsafe) let textStorage = textStorage
         MainActor.assumeIsolated {
-            if editedMask.contains(.editedCharacters) {
+            if editedMask.contains(.editedCharacters), !isLoading {
                 shiftPendingPhrases(location: editedRange.location, oldLength: editedRange.length - delta,
                                     newLength: editedRange.length)
             }
@@ -701,4 +847,11 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         }
         return count
     }
+}
+
+/// Blocks on the pasteboard, with the note they came from (so a paste into
+/// another note can copy their attachments).
+struct NoteBlocksPayload: Codable {
+    var noteID: UUID?
+    var document: NoteDocument
 }

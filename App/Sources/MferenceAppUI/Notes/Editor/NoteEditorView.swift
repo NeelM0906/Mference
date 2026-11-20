@@ -38,6 +38,16 @@ struct NoteEditorView: NSViewRepresentable {
         if controller.textView !== textView { controller.attach(textView) }
     }
 
+    /// Leaving Notes: save at once (a pending autosave would find no view).
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        if let textView = scroll.documentView as? NoteTextView { coordinator.controller.detach(textView) }
+    }
+
+    /// Only web and mail links open (in the default browser or mail app).
+    static func opensLink(_ url: URL) -> Bool {
+        ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "")
+    }
+
     final class Coordinator: NSObject, NSTextViewDelegate {
         let controller: NoteEditorController
         init(controller: NoteEditorController) { self.controller = controller }
@@ -49,7 +59,7 @@ struct NoteEditorView: NSViewRepresentable {
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             // Links open in the default browser (spec 4.1).
             let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
-            guard let url, ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") else { return true }
+            guard let url, NoteEditorView.opensLink(url) else { return true }
             NSWorkspace.shared.open(url)
             return true
         }
