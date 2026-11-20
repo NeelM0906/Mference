@@ -87,10 +87,8 @@ struct NotesScreen: View {
         .dropDestination(for: URL.self) { (urls: [URL], _: CGPoint) -> Bool in
             model.voice.transcribe?(urls) ?? false
         }
-        .task {
-            await model.purgeExpired()
-            model.selectFirstIfNeeded()
-        }
+        // The first note shows at once; the purge waits for launch recovery.
+        .task { await model.opened() }
         .confirmationDialog("Write the summary again?",
                             isPresented: Binding(get: { model.summaries?.redoConfirmation != nil },
                                                  set: { if !$0 { model.summaries?.cancelRedo() } }),
@@ -143,18 +141,31 @@ private struct NotesScreenChrome: ViewModifier {
 }
 
 /// Transcribe file, Record meeting and New note in the shell's top bar.
+/// While a meeting records they step back for the shell's timer chip; the
+/// meeting layout (board 4) shows the chip alone.
 struct NotesToolbarActions: View {
     let model: NotesModel
 
     var body: some View {
         HStack(spacing: MFSpacing.s) {
-            if let toolbar = model.voice.toolbar {
-                // N3's toolbar: Transcribe file and Record meeting with its popover.
+            if !model.isMeetingLive {
+                if let toolbar = model.voice.toolbar {
+                    // N3's toolbar: Transcribe file and Record meeting with its popover.
+                    toolbar()
+                } else {
+                    ownVoiceButtons
+                }
+            } else if let toolbar = model.voice.toolbar {
+                // Hidden, but still there to present its sheet (⇧⌘O while recording).
                 toolbar()
-            } else {
-                ownVoiceButtons
+                    .hidden()
+                    .frame(width: 0, height: 0)
+                    .clipped()
+                    .accessibilityHidden(true)
             }
-            newNoteButton
+            if !model.showsMeetingLayout {
+                newNoteButton
+            }
         }
     }
 

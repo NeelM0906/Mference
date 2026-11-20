@@ -87,8 +87,9 @@ struct RecordingBar: View {
             Text(Self.title(phase: session.phase))
                 .font(MFFont.headline)
                 .foregroundStyle(MFColor.ink)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(VoiceFormat.clock(live.map { $0.recordedTime(at: rendersStatically ? $0.updatedAt : context.date) }
+            // Ticks in phase with the timer chip (same anchor), so both read the same second.
+            TimelineView(.periodic(from: live?.updatedAt ?? .now, by: 1)) { context in
+                Text(VoiceFormat.clock(live.map { VoiceFormat.liveTime($0, at: rendersStatically ? $0.updatedAt : context.date) }
                                        ?? 0))
                     .font(MFFont.body)
                     .monospacedDigit()

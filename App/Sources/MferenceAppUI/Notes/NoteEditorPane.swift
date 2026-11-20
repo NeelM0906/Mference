@@ -46,8 +46,11 @@ struct NoteEditorPane: View {
                     NoteRecordingHeader(model: model, note: note, transcript: recording.transcript,
                                         player: recording.player)
                 }
+                // A recorded note's chips carry its date (board 5): no date line.
+                let hasRecording = recording?.noteID == note.id
                 NoteEditorView(controller: model.editor,
-                               dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar),
+                               dateLine: hasRecording ? ""
+                                   : Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar),
                                bottomInset: showsDictationBar ? NoteEditorMetrics.dictationBarInset : 0)
                     .accessibilityLabel("Note text")
                     // Dictation's bar sits over the bottom of the note (board 2).
@@ -66,7 +69,9 @@ struct NoteEditorPane: View {
                 footer(note)
             }
             .background(MFColor.surface)
-            .task(id: note.id) { await loadRecording(for: note) }
+            // Again when a file note finishes transcribing or the meeting
+            // shown with the panes ends.
+            .task(id: model.recordingKey(for: note)) { await loadRecording(for: note) }
             .onDisappear { recording?.player.pause() }
             .fileImporter(isPresented: $importingAttachment, allowedContentTypes: [.image, .audio],
                           allowsMultipleSelection: true) { result in
@@ -90,19 +95,20 @@ struct NoteEditorPane: View {
     }
 
     /// A finished meeting or file note gets its player and transcript; a
-    /// live meeting, a typed note or a build without meetings gets none.
+    /// live meeting, a typed note, a file still transcribing or a build
+    /// without meetings gets none.
     private func loadRecording(for note: Note) async {
         recording?.player.pause()
-        guard let meetings = model.meetings, note.recording != nil, model.liveMeetingNoteID != note.id,
-              let transcript = meetings.transcript(for: note.id) else {
+        guard let finished = model.finishedRecording(for: note) else {
             recording = nil
             model.editor.onTimeChipClick = nil
             return
         }
-        let audio = meetings.audio(for: note.id)
+        let audio = finished.audio
         let player = RecordingPlayerModel(tracks: audio?.tracks ?? [], directory: audio?.directory,
-                                          duration: audio?.duration ?? note.recording?.duration ?? 0)
-        recording = RecordingViewState(noteID: note.id, transcript: transcript, player: player)
+                                          duration: audio?.duration ?? note.recording?.duration ?? 0,
+                                          playback: model.makePlayback())
+        recording = RecordingViewState(noteID: note.id, transcript: finished.transcript, player: player)
         // A time chip in the note plays from there.
         model.editor.onTimeChipClick = { [weak player] time in player?.play(from: time) }
         await player.load()
