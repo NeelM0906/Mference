@@ -52,13 +52,13 @@ public final class MeetingSummaries {
     @ObservationIgnored private var runner: Task<Void, Never>?
 
     public init(engine: any EngineServicing, summarizer: MeetingSummarizer, assistant: (any AppleModelServicing)?,
-                context: ModelContext, writer: any MeetingNoteWriting, todos: (any MeetingTodoSink)?,
+                writer: any MeetingNoteWriting, todos: (any MeetingTodoSink)?,
                 now: @escaping @Sendable () -> Date = { Date.now }, locale: Locale = .current,
                 timeZone: TimeZone = .current) {
         self.engine = engine
         self.summarizer = summarizer
         self.assistant = assistant
-        self.context = context
+        self.context = writer.context
         self.writer = writer
         self.todos = todos
         self.now = now

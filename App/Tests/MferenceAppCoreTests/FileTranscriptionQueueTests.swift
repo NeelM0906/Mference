@@ -24,7 +24,7 @@ import Testing
         let container = try AppModelContainer.inMemory()
         let writer = InMemoryMeetingNoteWriter(context: container.mainContext)
         return Harness(container: container, writer: writer,
-                       queue: FileTranscriptionQueue(speech: speech, context: container.mainContext, writer: writer),
+                       queue: FileTranscriptionQueue(speech: speech, writer: writer),
                        speech: speech)
     }
 

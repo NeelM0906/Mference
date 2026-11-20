@@ -36,6 +36,11 @@ extension NoteStore: MeetingNoteWriting {
         try edit(noteID) { $0.append(.marker(time: time)) }
     }
 
+    public func discardNote(_ noteID: UUID) async {
+        guard let note = try? self.note(id: noteID) else { return }
+        try? await deletePermanently(note)
+    }
+
     public func transcriptDidChange(in noteID: UUID) {
         guard let note = try? self.note(id: noteID) else { return }
         try? transcriptDidChange(in: note)

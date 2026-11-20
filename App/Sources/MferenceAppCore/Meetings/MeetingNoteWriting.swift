@@ -45,6 +45,10 @@ public struct MeetingActionItemRow: Sendable, Hashable {
 /// do nothing.
 @MainActor
 public protocol MeetingNoteWriting: AnyObject {
+    /// The context the writer saves on. The meeting owners read and save
+    /// recordings on this same context, so the open editor sees every write
+    /// (one store, one context, one revision).
+    var context: ModelContext { get }
     /// Creates an empty note of `kind` (`.meeting` or `.file`) in the
     /// writer's model context, so `MeetingSession` can attach its recording.
     func createNote(id: UUID, kind: NoteKind, title: String, createdAt: Date) throws
@@ -65,6 +69,9 @@ public protocol MeetingNoteWriting: AnyObject {
     func appendMarker(at time: TimeInterval, to noteID: UUID) throws
     /// The transcript changed: refresh the note's search text.
     func transcriptDidChange(in noteID: UUID)
+    /// Deletes a note that never became one (a cancelled file) for good,
+    /// with its recordings.
+    func discardNote(_ noteID: UUID) async
 }
 
 /// A `MeetingNoteWriting` that keeps the written content in memory and the
@@ -142,6 +149,13 @@ public final class InMemoryMeetingNoteWriter: MeetingNoteWriting {
 
     public func transcriptDidChange(in noteID: UUID) {
         searchRefreshes[noteID, default: 0] += 1
+    }
+
+    public func discardNote(_ noteID: UUID) async {
+        guard let note = note(noteID) else { return }
+        context.delete(note)
+        try? context.save()
+        bodies[noteID] = nil
     }
 
     private func note(_ id: UUID) -> Note? {

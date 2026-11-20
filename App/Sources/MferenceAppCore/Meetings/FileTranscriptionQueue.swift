@@ -64,10 +64,11 @@ public final class FileTranscriptionQueue {
     @ObservationIgnored private var consumers: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var didRecover = false
 
-    public init(speech: any SpeechServicing, context: ModelContext, writer: any MeetingNoteWriting,
+    /// Recordings are read and saved on `writer.context` (the Notes store's).
+    public init(speech: any SpeechServicing, writer: any MeetingNoteWriting,
                 now: @escaping @Sendable () -> Date = { Date.now }) {
         self.speech = speech
-        self.context = context
+        self.context = writer.context
         self.writer = writer
         self.now = now
     }
@@ -186,11 +187,8 @@ public final class FileTranscriptionQueue {
             fail(noteID, message: error.message)
         case .cancelled:
             rows.removeAll { $0.noteID == noteID }
-            if let note = fetchNote(noteID) {
-                context.delete(note)
-                try? context.save()
-            }
-            Task { [speech] in try? await speech.deleteRecordings(for: noteID) }
+            // Through the Notes store: the note and its recordings go together.
+            Task { [writer] in await writer.discardNote(noteID) }
         }
     }
 

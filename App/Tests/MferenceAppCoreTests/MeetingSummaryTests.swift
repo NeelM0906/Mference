@@ -52,7 +52,7 @@ import Testing
             summarizer: MeetingSummarizer(engine: engine, prompt: try MeetingSummaryPrompt.load(),
                                           chunkCharacters: chunkCharacters),
             assistant: AppleModelService(primary: apple, fallback: quick),
-            context: container.mainContext, writer: writer, todos: todos,
+            writer: writer, todos: todos,
             now: { Self.start.addingTimeInterval(3_600) }, locale: Locale(identifier: "en_GB"), timeZone: Self.utc)
         return Harness(container: container, writer: writer, summaries: summaries, engine: engine, todos: todos,
                        appleModel: apple, quickTitle: quick)
@@ -234,7 +234,7 @@ import Testing
         let speech = FakeSpeechService(meeting: FakeSpeechService.MeetingScript(
             live: [.segment(segment)],
             result: TranscriptResult(segments: [segment], speakers: [.you], duration: 3)))
-        let session = MeetingSession(speech: speech, context: h.context, writer: h.writer,
+        let session = MeetingSession(speech: speech, writer: h.writer,
                                      locale: Locale(identifier: "en_GB"), timeZone: Self.utc)
         session.afterMeeting = { [summaries = h.summaries] noteID, summarize in
             if summarize { summaries.summarize(noteID) }

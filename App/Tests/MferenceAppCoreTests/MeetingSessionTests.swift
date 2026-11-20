@@ -31,7 +31,7 @@ import Testing
     func harness(_ speech: any SpeechServicing, endedAt: Date = start.addingTimeInterval(600)) throws -> Harness {
         let container = try AppModelContainer.inMemory()
         let writer = InMemoryMeetingNoteWriter(context: container.mainContext)
-        let session = MeetingSession(speech: speech, context: container.mainContext, writer: writer,
+        let session = MeetingSession(speech: speech, writer: writer,
                                      now: { endedAt }, locale: Locale(identifier: "en_GB"), timeZone: Self.utc)
         return Harness(container: container, writer: writer, session: session, speech: speech)
     }
@@ -255,7 +255,7 @@ import Testing
         // Next launch: the speech service reports the files it closed.
         let track = RecordedTrack(fileName: "mic-1.m4a", kind: .microphone, startOffset: 0, duration: 2)
         speech.interrupted = [InterruptedRecording(noteID: noteID, tracks: [track], endedAt: Self.start)]
-        let relaunched = MeetingSession(speech: speech, context: h.context, writer: h.writer, now: { Self.start },
+        let relaunched = MeetingSession(speech: speech, writer: h.writer, now: { Self.start },
                                         locale: Locale(identifier: "en_GB"), timeZone: Self.utc)
         #expect(await relaunched.recoverInterruptedMeetings().isEmpty)
         #expect(h.recording(noteID)?.tracks == [track])

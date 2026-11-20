@@ -81,17 +81,25 @@ public final class MeetingSession {
     /// Finished notes' transcripts, so a rename shows everywhere at once.
     @ObservationIgnored private var transcripts: [UUID: TranscriptModel] = [:]
 
-    /// `writer` must write through `context` (the app's main context), so
-    /// the note it creates is the one this session attaches the recording to.
-    public init(speech: any SpeechServicing, context: ModelContext, writer: any MeetingNoteWriting,
+    /// Recordings are read and saved on `writer.context`, the Notes store's
+    /// own, so note bodies and recordings never live on separate contexts.
+    public init(speech: any SpeechServicing, writer: any MeetingNoteWriting,
                 now: @escaping @Sendable () -> Date = { Date.now }, locale: Locale = .current,
                 timeZone: TimeZone = .current) {
         self.speech = speech
-        self.context = context
+        self.context = writer.context
         self.writer = writer
         self.now = now
         self.locale = locale
         self.timeZone = timeZone
+    }
+
+    /// For callers that pass the context too; it must be the writer's.
+    public convenience init(speech: any SpeechServicing, context: ModelContext, writer: any MeetingNoteWriting,
+                            now: @escaping @Sendable () -> Date = { Date.now }, locale: Locale = .current,
+                            timeZone: TimeZone = .current) {
+        precondition(context === writer.context, "MeetingSession must use its writer's context")
+        self.init(speech: speech, writer: writer, now: now, locale: locale, timeZone: timeZone)
     }
 
     // MARK: Recording

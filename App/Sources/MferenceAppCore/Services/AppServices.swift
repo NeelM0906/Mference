@@ -31,6 +31,11 @@ public final class AppServices {
     /// Notes and folders (Notes spec 4.1, 8): the one store the Notes
     /// screens, dictation and meetings write through.
     public let notes: NoteStore
+    /// The remembered voice choices (Settings › Speech, the popover, the
+    /// dictation bar's chips).
+    public let speechPreferences: SpeechPreferences
+    /// The one consumer of dictation events (stream ownership, team N3).
+    public let dictation: DictationController
     /// The meeting being recorded (Notes spec 4.4): the one consumer of
     /// `MeetingRecording.events`, so a meeting keeps going outside Notes.
     public let meetings: MeetingSession
@@ -42,11 +47,6 @@ public final class AppServices {
     /// started once by `startLaunchRecovery()`. Anything that deletes notes
     /// or recordings at launch (the Recently deleted purge) waits for it.
     public private(set) var launchRecovery: Task<Void, Never>?
-    /// The remembered voice choices (Settings › Speech, the popover, the
-    /// dictation bar's chips).
-    public let speechPreferences: SpeechPreferences
-    /// The one consumer of dictation events (stream ownership, team N3).
-    public let dictation: DictationController
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -86,16 +86,18 @@ public final class AppServices {
         let notes = NoteStore(container: modelContainer, attachments: noteAttachments ?? .temporary(),
                               speech: speech)
         self.notes = notes
-        // Meeting and file notes get their summary, action items and lines
-        // through the Notes store, on its (main) context.
-        let context = notes.context
+        let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
+        self.speechPreferences = speechPreferences
+        dictation = DictationController(speech: speech, permissions: permissions, preferences: speechPreferences)
+        // Meeting and file notes write through the one Notes store (its
+        // context, its revision), so an open editor takes their writes in.
         let writer = meetingWriter ?? notes
-        let meetings = MeetingSession(speech: speech, context: context, writer: writer)
+        let meetings = MeetingSession(speech: speech, writer: writer)
         let summaries = MeetingSummaries(
             engine: engine,
             summarizer: MeetingSummarizer(engine: engine, prompt: try? MeetingSummaryPrompt.load()),
-            assistant: apple?.assistant, context: context, writer: writer, todos: apple?.calendar)
-        let files = FileTranscriptionQueue(speech: speech, context: context, writer: writer)
+            assistant: apple?.assistant, writer: writer, todos: apple?.calendar)
+        let files = FileTranscriptionQueue(speech: speech, writer: writer)
         meetings.afterMeeting = { [weak summaries] noteID, summarize in
             if summarize { summaries?.summarize(noteID) }
         }
@@ -103,9 +105,6 @@ public final class AppServices {
         self.meetings = meetings
         self.summaries = summaries
         self.files = files
-        let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
-        self.speechPreferences = speechPreferences
-        dictation = DictationController(speech: speech, permissions: permissions, preferences: speechPreferences)
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
