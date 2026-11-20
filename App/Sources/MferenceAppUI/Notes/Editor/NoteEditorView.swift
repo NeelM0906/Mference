@@ -8,6 +8,9 @@ struct NoteEditorView: NSViewRepresentable {
     let controller: NoteEditorController
     /// The date line above the title ("19 November 2026 at 11:40").
     var dateLine: String
+    /// Room kept clear at the bottom (the dictation bar), so the last
+    /// lines can scroll above it.
+    var bottomInset: CGFloat = 0
 
     func makeCoordinator() -> Coordinator { Coordinator(controller: controller) }
 
@@ -35,6 +38,10 @@ struct NoteEditorView: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? NoteTextView else { return }
         if textView.dateLine != dateLine { textView.dateLine = dateLine }
+        if scroll.contentInsets.bottom != bottomInset {
+            scroll.automaticallyAdjustsContentInsets = false
+            scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomInset, right: 0)
+        }
         if controller.textView !== textView { controller.attach(textView) }
     }
 

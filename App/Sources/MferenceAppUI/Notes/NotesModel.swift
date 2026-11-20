@@ -148,6 +148,7 @@ public final class NotesModel {
             self?.voice.editorFocusChanged?(focused ? editor : nil)
         }
         editor.onCancel = { [weak self] in self?.voice.escape?() ?? false }
+        editor.onMediaDropped = { [weak self] urls in self?.voice.transcribe?(urls) ?? false }
     }
 
     public convenience init(services: AppServices) {

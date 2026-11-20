@@ -46,6 +46,16 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
     /// Copies a dropped or pasted image or audio file into the note; returns
     /// its block.
     var importFile: ((URL) -> NoteDocument.Block?)?
+    /// Audio or video files dropped or pasted on the note: queued for
+    /// transcription; returns false when transcription is not available.
+    var transcribeFiles: (([URL]) -> Bool)?
+    /// Set while a paste or drop was handled without inserting text.
+    private var handledWithoutInserting = false
+
+    static func isAudioOrVideo(_ url: URL) -> Bool {
+        UTType(filenameExtension: url.pathExtension)?.conforms(to: .audiovisualContent) ?? false
+    }
+
     /// Copies another note's attachment into this one (pasting blocks
     /// between notes); returns the new id.
     var copyAttachment: ((String, UUID) -> String?)?
@@ -684,7 +694,9 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
     }
 
     override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
-        guard isEditable, let incoming = pasted(from: pboard, type: type), incoming.length > 0 else { return false }
+        handledWithoutInserting = false
+        guard isEditable else { return false }
+        guard let incoming = pasted(from: pboard, type: type), incoming.length > 0 else { return handledWithoutInserting }
         let selection = selectedRange()
         guard shouldChangeText(in: selection, replacementString: incoming.string) else { return false }
         textStorage?.replaceCharacters(in: selection, with: incoming)
@@ -702,7 +714,14 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
             guard let data = pboard.data(forType: type) else { return nil }
             return objects(blocksFromPasteboard(data))
         case .fileURL:
-            let urls = pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+            var urls = pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+            // Audio and video become transcribed notes (spec 4.6) when
+            // transcription is wired; images (and audio otherwise) attach.
+            let media = urls.filter(Self.isAudioOrVideo)
+            if !media.isEmpty, transcribeFiles?(media) == true {
+                handledWithoutInserting = true
+                urls.removeAll(where: Self.isAudioOrVideo)
+            }
             let blocks = urls.compactMap { importFile?($0) }
             return blocks.isEmpty ? nil : objects(NoteDocument(blocks: blocks))
         case .png, .tiff:

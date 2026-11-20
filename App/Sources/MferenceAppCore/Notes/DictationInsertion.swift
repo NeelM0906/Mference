@@ -20,4 +20,14 @@ public protocol DictationInsertionTarget: AnyObject {
     func dropPhrase(_ id: UUID)
     /// Removes every pending marker (session ended, failed, note switched).
     func dropAllPhrases()
+    /// A dictation is starting into this target: every phrase of it belongs
+    /// to the note shown now (`noteID`), whatever the person opens next,
+    /// until `dropAllPhrases`. Called by the dictation controller as it
+    /// records `noteID` as the active note.
+    func dictationWillStart()
+}
+
+extension DictationInsertionTarget {
+    /// Targets that keep no binding need nothing here.
+    public func dictationWillStart() {}
 }
