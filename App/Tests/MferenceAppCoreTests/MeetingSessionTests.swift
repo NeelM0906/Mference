@@ -391,6 +391,65 @@ import Testing
         #expect(speech.calls.contains(.pause) && speech.calls.contains(.resume))
     }
 
+    @Test func markMomentGoesToTheOpenEditorElseTheStore() async throws {
+        final class Target: MeetingNoteTarget {
+            var noteID: UUID
+            var shows: Bool
+            var inserted: [TimeInterval] = []
+            var onTimeChipClick: ((TimeInterval) -> Void)?
+            init(noteID: UUID, shows: Bool) { self.noteID = noteID; self.shows = shows }
+            func insertMarker(time: TimeInterval, in noteID: UUID) -> Bool {
+                guard shows, noteID == self.noteID else { return false }
+                inserted.append(time)
+                return true
+            }
+            func insertTranscriptAnchor(segmentID: UUID, in noteID: UUID) -> Bool { false }
+            func reveal(segmentID: UUID) {}
+        }
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions())
+        let target = Target(noteID: noteID, shows: true)
+        h.session.noteTarget = target
+        speech.setMeetingTime(30)
+        await h.session.markMoment()
+        #expect(target.inserted == [30])
+        #expect(h.writer.body(of: noteID).markers.isEmpty)
+        // Another note is shown: the marker goes to the meeting's note through the store.
+        target.shows = false
+        speech.setMeetingTime(45)
+        await h.session.markMoment()
+        #expect(target.inserted == [30])
+        #expect(h.writer.body(of: noteID).markers == [45])
+    }
+
+    @Test func aSummaryAskedForWhileRecordingRunsWhenTheMeetingEnds() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let h = try harness(speech)
+        var summarize: Bool?
+        h.session.afterMeeting = { summarize = $1 }
+        let noteID = try await h.session.start(MeetingStartOptions(summaryWhenStopped: false))
+        // Asking during the meeting leaves it pending until the transcript is in.
+        h.recording(noteID)?.summaryState = .pending
+        await h.session.stop()
+        await h.session.waitUntilFinished()
+        #expect(summarize == true)
+    }
+
+    @Test func theTranscriptCacheIsBounded() async throws {
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        for _ in 0..<(MeetingSession.transcriptCacheLimit + 10) {
+            let id = UUID()
+            try h.writer.createNote(id: id, kind: .file, title: "f", createdAt: .now)
+            let record = NoteRecording()
+            h.context.insert(record)
+            h.note(id)?.recording = record
+            #expect(h.session.transcript(for: id) != nil)
+        }
+        #expect(h.session.cachedTranscriptCount == MeetingSession.transcriptCacheLimit)
+    }
+
     @Test func gapsAreSaved() async throws {
         let gap = RecordingGap(start: Self.start.addingTimeInterval(60), end: Self.start.addingTimeInterval(400),
                                at: 60, reason: .sleep)

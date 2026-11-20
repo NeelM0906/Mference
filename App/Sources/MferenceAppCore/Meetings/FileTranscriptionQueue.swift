@@ -63,6 +63,9 @@ public final class FileTranscriptionQueue {
     @ObservationIgnored private var jobs: [UUID: FileJob] = [:]
     @ObservationIgnored private var consumers: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var didRecover = false
+    /// Files whose job is being created right now, and those cancelled meanwhile.
+    @ObservationIgnored private var starting: Set<UUID> = []
+    @ObservationIgnored private var cancelledWhileStarting: Set<UUID> = []
 
     /// Recordings are read and saved on `writer.context` (the Notes store's).
     public init(speech: any SpeechServicing, writer: any MeetingNoteWriting,
@@ -102,7 +105,11 @@ public final class FileTranscriptionQueue {
 
     /// Removes a file from the queue; its unfinished note goes too.
     public func cancel(_ noteID: UUID) async {
-        guard let job = jobs[noteID] else { return }
+        guard let job = jobs[noteID] else {
+            // The job is still being created: cancel it as soon as it exists.
+            if starting.contains(noteID) { cancelledWhileStarting.insert(noteID) }
+            return
+        }
         await speech.cancel(job.id)
     }
 
@@ -141,11 +148,14 @@ public final class FileTranscriptionQueue {
         }
         upsertRow(Row(noteID: noteID, fileName: fileName, phase: .queued, fraction: 0))
         let job: FileJob
+        starting.insert(noteID)
+        defer { starting.remove(noteID) }
         do {
             job = try await speech.transcribeFile(url, options: FileTranscriptionOptions(
                 noteID: noteID, language: options.language, speakerLabels: options.speakerLabels,
                 keepAudio: options.keepAudio))
         } catch {
+            cancelledWhileStarting.remove(noteID)
             let message = (error as? SpeechError)?.message ?? SpeechError.failed("").message
             fail(noteID, message: message)
             return createNote ? noteID : nil
@@ -158,6 +168,9 @@ public final class FileTranscriptionQueue {
                 self.handle(event, noteID: noteID)
             }
             self?.jobEnded(noteID, jobID: jobID)
+        }
+        if cancelledWhileStarting.remove(noteID) != nil {
+            await speech.cancel(job.id)
         }
         return noteID
     }

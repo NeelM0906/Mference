@@ -58,6 +58,8 @@ public protocol MeetingNoteWriting: AnyObject {
     /// the top of the body, replacing the ones written before (Redo); the
     /// person's own notes below stay.
     func replaceMeetingSections(_ sections: MeetingSections, in noteID: UUID) throws
+    /// Whether the note's body may be written (not from a newer version, not damaged).
+    func canWrite(_ noteID: UUID) -> Bool
     /// The Action items checklist rows as they are now, in order.
     func actionItems(in noteID: UUID) -> [MeetingActionItemRow]
     /// What the person typed in the note (outside the title and the
@@ -129,6 +131,11 @@ public final class InMemoryMeetingNoteWriter: MeetingNoteWriting {
     }
 
     public func actionItems(in noteID: UUID) -> [MeetingActionItemRow] { body(of: noteID).actionItems }
+
+    /// Notes whose body may not be written; tests set them.
+    public var readOnlyNotes: Set<UUID> = []
+
+    public func canWrite(_ noteID: UUID) -> Bool { !readOnlyNotes.contains(noteID) }
 
     /// Typed notes for the summary; tests set them.
     public var typedNotes: [UUID: String] = [:]
