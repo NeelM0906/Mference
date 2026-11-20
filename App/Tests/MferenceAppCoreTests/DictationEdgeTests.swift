@@ -78,9 +78,15 @@ final class Inbox {
 final class InboxTarget: DictationInsertionTarget {
     var noteID = UUID()
     var begun: [UUID] = []
+    /// What happened, in order ("start", "begin").
+    var log: [String] = []
+    func dictationWillStart() { log.append("start") }
     let inbox: Inbox
     init(_ inbox: Inbox) { self.inbox = inbox }
-    func beginPhrase(_ id: UUID) { begun.append(id) }
+    func beginPhrase(_ id: UUID) {
+        begun.append(id)
+        log.append("begin")
+    }
     func finishPhrase(_ id: UUID, text: String) { inbox.phrases.append(text) }
     func dropPhrase(_ id: UUID) {}
     func dropAllPhrases() { inbox.dropAllCount += 1 }
@@ -132,6 +138,17 @@ final class InboxTarget: DictationInsertionTarget {
         await step(speech, dictation, 2) // level, phrase started
         await dictation.stop()
         #expect(inbox.phrases == ["last words"], "the controller holds the note until stop returns")
+    }
+
+    @Test func theEditorBindsTheDictationBeforeTheFirstPhrase() async {
+        let speech = FakeSpeechService(dictation: .saying("hello"), stepped: true)
+        let target = InboxTarget(Inbox())
+        let dictation = DictationController(speech: speech, permissions: FakePermissionBroker(), preferences: preferences())
+        await dictation.start(in: target)
+        #expect(target.log == ["start"], "dictationWillStart runs as dictation starts")
+        await step(speech, dictation, 2) // level, phrase started
+        #expect(target.log == ["start", "begin"])
+        await dictation.stop()
     }
 
     @Test func aPhraseNeverBeginsInAnotherNote() async {
