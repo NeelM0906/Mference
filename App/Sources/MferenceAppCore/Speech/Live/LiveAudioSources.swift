@@ -40,13 +40,20 @@ public struct LiveAudioSourceFactory: AudioSourceFactory {
 
 /// The microphone through AVAudioEngine's input tap. A device or format
 /// change (headphones plugged in) restarts the tap with the new format.
+///
+/// Locking: the tap block reads only `continuation`, under `lock`. Starting,
+/// restarting (the configuration-change notification) and stopping the
+/// engine all run on `control`, one at a time, so a device change cannot
+/// restart capture after `stop()`.
 final class MicrophoneSource: AudioSource, @unchecked Sendable {
     let track = TrackKind.microphone
     private let deviceUID: String?
     private let lock = NSLock()
-    private var engine: AVAudioEngine?
     private var continuation: AsyncThrowingStream<AudioChunk, Error>.Continuation?
+    /// Only touched on `control`; nil once stopped.
+    private var engine: AVAudioEngine?
     private var observer: NSObjectProtocol?
+    private let control = DispatchQueue(label: "ai.mference.speech.microphone-control")
 
     init(deviceUID: String?) { self.deviceUID = deviceUID }
 
@@ -55,19 +62,23 @@ final class MicrophoneSource: AudioSource, @unchecked Sendable {
             throw SpeechError.permissionDenied(.microphone)
         }
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: AudioChunk.self)
-        let engine = AVAudioEngine()
-        lock.withLock {
-            self.engine = engine
-            self.continuation = continuation
-        }
+        lock.withLock { self.continuation = continuation }
         do {
-            try configure(engine)
+            try await onControl {
+                let engine = AVAudioEngine()
+                self.engine = engine
+                try self.configure(engine)
+                self.observer = NotificationCenter.default.addObserver(
+                    forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+                ) { [weak source = self, control = self.control] _ in
+                    guard let source else { return }
+                    control.async { source.restart() }
+                }
+            }
         } catch {
             await stop()
             throw error as? SpeechError ?? .failed(error.localizedDescription)
         }
-        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
-                                                          queue: nil) { [weak self] _ in self?.restart() }
         continuation.onTermination = { [weak self] _ in Task { await self?.stop() } }
         return stream
     }
@@ -93,8 +104,9 @@ final class MicrophoneSource: AudioSource, @unchecked Sendable {
         try engine.start()
     }
 
+    /// On `control`. Does nothing once stopped.
     private func restart() {
-        guard let engine = lock.withLock({ self.engine }) else { return }
+        guard let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         do {
@@ -105,18 +117,26 @@ final class MicrophoneSource: AudioSource, @unchecked Sendable {
     }
 
     func stop() async {
-        let (engine, continuation) = lock.withLock { () -> (AVAudioEngine?, AsyncThrowingStream<AudioChunk, Error>.Continuation?) in
-            defer {
-                self.engine = nil
-                self.continuation = nil
-            }
-            return (self.engine, self.continuation)
+        try? await onControl {
+            if let observer = self.observer { NotificationCenter.default.removeObserver(observer) }
+            self.observer = nil
+            self.engine?.inputNode.removeTap(onBus: 0)
+            self.engine?.stop()
+            self.engine = nil
         }
-        if let observer { NotificationCenter.default.removeObserver(observer) }
-        observer = nil
-        engine?.inputNode.removeTap(onBus: 0)
-        engine?.stop()
+        let continuation = lock.withLock { () -> AsyncThrowingStream<AudioChunk, Error>.Continuation? in
+            defer { self.continuation = nil }
+            return self.continuation
+        }
         continuation?.finish()
+    }
+
+    private func onControl<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            control.async {
+                do { continuation.resume(returning: try body()) } catch { continuation.resume(throwing: error) }
+            }
+        }
     }
 }
 
