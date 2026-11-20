@@ -731,6 +731,21 @@ final class NoteTextView: NSTextView, NSTextLayoutManagerDelegate, NSTextStorage
         }
     }
 
+    /// Selects and scrolls to the time chip of `segmentID` (a ⌘K transcript hit).
+    func reveal(segmentID: UUID) {
+        guard let storage = textStorage else { return }
+        var found: NSRange?
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+            if let attachment = value as? NoteBlockAttachment, attachment.block == .transcriptAnchor(segmentID: segmentID) {
+                found = range
+                stop.pointee = true
+            }
+        }
+        guard let found else { return }
+        setSelectedRange(NSRange(location: found.location, length: 0))
+        scrollRangeToVisible(found)
+    }
+
     // MARK: Meeting markers
 
     /// Inserts a "Mark moment" line after the caret's line (meeting notes).

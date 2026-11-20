@@ -103,7 +103,10 @@ public final class NotesModel {
         var deletedAt: Date?
     }
 
-    public init(store: NoteStore, speech: any SpeechServicing, searchDelay: Duration = .milliseconds(150),
+    /// The pause in typing before a search runs.
+    public static let searchPause: Duration = .milliseconds(150)
+
+    public init(store: NoteStore, speech: any SpeechServicing, searchDelay: Duration = NotesModel.searchPause,
                 now: @escaping () -> Date = Date.init) {
         self.store = store
         self.editor = NoteEditorController(store: store)
@@ -264,6 +267,7 @@ public final class NotesModel {
     // MARK: Selection
 
     public func select(_ note: Note?) {
+        if note?.id != selectedNoteID { revealedSegmentID = nil }
         selectedNoteID = note?.id
         editor.open(note)
     }
@@ -447,6 +451,39 @@ public final class NotesModel {
             }
         }
         return moved
+    }
+
+    // MARK: Search (⌘K) and export
+
+    /// The transcript line a ⌘K hit asked to show; the meeting layout (N3)
+    /// scrolls to it, and the editor scrolls to its time chip.
+    public private(set) var revealedSegmentID: UUID?
+
+    /// ⌘K's Notes results for `query` (title, then body, then transcript lines).
+    public func searchHits(_ query: String, limit: Int = 8) -> [NoteSearchHit] {
+        (try? store.searchHits(query, limit: limit)) ?? []
+    }
+
+    /// Opens a ⌘K hit: All notes, that note, and its transcript line.
+    public func open(_ hit: NoteSearchHit) {
+        query = ""
+        commitQuery()
+        scope = .all
+        guard let note = try? store.note(id: hit.noteID) else { return }
+        select(note)
+        if case .transcript(let segment, _) = hit.match {
+            revealedSegmentID = segment
+            editor.reveal(segmentID: segment)
+        } else {
+            revealedSegmentID = nil
+        }
+    }
+
+    /// Asks where, then exports `note` (Markdown with an attachments folder,
+    /// plain text, or PDF).
+    public func export(_ note: Note, as format: NoteExportFormat) {
+        if note.id == selectedNoteID { editor.saveNow(force: true) }
+        if let message = NoteExporter.export(note, store: store, format: format) { errorMessage = message }
     }
 
     // MARK: Errors

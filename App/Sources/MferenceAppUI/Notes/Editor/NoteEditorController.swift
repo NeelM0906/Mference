@@ -18,6 +18,8 @@ public final class NoteEditorController {
     @ObservationIgnored private var autosave: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var segmentTimes: [UUID: TimeInterval] = [:]
+    /// A ⌘K transcript hit waiting for the editor to show its note.
+    @ObservationIgnored private var pendingReveal: UUID?
     /// Phrases still being transcribed when their note left the editor
     /// (another note opened, the view went away or was replaced). They are
     /// handed back when the note is shown again; one that finishes before
@@ -69,6 +71,7 @@ public final class NoteEditorController {
     /// Saves the open note, then shows `note` (nil shows nothing).
     public func open(_ note: Note?) {
         guard note?.id != self.note?.id || note == nil else { return }
+        pendingReveal = nil
         saveNow(force: true)
         detachPendingPhrases(from: textView)
         self.note = note
@@ -187,6 +190,10 @@ public final class NoteEditorController {
         textView.noteID = note?.id
         textView.load(document)
         textView.notice = Self.notice(for: document.readOnlyReason)
+        if let pendingReveal, note != nil {
+            textView.reveal(segmentID: pendingReveal)
+            self.pendingReveal = nil
+        }
         reattachPendingPhrases(stored: document)
         readOnlyReason = document.readOnlyReason
         wordCount = textView.document.wordCount
@@ -260,11 +267,22 @@ public final class NoteEditorController {
         textView.insertAttachment(block)
     }
 
-    /// The note as plain text, for the share sheet.
+    /// The note as Markdown, for the share sheet (spec 4.1).
     public var shareText: String {
         _ = selectionRevision
         _ = wordCount
-        return textView?.document.plainText ?? note.map { store.document(of: $0).plainText } ?? ""
+        guard let document = textView?.document ?? note.map({ store.document(of: $0) }) else { return "" }
+        return NoteExport.markdown(document, segmentTimes: segmentTimes)
+    }
+
+    /// Scrolls to a transcript segment's time chip, if the note has one.
+    /// When the editor is not showing yet (⌘K opened Notes from another
+    /// section), it happens as soon as the note loads.
+    public func reveal(segmentID: UUID) {
+        pendingReveal = segmentID
+        guard let textView, note != nil else { return }
+        textView.reveal(segmentID: segmentID)
+        pendingReveal = nil
     }
 
     public func focus() {

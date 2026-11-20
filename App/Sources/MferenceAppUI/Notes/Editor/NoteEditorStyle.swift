@@ -44,6 +44,8 @@ nonisolated enum NoteEditorMetrics {
     /// Chips sit a little below the baseline to center on the line.
     static let chipBaselineDrop: CGFloat = 5
     static let imageMaxWidth: CGFloat = 520
+    /// Page margin of an exported PDF (half an inch).
+    static let pdfMargin: CGFloat = 36
     /// Italic in Geist (no italic face): a slant.
     static let italicObliqueness: CGFloat = 0.18
     /// Editor padding (`.doc` padding 22px 56px).

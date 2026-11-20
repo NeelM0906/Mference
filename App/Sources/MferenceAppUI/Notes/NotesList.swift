@@ -264,6 +264,11 @@ struct NoteRow: View {
                 }
             }
             Button("Duplicate") { model.duplicate(note) }
+            Menu("Export") {
+                ForEach(NoteExportFormat.allCases, id: \.self) { format in
+                    Button(format.label) { model.export(note, as: format) }
+                }
+            }
             Divider()
             Button("Delete", role: .destructive) { model.delete(note) }
         }
