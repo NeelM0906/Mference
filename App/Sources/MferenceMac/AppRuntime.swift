@@ -12,6 +12,10 @@ final class AppRuntime {
     let web: WebAnswers
     let chat: ChatViewModel
     let screenModels: ScreenModels
+    /// The menu-bar extra's view of the engine (chat's engine, so Apple's
+    /// model is listed while Settings allows it).
+    let menuBar: MenuBarModel
+    private var menuBarTask: Task<Void, Never>?
 
     /// Quit steps, run in order: web answers (SearXNG) and Find stop before
     /// the engine shuts down (U3's notes).
@@ -35,6 +39,8 @@ final class AppRuntime {
                              files: services.find,
                              defaultModel: { [settings = services.settings] in settings.defaultModel })
         screenModels = ScreenModels.live(services: services)
+        let menuBar = MenuBarModel(engine: services.chatEngine)
+        self.menuBar = menuBar
         let engine = services.engine
         let find = services.find
         shutdownSteps = [
@@ -45,10 +51,12 @@ final class AppRuntime {
         ]
         // Find picks up where it left off (nothing runs while it is off).
         Task { await find?.start() }
+        menuBarTask = Task { await menuBar.run() }
     }
 
     /// Runs every quit step in order.
     func shutdown() async {
+        menuBarTask?.cancel()
         for step in shutdownSteps {
             await step()
         }
