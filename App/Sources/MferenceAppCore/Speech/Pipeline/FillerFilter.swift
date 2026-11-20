@@ -14,13 +14,15 @@ public enum FillerFilter {
     public static let languages: Set<String> = ["en", "fr", "de", "es", "it", "pt", "nl"]
 
     /// Fillers per language. Words that are fillers in one language and real
-    /// words in another ("em" is Portuguese for "in", "er" German for "he")
-    /// appear only in their own list.
+    /// words in another ("em" is Portuguese for "in", "er" German and Dutch
+    /// for "he"/"there") are left out, since a language guessed from a short
+    /// phrase can be wrong. Callers pass a language only when the person
+    /// pinned it; otherwise the universal list applies.
     static let fillers: [String: Set<String>] = [
-        "en": ["um", "umm", "uh", "uhh", "uhm", "erm", "er", "hmm", "hm", "mm", "mhm"],
+        "en": ["um", "umm", "uh", "uhh", "uhm", "erm", "hmm", "hm", "mm", "mhm"],
         "fr": ["euh", "euhh", "heu", "hum", "hmm", "bah"],
         "de": ["äh", "ähm", "öh", "öhm", "hm", "hmm", "mhm"],
-        "es": ["eh", "ehm", "em", "emm", "mmm", "hmm"],
+        "es": ["eh", "ehm", "emm", "mmm", "hmm"],
         "it": ["eh", "ehm", "ehh", "uhm", "mmm", "hmm"],
         "pt": ["hum", "hã", "ãh", "ahn", "uhm", "hmm"],
         "nl": ["eh", "ehm", "uh", "uhm", "euh", "hmm"],

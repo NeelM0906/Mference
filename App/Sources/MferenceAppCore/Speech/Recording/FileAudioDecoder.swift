@@ -58,6 +58,7 @@ final class FileAudioDecoder: @unchecked Sendable {
             }
             guard let block = CMSampleBufferGetDataBuffer(buffer) else { continue }
             let length = CMBlockBufferGetDataLength(block)
+            guard length >= MemoryLayout<Float>.size else { continue }
             var samples = [Float](repeating: 0, count: length / MemoryLayout<Float>.size)
             let status = samples.withUnsafeMutableBytes { raw in
                 CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: raw.count, destination: raw.baseAddress!)

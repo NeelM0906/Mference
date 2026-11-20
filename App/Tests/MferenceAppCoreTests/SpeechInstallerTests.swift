@@ -128,6 +128,28 @@ import Testing
                 == fixture.bodies["Encoder.mlmodelc/weights/weight.bin"])
     }
 
+    @Test func anInstallRightAfterPauseStartsAfresh() async throws {
+        // Review #219-1: an install arriving while a paused one winds down must not join it.
+        let hold = FakeEngineLatch()
+        let fixture = try await Fixture.make(holdAfter: 60_000, hold: hold)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let installer = fixture.installer()
+        let part = fixture.root.appending(path: "asr/rev1/Encoder.mlmodelc/weights/weight.bin.part")
+        let first = Task { try await installer.install(.speech) }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while DownloadManager.fileSize(part) < 60_000, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await installer.pause(.speech)
+        let reports = ProgressLog()
+        let second = Task { try await installer.install(.speech) { reports.append($0) } }
+        hold.open()
+        await #expect(throws: CancellationError.self) { try await first.value }
+        try await second.value
+        #expect(installer.isInstalled(.speech))
+        #expect(reports.values.last == 1, "the new caller hears its own progress")
+    }
+
     @Test func cancelDeletesThePartialDownload() async throws {
         let hold = FakeEngineLatch()
         let fixture = try await Fixture.make(holdAfter: 50_000, hold: hold)
