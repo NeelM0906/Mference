@@ -17,6 +17,16 @@ public enum NoteScope: Sendable, Hashable {
 public enum NoteStoreError: Error, Sendable, Equatable {
     /// The note or folder was deleted from the store.
     case gone
+    /// The stored body is from a newer build or damaged: it is shown, never
+    /// saved over.
+    case readOnly(NoteDocument.ReadOnlyReason)
+    /// Deleting for good applies only to notes in Recently deleted.
+    case notInTrash
+    /// The note is being deleted for good right now.
+    case beingDeleted
+    /// Some notes could not be deleted for good (their files could not be
+    /// removed); they stay in Recently deleted and the next purge retries.
+    case someNotDeleted(Int)
 }
 
 /// Notes and folders in the SwiftData store: create, edit, pin, folders,
@@ -28,8 +38,8 @@ public enum NoteStoreError: Error, Sendable, Equatable {
 @MainActor
 @Observable
 public final class NoteStore {
-    /// How long a note stays in Recently deleted.
-    public static let trashRetention: TimeInterval = 30 * 24 * 60 * 60
+    /// How long a note stays in Recently deleted, in calendar days.
+    public static let trashRetentionDays = 30
 
     @ObservationIgnored public let context: ModelContext
     /// A context does not keep its container alive; the store holds it.
@@ -39,6 +49,14 @@ public final class NoteStore {
 
     /// Bumped on every change to a note or folder; views observe it.
     public private(set) var revision = 0
+    /// The calendar Recently deleted counts days with.
+    @ObservationIgnored public var calendar = Calendar.current
+
+    /// Notes whose files are being deleted right now; they cannot be
+    /// restored or deleted again until that finishes.
+    @ObservationIgnored private var deleting: Set<UUID> = []
+    /// The purge running or last run; a new purge waits for it.
+    @ObservationIgnored private var purgeChain: Task<Result<Int, NoteStoreError>, Never>?
 
     public init(container: ModelContainer, attachments: NoteAttachments, speech: any SpeechServicing) {
         self.container = container
@@ -110,7 +128,7 @@ public final class NoteStore {
                            now: Date = .now) throws -> Note {
         let note = Note(title: title, kind: kind, createdAt: now, folder: folder)
         let document = title.isEmpty ? NoteDocument.empty : NoteDocument.titled(title)
-        note.bodyJSON = document.encoded()
+        note.bodyJSON = try document.encoded()
         note.searchText = NoteSearch.searchText(title: title, document: document, transcript: [])
         context.insert(note)
         try commit()
@@ -120,9 +138,12 @@ public final class NoteStore {
     /// Saves an edited body: the title follows the title line, the search
     /// text is rebuilt, and the edit time moves. A body that did not change
     /// saves nothing (switching notes saves without moving the note up).
+    /// A body that did not encode, or a stored body this build cannot fully
+    /// read (newer version, damaged), is never written.
     public func save(_ document: NoteDocument, to note: Note, now: Date = .now) throws {
         try ensureAlive(note)
-        let data = document.encoded()
+        try ensureWritable(note)
+        let data = try document.encoded()
         guard data != note.bodyJSON else { return }
         note.bodyJSON = data
         note.title = document.title
@@ -135,9 +156,10 @@ public final class NoteStore {
     /// keeping the body's title line in step.
     public func setTitle(_ title: String, of note: Note, now: Date = .now) throws {
         try ensureAlive(note)
+        try ensureWritable(note)
         var document = document(of: note)
         document.setTitle(title)
-        note.bodyJSON = document.encoded()
+        note.bodyJSON = try document.encoded()
         note.title = document.title
         note.updatedAt = now
         refreshSearchText(note, document: document)
@@ -184,9 +206,16 @@ public final class NoteStore {
         copy.hasDictation = note.hasDictation
         let document = document(of: note)
         copy.searchText = NoteSearch.searchText(title: copy.title, document: document, transcript: [])
-        try attachments.copyAll(from: note.id, to: copy.id)
         context.insert(copy)
-        try commit()
+        do {
+            try attachments.copyAll(from: note.id, to: copy.id)
+            try commit()
+        } catch {
+            // Leave neither a half-made note nor an orphan folder.
+            context.delete(copy)
+            try? attachments.deleteAll(for: copy.id)
+            throw error
+        }
         return copy
     }
 
@@ -201,46 +230,90 @@ public final class NoteStore {
     }
 
     /// Puts a note back from Recently deleted. A folder deleted meanwhile
-    /// already left it in All notes.
+    /// already left it in All notes. A note being deleted for good cannot
+    /// come back.
     public func restore(_ note: Note) throws {
         try ensureAlive(note)
+        guard !deleting.contains(note.id) else { throw NoteStoreError.beingDeleted }
         note.deletedAt = nil
         try commit()
     }
 
-    /// Deletes the note now, with its attachments and recordings. Files go
-    /// first: when they cannot be deleted the note stays in Recently deleted,
-    /// so the next purge tries again and no audio is orphaned.
+    /// Whether `note` is being deleted for good right now.
+    public func isBeingDeleted(_ note: Note) -> Bool { deleting.contains(note.id) }
+
+    /// Deletes a note in Recently deleted now, with its recordings and
+    /// attachments. Files go first: when they cannot be deleted the note
+    /// stays in Recently deleted, so the next purge tries again and no audio
+    /// is orphaned. Restoring is refused while this runs.
     public func deletePermanently(_ note: Note) async throws {
         try ensureAlive(note)
-        try await deleteFiles(of: note.id)
+        guard note.deletedAt != nil else { throw NoteStoreError.notInTrash }
+        let id = note.id
+        guard deleting.insert(id).inserted else { throw NoteStoreError.beingDeleted }
+        defer { deleting.remove(id) }
+        try await speech.deleteRecordings(for: id)
+        // The note may have gone meanwhile (another window, a second purge).
         try ensureAlive(note)
+        guard note.deletedAt != nil else { throw NoteStoreError.notInTrash }
+        try attachments.deleteAll(for: id)
         context.delete(note)
         try commit()
     }
 
-    /// Deletes everything in Recently deleted.
-    public func emptyTrash() async throws {
-        for note in try notes(in: .recentlyDeleted) {
-            try await deletePermanently(note)
-        }
+    /// Deletes everything in Recently deleted. Keeps going past a note whose
+    /// files cannot be deleted, then throws `.someNotDeleted` for those.
+    /// Returns how many were deleted.
+    @discardableResult
+    public func emptyTrash() async throws -> Int {
+        let outcome = await deleteForGood(try notes(in: .recentlyDeleted)) { _ in true }
+        return try outcome.get()
     }
 
-    /// Purges notes deleted more than 30 days before `now` (at launch and
-    /// when Notes opens). Returns how many were purged.
+    /// Purges notes deleted 30 calendar days or more before `now` (at
+    /// launch and when Notes opens). Purges run one at a time; one asked
+    /// for while another runs waits for it. Returns how many were purged.
     @discardableResult
     public func purgeExpired(now: Date = .now) async throws -> Int {
-        let cutoff = now.addingTimeInterval(-Self.trashRetention)
-        let expired = try notes(in: .recentlyDeleted).filter { ($0.deletedAt ?? .distantFuture) <= cutoff }
-        for note in expired {
-            try await deletePermanently(note)
+        let previous = purgeChain
+        let task = Task { @MainActor [weak self] () -> Result<Int, NoteStoreError> in
+            _ = await previous?.value
+            guard let self else { return .success(0) }
+            let candidates = (try? notes(in: .recentlyDeleted)) ?? []
+            return await deleteForGood(candidates) { [weak self] note in self?.isExpired(note, now: now) ?? false }
         }
-        return expired.count
+        purgeChain = task
+        return try await task.value.get()
     }
 
     /// The day a note in Recently deleted goes for good.
     public func purgeDate(of note: Note) -> Date? {
-        note.deletedAt?.addingTimeInterval(Self.trashRetention)
+        note.deletedAt.flatMap { calendar.date(byAdding: .day, value: Self.trashRetentionDays, to: $0) }
+    }
+
+    private func isExpired(_ note: Note, now: Date) -> Bool {
+        guard let purge = purgeDate(of: note) else { return false }
+        return purge <= now
+    }
+
+    /// Deletes each note still in the trash and passing `include` when its
+    /// turn comes (a note restored meanwhile is skipped).
+    private func deleteForGood(_ notes: [Note], include: (Note) -> Bool) async -> Result<Int, NoteStoreError> {
+        var deleted = 0
+        var failed = 0
+        for note in notes {
+            guard note.modelContext != nil, !note.isDeleted, note.deletedAt != nil, include(note),
+                  !deleting.contains(note.id) else { continue }
+            do {
+                try await deletePermanently(note)
+                deleted += 1
+            } catch let error as NoteStoreError where error == .notInTrash || error == .gone || error == .beingDeleted {
+                continue
+            } catch {
+                failed += 1
+            }
+        }
+        return failed > 0 ? .failure(.someNotDeleted(failed)) : .success(deleted)
     }
 
     // MARK: Folders
@@ -323,14 +396,13 @@ public final class NoteStore {
         guard note.modelContext != nil, !note.isDeleted else { throw NoteStoreError.gone }
     }
 
+    private func ensureWritable(_ note: Note) throws {
+        if let reason = NoteDocument.decode(note.bodyJSON).readOnlyReason { throw NoteStoreError.readOnly(reason) }
+    }
+
     private func commit() throws {
         try context.save()
         revision += 1
-    }
-
-    private func deleteFiles(of noteID: UUID) async throws {
-        try attachments.deleteAll(for: noteID)
-        try await speech.deleteRecordings(for: noteID)
     }
 
     private static func freeName(_ base: String, taken: [String]) -> String {

@@ -26,15 +26,30 @@ public struct NoteAttachments: Sendable {
         root.appending(path: noteID.uuidString, directoryHint: .isDirectory)
     }
 
+    /// The file for an attachment id. An id is one file name: anything
+    /// else (a path, "..", a hidden name) maps to a name that never exists,
+    /// so a crafted id can never reach outside the note's folder.
     public func url(of attachmentID: String, in noteID: UUID) -> URL {
-        directory(for: noteID).appending(path: attachmentID, directoryHint: .notDirectory)
+        directory(for: noteID).appending(path: Self.isValidID(attachmentID) ? attachmentID : "invalid-attachment-id",
+                                         directoryHint: .notDirectory)
+    }
+
+    /// One plain file name: no separators, not hidden, not "." or "..".
+    public static func isValidID(_ id: String) -> Bool {
+        !id.isEmpty && !id.hasPrefix(".") && !id.contains("/") && !id.contains("\\") && !id.contains(":")
+            && id.count <= 255
+    }
+
+    /// Letters and digits only, lowercased ("png", "m4a").
+    static func cleanExtension(_ ext: String) -> String {
+        String(ext.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }.prefix(10))
     }
 
     /// Copies `file` into the note's folder; returns the new attachment id.
     public func importFile(_ file: URL, into noteID: UUID) throws -> String {
         let directory = directory(for: noteID)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let ext = file.pathExtension.lowercased()
+        let ext = Self.cleanExtension(file.pathExtension)
         let id = UUID().uuidString + (ext.isEmpty ? "" : ".\(ext)")
         try FileManager.default.copyItem(at: file, to: directory.appending(path: id))
         return id
@@ -44,7 +59,8 @@ public struct NoteAttachments: Sendable {
     public func write(_ data: Data, fileExtension: String, into noteID: UUID) throws -> String {
         let directory = directory(for: noteID)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let id = UUID().uuidString + (fileExtension.isEmpty ? "" : ".\(fileExtension.lowercased())")
+        let ext = Self.cleanExtension(fileExtension)
+        let id = UUID().uuidString + (ext.isEmpty ? "" : ".\(ext)")
         try data.write(to: directory.appending(path: id), options: .atomic)
         return id
     }
