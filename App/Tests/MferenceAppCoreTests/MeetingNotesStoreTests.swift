@@ -136,9 +136,9 @@ import Testing
         #expect(!services.meetings.isActive)
         let record = try #require(try services.notes.note(id: id)?.recording)
         #expect(record.endedAt != nil && record.transcriptionState == .done)
-        #expect(speech.calls.contains(.stopMeeting))
-        // AppRuntime shuts speech down next; this step doesn't do it twice.
-        #expect(!speech.calls.contains(.shutdown))
+        // Through the speech service's fast quit path, not the normal stop.
+        #expect(speech.calls.contains(.shutdown))
+        #expect(!speech.calls.contains(.stopMeeting))
     }
 
     @Test func aSummaryHeadingThePersonTypedIsNeverReplaced() throws {

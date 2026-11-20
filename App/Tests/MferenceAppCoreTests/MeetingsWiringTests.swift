@@ -22,6 +22,23 @@ import Testing
         await services.summaries.waitUntilIdle()
     }
 
+    @Test func aMeetingEndedAtQuitIsSummarisedAtTheNextLaunch() async throws {
+        let speech = FakeSpeechService()
+        let segment = TranscriptSegment(track: .microphone, start: 0, end: 2, speakerID: SpeakerInfo.youID,
+                                        text: "Ship it on Friday.", isFinal: true)
+        speech.setMeetingScript(FakeSpeechService.MeetingScript(
+            live: [.segment(segment)], result: TranscriptResult(segments: [segment], speakers: [.you], duration: 2)))
+        let services = AppServices.preview(speech: speech)
+        let noteID = try await services.meetings.start(MeetingStartOptions(summaryWhenStopped: true))
+        await services.shutDownVoice()
+        #expect(services.summaries.status(for: noteID) != .queued)
+        #expect(try services.notes.note(id: noteID)?.recording?.summaryState == .pending)
+        // Next launch (same store): recovery, then the pending summary is queued.
+        await services.startLaunchRecovery().value
+        #expect(services.summaries.status(for: noteID) != .none)
+        await services.summaries.waitUntilIdle()
+    }
+
     @Test func launchRecoveryRunsOnce() async throws {
         let speech = FakeSpeechService()
         let services = AppServices.preview(speech: speech)

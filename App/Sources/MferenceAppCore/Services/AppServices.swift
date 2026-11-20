@@ -170,8 +170,9 @@ public final class AppServices {
     }
 
     /// The meeting part of quitting (spec 6.1), after the person confirmed:
-    /// stops a recording meeting and waits until its transcript is saved.
-    /// `AppRuntime` then shuts speech down, then web, then the engine.
+    /// ends a meeting through the speech service's fast quit path and saves
+    /// it (`MeetingSession.stopForQuit()`). `AppRuntime` then shuts speech
+    /// down (a no-op by then), web and the engine.
     public func shutDownVoice() async {
         await meetings.stopForQuit()
     }
@@ -182,9 +183,11 @@ public final class AppServices {
     @discardableResult
     public func startLaunchRecovery() -> Task<Void, Never> {
         if let launchRecovery { return launchRecovery }
-        let task = Task { [meetings, files] in
+        let task = Task { [meetings, files, summaries] in
             await meetings.recoverInterruptedMeetings()
             await files.recoverInterruptedJobs()
+            // A meeting ended at quit gets its summary now.
+            summaries.resumePending()
         }
         launchRecovery = task
         return task

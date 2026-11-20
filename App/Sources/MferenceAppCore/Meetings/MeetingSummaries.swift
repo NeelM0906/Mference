@@ -100,6 +100,24 @@ public final class MeetingSummaries {
 
     public func cancelRedo() { redoConfirmation = nil }
 
+    /// At launch, after recovery: summaries left pending on finished notes
+    /// (a meeting ended at quit, or a summary the app quit in) run now.
+    /// Notes still transcribing get theirs when the transcript is in.
+    @discardableResult
+    public func resumePending() -> [UUID] {
+        let pending = RecordingSummaryState.pending.rawValue
+        let records = (try? context.fetch(FetchDescriptor<NoteRecording>(
+            predicate: #Predicate { $0.summaryStateRawValue == pending }))) ?? []
+        var resumed: [UUID] = []
+        for record in records {
+            guard let note = record.note, note.deletedAt == nil, record.endedAt != nil, !Self.isTranscribing(record)
+            else { continue }
+            summarize(note.id)
+            resumed.append(note.id)
+        }
+        return resumed
+    }
+
     /// Waits until every queued summary has finished (tests, quit).
     public func waitUntilIdle() async {
         while let runner { await runner.value }
