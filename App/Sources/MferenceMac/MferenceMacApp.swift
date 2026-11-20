@@ -1,3 +1,4 @@
+import AppKit
 import MferenceAppCore
 import MferenceAppUI
 import MferenceDesign
@@ -8,6 +9,7 @@ struct MferenceMacApp: App {
     /// Owns the app's services, chat and screen models, and runs the quit
     /// sequence.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @Environment(\.openWindow) private var openWindow
     @State private var shell = ShellModel(
         selection: ProcessInfo.processInfo.environment[WindowCapture.sectionVariable]
             .flatMap(AppSection.init(rawValue:)) ?? .chat)
@@ -50,6 +52,22 @@ struct MferenceMacApp: App {
         .commands {
             ShellCommands(model: shell)
             VoiceCommands(voice: delegate.runtime.voice)
+        }
+
+        // While a meeting records: the time, Open, Pause or Resume, Stop (D7).
+        MenuBarExtra(isInserted: Binding(get: { delegate.runtime.voice.liveMeeting != nil }, set: { _ in })) {
+            if let live = delegate.runtime.voice.liveMeeting {
+                RecordingMenuContent(live: live, controls: delegate.runtime.voice.recordingControls) {
+                    openWindow(id: "main")
+                    NSApp.activate()
+                    shell.show(.notes)
+                    delegate.runtime.voice.openLiveMeeting()
+                }
+            }
+        } label: {
+            if let live = delegate.runtime.voice.liveMeeting {
+                RecordingMenuLabel(live: live)
+            }
         }
     }
 }
