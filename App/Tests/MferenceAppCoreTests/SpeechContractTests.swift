@@ -137,4 +137,78 @@ import Testing
         }
         await #expect(throws: SpeechError.self) { try await speech.install(.speech) }
     }
+
+    @Test func stoppingTwiceOrLateNeverReleasesANewerSession() async throws {
+        let speech = FakeSpeechService()
+        let first = try await speech.startDictation(DictationOptions())
+        await first.stop()
+        let meeting = try await speech.startMeeting(MeetingOptions(noteID: UUID()))
+        await first.stop()
+        #expect(speech.status.liveSession?.kind == .meeting, "a late stop must not free the meeting's microphone")
+        await #expect(throws: SpeechError.busy(.meeting)) { _ = try await speech.startDictation(DictationOptions()) }
+        await meeting.stop()
+        await meeting.stop()
+        #expect(speech.status.liveSession == nil)
+    }
+
+    @Test func cancelEndsTheJobStream() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let job = try await speech.transcribeFile(URL(fileURLWithPath: "/tmp/a.m4a"),
+                                                  options: FileTranscriptionOptions(noteID: UUID()))
+        await speech.cancel(job.id)
+        var events: [FileJobEvent] = []
+        for await event in job.events { events.append(event) }
+        #expect(events == [.cancelled])
+        #expect(!speech.advance(), "a cancelled job plays nothing later")
+        #expect(speech.status.fileQueue.isEmpty)
+    }
+
+    @Test func shutdownEndsLiveSessionsAndJobs() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let meeting = try await speech.startMeeting(MeetingOptions(noteID: UUID()))
+        let job = try await speech.transcribeFile(URL(fileURLWithPath: "/tmp/b.m4a"),
+                                                  options: FileTranscriptionOptions(noteID: UUID()))
+        await speech.shutdown()
+        var meetingEnded = false
+        for await event in meeting.events { if case .ended = event { meetingEnded = true } }
+        var jobEvents: [FileJobEvent] = []
+        for await event in job.events { jobEvents.append(event) }
+        #expect(meetingEnded && jobEvents == [.cancelled])
+        #expect(speech.status.liveSession == nil)
+    }
+
+    @Test func filesWaitWhileALiveSessionRuns() async throws {
+        let speech = FakeSpeechService()
+        let meeting = try await speech.startMeeting(MeetingOptions(noteID: UUID()))
+        let job = try await speech.transcribeFile(URL(fileURLWithPath: "/tmp/c.m4a"),
+                                                  options: FileTranscriptionOptions(noteID: UUID()))
+        var events: [FileJobEvent] = []
+        for await event in job.events { events.append(event) }
+        #expect(events.contains(.paused))
+        await meeting.stop()
+    }
+
+    @Test func liveStatusCarriesTheNoteAndPausedTime() async throws {
+        let speech = FakeSpeechService()
+        let noteID = UUID()
+        let meeting = try await speech.startMeeting(MeetingOptions(noteID: noteID))
+        let live = try #require(speech.status.liveSession)
+        #expect(live.kind == .meeting && live.noteID == noteID && !live.isPaused)
+        await meeting.pause()
+        let paused = try #require(speech.status.liveSession)
+        #expect(paused.isPaused)
+        #expect(paused.recordedTime(at: .now.addingTimeInterval(60)) == paused.recordedTime, "paused time stands still")
+        let running = LiveSessionStatus(kind: .meeting, noteID: noteID, startedAt: .now, recordedTime: 10,
+                                        updatedAt: Date(timeIntervalSince1970: 0))
+        #expect(running.recordedTime(at: Date(timeIntervalSince1970: 5)) == 15)
+        await meeting.stop()
+    }
+
+    @Test func interruptedRecordingsAreReportedOnce() async {
+        let speech = FakeSpeechService()
+        let lost = InterruptedRecording(noteID: UUID(), tracks: [], endedAt: .now)
+        speech.setInterruptedRecordings([lost])
+        #expect(await speech.recoverInterruptedRecordings() == [lost])
+        #expect(await speech.recoverInterruptedRecordings().isEmpty)
+    }
 }
