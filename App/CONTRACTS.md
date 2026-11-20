@@ -13,12 +13,18 @@ Adding an implementation behind a contract needs no approval.
 | SwiftData schema, store location | `Sources/MferenceAppCore/Persistence/Schema.swift` | U2 |
 | Sections in the pill bar | `Sources/MferenceAppCore/Navigation/AppSection.swift` | U1 (shell) |
 | Just-in-time permissions | `Sources/MferenceAppCore/Permissions/PermissionBroker.swift` | U2 |
+| Speech for Notes (dictation, meetings, files) | `Sources/MferenceAppCore/Speech/SpeechServicing.swift`, `SpeechTypes.swift` | N2 (`SpeechService`) |
 
 Rules that follow from them:
 
 - Views and view models import `MferenceAppCore`, `MferenceDesign` and
   SwiftUI only. Only `MferenceAppCore/Engine` imports `MferenceEngine` or
   `Mference`.
+- Only `MferenceAppCore/Speech` imports `FluidAudio`, uses AVFoundation
+  capture (`AVAudioEngine` input, `AVCaptureDevice`) or creates Core Audio
+  process taps; everything else talks to `SpeechServicing`. Tests use
+  `FakeSpeechService`: no speech model, microphone, call tap or TCC prompt.
+  (The permission broker's existing microphone probe stays in `Permissions`.)
 - Every color, font, spacing and radius in a view comes from
   `MferenceDesign`; no raw hex or point literals in views. Deviation
   (coordinator ruling 2026-11-18): a screen may keep its own layout sizes
