@@ -83,8 +83,12 @@ public struct SpeechSettingsView: View {
         }
     }
 
-    /// The credit the licence asks for (spec 3).
-    static let credit = "Fluid Speech Pro by FluidVoice, built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra. Licensed CC BY 4.0."
+    /// The credits the licences ask for (spec 3, App/Resources/Speech/SOURCES.md):
+    /// Fluid Speech Pro and the speaker-label models (both CC BY 4.0), LS-EEND
+    /// (MIT) and the FluidAudio SDK (Apache 2.0).
+    static let credit = "Fluid Speech Pro by FluidVoice, built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra. Licensed CC BY 4.0. "
+        + "Speaker labels use the pyannote Community-1 models by pyannote, WeSpeaker, BUT Speech@FIT and Fluid Inference, "
+        + "modified for Core ML and licensed CC BY 4.0, and LS-EEND (MIT). Speech runs on FluidAudio (Apache 2.0)."
 
     /// The size line, then a failure or the Offline line when there is one.
     static func speechSubtitle(_ model: SpeechSettingsModel) -> String {
