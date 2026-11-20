@@ -28,6 +28,9 @@ public final class AppServices {
     /// Dictation, meetings and file transcription (Notes spec 6.2). The UI
     /// and Notes talk only to this protocol.
     public let speech: any SpeechServicing
+    /// Notes and folders (Notes spec 4.1, 8): the one store the Notes
+    /// screens, dictation and meetings write through.
+    public let notes: NoteStore
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -43,6 +46,7 @@ public final class AppServices {
                 downloads: DownloadManager? = nil,
                 apple: AppleServices? = nil,
                 speech: (any SpeechServicing)? = nil,
+                noteAttachments: NoteAttachments? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
@@ -58,6 +62,10 @@ public final class AppServices {
         self.downloads = downloads
         self.apple = apple
         self.speech = speech ?? UnavailableSpeechService()
+        // Without a folder given (tests that build this by hand), attachments
+        // go to a temporary folder, never the person's.
+        self.notes = NoteStore(container: modelContainer, attachments: noteAttachments ?? .temporary(),
+                               speech: self.speech)
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -97,16 +105,22 @@ public final class AppServices {
             policy: DownloadManager.Policy(isOffline: { await MainActor.run { settings.offlineMode } }),
             onInstalled: { _ in await engine.refreshCatalog() })
         let permissions = LivePermissionBroker(presentReason: presentPermissionReason)
-        return AppServices(engine: engine,
-                           settings: settings,
-                           permissions: permissions,
-                           modelContainer: container,
-                           downloads: downloads,
-                           apple: AppleServices.live(engine: engine, broker: permissions, container: container,
-                                                     useAppleModel: { await MainActor.run { settings.useAppleModel } }),
-                           appleChat: FoundationChatModel(),
-                           storeError: storeError,
-                           idleUnload: idleUnload)
+        let services = AppServices(engine: engine,
+                                   settings: settings,
+                                   permissions: permissions,
+                                   modelContainer: container,
+                                   downloads: downloads,
+                                   apple: AppleServices.live(engine: engine, broker: permissions, container: container,
+                                                             useAppleModel: { await MainActor.run { settings.useAppleModel } }),
+                                   noteAttachments: .live,
+                                   appleChat: FoundationChatModel(),
+                                   storeError: storeError,
+                                   idleUnload: idleUnload)
+        // Recently deleted keeps notes 30 days; purge the expired ones (and
+        // their audio) once at launch. Notes repeats it when it opens.
+        let notes = services.notes
+        Task { @MainActor in _ = try? await notes.purgeExpired() }
+        return services
     }
 
     /// Previews and tests: an in-memory store and settings, fake permissions,
