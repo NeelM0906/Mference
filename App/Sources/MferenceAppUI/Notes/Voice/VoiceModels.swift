@@ -81,6 +81,9 @@ public final class VoiceModels {
         }
     }
 
+    /// ⇧⌘D is enabled with a focused note editor, or to stop dictation.
+    public var canToggleDictation: Bool { focusedDictationTarget != nil || dictation.isActive }
+
     /// ⇧⌘D from the menu: the focused editor, or stop when there is none.
     public func toggleDictation() {
         if let target = focusedDictationTarget {
@@ -105,6 +108,15 @@ public final class VoiceModels {
             return
         }
         setup.require(.recordMeeting) { [weak self] in self?.showsRecordPopover = true }
+    }
+
+    /// ⇧⌘M works only while a meeting records.
+    public var canMarkMoment: Bool { liveMeeting != nil && recordingControls != nil }
+
+    /// Mark moment (⇧⌘M), from any section.
+    public func markMoment() {
+        guard canMarkMoment, let controls = recordingControls else { return }
+        Task { await controls.markMomentInRecording() }
     }
 
     /// The timer chip and the menu bar's Open: the meeting note.

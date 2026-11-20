@@ -129,7 +129,7 @@ public struct TranscribeFilesSheet: View {
     private var dropZone: some View {
         VStack(spacing: MFSpacing.s) {
             Image(systemName: "square.and.arrow.up")
-                .font(.system(size: ImportMetrics.dropIcon, weight: .regular))
+                .font(MFFont.title)
                 .foregroundStyle(MFColor.secondary)
                 .accessibilityHidden(true)
             HStack(spacing: MFSpacing.xs) {
@@ -328,7 +328,6 @@ enum ImportMetrics {
     static let padding: CGFloat = 26
     static let icon: CGFloat = 34
     static let cancel: CGFloat = 14
-    static let dropIcon: CGFloat = 20
     static let dash: [CGFloat] = [5, 4]
     static let dashWidth: CGFloat = 1.5
     static let progressWidth: CGFloat = 400

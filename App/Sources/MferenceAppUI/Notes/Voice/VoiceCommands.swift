@@ -1,8 +1,11 @@
 import MferenceAppCore
 import SwiftUI
 
-/// The voice menu commands (Notes spec D10): Dictate ⇧⌘D in the Edit menu,
-/// for the note editor that has focus.
+/// The voice menu commands (Notes spec D10), in the Edit menu: Dictate ⇧⌘D
+/// for the note editor that has focus, and Mark Moment ⇧⌘M only while a
+/// meeting records. Record meeting ⇧⌘R and Transcribe file ⇧⌘O belong to
+/// the Notes toolbar buttons, so they work only inside Notes. None clash
+/// with ⌘N, ⌘K, ⌘1–⌘7 or ⌘,.
 public struct VoiceCommands: Commands {
     let voice: VoiceModels
 
@@ -13,6 +16,10 @@ public struct VoiceCommands: Commands {
             Divider()
             Button(voice.dictation.isActive ? "Stop Dictating" : "Dictate") { voice.toggleDictation() }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(!voice.canToggleDictation)
+            Button("Mark Moment") { voice.markMoment() }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .disabled(!voice.canMarkMoment)
         }
     }
 }

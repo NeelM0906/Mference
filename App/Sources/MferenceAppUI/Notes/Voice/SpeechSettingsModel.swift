@@ -19,10 +19,14 @@ public final class SpeechSettingsModel {
     /// Set while Remove runs, and when it failed.
     public private(set) var isRemoving = false
     public private(set) var removeError: String?
+    /// Why the speaker-labels download stopped, when the service threw
+    /// without changing its status.
+    public private(set) var speakerLabelsError: SpeechError?
 
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let permissions: any PermissionBroker
     @ObservationIgnored private var labelsTask: Task<Void, Never>?
+    @ObservationIgnored private var labelsGeneration: UInt64 = 0
 
     public init(setup: SpeechSetupModel, preferences: SpeechPreferences, speech: any SpeechServicing,
                 permissions: any PermissionBroker) {
@@ -63,11 +67,38 @@ public final class SpeechSettingsModel {
     }
 
     public func downloadSpeakerLabels() {
-        guard labelsTask == nil, !setup.offline else { return }
+        guard !setup.offline else { return }
+        if labelsTask != nil, case .downloading = speech.status.speakerLabels { return }
+        labelsGeneration &+= 1
+        let generation = labelsGeneration
+        speakerLabelsError = nil
         labelsTask = Task { [weak self, speech] in
-            try? await speech.install(.speakerLabels)
-            self?.labelsTask = nil
+            var failure: SpeechError?
+            do {
+                try await speech.install(.speakerLabels)
+            } catch is CancellationError {
+                // Paused or cancelled: the status says which.
+            } catch {
+                failure = (error as? SpeechError) ?? .failed(String(describing: error))
+            }
+            guard let self, generation == self.labelsGeneration else { return }
+            self.labelsTask = nil
+            self.speakerLabelsError = failure
         }
+    }
+
+    /// The speaker-labels row's failure line, if any.
+    public var speakerLabelsFailure: String? {
+        if case .failed(let error) = speakerLabelsState { return error.message }
+        if case .notInstalled = speakerLabelsState { return speakerLabelsError?.message }
+        return nil
+    }
+
+    /// The Fluid Speech Pro row's failure line, if any (status, install or Remove).
+    public var speechFailure: String? {
+        if let removeError { return removeError }
+        if case .failed(let message) = setup.display { return message }
+        return nil
     }
 
     public func pauseSpeakerLabels() {

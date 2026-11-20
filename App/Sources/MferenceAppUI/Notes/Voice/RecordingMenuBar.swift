@@ -9,6 +9,8 @@ import SwiftUI
 public protocol LiveRecordingControls: AnyObject {
     func pauseRecording() async
     func resumeRecording() async
+    /// Mark moment (⇧⌘M): a marker line at the recording time.
+    func markMomentInRecording() async
     /// Stop and summarize (the summary runs only if it was asked for).
     func stopRecording() async
 }

@@ -42,7 +42,10 @@ final class AppRuntime {
         // Spec 6.1: a recording stops cleanly (the person confirmed quitting)
         // and dictation lands its last phrase, then speech, web, the engine.
         shutdownSteps = [
-            { await voice.stopLiveSessions() },
+            {
+                await voice.stopLiveSessions()
+                voice.setup.stop()
+            },
             { await speech.shutdown() },
             { await web.shutdown() },
             { await engine.shutdown() },

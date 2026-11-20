@@ -124,6 +124,18 @@ public struct SettingsView: View {
         memory.delete(entry.id)
     }
 
+    /// The Models row's speech badge.
+    static func speechBadge(_ state: SpeechModelState) -> MFBadge.Kind {
+        switch state {
+        case .ready: .installed
+        case .downloading(let progress): .custom("Downloading \(MFProgress.percent(progress) ?? 0)%", .accent)
+        case .paused: .custom("Paused", .neutral)
+        case .preparing: .custom("Preparing…", .neutral)
+        case .failed: .custom("Needs attention", .preview)
+        case .notInstalled: .custom("Not installed", .neutral)
+        }
+    }
+
     /// Offline mode turns web search off (shown off and disabled) and model
     /// downloads off, whatever the stored switch says.
     static func webSearchShown(_ settings: (any AppSettingsModel)?) -> Bool {
@@ -262,7 +274,7 @@ public struct SettingsView: View {
                 MFListRow("Speech · Fluid Speech Pro",
                           subtitle: "Dictation, meetings and audio files, transcribed on this Mac. Set up in Speech.") {
                     if let voice {
-                        MFBadge(voice.setup.modelState.isReady ? .installed : .custom("Not installed", .neutral))
+                        MFBadge(Self.speechBadge(voice.setup.modelState))
                     } else {
                         MFBadge(.later)
                     }

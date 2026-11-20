@@ -33,14 +33,22 @@ public final class SpeechSetupModel {
     public private(set) var status: SpeechStatus
     /// The card is showing (a voice action is waiting for the model).
     public private(set) var pendingAction: Action?
-    /// Bytes the Speech package downloads, from its pins.
+    /// Bytes the Speech package downloads, from its pins (0 where no
+    /// service is built: the card then leaves the size out).
     public let downloadBytes: Int64
+    /// Why the last download stopped, when the service threw without
+    /// changing its status (Offline mode mid-call, low disk, no service).
+    /// Shown as a failure until the next download or status change.
+    public private(set) var installError: SpeechError?
 
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let isOffline: @MainActor () -> Bool
     @ObservationIgnored private var continuation: (@MainActor () -> Void)?
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var installTask: Task<Void, Never>?
+    /// Bumped by each download, so a paused download's late end never
+    /// clears the task of the Resume that followed it.
+    @ObservationIgnored private var installGeneration: UInt64 = 0
 
     public init(speech: any SpeechServicing, isOffline: @escaping @MainActor () -> Bool) {
         self.speech = speech
@@ -70,7 +78,17 @@ public final class SpeechSetupModel {
     public var modelState: SpeechModelState { status.speech }
 
     public var display: Display {
-        Self.display(for: status.speech)
+        Self.display(for: status.speech, installError: installError)
+    }
+
+    static func display(for state: SpeechModelState, installError: SpeechError?) -> Display {
+        switch state {
+        case .notInstalled, .failed:
+            if let installError { return .failed(installError.message) }
+        case .downloading, .paused, .preparing, .ready:
+            break
+        }
+        return display(for: state)
     }
 
     static func display(for state: SpeechModelState) -> Display {
@@ -105,16 +123,25 @@ public final class SpeechSetupModel {
     }
 
     /// Download, or resume a paused download. Approval happens in the view.
+    /// A Resume while the paused download is still winding down starts the
+    /// install again (the service joins or resumes it).
     public func download() {
-        guard installTask == nil, !offline else { return }
+        guard !offline else { return }
+        // The service's own status: the cached copy can lag a pause by a beat.
+        if installTask != nil, case .downloading = speech.status.speech { return }
+        installGeneration &+= 1
+        let generation = installGeneration
+        installError = nil
         installTask = Task { [weak self, speech] in
             do {
                 try await speech.install(.speech)
-                self?.installFinished()
+                self?.installEnded(generation, error: nil, finished: true)
+            } catch is CancellationError {
+                // Paused or cancelled: the status says which.
+                self?.installEnded(generation, error: nil, finished: false)
             } catch {
-                // Paused, cancelled or failed: the status says which.
-                self?.installTask = nil
-                self?.apply(speech.status)
+                self?.installEnded(generation, error: (error as? SpeechError) ?? .failed(String(describing: error)),
+                                   finished: false)
             }
         }
     }
@@ -132,16 +159,22 @@ public final class SpeechSetupModel {
         await installTask?.value
     }
 
-    private func installFinished() {
+    private func installEnded(_ generation: UInt64, error: SpeechError?, finished: Bool) {
+        guard generation == installGeneration else { return }
         installTask = nil
+        installError = error
         apply(speech.status)
-        guard status.speech.isReady, let action = continuation else { return }
+        guard finished, status.speech.isReady, let action = continuation else { return }
         continuation = nil
         pendingAction = nil
         action()
     }
 
     private func apply(_ status: SpeechStatus) {
+        // A download that started or finished since replaces the old error.
+        if status.speech != self.status.speech, installTask == nil, status.speech != .notInstalled {
+            installError = nil
+        }
         self.status = status
         // Installed elsewhere (Settings) while the card waited.
         if status.speech.isReady, installTask == nil, let action = continuation {
