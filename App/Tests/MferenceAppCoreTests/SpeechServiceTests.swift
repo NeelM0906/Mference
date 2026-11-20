@@ -96,7 +96,7 @@ import Testing
     static func rig(installed: [SpeechPackageID] = [.speech], sources: any AudioSourceFactory,
                     recognizer: any SpeechRecognizing = ScriptedTranscriber(),
                     diarizer: any SpeakerDiarizing = ScriptedDiarizer(live: [], final: []),
-                    idleUnload: Duration? = nil) throws -> Rig {
+                    idleUnload: Duration? = nil, callAudioAllowed: Bool = true) throws -> Rig {
         let root = FileManager.default.temporaryDirectory.appending(path: "mference-speech-\(UUID().uuidString)")
         let speechRoot = root.appending(path: "Speech")
         var packages: [SpeechPackageID: SpeechModelPackage] = [:]
@@ -120,7 +120,8 @@ import Testing
         let failures = FailureLog()
         let service = SpeechService(.init(installer: installer, loader: loader, sources: sources,
                                           recordings: recordings, power: power, idleUnload: idleUnload,
-                                          onCallAudioFailure: { error in failures.append(error) }))
+                                          onCallAudioFailure: { error in failures.append(error) },
+                                          callAudioAllowed: { callAudioAllowed }))
         return Rig(service: service, loader: loader, power: power, root: root, recordings: recordings,
                    callFailures: failures)
     }
@@ -199,8 +200,8 @@ import Testing
     // MARK: Meetings
 
     @Test func meetingSegmentsFromTwoTracksInTimeOrderWithoutEchoes() async throws {
-        // Mic: "Can you hear me?" at 0.5 s, then an echo of the call at 3 s.
-        let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(0.5, 0), (1, 0.2), (1.5, 0), (1, 0.3), (1, 0)]))
+        // Mic: "Can you hear me?" at 0.5 s, then the call's words echoed back at 2 s.
+        let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(0.5, 0), (1, 0.2), (0.5, 0), (2.2, 0.3), (0.8, 0)]))
         // Call: "Ship it on Friday." at 2 s.
         let call = FakeAudioSource(track: .call, chunks: Self.chunks([(2, 0), (2.2, 0.4), (0.8, 0)]))
         let rig = try Self.rig(sources: FakeAudioSourceFactory(microphone: mic, call: call),
@@ -257,6 +258,49 @@ import Testing
         let result = try #require(Self.result(events))
         #expect(result.segments.map(\.text) == ["Just me."])
         #expect(result.tracks.map(\.kind) == [.microphone])
+    }
+
+    @Test func callAudioIsNotTappedWithoutPermission() async throws {
+        // L6: the record popover asks first; the service never taps unasked.
+        let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(1, 0)]))
+        let call = FakeAudioSource(track: .call, chunks: Self.chunks([(1, 0.4)]))
+        let rig = try Self.rig(sources: FakeAudioSourceFactory(microphone: mic, call: call), callAudioAllowed: false)
+        defer { try? FileManager.default.removeItem(at: rig.root) }
+        let meeting = try await rig.service.startMeeting(MeetingOptions(noteID: UUID(), callAudio: .allApps))
+        let log = EventLog(meeting.events)
+        await meeting.stop()
+        #expect(await log.waitUntilFinished())
+        let events = await log.events
+        #expect(events.prefix(2) == [.started(callAudio: false), .callAudioUnavailable(.permissionDenied(.systemAudio))])
+        #expect(call.startCount == 0)
+        #expect(rig.callFailures.errors.isEmpty, "not asked is not denied")
+    }
+
+    @Test func quitClosesTheMeetingWithoutTheSpeakerPassOrConversion() async throws {
+        // Review #226 HIGH: shutdown must fit the quit deadline.
+        let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(1, 0.2), (1, 0)]))
+        let call = FakeAudioSource(track: .call, chunks: Self.chunks([(1, 0.4), (1, 0)]))
+        let diarizer = ScriptedDiarizer(live: [SpeakerTurn(speaker: "0", start: 0, end: 1.2)],
+                                        final: [SpeakerTurn(speaker: "F", start: 0, end: 2)])
+        let rig = try Self.rig(installed: [.speech, .speakerLabels],
+                               sources: FakeAudioSourceFactory(microphone: mic, call: call),
+                               recognizer: AmplitudeTranscriber([(0.2, "Me."), (0.4, "Them.")]), diarizer: diarizer)
+        defer { try? FileManager.default.removeItem(at: rig.root) }
+        let note = UUID()
+        let meeting = try await rig.service.startMeeting(MeetingOptions(noteID: note, callAudio: .allApps))
+        let log = EventLog(meeting.events)
+        #expect(await log.wait { Self.finals($0).count == 2 })
+        await rig.service.shutdown()
+        #expect(await log.waitUntilFinished())
+        let events = await log.events
+        let result = try #require(Self.result(events))
+        #expect(diarizer.finalPassFiles.isEmpty, "no speaker pass at quit")
+        #expect(result.speakerMapping.isEmpty && result.segments.contains { $0.speakerID == "live-0" })
+        #expect(Set(result.tracks.map(\.fileName)) == ["microphone-1.m4a", "call-1.m4a"])
+        let folder = rig.recordings.directory(for: note)
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "call-1.caf").path), "converted later")
+        #expect(await rig.service.recoverInterruptedRecordings().isEmpty)
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "call-1.m4a").path))
     }
 
     @Test func renamesCarryOverAfterTheFinalSpeakerPass() async throws {
@@ -376,8 +420,9 @@ import Testing
         }
         #expect(result.segments.map(\.text) == ["First part.", "Second part."])
         #expect(result.segments.allSatisfy { $0.track == .file })
-        #expect(result.tracks.map(\.fileName) == ["interview.wav"])
-        #expect(FileManager.default.fileExists(atPath: rig.recordings.directory(for: note).appending(path: "interview.wav").path))
+        let copy = try #require(result.tracks.first?.fileName)
+        #expect(result.tracks.count == 1 && copy.hasPrefix("import-") && copy.hasSuffix("-interview.wav"))
+        #expect(FileManager.default.fileExists(atPath: rig.recordings.directory(for: note).appending(path: copy).path))
         #expect(rig.service.status.fileQueue.first?.phase == .done)
     }
 
@@ -423,6 +468,34 @@ import Testing
         #expect(await firstLog.waitUntilFinished())
         #expect(await firstLog.events.last == .cancelled)
         #expect(rig.service.status.fileQueue.isEmpty)
+    }
+
+    @Test func twoImportsWithTheSameNameKeepTheirOwnFiles() async throws {
+        // Review #226: same names must not overwrite a queued input or kept audio.
+        let rig = try Self.rig(sources: FakeAudioSourceFactory(microphone: FakeAudioSource(track: .microphone, chunks: [])),
+                               recognizer: AmplitudeTranscriber([(0.2, "One."), (0.4, "Two.")]))
+        defer { try? FileManager.default.removeItem(at: rig.root) }
+        let note = UUID()
+        let first = rig.root.appending(path: "a/memo.wav")
+        let second = rig.root.appending(path: "b/memo.wav")
+        for url in [first, second] {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+        try Self.writeWAV(first, parts: [(1, 0.2), (1, 0)])
+        try Self.writeWAV(second, parts: [(1, 0.4), (1, 0)])
+        let one = try await rig.service.transcribeFile(first, options: FileTranscriptionOptions(noteID: note))
+        let two = try await rig.service.transcribeFile(second, options: FileTranscriptionOptions(noteID: note))
+        let logOne = EventLog(one.events)
+        let logTwo = EventLog(two.events)
+        #expect(await logOne.waitUntilFinished())
+        #expect(await logTwo.waitUntilFinished())
+        guard case .finished(let a) = await logOne.events.last, case .finished(let b) = await logTwo.events.last else {
+            Issue.record("both files finish")
+            return
+        }
+        #expect(a.segments.map(\.text) == ["One."] && b.segments.map(\.text) == ["Two."])
+        #expect(a.tracks.first?.fileName != b.tracks.first?.fileName)
+        #expect(one.fileName == "memo.wav" && two.fileName == "memo.wav")
     }
 
     @Test func timeLeftComesFromMeasuredSpeed() {

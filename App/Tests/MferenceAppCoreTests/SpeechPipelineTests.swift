@@ -58,6 +58,24 @@ import Testing
         #expect(phrases.allSatisfy { $0.end - $0.start <= 15 + 1e-9 })
     }
 
+    @Test func noPhraseIsLongerThanTheModelWindowWithSileroFrames() {
+        // Review #216-3: 4,096-sample frames plus padding must still cut at <= 15 s.
+        var segmenter = Segmenter(track: .microphone)
+        var events: [SegmenterEvent] = []
+        let silence = [Float](repeating: 0, count: 4_096)
+        let voice = [Float](repeating: 0.3, count: 4_096)
+        events += segmenter.process(frame: silence, probability: 0.1)
+        for _ in 0..<200 { events += segmenter.process(frame: voice, probability: 0.95) }
+        for _ in 0..<4 { events += segmenter.process(frame: silence, probability: 0.1) }
+        let phrases = Self.phrases(events)
+        #expect(phrases.count == 4)
+        #expect(phrases.allSatisfy { $0.samples.count <= 240_000 })
+        #expect(phrases.allSatisfy { $0.end - $0.start <= 15 + 1e-9 })
+        for (first, second) in zip(phrases, phrases.dropFirst()) {
+            #expect(abs(second.start - first.end) < 1e-9, "no gap or overlap at a cut")
+        }
+    }
+
     @Test func aClickIsDropped() {
         let events = Self.run("___S______")
         #expect(Self.phrases(events).isEmpty)
@@ -129,6 +147,9 @@ import Testing
         #expect(FillerFilter.clean("Moro em Lisboa.", languageCode: "pt") == "Moro em Lisboa.")
         #expect(FillerFilter.clean("Er kommt morgen.", languageCode: "de") == "Er kommt morgen.")
         #expect(FillerFilter.clean("Moro em Lisboa.", languageCode: nil) == "Moro em Lisboa.")
+        // Review #216-2: a wrong guess must not eat real words either.
+        #expect(FillerFilter.clean("Moro em Lisboa.", languageCode: "es") == "Moro em Lisboa.")
+        #expect(FillerFilter.clean("Dan is er niemand.", languageCode: "en") == "Dan is er niemand.")
     }
 
     @Test func repeatedWords() {
@@ -182,7 +203,20 @@ import Testing
 
     @Test func callTextAcrossTwoSegmentsCounts() {
         let call = [Self.segment(.call, 0, 2, "We agreed on the plan."), Self.segment(.call, 2, 4, "Ship it Friday.")]
-        #expect(EchoDeduplicator.isEcho(Self.segment(.microphone, 1, 4, "the plan ship it friday"), of: call))
+        #expect(EchoDeduplicator.isEcho(Self.segment(.microphone, 0.1, 4.1, "we agreed on the plan ship it friday"), of: call))
+    }
+
+    @Test func aShortReplyInsideALongCallPhraseIsKept() {
+        // Review #216-1: "Okay." at 5 s inside a 0-15 s call phrase that contains "okay".
+        let call = [Self.segment(.call, 0, 15, "So we ship on Friday okay and then we review the numbers next week together.")]
+        #expect(!EchoDeduplicator.isEcho(Self.segment(.microphone, 5, 5.6, "Okay."), of: call))
+        #expect(!EchoDeduplicator.isEcho(Self.segment(.microphone, 5, 6, "Okay, okay, sure."), of: call))
+    }
+
+    @Test func repeatingPartOfALongCallPhraseIsNotEnough() {
+        // Every mic word is in the call, but the call said far more over that stretch.
+        let call = [Self.segment(.call, 0, 4, "the plan is to ship it friday unless the review finds problems")]
+        #expect(!EchoDeduplicator.isEcho(Self.segment(.microphone, 0, 4, "ship it friday"), of: call))
     }
 }
 
@@ -258,6 +292,38 @@ import Testing
         // One second in; the converter keeps its filter's latency (about
         // 14 ms) in flight, which comes out with the next buffer.
         #expect(total <= 16_000 && total > 16_000 - 512)
+    }
+
+    @Test func aMicOnTheSecondInputIsHeard() throws {
+        // Review #216-4: signal on channel 1 only of a 4-channel interface.
+        let layout = try #require(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 4))
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, interleaved: false,
+                                   channelLayout: layout)
+        let resampler = try AudioResampler(inputFormat: format)
+        var peak: Float = 0
+        for _ in 0..<5 {
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800))
+            buffer.frameLength = 4_800
+            for channel in 0..<4 {
+                for index in 0..<4_800 {
+                    buffer.floatChannelData![channel][index] = channel == 1 ? 0.8 * sin(2 * .pi * 440 * Float(index) / 48_000) : 0
+                }
+            }
+            peak = max(peak, try resampler.convert(buffer).map(abs).max() ?? 0)
+        }
+        #expect(peak > 0.1, "the voice on input 2 reaches the model")
+    }
+
+    @Test func interleavedInt16InputConverts() throws {
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 44_100, channels: 2,
+                                                interleaved: true))
+        let resampler = try AudioResampler(inputFormat: format)
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44_100))
+        buffer.frameLength = 44_100
+        for index in 0..<44_100 * 2 { buffer.int16ChannelData![0][index] = Int16(8_000 * sin(Double(index) / 20)) }
+        let samples = try resampler.convert(buffer)
+        #expect(samples.count > 15_000 && samples.count <= 16_000)
+        #expect((samples.map(abs).max() ?? 0) > 0.05)
     }
 
     @Test func aPinnedLanguageLabelsEveryPhrase() {

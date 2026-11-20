@@ -38,7 +38,14 @@ public actor SpeechModelInstaller {
     private let policy: Policy
     private let configuration: URLSessionConfiguration
     private let urlFor: @Sendable (SpeechModelSource, SpeechModelFile) -> URL
-    private var active: [SpeechPackageID: Task<Void, Error>] = [:]
+    private struct Download {
+        var token: UUID
+        var task: Task<Void, Error>
+        /// Paused or cancelled: a new install waits for it instead of joining.
+        var stopped = false
+    }
+    private var active: [SpeechPackageID: Download] = [:]
+    private let observers = ProgressObservers()
 
     public static var defaultRoot: URL {
         AppStorageLocation.applicationSupport.appending(path: "Speech", directoryHint: .isDirectory)
@@ -121,32 +128,48 @@ public actor SpeechModelInstaller {
     public func install(_ id: SpeechPackageID,
                         progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws {
         guard let package = packages[id] else { throw SpeechError.failed("unknown package \(id.rawValue)") }
-        if let running = active[id] { return try await running.value }
-        let task = Task { try await self.run(id, package, progress: progress) }
-        active[id] = task
-        defer { active[id] = nil }
-        try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
+        let observer = observers.add(id, progress)
+        defer { observers.remove(id, observer) }
+        // A download that was paused or cancelled may still be winding
+        // down: wait for it (two transfers never write one partial file),
+        // then start afresh instead of joining it.
+        while let running = active[id], running.stopped {
+            _ = try? await running.task.value
+            // Finished: it no longer counts, whether or not its own caller
+            // has run its cleanup yet.
+            if active[id]?.token == running.token { active[id] = nil }
         }
+        if let running = active[id] { return try await running.task.value }
+        let token = UUID()
+        let observers = observers
+        let task = Task { try await self.run(id, package) { fraction in observers.report(id, fraction) } }
+        active[id] = Download(token: token, task: task)
+        defer { if active[id]?.token == token { active[id] = nil } }
+        try await task.value
     }
 
     /// Stops the download and keeps the bytes so far.
     public func pause(_ id: SpeechPackageID) {
-        active[id]?.cancel()
+        stop(id)
     }
 
     /// Stops every download (Offline mode turned on); bytes are kept.
     public func pauseAll() {
-        for task in active.values { task.cancel() }
+        for id in active.keys { stop(id) }
+    }
+
+    private func stop(_ id: SpeechPackageID) {
+        guard var running = active[id] else { return }
+        running.stopped = true
+        running.task.cancel()
+        active[id] = running
     }
 
     /// Stops the download and deletes everything it wrote.
     public func cancel(_ id: SpeechPackageID) async {
-        if let task = active[id] {
-            task.cancel()
-            _ = try? await task.value
+        if let running = active[id] {
+            stop(id)
+            _ = try? await running.task.value
         }
         guard !isInstalled(id) else { return }
         deleteFiles(id)
@@ -154,9 +177,9 @@ public actor SpeechModelInstaller {
 
     /// Deletes an installed (or partial) package.
     public func remove(_ id: SpeechPackageID) async throws {
-        if let task = active[id] {
-            task.cancel()
-            _ = try? await task.value
+        if let running = active[id] {
+            stop(id)
+            _ = try? await running.task.value
         }
         deleteFiles(id)
     }
@@ -231,6 +254,26 @@ public actor SpeechModelInstaller {
         }
         guard isInstalled(id) else { throw SpeechError.downloadFailed("files went missing after download") }
         progress(1)
+    }
+
+    /// Everyone waiting on a package's download hears its progress, joiners
+    /// included, in order and before `install` returns.
+    final class ProgressObservers: Sendable {
+        private let observers = Mutex<[SpeechPackageID: [UUID: @Sendable (Double) -> Void]]>([:])
+
+        func add(_ id: SpeechPackageID, _ observer: @escaping @Sendable (Double) -> Void) -> UUID {
+            let key = UUID()
+            observers.withLock { $0[id, default: [:]][key] = observer }
+            return key
+        }
+
+        func remove(_ id: SpeechPackageID, _ key: UUID) {
+            observers.withLock { _ = $0[id]?.removeValue(forKey: key) }
+        }
+
+        func report(_ id: SpeechPackageID, _ fraction: Double) {
+            for observer in observers.withLock({ Array(($0[id] ?? [:]).values) }) { observer(fraction) }
+        }
     }
 
     /// Sums bytes across files and reports the package fraction.

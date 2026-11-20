@@ -87,7 +87,10 @@ actor DictationPipeline {
         do {
             let heard = try await lane.run { try await recognizer.transcribe(samples) }
             let code = heard.languageCode ?? PhraseLanguage.code(for: heard.text, setting: language)
-            let text = cleanUp ? FillerFilter.clean(heard.text, languageCode: code) : heard.text
+            // Only a pinned language picks its own filler list: a guess from a
+            // short phrase can be wrong ("Moro em Lisboa" read as Spanish).
+            let fillerLanguage: String? = if case .fixed(let pinned) = language { pinned } else { nil }
+            let text = cleanUp ? FillerFilter.clean(heard.text, languageCode: fillerLanguage) : heard.text
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             continuation.yield(trimmed.isEmpty ? .phraseDropped(phrase.id)
                                                : .phraseFinished(phrase.id, text: trimmed, languageCode: code))

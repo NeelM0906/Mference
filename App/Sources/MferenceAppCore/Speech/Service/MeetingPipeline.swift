@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// One meeting recording (spec 6.3). Two tracks, each with its own capture,
 /// voice activity and file: the microphone ("You") and, when allowed, the
@@ -28,6 +29,7 @@ actor MeetingPipeline {
     private let continuation: AsyncStream<MeetingEvent>.Continuation
     private let onLiveStatus: @Sendable (LiveSessionStatus?) -> Void
     private let onCallAudioFailure: @Sendable (SpeechError) async -> Void
+    private let callAudioAllowed: @Sendable () async -> Bool
     private let onEnd: @Sendable () async -> Void
     private let now: @Sendable () -> Date
 
@@ -55,6 +57,8 @@ actor MeetingPipeline {
     private var pausedAt: TimeInterval = 0
     private var resumedAt: Date
     private var stopTask: Task<Void, Never>?
+    private var quitting = false
+    private var quitWaiters: [any QuitWaiter] = []
     private var finishTask: Task<Void, Never>?
 
     /// Live diarization is fed about once a second.
@@ -65,6 +69,7 @@ actor MeetingPipeline {
          continuation: AsyncStream<MeetingEvent>.Continuation,
          onLiveStatus: @escaping @Sendable (LiveSessionStatus?) -> Void,
          onCallAudioFailure: @escaping @Sendable (SpeechError) async -> Void,
+         callAudioAllowed: @escaping @Sendable () async -> Bool = { true },
          onEnd: @escaping @Sendable () async -> Void,
          now: @escaping @Sendable () -> Date = { .now }) {
         self.options = options
@@ -77,6 +82,7 @@ actor MeetingPipeline {
         self.continuation = continuation
         self.onLiveStatus = onLiveStatus
         self.onCallAudioFailure = onCallAudioFailure
+        self.callAudioAllowed = callAudioAllowed
         self.onEnd = onEnd
         self.now = now
         resumedAt = startedAt
@@ -93,7 +99,13 @@ actor MeetingPipeline {
         let microphone = try sources.microphone(deviceID: options.microphoneID)
         try await startTrack(.microphone, source: microphone, at: 0)
         var callFailure: SpeechError?
-        if options.callAudio != .off {
+        var callRefused = false
+        if options.callAudio != .off, !(await callAudioAllowed()) {
+            // Not granted (never asked, or denied): no tap, so no system
+            // prompt without its reason (L6).
+            callFailure = .permissionDenied(.systemAudio)
+            callRefused = true
+        } else if options.callAudio != .off {
             do {
                 let call = try sources.call(options.callAudio)
                 try await startTrack(.call, source: call, at: 0)
@@ -104,7 +116,7 @@ actor MeetingPipeline {
         }
         continuation.yield(.started(callAudio: callAvailable))
         if let callFailure {
-            await onCallAudioFailure(callFailure)
+            if !callRefused { await onCallAudioFailure(callFailure) }
             continuation.yield(.callAudioUnavailable(callFailure))
         }
         if callAvailable, let diarizer = stages.diarizer {
@@ -230,7 +242,8 @@ actor MeetingPipeline {
         continuation.yield(.segment(segment))
         if segment.track == .call {
             // A call phrase that finished after the mic heard it as an echo.
-            for mic in finals.values where mic.track == .microphone && EchoDeduplicator.isEcho(mic, of: [segment]) {
+            let calls = finals.values.filter { $0.track == .call }
+            for mic in finals.values where mic.track == .microphone && EchoDeduplicator.isEcho(mic, of: calls) {
                 finals[mic.id] = nil
                 continuation.yield(.segmentRemoved(mic.id))
             }
@@ -343,7 +356,7 @@ actor MeetingPipeline {
             await stop()
             return
         }
-        if callAvailable {
+        if callAvailable, await callAudioAllowed() {
             do {
                 try await startTrack(.call, source: try sources.call(options.callAudio), at: offset)
             } catch {
@@ -383,24 +396,51 @@ actor MeetingPipeline {
         await stopTask?.value
     }
 
-    /// Stops and waits for the result to be out (shutdown).
-    func stopAndFinish() async {
+    /// Quit (spec 6.1): stops capture and closes the files, and returns
+    /// within the quit deadline. The speaker pass is skipped (live labels
+    /// stay) and kept audio converts at the next launch. Anything still
+    /// running from an earlier `stop()` is cut short the same way.
+    func stopForQuit() async {
+        quitting = true
+        let waiters = quitWaiters
+        quitWaiters = []
+        for waiter in waiters { waiter.resume() }
         await stop()
         await finishTask?.value
     }
 
+    var isQuitting: Bool { quitting }
+
+    /// Runs `work`, or gives up as soon as the app quits (the work is left
+    /// to end on its own; the process is exiting).
+    private func untilQuit<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async -> T? {
+        guard !quitting else { return nil }
+        let once = QuitRace<T>()
+        quitWaiters.append(once)
+        return await withCheckedContinuation { continuation in
+            once.begin(continuation)
+            Task {
+                let value = try? await work()
+                once.resume(value)
+            }
+        }
+    }
+
     private func finish() async {
         continuation.yield(.finishing(.transcribingLastPhrases))
-        for task in lastTranscription.values { await task.value }
+        let pending = Array(lastTranscription.values)
+        _ = await untilQuit { for task in pending { await task.value } }
         try? recording.closeAll()
         var segments = finals.values.sorted { $0.start < $1.start || ($0.start == $1.start && $0.track == .microphone) }
         var mapping: [String: String] = [:]
-        if let diarizer = stages.diarizer, live != nil || segments.contains(where: { $0.track == .call }) {
+        if !quitting, let diarizer = stages.diarizer, live != nil || segments.contains(where: { $0.track == .call }) {
             continuation.yield(.finishing(.labellingSpeakers(progress: 0)))
             let files = recording.files(of: .call)
             let continuation = continuation
-            if !files.isEmpty, let turns = try? await diarizer.diarize(files, progress: { progress in
-                continuation.yield(.finishing(.labellingSpeakers(progress: progress)))
+            if !files.isEmpty, let turns = await untilQuit({
+                try await diarizer.diarize(files, progress: { progress in
+                    continuation.yield(.finishing(.labellingSpeakers(progress: progress)))
+                })
             }) {
                 let finalTurns = turns.map { SpeakerTurn(speaker: "speaker-\($0.speaker)", start: $0.start, end: $0.end) }
                 mapping = SpeakerAlignment.mapping(liveSegments: segments, finalTurns: finalTurns)
@@ -408,7 +448,10 @@ actor MeetingPipeline {
             }
             continuation.yield(.finishing(.labellingSpeakers(progress: 1)))
         }
-        let tracks = (try? await recording.finish(keepAudio: options.keepAudio)) ?? []
+        let (tracks, failure) = await recording.finish(keepAudio: options.keepAudio,
+                                                       stopEarly: { [weak self] in await self?.isQuitting ?? true })
+        // Conversion errors are reported; the CAF files stay as the tracks.
+        if let failure { continuation.yield(.failed(failure)) }
         let result = TranscriptResult(segments: segments, speakers: SpeakerAlignment.speakers(for: segments),
                                       tracks: tracks, gaps: gaps, duration: recordedTime,
                                       languageCode: dominantLanguage(languages),
@@ -419,4 +462,40 @@ actor MeetingPipeline {
         continuation.finish()
         await onEnd()
     }
+}
+
+/// One wait that ends with the work's value or with quit, whichever is first.
+final class QuitRace<T: Sendable>: Sendable {
+    private let state = Mutex<(continuation: CheckedContinuation<T?, Never>?, done: Bool, early: T??)>((nil, false, nil))
+
+    func begin(_ continuation: CheckedContinuation<T?, Never>) {
+        let early: T?? = state.withLock { s in
+            if let early = s.early { return early }
+            s.continuation = continuation
+            return nil
+        }
+        if let early { continuation.resume(returning: early) }
+    }
+
+    func resume(_ value: T?) {
+        let continuation = state.withLock { s -> CheckedContinuation<T?, Never>? in
+            guard !s.done else { return nil }
+            s.done = true
+            guard let continuation = s.continuation else {
+                s.early = .some(value)
+                return nil
+            }
+            s.continuation = nil
+            return continuation
+        }
+        continuation?.resume(returning: value)
+    }
+}
+
+protocol QuitWaiter: Sendable {
+    func resume()
+}
+
+extension QuitRace: QuitWaiter {
+    func resume() { resume(nil) }
 }

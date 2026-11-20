@@ -23,12 +23,17 @@ public final class SpeechService: SpeechServicing {
         /// Told when call audio could not be captured (the tap failed), so
         /// the permission reads as denied from then on.
         public var onCallAudioFailure: @Sendable (SpeechError) async -> Void
+        /// Whether call audio may be tapped: the permission broker's state,
+        /// read without prompting. The record popover asks first (reason,
+        /// then the system prompt, L6); a meeting never taps without it.
+        public var callAudioAllowed: @Sendable () async -> Bool
 
         public init(installer: SpeechModelInstaller, loader: any SpeechModelLoading, sources: any AudioSourceFactory,
                     recordings: RecordingStore, power: any PowerEventSource,
                     segmenter: Segmenter.Configuration = Segmenter.Configuration(),
                     idleUnload: Duration? = .seconds(600),
-                    onCallAudioFailure: @escaping @Sendable (SpeechError) async -> Void = { _ in }) {
+                    onCallAudioFailure: @escaping @Sendable (SpeechError) async -> Void = { _ in },
+                    callAudioAllowed: @escaping @Sendable () async -> Bool = { true }) {
             self.installer = installer
             self.loader = loader
             self.sources = sources
@@ -37,6 +42,7 @@ public final class SpeechService: SpeechServicing {
             self.segmenter = segmenter
             self.idleUnload = idleUnload
             self.onCallAudioFailure = onCallAudioFailure
+            self.callAudioAllowed = callAudioAllowed
         }
     }
 
@@ -407,13 +413,14 @@ actor SpeechCoordinator {
             continuation: continuation,
             onLiveStatus: { status in box.mutate { if $0.liveSession?.kind == .meeting { $0.liveSession = status } } },
             onCallAudioFailure: dependencies.onCallAudioFailure,
+            callAudioAllowed: dependencies.callAudioAllowed,
             onEnd: { [weak self] in await self?.release(id) })
         box.mutate { $0.liveSession = LiveSessionStatus(kind: .meeting, noteID: options.noteID, startedAt: startedAt) }
         do {
             try await pipeline.start()
         } catch {
             box.mutate { $0.liveSession = nil }
-            _ = try? await recording.finish(keepAudio: false)
+            _ = await recording.finish(keepAudio: false)
             try? dependencies.recordings.delete(noteID: options.noteID)
             throw error as? SpeechError ?? .failed(String(describing: error))
         }
@@ -444,13 +451,15 @@ actor SpeechCoordinator {
     func transcribeFile(_ url: URL, options: FileTranscriptionOptions) async throws -> FileJob {
         guard dependencies.installer.isInstalled(.speech) else { throw SpeechError.notInstalled(.speech) }
         let directory = dependencies.recordings.directory(for: options.noteID)
-        let copy = directory.appending(path: url.lastPathComponent)
+        // A name of its own: never another import's input, a meeting track
+        // or the manifest. The copy (a video can be gigabytes) runs off
+        // this actor, so starting a session is never held up by it.
+        let copy = directory.appending(path: "import-\(UUID().uuidString.prefix(8).lowercased())-\(url.lastPathComponent)")
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            if copy.standardizedFileURL != url.standardizedFileURL {
-                try? FileManager.default.removeItem(at: copy)
+            try await Task.detached {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 try FileManager.default.copyItem(at: url, to: copy)
-            }
+            }.value
         } catch {
             throw SpeechError.failed(error.localizedDescription)
         }
@@ -552,7 +561,9 @@ actor SpeechCoordinator {
         current?.task.cancel()
         switch live {
         case .dictation(_, let pipeline)?: await pipeline.stop()
-        case .meeting(_, let pipeline)?: await pipeline.stopAndFinish()
+        // Quit: capture stops and files close; no speaker pass or
+        // conversion inside the quit deadline (they run at next launch).
+        case .meeting(_, let pipeline)?: await pipeline.stopForQuit()
         case nil: break
         }
         await current?.task.value
