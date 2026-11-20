@@ -14,6 +14,7 @@ Adding an implementation behind a contract needs no approval.
 | Sections in the pill bar | `Sources/MferenceAppCore/Navigation/AppSection.swift` | U1 (shell) |
 | Just-in-time permissions | `Sources/MferenceAppCore/Permissions/PermissionBroker.swift` | U2 |
 | Speech for Notes (dictation, meetings, files) | `Sources/MferenceAppCore/Speech/SpeechServicing.swift`, `SpeechTypes.swift` | N2 (`SpeechService`) |
+| Speech model pins (repo, revision, size, SHA-256 per file) | `Sources/MferenceAppCore/Speech/SpeechModelPins.swift`, `Resources/Speech/SOURCES.md` | coordinator |
 
 Rules that follow from them:
 
@@ -24,6 +25,9 @@ Rules that follow from them:
   capture (`AVAudioEngine` input, `AVCaptureDevice`) or creates Core Audio
   process taps; everything else talks to `SpeechServicing`. Tests use
   `FakeSpeechService`: no speech model, microphone, call tap or TCC prompt.
+  FluidAudio is used only through APIs that load local, verified folders
+  (`AsrModels.loadLocal`, `VadManager(config:vadModel:)`, …); never
+  `load(from:)`, `downloadAndLoad` or `ModelHub` (`NetworkAllowlistTests`).
   (The permission broker's existing microphone probe stays in `Permissions`.)
 - Every color, font, spacing and radius in a view comes from
   `MferenceDesign`; no raw hex or point literals in views. Deviation
