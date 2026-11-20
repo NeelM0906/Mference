@@ -223,7 +223,9 @@ check_accessor() {
         exit 1
     fi
 }
-check_accessor '*LlamaCpp*' 'resource_bundle_accessor.m' 'mainBundle] (bundleURL|resourceURL)]'
+# Objective-C message syntax (`[NSBundle mainBundle] resourceURL]`) or the
+# dot syntax newer Xcode toolchains generate (`NSBundle.mainBundle.resourceURL`).
+check_accessor '*LlamaCpp*' 'resource_bundle_accessor.m' 'mainBundle(\] |\.)(bundleURL|resourceURL)'
 check_accessor '*/Mference.*' 'resource_bundle_accessor.swift' 'Bundle\.main\.(bundleURL|resourceURL)'
 
 # Placement check: the required bundles must sit in Contents/Resources,

@@ -8,7 +8,7 @@ import SwiftUI
 /// payments, other mail providers, iPhone) are shown as "Later".
 public struct SettingsView: View {
     public enum Pane: String, CaseIterable, Identifiable, Hashable, Comparable, Sendable {
-        case models, memory, privacy, connections, speech, shortcuts, iPhone
+        case models, find, memory, privacy, connections, speech, shortcuts, iPhone
 
         public var id: String { rawValue }
 
@@ -20,6 +20,7 @@ public struct SettingsView: View {
         public var title: String {
             switch self {
             case .models: "Models"
+            case .find: "Find"
             case .memory: "Memory"
             case .privacy: "Privacy"
             case .connections: "Connections"
@@ -46,6 +47,7 @@ public struct SettingsView: View {
     @Environment(VoiceModels.self) private var voice: VoiceModels?
     /// The pane Settings opened at: a static render (snapshot) starts there.
     private let initialPane: Pane
+    @Environment(FindService.self) private var find: FindService?
 
     /// A nil input shows that section's honest "not available yet" state.
     public init(library: (any ModelLibraryModel)? = nil, memory: (any MemoryListModel)? = nil,
@@ -199,6 +201,7 @@ public struct SettingsView: View {
             // opened at, as the scroll view would show it.
             let first = rendersStatically ? initialPane : .models
             if first <= .models { modelsSection.id(Pane.models) }
+            if first <= .find { FindSettingsSection(find: find).id(Pane.find) }
             if first <= .memory { memorySection.id(Pane.memory) }
             if first <= .privacy { privacySection.id(Pane.privacy) }
             if first <= .connections { connectionsSection.id(Pane.connections) }

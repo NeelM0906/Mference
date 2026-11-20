@@ -47,6 +47,9 @@ public final class AppServices {
     /// started once by `startLaunchRecovery()`. Anything that deletes notes
     /// or recordings at launch (the Recently deleted purge) waits for it.
     public private(set) var launchRecovery: Task<Void, Never>?
+    /// Find: content search over the person's folders; nil only in tests
+    /// that build `AppServices` by hand.
+    public let find: FindService?
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -65,6 +68,7 @@ public final class AppServices {
                 speechPreferences: SpeechPreferences? = nil,
                 noteAttachments: NoteAttachments? = nil,
                 meetingWriter: (any MeetingNoteWriting)? = nil,
+                find: FindService? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
@@ -107,6 +111,7 @@ public final class AppServices {
         self.meetings = meetings
         self.summaries = summaries
         self.files = files
+        self.find = find
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -135,7 +140,10 @@ public final class AppServices {
     /// the engine until something asks for the catalog.
     /// `presentPermissionReason` shows a permission's one-line reason and returns
     /// whether the person went on; the system prompt follows only then (L6).
-    public static func live(presentPermissionReason: @escaping LivePermissionBroker.ReasonPresenter) -> AppServices {
+    /// `findHelper` is the executable that serves `--find-extract-worker`
+    /// (the app itself); nil reads files in this process.
+    public static func live(presentPermissionReason: @escaping LivePermissionBroker.ReasonPresenter,
+                            findHelper: URL? = nil) -> AppServices {
         let settings = AppSettings()
         let idleUnload = IdleUnloadControl(delay: settings.idleUnloadDelay)
         let container: ModelContainer
@@ -168,6 +176,8 @@ public final class AppServices {
                                    speech: speech,
                                    speechPreferences: SpeechPreferences(),
                                    noteAttachments: .live,
+                                   find: FindService.live(settings: FindSettings(), engine: engine, helper: findHelper,
+                                                          permissions: permissions),
                                    appleChat: FoundationChatModel(),
                                    storeError: storeError,
                                    idleUnload: idleUnload)
@@ -231,6 +241,7 @@ public final class AppServices {
                            downloads: downloads,
                            apple: AppleServices.preview(engine: engine, container: container),
                            speech: speech,
+                           find: FindService.preview(settings: FindSettings(store: InMemorySettingsStore())),
                            idleUnload: idleUnload)
     }
 

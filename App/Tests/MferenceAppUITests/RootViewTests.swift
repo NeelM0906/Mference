@@ -11,6 +11,6 @@ import Testing
     }
 
     @Test func pillsFollowTheMockupOrder() {
-        #expect(AppSection.pills.map(\.title) == ["Chat", "Mail", "Calendar", "Notes", "Errands", "Scan"])
+        #expect(AppSection.pills.map(\.title) == ["Chat", "Find", "Mail", "Calendar", "Notes", "Errands", "Scan"])
     }
 }

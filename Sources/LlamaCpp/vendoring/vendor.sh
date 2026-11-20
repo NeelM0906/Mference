@@ -115,17 +115,33 @@ common=(
   vendor/nlohmann/json.hpp vendor/nlohmann/json_fwd.hpp
 )
 
+# llama.cpp's multimodal library (mtmd), without its helpers: EmbeddingGemma 2's
+# image and audio encoders (gemma4v, gemma4a). Images and audio are decoded by
+# the caller (Apple's frameworks) and handed over as pixels and samples, so the
+# helpers' decoders (stb_image, miniaudio, ffmpeg) are not needed. Every model
+# graph upstream's mtmd target builds is included, because mtmd.cpp references
+# them all.
+mtmd=(
+  tools/mtmd/mtmd.h tools/mtmd/mtmd.cpp tools/mtmd/mtmd-audio.cpp tools/mtmd/mtmd-audio.h
+  tools/mtmd/mtmd-image.cpp tools/mtmd/mtmd-image.h tools/mtmd/mtmd-model.cpp tools/mtmd/mtmd-model.h
+  tools/mtmd/mtmd-subcontext.cpp tools/mtmd/mtmd-subcontext.h tools/mtmd/mtmd-graph.cpp tools/mtmd/mtmd-graph.h
+  tools/mtmd/mtmd-impl.h tools/mtmd/mtmd-internal.h tools/mtmd/debug/mtmd-debug.h tools/mtmd/models/models.h
+)
+while IFS= read -r f; do mtmd+=("tools/mtmd/$f"); done < <(cd "$src/tools/mtmd" && \
+  sed -n '/^add_library(mtmd/,/^ *)/p' CMakeLists.txt | grep -o 'models/[A-Za-z0-9_.-]*\.cpp' | LC_ALL=C sort)
+
 dest_of() {
   case "$1" in
     include/*) echo "include/${1#include/}" ;;
     ggml/include/*) echo "include/${1#ggml/include/}" ;;
+    tools/mtmd/mtmd.h) echo "include/mtmd.h" ;;
     *) echo "$1" ;;
   esac
 }
 
 build_tree() {
   local out=$1 f d
-  for f in "${public_headers[@]}" "${ggml_core[@]}" "${ggml_cpu[@]}" "${ggml_metal[@]}" "${llama[@]}" "${common[@]}"; do
+  for f in "${public_headers[@]}" "${ggml_core[@]}" "${ggml_cpu[@]}" "${ggml_metal[@]}" "${llama[@]}" "${common[@]}" "${mtmd[@]}"; do
     d=$(dest_of "$f")
     mkdir -p "$out/$(dirname "$d")"
     cp "$src/$f" "$out/$d"

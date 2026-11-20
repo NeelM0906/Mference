@@ -170,10 +170,12 @@ public struct LlamaBackend: EngineBackend {
 enum LlamaRuntime {
     private static let once: Void = {
         llama_backend_init()
-        llama_log_set({ level, text, _ in
+        let log: ggml_log_callback = { level, text, _ in
             guard let text, level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR else { return }
             fputs(String(cString: text), stderr)
-        }, nil)
+        }
+        llama_log_set(log, nil)
+        mtmd_log_set(log, nil)
     }()
 
     static func initialize() {

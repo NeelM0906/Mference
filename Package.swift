@@ -18,7 +18,7 @@ let llamaCppDefines: [(String, String?)] = [
     ("_XOPEN_SOURCE", "600"),
 ]
 let llamaCppHeaderPaths = [
-    "ggml/src", "ggml/src/ggml-cpu", "ggml/src/ggml-metal", "src", "common", "vendor",
+    "ggml/src", "ggml/src/ggml-cpu", "ggml/src/ggml-metal", "src", "common", "vendor", "tools/mtmd",
 ]
 // ggml-metal's Objective-C uses manual retain/release, so ARC (which SwiftPM
 // enables for Objective-C) is off. Upstream's warnings are not ours to fix, so
@@ -30,7 +30,9 @@ let llamaCppCSettings: [CSetting] =
 let llamaCppCXXSettings: [CXXSetting] =
     llamaCppDefines.map { CXXSetting.define($0.0, to: $0.1) }
     + llamaCppHeaderPaths.map { CXXSetting.headerSearchPath($0) }
-    + [.define("NDEBUG", .when(configuration: .release)), .unsafeFlags(["-w"])]
+    // SwiftPM defines DEBUG=1 in debug builds; mtmd-audio.cpp has a
+    // `constexpr bool DEBUG`, so the macro is taken back for this target.
+    + [.define("NDEBUG", .when(configuration: .release)), .unsafeFlags(["-w", "-UDEBUG"])]
 
 // macOS 26 / iOS 26 is the floor (maintainer decision, 2026-11-18); macOS 26
 // runs on every Apple Silicon Mac. Shaders always compile at MSL 4.0.

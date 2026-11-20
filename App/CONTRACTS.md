@@ -37,6 +37,17 @@ Rules that follow from them:
   named in `MFMetrics`.
 - Tests drive the engine through `EngineService` over an `EngineHost` with
   `FakeEngineBackend`; no test loads a model or touches the network.
+- Find (2026-11-19) adds `AppSection.find` after Chat, and one exception to
+  "one resident model": its search model (EmbeddingGemma 2, text, ~310 MB,
+  plus its image and audio encoders, ~555 MB, when Photos, video and audio is
+  on) runs through `MferenceEngine.LlamaEmbedder` in `Engine/FindEmbedderLive.swift`,
+  a small second llama.cpp context that is never an `EngineHost` model and is
+  freed when Find is idle. Find's tests use `HashingTextEmbedder`. Find also
+  adds `AppPermission.photos` (`NSPhotoLibraryUsageDescription`), asked only
+  when the person turns on Settings › Find › Photos library; the library is
+  read through PhotoKit (`Find/FindPhotos.swift`), never as files. Find's
+  views also use AppKit for the floating panel, the ⌥Space hot key, open
+  panels and Quick Look thumbnails.
 - Rich per-feature values (citations, steps, scan fields) are Codable types
   owned by the feature and stored as `Data` in the schema's `*JSON` fields, so
   a feature can evolve them without a schema migration.
