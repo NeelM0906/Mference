@@ -69,6 +69,21 @@ public struct TranscribeFilesSheet: View {
     /// What AVFoundation can open with an audio track (spec 4.6).
     public static let acceptedTypes: [UTType] = [.audio, .audiovisualContent, .movie]
 
+    /// The files among `urls` worth queueing: local files (not folders or
+    /// web links) whose type is audio or video. A PDF dropped by mistake
+    /// never becomes a failing transcript note.
+    public static func acceptedFiles(_ urls: [URL]) -> [URL] {
+        urls.filter { url in
+            guard url.isFileURL, !url.hasDirectoryPath else { return false }
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                return false
+            }
+            guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+            return acceptedTypes.contains { type.conforms(to: $0) }
+        }
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Transcribe audio files")
@@ -118,12 +133,16 @@ public struct TranscribeFilesSheet: View {
         }
     }
 
-    private func add(_ urls: [URL]) {
-        guard let queue, !urls.isEmpty else { return }
+    /// Queues the accepted files; false when none qualifies or no queue is wired.
+    @discardableResult
+    private func add(_ urls: [URL]) -> Bool {
+        let urls = Self.acceptedFiles(urls)
+        guard let queue, !urls.isEmpty else { return false }
         Task {
             await queue.add(urls, language: preferences.language, speakerLabels: preferences.fileSpeakerLabels,
                             summary: preferences.fileSummary)
         }
+        return true
     }
 
     private var dropZone: some View {
@@ -193,13 +212,13 @@ public struct TranscribeFilesSheet: View {
 struct FileDropTarget: ViewModifier {
     let isActive: Bool
     @Binding var isTargeted: Bool
-    let onDrop: ([URL]) -> Void
+    /// Returns whether the drop was taken.
+    let onDrop: ([URL]) -> Bool
 
     func body(content: Content) -> some View {
         if isActive {
             content.dropDestination(for: URL.self) { urls, _ in
                 onDrop(urls)
-                return !urls.isEmpty
             } isTargeted: { isTargeted = $0 }
         } else {
             content
@@ -243,6 +262,7 @@ struct FileQueueRowView: View {
             if row.phase == .done {
                 Button("Open note", action: onOpen)
                     .buttonStyle(.mfSecondary)
+                    .accessibilityLabel("Open the note for \(row.fileName)")
             } else if !Self.stateIsFailure(row), row.phase != .cancelled {
                 Button(action: onCancel) {
                     Image(systemName: "xmark")
@@ -327,7 +347,8 @@ enum ImportMetrics {
     static let width: CGFloat = 600
     static let padding: CGFloat = 26
     static let icon: CGFloat = 34
-    static let cancel: CGFloat = 14
+    /// The cancel button's glyph box (a 28 pt target with the button padding).
+    static let cancel: CGFloat = 16
     static let dash: [CGFloat] = [5, 4]
     static let dashWidth: CGFloat = 1.5
     static let progressWidth: CGFloat = 400

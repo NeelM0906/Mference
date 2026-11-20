@@ -99,7 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // A meeting is recording: ask first (spec 6.1, D7).
-        if !terminating, runtime.voice.liveMeeting != nil, !QuitConfirmation.confirm() {
+        if !terminating, runtime.voice.isMeetingActive,
+           !QuitConfirmation.confirm(finishing: runtime.voice.isMeetingFinishing) {
             return .terminateCancel
         }
         if !terminating {
@@ -126,21 +127,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// The quit confirmation while a meeting records.
+/// The quit confirmation while a meeting records or is still finishing.
 enum QuitConfirmation {
-    static let title = "A meeting is recording"
-    static let message = "Quitting stops the recording. Everything transcribed so far is saved in the meeting note."
-    static let stopAndQuit = "Stop and Quit"
-    static let keepRecording = "Keep Recording"
+    struct Copy: Equatable {
+        let title: String
+        let message: String
+        let quit: String
+        let stay: String
+    }
 
-    /// Shows the alert; true when the person chose to stop and quit.
+    static func copy(finishing: Bool) -> Copy {
+        finishing
+            ? Copy(title: "A meeting is finishing",
+                   message: "Mference is transcribing the last phrases and labelling speakers. Quit waits until the transcript is saved.",
+                   quit: "Finish and Quit", stay: "Keep Open")
+            : Copy(title: "A meeting is recording",
+                   message: "Quitting stops the recording. Everything transcribed so far is saved in the meeting note.",
+                   quit: "Stop and Quit", stay: "Keep Recording")
+    }
+
+    /// Shows the alert; true when the person chose to quit.
     @MainActor
-    static func confirm() -> Bool {
+    static func confirm(finishing: Bool) -> Bool {
+        let copy = copy(finishing: finishing)
         let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.addButton(withTitle: stopAndQuit)
-        alert.addButton(withTitle: keepRecording)
+        alert.messageText = copy.title
+        alert.informativeText = copy.message
+        alert.addButton(withTitle: copy.quit)
+        alert.addButton(withTitle: copy.stay)
         return alert.runModal() == .alertFirstButtonReturn
     }
 }

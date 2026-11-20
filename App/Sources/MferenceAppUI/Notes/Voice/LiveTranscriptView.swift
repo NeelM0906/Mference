@@ -9,15 +9,26 @@ import SwiftUI
 public struct LiveTranscriptView: View {
     let transcript: TranscriptModel
     let languageCode: String?
-    /// Scrolls here when it changes (a time chip in your notes was clicked).
-    let scrollTarget: TimeInterval?
+    /// A time chip in your notes was clicked: scroll there (a new request
+    /// each click, so the same chip scrolls again).
+    let scrollRequest: TranscriptScrollRequest?
     @State private var renaming: SpeakerInfo?
+    /// After a jump, following new lines waits a little so the person can read.
+    @State private var followPausedUntil: Date?
     @State private var newName = ""
 
-    public init(transcript: TranscriptModel, languageCode: String? = nil, scrollTarget: TimeInterval? = nil) {
+    public init(transcript: TranscriptModel, languageCode: String? = nil, scrollRequest: TranscriptScrollRequest? = nil) {
         self.transcript = transcript
         self.languageCode = languageCode
-        self.scrollTarget = scrollTarget
+        self.scrollRequest = scrollRequest
+    }
+
+    /// How long following new lines pauses after a time-chip jump.
+    static let followPause: TimeInterval = 15
+
+    /// Whether a new line should scroll into view at `now`.
+    static func follows(pausedUntil: Date?, now: Date) -> Bool {
+        pausedUntil.map { now >= $0 } ?? true
     }
 
     public var body: some View {
@@ -49,11 +60,13 @@ public struct LiveTranscriptView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: transcript.segments.last?.id) { _, last in
-                    guard scrollTarget == nil, let last else { return }
+                    guard let last, Self.follows(pausedUntil: followPausedUntil, now: .now) else { return }
+                    followPausedUntil = nil
                     withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                 }
-                .onChange(of: scrollTarget) { _, time in
-                    guard let time, let hit = Self.segment(at: time, in: transcript.segments) else { return }
+                .onChange(of: scrollRequest) { _, request in
+                    guard let request, let hit = Self.segment(at: request.time, in: transcript.segments) else { return }
+                    followPausedUntil = Date.now.addingTimeInterval(Self.followPause)
                     withAnimation { proxy.scrollTo(hit.id, anchor: .top) }
                 }
             }
@@ -117,6 +130,13 @@ public struct LiveTranscriptView: View {
     }
 }
 
+/// A click on a time chip: where to scroll. Each click is a new request.
+public struct TranscriptScrollRequest: Hashable, Sendable {
+    public let id = UUID()
+    public let time: TimeInterval
+    public init(time: TimeInterval) { self.time = time }
+}
+
 /// Meeting layout sizes from `MeetingLive.dc.html`.
 enum LiveMetrics {
     static let transcriptPadding = CGSize(width: 28, height: 16)
@@ -133,4 +153,6 @@ enum LiveMetrics {
     static let meterBarRadius: CGFloat = 1
     static let meterHeight: CGFloat = 16
     static let meterHeights: [CGFloat] = [6, 10, 14, 16, 8]
+    /// The dot while paused or finishing.
+    static let dimmed: Double = 0.4
 }

@@ -38,7 +38,7 @@ struct RecordingBar: View {
             if session.callAudioAvailable, let callSourceName {
                 meter(level: session.callLevel ?? 0, label: "Call audio · \(callSourceName)",
                       color: SpeakerPalette.color(1))
-            } else if session.phase != .starting {
+            } else if Self.showsMicrophoneOnly(chosen: callSourceName, session: session) {
                 Text("Call audio off · microphone only")
                     .font(MFFont.caption)
                     .foregroundStyle(MFColor.tertiary)
@@ -82,10 +82,10 @@ struct RecordingBar: View {
         HStack(spacing: MFSpacing.s) {
             Circle().fill(MFColor.danger)
                 .frame(width: LiveMetrics.recordDot, height: LiveMetrics.recordDot)
-                .opacity(isPaused || finishing != nil ? 0.4 : 1)
+                .opacity(isPaused || finishing != nil ? LiveMetrics.dimmed : 1)
                 .accessibilityHidden(true)
             Text(Self.title(phase: session.phase))
-                .font(MFFont.bodyEmphasis.weight(.semibold))
+                .font(MFFont.headline)
                 .foregroundStyle(MFColor.ink)
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 Text(VoiceFormat.clock(live.map { $0.recordedTime(at: rendersStatically ? $0.updatedAt : context.date) }
@@ -101,6 +101,14 @@ struct RecordingBar: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// "Call audio off": when it was off from the start, or, when chosen,
+    /// only once capture is running without it (not in the moment before
+    /// the session's start event).
+    static func showsMicrophoneOnly(chosen: String?, session: MeetingSession) -> Bool {
+        guard session.phase != .starting else { return false }
+        return chosen == nil || session.micLevel > 0
     }
 
     static func title(phase: MeetingSession.Phase) -> String {

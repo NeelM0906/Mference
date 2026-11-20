@@ -51,6 +51,22 @@ public struct RecordingPlayerBar: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(MFColor.chromeDivider).frame(height: MFLayout.hairline)
         }
+        // Keyboard: focus the player (Tab), then Space plays or pauses and the
+        // arrows skip 5 s (Space is not bound globally: it types in the note).
+        .focusable()
+        .onKeyPress(.space) {
+            player.togglePlay()
+            return .handled
+        }
+        .onKeyPress(.leftArrow) {
+            player.skip(-FinishedMetrics.arrowSkip)
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            player.skip(FinishedMetrics.arrowSkip)
+            return .handled
+        }
+        .onDisappear { player.pause() }
         .overlay(alignment: .center) {
             if player.hasAudio == false {
                 Text(player.loadError ?? "The audio was deleted after transcribing. The transcript stays.")
@@ -371,4 +387,6 @@ enum FinishedMetrics {
     static let chipHeight: CGFloat = 26
     static let speakerDot: CGFloat = 8
     static let speakerColumn: CGFloat = 104
+    /// Arrow keys on the player skip this many seconds.
+    static let arrowSkip: TimeInterval = 5
 }

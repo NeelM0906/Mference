@@ -8,15 +8,24 @@ import Observation
 /// a double.
 @MainActor
 public protocol AudioPlayback: AnyObject {
-    /// Loads the tracks, each at its start offset. Returns the length.
+    /// Loads the tracks that exist, each at its start offset, and returns
+    /// the length. Throws `PlaybackError.noAudio` when none of the files is
+    /// there (deleted after transcribing).
     func load(tracks: [RecordedTrack], directory: URL) async throws -> TimeInterval
     func play()
     func pause()
     func seek(to time: TimeInterval)
     var rate: Float { get set }
     var currentTime: TimeInterval { get }
-    /// Called about ten times a second while playing, and at the end.
+    /// Called about ten times a second while playing.
     var onTick: (@MainActor () -> Void)? { get set }
+    /// Called when playback reaches the end.
+    var onEnded: (@MainActor () -> Void)? { get set }
+}
+
+public enum PlaybackError: Error, Equatable {
+    /// None of the recording's audio files is on disk.
+    case noAudio
 }
 
 /// AVPlayer over one composition of every track (microphone and call files,
@@ -25,30 +34,54 @@ public protocol AudioPlayback: AnyObject {
 public final class CompositionPlayback: AudioPlayback {
     private let player = AVPlayer()
     private var observer: Any?
+    private var endObserver: (any NSObjectProtocol)?
     private var desiredRate: Float = 1
     public var onTick: (@MainActor () -> Void)?
+    public var onEnded: (@MainActor () -> Void)?
 
     public init() {}
 
+    isolated deinit {
+        if let observer { player.removeTimeObserver(observer) }
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+    }
+
+    /// The loaded composition's length (tests).
+    private(set) var itemDuration: TimeInterval = 0
+
     public func load(tracks: [RecordedTrack], directory: URL) async throws -> TimeInterval {
         let composition = AVMutableComposition()
+        var loaded = 0
         for track in tracks {
-            let asset = AVURLAsset(url: directory.appending(path: track.fileName))
-            guard let source = try await asset.loadTracks(withMediaType: .audio).first else { continue }
+            let url = directory.appending(path: track.fileName)
+            // A missing file (one track deleted, a crash before a file was
+            // written) leaves the rest playable.
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let asset = AVURLAsset(url: url)
+            guard let source = try? await asset.loadTracks(withMediaType: .audio).first else { continue }
             let range = try await source.load(.timeRange)
             let target = composition.addMutableTrack(withMediaType: .audio,
                                                      preferredTrackID: kCMPersistentTrackID_Invalid)
             try target?.insertTimeRange(range, of: source,
                                         at: CMTime(seconds: track.startOffset, preferredTimescale: 600))
+            loaded += 1
         }
-        player.replaceCurrentItem(with: AVPlayerItem(asset: composition))
+        guard loaded > 0 else { throw PlaybackError.noAudio }
+        let item = AVPlayerItem(asset: composition)
+        player.replaceCurrentItem(with: item)
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification,
+                                                             object: item, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.onEnded?() }
+        }
         if observer == nil {
             observer = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 10),
                                                       queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.onTick?() }
             }
         }
-        return composition.duration.seconds.isFinite ? composition.duration.seconds : 0
+        itemDuration = composition.duration.seconds.isFinite ? composition.duration.seconds : 0
+        return itemDuration
     }
 
     public func play() { player.playImmediately(atRate: desiredRate) }
@@ -87,11 +120,16 @@ public final class RecordingPlayerModel {
     public private(set) var speed: Float = 1
     /// Nil until loaded; false when the audio was deleted after transcribing.
     public private(set) var hasAudio: Bool?
+    /// Set when the files exist but could not be opened.
     public private(set) var loadError: String?
 
     @ObservationIgnored private let playback: any AudioPlayback
     @ObservationIgnored private let tracks: [RecordedTrack]
     @ObservationIgnored private let directory: URL?
+    /// Ticks right after a seek may still carry the old position: until
+    /// this time, only ticks near the seek target count.
+    @ObservationIgnored private var ignoreTicksUntil: Date?
+    @ObservationIgnored private var seekTarget: TimeInterval = 0
 
     /// - Parameter directory: where the tracks live; nil when no audio was kept.
     public init(tracks: [RecordedTrack], directory: URL?, duration: TimeInterval,
@@ -101,6 +139,7 @@ public final class RecordingPlayerModel {
         self.duration = duration
         self.playback = playback
         playback.onTick = { [weak self] in self?.tick() }
+        playback.onEnded = { [weak self] in self?.reachedEnd() }
     }
 
     /// Loads the audio (once).
@@ -112,8 +151,11 @@ public final class RecordingPlayerModel {
         }
         do {
             let length = try await playback.load(tracks: tracks, directory: directory)
-            if length > 0 { duration = max(duration, length) }
+            // The audio's own length: a note can outlast its audio.
+            if length > 0 { duration = length }
             hasAudio = true
+        } catch PlaybackError.noAudio {
+            hasAudio = false
         } catch {
             hasAudio = false
             loadError = "The recording could not be opened."
@@ -146,6 +188,21 @@ public final class RecordingPlayerModel {
         let clamped = min(max(0, time), duration)
         playback.seek(to: clamped)
         currentTime = clamped
+        seekTarget = clamped
+        ignoreTicksUntil = Date.now.addingTimeInterval(0.3)
+    }
+
+    /// Leaving the note: playback stops.
+    public func pause() {
+        guard isPlaying else { return }
+        playback.pause()
+        isPlaying = false
+    }
+
+    /// The keyboard's arrows on the player: back or ahead by `seconds`.
+    public func skip(_ seconds: TimeInterval) {
+        guard hasAudio == true else { return }
+        seek(to: currentTime + seconds)
     }
 
     /// 1× → 1.5× → 2× → 1×.
@@ -166,11 +223,17 @@ public final class RecordingPlayerModel {
     }
 
     private func tick() {
+        if let ignoreTicksUntil, Date.now < ignoreTicksUntil,
+           abs(playback.currentTime - seekTarget) > 1 { return }
+        ignoreTicksUntil = nil
         currentTime = playback.currentTime
-        if currentTime >= duration - 0.05, isPlaying {
-            playback.pause()
-            isPlaying = false
-            currentTime = duration
-        }
+        if currentTime >= duration - 0.05, isPlaying { reachedEnd() }
+    }
+
+    /// The end: the button reads Play again, and Play starts over.
+    private func reachedEnd() {
+        playback.pause()
+        isPlaying = false
+        currentTime = duration
     }
 }
