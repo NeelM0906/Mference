@@ -115,10 +115,16 @@ public final class AppServices {
             idleUnload.setDelay(settings.idleUnloadDelay)
             settings.onIdleUnloadChange = { idleUnload.setDelay($0) }
         }
-        if let downloads {
-            // Offline mode stops downloads already running, not only new ones.
+        let speechService = self.speech as? SpeechService
+        if downloads != nil || speechService != nil {
+            // Offline mode stops downloads already running, not only new
+            // ones: the GGUF models and the speech packages.
             settings.onOfflineModeChange = { offline in
-                if offline { Task { await downloads.pauseAll() } }
+                guard offline else { return }
+                Task {
+                    await downloads?.pauseAll()
+                    await speechService?.pauseAllInstalls()
+                }
             }
         }
     }
@@ -144,7 +150,23 @@ public final class AppServices {
         let downloads = DownloadManager(
             policy: DownloadManager.Policy(isOffline: { await MainActor.run { settings.offlineMode } }),
             onInstalled: { _ in await engine.refreshCatalog() })
-        let permissions = LivePermissionBroker(presentReason: presentPermissionReason)
+        // Speech (Notes spec 6.2): the call-audio permission is remembered in
+        // the app's defaults; models load from the verified install on first use.
+        let systemAudio = SystemAudioPermission()
+        let speech = SpeechService.live(isOffline: { await MainActor.run { settings.offlineMode } },
+                                        systemAudio: systemAudio)
+        // Opening Screen & System Audio Recording from the app lets a
+        // recorded call-audio denial be checked again by the next tap.
+        let eventStore = EventStoreBox()
+        var system = LivePermissionBroker.System.live(eventStore: eventStore, systemAudio: systemAudio.access)
+        let openURL = system.openURL
+        let callAudioPane = LivePermissionBroker.settingsURL(for: .systemAudio)
+        system.openURL = { url in
+            if url == callAudioPane { systemAudio.systemSettingsOpened() }
+            await openURL(url)
+        }
+        let permissions = LivePermissionBroker(presentReason: presentPermissionReason, eventStore: eventStore,
+                                               systemAudio: systemAudio.access, system: system)
         let services = AppServices(engine: engine,
                                    settings: settings,
                                    permissions: permissions,
@@ -152,6 +174,7 @@ public final class AppServices {
                                    downloads: downloads,
                                    apple: AppleServices.live(engine: engine, broker: permissions, container: container,
                                                              useAppleModel: { await MainActor.run { settings.useAppleModel } }),
+                                   speech: speech,
                                    speechPreferences: SpeechPreferences(),
                                    noteAttachments: .live,
                                    appleChat: FoundationChatModel(),
