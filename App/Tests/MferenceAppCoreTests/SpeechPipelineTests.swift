@@ -186,6 +186,10 @@ import Testing
         #expect(FillerFilter.clean("Moro em Lisboa.", languageCode: "pt") == "Moro em Lisboa.")
         #expect(FillerFilter.clean("Er kommt morgen.", languageCode: "de") == "Er kommt morgen.")
         #expect(FillerFilter.clean("Moro em Lisboa.", languageCode: nil) == "Moro em Lisboa.")
+        // Codex review on #251: "um" is a word in Portuguese and German.
+        #expect(FillerFilter.clean("Eu tenho um carro.", languageCode: nil) == "Eu tenho um carro.")
+        #expect(FillerFilter.clean("Wir treffen uns um acht.", languageCode: nil) == "Wir treffen uns um acht.")
+        #expect(FillerFilter.clean("Wir treffen uns um acht.", languageCode: "de") == "Wir treffen uns um acht.")
         // Review #216-2: a wrong guess must not eat real words either.
         #expect(FillerFilter.clean("Moro em Lisboa.", languageCode: "es") == "Moro em Lisboa.")
         #expect(FillerFilter.clean("Dan is er niemand.", languageCode: "en") == "Dan is er niemand.")
@@ -210,8 +214,9 @@ import Testing
     }
 
     @Test func unknownLanguageUsesTheSafeList() {
-        #expect(FillerFilter.clean("Um, äh, euh, okay.", languageCode: nil) == "Okay.")
-        #expect(FillerFilter.clean("Um, okay.", languageCode: "fi") == "Okay.")
+        #expect(FillerFilter.clean("Umm, äh, euh, okay.", languageCode: nil) == "Okay.")
+        #expect(FillerFilter.clean("Uh, okay.", languageCode: "fi") == "Okay.")
+        #expect(FillerFilter.clean("Um, okay.", languageCode: nil) == "Um, okay.", "a word in pt and de")
     }
 }
 

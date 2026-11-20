@@ -29,8 +29,9 @@ public enum FillerFilter {
     ]
 
     /// Used when the language is not known: fillers in every listed language
-    /// that are no word anywhere.
-    static let universal: Set<String> = ["um", "umm", "uh", "uhh", "uhm", "erm", "ehm", "euh", "äh", "ähm", "hmm", "mhm"]
+    /// that are no word anywhere ("um" is left out: Portuguese "a", German
+    /// "at"; it goes only when English is pinned).
+    static let universal: Set<String> = ["umm", "uh", "uhh", "uhm", "erm", "ehm", "euh", "äh", "ähm", "hmm", "mhm"]
 
     /// Doubled words that are grammatical ("that that", "nous nous"): kept.
     static let allowedRepeats: [String: Set<String>] = [
