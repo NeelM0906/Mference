@@ -11,8 +11,13 @@ public protocol LiveRecordingControls: AnyObject {
     func resumeRecording() async
     /// Mark moment (⇧⌘M): a marker line at the recording time.
     func markMomentInRecording() async
-    /// Stop and summarize (the summary runs only if it was asked for).
+    /// Stop and summarize (the menu bar): a normal stop; the last phrases,
+    /// the speaker pass and the summary follow as usual.
     func stopRecording() async
+    /// Quit, after the speech service has shut down (which ends the meeting
+    /// at once and defers its finishing to the next launch): waits until the
+    /// session has saved what it received.
+    func waitUntilSaved() async
 }
 
 /// The menu bar item's menu while a meeting records (D7): the time, Open,

@@ -29,8 +29,9 @@ import Testing
         #expect(await voice.recordMeetingModel.startRecording())
         #expect(services.meetings.isActive && voice.isMeetingActive)
         try await eventually { voice.canMarkMoment }
-        await voice.stopLiveSessions()
-        #expect(!services.meetings.isActive, "quit's stop reaches the session")
+        await voice.shutDownForQuit()
+        #expect(!services.meetings.isActive, "quit ends and saves the meeting")
+        #expect(speech.calls.contains(.shutdown) && !speech.calls.contains(.stopMeeting))
     }
 
     @Test func theImportSheetShowsTheRealQueue() async throws {

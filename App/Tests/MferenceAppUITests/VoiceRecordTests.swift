@@ -14,6 +14,7 @@ final class FakeRecordingControls: LiveRecordingControls {
     func resumeRecording() async { calls.append("resume") }
     func stopRecording() async { calls.append("stop") }
     func markMomentInRecording() async { calls.append("mark") }
+    func waitUntilSaved() async { calls.append("saved") }
 }
 
 /// The record popover (board 3), the timer chip and menu bar (D7), and quit.
@@ -127,8 +128,9 @@ final class FakeRecordingControls: LiveRecordingControls {
         #expect(models.liveMeeting?.noteID == note)
         models.recordMeeting()
         #expect(opened == [note] && !models.showsRecordPopover, "Record meeting opens the running meeting")
-        await models.stopLiveSessions()
-        #expect(controls.calls == ["stop"])
+        await models.shutDownForQuit()
+        #expect(controls.calls == ["saved"], "quit never stops the meeting the normal way")
+        #expect(speech.calls.last == .shutdown, "the speech service's quick shutdown ends it")
     }
 
     @Test func dictationIsNotAMeeting() async throws {
@@ -164,8 +166,8 @@ final class FakeRecordingControls: LiveRecordingControls {
         let controls = FakeRecordingControls()
         models.recordingControls = controls
         #expect(models.isMeetingActive && models.isMeetingFinishing, "finishing still counts as active")
-        await models.stopLiveSessions()
-        #expect(controls.calls == ["stop"], "quit lets the finishing meeting save")
+        await models.shutDownForQuit()
+        #expect(controls.calls == ["saved"], "a finishing meeting is ended by the shutdown and saved")
         #expect(QuitConfirmation.copy(finishing: true).quit == "Quit")
         #expect(QuitConfirmation.copy(finishing: true).message.hasSuffix("the next time you open it."),
                 "quit promises nothing inside the shutdown deadline; launch recovery finishes it")

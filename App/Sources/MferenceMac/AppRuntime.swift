@@ -42,16 +42,17 @@ final class AppRuntime {
         voice.connect(files: services.files)
         if let notes = screenModels.notes { voice.connect(notes: notes) }
         let engine = services.engine
-        let speech = services.speech
         let voice = voice
-        // Spec 6.1: a recording stops cleanly (the person confirmed quitting)
-        // and dictation lands its last phrase, then speech, web, the engine.
+        // Spec 6.1: voice (dictation, the speech service, the meeting's save),
+        // then web, then the engine.
         shutdownSteps = [
+            // Dictation's last phrase, then the speech service's quick
+            // shutdown (meetings finish at the next launch), then the meeting
+            // session saves: all inside the quit deadline.
             {
-                await voice.stopLiveSessions()
+                await voice.shutDownForQuit()
                 voice.setup.stop()
             },
-            { await speech.shutdown() },
             { await web.shutdown() },
             { await engine.shutdown() },
         ]
