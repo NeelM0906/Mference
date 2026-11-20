@@ -57,8 +57,9 @@ let package = Package(
                 .product(name: "Mference", package: "Mference"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
-            // Versioned web-answer prompt and tool schemas (spec 4.5.3), U3.
-            resources: [.process("Web/Resources")],
+            // Versioned web-answer prompt and tool schemas (spec 4.5.3), U3;
+            // versioned meeting-summary prompts (Notes spec 6.5), N4.
+            resources: [.process("Web/Resources"), .process("Meetings/Resources")],
             swiftSettings: appSwiftSettings),
         .target(
             name: "MferenceAppUI",
