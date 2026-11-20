@@ -162,13 +162,58 @@ import Testing
         try session.openTrack(.call, at: 0)
         try session.write(FakeAudioSource.tone(seconds: 1), to: .microphone)
         try session.write(FakeAudioSource.tone(seconds: 1), to: .call)
-        let calls = Counter()
-        // Stop after the first track, as a quit mid-conversion would.
-        _ = await session.finish(keepAudio: true, stopEarly: { calls.next() > 0 })
+        let folder = store.directory(for: note)
+        // Stop once the first track is converted (its CAF is gone), as a
+        // quit between two conversions would.
+        let firstCAF = folder.appending(path: "microphone-1.caf").path
+        _ = await session.finish(keepAudio: true, stopEarly: { !FileManager.default.fileExists(atPath: firstCAF) })
         let manifest = try #require(store.readManifest(note))
         #expect(manifest.tracks.map(\.fileName) == ["microphone-1.m4a", "call-1.caf"])
-        let folder = store.directory(for: note)
         for track in manifest.tracks { #expect(FileManager.default.fileExists(atPath: folder.appending(path: track.fileName).path)) }
+    }
+
+    @Test func quitStopsAConversionMidTrack() async throws {
+        // Review #226 pass 2: a long track's conversion stops at quit too.
+        let root = Self.root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = RecordingStore(root: root, availableBytes: { _ in 10 << 30 })
+        let note = UUID()
+        let session = try store.begin(noteID: note, startedAt: .now, keepAudio: true)
+        try session.openTrack(.microphone, at: 0)
+        try session.write(FakeAudioSource.tone(seconds: 10), to: .microphone)
+        let calls = Counter()
+        // The check before the track, the converter's first, then quit at its second (chunk 8 of 10).
+        let (tracks, failure) = await session.finish(keepAudio: true, stopEarly: { calls.next() >= 2 })
+        #expect(failure == nil, "a quit is not a failure")
+        #expect(calls.next() == 3)
+        #expect(tracks.map(\.fileName) == ["microphone-1.m4a"])
+        #expect(store.readManifest(note)?.state == .converting)
+        let folder = store.directory(for: note)
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "microphone-1.caf").path))
+        #expect(!FileManager.default.fileExists(atPath: folder.appending(path: "microphone-1.m4a").path), "no partial file")
+        #expect(await store.recoverInterrupted().isEmpty)
+        #expect(try AVAudioFile(forReading: folder.appending(path: "microphone-1.m4a")).length > 0)
+    }
+
+    @Test func aCancelledConversionKeepsTheCAF() async throws {
+        let root = Self.root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let caf = root.appending(path: "call-1.caf")
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        do {
+            let file = try AVAudioFile(forWriting: caf, settings: format.settings)
+            let samples = FakeAudioSource.tone(seconds: 10)
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)))
+            buffer.frameLength = AVAudioFrameCount(samples.count)
+            for (index, sample) in samples.enumerated() { buffer.floatChannelData![0][index] = sample }
+            try file.write(from: buffer)
+        }
+        let conversion = Task { try await AudioFileConverter.convertToM4A(caf) }
+        conversion.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await conversion.value }
+        #expect(FileManager.default.fileExists(atPath: caf.path))
+        #expect(!FileManager.default.fileExists(atPath: root.appending(path: "call-1.m4a").path))
     }
 
     @Test func recordingRefusesUnderOneGigabyteFree() throws {

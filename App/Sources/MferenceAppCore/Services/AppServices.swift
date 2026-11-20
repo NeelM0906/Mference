@@ -155,18 +155,8 @@ public final class AppServices {
         let systemAudio = SystemAudioPermission()
         let speech = SpeechService.live(isOffline: { await MainActor.run { settings.offlineMode } },
                                         systemAudio: systemAudio)
-        // Opening Screen & System Audio Recording from the app lets a
-        // recorded call-audio denial be checked again by the next tap.
-        let eventStore = EventStoreBox()
-        var system = LivePermissionBroker.System.live(eventStore: eventStore, systemAudio: systemAudio.access)
-        let openURL = system.openURL
-        let callAudioPane = LivePermissionBroker.settingsURL(for: .systemAudio)
-        system.openURL = { url in
-            if url == callAudioPane { systemAudio.systemSettingsOpened() }
-            await openURL(url)
-        }
-        let permissions = LivePermissionBroker(presentReason: presentPermissionReason, eventStore: eventStore,
-                                               systemAudio: systemAudio.access, system: system)
+        let permissions = LivePermissionBroker(presentReason: presentPermissionReason,
+                                               systemAudio: systemAudio.access)
         let services = AppServices(engine: engine,
                                    settings: settings,
                                    permissions: permissions,

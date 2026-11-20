@@ -12,11 +12,11 @@ import Synchronization
 
 /// The real sources and device lists.
 public struct LiveAudioSourceFactory: AudioSourceFactory {
-    /// Told when a tap's audio shows whether call audio is allowed.
-    let onCallAccess: @Sendable (TapAccessVerdict.Result) -> Void
+    /// Told once per tap when it first hears other apps (call audio works).
+    let onCallAudioHeard: @Sendable () -> Void
 
-    init(onCallAccess: @escaping @Sendable (TapAccessVerdict.Result) -> Void = { _ in }) {
-        self.onCallAccess = onCallAccess
+    init(onCallAudioHeard: @escaping @Sendable () -> Void = {}) {
+        self.onCallAudioHeard = onCallAudioHeard
     }
 
     public func microphone(deviceID: String?) throws -> any AudioSource {
@@ -26,8 +26,8 @@ public struct LiveAudioSourceFactory: AudioSourceFactory {
     public func call(_ source: CallAudioSource) throws -> any AudioSource {
         switch source {
         case .off: throw SpeechError.failed("call audio is off")
-        case .allApps: ProcessTapSource(target: .allApps, onVerdict: onCallAccess)
-        case .app(let bundleID, _): ProcessTapSource(target: .app(bundleID), onVerdict: onCallAccess)
+        case .allApps: ProcessTapSource(target: .allApps, onHeard: onCallAudioHeard)
+        case .app(let bundleID, _): ProcessTapSource(target: .app(bundleID), onHeard: onCallAudioHeard)
         }
     }
 
@@ -121,78 +121,67 @@ final class MicrophoneSource: AudioSource, @unchecked Sendable {
 
 // MARK: Call audio
 
-/// Whether a running tap actually hears other apps (spec 5.2, L6). macOS
-/// has no public call that reads the call-audio permission, and a denied
-/// tap does not fail: it delivers digital silence. So the verdict comes
-/// from the audio: any non-zero sample means granted; `deniedAfter` seconds
-/// of exact silence while the tapped apps are playing means denied. Silence
-/// while nothing plays says nothing. A pure value, fed by the tap.
-struct TapAccessVerdict: Sendable, Hashable {
-    enum Result: Sendable, Hashable { case undecided, granted, denied }
-
-    /// Long enough that a quiet stretch of a real call (most call apps send
-    /// comfort noise, not zeros) does not read as a denial.
-    static let deniedAfter: TimeInterval = 15
-
-    private(set) var result = Result.undecided
-    private(set) var silentWhilePlaying: TimeInterval = 0
-
-    /// One check: whether any sample since the last one was non-zero, how
-    /// much exact silence arrived, and whether the tapped apps are playing.
-    mutating func tick(heardSound: Bool, silentSeconds: TimeInterval, othersPlaying: Bool) {
-        guard result == .undecided else { return }
-        if heardSound {
-            result = .granted
-            return
-        }
-        if othersPlaying { silentWhilePlaying += silentSeconds }
-        if silentWhilePlaying >= Self.deniedAfter { result = .denied }
-    }
-}
-
 /// Other apps' output through a Core Audio process tap: every app but this
 /// one (the safe default, spec 12), or one app with its helper processes
-/// (browsers and call apps play through helpers). Core Audio errors are
-/// failures (`SpeechError.failed`), never a recorded denial; a denial is
-/// judged from the audio (`TapAccessVerdict`) and ends the stream with
-/// `.permissionDenied(.systemAudio)`. When the output device changes or
-/// goes away (Bluetooth headphones), the tap is rebuilt on the new default
-/// output; if that fails the stream ends with the error.
+/// (browsers and call apps play through helpers). Core Audio errors end the
+/// stream as failures (`SpeechError.failed`); nothing here decides or
+/// records a permission. A denied tap does not fail, it delivers digital
+/// silence, and silence is never read as a denial (an in-person meeting is
+/// silent too): `onHeard` runs once, when the tap first hears a non-zero
+/// sample. When the default output device changes or goes away (Bluetooth
+/// headphones), the tap is rebuilt on the new one; if that fails the stream
+/// ends with the error.
+///
+/// Locking: the IO block touches only `io`, which is never held while a
+/// tap stops, so stopping (which waits for an IO cycle in flight) cannot
+/// deadlock with it. Starting, rebuilding and stopping the tap all run on
+/// `control`, one at a time, so a device change cannot race `stop()`.
 final class ProcessTapSource: AudioSource, @unchecked Sendable {
     enum Target: Sendable { case allApps, app(String) }
 
     let track = TrackKind.call
     private let target: Target
-    private let onVerdict: @Sendable (TapAccessVerdict.Result) -> Void
-    private let lock = NSLock()
+    private let onHeard: @Sendable () -> Void
+    private struct IOState {
+        var continuation: AsyncThrowingStream<AudioChunk, Error>.Continuation?
+        var heard = false
+    }
+    private let io = Mutex(IOState())
+    /// Only touched on `control`.
     private var tap = ProcessTap()
-    private var continuation: AsyncThrowingStream<AudioChunk, Error>.Continuation?
-    private var verdict = TapAccessVerdict()
-    private var heardSound = false
-    private var silentFrames = 0
-    private var sampleRate: Double = 48_000
-    private var timer: DispatchSourceTimer?
-    private var deviceListener: AudioObjectPropertyListenerBlock?
-    private let queue = DispatchQueue(label: "ai.mference.speech.call-control")
+    private var stopped = false
+    private var listener: AudioObjectPropertyListenerBlock?
+    private let control = DispatchQueue(label: "ai.mference.speech.call-control")
 
-    init(target: Target, onVerdict: @escaping @Sendable (TapAccessVerdict.Result) -> Void = { _ in }) {
+    init(target: Target, onHeard: @escaping @Sendable () -> Void = {}) {
         self.target = target
-        self.onVerdict = onVerdict
+        self.onHeard = onHeard
     }
 
     func start() async throws -> AsyncThrowingStream<AudioChunk, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: AudioChunk.self)
-        lock.withLock { self.continuation = continuation }
+        io.withLock { $0.continuation = continuation }
         do {
-            try startTap()
+            try await onControl {
+                self.stopped = false
+                try self.startTap()
+                self.listenForOutputChanges()
+            }
         } catch {
-            lock.withLock { self.tap.stop() }
-            lock.withLock { self.continuation = nil }
+            io.withLock { $0.continuation = nil }
             throw error as? SpeechError ?? .failed(error.localizedDescription)
         }
-        startWatching()
         continuation.onTermination = { [weak self] _ in Task { await self?.stop() } }
         return stream
+    }
+
+    /// Runs `body` on `control` and waits for it.
+    private func onControl<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            control.async {
+                do { continuation.resume(returning: try body()) } catch { continuation.resume(throwing: error) }
+            }
+        }
     }
 
     private func processes() throws -> [AudioObjectID] {
@@ -205,70 +194,64 @@ final class ProcessTapSource: AudioSource, @unchecked Sendable {
         }
     }
 
+    /// On `control`. A tap that fails partway is torn down before the error.
     private func startTap() throws {
         let processes = try processes()
         var resampler: AudioResampler?
-        try lock.withLock {
+        do {
             try tap.start(processes: processes) { [weak self] buffer in
                 guard let self else { return }
                 if resampler == nil { resampler = try? AudioResampler(inputFormat: buffer.format) }
-                self.noteAccess(buffer)
+                self.noteSound(buffer)
                 guard let samples = try? resampler?.convert(buffer), !samples.isEmpty else { return }
-                self.lock.withLock { self.continuation }?.yield(AudioChunk(samples: samples))
+                self.io.withLock { $0.continuation }?.yield(AudioChunk(samples: samples))
             }
+        } catch {
+            tap.stop()
+            throw error
         }
     }
 
-    /// Counts silence and sound for the verdict (on the tap's IO queue).
-    private func noteAccess(_ buffer: AVAudioPCMBuffer) {
-        guard let channels = buffer.floatChannelData else { return }
-        var sound = false
-        for channel in 0..<Int(buffer.format.channelCount) where !sound {
-            let samples = UnsafeBufferPointer(start: channels[channel], count: Int(buffer.frameLength))
-            sound = samples.contains { $0 != 0 }
+    /// On the tap's IO queue: the first non-zero sample tells `onHeard`, once.
+    private func noteSound(_ buffer: AVAudioPCMBuffer) {
+        guard !io.withLock({ $0.heard }), Self.hasSound(buffer) else { return }
+        let first = io.withLock { state -> Bool in
+            defer { state.heard = true }
+            return !state.heard
         }
-        lock.withLock {
-            sampleRate = buffer.format.sampleRate
-            if sound { heardSound = true } else { silentFrames += Int(buffer.frameLength) }
-        }
+        if first { control.async { [onHeard] in onHeard() } }
     }
 
-    /// Twice a second: the verdict; and the output device, to rebuild on a change.
-    private func startWatching() {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
-        timer.setEventHandler { [weak self] in self?.checkAccess() }
-        timer.resume()
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.outputChanged() }
-        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
-                                                 mScope: kAudioObjectPropertyScopeGlobal,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, queue, listener)
-        lock.withLock {
-            self.timer = timer
-            deviceListener = listener
+    /// Whether any sample in any channel is non-zero (a denied tap delivers
+    /// exact zeros).
+    static func hasSound(_ buffer: AVAudioPCMBuffer) -> Bool {
+        guard let channels = buffer.floatChannelData else { return false }
+        let frames = Int(buffer.frameLength)
+        for channel in 0..<Int(buffer.format.channelCount) {
+            if UnsafeBufferPointer(start: channels[channel], count: frames).contains(where: { $0 != 0 }) { return true }
         }
+        return false
     }
 
-    private func checkAccess() {
-        let othersPlaying = CoreAudioDevices.isPlaying(processes: (try? processes()) ?? [])
-        let (before, after) = lock.withLock { () -> (TapAccessVerdict.Result, TapAccessVerdict.Result) in
-            let before = verdict.result
-            verdict.tick(heardSound: heardSound, silentSeconds: Double(silentFrames) / sampleRate,
-                         othersPlaying: othersPlaying)
-            heardSound = false
-            silentFrames = 0
-            return (before, verdict.result)
-        }
-        guard before == .undecided, after != .undecided else { return }
-        onVerdict(after)
-        if after == .denied { finish(throwing: SpeechError.permissionDenied(.systemAudio)) }
+    private static var outputDeviceAddress: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                   mScope: kAudioObjectPropertyScopeGlobal,
+                                   mElement: kAudioObjectPropertyElementMain)
     }
 
-    /// The default output changed or went away: rebuild the tap on the new one.
+    /// On `control`: the default output device (not the alert device).
+    private func listenForOutputChanges() {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.outputChanged() }
+        var address = Self.outputDeviceAddress
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, control, block)
+        listener = block
+    }
+
+    /// On `control`: the default output changed or went away, so the tap
+    /// is rebuilt on the new one. After `stop()` it does nothing.
     private func outputChanged() {
-        guard lock.withLock({ continuation != nil }) else { return }
-        lock.withLock { tap.stop() }
+        guard !stopped else { return }
+        tap.stop()
         do {
             try startTap()
         } catch {
@@ -277,36 +260,34 @@ final class ProcessTapSource: AudioSource, @unchecked Sendable {
     }
 
     private func finish(throwing error: Error?) {
-        let continuation = lock.withLock { () -> AsyncThrowingStream<AudioChunk, Error>.Continuation? in
-            defer { self.continuation = nil }
-            return self.continuation
+        let continuation = io.withLock { state -> AsyncThrowingStream<AudioChunk, Error>.Continuation? in
+            defer { state.continuation = nil }
+            return state.continuation
         }
         guard let continuation else { return }
         if let error { continuation.finish(throwing: error) } else { continuation.finish() }
     }
 
     func stop() async {
-        let (timer, listener) = lock.withLock { () -> (DispatchSourceTimer?, AudioObjectPropertyListenerBlock?) in
-            defer {
-                self.timer = nil
-                deviceListener = nil
-            }
-            return (self.timer, deviceListener)
+        let listener = try? await onControl { () -> UncheckedBox<AudioObjectPropertyListenerBlock?> in
+            self.stopped = true
+            self.tap.stop()
+            defer { self.listener = nil }
+            return UncheckedBox(self.listener)
         }
-        timer?.cancel()
-        if let listener {
-            var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
-                                                     mScope: kAudioObjectPropertyScopeGlobal,
-                                                     mElement: kAudioObjectPropertyElementMain)
-            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, queue, listener)
+        // Removed off `control`, where a late callback may be waiting; it
+        // finds `stopped` and returns.
+        if let block = listener?.value {
+            var address = Self.outputDeviceAddress
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, control, block)
         }
-        lock.withLock { tap.stop() }
         finish(throwing: nil)
     }
 }
 
 /// One process tap and its private aggregate device. The IO block runs on
-/// its own serial queue.
+/// its own serial queue; `stop()` waits for a cycle in flight, so the
+/// caller must not hold a lock that the IO block takes.
 struct ProcessTap {
     private(set) var tapID = AudioObjectID(kAudioObjectUnknown)
     private(set) var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -380,8 +361,7 @@ struct ProcessTap {
         tapID = AudioObjectID(kAudioObjectUnknown)
     }
 
-    /// A Core Audio error is a failure, not a permission answer: a denied
-    /// tap is judged from its audio instead (`TapAccessVerdict`).
+    /// A Core Audio error is a failure, never a permission answer.
     private func check(_ status: OSStatus, _ step: String) throws {
         guard status == noErr else { throw SpeechError.failed("call audio: cannot \(step) (\(status))") }
     }
@@ -447,7 +427,7 @@ enum CoreAudioDevices {
 
     static func defaultOutputUID() -> String? {
         let device: AudioObjectID = property(AudioObjectID(kAudioObjectSystemObject),
-                                             kAudioHardwarePropertyDefaultSystemOutputDevice, default: 0)
+                                             kAudioHardwarePropertyDefaultOutputDevice, default: 0)
         return device == 0 ? nil : string(device, kAudioDevicePropertyDeviceUID)
     }
 
@@ -468,16 +448,6 @@ enum CoreAudioDevices {
             guard let id = string(process, kAudioProcessPropertyBundleID) else { return false }
             return id == bundleID || id.hasPrefix(bundleID + ".")
         }
-    }
-
-    /// Whether `processes` (or, when empty, any process but this app) is
-    /// playing audio right now.
-    static func isPlaying(processes: [AudioObjectID]) -> Bool {
-        let own = processObject(pid: ProcessInfo.processInfo.processIdentifier)
-        let candidates = processes.isEmpty
-            ? objects(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList).filter { $0 != own }
-            : processes
-        return candidates.contains { (property($0, kAudioProcessPropertyIsRunningOutput, default: UInt32(0))) != 0 }
     }
 
     /// Apps with an audio process (playing or able to), by their main bundle id.
