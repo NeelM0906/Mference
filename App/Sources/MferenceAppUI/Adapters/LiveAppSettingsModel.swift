@@ -225,6 +225,7 @@ extension ScreenModels {
             library: LiveModelLibraryModel(library: library, settings: services.settings,
                                            downloads: services.downloads),
             memory: LiveMemoryListModel(store: MemoryStore(context: services.modelContainer.mainContext)),
-            settings: LiveAppSettingsModel(settings: services.settings, connections: connections))
+            settings: LiveAppSettingsModel(settings: services.settings, connections: connections),
+            notes: NotesModel(services: services))
     }
 }

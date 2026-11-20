@@ -260,6 +260,13 @@ public final class NoteEditorController {
         textView.insertAttachment(block)
     }
 
+    /// The note as plain text, for the share sheet.
+    public var shareText: String {
+        _ = selectionRevision
+        _ = wordCount
+        return textView?.document.plainText ?? note.map { store.document(of: $0).plainText } ?? ""
+    }
+
     public func focus() {
         guard let textView else { return }
         textView.window?.makeFirstResponder(textView)
