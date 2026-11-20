@@ -24,7 +24,7 @@ import Testing
         let container = try AppModelContainer.inMemory()
         let writer = InMemoryMeetingNoteWriter(context: container.mainContext)
         return Harness(container: container, writer: writer,
-                       queue: FileTranscriptionQueue(speech: speech, context: container.mainContext, writer: writer),
+                       queue: FileTranscriptionQueue(speech: speech, writer: writer),
                        speech: speech)
     }
 
@@ -66,6 +66,7 @@ import Testing
         #expect(record.segments.map(\.text) == ["Welcome to week three."])
         #expect(record.duration == 4_680 && record.languageCode == "en" && record.audioKept)
         #expect(h.queue.rows.first?.phase == .done)
+        #expect(h.queue.rows.first?.speakerCount == 1)
         #expect(!h.queue.isBusy)
         #expect(summarized.isEmpty)
         #expect(h.writer.searchRefreshes[id] == 1)
@@ -117,6 +118,25 @@ import Testing
         #expect(speech.calls.contains { if case .cancel = $0 { true } else { false } })
     }
 
+    @Test func cancellingThroughTheNotesStoreDeletesTheNoteAndItsRecordings() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let container = try AppModelContainer.inMemory()
+        let notes = NoteStore(container: container, attachments: .temporary(), speech: speech)
+        let queue = FileTranscriptionQueue(speech: speech, writer: notes)
+        let ids = await queue.add([URL(filePath: "/tmp/lecture.m4a")], options: FileImportOptions(summarize: true))
+        let id = try #require(ids.first)
+        speech.advance() // queued
+        speech.advance() // started
+        for _ in 0..<50 { await Task.yield() }
+        await queue.cancel(id)
+        for _ in 0..<500 where (try? notes.note(id: id)) != nil { await Task.yield() }
+        #expect(try notes.note(id: id) == nil)
+        #expect(speech.calls.contains(.deleteRecordings(id)))
+        #expect(queue.rows.isEmpty)
+        // Nothing is left for the next launch to re-queue.
+        #expect(await queue.recoverInterruptedJobs().isEmpty)
+    }
+
     @Test func filesWaitWhileAMeetingRecords() async throws {
         let speech = FakeSpeechService(stepped: true)
         let h = try harness(speech)
@@ -128,6 +148,15 @@ import Testing
         for _ in 0..<50 { await Task.yield() }
         #expect(h.queue.rows.first?.phase == .paused)
         await meeting.stop()
+    }
+
+    @Test func launchRecoveryLeavesAFileAlreadyQueued() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let h = try harness(speech)
+        let ids = await h.queue.add([URL(filePath: "/tmp/early.m4a")], options: FileImportOptions())
+        #expect(await h.queue.recoverInterruptedJobs().isEmpty)
+        #expect(speech.calls.filter { if case .transcribeFile = $0 { true } else { false } }.count == 1)
+        #expect(h.queue.rows.map(\.noteID) == ids)
     }
 
     @Test func launchRequeuesFilesWithACopyAndFailsTheRest() async throws {

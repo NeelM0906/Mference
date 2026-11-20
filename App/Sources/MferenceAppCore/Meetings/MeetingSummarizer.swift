@@ -54,6 +54,8 @@ enum MeetingResources {
 public enum MeetingSummaryError: Error, Sendable, Hashable {
     /// The model's answer was not the JSON the prompt asks for, twice.
     case unreadableAnswer
+    /// A request was too long for Quick's context even after halving the chunks.
+    case inputTooLarge
     /// There is nothing to summarize.
     case emptyTranscript
     /// The engine could not run Quick; `message` is its user-facing line.
@@ -61,7 +63,7 @@ public enum MeetingSummaryError: Error, Sendable, Hashable {
 
     public var message: String {
         switch self {
-        case .unreadableAnswer, .engine: "Couldn't write a summary"
+        case .unreadableAnswer, .inputTooLarge, .engine: "Couldn't write a summary"
         case .emptyTranscript: "Nothing was said, so there is no summary."
         }
     }
@@ -80,12 +82,18 @@ public struct MeetingSummarizer: Sendable {
 
     private let engine: any EngineServicing
     private let prompt: MeetingSummaryPrompt
+    /// The prompt resource could not be read: every summary fails (with Retry)
+    /// instead of the app failing at launch. The tests load the resource.
+    private let promptMissing: Bool
     /// Transcript characters per request; nil derives it from Quick's context.
     private let chunkCharacters: Int?
 
-    public init(engine: any EngineServicing, prompt: MeetingSummaryPrompt, chunkCharacters: Int? = nil) {
+    public init(engine: any EngineServicing, prompt: MeetingSummaryPrompt?, chunkCharacters: Int? = nil) {
         self.engine = engine
-        self.prompt = prompt
+        self.prompt = prompt ?? MeetingSummaryPrompt(version: 0, system: "", mapSystem: "", reduceSystem: "",
+                                                     untrustedRule: "", maximumCompletionTokens: 1,
+                                                     temperature: 0)
+        self.promptMissing = prompt == nil
         self.chunkCharacters = chunkCharacters
     }
 
@@ -135,8 +143,28 @@ public struct MeetingSummarizer: Sendable {
                           progress: @Sendable (Step) async -> Void = { _ in }) async throws -> MeetingSections {
         let lines = Self.transcriptLines(segments, speakers: speakers)
         guard !lines.isEmpty else { throw MeetingSummaryError.emptyTranscript }
-        let limit = await budget()
-        let trimmedNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !promptMissing else { throw MeetingSummaryError.unreadableAnswer }
+        // The estimate can be short for dense speech: a request Quick
+        // refuses as too long is tried again in chunks half the size.
+        var limit = await budget()
+        while true {
+            do {
+                return try await summarize(lines: lines, notes: notes, limit: limit, progress: progress)
+            } catch MeetingSummaryError.inputTooLarge where limit / 2 >= Self.smallestChunk {
+                limit /= 2
+            }
+        }
+    }
+
+    /// Below this, a request too long for Quick is not worth splitting further.
+    static let smallestChunk = 1_000
+
+    private func summarize(lines: [String], notes: String, limit: Int,
+                           progress: @Sendable (Step) async -> Void) async throws -> MeetingSections {
+        // The person's notes go in every final request: at most a quarter of
+        // the budget, and the transcript chunks and combine step get the rest.
+        let trimmedNotes = Self.clip(notes.trimmingCharacters(in: .whitespacesAndNewlines), to: limit / 4)
+        let transcriptLimit = max(Self.smallestChunk / 2, limit - trimmedNotes.count)
         let whole = lines.joined(separator: "\n")
         if whole.count + trimmedNotes.count <= limit {
             return try await ask(system: prompt.system, input: Self.input(transcript: whole, notes: trimmedNotes))
@@ -149,7 +177,16 @@ public struct MeetingSummarizer: Sendable {
             partNotes.append(try await ask(system: prompt.mapSystem, input: Self.input(transcript: part, notes: "")))
         }
         await progress(.combining)
-        return try await reduce(partNotes, notes: trimmedNotes, limit: limit)
+        // Room for the notes in every combine request.
+        return try await reduce(partNotes, notes: trimmedNotes, limit: transcriptLimit)
+    }
+
+    /// At most `limit` characters, cut at a word where it can be, with "…".
+    static func clip(_ text: String, to limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let head = text.prefix(max(0, limit - 1))
+        let cut = head.lastIndex(where: \.isWhitespace).map { head[..<$0] } ?? head
+        return String(cut) + "…"
     }
 
     /// Combines parts' notes, in rounds when they are themselves too long.
@@ -229,6 +266,8 @@ public struct MeetingSummarizer: Sendable {
                 case .prepared, .reasoning, .toolCall: break
                 }
             }
+        } catch EngineServiceError.requestTooLarge {
+            throw MeetingSummaryError.inputTooLarge
         } catch let error as EngineServiceError {
             throw MeetingSummaryError.engine(error.userMessage)
         }
@@ -237,12 +276,13 @@ public struct MeetingSummarizer: Sendable {
     }
 
     /// Characters of transcript per request: Quick's context less the
-    /// answer and the instructions, at about 3 characters a token.
+    /// answer and the instructions, at about 2.5 characters a token (dense
+    /// transcript lines run near 2.3).
     private func budget() async -> Int {
         if let chunkCharacters { return max(200, chunkCharacters) }
         let context = await engine.models().first { $0.model == .quick }?.contextLength ?? 0
         let tokens = (context > 0 ? min(context, 32_768) : 8_192) - prompt.maximumCompletionTokens - 1_024
-        return max(4_000, tokens * 3)
+        return max(4_000, tokens * 5 / 2)
     }
 
     // MARK: Strict parsing
