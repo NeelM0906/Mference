@@ -28,6 +28,11 @@ struct MferenceMacApp: App {
                 .environment(delegate.runtime.chat)
                 .environment(delegate.runtime.voice)
                 .onAppear {
+                    // Leaving Notes mid-dictation: the last phrase lands first.
+                    let voice = delegate.runtime.voice
+                    shell.finishBeforeLeaving = { section in
+                        VoiceModels.finishBeforeLeaving(section, voice: voice)
+                    }
                     // Calendar's "Open Settings" goes to Settings > Connections.
                     let shell = shell
                     delegate.runtime.services.apple?.calendar.openSettings = {
@@ -44,6 +49,7 @@ struct MferenceMacApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             ShellCommands(model: shell)
+            VoiceCommands(voice: delegate.runtime.voice)
         }
     }
 }

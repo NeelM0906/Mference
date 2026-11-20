@@ -31,6 +31,11 @@ public final class AppServices {
     /// Notes and folders (Notes spec 4.1, 8): the one store the Notes
     /// screens, dictation and meetings write through.
     public let notes: NoteStore
+    /// The remembered voice choices (Settings › Speech, the popover, the
+    /// dictation bar's chips).
+    public let speechPreferences: SpeechPreferences
+    /// The one consumer of dictation events (stream ownership, team N3).
+    public let dictation: DictationController
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -46,6 +51,7 @@ public final class AppServices {
                 downloads: DownloadManager? = nil,
                 apple: AppleServices? = nil,
                 speech: (any SpeechServicing)? = nil,
+                speechPreferences: SpeechPreferences? = nil,
                 noteAttachments: NoteAttachments? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
@@ -61,11 +67,15 @@ public final class AppServices {
         }
         self.downloads = downloads
         self.apple = apple
-        self.speech = speech ?? UnavailableSpeechService()
+        let speech = speech ?? UnavailableSpeechService()
+        self.speech = speech
         // Without a folder given (tests that build this by hand), attachments
         // go to a temporary folder, never the person's.
         self.notes = NoteStore(container: modelContainer, attachments: noteAttachments ?? .temporary(),
-                               speech: self.speech)
+                               speech: speech)
+        let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
+        self.speechPreferences = speechPreferences
+        dictation = DictationController(speech: speech, permissions: permissions, preferences: speechPreferences)
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -112,6 +122,7 @@ public final class AppServices {
                                    downloads: downloads,
                                    apple: AppleServices.live(engine: engine, broker: permissions, container: container,
                                                              useAppleModel: { await MainActor.run { settings.useAppleModel } }),
+                                   speechPreferences: SpeechPreferences(),
                                    noteAttachments: .live,
                                    appleChat: FoundationChatModel(),
                                    storeError: storeError,
