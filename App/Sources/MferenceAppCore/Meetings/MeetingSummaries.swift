@@ -52,13 +52,13 @@ public final class MeetingSummaries {
     @ObservationIgnored private var runner: Task<Void, Never>?
 
     public init(engine: any EngineServicing, summarizer: MeetingSummarizer, assistant: (any AppleModelServicing)?,
-                context: ModelContext, writer: any MeetingNoteWriting, todos: (any MeetingTodoSink)?,
+                writer: any MeetingNoteWriting, todos: (any MeetingTodoSink)?,
                 now: @escaping @Sendable () -> Date = { Date.now }, locale: Locale = .current,
                 timeZone: TimeZone = .current) {
         self.engine = engine
         self.summarizer = summarizer
         self.assistant = assistant
-        self.context = context
+        self.context = writer.context
         self.writer = writer
         self.todos = todos
         self.now = now
@@ -70,12 +70,15 @@ public final class MeetingSummaries {
 
     public func status(for noteID: UUID) -> Status {
         if let status = statuses[noteID] { return status }
-        switch fetchNote(noteID)?.recording?.summaryState {
-        case .written?: return .written
-        case .failed?: return .failed(MeetingSummaryError.unreadableAnswer.message)
-        // Pending with no job here: the app quit while it ran; Retry starts it again.
-        case .pending?: return .failed(MeetingSummaryError.unreadableAnswer.message)
-        case .none?, nil: return .none
+        guard let record = fetchNote(noteID)?.recording else { return .none }
+        switch record.summaryState {
+        case .written: return .written
+        case .failed: return .failed(MeetingSummaryError.unreadableAnswer.message)
+        case .pending:
+            // Asked for while the file still transcribes: it runs when the
+            // transcript is in. Otherwise the app quit while it ran: Retry.
+            return Self.isTranscribing(record) ? .queued : .failed(MeetingSummaryError.unreadableAnswer.message)
+        case .none: return .none
         }
     }
 
@@ -104,6 +107,8 @@ public final class MeetingSummaries {
 
     private func enqueue(_ noteID: UUID, redo: Bool) {
         guard !queue.contains(where: { $0.noteID == noteID }) else { return }
+        // A written summary is replaced only through Redo, after its confirm.
+        if !redo, fetchNote(noteID)?.recording?.summaryState == .written { return }
         if case .writing? = statuses[noteID] { return }
         if statuses[noteID] == .waitingForChat { return }
         queue.append((noteID, redo))
@@ -119,7 +124,14 @@ public final class MeetingSummaries {
     }
 
     private func run(_ noteID: UUID, redo: Bool) async {
-        guard let record = fetchNote(noteID)?.recording else {
+        guard let first = liveRecord(noteID) else {
+            statuses[noteID] = nil
+            return
+        }
+        // A file still transcribing: its transcript triggers the summary.
+        guard !Self.isTranscribing(first) else {
+            first.summaryState = .pending
+            try? context.save()
             statuses[noteID] = nil
             return
         }
@@ -127,15 +139,32 @@ public final class MeetingSummaries {
             statuses[noteID] = .waitingForChat
             for await status in engine.statusUpdates() where !status.isGenerating { break }
         }
+        // Every wait can outlast the note (Empty trash): look it up again.
+        guard let record = liveRecord(noteID) else {
+            statuses[noteID] = nil
+            return
+        }
         statuses[noteID] = .writing(nil)
         record.summaryState = .pending
         try? context.save()
         let segments = record.segments
         let speakers = record.speakers
+        let notes = writer.personalNotes(in: noteID)
+        let outcome: Result<MeetingSections, any Error>
         do {
-            let sections = try await summarizer.summarize(segments: segments, speakers: speakers) { [weak self] step in
+            outcome = .success(try await summarizer.summarize(segments: segments, speakers: speakers, notes: notes) {
+                [weak self] step in
                 await MainActor.run { self?.statuses[noteID] = .writing(step) }
-            }
+            })
+        } catch {
+            outcome = .failure(error)
+        }
+        guard let record = liveRecord(noteID) else {
+            statuses[noteID] = nil
+            return
+        }
+        do {
+            let sections = try outcome.get()
             try writer.replaceMeetingSections(sections, in: noteID)
             if redo { record.todosAddedAt = nil }
             record.summaryState = .written
@@ -150,6 +179,21 @@ public final class MeetingSummaries {
             record.summaryState = .failed
             try? context.save()
             statuses[noteID] = .failed(MeetingSummaryError.unreadableAnswer.message)
+        }
+    }
+
+    /// The note's recording if the note still exists (it can be deleted for
+    /// good while a summary waits or runs).
+    private func liveRecord(_ noteID: UUID) -> NoteRecording? {
+        guard let note = fetchNote(noteID), !note.isDeleted, let record = note.recording, !record.isDeleted
+        else { return nil }
+        return record
+    }
+
+    static func isTranscribing(_ record: NoteRecording) -> Bool {
+        switch record.transcriptionState {
+        case .queued, .running, .live: true
+        case .none, .done, .failed: false
         }
     }
 
@@ -173,6 +217,11 @@ public final class MeetingSummaries {
     }
 
     // MARK: Add to To-dos
+
+    /// The Action items checklist rows as they stand in the note now.
+    public func actionItems(for noteID: UUID) -> [MeetingActionItemRow] {
+        writer.actionItems(in: noteID)
+    }
 
     /// "Add n to To-dos": the unchecked action items now in the note.
     public func uncheckedActionItemCount(for noteID: UUID) -> Int {

@@ -17,6 +17,15 @@ public struct FileImportOptions: Sendable, Hashable {
         self.keepAudio = keepAudio
         self.summarize = summarize
     }
+
+    /// The import sheet's defaults from the one shared `SpeechPreferences`;
+    /// no summary when Settings turned summaries off.
+    @MainActor
+    public init(preferences: SpeechPreferences) {
+        self.init(language: preferences.language, speakerLabels: preferences.fileSpeakerLabels,
+                  keepAudio: preferences.keepAudio == .keep,
+                  summarize: preferences.fileSummary && preferences.summaryModel != .off)
+    }
 }
 
 /// Transcribing audio and video files into notes (spec 4.6). `AppServices`
@@ -37,6 +46,8 @@ public final class FileTranscriptionQueue {
         public var fraction: Double
         public var remaining: TimeInterval?
         public var languageCode: String?
+        /// Speakers in the finished transcript; nil until done.
+        public var speakerCount: Int?
     }
 
     /// Queue rows in the order added; Done and failed rows stay until cleared.
@@ -53,10 +64,11 @@ public final class FileTranscriptionQueue {
     @ObservationIgnored private var consumers: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var didRecover = false
 
-    public init(speech: any SpeechServicing, context: ModelContext, writer: any MeetingNoteWriting,
+    /// Recordings are read and saved on `writer.context` (the Notes store's).
+    public init(speech: any SpeechServicing, writer: any MeetingNoteWriting,
                 now: @escaping @Sendable () -> Date = { Date.now }) {
         self.speech = speech
-        self.context = context
+        self.context = writer.context
         self.writer = writer
         self.now = now
     }
@@ -139,12 +151,13 @@ public final class FileTranscriptionQueue {
             return createNote ? noteID : nil
         }
         jobs[noteID] = job
+        let jobID = job.id
         consumers[noteID] = Task { [weak self] in
             for await event in job.events {
                 guard let self else { return }
                 self.handle(event, noteID: noteID)
             }
-            self?.jobEnded(noteID)
+            self?.jobEnded(noteID, jobID: jobID)
         }
         return noteID
     }
@@ -174,11 +187,15 @@ public final class FileTranscriptionQueue {
             fail(noteID, message: error.message)
         case .cancelled:
             rows.removeAll { $0.noteID == noteID }
-            if let note = fetchNote(noteID) {
-                context.delete(note)
+            // Never left "running": if the note can't be deleted for good
+            // it stays in Recently deleted as failed, and is not re-queued.
+            if let record = fetchNote(noteID)?.recording {
+                record.transcriptionState = .failed
+                record.summaryState = .none
                 try? context.save()
             }
-            Task { [speech] in try? await speech.deleteRecordings(for: noteID) }
+            // Through the Notes store: the note and its recordings go together.
+            Task { [writer] in await writer.discardNote(noteID) }
         }
     }
 
@@ -204,6 +221,7 @@ public final class FileTranscriptionQueue {
             row.remaining = 0
             row.duration = row.duration ?? result.duration
             row.languageCode = result.languageCode ?? row.languageCode
+            row.speakerCount = Set(result.segments.map(\.speakerID)).count
         }
         if summarize { afterTranscript?(noteID) }
     }
@@ -217,7 +235,9 @@ public final class FileTranscriptionQueue {
         updateRow(noteID) { $0.phase = .failed(message) }
     }
 
-    private func jobEnded(_ noteID: UUID) {
+    /// Forgets a finished job, unless the note has a newer one by now.
+    private func jobEnded(_ noteID: UUID, jobID: FileJob.ID) {
+        guard jobs[noteID]?.id == jobID else { return }
         jobs[noteID] = nil
         consumers[noteID] = nil
     }
@@ -237,7 +257,9 @@ public final class FileTranscriptionQueue {
         }))) ?? []
         var requeued: [UUID] = []
         for record in open {
-            guard let note = record.note, let fileName = record.sourceFileName else { continue }
+            // A file added during launch is already queued: leave it.
+            guard let note = record.note, note.deletedAt == nil, let fileName = record.sourceFileName,
+                  jobs[note.id] == nil else { continue }
             let copy = speech.recordingsDirectory(for: note.id).appending(path: fileName)
             guard FileManager.default.fileExists(atPath: copy.path) else {
                 upsertRow(Row(noteID: note.id, fileName: fileName, phase: .queued, fraction: 0))
