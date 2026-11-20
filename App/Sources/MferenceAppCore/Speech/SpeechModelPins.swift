@@ -182,8 +182,6 @@ public enum SpeechModelPins {
                             size: 177499, sha256: "f7cd5cc16e63e2d89db052a23018ecfc47a311998ed1e9e39838fbac65048688"),
         ]),
         SpeechModelSource(repo: "FluidInference/ls-eend-coreml", revision: "28ce1b1f8ef186729df63b3886fbaae7bc10c4a1", license: "MIT", files: [
-            SpeechModelFile(repoPath: "AMI/.DS_Store", installPath: "ls-eend-coreml/28ce1b1f8ef186729df63b3886fbaae7bc10c4a1/AMI/.DS_Store",
-                            size: 6148, sha256: "a4bf952ae08fa8f102d802c202b40803ec71a8c0e755e4daa2b8579c1fee03ae"),
             SpeechModelFile(repoPath: "AMI/ls_eend_ami_step.json", installPath: "ls-eend-coreml/28ce1b1f8ef186729df63b3886fbaae7bc10c4a1/AMI/ls_eend_ami_step.json",
                             size: 1237, sha256: "3eab7020357a5639a8a5dc6631e85bfb14ec118035367f7eb60beaaae7727d90"),
             SpeechModelFile(repoPath: "AMI/ls_eend_ami_step.mlmodelc/analytics/coremldata.bin", installPath: "ls-eend-coreml/28ce1b1f8ef186729df63b3886fbaae7bc10c4a1/AMI/ls_eend_ami_step.mlmodelc/analytics/coremldata.bin",

@@ -30,10 +30,12 @@ import Testing
 
     @Test func pinnedSizesMatchTheMeasuredDownload() {
         #expect(SpeechModelPins.speech.totalBytes == 653_388_064)
-        #expect(SpeechModelPins.speakerLabels.totalBytes == 66_591_913)
+        #expect(SpeechModelPins.speakerLabels.totalBytes == 66_585_765, "without the stray AMI/.DS_Store")
         let installed = SpeechModelPins.speech.sources.flatMap(\.files).map(\.installPath)
         #expect(installed.contains { $0.contains("/JointDecisionv3.mlmodelc/") }, "the .v3 loader's joint name")
         #expect(!installed.contains { $0.contains("/JointDecision.mlmodelc/") })
+        let labels = SpeechModelPins.speakerLabels.sources.flatMap(\.files).map(\.repoPath)
+        #expect(!labels.contains { ($0 as NSString).lastPathComponent == ".DS_Store" })
     }
 
     /// FluidAudio's `load(from:)`, `downloadAndLoad` and `ModelHub` fetch

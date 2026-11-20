@@ -30,14 +30,21 @@ Install note: the joint model `JointDecision.mlmodelc` is installed as
 `JointDecisionv3.mlmodelc`, the name FluidAudio's `.v3` loader expects. It has
 no top-K outputs, so the app never passes a language hint to the decoder.
 
-## Speaker labels package (meetings, optional): 66,591,913 bytes
+## Speaker labels package (meetings, optional): 66,585,765 bytes
 
 | Model | Repository @ revision | Licence | Bytes |
 | --- | --- | --- | --- |
 | Offline diarization, pyannote Community-1 set (Segmentation, FBank, Embedding, PLDA, PldaRho, PLDA parameters) | `FluidInference/speaker-diarization-coreml` @ `7eab74f3463c736418d0eb10296261ae581146c9` | CC BY 4.0 (scoped in its `NOTICE.md`) | 22,008,379 |
-| Live diarization, LS-EEND AMI variant | `FluidInference/ls-eend-coreml` @ `28ce1b1f8ef186729df63b3886fbaae7bc10c4a1` | MIT | 44,583,534 |
+| Live diarization, LS-EEND AMI variant | `FluidInference/ls-eend-coreml` @ `28ce1b1f8ef186729df63b3886fbaae7bc10c4a1` | MIT | 44,577,386 |
 
 Attribution for the Community-1 set (per its NOTICE.md): pyannote, WeSpeaker,
 BUT Speech@FIT and Fluid Inference, CC BY 4.0, modified Core ML conversions.
 The legacy `pyannote_segmentation` / `wespeaker*` files and LS-EEND's
-`optimized/` folder are not downloaded.
+`optimized/` folder are not downloaded, nor is the stray `AMI/.DS_Store`
+(dropped 2026-11-20).
+
+Known issue (C-N1 run 1): FluidAudio 0.18.4 loads only the
+`optimized/<variant>/<step>/ls_eend_<variant>_<step>.mlmodelc` export, with
+its config embedded in the model metadata. The pinned `AMI/ls_eend_ami_step`
+export has neither, so live speaker labels stay off until `optimized/ami/<step>/`
+is pinned instead.
