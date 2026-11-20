@@ -84,6 +84,7 @@ final class GatedInstallSpeech: SpeechServicing {
     func cancel(_ job: FileJob.ID) async { await base.cancel(job) }
     func inputDevices() async -> [AudioInputDevice] { await base.inputDevices() }
     func runningAudioApps() async -> [RunningAudioApp] { await base.runningAudioApps() }
+    var hasHeardCallAudio: Bool { base.hasHeardCallAudio }
     func recordingsSize() async -> Int64 { await base.recordingsSize() }
     func deleteRecordings(for noteID: UUID) async throws { try await base.deleteRecordings(for: noteID) }
     func recordingsDirectory(for noteID: UUID) -> URL { base.recordingsDirectory(for: noteID) }
@@ -286,6 +287,7 @@ final class ManualStatusSpeech: SpeechServicing {
     func cancel(_ job: FileJob.ID) async { await base.cancel(job) }
     func inputDevices() async -> [AudioInputDevice] { await base.inputDevices() }
     func runningAudioApps() async -> [RunningAudioApp] { await base.runningAudioApps() }
+    var hasHeardCallAudio: Bool { base.hasHeardCallAudio }
     func recordingsSize() async -> Int64 { await base.recordingsSize() }
     func deleteRecordings(for noteID: UUID) async throws { try await base.deleteRecordings(for: noteID) }
     func recordingsDirectory(for noteID: UUID) -> URL { base.recordingsDirectory(for: noteID) }

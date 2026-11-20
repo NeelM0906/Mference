@@ -34,10 +34,15 @@ public final class FakeSpeechService: SpeechServicing {
     /// What a meeting produces while live, and its final result on stop.
     public struct MeetingScript: Sendable {
         public var callAudioAvailable: Bool
+        /// Sends `.noCallAudioHeard` right after `.started` when the meeting
+        /// records call audio (the tap heard only silence).
+        public var noCallAudioHeard: Bool
         public var live: [MeetingEvent]
         public var result: TranscriptResult
-        public init(callAudioAvailable: Bool = true, live: [MeetingEvent] = [], result: TranscriptResult) {
+        public init(callAudioAvailable: Bool = true, noCallAudioHeard: Bool = false, live: [MeetingEvent] = [],
+                    result: TranscriptResult) {
             self.callAudioAvailable = callAudioAvailable
+            self.noCallAudioHeard = noCallAudioHeard
             self.live = live
             self.result = result
         }
@@ -55,6 +60,7 @@ public final class FakeSpeechService: SpeechServicing {
         var interrupted: [InterruptedRecording] = []
         var installError: SpeechError?
         var startError: SpeechError?
+        var hasHeardCallAudio = false
         /// Scripted events not yet played, with the session or job they belong to.
         var pending: [(owner: UUID, step: Step)] = []
         /// How to end each open session or job (for stop, cancel, shutdown).
@@ -112,6 +118,8 @@ public final class FakeSpeechService: SpeechServicing {
         state.withLock { $0.fileResults[name] = result }
     }
     public func setRecordingsSize(_ bytes: Int64) { state.withLock { $0.recordingsSize = bytes } }
+    /// What `hasHeardCallAudio` reads (false until set).
+    public func setHasHeardCallAudio(_ heard: Bool) { state.withLock { $0.hasHeardCallAudio = heard } }
     /// What `recoverInterruptedRecordings()` reports (once).
     public func setInterruptedRecordings(_ recordings: [InterruptedRecording]) {
         state.withLock { $0.interrupted = recordings }
@@ -214,6 +222,9 @@ public final class FakeSpeechService: SpeechServicing {
         if options.callAudio != .off && !script.callAudioAvailable {
             steps.append { continuation.yield(.callAudioUnavailable(.permissionDenied(.systemAudio))) }
         }
+        if callAudio && script.noCallAudioHeard {
+            steps.append { continuation.yield(.noCallAudioHeard) }
+        }
         steps += script.live.map { event in { continuation.yield(event) } }
         register(owner) {
             continuation.yield(.finishing(.transcribingLastPhrases))
@@ -301,6 +312,7 @@ public final class FakeSpeechService: SpeechServicing {
 
     public func inputDevices() async -> [AudioInputDevice] { devices }
     public func runningAudioApps() async -> [RunningAudioApp] { apps }
+    public var hasHeardCallAudio: Bool { state.withLock { $0.hasHeardCallAudio } }
     public func recordingsSize() async -> Int64 { state.withLock { $0.recordingsSize } }
 
     public func deleteRecordings(for noteID: UUID) async throws { record(.deleteRecordings(noteID)) }

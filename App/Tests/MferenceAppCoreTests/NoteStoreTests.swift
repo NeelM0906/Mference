@@ -447,6 +447,7 @@ final class ControlledSpeech: SpeechServicing {
     func cancel(_ job: FileJob.ID) async { await base.cancel(job) }
     func inputDevices() async -> [AudioInputDevice] { await base.inputDevices() }
     func runningAudioApps() async -> [RunningAudioApp] { await base.runningAudioApps() }
+    var hasHeardCallAudio: Bool { base.hasHeardCallAudio }
     func recordingsSize() async -> Int64 { await base.recordingsSize() }
     func recordingsDirectory(for noteID: UUID) -> URL { base.recordingsDirectory(for: noteID) }
     func recoverInterruptedRecordings() async -> [InterruptedRecording] { await base.recoverInterruptedRecordings() }

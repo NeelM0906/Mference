@@ -33,6 +33,7 @@ public struct LiveAudioSourceFactory: AudioSourceFactory {
 
     public func inputDevices() async -> [AudioInputDevice] { CoreAudioDevices.inputDevices() }
     public func runningAudioApps() async -> [RunningAudioApp] { await CoreAudioDevices.runningAudioApps() }
+    public func isPlayingOutput(_ source: CallAudioSource) async -> Bool? { CoreAudioDevices.isPlayingOutput(source) }
 }
 
 // MARK: Microphone
@@ -448,6 +449,36 @@ enum CoreAudioDevices {
             guard let id = string(process, kAudioProcessPropertyBundleID) else { return false }
             return id == bundleID || id.hasPrefix(bundleID + ".")
         }
+    }
+
+    /// Whether the audio processes `source` covers are playing sound now
+    /// (`kAudioProcessPropertyIsRunningOutput`): every process but this
+    /// one for `.allApps`, the app and its helpers for `.app`. An app with no
+    /// audio process is not playing; nil when no process could be read.
+    static func isPlayingOutput(_ source: CallAudioSource) -> Bool? {
+        let processes: [AudioObjectID]
+        switch source {
+        case .off: return nil
+        case .allApps:
+            let own = getpid()
+            processes = objects(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyProcessObjectList)
+                .filter { property($0, kAudioProcessPropertyPID, default: own) != own }
+        case .app(let bundleID, _):
+            processes = processObjects(bundleID: bundleID)
+            if processes.isEmpty { return false }
+        }
+        var readable = false
+        for process in processes {
+            var address = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyIsRunningOutput,
+                                                     mScope: kAudioObjectPropertyScopeGlobal,
+                                                     mElement: kAudioObjectPropertyElementMain)
+            var running: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            guard AudioObjectGetPropertyData(process, &address, 0, nil, &size, &running) == noErr else { continue }
+            if running != 0 { return true }
+            readable = true
+        }
+        return readable ? false : nil
     }
 
     /// Apps with an audio process (playing or able to), by their main bundle id.

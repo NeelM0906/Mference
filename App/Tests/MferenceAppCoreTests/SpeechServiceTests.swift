@@ -554,3 +554,66 @@ import Testing
         await #expect(throws: SpeechError.notInstalled(.speech)) { _ = try await rig.service.startDictation(DictationOptions()) }
     }
 }
+
+// MARK: No call audio heard
+
+extension SpeechServiceTests {
+    static func hints(_ events: [MeetingEvent]) -> Int { events.filter { $0 == .noCallAudioHeard }.count }
+
+    static func callFinals(_ events: [MeetingEvent]) -> Int { finals(events).filter { $0.track == .call }.count }
+
+    /// A meeting whose call track plays `call`; returns its events once the
+    /// call has `callFinals` finished phrases (and the hint, if `hint`).
+    func silentCallMeeting(_ call: [(TimeInterval, Float)], playingOutput: Bool?, callFinals: Int = 0,
+                           hint: Bool) async throws -> [MeetingEvent] {
+        let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(1, 0)]))
+        let source = FakeAudioSource(track: .call, chunks: Self.chunks(call))
+        let rig = try Self.rig(sources: FakeAudioSourceFactory(microphone: mic, call: source, playingOutput: playingOutput),
+                               recognizer: AmplitudeTranscriber([(0.4, "Hello?")]))
+        defer { try? FileManager.default.removeItem(at: rig.root) }
+        let meeting = try await rig.service.startMeeting(MeetingOptions(noteID: UUID(), callAudio: .allApps))
+        let log = EventLog(meeting.events)
+        #expect(await log.wait { Self.callFinals($0) >= callFinals && (!hint || Self.hints($0) > 0) })
+        await meeting.stop()
+        #expect(await log.waitUntilFinished())
+        return await log.events
+    }
+
+    @Test func silentCallAudioHintsOnceAfterThirtySeconds() async throws {
+        // A refused tap: exact zeros for 45 s while other apps play.
+        let events = try await silentCallMeeting([(45, 0)], playingOutput: true, hint: true)
+        #expect(Self.hints(events) == 1, "once per meeting, not again at each recheck")
+        #expect(events.first == .started(callAudio: true))
+        #expect(!events.contains { if case .callAudioUnavailable = $0 { true } else { false } }, "only a hint")
+        #expect(Self.result(events)?.tracks.map(\.kind).contains(.call) == true, "the call track still records")
+    }
+
+    @Test func silentCallAudioHintsWhenPlaybackCantBeRead() async throws {
+        // Core Audio can't say whether other apps play: silence alone is enough.
+        let events = try await silentCallMeeting([(31, 0)], playingOutput: nil, hint: true)
+        #expect(Self.hints(events) == 1)
+    }
+
+    @Test func noHintBeforeThirtySeconds() async throws {
+        // 25 s of silence, then the other side speaks; the phrase proves the
+        // silence was all read.
+        let events = try await silentCallMeeting([(25, 0), (1, 0.4), (1, 0)], playingOutput: true, callFinals: 1,
+                                                 hint: false)
+        #expect(Self.hints(events) == 0)
+    }
+
+    @Test func noHintOnceTheCallWasHeard() async throws {
+        // The other side spoke at the start, then went quiet for 40 s.
+        let events = try await silentCallMeeting([(1, 0.4), (40, 0), (1, 0.4), (1, 0)], playingOutput: true,
+                                                 callFinals: 2, hint: false)
+        #expect(Self.hints(events) == 0)
+    }
+
+    @Test func noHintWhileNothingElsePlays() async throws {
+        // An in-person meeting: silence on the tap and no app playing sound
+        // through 40 s (asked at 30, 35 and 40 s), then a phrase.
+        let events = try await silentCallMeeting([(41, 0), (1, 0.4), (1, 0)], playingOutput: false, callFinals: 1,
+                                                 hint: false)
+        #expect(Self.hints(events) == 0)
+    }
+}

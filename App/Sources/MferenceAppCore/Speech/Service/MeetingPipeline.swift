@@ -60,9 +60,19 @@ actor MeetingPipeline {
     private var quitting = false
     private var quitWaiters: [any QuitWaiter] = []
     private var finishTask: Task<Void, Never>?
+    /// Whether the call track has carried a non-zero sample (a refused tap
+    /// delivers exact zeros), and whether the hint went out.
+    private var callHeard = false
+    private var silentCallHinted = false
+    /// Call-track samples at which "are other apps playing" is next asked.
+    private var nextSilentCallCheck = SpeechAudio.samples(MeetingPipeline.silentCallHintAfter)
 
     /// Live diarization is fed about once a second.
     static let liveFeedSamples = 16_000
+    /// Recording time with only silence on the call track before the hint.
+    static let silentCallHintAfter: TimeInterval = 30
+    /// While nothing else plays, how often (recording time) to ask again.
+    static let silentCallRecheck: TimeInterval = 5
 
     init(options: MeetingOptions, startedAt: Date, stages: Stages, lane: TranscriptionLane,
          sources: any AudioSourceFactory, recording: RecordingSession, segmenter: Segmenter.Configuration,
@@ -190,6 +200,7 @@ actor MeetingPipeline {
         } else {
             levels.call = level
             await feedLiveDiarizer(chunk.samples, at: start)
+            await watchForSilentCall(chunk.samples)
         }
         if let segmenter = segmenters[kind] { await handle(kind, segmenter: try await segmenter.feed(chunk.samples)) }
     }
@@ -248,6 +259,25 @@ actor MeetingPipeline {
                 continuation.yield(.segmentRemoved(mic.id))
             }
         }
+    }
+
+    /// Sends `.noCallAudioHeard` once per meeting: the tap has delivered
+    /// only exact silence for `silentCallHintAfter` of recording while the
+    /// tapped apps play sound. When Core Audio can't say whether they do,
+    /// the silence alone is enough. While they don't, it asks again every
+    /// `silentCallRecheck`. Nothing is stored: it is only a hint.
+    private func watchForSilentCall(_ samples: [Float]) async {
+        guard !callHeard, !silentCallHinted else { return }
+        if samples.contains(where: { $0 != 0 }) {
+            callHeard = true
+            return
+        }
+        guard let recorded = trackSamples[.call], recorded >= nextSilentCallCheck else { return }
+        nextSilentCallCheck = recorded + SpeechAudio.samples(Self.silentCallRecheck)
+        let playing = await sources.isPlayingOutput(options.callAudio) ?? true
+        guard playing, !callHeard, !silentCallHinted, callAvailable, phase == .running, !paused else { return }
+        silentCallHinted = true
+        continuation.yield(.noCallAudioHeard)
     }
 
     // MARK: Speakers

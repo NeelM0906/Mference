@@ -84,12 +84,15 @@ public final class FakeAudioSourceFactory: AudioSourceFactory {
     public let callSource: FakeAudioSource?
     /// What `call(_:)` throws when `callSource` is nil.
     public let callError: SpeechError
+    /// What `isPlayingOutput(_:)` answers: other apps playing, nil unreadable.
+    public let playingOutput: Bool?
 
     public init(microphone: FakeAudioSource, call: FakeAudioSource? = nil,
-                callError: SpeechError = .permissionDenied(.systemAudio)) {
+                callError: SpeechError = .permissionDenied(.systemAudio), playingOutput: Bool? = true) {
         microphoneSource = microphone
         callSource = call
         self.callError = callError
+        self.playingOutput = playingOutput
     }
 
     public func microphone(deviceID: String?) throws -> any AudioSource { microphoneSource }
@@ -104,6 +107,8 @@ public final class FakeAudioSourceFactory: AudioSourceFactory {
     }
 
     public func runningAudioApps() async -> [RunningAudioApp] { [] }
+
+    public func isPlayingOutput(_ source: CallAudioSource) async -> Bool? { playingOutput }
 }
 
 /// Speech probability from the audio itself: a frame whose peak is above

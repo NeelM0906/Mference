@@ -41,6 +41,30 @@ Rules that follow from them:
   owned by the feature and stored as `Data` in the schema's `*JSON` fields, so
   a feature can evolve them without a schema migration.
 
+## Speech: call audio heard (N2, 2026-11-20)
+
+macOS can't report whether call audio (the Core Audio process tap) was
+allowed: a refused tap does not fail, it delivers exact silence. So the
+permission reads `.granted` once it has been asked, and is never stored or
+shown as denied from silence. Two additions to `SpeechServicing` cover the gap:
+
+- `SpeechServicing.hasHeardCallAudio` (read-only, never prompts): whether a
+  meeting's tap has ever heard other apps (`SystemAudioPermission`). Settings
+  › Speech shows call audio as "System audio recording · asked" until it is
+  true, then "· allowed". `FakeSpeechService.setHasHeardCallAudio(_:)` sets it.
+- `MeetingEvent.noCallAudioHeard`, a hint sent at most once per meeting.
+  It is sent when call audio is on, the tap has delivered only exact silence
+  for 30 s of recording, and the tapped apps are playing sound
+  (`kAudioProcessPropertyIsRunningOutput`: every app but Mference for All
+  apps, else the chosen app). When Core Audio can't say whether they play,
+  30 s of silence alone sends it. While they don't play, it is checked again
+  every 5 s. The meeting keeps recording both tracks. Show it with
+  `MeetingEvent.noCallAudioHeardMessage`: "No call audio yet. If the other
+  side is talking, check Call audio in System Settings."
+  `FakeSpeechService.MeetingScript(noCallAudioHeard: true)` sends it right
+  after `.started` when the meeting records call audio. The meeting session
+  ignores it for now; the meeting screen renders it (N3/N4).
+
 ## Build and test
 
 The app builds with Xcode's toolchain (SwiftData's `@Model` macro is not in

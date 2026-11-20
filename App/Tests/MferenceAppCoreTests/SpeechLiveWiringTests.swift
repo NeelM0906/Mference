@@ -54,6 +54,24 @@ import Testing
         #expect(!permission.hasHeardCallAudio)
     }
 
+    @Test func theServiceReadsHeardCallAudioFromItsPermission() throws {
+        // `SpeechService.live` passes `SystemAudioPermission.hasHeardCallAudio`.
+        let store = InMemorySettingsStore()
+        let permission = SystemAudioPermission(store: store, probe: { false })
+        let root = FileManager.default.temporaryDirectory.appending(path: "heard-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = SpeechService(.init(
+            installer: SpeechModelInstaller(root: root, packages: [:], allowedHosts: []),
+            loader: ScriptedModelLoader(recognizer: ScriptedTranscriber(), voiceActivity: ScriptedVoiceActivity(),
+                                        diarizer: ScriptedDiarizer(live: [], final: [])),
+            sources: FakeAudioSourceFactory(microphone: FakeAudioSource(track: .microphone, chunks: [])),
+            recordings: RecordingStore(root: root, availableBytes: { _ in 100 << 30 }), power: FakePowerEvents(),
+            callAudioHeard: { permission.hasHeardCallAudio }))
+        #expect(!service.hasHeardCallAudio)
+        permission.heardCallAudio()
+        #expect(service.hasHeardCallAudio)
+    }
+
     @Test func theBrokerAsksThroughThePersistedAccess() async {
         let store = InMemorySettingsStore()
         let permission = SystemAudioPermission(store: store, probe: { true })

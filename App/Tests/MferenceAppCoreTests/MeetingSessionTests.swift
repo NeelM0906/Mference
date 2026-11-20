@@ -704,6 +704,7 @@ final class ManualMeetingSpeech: SpeechServicing, @unchecked Sendable {
     func cancel(_ job: FileJob.ID) async {}
     func inputDevices() async -> [AudioInputDevice] { [] }
     func runningAudioApps() async -> [RunningAudioApp] { [] }
+    var hasHeardCallAudio: Bool { false }
     func recordingsSize() async -> Int64 { 0 }
     func deleteRecordings(for noteID: UUID) async throws {}
     func recordingsDirectory(for noteID: UUID) -> URL {

@@ -89,6 +89,39 @@ import Testing
         #expect(result.duration == 12)
     }
 
+    @Test func theFakeSendsTheNoCallAudioHintAfterStart() async throws {
+        let script = FakeSpeechService.MeetingScript(noCallAudioHeard: true,
+                                                     result: TranscriptResult(segments: [], speakers: [.you], duration: 40))
+        let speech = FakeSpeechService(meeting: script)
+        let meeting = try await speech.startMeeting(MeetingOptions(noteID: UUID(), callAudio: .allApps))
+        await meeting.stop()
+        var events: [MeetingEvent] = []
+        for await event in meeting.events { events.append(event) }
+        #expect(Array(events.prefix(2)) == [.started(callAudio: true), .noCallAudioHeard])
+        #expect(events.filter { $0 == .noCallAudioHeard }.count == 1)
+        // No call audio, no hint: off, or unavailable.
+        for (options, available) in [(MeetingOptions(noteID: UUID(), callAudio: .off), true),
+                                     (MeetingOptions(noteID: UUID(), callAudio: .allApps), false)] {
+            var unheard = script
+            unheard.callAudioAvailable = available
+            speech.setMeetingScript(unheard)
+            let other = try await speech.startMeeting(options)
+            await other.stop()
+            var seen: [MeetingEvent] = []
+            for await event in other.events { seen.append(event) }
+            #expect(!seen.contains(.noCallAudioHeard))
+        }
+        #expect(MeetingEvent.noCallAudioHeardMessage
+                == "No call audio yet. If the other side is talking, check Call audio in System Settings.")
+    }
+
+    @Test func theFakeReportsWhetherCallAudioWasHeard() {
+        let speech = FakeSpeechService()
+        #expect(!speech.hasHeardCallAudio)
+        speech.setHasHeardCallAudio(true)
+        #expect(speech.hasHeardCallAudio)
+    }
+
     @Test func fileJobsReportProgressAndTheirResult() async throws {
         let speech = FakeSpeechService()
         let segment = TranscriptSegment(track: .file, start: 0, end: 2, speakerID: SpeakerInfo.othersID,

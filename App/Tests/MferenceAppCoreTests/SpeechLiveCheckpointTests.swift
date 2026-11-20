@@ -487,6 +487,7 @@ final class FixtureSources: AudioSourceFactory {
 
     func inputDevices() async -> [AudioInputDevice] { [] }
     func runningAudioApps() async -> [RunningAudioApp] { [] }
+    func isPlayingOutput(_ source: CallAudioSource) async -> Bool? { true }
 }
 
 /// One stream's events with their arrival time, in seconds from `start`.

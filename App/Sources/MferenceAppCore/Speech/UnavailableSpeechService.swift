@@ -34,6 +34,7 @@ public final class UnavailableSpeechService: SpeechServicing {
     public func cancel(_ job: FileJob.ID) async {}
     public func inputDevices() async -> [AudioInputDevice] { [] }
     public func runningAudioApps() async -> [RunningAudioApp] { [] }
+    public var hasHeardCallAudio: Bool { false }
     public func recordingsSize() async -> Int64 { 0 }
     public func deleteRecordings(for noteID: UUID) async throws {}
     public func recordingsDirectory(for noteID: UUID) -> URL {

@@ -27,13 +27,17 @@ public final class SpeechService: SpeechServicing {
         /// read without prompting. The record popover asks first (reason,
         /// then the system prompt, L6); a meeting never taps without it.
         public var callAudioAllowed: @Sendable () async -> Bool
+        /// Whether a tap has ever heard other apps (`SystemAudioPermission`),
+        /// for `hasHeardCallAudio`.
+        public var callAudioHeard: @Sendable () -> Bool
 
         public init(installer: SpeechModelInstaller, loader: any SpeechModelLoading, sources: any AudioSourceFactory,
                     recordings: RecordingStore, power: any PowerEventSource,
                     segmenter: Segmenter.Configuration = Segmenter.Configuration(),
                     idleUnload: Duration? = .seconds(600),
                     onCallAudioFailure: @escaping @Sendable (SpeechError) async -> Void = { _ in },
-                    callAudioAllowed: @escaping @Sendable () async -> Bool = { true }) {
+                    callAudioAllowed: @escaping @Sendable () async -> Bool = { true },
+                    callAudioHeard: @escaping @Sendable () -> Bool = { false }) {
             self.installer = installer
             self.loader = loader
             self.sources = sources
@@ -43,6 +47,7 @@ public final class SpeechService: SpeechServicing {
             self.idleUnload = idleUnload
             self.onCallAudioFailure = onCallAudioFailure
             self.callAudioAllowed = callAudioAllowed
+            self.callAudioHeard = callAudioHeard
         }
     }
 
@@ -50,6 +55,7 @@ public final class SpeechService: SpeechServicing {
     private let coordinator: SpeechCoordinator
     private let recordings: RecordingStore
     private let installer: SpeechModelInstaller
+    private let callAudioHeard: @Sendable () -> Bool
 
     public init(_ dependencies: Dependencies) {
         let installer = dependencies.installer
@@ -62,11 +68,14 @@ public final class SpeechService: SpeechServicing {
         coordinator = SpeechCoordinator(dependencies: dependencies, box: box)
         recordings = dependencies.recordings
         self.installer = installer
+        callAudioHeard = dependencies.callAudioHeard
         let coordinator = coordinator
         Task { await coordinator.listenForPower() }
     }
 
     // MARK: SpeechServicing
+
+    public var hasHeardCallAudio: Bool { callAudioHeard() }
 
     public var status: SpeechStatus { box.status }
     public func statusUpdates() -> AsyncStream<SpeechStatus> { box.updates() }
