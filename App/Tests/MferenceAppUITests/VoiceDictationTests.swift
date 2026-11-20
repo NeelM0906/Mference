@@ -83,6 +83,8 @@ final class AppendingTarget: DictationInsertionTarget {
         #expect(DictationBar.detail(.listening, error: nil) == "Text lands after each pause")
         #expect(DictationBar.title(.idle, error: .permissionDenied(.microphone)) == "Dictation stopped")
         #expect(DictationBar.detail(.idle, error: .busy(.meeting)) == "A meeting is recording. Stop it first.")
+        #expect(DictationBar.detail(.listening, error: nil, cleanUpChanged: true)
+                == "Clean up applies from your next dictation")
         #expect(VoiceFormat.languageChip(.automatic, detected: "en") == "English · auto")
         #expect(VoiceFormat.languageChip(.automatic, detected: nil) == "Automatic")
         #expect(VoiceFormat.languageChip(.fixed("de"), detected: "en") == "German")
@@ -165,5 +167,38 @@ struct DictationBoardEditor: View {
             Spacer()
         }
         .background(MFColor.surface)
+    }
+}
+
+/// Leaving Notes mid-dictation (review of #218): the shell waits for the
+/// last phrase, then switches.
+@MainActor
+@Suite struct VoiceLeaveNotesTests {
+    @Test func leavingNotesLandsTheLastPhraseFirst() async throws {
+        let speech = FakeSpeechService(dictation: .saying("one more thing"), stepped: true)
+        let voice = VoiceModels(speech: speech, permissions: FakePermissionBroker(),
+                                preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
+        let shell = ShellModel(selection: .notes, defaults: nil)
+        shell.finishBeforeLeaving = { VoiceModels.finishBeforeLeaving($0, voice: voice) }
+        let note = AppendingTarget(text: "Agenda.")
+        await voice.dictation.start(in: note)
+        speech.advance(); speech.advance() // level, phrase started
+        for _ in 0..<20 { await Task.yield() }
+        shell.show(.chat)
+        #expect(shell.selection == .notes, "Notes stays until the phrase is in")
+        await shell.waitForPendingSwitch()
+        #expect(shell.selection == .chat)
+        #expect(note.text == "Agenda. One more thing")
+        #expect(!voice.dictation.isActive)
+    }
+
+    @Test func otherSwitchesAreImmediate() {
+        let voice = VoiceModels(speech: FakeSpeechService(), permissions: FakePermissionBroker(),
+                                preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
+        let shell = ShellModel(selection: .notes, defaults: nil)
+        shell.finishBeforeLeaving = { VoiceModels.finishBeforeLeaving($0, voice: voice) }
+        shell.show(.chat)
+        #expect(shell.selection == .chat, "nothing to finish: the switch is immediate")
+        #expect(VoiceModels.finishBeforeLeaving(.chat, voice: voice) == nil)
     }
 }
