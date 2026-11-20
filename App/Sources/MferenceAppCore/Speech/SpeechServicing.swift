@@ -10,6 +10,15 @@ import Foundation
 // (dictation or meeting) at a time; starting a second throws
 // `SpeechError.busy`. File jobs run one at a time and pause while a live
 // session runs. No call here downloads anything except `install`.
+//
+// STREAM OWNERSHIP: `DictationSession.events`, `MeetingRecording.events` and
+// `FileJob.events` are single-consumer `AsyncStream`s. Each must be consumed
+// by one long-lived `MferenceAppCore` owner held by `AppServices` (the
+// meeting session, the file-transcription queue, the dictation controller),
+// never by a SwiftUI view's `.task`: leaving the screen cancels the task,
+// which ends the stream and loses the rest (a meeting keeps recording when
+// you leave Notes, D7; files keep transcribing with the sheet closed, 4.6).
+// Views observe those owners instead. Two tasks awaiting one stream trap.
 
 public protocol SpeechServicing: AnyObject, Sendable {
     /// The current status, without waiting.
@@ -24,7 +33,9 @@ public protocol SpeechServicing: AnyObject, Sendable {
     func downloadSize(of package: SpeechPackageID) -> Int64
     /// Downloads (resuming a paused download), verifies every file against
     /// its pinned SHA-256, then runs the first load. Returns when `.ready`.
-    /// Throws `SpeechError.offline` in Offline mode.
+    /// Throws `SpeechError.offline` in Offline mode, and `CancellationError`
+    /// when `pauseInstall` or `cancelInstall` stops it (the status then says
+    /// `.paused` or `.notInstalled`). A second call while one runs waits for it.
     func install(_ package: SpeechPackageID) async throws
     func pauseInstall(_ package: SpeechPackageID) async
     /// Stops and deletes the partial download.
@@ -61,7 +72,12 @@ public protocol SpeechServicing: AnyObject, Sendable {
     /// Where a note's audio lives, for playback and Show in Finder.
     func recordingsDirectory(for noteID: UUID) -> URL
 
-    /// Stops a live session, finishing the last phrase; for quit (spec 6.1).
+    /// Meetings the app quit in, with their audio files closed and usable;
+    /// called once at launch, before any new session (spec 6.3).
+    func recoverInterruptedRecordings() async -> [InterruptedRecording]
+
+    /// Stops any live session (its stream gets `.ended`) and file jobs, for
+    /// quit (spec 6.1). Returns when capture has stopped and files are closed.
     func shutdown() async
 }
 
@@ -155,7 +171,9 @@ public final class DictationSession: Sendable {
         self.onLanguage = setLanguage
     }
 
-    /// Finishes the phrase in progress, then ends (Done, Esc, ⇧⌘D).
+    /// Finishes the phrase in progress, then ends (Done, Esc, ⇧⌘D, switching
+    /// notes). Returns after the last `.phraseFinished`/`.phraseDropped` and
+    /// `.ended` are in the stream. Calling it again is a no-op.
     public func stop() async { await onStop() }
     /// The language chip: pin one or go back to automatic.
     public func setLanguage(_ language: SpeechLanguage) async { await onLanguage(language) }
@@ -183,7 +201,9 @@ public enum MeetingEvent: Sendable, Hashable {
     /// After stop: finishing phrases, then the final speaker pass.
     case finishing(MeetingFinishStep)
     case failed(SpeechError)
-    /// Final result (segments relabelled by the offline pass); the stream finishes after this.
+    /// Final result; the stream finishes after this. Segments keep the ids
+    /// they had live (only `speakerID` may change); `speakerMapping` maps
+    /// live speaker ids to final ones.
     case ended(TranscriptResult)
 }
 
@@ -200,7 +220,8 @@ public final class MeetingRecording: Sendable {
         public var resume: @Sendable () async -> Void
         /// Returns the recording time of the mark.
         public var markMoment: @Sendable () async -> TimeInterval
-        /// Ends capture; the result arrives as `.ended`.
+        /// Ends capture and returns once capture has stopped; the finishing
+        /// steps and the result follow as events. Calling it again is a no-op.
         public var stop: @Sendable () async -> Void
 
         public init(pause: @escaping @Sendable () async -> Void, resume: @escaping @Sendable () async -> Void,

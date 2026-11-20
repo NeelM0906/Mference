@@ -39,5 +39,6 @@ public final class UnavailableSpeechService: SpeechServicing {
     public func recordingsDirectory(for noteID: UUID) -> URL {
         AppStorageLocation.applicationSupport.appending(path: "Recordings/\(noteID.uuidString)", directoryHint: .isDirectory)
     }
+    public func recoverInterruptedRecordings() async -> [InterruptedRecording] { [] }
     public func shutdown() async {}
 }

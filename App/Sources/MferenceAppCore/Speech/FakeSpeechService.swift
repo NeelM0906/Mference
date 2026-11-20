@@ -5,9 +5,12 @@ import Synchronization
 /// call tap, no network, no TCC. Package states, dictation phrases, meeting
 /// segments and file results are scripted; every call is recorded.
 ///
-/// Live sessions follow the real rules: one at a time (`SpeechError.busy`),
-/// and only once `.speech` is ready. Scripts play as soon as a session
-/// starts unless `stepped` is set; then `advance()` plays one event at a time.
+/// Sessions follow the real rules: `.speech` must be ready, one live session
+/// at a time (`SpeechError.busy`), `stop` is idempotent and releases only its
+/// own session, `cancel` ends that job's stream with `.cancelled`, and
+/// `shutdown` ends everything. Scripts play as soon as a session starts
+/// unless `stepped` is set; then `advance()` plays one event at a time, and
+/// stopping a session plays the rest of that session's events only.
 public final class FakeSpeechService: SpeechServicing {
     public enum Call: Sendable, Hashable {
         case install(SpeechPackageID), pauseInstall(SpeechPackageID), cancelInstall(SpeechPackageID)
@@ -15,7 +18,7 @@ public final class FakeSpeechService: SpeechServicing {
         case startDictation(DictationOptions), stopDictation, setLanguage(SpeechLanguage)
         case startMeeting(MeetingOptions), pause, resume, markMoment, stopMeeting
         case transcribeFile(String, FileTranscriptionOptions), cancel(FileJob.ID)
-        case deleteRecordings(UUID), shutdown
+        case deleteRecordings(UUID), recoverInterruptedRecordings, shutdown
     }
 
     /// What a dictation session says: each phrase as started, then finished
@@ -40,6 +43,8 @@ public final class FakeSpeechService: SpeechServicing {
         }
     }
 
+    private typealias Step = @Sendable () -> Void
+
     private struct State {
         var status: SpeechStatus
         var calls: [Call] = []
@@ -47,10 +52,15 @@ public final class FakeSpeechService: SpeechServicing {
         var dictation: DictationScript
         var meeting: MeetingScript?
         var fileResults: [String: Result<TranscriptResult, SpeechError>] = [:]
+        var interrupted: [InterruptedRecording] = []
         var installError: SpeechError?
         var startError: SpeechError?
-        var pending: [@Sendable () -> Void] = []
-        var stoppers: [@Sendable () -> Void] = []
+        /// Scripted events not yet played, with the session or job they belong to.
+        var pending: [(owner: UUID, step: Step)] = []
+        /// How to end each open session or job (for stop, cancel, shutdown).
+        var enders: [UUID: Step] = [:]
+        /// The session holding the microphone.
+        var liveOwner: UUID?
         var markTime: TimeInterval = 0
         var recordingsSize: Int64 = 0
     }
@@ -66,7 +76,7 @@ public final class FakeSpeechService: SpeechServicing {
     public init(status: SpeechStatus = SpeechStatus(speech: .ready, speakerLabels: .ready),
                 dictation: DictationScript = .saying("Hello from dictation."),
                 meeting: MeetingScript? = nil,
-                sizes: [SpeechPackageID: Int64] = [.speech: 653_632_103, .speakerLabels: 22_000_000],
+                sizes: [SpeechPackageID: Int64] = [.speech: 653_632_103, .speakerLabels: 111_000_000],
                 devices: [AudioInputDevice] = [AudioInputDevice(id: "builtin", name: "MacBook Pro Microphone",
                                                                 isDefault: true)],
                 apps: [RunningAudioApp] = [RunningAudioApp(bundleID: "us.zoom.xos", name: "zoom.us")],
@@ -89,9 +99,7 @@ public final class FakeSpeechService: SpeechServicing {
 
     public var calls: [Call] { state.withLock { $0.calls } }
 
-    public func setStatus(_ status: SpeechStatus) {
-        mutate { $0 = status }
-    }
+    public func setStatus(_ status: SpeechStatus) { mutate { $0 = status } }
 
     /// The next `install` fails with this error (once).
     public func failNextInstall(with error: SpeechError) { state.withLock { $0.installError = error } }
@@ -103,13 +111,17 @@ public final class FakeSpeechService: SpeechServicing {
         state.withLock { $0.fileResults[name] = result }
     }
     public func setRecordingsSize(_ bytes: Int64) { state.withLock { $0.recordingsSize = bytes } }
+    /// What `recoverInterruptedRecordings()` reports (once).
+    public func setInterruptedRecordings(_ recordings: [InterruptedRecording]) {
+        state.withLock { $0.interrupted = recordings }
+    }
+    /// The recording time `markMoment()` reports (tests set the meeting clock).
+    public func setMeetingTime(_ time: TimeInterval) { state.withLock { $0.markTime = time } }
 
     /// Plays the next scripted event (stepped mode). Returns false when none is left.
     @discardableResult
     public func advance() -> Bool {
-        let next: (@Sendable () -> Void)? = state.withLock { s in
-            s.pending.isEmpty ? nil : s.pending.removeFirst()
-        }
+        let next: Step? = state.withLock { s in s.pending.isEmpty ? nil : s.pending.removeFirst().step }
         next?()
         return next != nil
     }
@@ -161,10 +173,11 @@ public final class FakeSpeechService: SpeechServicing {
 
     public func startDictation(_ options: DictationOptions) async throws -> DictationSession {
         record(.startDictation(options))
-        try claimLiveSession(.dictation)
+        let owner = UUID()
+        try claimLiveSession(LiveSessionStatus(kind: .dictation, noteID: nil, startedAt: .now), owner: owner)
         let (events, continuation) = AsyncStream.makeStream(of: DictationEvent.self)
         let script = state.withLock { $0.dictation }
-        var steps: [@Sendable () -> Void] = [{ continuation.yield(.level(0.4)) }]
+        var steps: [Step] = [{ continuation.yield(.level(0.4)) }]
         for phrase in script.phrases {
             let id = UUID()
             steps.append { continuation.yield(.phraseStarted(id)) }
@@ -174,69 +187,82 @@ public final class FakeSpeechService: SpeechServicing {
                 steps.append { continuation.yield(.phraseDropped(id)) }
             }
         }
-        let end: @Sendable () -> Void = { [weak self] in
+        register(owner) {
             continuation.yield(.ended)
             continuation.finish()
-            self?.releaseLiveSession()
         }
-        schedule(steps)
+        schedule(steps, owner: owner)
         return DictationSession(events: events,
                                 stop: { [weak self] in
                                     self?.record(.stopDictation)
-                                    self?.flushPending()
-                                    end()
+                                    self?.end(owner)
                                 },
                                 setLanguage: { [weak self] language in self?.record(.setLanguage(language)) })
     }
 
     public func startMeeting(_ options: MeetingOptions) async throws -> MeetingRecording {
         record(.startMeeting(options))
-        try claimLiveSession(.meeting)
+        let owner = UUID()
+        let startedAt = Date.now
+        try claimLiveSession(LiveSessionStatus(kind: .meeting, noteID: options.noteID, startedAt: startedAt), owner: owner)
         let script = state.withLock { $0.meeting } ?? MeetingScript(result: TranscriptResult(
             segments: [], speakers: [.you], duration: 0))
         let (events, continuation) = AsyncStream.makeStream(of: MeetingEvent.self)
         let callAudio = options.callAudio != .off && script.callAudioAvailable
-        var steps: [@Sendable () -> Void] = [{ continuation.yield(.started(callAudio: callAudio)) }]
+        var steps: [Step] = [{ continuation.yield(.started(callAudio: callAudio)) }]
         if options.callAudio != .off && !script.callAudioAvailable {
             steps.append { continuation.yield(.callAudioUnavailable(.permissionDenied(.systemAudio))) }
         }
         steps += script.live.map { event in { continuation.yield(event) } }
-        schedule(steps)
+        register(owner) {
+            continuation.yield(.finishing(.transcribingLastPhrases))
+            continuation.yield(.finishing(.labellingSpeakers(progress: 1)))
+            continuation.yield(.ended(script.result))
+            continuation.finish()
+        }
+        schedule(steps, owner: owner)
         let controls = MeetingRecording.Controls(
-            pause: { [weak self] in self?.record(.pause); continuation.yield(.paused) },
-            resume: { [weak self] in self?.record(.resume); continuation.yield(.resumed) },
+            pause: { [weak self] in
+                self?.record(.pause)
+                self?.setPaused(true, owner: owner)
+                continuation.yield(.paused)
+            },
+            resume: { [weak self] in
+                self?.record(.resume)
+                self?.setPaused(false, owner: owner)
+                continuation.yield(.resumed)
+            },
             markMoment: { [weak self] in
                 self?.record(.markMoment)
                 return self?.state.withLock { $0.markTime } ?? 0
             },
             stop: { [weak self] in
                 self?.record(.stopMeeting)
-                self?.flushPending()
-                continuation.yield(.finishing(.transcribingLastPhrases))
-                continuation.yield(.finishing(.labellingSpeakers(progress: 1)))
-                continuation.yield(.ended(script.result))
-                continuation.finish()
-                self?.releaseLiveSession()
+                self?.end(owner)
             })
-        return MeetingRecording(noteID: options.noteID, startedAt: .now, events: events, controls: controls)
+        return MeetingRecording(noteID: options.noteID, startedAt: startedAt, events: events, controls: controls)
     }
-
-    /// The recording time `markMoment()` reports (tests set the meeting clock).
-    public func setMeetingTime(_ time: TimeInterval) { state.withLock { $0.markTime = time } }
 
     public func transcribeFile(_ url: URL, options: FileTranscriptionOptions) async throws -> FileJob {
         let name = url.lastPathComponent
         record(.transcribeFile(name, options))
-        try requireReady()
+        guard status.speech.isReady else { throw SpeechError.notInstalled(.speech) }
         if let error = takeStartError() { throw error }
         let (events, continuation) = AsyncStream.makeStream(of: FileJobEvent.self)
         let job = FileJob(noteID: options.noteID, fileName: name, events: events)
+        let id = job.id
         let result = state.withLock { $0.fileResults[name] }
             ?? .success(TranscriptResult(segments: [], speakers: [.others], duration: 0))
-        mutate { $0.fileQueue.append(FileJobStatus(id: job.id, noteID: options.noteID, fileName: name)) }
-        let id = job.id
-        schedule([
-            { continuation.yield(.queued(position: 0)) },
+        mutate { $0.fileQueue.append(FileJobStatus(id: id, noteID: options.noteID, fileName: name)) }
+        var steps: [Step] = [{ continuation.yield(.queued(position: 0)) }]
+        if status.liveSession != nil {
+            // Files wait while dictation or a meeting runs.
+            steps.append { [weak self] in
+                continuation.yield(.paused)
+                self?.updateJob(id) { $0.phase = .paused }
+            }
+        }
+        steps += [
             { continuation.yield(.started(duration: 60)) },
             { [weak self] in
                 continuation.yield(.progress(fraction: 0.5, remaining: 2, languageCode: "en"))
@@ -251,14 +277,24 @@ public final class FakeSpeechService: SpeechServicing {
                 self?.updateJob(id) { job in
                     if case .success = result { job.phase = .done; job.fraction = 1 } else { job.phase = .failed }
                 }
+                self?.state.withLock { _ = $0.enders.removeValue(forKey: id) }
             },
-        ])
-        state.withLock { $0.stoppers.append { continuation.yield(.cancelled); continuation.finish() } }
+        ]
+        register(id) {
+            continuation.yield(.cancelled)
+            continuation.finish()
+        }
+        schedule(steps, owner: id)
         return job
     }
 
     public func cancel(_ job: FileJob.ID) async {
         record(.cancel(job))
+        let ender = state.withLock { s -> Step? in
+            s.pending.removeAll { $0.owner == job }
+            return s.enders.removeValue(forKey: job)
+        }
+        ender?()
         mutate { $0.fileQueue.removeAll { $0.id == job } }
     }
 
@@ -272,26 +308,28 @@ public final class FakeSpeechService: SpeechServicing {
         recordingsRoot.appending(path: noteID.uuidString, directoryHint: .isDirectory)
     }
 
+    public func recoverInterruptedRecordings() async -> [InterruptedRecording] {
+        record(.recoverInterruptedRecordings)
+        return state.withLock { s in defer { s.interrupted = [] }; return s.interrupted }
+    }
+
     public func shutdown() async {
         record(.shutdown)
-        let stoppers = state.withLock { s -> [@Sendable () -> Void] in
-            defer { s.stoppers = []; s.pending = [] }
-            return s.stoppers
-        }
-        stoppers.forEach { $0() }
-        releaseLiveSession()
+        let owners = state.withLock { Array($0.enders.keys) }
+        for owner in owners { end(owner) }
     }
 
     // MARK: Internals
 
     private func record(_ call: Call) { state.withLock { $0.calls.append(call) } }
 
+    /// Changes the status and tells observers in order (inside the lock, so
+    /// two changes can never reach an observer swapped).
     private func mutate(_ change: (inout SpeechStatus) -> Void) {
-        let (status, observers) = state.withLock { s in
+        state.withLock { s in
             change(&s.status)
-            return (s.status, Array(s.observers.values))
+            for observer in s.observers.values { observer.yield(s.status) }
         }
-        observers.forEach { $0.yield(status) }
     }
 
     private func setPackage(_ package: SpeechPackageID, _ value: SpeechModelState) {
@@ -303,38 +341,71 @@ public final class FakeSpeechService: SpeechServicing {
         }
     }
 
-    private func updateJob(_ id: FileJob.ID, _ change: @escaping (inout FileJobStatus) -> Void) {
+    private func updateJob(_ id: FileJob.ID, _ change: (inout FileJobStatus) -> Void) {
         mutate { status in
             if let index = status.fileQueue.firstIndex(where: { $0.id == id }) { change(&status.fileQueue[index]) }
         }
-    }
-
-    private func requireReady() throws {
-        guard status.speech.isReady else { throw SpeechError.notInstalled(.speech) }
     }
 
     private func takeStartError() -> SpeechError? {
         state.withLock { s in defer { s.startError = nil }; return s.startError }
     }
 
-    private func claimLiveSession(_ kind: LiveSessionKind) throws {
-        try requireReady()
-        if let error = takeStartError() { throw error }
-        if let running = status.liveSession { throw SpeechError.busy(running) }
-        mutate { $0.liveSession = kind }
-    }
-
-    private func releaseLiveSession() { mutate { $0.liveSession = nil } }
-
-    private func schedule(_ steps: [@Sendable () -> Void]) {
-        if stepped {
-            state.withLock { $0.pending += steps }
-        } else {
-            steps.forEach { $0() }
+    /// Checks and claims the microphone in one step.
+    private func claimLiveSession(_ live: LiveSessionStatus, owner: UUID) throws {
+        try state.withLock { s in
+            guard s.status.speech.isReady else { throw SpeechError.notInstalled(.speech) }
+            if let error = s.startError {
+                s.startError = nil
+                throw error
+            }
+            if let running = s.status.liveSession { throw SpeechError.busy(running.kind) }
+            s.liveOwner = owner
+            s.status.liveSession = live
+            for observer in s.observers.values { observer.yield(s.status) }
         }
     }
 
-    private func flushPending() {
-        while advance() {}
+    private func setPaused(_ paused: Bool, owner: UUID) {
+        mutate { status in
+            guard var live = status.liveSession, live.isPaused != paused else { return }
+            let now = Date.now
+            live.recordedTime = live.recordedTime(at: now)
+            live.updatedAt = now
+            live.isPaused = paused
+            status.liveSession = live
+        }
+        _ = owner
+    }
+
+    private func register(_ owner: UUID, ender: @escaping Step) {
+        state.withLock { $0.enders[owner] = ender }
+    }
+
+    /// Plays the rest of `owner`'s events, then ends it, once; releases the
+    /// microphone only if `owner` holds it.
+    private func end(_ owner: UUID) {
+        let (rest, ender) = state.withLock { s -> ([Step], Step?) in
+            let rest = s.pending.filter { $0.owner == owner }.map { $0.step }
+            s.pending.removeAll { $0.owner == owner }
+            return (rest, s.enders.removeValue(forKey: owner))
+        }
+        guard let ender else { return }
+        rest.forEach { $0() }
+        ender()
+        state.withLock { s in
+            guard s.liveOwner == owner else { return }
+            s.liveOwner = nil
+            s.status.liveSession = nil
+            for observer in s.observers.values { observer.yield(s.status) }
+        }
+    }
+
+    private func schedule(_ steps: [Step], owner: UUID) {
+        if stepped {
+            state.withLock { s in s.pending += steps.map { (owner, $0) } }
+        } else {
+            steps.forEach { $0() }
+        }
     }
 }

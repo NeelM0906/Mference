@@ -35,13 +35,14 @@ public enum SpeechModelState: Sendable, Hashable {
 public struct SpeechStatus: Sendable, Hashable {
     public var speech: SpeechModelState
     public var speakerLabels: SpeechModelState
-    /// The live session holding the microphone, if any.
-    public var liveSession: LiveSessionKind?
+    /// The live session holding the microphone, if any (the recording chip
+    /// and the menu bar item read it).
+    public var liveSession: LiveSessionStatus?
     /// Files waiting or running (the queue keeps going with the sheet closed).
     public var fileQueue: [FileJobStatus]
 
     public init(speech: SpeechModelState = .notInstalled, speakerLabels: SpeechModelState = .notInstalled,
-                liveSession: LiveSessionKind? = nil, fileQueue: [FileJobStatus] = []) {
+                liveSession: LiveSessionStatus? = nil, fileQueue: [FileJobStatus] = []) {
         self.speech = speech
         self.speakerLabels = speakerLabels
         self.liveSession = liveSession
@@ -58,6 +59,33 @@ public struct SpeechStatus: Sendable, Hashable {
 
 public enum LiveSessionKind: String, Sendable, Hashable, Codable {
     case dictation, meeting
+}
+
+/// The session holding the microphone.
+public struct LiveSessionStatus: Sendable, Hashable {
+    public var kind: LiveSessionKind
+    /// The note it writes into (the meeting note, or the note being dictated into).
+    public var noteID: UUID?
+    public var startedAt: Date
+    public var isPaused: Bool
+    /// Recording time so far, pauses excluded, as of `updatedAt`.
+    public var recordedTime: TimeInterval
+    public var updatedAt: Date
+
+    public init(kind: LiveSessionKind, noteID: UUID?, startedAt: Date, isPaused: Bool = false,
+                recordedTime: TimeInterval = 0, updatedAt: Date? = nil) {
+        self.kind = kind
+        self.noteID = noteID
+        self.startedAt = startedAt
+        self.isPaused = isPaused
+        self.recordedTime = recordedTime
+        self.updatedAt = updatedAt ?? startedAt
+    }
+
+    /// Recording time at `now`: the timer chip's text.
+    public func recordedTime(at now: Date) -> TimeInterval {
+        isPaused ? recordedTime : recordedTime + max(0, now.timeIntervalSince(updatedAt))
+    }
 }
 
 /// What a speech call can fail with; `message` is the line the UI shows.
@@ -220,10 +248,14 @@ public struct TranscriptResult: Sendable, Hashable {
     public var languageCode: String?
     /// The folder holding `tracks`; nil when no audio was kept.
     public var audioDirectory: URL?
+    /// Live speaker id → final speaker id, from the final diarization pass,
+    /// so renames made during the meeting carry over. Segment ids never
+    /// change between live and final.
+    public var speakerMapping: [String: String]
 
     public init(segments: [TranscriptSegment], speakers: [SpeakerInfo], tracks: [RecordedTrack] = [],
                 gaps: [RecordingGap] = [], duration: TimeInterval, languageCode: String? = nil,
-                audioDirectory: URL? = nil) {
+                audioDirectory: URL? = nil, speakerMapping: [String: String] = [:]) {
         self.segments = segments
         self.speakers = speakers
         self.tracks = tracks
@@ -231,6 +263,23 @@ public struct TranscriptResult: Sendable, Hashable {
         self.duration = duration
         self.languageCode = languageCode
         self.audioDirectory = audioDirectory
+        self.speakerMapping = speakerMapping
+    }
+}
+
+/// A meeting the app quit in (crash, power loss), found at the next launch.
+/// The speech service has already closed its audio files; the meetings layer
+/// closes the note with what was saved.
+public struct InterruptedRecording: Sendable, Hashable {
+    public var noteID: UUID
+    public var tracks: [RecordedTrack]
+    /// When the last audio was written.
+    public var endedAt: Date
+
+    public init(noteID: UUID, tracks: [RecordedTrack], endedAt: Date) {
+        self.noteID = noteID
+        self.tracks = tracks
+        self.endedAt = endedAt
     }
 }
 
