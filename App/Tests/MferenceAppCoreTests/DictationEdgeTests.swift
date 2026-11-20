@@ -94,7 +94,7 @@ final class InboxTarget: DictationInsertionTarget {
         let broker = GatedBroker()
         let dictation = DictationController(speech: speech, permissions: broker, preferences: preferences())
         let start = Task { await dictation.start(in: InboxTarget(Inbox())) }
-        for _ in 0..<200 where !broker.isAsking { await Task.yield() }
+        await waitUntil("the microphone prompt") { broker.isAsking }
         #expect(dictation.phase == .starting)
         await dictation.stop() // Esc while the prompt shows
         #expect(dictation.phase == .idle)
@@ -114,7 +114,7 @@ final class InboxTarget: DictationInsertionTarget {
         speech.send(.phraseStarted(UUID()))
         speech.send(.failed(.failed("audio engine stopped")))
         speech.end()
-        for _ in 0..<200 where dictation.isActive { await Task.yield() }
+        await waitUntil("dictation to end") { !dictation.isActive }
         #expect(!dictation.isActive && dictation.error == .failed("audio engine stopped"))
         #expect(inbox.dropAllCount >= 1, "the pending marker goes")
         #expect(dictation.pendingPhrases.isEmpty)
@@ -128,7 +128,7 @@ final class InboxTarget: DictationInsertionTarget {
             let target = InboxTarget(inbox)
             await dictation.start(in: target)
         } // The view's own reference is gone (leaving Notes).
-        await step(speech, 2) // level, phrase started
+        await step(speech, dictation, 2) // level, phrase started
         await dictation.stop()
         #expect(inbox.phrases == ["last words"], "the controller holds the note until stop returns")
     }

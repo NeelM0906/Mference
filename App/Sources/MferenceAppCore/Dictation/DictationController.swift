@@ -40,6 +40,10 @@ public final class DictationController {
 
     public var isActive: Bool { phase != .idle }
 
+    /// Events handled since launch, so tests can wait for one specific event
+    /// instead of yielding and hoping (deterministic under load).
+    @ObservationIgnored public private(set) var handledEventCount = 0
+
     public let preferences: SpeechPreferences
     @ObservationIgnored private let speech: any SpeechServicing
     @ObservationIgnored private let permissions: any PermissionBroker
@@ -168,6 +172,7 @@ public final class DictationController {
     // MARK: Events
 
     private func handle(_ event: DictationEvent) {
+        defer { handledEventCount += 1 }
         switch event {
         case .phraseStarted(let id):
             pendingPhrases.insert(id)

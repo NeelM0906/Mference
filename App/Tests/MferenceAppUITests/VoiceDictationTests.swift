@@ -32,12 +32,10 @@ final class AppendingTarget: DictationInsertionTarget {
                     preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
     }
 
-    private func eventually(_ condition: @MainActor () -> Bool) async throws {
-        for _ in 0..<200 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        Issue.record("condition never became true")
+    /// Waits for `condition` (see `waitUntil`), never for a count of yields.
+    private func eventually(sourceLocation: SourceLocation = #_sourceLocation,
+                            _ condition: @MainActor () -> Bool) async throws {
+        await waitUntil(timeout: .seconds(10), sourceLocation: sourceLocation, condition)
     }
 
     @Test func firstDictationGoesThroughSetupThenStarts() async throws {
@@ -102,8 +100,9 @@ final class AppendingTarget: DictationInsertionTarget {
         await models.dictation.start(in: AppendingTarget())
         // Level, the first phrase (English detected), then the second phrase started.
         for _ in 0..<4 {
+            let before = models.dictation.handledEventCount
             speech.advance()
-            for _ in 0..<20 { await Task.yield() }
+            await waitUntil("the dictation event") { models.dictation.handledEventCount > before }
         }
         #expect(models.dictation.phase == .listening && models.dictation.level > 0)
         #expect(models.dictation.detectedLanguage == "en" && models.dictation.pendingPhrases.count == 1)
@@ -183,7 +182,7 @@ struct DictationBoardEditor: View {
         let note = AppendingTarget(text: "Agenda.")
         await voice.dictation.start(in: note)
         speech.advance(); speech.advance() // level, phrase started
-        for _ in 0..<20 { await Task.yield() }
+        await waitUntil("level and phrase handled") { voice.dictation.handledEventCount >= 2 }
         shell.show(.chat)
         #expect(shell.selection == .notes, "Notes stays until the phrase is in")
         await shell.waitForPendingSwitch()

@@ -12,12 +12,10 @@ import Testing
 /// FileTranscriptionQueue, N1's NotesModel) over FakeSpeechService.
 @MainActor
 @Suite(.serialized) struct VoiceWiringTests {
-    private func eventually(_ condition: @MainActor () -> Bool) async throws {
-        for _ in 0..<400 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        Issue.record("condition never became true")
+    /// Waits for `condition` (see `waitUntil`), never for a count of yields.
+    private func eventually(sourceLocation: SourceLocation = #_sourceLocation,
+                            _ condition: @MainActor () -> Bool) async throws {
+        await waitUntil(timeout: .seconds(10), sourceLocation: sourceLocation, condition)
     }
 
     @Test func liveVoiceModelsDriveTheServicesMeetingSession() async throws {

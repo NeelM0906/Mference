@@ -49,11 +49,8 @@ import Testing
         return Harness(container: container, speech: speech, session: session, voice: voice)
     }
 
-    func settle(until condition: () -> Bool) async {
-        for _ in 0..<400 {
-            if condition() { return }
-            await Task.yield()
-        }
+    func settle(sourceLocation: SourceLocation = #_sourceLocation, until condition: @MainActor () -> Bool) async {
+        await waitUntil(sourceLocation: sourceLocation, condition)
     }
 
     @Test func popoverStartsTheMeetingThroughTheSessionAndOpensItsNote() async throws {

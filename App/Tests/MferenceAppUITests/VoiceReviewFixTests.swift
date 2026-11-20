@@ -100,12 +100,10 @@ final class GatedInstallSpeech: SpeechServicing {
                     preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { offline })
     }
 
-    private func eventually(_ condition: @MainActor () -> Bool) async throws {
-        for _ in 0..<400 {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        Issue.record("condition never became true")
+    /// Waits for `condition` (see `waitUntil`), never for a count of yields.
+    private func eventually(sourceLocation: SourceLocation = #_sourceLocation,
+                            _ condition: @MainActor () -> Bool) async throws {
+        await waitUntil(timeout: .seconds(10), sourceLocation: sourceLocation, condition)
     }
 
     @Test func pauseThenResumeInstallsAgainAndContinues() async throws {
@@ -311,10 +309,10 @@ final class ManualStatusSpeech: SpeechServicing {
         #expect(models.setup.display == failed)
         // The stream's values arrive late, oldest first (load on the main actor).
         speech.deliver(SpeechStatus())
-        for _ in 0..<50 { await Task.yield() }
+        await waitUntil("the stale status applied") { models.setup.status.speech == .notInstalled }
         #expect(models.setup.display == failed, "the stale Not installed doesn't bring Download back")
         speech.deliver(base.status)
-        for _ in 0..<50 { await Task.yield() }
+        await waitUntil("the current status applied") { models.setup.status.speech != .notInstalled }
         #expect(models.setup.display == failed)
     }
 }

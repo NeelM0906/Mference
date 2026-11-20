@@ -73,7 +73,7 @@ extension CompositionPlaybackTests {
                                                            startOffset: 0, duration: 1)], directory: folder)
         #expect(await playback.waitUntilReady())
         playback.seek(to: 0.5)
-        for _ in 0..<100 where abs(playback.currentTime - 0.5) > 0.02 { try await Task.sleep(for: .milliseconds(10)) }
+        await waitUntil("the seek") { abs(playback.currentTime - 0.5) <= 0.02 }
         #expect(abs(playback.currentTime - 0.5) < 0.02, "seek lands where asked")
         // The real end of the item: play the last 0.3 s silently at 2×.
         playback.seek(to: 0.7)
@@ -81,7 +81,7 @@ extension CompositionPlaybackTests {
         playback.onEnded = { ended = true }
         playback.rate = 2
         playback.play()
-        for _ in 0..<300 where !ended { try await Task.sleep(for: .milliseconds(10)) }
+        await waitUntil("the end of the item") { ended }
         #expect(ended, "AVPlayerItemDidPlayToEndTime reaches onEnded")
         playback.pause()
     }
