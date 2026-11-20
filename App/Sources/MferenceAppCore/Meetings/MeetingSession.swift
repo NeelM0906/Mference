@@ -372,6 +372,9 @@ public enum MeetingCopy {
 
     /// A transcribed file's title until the summary names it: the file name
     /// without its extension (spec 4.6).
+    /// A file the app quit while transcribing, whose copy is gone.
+    public static let fileGone = "The file's copy is gone. Add the file again."
+
     public static func fileTitle(_ fileName: String) -> String {
         let stem = (fileName as NSString).deletingPathExtension
         return stem.isEmpty ? fileName : stem
