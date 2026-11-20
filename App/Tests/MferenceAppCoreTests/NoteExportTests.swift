@@ -74,6 +74,12 @@ import Testing
         #expect(try Data(contentsOf: folder.appending(path: "Trip attachments/\(id)")) == Data([1, 2, 3]))
     }
 
+    @Test func contentFromANewerVersionExportsItsText() {
+        let document = NoteDocument.decode(Data(#"{"v":1,"blocks":[{"type":"callout","runs":[{"t":"Keep *this*"}]},{"type":"video"}]}"#.utf8))
+        #expect(NoteExport.markdown(document) == "Keep \\*this\\*\n")
+        #expect(NoteExport.plainText(document) == "Keep *this*\n")
+    }
+
     @Test func fileNamesAreSafe() {
         #expect(NoteExport.fileName(for: "Q3: plan / budget?") == "Q3- plan - budget-")
         #expect(NoteExport.fileName(for: "   ") == "Note")
