@@ -70,6 +70,9 @@ struct FileTranscriber: Sendable {
             }
         }
         try await transcribe(await track.flush())
+        // Recognition runs off this task (the lane): a Cancel during the last
+        // phrase or the speaker pass must still end as a cancel.
+        try Task.checkCancellation()
 
         var speakers: [SpeakerInfo] = segments.isEmpty ? [] : [.others]
         if options.speakerLabels, let diarizer, !segments.isEmpty {
@@ -77,6 +80,7 @@ struct FileTranscriber: Sendable {
                 .map { SpeakerTurn(speaker: "speaker-\($0.speaker)", start: $0.start, end: $0.end) }
             segments = SpeakerAlignment.relabel(segments, finalTurns: turns, mapping: [:])
             speakers = SpeakerAlignment.speakers(for: segments)
+            try Task.checkCancellation()
         }
         let language = dominantLanguage(languages)
         events.yield(.progress(fraction: 1, remaining: 0, languageCode: language))

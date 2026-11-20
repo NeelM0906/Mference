@@ -549,6 +549,23 @@ import Testing
         #expect(await rig.service.recoverInterruptedRecordings().isEmpty)
     }
 
+    @Test func cancelDuringTheLastPhraseIsACancel() async throws {
+        // Codex review on #251: recognition runs off the job's task, so a
+        // Cancel while the last phrase is recognized must not end in success.
+        let rig = try Self.rig(sources: FakeAudioSourceFactory(microphone: FakeAudioSource(track: .microphone, chunks: [])),
+                               recognizer: AmplitudeTranscriber([(0.2, "Last.")], delay: .milliseconds(500)))
+        defer { try? FileManager.default.removeItem(at: rig.root) }
+        let input = rig.root.appending(path: "speech.wav")
+        try Self.writeWAV(input, parts: [(1, 0.2)]) // speech to the end: the phrase ends at the flush
+        let job = try await rig.service.transcribeFile(input, options: FileTranscriptionOptions(noteID: UUID()))
+        let log = EventLog(job.events)
+        #expect(await log.wait { $0.contains { if case .started = $0 { true } else { false } } })
+        try await Task.sleep(for: .milliseconds(150))
+        await rig.service.cancel(job.id)
+        #expect(await log.waitUntilFinished())
+        #expect(await log.events.last == .cancelled)
+    }
+
     @Test func recordingsAreNotDeletedWhileAMeetingRecordsIntoThem() async throws {
         // Codex review on #251: deleting the note for good mid-meeting.
         let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(1, 0.2), (1, 0)]))
