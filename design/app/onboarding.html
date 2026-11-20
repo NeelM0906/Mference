@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mference first run</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap">
+<style>
+/* Design sketch: a motion pass over the existing first run (App/Sources/MferenceAppUI/Onboarding/OnboardingView.swift).
+   Same four steps and rules (L4 Deep only above 16 GB and only after a yes, L5/L6 no account and no permission up front),
+   plus one new step, the first answer. Each step: one moving picture, a short title, one number.
+   Tokens from MferenceDesign/Tokens.swift; window 1200 x 748 with the 270 pt sidebar (MFLayout). Light only, as the mockups. */
+:root{
+  --ink:#17181C; --secondary:#4F535D; --tertiary:#5E626C; --hair:#E3E5EA; --hair-strong:#DFE1E6; --fill:#F0F1F4; --fill-subtle:#ECEDF0;
+  --surface:#FFFFFF; --canvas:#FBFBFC; --accent:#2F47B8; --accent-fill:#E8ECFF; --success:#1C6B43; --success-fill:#E3F4EA;
+  --preview:#8A4B06; --preview-fill:#FFF1DE; --sidebar:#F6F6F8; --sidebar-sel:#E6E7EC; --toggle-off:#C9CCD3;
+  --wall:linear-gradient(135deg,#E7E3FF,#F3F4F9 55%,#FFE5D4);
+  --glass:rgba(251,251,252,.78); --rim:rgba(255,255,255,.85); --off:rgba(23,24,28,.08);
+  --font:"Geist",-apple-system,BlinkMacSystemFont,system-ui,sans-serif; color-scheme:light;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 var(--font);padding:32px max(16px,env(safe-area-inset-left,0px)) 72px}
+main{max-width:1220px;margin:0 auto;display:flex;flex-direction:column;gap:52px}
+h1,h2{margin:0;font-weight:600;letter-spacing:-.02em}
+h1{font-size:28px} h2{font-size:19px}
+p{margin:0;max-width:72ch}
+.eyebrow{font:600 11px/1 var(--font);letter-spacing:.06em;text-transform:uppercase;color:var(--tertiary)}
+.lede{color:var(--secondary);font-size:14.5px}
+header,section{display:flex;flex-direction:column;gap:14px}
+.small{font-size:12.5px;color:var(--tertiary)}
+code{font-size:12px;background:var(--fill-subtle);padding:1px 5px;border-radius:5px}
+.desk{border-radius:22px;overflow:hidden;border:1px solid var(--hair);background:var(--wall);min-width:0}
+.mbar{height:28px;display:flex;align-items:center;justify-content:flex-end;gap:14px;padding:0 14px;font-size:12.5px;font-weight:500;background:rgba(255,255,255,.2)}
+.mbar .me{display:flex;align-items:center;padding:2px 8px;border-radius:999px;background:var(--glass);box-shadow:inset 0 0 0 .5px var(--rim);transition:background .4s,color .4s,box-shadow .4s}
+.mbar .me.ping{background:var(--ink);color:#fff;box-shadow:0 0 0 6px rgba(47,71,184,.15)}
+.mbar svg{width:16px;height:16px}
+.stagewrap{display:flex;justify-content:center;padding:26px 18px 34px}
+.win{position:relative;width:100%;max-width:1200px;aspect-ratio:1200/748;max-height:748px;min-height:560px;border-radius:22px;overflow:hidden;display:grid;grid-template-columns:270px minmax(0,1fr);
+  background:var(--glass);-webkit-backdrop-filter:blur(30px) saturate(170%);backdrop-filter:blur(30px) saturate(170%);
+  box-shadow:inset 0 1px 0 var(--rim),inset 0 0 0 .5px var(--rim),0 30px 70px rgba(23,24,28,.18);
+  transition:transform .9s cubic-bezier(.6,0,.2,1),opacity .9s;transform-origin:calc(100% - 110px) -40px}
+.win.fly{transform:scale(.04);opacity:0}
+.tl{position:absolute;top:16px;left:18px;display:flex;gap:8px;z-index:5}
+.tl i{width:12px;height:12px;border-radius:50%;display:block}
+.tl i:nth-child(1){background:#ff5f57}.tl i:nth-child(2){background:#febc2e}.tl i:nth-child(3){background:#28c840}
+.side{background:rgba(246,246,248,.7);box-shadow:inset -1px 0 0 var(--hair);padding:58px 16px 20px;display:flex;flex-direction:column;gap:4px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:14px;padding:0 10px 18px}
+.brand i{width:28px;height:28px;border-radius:8px;background:linear-gradient(150deg,#f6f6f8,#c9ccd3);display:grid;place-items:center;color:#3b3e45;font-style:normal}
+.brand i svg{width:15px;height:15px}
+.side button{font:inherit;font-size:13.5px;display:grid;grid-template-columns:22px 1fr;align-items:center;gap:10px;text-align:left;border:0;background:none;color:var(--secondary);padding:9px 10px;border-radius:10px;cursor:pointer}
+.side button .n{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11.5px;font-weight:600;box-shadow:inset 0 0 0 1.5px var(--hair-strong);color:var(--tertiary)}
+.side button.done .n{background:var(--success-fill);color:var(--success);box-shadow:none}
+.side button[aria-current=true]{background:var(--sidebar-sel);color:var(--ink);font-weight:500}
+.side button[aria-current=true] .n{box-shadow:inset 0 0 0 2px var(--ink);color:var(--ink)}
+.side .new{font-size:10px;font-weight:600;color:var(--preview);margin-left:6px}
+.side .fill{flex:1}
+.side .foot{font-size:12px;color:var(--tertiary);padding:0 10px}
+.main{position:relative;min-width:0}
+.scene{position:absolute;inset:0;padding:64px 64px 96px;display:flex;flex-direction:column;gap:20px;opacity:0;transform:translateY(10px);transition:opacity .5s,transform .6s cubic-bezier(.2,.7,.2,1);pointer-events:none}
+.scene.on{opacity:1;transform:none;pointer-events:auto}
+.t{font-size:clamp(28px,3.6vw,44px);font-weight:700;letter-spacing:-.035em;line-height:1.05}
+.big{font-size:clamp(30px,4.4vw,52px);font-weight:700;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums}
+.sub{color:var(--secondary);font-size:15px}
+.foot{position:absolute;left:64px;right:64px;bottom:28px;display:flex;justify-content:space-between;align-items:center;z-index:6}
+.btn{font:inherit;font-weight:500;font-size:14px;border:0;border-radius:999px;padding:10px 20px;cursor:pointer;background:var(--ink);color:#fff}
+.btn.q{background:var(--fill);color:var(--ink)}
+.link{font:inherit;font-size:13.5px;background:none;border:0;color:var(--tertiary);cursor:pointer}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+/* step 1: features settle into the Mac */
+.mac{position:relative;flex:1;min-height:220px;perspective:900px}
+.screen{position:absolute;left:50%;top:6%;transform:translateX(-50%);width:min(70%,560px);aspect-ratio:16/10;border-radius:18px;border:2px solid var(--ink);background:rgba(255,255,255,.55);display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:20px;align-content:center}
+.screen::after{content:"";position:absolute;left:30%;right:30%;bottom:-16px;height:10px;border-radius:0 0 8px 8px;background:var(--ink)}
+.fe{border-radius:14px;background:var(--surface);box-shadow:0 8px 20px rgba(23,24,28,.10);aspect-ratio:1;display:grid;place-items:center;align-content:center;gap:6px;font-weight:600;font-size:13px;transition:transform 1s cubic-bezier(.2,.9,.2,1),opacity .6s}
+.fe svg{width:28px;height:28px;color:var(--accent)}
+.fe.out{opacity:0;transform:translate(var(--dx),var(--dy)) rotateX(40deg) rotateY(var(--ry)) scale(1.4)}
+.nolink{position:absolute;right:0;top:0;font-size:12.5px;color:var(--success);background:var(--success-fill);border-radius:999px;padding:4px 10px;font-weight:500}
+/* step 2: memory bar */
+.membar{position:relative;height:64px;border-radius:14px;box-shadow:inset 0 0 0 2px var(--ink);overflow:hidden;background:rgba(255,255,255,.55)}
+.blk{position:absolute;top:8px;bottom:8px;border-radius:9px;display:flex;align-items:center;padding:0 10px;font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;transition:width 1s cubic-bezier(.2,.9,.2,1)}
+.blk.q{left:8px;background:var(--accent);color:#fff}
+.blk.d{background:repeating-linear-gradient(135deg,var(--preview-fill),var(--preview-fill) 8px,#ffe7c4 8px,#ffe7c4 16px);color:var(--preview);box-shadow:inset 0 0 0 1.5px var(--preview)}
+.scale{display:flex;justify-content:space-between;font-size:12px;color:var(--tertiary);font-variant-numeric:tabular-nums}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.mcard{border-radius:14px;background:var(--surface);box-shadow:inset 0 0 0 1px var(--hair-strong);padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.mcard b{font-size:16px}
+.mcard canvas{display:block;width:100%}
+.chip{font-size:11.5px;font-weight:500;border-radius:999px;padding:3px 9px;align-self:flex-start}
+.chip.ok{background:var(--success-fill);color:var(--success)} .chip.warn{background:var(--preview-fill);color:var(--preview)}
+/* step 3: permissions */
+.perm{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.pc{border-radius:16px;background:var(--surface);box-shadow:inset 0 0 0 1px var(--hair-strong);padding:16px;display:flex;flex-direction:column;gap:10px;min-height:170px;transition:box-shadow .4s,transform .4s}
+.pc svg{width:26px;height:26px;color:var(--tertiary);transition:color .4s}
+.pc b{font-size:15px}
+.pc .why{font-size:12.5px;color:var(--secondary);opacity:0;transform:translateY(6px);transition:opacity .4s,transform .4s}
+.pc .st{margin-top:auto;font-size:12px;color:var(--tertiary)}
+.pc.ask{box-shadow:inset 0 0 0 2px var(--accent),0 12px 28px rgba(47,71,184,.15);transform:translateY(-4px)}
+.pc.ask svg{color:var(--accent)} .pc.ask .why{opacity:1;transform:none}
+/* step 4: mail */
+.mailw{display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:14px;flex:1;min-height:200px}
+.col{border-radius:16px;background:rgba(255,255,255,.6);box-shadow:inset 0 0 0 1px var(--hair-strong);padding:12px;display:flex;flex-direction:column;gap:8px}
+.col h3{margin:0 0 4px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--tertiary)}
+.env{border-radius:10px;background:var(--surface);box-shadow:0 2px 6px rgba(23,24,28,.08);padding:8px 10px;font-size:12.5px;transition:transform .7s cubic-bezier(.2,.9,.2,1),opacity .5s}
+.env b{display:block;font-size:13px}
+/* step 5: first answer */
+.chat{display:flex;flex-direction:column;gap:12px;max-width:640px}
+.bub{align-self:flex-end;background:var(--fill);border-radius:18px;padding:10px 14px}
+.reply{font-size:15px;line-height:1.6;min-height:110px}
+.reply .cur{display:inline-block;width:8px;height:17px;background:var(--accent);vertical-align:-3px;margin-left:2px;animation:bl 1s steps(1) infinite}
+@keyframes bl{50%{opacity:0}}
+.meta{font-size:12px;color:var(--tertiary)}
+.sw{width:40px;height:24px;border-radius:12px;background:var(--toggle-off);position:relative;border:0;cursor:pointer;flex:none}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .2s}
+.sw[aria-checked=true]{background:var(--success)} .sw[aria-checked=true]::after{left:18px}
+.row{display:flex;align-items:center;gap:12px;font-size:14px;font-weight:500}
+.under{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+/* site mock (the existing site's own look) */
+.site{border:1px solid var(--hair);border-radius:18px;overflow:hidden;background:#fbfbf9;color:#0e0f12;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter",sans-serif}
+.sbar{display:flex;gap:10px;align-items:center;padding:9px 14px;border-bottom:1px solid rgba(14,15,18,.13);font-size:12px;color:#5d6068;background:#f2f2ef}
+.sbar .u{flex:1;min-width:0;background:#fff;border:1px solid rgba(14,15,18,.13);border-radius:999px;padding:3px 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb{position:relative;padding:22px 28px;border-bottom:1px solid rgba(14,15,18,.13)}
+.sb:last-child{border-bottom:0}
+.sb.new{background:rgba(232,89,12,.07);box-shadow:inset 3px 0 0 #e8590c}
+.sb .bd{position:absolute;top:10px;right:12px;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid rgba(14,15,18,.13);color:#5d6068;background:#fff}
+.sb.new .bd{color:#fff;background:#e8590c;border-color:#e8590c}
+.sh1{font-size:clamp(30px,5vw,54px);font-weight:720;letter-spacing:-.045em;line-height:.98;max-width:12em}
+.sbtn{display:inline-block;background:#0e0f12;color:#fff;font-weight:600;font-size:14px;padding:9px 16px;border-radius:11px}
+.sbtn.g{background:transparent;color:#0e0f12;box-shadow:inset 0 0 0 1.5px #0e0f12}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:12px}
+.g2 canvas{display:block;width:100%}
+.cap{display:flex;justify-content:space-between;margin-top:8px;font-weight:600;font-size:14px}
+.tablewrap{overflow-x:auto;border:1px solid var(--hair-strong);border-radius:14px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:600px}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--hair);vertical-align:top}
+th{font:600 11px/1.2 var(--font);letter-spacing:.06em;text-transform:uppercase;color:var(--tertiary);background:var(--fill-subtle)}
+tr:last-child td{border-bottom:none}
+footer{font-size:12px;color:var(--tertiary);border-top:1px solid var(--hair);padding-top:14px;max-width:1220px;margin:0 auto}
+@media (max-width:860px){.win{grid-template-columns:minmax(0,1fr);aspect-ratio:auto;height:640px}.side{display:none}.scene{padding:52px 20px 84px}.foot{left:20px;right:20px}
+  .perm{grid-template-columns:repeat(2,minmax(0,1fr))}.two,.g2{grid-template-columns:minmax(0,1fr)}.mailw{grid-template-columns:minmax(0,1fr)}.mailw .col:nth-child(n+2){display:none}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="m" viewBox="0 0 16 16"><path d="M3 13V4.3c0-.7.9-1 1.3-.4L8 9l3.7-5.1c.4-.6 1.3-.3 1.3.4V13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="chat" viewBox="0 0 16 16"><path d="M2.5 3h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.5V12H2.5A1.5 1.5 0 0 1 1 10.5v-6A1.5 1.5 0 0 1 2.5 3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></symbol>
+<symbol id="mail" viewBox="0 0 16 16"><rect x="1.5" y="3" width="13" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="m2 4 6 5 6-5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></symbol>
+<symbol id="cal" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2 6.5h12M5.5 1.8v2.5M10.5 1.8v2.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+<symbol id="scan" viewBox="0 0 16 16"><path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2M4.5 8h7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+<symbol id="todo" viewBox="0 0 16 16"><circle cx="4" cy="4.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="4" cy="11.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7.5 4.5h6M7.5 11.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+<symbol id="cam" viewBox="0 0 16 16"><rect x="1.5" y="4" width="13" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.5 4l1-1.8h3l1 1.8" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
+<symbol id="disk" viewBox="0 0 16 16"><rect x="1.8" y="4.5" width="12.4" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="11.3" cy="8" r=".9" fill="currentColor"/></symbol>
+</defs></svg>
+
+<main>
+<header>
+  <span class="eyebrow">Design sketch · First run · Motion pass</span>
+  <h1>Mference first run</h1>
+  <p class="lede">The app's existing first run, with the same four steps and rules, shown instead of told. Each step is one moving picture, a short title and one number; the long sentences move to tooltips and Settings. One new step, the first answer, ends the run. It plays by itself; click a step in the sidebar to jump.</p>
+</header>
+
+<section>
+  <div class="desk">
+    <div class="mbar"><span>Wi-Fi</span><span class="me" id="meIcon"><svg><use href="#m"/></svg></span><span>9:41 AM</span></div>
+    <div class="stagewrap">
+      <div class="win" id="win" role="region" aria-label="Mference first run">
+        <div class="tl"><i></i><i></i><i></i></div>
+        <aside class="side" id="side"><div class="brand"><i><svg><use href="#m"/></svg></i>Mference</div><div class="fill"></div><div class="foot">No account</div></aside>
+        <div class="main">
+
+          <div class="scene" data-s="0">
+            <div class="t">Your own AI, on this Mac.</div>
+            <div class="mac" id="mac"><span class="nolink">No account · no usage data sent</span>
+              <div class="screen">
+                <div class="fe out" style="--dx:-260px;--dy:-120px;--ry:-30deg"><svg><use href="#chat"/></svg>Chat</div>
+                <div class="fe out" style="--dx:-90px;--dy:-200px;--ry:20deg"><svg><use href="#mail"/></svg>Mail</div>
+                <div class="fe out" style="--dx:120px;--dy:-190px;--ry:-20deg"><svg><use href="#cal"/></svg>Calendar</div>
+                <div class="fe out" style="--dx:260px;--dy:-100px;--ry:30deg"><svg><use href="#scan"/></svg>Scan</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="scene" data-s="1">
+            <div class="t">This Mac: 24 GB.</div>
+            <div class="membar"><div class="blk q" id="bq" style="width:0">Quick 4B · 4.52 GB</div><div class="blk d" id="bd" style="width:0;left:0">Deep 27B · 14.80 GB</div></div>
+            <div class="scale"><span>0</span><span>Apple M5 · 24 GB memory · 312 GB free</span><span>24 GB</span></div>
+            <div class="two">
+              <div class="mcard"><span class="chip ok">Installing now</span><b>Quick 4B</b><canvas id="cq"></canvas><span class="small" id="qtxt">0.00 of 2.91 GB</span></div>
+              <div class="mcard"><span class="chip warn">Tight on this Mac</span><b>Deep 27B</b><span class="small">Download Deep too? 12.12 GB more.</span><div class="under"><button class="btn q" type="button">Not now</button><button class="btn" type="button">Download Deep</button></div></div>
+            </div>
+          </div>
+
+          <div class="scene" data-s="2">
+            <div class="t">Nothing asked up front.</div>
+            <div class="perm" id="perm">
+              <div class="pc"><svg><use href="#cal"/></svg><b>Calendar</b><span class="why">When you open Calendar.</span><span class="st">Not asked</span></div>
+              <div class="pc"><svg><use href="#todo"/></svg><b>Reminders</b><span class="why">When you add a to-do.</span><span class="st">Not asked</span></div>
+              <div class="pc"><svg><use href="#disk"/></svg><b>Full Disk Access</b><span class="why">When you connect Mail.</span><span class="st">Not asked</span></div>
+              <div class="pc"><svg><use href="#cam"/></svg><b>Camera</b><span class="why">When you scan a receipt.</span><span class="st">Not asked</span></div>
+            </div>
+            <div class="big" style="font-size:clamp(26px,3.4vw,40px)"><span id="askN">0</span> of 4 asked today.</div>
+          </div>
+
+          <div class="scene" data-s="3">
+            <div class="t">Mail, sorted here.</div>
+            <div class="mailw" id="mailw">
+              <div class="col"><h3>Inbox</h3><div id="inbox" style="display:flex;flex-direction:column;gap:8px"></div></div>
+              <div class="col"><h3>Important</h3><div id="imp" style="display:flex;flex-direction:column;gap:8px"></div></div>
+              <div class="col"><h3>To-dos</h3><div id="tod" style="display:flex;flex-direction:column;gap:8px"></div></div>
+            </div>
+            <div class="under"><span class="small">Optional. Replies send only when you click Send.</span><span style="display:flex;gap:10px"><button class="btn q" type="button">Not now</button><button class="btn" type="button">Connect Mail</button></span></div>
+          </div>
+
+          <div class="scene" data-s="4">
+            <div class="t">Say hello.</div>
+            <div class="chat"><div class="bub">What can you do without the internet?</div><div class="reply" id="reply"></div><div class="meta">Quick 4B · on this Mac · offline</div></div>
+            <div class="row"><button class="sw" role="switch" aria-checked="false" id="sw1" aria-label="Update automatically"></button>Update automatically</div>
+          </div>
+
+          <div class="foot"><button class="link" id="skip" type="button">Skip</button><button class="btn" id="next" type="button">Continue</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Step</th><th>Today (OnboardingView)</th><th>Proposed</th><th>Rule kept</th></tr></thead>
+    <tbody>
+      <tr><td>Welcome</td><td>Title, one paragraph, "No account" line</td><td>Four feature tiles settle into a Mac; "No account · no usage data sent"</td><td>L5 no account</td></tr>
+      <tr><td>Models</td><td>"We checked this Mac: …" sentence and two cards</td><td>Memory bar with Quick and Deep sized to their estimated memory; Quick's download fills a grid</td><td>L4 Deep only above 16 GB, only after a yes</td></tr>
+      <tr><td>Permissions</td><td>One paragraph</td><td>Four permission cards light one by one with the moment each is asked</td><td>L6 nothing asked up front</td></tr>
+      <tr><td>Mail (optional)</td><td>One paragraph and buttons</td><td>Letters sort from Inbox into Important and To-dos</td><td>Send only on click</td></tr>
+      <tr><td>First answer (new)</td><td>None</td><td>The first answer streams from Quick; the update switch starts off</td><td>Updates opt-in</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>The site, extended</h2>
+  <p class="small">The published page in <code>site/</code>, drawn as it is today. Orange blocks are proposed. Nothing existing is removed.</p>
+  <div class="site">
+    <div class="sbar"><span>●●●</span><span class="u">neelm0906.github.io/Mference</span></div>
+    <div class="sb new"><span class="bd">changed</span><div class="under"><b style="font-size:17px">Mference</b><span class="sbtn">Download for Mac</span></div><div style="font-size:12.5px;color:#5d6068;margin-top:6px">Today: "Get the source release". Needs a signed app release first.</div></div>
+    <div class="sb"><span class="bd">existing</span><div class="sh1">Run the models you couldn't before.</div><div class="g2"><figure style="margin:0"><canvas id="sFull"></canvas><div class="cap"><span>All 256 experts loaded</span><span style="color:#9a9ca4;text-decoration:line-through">19.6 GB</span></div></figure><figure style="margin:0"><canvas id="sSparse"></canvas><div class="cap"><span>Only the 8 it calls</span><span style="color:#4f4ee0">1.45 GB</span></div></figure></div></div>
+    <div class="sb new"><span class="bd">new · demo</span><div style="font-size:26px;font-weight:700;letter-spacing:-.035em">Watch it answer.</div><div style="margin-top:10px;font-size:15px" id="sReply"></div><div style="font-size:12.5px;color:#5d6068;margin-top:8px">Recorded run · Qwen 3.6 on a 24 GB M5 · 23.5 to 29.3 tokens/s</div></div>
+    <div class="sb new"><span class="bd">new · what it does</span><div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px">
+      <div><b>Chat</b><div style="font-size:13px;color:#5d6068">Web answers with citations</div></div><div><b>Mail</b><div style="font-size:13px;color:#5d6068">Sorted, drafts in your voice</div></div><div><b>Calendar</b><div style="font-size:13px;color:#5d6068">Events from your mail</div></div><div><b>Scan</b><div style="font-size:13px;color:#5d6068">Receipts read on device</div></div></div></div>
+    <div class="sb"><span class="bd">existing</span><div style="font-size:20px;font-weight:600;color:#5d6068">See what your Mac can run now that it couldn't before.</div><div style="font-size:13px;color:#5d6068;margin-top:6px">Memory picker and the four model rows (Qwen 3.6, Qwen 3.8, Maple Preview, MiniCPM5)</div></div>
+    <div class="sb new"><span class="bd">new · download</span><div class="under"><b style="font-size:24px;letter-spacing:-.03em">Mference for Mac.</b><span style="display:flex;gap:10px"><span class="sbtn">Download</span><span class="sbtn g">What's new</span></span></div><div style="font-size:12.5px;color:#5d6068;margin-top:6px">macOS 26 · Apple Silicon · updates itself when you turn updates on</div></div>
+  </div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Change</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Nav button: Download for Mac (after the first signed release)</td><td>The app is the product now; the source release is for developers</td></tr>
+      <tr><td>Watch it answer: a recorded run at its real speed</td><td>A demo with no install</td></tr>
+      <tr><td>What it does: chat, mail, calendar, scan</td><td>The page sells streaming only; the README leads with the assistant</td></tr>
+      <tr><td>Download block and <code>site/appcast.xml</code></td><td>One end to the page, and the update feed the app reads, published by the existing Pages workflow</td></tr>
+      <tr><td>Fix the share text "A 175 GB model in 2.36 GB of memory"</td><td>That model (Flash-Next) was retired on 18 Nov; the hero now shows Qwen 3.6</td></tr>
+    </tbody>
+  </table></div>
+</section>
+</main>
+<footer>Sizes from the app: Quick 2,912,109,728 bytes on disk (DownloadSource), 4.52 GB estimated in memory (MemoryFit: size + 1.5 GiB); Deep 12,120,016,960 bytes, 14.80 GB estimated. Site figures from site/data.js. The Mac, free disk, mail and the reply text are examples.</footer>
+
+<script>
+(function(){
+  function grid(cv,o){
+    var cols=o.cols,rows=o.rows,N=cols*rows,gap=o.gap||2,ctx=cv.getContext('2d'),dpr=Math.min(window.devicePixelRatio||1,2),s=4,W=0,H=0,lit=new Float32Array(N),tgt=new Float32Array(N),fill=0,mode=o.mode||'sparse',top=o.top||8,last=0;
+    function size(){var w=cv.clientWidth||cv.parentNode.clientWidth||300;s=Math.max(3,Math.floor((w-gap*(cols-1))/cols));W=cols*s+(cols-1)*gap;H=rows*s+(rows-1)*gap;cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);cv.style.height=H+'px';ctx.setTransform(dpr,0,0,dpr,0,0);}
+    size();
+    function pick(){tgt.fill(0);for(var n=0;n<top;){var i=(Math.random()*N)|0;if(!tgt[i]){tgt[i]=1;n++;}}}
+    if(mode==='full'){tgt.fill(1);lit.fill(1);}else if(mode==='sparse')pick();
+    (function draw(t){
+      if(mode==='sparse'&&t-last>(o.every||1200)){pick();last=t;}
+      if(mode==='fill'){var k=Math.floor(fill*N);for(var j=0;j<N;j++)tgt[j]=j<k?1:0;}
+      ctx.clearRect(0,0,W,H);
+      for(var i=0;i<N;i++){lit[i]+=(tgt[i]-lit[i])*.2;var x=(i%cols)*(s+gap),y=((i/cols)|0)*(s+gap),v=lit[i];
+        ctx.fillStyle=v>.05?o.on:o.off;ctx.globalAlpha=v>.05?Math.min(1,.3+v):1;ctx.beginPath();if(ctx.roundRect)ctx.roundRect(x,y,s,s,Math.max(1,s*.22));else ctx.rect(x,y,s,s);ctx.fill();}
+      ctx.globalAlpha=1;requestAnimationFrame(draw);})(0);
+    return {set:function(f){fill=f;},resize:size};
+  }
+  var ACC='#2F47B8',OFF='rgba(23,24,28,.09)';
+  var gq=grid(document.getElementById('cq'),{cols:36,rows:5,mode:'fill',on:ACC,off:OFF});
+  grid(document.getElementById('sFull'),{cols:32,rows:8,mode:'full',on:'#9a9ca4',off:'rgba(14,15,18,.12)'});
+  grid(document.getElementById('sSparse'),{cols:32,rows:8,on:'#4f4ee0',off:'rgba(14,15,18,.12)',every:1500});
+
+  var timers=[];function later(f,ms){timers.push(setTimeout(f,ms));}function clear(){timers.forEach(clearTimeout);timers=[];}
+  function welcome(){[].forEach.call(document.querySelectorAll('.fe'),function(e,i){e.classList.add('out');later(function(){e.classList.remove('out');},300+i*260);});}
+  function models(){var bq=document.getElementById('bq'),bd=document.getElementById('bd'),mb=bq.parentNode.clientWidth-16;bq.style.width='0';bd.style.width='0';
+    later(function(){bq.style.width=(mb*4.52/24)+'px';},200);later(function(){bd.style.left=(8+mb*4.52/24+6)+'px';bd.style.width=(mb*14.80/24)+'px';},900);
+    var f=0,iv=setInterval(function(){f=Math.min(1,f+.02);gq.set(f);document.getElementById('qtxt').textContent=(2.91*f).toFixed(2)+' of 2.91 GB';if(f>=1)clearInterval(iv);},70);timers.push(iv);}
+  function perms(){var cs=[].slice.call(document.querySelectorAll('.pc')),n=document.getElementById('askN');n.textContent='0';cs.forEach(function(c){c.classList.remove('ask');});
+    cs.forEach(function(c,i){later(function(){cs.forEach(function(k){k.classList.remove('ask');});c.classList.add('ask');},400+i*900);});later(function(){cs.forEach(function(k){k.classList.remove('ask');});},400+4*900);}
+  var mails=[['Dana Kim','Contract signed, next steps','imp'],['Shop','Your order shipped','in'],['Alex','Can you send the Q3 deck by Friday?','tod'],['Bank','Statement ready','in'],['Priya','Dinner Thursday at 7?','imp']];
+  function mail(){var ib=document.getElementById('inbox'),im=document.getElementById('imp'),td=document.getElementById('tod');ib.innerHTML='';im.innerHTML='';td.innerHTML='';
+    var els=mails.map(function(m){var e=document.createElement('div');e.className='env';e.innerHTML='<b>'+m[0]+'</b>'+m[1];ib.appendChild(e);return e;});
+    els.forEach(function(e,i){var to=mails[i][2];if(to==='in')return;later(function(){e.style.opacity='0';e.style.transform='translateX(60px)';later(function(){(to==='imp'?im:td).appendChild(e);e.style.transform='translateX(-30px)';requestAnimationFrame(function(){e.style.opacity='1';e.style.transform='none';});},500);},500+i*600);});}
+  function stream(el,txt,rate,done){el.innerHTML='';var w=txt.split(' '),i=0,iv=setInterval(function(){if(i>=w.length){clearInterval(iv);el.innerHTML=txt;done&&done();return;}el.innerHTML=w.slice(0,++i).join(' ')+'<span class="cur"></span>';},1000/rate);timers.push(iv);return iv;}
+  function answer(){stream(document.getElementById('reply'),'Chat, sort your mail, plan your week and read receipts. Web answers need the internet; everything else runs here.',8);}
+  var siteIv=null;function siteLoop(){clearInterval(siteIv);var el=document.getElementById('sReply'),txt='Only 3 billion of 35 billion parts work on each token, so most of the model can wait on the SSD.',w=txt.split(' '),i=0;siteIv=setInterval(function(){if(i>=w.length){clearInterval(siteIv);setTimeout(siteLoop,2500);return;}el.textContent=w.slice(0,++i).join(' ');},1000/4);}
+  siteLoop();
+
+  var NAMES=['Welcome','Models','Permissions','Mail (optional)','First answer'],RUN=[welcome,models,perms,mail,answer],DUR=[4200,6000,5200,5200,5600];
+  var scenes=[].slice.call(document.querySelectorAll('.scene')),side=document.getElementById('side'),fillEl=side.querySelector('.fill'),btns=[],cur=0,auto=null,win=document.getElementById('win'),me=document.getElementById('meIcon');
+  NAMES.forEach(function(nm,i){var b=document.createElement('button');b.type='button';b.innerHTML='<span class="n">'+(i+1)+'</span><span>'+nm+(i===4?'<span class="new">NEW</span>':'')+'</span>';b.addEventListener('click',function(){go(i);});side.insertBefore(b,fillEl);btns.push(b);});
+  function go(i){clearTimeout(auto);clear();win.classList.remove('fly');me.classList.remove('ping');cur=i;
+    scenes.forEach(function(s,k){s.classList.toggle('on',k===i);});
+    btns.forEach(function(b,k){b.setAttribute('aria-current',k===i?'true':'false');b.classList.toggle('done',k<i);b.querySelector('.n').textContent=k<i?'✓':(k+1);});
+    document.getElementById('next').textContent=i===scenes.length-1?'Start Chatting':'Continue';
+    if(i===1)gq.resize();RUN[i]();auto=setTimeout(function(){i<scenes.length-1?go(i+1):finish();},DUR[i]);}
+  function finish(){clearTimeout(auto);win.classList.add('fly');setTimeout(function(){me.classList.add('ping');},700);setTimeout(function(){go(0);},3400);}
+  document.getElementById('next').addEventListener('click',function(){cur<scenes.length-1?go(cur+1):finish();});
+  document.getElementById('skip').addEventListener('click',finish);
+  var sw=document.getElementById('sw1');sw.addEventListener('click',function(){sw.setAttribute('aria-checked',sw.getAttribute('aria-checked')==='true'?'false':'true');});
+  go(0);
+})();
+</script>
+</body>
+</html>
