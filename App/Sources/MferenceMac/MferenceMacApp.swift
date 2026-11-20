@@ -91,7 +91,7 @@ private struct MenuBarContent: View {
                             showWindow()
                         },
                         // Runs applicationShouldTerminate, so the quit
-                        // sequence (web, then engine) runs as from ⌘Q.
+                        // sequence (web, Find, then engine) runs as from ⌘Q.
                         quit: { NSApplication.shared.terminate(nil) }))
     }
 
