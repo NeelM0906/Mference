@@ -18,6 +18,18 @@ public final class VoiceModels {
     /// The note editor that has focus, set by the editor (team N1): ⇧⌘D
     /// dictates into it. Weak, so a closed editor never receives text.
     @ObservationIgnored public weak var focusedDictationTarget: (any DictationInsertionTarget)?
+    /// The record popover (board 3).
+    @ObservationIgnored public private(set) var recordMeetingModel: RecordMeetingModel!
+    public var showsRecordPopover = false
+
+    // Hooks the app wires to the other teams' models.
+
+    /// Starts a meeting and returns its note (N4's `MeetingSession.start`).
+    @ObservationIgnored public var startMeeting: (@MainActor (RecordMeetingModel.Request) async throws -> UUID)?
+    /// Pause, resume and stop for the menu bar and quit (N4's `MeetingSession`).
+    @ObservationIgnored public var recordingControls: (any LiveRecordingControls)?
+    /// Shows a note in Notes (N1's navigation): the timer chip, Open note.
+    @ObservationIgnored public var openNote: (@MainActor (UUID) -> Void)?
 
     public init(speech: any SpeechServicing, permissions: any PermissionBroker, preferences: SpeechPreferences,
                 dictation: DictationController? = nil,
@@ -28,6 +40,14 @@ public final class VoiceModels {
         setup = SpeechSetupModel(speech: speech, isOffline: isOffline)
         settings = SpeechSettingsModel(setup: setup, preferences: preferences, speech: speech,
                                        permissions: permissions)
+        recordMeetingModel = RecordMeetingModel(speech: speech, permissions: permissions, preferences: preferences) {
+            [weak self] request in
+            guard let self, let startMeeting = self.startMeeting else {
+                throw MeetingsUnavailable()
+            }
+            let noteID = try await startMeeting(request)
+            self.openNote?(noteID)
+        }
     }
 
     /// The app's: over `services.speech` and `services.dictation`, Offline
@@ -65,9 +85,41 @@ public final class VoiceModels {
         }
     }
 
+    // MARK: Meetings (spec 4.3, D7)
+
+    /// The meeting that holds the microphone, for the timer chip, the menu
+    /// bar and the quit confirmation.
+    public var liveMeeting: LiveSessionStatus? {
+        setup.status.liveSession.flatMap { $0.kind == .meeting ? $0 : nil }
+    }
+
+    /// Record meeting (⇧⌘R): the popover, through the setup card on first use.
+    public func recordMeeting() {
+        guard liveMeeting == nil else {
+            openLiveMeeting()
+            return
+        }
+        setup.require(.recordMeeting) { [weak self] in self?.showsRecordPopover = true }
+    }
+
+    /// The timer chip and the menu bar's Open: the meeting note.
+    public func openLiveMeeting() {
+        if let noteID = liveMeeting?.noteID { openNote?(noteID) }
+    }
+
+    /// Quit and the menu bar's Stop: stops the meeting and waits until its
+    /// transcript is saved; then any dictation (its last phrase lands).
+    public func stopLiveSessions() async {
+        if liveMeeting != nil { await recordingControls?.stopRecording() }
+        await dictation.stop()
+    }
+
     /// Switching notes or leaving Notes: the last phrase lands in the note
     /// it belongs to, then dictation stops (N1 calls this).
     public func stopDictation() async {
         await dictation.stop()
     }
 }
+
+/// Start was pressed in a build where meetings are not wired yet.
+struct MeetingsUnavailable: Error {}

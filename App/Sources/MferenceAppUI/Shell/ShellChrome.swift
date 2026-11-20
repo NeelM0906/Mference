@@ -50,6 +50,8 @@ struct ShellTrailingControls: View {
     @Bindable var model: ShellModel
     /// Actions the visible screen contributes (`shellToolbar`).
     var items: [ShellToolbarItem] = []
+    /// Team N3's voice models: the red recording timer chip (D7).
+    @Environment(VoiceModels.self) private var voice: VoiceModels?
 
     /// A screen with its own actions (Scan, Calendar, Mail) gets the bar the
     /// mockup draws for it: its actions and the Settings gear. "On this
@@ -58,6 +60,13 @@ struct ShellTrailingControls: View {
 
     var body: some View {
         HStack(spacing: MFSpacing.m) {
+            // While a meeting records, on every section: opens the meeting note.
+            if let voice, let live = voice.liveMeeting {
+                RecordingTimerChip(live: live) {
+                    model.show(.notes)
+                    voice.openLiveMeeting()
+                }
+            }
             ShellToolbarItems(items: items)
             if Self.showsGeneralControls(screenItems: items) {
                 MFChip("On this Mac", systemImage: "lock", tone: .success)

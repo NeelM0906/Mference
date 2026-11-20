@@ -24,6 +24,17 @@ enum VoiceFormat {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
+    /// The clock for VoiceOver: "12 minutes 48 seconds".
+    static func spokenClock(_ time: TimeInterval) -> String {
+        let total = max(0, Int(time.rounded(.down)))
+        let components = DateComponents(hour: total / 3600, minute: (total % 3600) / 60, second: total % 60)
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .full
+        formatter.allowedUnits = total >= 3600 ? [.hour, .minute, .second] : [.minute, .second]
+        formatter.zeroFormattingBehavior = .dropLeading
+        return formatter.string(from: components) ?? clock(time)
+    }
+
     /// A length in words: "42 min", "1 h 18 min", "under a minute".
     static func length(_ time: TimeInterval) -> String {
         let minutes = Int((time / 60).rounded())

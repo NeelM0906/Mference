@@ -37,7 +37,13 @@ final class AppRuntime {
         screenModels = ScreenModels.live(services: services)
         voice = VoiceModels.live(services: services)
         let engine = services.engine
+        let speech = services.speech
+        let voice = voice
+        // Spec 6.1: a recording stops cleanly (the person confirmed quitting)
+        // and dictation lands its last phrase, then speech, web, the engine.
         shutdownSteps = [
+            { await voice.stopLiveSessions() },
+            { await speech.shutdown() },
             { await web.shutdown() },
             { await engine.shutdown() },
         ]
@@ -89,6 +95,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var replied = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // A meeting is recording: ask first (spec 6.1, D7).
+        if !terminating, runtime.voice.liveMeeting != nil, !QuitConfirmation.confirm() {
+            return .terminateCancel
+        }
         if !terminating {
             terminating = true
             Task {
@@ -110,5 +120,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !replied else { return }
         replied = true
         sender.reply(toApplicationShouldTerminate: true)
+    }
+}
+
+/// The quit confirmation while a meeting records.
+enum QuitConfirmation {
+    static let title = "A meeting is recording"
+    static let message = "Quitting stops the recording. Everything transcribed so far is saved in the meeting note."
+    static let stopAndQuit = "Stop and Quit"
+    static let keepRecording = "Keep Recording"
+
+    /// Shows the alert; true when the person chose to stop and quit.
+    @MainActor
+    static func confirm() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: stopAndQuit)
+        alert.addButton(withTitle: keepRecording)
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
