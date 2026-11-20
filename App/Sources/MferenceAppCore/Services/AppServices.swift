@@ -28,6 +28,9 @@ public final class AppServices {
     /// Dictation, meetings and file transcription (Notes spec 6.2). The UI
     /// and Notes talk only to this protocol.
     public let speech: any SpeechServicing
+    /// Notes and folders (Notes spec 4.1, 8): the one store the Notes
+    /// screens, dictation and meetings write through.
+    public let notes: NoteStore
     /// The remembered voice choices (Settings › Speech, the popover, the
     /// dictation bar's chips).
     public let speechPreferences: SpeechPreferences
@@ -49,6 +52,7 @@ public final class AppServices {
                 apple: AppleServices? = nil,
                 speech: (any SpeechServicing)? = nil,
                 speechPreferences: SpeechPreferences? = nil,
+                noteAttachments: NoteAttachments? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
@@ -64,8 +68,12 @@ public final class AppServices {
         self.downloads = downloads
         self.apple = apple
         let speech = speech ?? UnavailableSpeechService()
-        let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
         self.speech = speech
+        // Without a folder given (tests that build this by hand), attachments
+        // go to a temporary folder, never the person's.
+        self.notes = NoteStore(container: modelContainer, attachments: noteAttachments ?? .temporary(),
+                               speech: speech)
+        let speechPreferences = speechPreferences ?? SpeechPreferences(store: InMemorySettingsStore())
         self.speechPreferences = speechPreferences
         dictation = DictationController(speech: speech, permissions: permissions, preferences: speechPreferences)
         self.settings = settings
@@ -107,17 +115,23 @@ public final class AppServices {
             policy: DownloadManager.Policy(isOffline: { await MainActor.run { settings.offlineMode } }),
             onInstalled: { _ in await engine.refreshCatalog() })
         let permissions = LivePermissionBroker(presentReason: presentPermissionReason)
-        return AppServices(engine: engine,
-                           settings: settings,
-                           permissions: permissions,
-                           modelContainer: container,
-                           downloads: downloads,
-                           apple: AppleServices.live(engine: engine, broker: permissions, container: container,
-                                                     useAppleModel: { await MainActor.run { settings.useAppleModel } }),
-                           speechPreferences: SpeechPreferences(),
-                           appleChat: FoundationChatModel(),
-                           storeError: storeError,
-                           idleUnload: idleUnload)
+        let services = AppServices(engine: engine,
+                                   settings: settings,
+                                   permissions: permissions,
+                                   modelContainer: container,
+                                   downloads: downloads,
+                                   apple: AppleServices.live(engine: engine, broker: permissions, container: container,
+                                                             useAppleModel: { await MainActor.run { settings.useAppleModel } }),
+                                   speechPreferences: SpeechPreferences(),
+                                   noteAttachments: .live,
+                                   appleChat: FoundationChatModel(),
+                                   storeError: storeError,
+                                   idleUnload: idleUnload)
+        // Recently deleted keeps notes 30 days; purge the expired ones (and
+        // their audio) once at launch. Notes repeats it when it opens.
+        let notes = services.notes
+        Task { @MainActor in _ = try? await notes.purgeExpired() }
+        return services
     }
 
     /// Previews and tests: an in-memory store and settings, fake permissions,
