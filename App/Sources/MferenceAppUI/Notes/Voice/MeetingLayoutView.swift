@@ -80,6 +80,7 @@ public struct MeetingLayoutView<Notes: View>: View {
 extension MeetingSession: LiveRecordingControls {
     public func pauseRecording() async { await pause() }
     public func resumeRecording() async { await resume() }
+    public func markMomentInRecording() async { await markMoment() }
 
     /// Stops and waits until the transcript is saved (quit waits on it).
     public func stopRecording() async {

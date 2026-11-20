@@ -53,7 +53,7 @@ struct RecordingBar: View {
                 }
             }
             .buttonStyle(MFButtonStyle(.secondary, size: .medium))
-            .keyboardShortcut("m", modifiers: [.command, .shift])
+            // ⇧⌘M is the menu command (VoiceCommands), active while recording.
             .disabled(!canControl)
             Button {
                 Task { isPaused ? await session.resume() : await session.pause() }

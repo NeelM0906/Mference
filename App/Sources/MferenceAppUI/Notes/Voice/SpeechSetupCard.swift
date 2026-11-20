@@ -16,7 +16,7 @@ public struct SpeechSetupCard: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Image(systemName: "waveform")
-                .font(.system(size: SetupMetrics.iconGlyph, weight: .medium))
+                .font(MFFont.title)
                 .foregroundStyle(MFColor.accentStrong)
                 .frame(width: SetupMetrics.icon, height: SetupMetrics.icon)
                 .background(RoundedRectangle(cornerRadius: SetupMetrics.iconRadius).fill(MFColor.accentFill))
@@ -48,6 +48,7 @@ public struct SpeechSetupCard: View {
         .overlay(RoundedRectangle(cornerRadius: MFRadius.xl).strokeBorder(MFColor.hairlineStrong, lineWidth: MFLayout.hairline))
         .shadow(color: MFColor.ink.opacity(SetupMetrics.shadowOpacity), radius: SetupMetrics.shadowRadius,
                 y: SetupMetrics.shadowY)
+        .onExitCommand { model.dismiss() }
         .confirmationDialog("Download Fluid Speech Pro?", isPresented: $confirmsDownload) {
             Button("Download") { model.download() }
             Button("Not now", role: .cancel) {}
@@ -58,12 +59,14 @@ public struct SpeechSetupCard: View {
 
     /// The download approval, worded as for Quick and Deep.
     static func approvalMessage(bytes: Int64) -> String {
-        "Fluid Speech Pro downloads (\(VoiceFormat.size(bytes))) from Hugging Face to this Mac and runs here. Nothing else is sent."
+        let size = bytes > 0 ? " (\(VoiceFormat.size(bytes)))" : ""
+        return "Fluid Speech Pro downloads\(size) from Hugging Face to this Mac and runs here. Nothing else is sent."
     }
 
     /// The model row's second line.
     static func modelLine(bytes: Int64) -> String {
-        "\(VoiceFormat.size(bytes)) · runs on the Neural Engine, so chat and the model you use there keep running"
+        let line = "runs on the Neural Engine, so chat and the model you use there keep running"
+        return bytes > 0 ? "\(VoiceFormat.size(bytes)) · \(line)" : line.prefix(1).uppercased() + line.dropFirst()
     }
 
     // MARK: Model row
@@ -140,6 +143,7 @@ public struct SpeechSetupCard: View {
         case .downloading:
             Button("Pause") { model.pause() }
                 .buttonStyle(.mfSecondary)
+                .accessibilityLabel("Pause the download")
             Button("Cancel") { model.cancel() }
                 .buttonStyle(.mfQuiet)
                 .accessibilityLabel("Cancel the download")
@@ -147,6 +151,7 @@ public struct SpeechSetupCard: View {
             Button("Resume") { model.download() }
                 .buttonStyle(.mfPrimary)
                 .disabled(model.offline)
+                .accessibilityLabel("Resume the download")
             Button("Cancel") { model.cancel() }
                 .buttonStyle(.mfQuiet)
                 .accessibilityLabel("Cancel the download")
@@ -217,7 +222,6 @@ enum SetupMetrics {
     static let width: CGFloat = 520
     static let padding = CGSize(width: 28, height: 26)
     static let icon: CGFloat = 44
-    static let iconGlyph: CGFloat = 20
     static let iconRadius: CGFloat = 12
     static let blockGap: CGFloat = 18
     static let lineGap: CGFloat = 3
