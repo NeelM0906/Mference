@@ -2,10 +2,11 @@ import MferenceAppCore
 import MferenceDesign
 import SwiftUI
 
-/// The ⌘K panel. For now it finds and opens sections (with their
-/// shortcuts); the chat and mail teams add their own results later.
+/// The ⌘K panel: finds and opens sections (with their shortcuts), and
+/// notes (title, text and transcript lines; Notes spec 6.6).
 struct ShellSearchPanel: View {
     @Bindable var model: ShellModel
+    @Environment(ScreenModels.self) private var screens: ScreenModels?
     @State private var query = ""
     @FocusState private var focused: Bool
 
@@ -14,6 +15,11 @@ struct ShellSearchPanel: View {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return all }
         return all.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
+    }
+
+    /// Notes: titles first, then text, then transcript lines (Notes spec 6.6).
+    private var noteHits: [NoteSearchHit] {
+        screens?.notes?.searchHits(query) ?? []
     }
 
     var body: some View {
@@ -27,7 +33,7 @@ struct ShellSearchPanel: View {
                 .padding(.vertical, MFSpacing.s)
                 .background(RoundedRectangle(cornerRadius: MFRadius.m).fill(MFColor.fill))
                 .accessibilityLabel("Search sections")
-            if matches.isEmpty {
+            if matches.isEmpty, noteHits.isEmpty {
                 Text("No section matches “\(query)”.")
                     .font(MFFont.callout)
                     .foregroundStyle(MFColor.secondary)
@@ -55,6 +61,12 @@ struct ShellSearchPanel: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+            }
+            if !noteHits.isEmpty, let notes = screens?.notes {
+                NoteSearchResults(hits: noteHits) { hit in
+                    model.show(.notes)
+                    notes.open(hit)
+                }
             }
         }
         .padding(MFSpacing.m)

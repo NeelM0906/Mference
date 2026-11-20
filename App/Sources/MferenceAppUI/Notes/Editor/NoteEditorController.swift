@@ -148,11 +148,17 @@ public final class NoteEditorController {
         textView.insertAttachment(block)
     }
 
-    /// The note as plain text, for the share sheet.
+    /// The note as Markdown, for the share sheet (spec 4.1).
     public var shareText: String {
         _ = selectionRevision
         _ = wordCount
-        return textView?.document.plainText ?? note.map { store.document(of: $0).plainText } ?? ""
+        guard let document = textView?.document ?? note.map({ store.document(of: $0) }) else { return "" }
+        return NoteExport.markdown(document, segmentTimes: segmentTimes)
+    }
+
+    /// Scrolls to a transcript segment's time chip, if the note has one.
+    public func reveal(segmentID: UUID) {
+        textView?.reveal(segmentID: segmentID)
     }
 
     public func focus() {

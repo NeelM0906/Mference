@@ -109,15 +109,26 @@ struct NoteEditorPane: View {
 
             iconButton(note.isPinned ? "pin.fill" : "pin", label: note.isPinned ? "Unpin" : "Pin",
                        help: note.isPinned ? "Unpin" : "Pin") { model.togglePin(note) }
-            ShareLink(item: model.editor.shareText) {
+            Menu {
+                ShareLink("Share…", item: model.editor.shareText)
+                Divider()
+                Section("Export as") {
+                    ForEach(NoteExportFormat.allCases, id: \.self) { format in
+                        Button(format.label) { model.export(note, as: format) }
+                    }
+                }
+            } label: {
                 Image(systemName: "square.and.arrow.up")
                     .font(.system(size: NotesMetrics.toolbarGlyph))
                     .foregroundStyle(MFColor.secondary)
                     .frame(width: NotesMetrics.iconButton, height: NotesMetrics.iconButton)
             }
+            .menuStyle(.button)
+            .menuIndicator(.hidden)
             .buttonStyle(.plain)
-            .accessibilityLabel("Share")
-            .help("Share")
+            .frame(width: NotesMetrics.iconButton, height: NotesMetrics.iconButton)
+            .accessibilityLabel("Share or export")
+            .help("Share or export")
             iconButton("trash", label: "Delete", help: "Delete") { model.delete(note) }
         }
         .disabled(!editable)
