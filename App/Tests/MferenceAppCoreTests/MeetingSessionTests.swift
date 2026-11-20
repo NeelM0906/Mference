@@ -8,14 +8,14 @@ import Testing
 /// pause and marks, call audio denied, and launch recovery. Model-free.
 @MainActor
 @Suite struct MeetingSessionTests {
-    static let start = Date(timeIntervalSince1970: 1_795_082_520) // 2026-11-19 10:02 UTC
-    static let utc = TimeZone(identifier: "UTC")!
+    nonisolated static let start = Date(timeIntervalSince1970: 1_795_082_520) // 2026-11-19 10:02 UTC
+    nonisolated static let utc = TimeZone(identifier: "UTC")!
 
     @MainActor struct Harness {
         let container: ModelContainer
         let writer: InMemoryMeetingNoteWriter
         let session: MeetingSession
-        let speech: FakeSpeechService
+        let speech: any SpeechServicing
 
         var context: ModelContext { container.mainContext }
 
@@ -28,7 +28,7 @@ import Testing
         }
     }
 
-    func harness(_ speech: FakeSpeechService, endedAt: Date = start.addingTimeInterval(600)) throws -> Harness {
+    func harness(_ speech: any SpeechServicing, endedAt: Date = start.addingTimeInterval(600)) throws -> Harness {
         let container = try AppModelContainer.inMemory()
         let writer = InMemoryMeetingNoteWriter(context: container.mainContext)
         let session = MeetingSession(speech: speech, context: container.mainContext, writer: writer,
@@ -37,11 +37,12 @@ import Testing
     }
 
     /// Lets the session's consumer task catch up with the fake's events.
-    func settle(until condition: () -> Bool = { false }) async {
-        for _ in 0..<200 {
+    func settle(until condition: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation) async {
+        for _ in 0..<500 {
             if condition() { return }
             await Task.yield()
         }
+        Issue.record("The condition never became true.", sourceLocation: sourceLocation)
     }
 
     static func segment(_ text: String, _ start: TimeInterval, _ end: TimeInterval, speaker: String = "you",
@@ -96,6 +97,21 @@ import Testing
         model.upsert(Self.segment("c", 7, 8))
         #expect(model.segments.map(\.text) == ["a", "b", "c"])
         #expect(model.speaker(for: model.segments[1]).name == "You")
+    }
+
+    @Test func anInPlaceUpdateThatMovesASegmentReorders() {
+        let first = UUID()
+        let model = TranscriptModel(segments: [Self.segment("a", 0, 1, final: false, id: first),
+                                               Self.segment("b", 5, 6), Self.segment("c", 10, 11)])
+        model.upsert(Self.segment("a, later", 7, 8, id: first))
+        #expect(model.segments.map(\.text) == ["b", "a, later", "c"])
+    }
+
+    @Test func theGapLabelNamesTheStretch() {
+        let gap = RecordingGap(start: Self.start.addingTimeInterval(180), end: Self.start.addingTimeInterval(3_480),
+                               at: 180, reason: .sleep)
+        #expect(MeetingCopy.gapLabel(gap, locale: Locale(identifier: "en_GB"), timeZone: Self.utc)
+            == "Gap: 10:05–11:00 (Mac asleep)")
     }
 
     @Test func anEchoRemovedAfterSavingIsRemovedFromTheStore() async throws {
@@ -181,17 +197,132 @@ import Testing
             == "Meeting 19 Nov at 10:02")
     }
 
-    @Test func notKeepingAudioIsRecorded() async throws {
+    @Test(arguments: [(true, true, true), (true, false, false), (false, true, false)])
+    func audioIsKeptOnlyWhenAskedAndWritten(keep: Bool, written: Bool, kept: Bool) async throws {
         let result = TranscriptResult(segments: [], speakers: [.you],
                                       tracks: [RecordedTrack(fileName: "mic-1.m4a", kind: .microphone,
                                                              startOffset: 0, duration: 5)],
-                                      duration: 5, audioDirectory: nil)
+                                      duration: 5, audioDirectory: written ? URL(filePath: "/tmp/rec") : nil)
         let speech = FakeSpeechService(meeting: FakeSpeechService.MeetingScript(result: result))
         let h = try harness(speech)
-        let noteID = try await h.session.start(MeetingStartOptions(keepAudio: false))
+        let noteID = try await h.session.start(MeetingStartOptions(keepAudio: keep))
         await h.session.stop()
         await h.session.waitUntilFinished()
-        #expect(h.recording(noteID)?.audioKept == false)
+        #expect(h.recording(noteID)?.audioKept == kept)
+        #expect((h.session.audio(for: noteID) != nil) == kept)
+        if kept {
+            let audio = try #require(h.session.audio(for: noteID))
+            #expect(audio.duration == 5)
+            #expect(audio.url(of: audio.tracks[0]) == speech.recordingsDirectory(for: noteID).appending(path: "mic-1.m4a"))
+        }
+    }
+
+    @Test func aSecondStopIsHarmless() async throws {
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        var ended = 0
+        h.session.afterMeeting = { _, _ in ended += 1 }
+        let noteID = try await h.session.start(MeetingStartOptions())
+        await h.session.stop()
+        await h.session.stop()
+        await h.session.waitUntilFinished()
+        await h.session.stop()
+        #expect(ended == 1)
+        #expect(h.session.phase == .idle)
+        #expect(h.recording(noteID)?.transcriptionState == .done)
+    }
+
+    // MARK: Streams that end badly
+
+    @Test func aStreamEndingWithoutAResultClosesTheNoteAndRecoveryAttachesItsAudio() async throws {
+        let speech = ManualMeetingSpeech()
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions())
+        speech.send(.started(callAudio: true))
+        speech.send(.segment(Self.segment("Before the crash.", 0, 2)))
+        speech.send(.failed(.failed("tap died")))
+        speech.finishStream()
+        await h.session.waitUntilFinished()
+        #expect(h.session.phase == .idle)
+        #expect(h.session.lastError == SpeechError.failed("").message)
+        let record = try #require(h.recording(noteID))
+        #expect(record.endedAt == Self.start.addingTimeInterval(600))
+        #expect(record.transcriptionState == .done)
+        #expect(record.segments.map(\.text) == ["Before the crash."])
+        #expect(h.writer.body(of: noteID).paragraphs == ["Recording ended unexpectedly at 10:12"])
+        #expect(h.session.audio(for: noteID) == nil)
+
+        // Next launch: the speech service reports the files it closed.
+        let track = RecordedTrack(fileName: "mic-1.m4a", kind: .microphone, startOffset: 0, duration: 2)
+        speech.interrupted = [InterruptedRecording(noteID: noteID, tracks: [track], endedAt: Self.start)]
+        let relaunched = MeetingSession(speech: speech, context: h.context, writer: h.writer, now: { Self.start },
+                                        locale: Locale(identifier: "en_GB"), timeZone: Self.utc)
+        #expect(await relaunched.recoverInterruptedMeetings().isEmpty)
+        #expect(h.recording(noteID)?.tracks == [track])
+        #expect(h.recording(noteID)?.endedAt == Self.start.addingTimeInterval(600))
+        #expect(relaunched.audio(for: noteID)?.tracks == [track])
+        #expect(h.writer.body(of: noteID).paragraphs.count == 1)
+    }
+
+    @Test func eventsAfterTheEndNeverReachTheNextMeeting() async throws {
+        let speech = ManualMeetingSpeech()
+        let h = try harness(speech)
+        let first = try await h.session.start(MeetingStartOptions(summaryWhenStopped: false))
+        let firstStream = try #require(speech.continuation)
+        firstStream.yield(.segment(Self.segment("First meeting.", 0, 1)))
+        firstStream.yield(.ended(TranscriptResult(segments: [Self.segment("First meeting.", 0, 1)],
+                                                  speakers: [.you], duration: 1)))
+        await h.session.waitUntilFinished()
+        let second = try await h.session.start(MeetingStartOptions(summaryWhenStopped: false))
+        // A stray event on the first meeting's stream after its end.
+        firstStream.yield(.segment(Self.segment("Late.", 2, 3)))
+        speech.send(.segment(Self.segment("Second meeting.", 0, 1)))
+        await settle { h.recording(second)?.segments.count == 1 }
+        #expect(h.recording(first)?.segments.map(\.text) == ["First meeting."])
+        #expect(h.recording(second)?.segments.map(\.text) == ["Second meeting."])
+        #expect(h.session.transcript?.segments.map(\.text) == ["Second meeting."])
+    }
+
+    @Test func aFinalResultWithoutSegmentsKeepsTheLiveTranscript() async throws {
+        let speech = ManualMeetingSpeech()
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions(summaryWhenStopped: false))
+        speech.send(.segment(Self.segment("Kept.", 0, 1)))
+        speech.send(.ended(TranscriptResult(segments: [], speakers: [.you], duration: 1)))
+        await h.session.waitUntilFinished()
+        #expect(h.recording(noteID)?.segments.map(\.text) == ["Kept."])
+    }
+
+    @Test func callAudioFailingMidCallIsSaidOnce() async throws {
+        let speech = ManualMeetingSpeech()
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions())
+        speech.send(.started(callAudio: true))
+        speech.send(.callAudioUnavailable(.failed("tap")))
+        speech.send(.callAudioUnavailable(.failed("tap")))
+        await settle { !h.session.callAudioAvailable && !h.writer.body(of: noteID).paragraphs.isEmpty }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(h.writer.body(of: noteID).paragraphs
+            == ["Call audio stopped at 10:12, so only your microphone was recorded after that."])
+    }
+
+    // MARK: Options from Settings
+
+    @Test func startOptionsComeFromTheSharedPreferences() {
+        let preferences = SpeechPreferences(store: InMemorySettingsStore())
+        preferences.microphoneID = "usb"
+        preferences.callAudio = .app(bundleID: "us.zoom.xos", name: "zoom.us")
+        preferences.keepAudio = .deleteAfterTranscribing
+        preferences.language = .fixed("de")
+        var options = MeetingStartOptions(preferences: preferences)
+        #expect(options.microphoneID == "usb" && options.keepAudio == false && options.language == .fixed("de"))
+        #expect(options.callAudio == .app(bundleID: "us.zoom.xos", name: "zoom.us"))
+        #expect(options.summaryWhenStopped)
+        preferences.summaryModel = .off
+        options = MeetingStartOptions(preferences: preferences)
+        #expect(!options.summaryWhenStopped)
+        let files = FileImportOptions(preferences: preferences)
+        #expect(!files.summarize && !files.keepAudio && files.language == .fixed("de"))
     }
 
     // MARK: Renames
@@ -318,6 +449,8 @@ import Testing
         #expect(h.session.phase == .idle)
         #expect(speech.status.liveSession == nil)
         #expect(speech.calls.contains(.stopMeeting))
+        #expect(speech.calls.contains { if case .deleteRecordings = $0 { true } else { false } })
+        #expect(try h.context.fetch(FetchDescriptor<Note>()).isEmpty)
     }
 
     // MARK: Launch recovery
@@ -362,4 +495,85 @@ import Testing
         #expect(await h.session.recoverInterruptedMeetings().isEmpty)
         #expect(speech.calls.filter { $0 == .recoverInterruptedRecordings }.count == 1)
     }
+
+    @Test func recoveryLeavesTheLiveMeetingAlone() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions())
+        speech.setInterruptedRecordings([InterruptedRecording(noteID: noteID, tracks: [], endedAt: Self.start)])
+        #expect(await h.session.recoverInterruptedMeetings().isEmpty)
+        #expect(h.recording(noteID)?.endedAt == nil)
+        #expect(h.recording(noteID)?.transcriptionState == .live)
+    }
+
+    @Test func recoveryNeverEndsBeforeTheLastGap() async throws {
+        let speech = FakeSpeechService()
+        let h = try harness(speech)
+        let id = UUID()
+        try h.writer.createNote(id: id, kind: .meeting, title: "Meeting", createdAt: Self.start)
+        let record = NoteRecording(startedAt: Self.start)
+        record.transcriptionState = .live
+        record.segments = [Self.segment("Before sleep.", 0, 300), Self.segment("After wake.", 300, 420)]
+        record.gaps = [RecordingGap(start: Self.start.addingTimeInterval(300),
+                                    end: Self.start.addingTimeInterval(3_600), at: 300, reason: .sleep)]
+        h.context.insert(record)
+        h.note(id)?.recording = record
+        try h.context.save()
+        #expect(await h.session.recoverInterruptedMeetings() == [id])
+        // Recording time says 10:09; the Mac slept until 11:02, so it ended no earlier.
+        #expect(h.recording(id)?.endedAt == Self.start.addingTimeInterval(3_600))
+        #expect(h.writer.body(of: id).paragraphs == ["Recording ended unexpectedly at 11:02"])
+    }
+}
+
+/// A speech service whose meeting stream the test drives by hand: events,
+/// a stream that ends without `.ended`, and launch reports.
+final class ManualMeetingSpeech: SpeechServicing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: AsyncStream<MeetingEvent>.Continuation?
+    private var reported: [InterruptedRecording] = []
+
+    var continuation: AsyncStream<MeetingEvent>.Continuation? { lock.withLock { current } }
+    var interrupted: [InterruptedRecording] {
+        get { lock.withLock { reported } }
+        set { lock.withLock { reported = newValue } }
+    }
+
+    func send(_ event: MeetingEvent) { continuation?.yield(event) }
+    func finishStream() { continuation?.finish() }
+
+    var status: SpeechStatus { SpeechStatus(speech: .ready, speakerLabels: .ready) }
+    func statusUpdates() -> AsyncStream<SpeechStatus> {
+        let (stream, continuation) = AsyncStream.makeStream(of: SpeechStatus.self)
+        continuation.yield(status)
+        return stream
+    }
+    func downloadSize(of package: SpeechPackageID) -> Int64 { 0 }
+    func install(_ package: SpeechPackageID) async throws {}
+    func pauseInstall(_ package: SpeechPackageID) async {}
+    func cancelInstall(_ package: SpeechPackageID) async {}
+    func remove(_ package: SpeechPackageID) async throws {}
+    func startDictation(_ options: DictationOptions) async throws -> DictationSession {
+        throw SpeechError.busy(.meeting)
+    }
+    func startMeeting(_ options: MeetingOptions) async throws -> MeetingRecording {
+        let (events, continuation) = AsyncStream.makeStream(of: MeetingEvent.self)
+        lock.withLock { current = continuation }
+        return MeetingRecording(noteID: options.noteID, startedAt: MeetingSessionTests.start, events: events,
+                                controls: .init(pause: {}, resume: {}, markMoment: { 0 },
+                                                stop: { continuation.finish() }))
+    }
+    func transcribeFile(_ url: URL, options: FileTranscriptionOptions) async throws -> FileJob {
+        throw SpeechError.notInstalled(.speech)
+    }
+    func cancel(_ job: FileJob.ID) async {}
+    func inputDevices() async -> [AudioInputDevice] { [] }
+    func runningAudioApps() async -> [RunningAudioApp] { [] }
+    func recordingsSize() async -> Int64 { 0 }
+    func deleteRecordings(for noteID: UUID) async throws {}
+    func recordingsDirectory(for noteID: UUID) -> URL {
+        URL(filePath: "/tmp/manual-recordings").appending(path: noteID.uuidString)
+    }
+    func recoverInterruptedRecordings() async -> [InterruptedRecording] { interrupted }
+    func shutdown() async {}
 }
