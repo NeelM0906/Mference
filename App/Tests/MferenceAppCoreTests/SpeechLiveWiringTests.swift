@@ -12,7 +12,7 @@ import Testing
 
     @Test func callAudioPermissionIsRememberedAcrossLaunches() async throws {
         let store = InMemorySettingsStore()
-        let first = SystemAudioPermission(store: store, probe: {})
+        let first = SystemAudioPermission(store: store, probe: { .granted })
         #expect(first.state == .notDetermined)
         try await first.request()
         #expect(first.state == .granted)
@@ -22,25 +22,64 @@ import Testing
         #expect(await relaunched.access.state() == .granted)
     }
 
-    @Test func aRefusedOrRevokedTapNeedsSystemSettings() async throws {
+    @Test func aCoreAudioErrorIsNotADenial() async throws {
         let store = InMemorySettingsStore()
-        let refused = SystemAudioPermission(store: store, probe: { throw Refused() })
-        await #expect(throws: Refused.self) { try await refused.request() }
-        #expect(refused.state == .needsSystemSettings)
+        let failing = SystemAudioPermission(store: store, probe: { throw Refused() })
+        await #expect(throws: Refused.self) { try await failing.request() }
+        #expect(failing.state == .notDetermined, "nothing recorded")
+    }
 
-        let granted = SystemAudioPermission(store: InMemorySettingsStore(), probe: {})
-        try await granted.request()
-        granted.record(granted: false)  // a meeting's tap failed: revoked
-        #expect(granted.state == .needsSystemSettings)
+    @Test func nothingPlayingLeavesItForTheNextTap() async throws {
+        // Granted is never recorded on timing: an undecided test tap is "asked".
+        let store = InMemorySettingsStore()
+        let permission = SystemAudioPermission(store: store, probe: { .undecided })
+        try await permission.request()
+        #expect(permission.stored == "asked")
+        #expect(permission.state == .granted, "the next meeting may tap and settle it")
+        permission.record(.denied)
+        #expect(permission.state == .needsSystemSettings)
+        permission.record(.undecided)
+        #expect(permission.state == .needsSystemSettings)
+    }
+
+    @Test func openingSystemSettingsLetsTheNextTapCheckAgain() async throws {
+        let store = InMemorySettingsStore()
+        let permission = SystemAudioPermission(store: store, probe: { .denied })
+        try await permission.request()
+        #expect(permission.state == .needsSystemSettings)
+        permission.systemSettingsOpened()
+        #expect(permission.state == .granted && permission.stored == "asked")
+        permission.record(.granted)
+        permission.systemSettingsOpened()
+        #expect(permission.stored == "granted")
     }
 
     @Test func theBrokerAsksThroughThePersistedAccess() async {
         let store = InMemorySettingsStore()
-        let permission = SystemAudioPermission(store: store, probe: {})
+        let permission = SystemAudioPermission(store: store, probe: { .granted })
         let broker = LivePermissionBroker(presentReason: { _ in true }, systemAudio: permission.access)
         #expect(await broker.state(of: .systemAudio) == .notDetermined)
         #expect(await broker.request(.systemAudio) == .granted)
         #expect(store.object(forKey: SystemAudioPermission.key) as? String == "granted")
+    }
+
+    @Test func aTapIsJudgedByWhatItHears() {
+        var verdict = TapAccessVerdict()
+        // Silence while nothing plays says nothing.
+        for _ in 0..<100 { verdict.tick(heardSound: false, silentSeconds: 0.5, othersPlaying: false) }
+        #expect(verdict.result == .undecided)
+        // A quiet stretch of a call is not a denial yet.
+        for _ in 0..<20 { verdict.tick(heardSound: false, silentSeconds: 0.5, othersPlaying: true) }
+        #expect(verdict.result == .undecided)
+        for _ in 0..<10 { verdict.tick(heardSound: false, silentSeconds: 0.5, othersPlaying: true) }
+        #expect(verdict.result == .denied, "15 s of digital silence while others play")
+        verdict.tick(heardSound: true, silentSeconds: 0, othersPlaying: true)
+        #expect(verdict.result == .denied, "a verdict is final")
+
+        var heard = TapAccessVerdict()
+        heard.tick(heardSound: false, silentSeconds: 0.5, othersPlaying: true)
+        heard.tick(heardSound: true, silentSeconds: 0, othersPlaying: true)
+        #expect(heard.result == .granted)
     }
 
     @Test func theLoaderReadsThePinnedFolders() throws {
