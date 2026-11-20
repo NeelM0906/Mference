@@ -41,9 +41,11 @@ Rules that follow from them:
   Mac logic under `Mobile/`.
 - Until engine ask E1 lands, `MferenceAppCore` links `MferenceEngine` on macOS
   only, and iOS code reaches the engine behind `#if canImport(MferenceEngine)`.
-- `MferenceLink` is Foundation only. Key agreement, encryption, framing and
-  replay checks are the link implementation's, not the message file's; every
-  envelope crosses authenticated and encrypted.
+- `MferenceLink` uses Foundation, CryptoKit and Security only (no sockets:
+  the transport lives in each app). `LinkProtocol.swift` is the messages, the
+  contract; key agreement, the pairing code, encryption, framing and replay
+  checks are the link implementation beside it. After the plain hello and
+  pairing exchange, every envelope crosses authenticated and encrypted.
 - Tests never load a model, touch the network or raise a permission prompt.
 
 ## Signing

@@ -9,14 +9,16 @@ struct LinkProtocolTests {
     /// One sample of every message, so a new case without a round trip fails
     /// `everyTypeHasASample`.
     static let samples: [LinkMessage] = [
-        .hello(LinkHello(role: .phone, deviceName: "iPhone", appVersion: "0.1")),
+        .hello(LinkHello(role: .phone, deviceName: "iPhone", appVersion: "0.1",
+                         identityKey: Data(repeating: 1, count: 32), ephemeralKey: Data(repeating: 2, count: 32))),
         .capabilities(LinkCapabilities(
             macName: "MacBook Pro",
             models: [LinkModel(id: "deep", title: "Deep 27B", isReady: true, isDefault: true)],
             webSearch: true, modelTransfer: true)),
         .error(LinkError(code: .notPaired, message: "Pair this iPhone first.", requestID: id)),
-        .pairRequest(LinkPairRequest(deviceName: "iPhone", publicKey: Data(repeating: 7, count: 32))),
-        .pairResponse(LinkPairResponse(macName: "MacBook Pro", publicKey: Data(repeating: 9, count: 32))),
+        .pairRequest(LinkPairRequest(deviceName: "iPhone")),
+        .pairResponse(LinkPairResponse(macName: "MacBook Pro", commitment: Data(repeating: 9, count: 32))),
+        .pairNonce(LinkPairNonce(nonce: Data(repeating: 7, count: 32))),
         .pairConfirm(LinkPairConfirm(accepted: true)),
         .forget,
         .webSearch(LinkWebSearchRequest(requestID: id, query: "swift testing", maxResults: 5)),
@@ -47,7 +49,8 @@ struct LinkProtocolTests {
     @Test func versionAndServiceAreFixed() {
         #expect(LinkProtocol.version == 1)
         #expect(LinkProtocol.bonjourServiceType == "_mference._tcp")
-        #expect(LinkHello(role: .mac, deviceName: "Mac", appVersion: "1").protocolVersions == [1])
+        #expect(LinkHello(role: .mac, deviceName: "Mac", appVersion: "1",
+                          identityKey: Data(), ephemeralKey: Data()).protocolVersions == [1])
     }
 
     @Test(arguments: samples)
@@ -62,7 +65,7 @@ struct LinkProtocolTests {
     /// Every wire type of v1. Adding a case means adding it here and a sample
     /// above; the switch in `LinkMessage.type` fails to compile without it.
     static let allTypes: Set<String> = [
-        "hello", "capabilities", "error", "pairRequest", "pairResponse", "pairConfirm", "forget",
+        "hello", "capabilities", "error", "pairRequest", "pairResponse", "pairNonce", "pairConfirm", "forget",
         "webSearch", "webSearchResults", "readPage", "pageText", "jobSubmit", "jobEvent", "jobCancel",
         "modelOffer", "modelChunkRequest", "modelChunk",
     ]
@@ -90,6 +93,36 @@ struct LinkProtocolTests {
         let forget = try JSONEncoder().encode(LinkMessage.forget)
         let forgetObject = try #require(try JSONSerialization.jsonObject(with: forget) as? [String: Any])
         #expect(forgetObject.keys.sorted() == ["type"])
+    }
+
+    /// Job events use the same explicit `type`/`body` shape as messages.
+    @Test func jobEventWireShape() throws {
+        func object(_ kind: LinkJobEvent.Kind) throws -> [String: Any] {
+            let data = try JSONEncoder().encode(LinkJobEvent(jobID: Self.id, kind: kind))
+            let event = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            return try #require(event["kind"] as? [String: Any])
+        }
+        let started = try object(.started)
+        #expect(started.keys.sorted() == ["type"])
+        #expect(started["type"] as? String == "started")
+        #expect(try object(.cancelled).keys.sorted() == ["type"])
+
+        let token = try object(.token(text: "Hel"))
+        #expect(token["type"] as? String == "token")
+        #expect((token["body"] as? [String: Any])?["text"] as? String == "Hel")
+        let step = try object(.step(text: "Read 40 PDFs"))
+        #expect((step["body"] as? [String: Any])?["text"] as? String == "Read 40 PDFs")
+
+        let finished = try object(.finished(result: LinkJobResult(
+            text: "| a |", modelTitle: "Deep 27B", promptTokens: 10, completionTokens: 3)))
+        #expect((finished["body"] as? [String: Any])?["modelTitle"] as? String == "Deep 27B")
+        let failed = try object(.failed(error: LinkError(code: .busy, message: "Busy")))
+        #expect((failed["body"] as? [String: Any])?["code"] as? String == "busy")
+
+        let unknown = Data(#"{"jobID":"\#(Self.id.uuidString)","kind":{"type":"teleport"}}"#.utf8)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(LinkJobEvent.self, from: unknown)
+        }
     }
 
     @Test func unknownTypeFailsToDecode() {
