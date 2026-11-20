@@ -39,6 +39,26 @@ import Testing
         await services.summaries.waitUntilIdle()
     }
 
+    @Test func aTranscriptShownWhileTheFileWasQueuedFillsInWhenItFinishes() async throws {
+        let speech = FakeSpeechService(stepped: true)
+        let segment = TranscriptSegment(track: .file, start: 0, end: 4, speakerID: SpeakerInfo.othersID,
+                                        text: "Welcome to week three.", isFinal: true)
+        speech.setFileResult(.success(TranscriptResult(segments: [segment], speakers: [.others], duration: 4)),
+                             forFileNamed: "lecture.m4a")
+        let services = AppServices.preview(speech: speech)
+        let id = try #require(await services.files.add([URL(filePath: "/tmp/lecture.m4a")],
+                                                       options: FileImportOptions()).first)
+        // The note is opened while the file is still queued: an empty transcript.
+        let shown = try #require(services.meetings.transcript(for: id))
+        #expect(shown.segments.isEmpty)
+        while speech.advance() {}
+        await services.files.waitUntilIdle()
+        // The same model, now with the transcript.
+        #expect(services.meetings.transcript(for: id) === shown)
+        #expect(shown.segments.map(\.text) == ["Welcome to week three."])
+        #expect(shown.speaker(for: shown.segments[0]).name == "Others")
+    }
+
     @Test func launchRecoveryRunsOnce() async throws {
         let speech = FakeSpeechService()
         let services = AppServices.preview(speech: speech)
