@@ -49,6 +49,8 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>To send a reply through Mail when you click Send.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>To take dictation on this Mac.</string>
+	<string>To hear you when you dictate or record a meeting.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>To hear the other side of a call while you record a meeting.</string>
 </dict>
 </plist>

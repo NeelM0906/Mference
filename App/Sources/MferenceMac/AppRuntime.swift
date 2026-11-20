@@ -70,6 +70,7 @@ enum PermissionReasonAlert {
         case .fullDiskAccess: "Mference needs Full Disk Access to read Mail"
         case .mailAutomation: "Mference would like to send through Mail"
         case .microphone: "Mference would like to use the microphone"
+        case .systemAudio: "Mference would like to hear call audio"
         }
     }
 }

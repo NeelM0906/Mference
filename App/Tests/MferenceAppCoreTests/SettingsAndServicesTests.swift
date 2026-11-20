@@ -276,6 +276,37 @@ import Testing
         #expect(log.calls == ["reason:fullDiskAccess", "open:Privacy_AllFiles"])
     }
 
+    @Test func systemAudioGoesThroughTheSpeechSuppliedAccess() async {
+        // The live system calls route call audio to SystemAudioAccess and
+        // nothing else (no TCC in tests).
+        let log = CallLog()
+        let access = SystemAudioAccess(state: { log.state(.systemAudio) },
+                                       request: {
+                                           log.record("tap:systemAudio")
+                                           log.set(.granted, .systemAudio)
+                                       })
+        let broker = LivePermissionBroker(presentReason: { permission in
+            log.record("reason:\(permission.rawValue)")
+            return true
+        }, systemAudio: access)
+        #expect(await broker.state(of: .systemAudio) == .notDetermined)
+        #expect(await broker.request(.systemAudio) == .granted)
+        #expect(log.calls == ["reason:systemAudio", "tap:systemAudio"])
+    }
+
+    @Test func unwiredSystemAudioNeverRecordsByAccident() async {
+        let broker = LivePermissionBroker(presentReason: { _ in true }, systemAudio: .unavailable)
+        #expect(await broker.request(.systemAudio) == .needsSystemSettings)
+        #expect(await LivePermissionBroker(presentReason: { _ in true }, systemAudio: .fixed(.granted))
+            .state(of: .systemAudio) == .granted)
+    }
+
+    @Test func meetingPermissionReasons() {
+        #expect(AppPermission.microphone.reason == "To hear you when you dictate or record a meeting.")
+        #expect(AppPermission.systemAudio.reason == "To hear the other side of a call while you record a meeting.")
+        #expect(LivePermissionBroker.settingsURL(for: .systemAudio).query == "Privacy_ScreenCapture")
+    }
+
     @Test func fakeBrokerAnswersOnlyUndeterminedRequests() async {
         let broker = FakePermissionBroker(states: [.camera: .needsSystemSettings], answers: [.calendar: .denied])
         #expect(await broker.state(of: .calendar) == .notDetermined)

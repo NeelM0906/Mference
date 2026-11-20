@@ -22,8 +22,13 @@ import Synchronization
 /// The bundle's `Info.plist` must carry the usage strings
 /// (`NSCalendarsFullAccessUsageDescription`,
 /// `NSRemindersFullAccessUsageDescription`, `NSCameraUsageDescription`,
-/// `NSMicrophoneUsageDescription`, `NSAppleEventsUsageDescription`), or the
-/// system refuses the request without asking.
+/// `NSMicrophoneUsageDescription`, `NSAudioCaptureUsageDescription`,
+/// `NSAppleEventsUsageDescription`), or the system refuses the request
+/// without asking.
+///
+/// System audio has no public state query; its state and prompt come from
+/// `SystemAudioAccess`, which the Speech service supplies (only
+/// `MferenceAppCore/Speech` creates Core Audio taps).
 public struct LivePermissionBroker: PermissionBroker {
     /// Shows `permission.reason` and returns whether the person chose to go
     /// on. Required: the system prompt never appears without the reason (L6).
@@ -50,6 +55,7 @@ public struct LivePermissionBroker: PermissionBroker {
         /// The real calls. EventKit requests go through `eventStore`, which
         /// must outlive the request (the broker keeps it).
         public static func live(eventStore: EventStoreBox = EventStoreBox(),
+                                systemAudio: SystemAudioAccess = .unavailable,
                                 homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> System {
             System(
                 state: { permission in
@@ -58,6 +64,7 @@ public struct LivePermissionBroker: PermissionBroker {
                     case .reminders: LivePermissionBroker.state(EKEventStore.authorizationStatus(for: .reminder))
                     case .camera: LivePermissionBroker.state(AVCaptureDevice.authorizationStatus(for: .video))
                     case .microphone: LivePermissionBroker.state(AVCaptureDevice.authorizationStatus(for: .audio))
+                    case .systemAudio: await systemAudio.state()
                     case .fullDiskAccess: LivePermissionBroker.fullDiskAccessState(homeDirectory: homeDirectory)
                     case .mailAutomation: await LivePermissionBroker.mailAutomationState(ask: false)
                     }
@@ -68,6 +75,7 @@ public struct LivePermissionBroker: PermissionBroker {
                     case .reminders: _ = try await eventStore.store.requestFullAccessToReminders()
                     case .camera: _ = await AVCaptureDevice.requestAccess(for: .video)
                     case .microphone: _ = await AVCaptureDevice.requestAccess(for: .audio)
+                    case .systemAudio: try await systemAudio.request()
                     case .mailAutomation: _ = await LivePermissionBroker.mailAutomationState(ask: true)
                     case .fullDiskAccess: break
                     }
@@ -90,11 +98,13 @@ public struct LivePermissionBroker: PermissionBroker {
     ///   - eventStore: the one EventKit store used for requests; share it
     ///     with the Calendar service.
     ///   - system: nil uses the live calls over `eventStore`.
+    ///   - systemAudio: how call-audio access is read and asked; used only
+    ///     when `system` is nil.
     public init(presentReason: @escaping ReasonPresenter, eventStore: EventStoreBox = EventStoreBox(),
-                system: System? = nil) {
+                systemAudio: SystemAudioAccess = .unavailable, system: System? = nil) {
         self.presentReason = presentReason
         self.storeBox = eventStore
-        self.system = system ?? .live(eventStore: eventStore)
+        self.system = system ?? .live(eventStore: eventStore, systemAudio: systemAudio)
     }
 
     /// The EventKit store requests go through.
@@ -197,6 +207,9 @@ public struct LivePermissionBroker: PermissionBroker {
         case .reminders: "Privacy_Reminders"
         case .camera: "Privacy_Camera"
         case .microphone: "Privacy_Microphone"
+        // Screen & System Audio Recording, which holds "System Audio
+        // Recording Only".
+        case .systemAudio: "Privacy_ScreenCapture"
         case .fullDiskAccess: "Privacy_AllFiles"
         case .mailAutomation: "Privacy_Automation"
         }
