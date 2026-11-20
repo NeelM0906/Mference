@@ -369,4 +369,11 @@ public enum MeetingCopy {
     }
 
     public static let micOnly = "Call audio was off, so only your microphone was recorded."
+
+    /// A transcribed file's title until the summary names it: the file name
+    /// without its extension (spec 4.6).
+    public static func fileTitle(_ fileName: String) -> String {
+        let stem = (fileName as NSString).deletingPathExtension
+        return stem.isEmpty ? fileName : stem
+    }
 }
