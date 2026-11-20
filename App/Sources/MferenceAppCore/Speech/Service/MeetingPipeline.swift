@@ -427,8 +427,9 @@ actor MeetingPipeline {
     }
 
     /// Quit (spec 6.1): stops capture and closes the files, and returns
-    /// within the quit deadline. The speaker pass is skipped (live labels
-    /// stay) and kept audio converts at the next launch. Anything still
+    /// within the quit deadline. Phrases already heard get up to
+    /// `lastPhrasesAtQuit` to finish; the speaker pass is skipped (live
+    /// labels stay) and kept audio converts at the next launch. Anything still
     /// running from an earlier `stop()` is cut short the same way.
     func stopForQuit() async {
         quitting = true
@@ -440,6 +441,28 @@ actor MeetingPipeline {
     }
 
     var isQuitting: Bool { quitting }
+
+    /// How long quit waits for phrases still being recognized (a phrase is
+    /// at most 15 s of audio and takes well under a second): part of the
+    /// app's 10 s quit deadline.
+    static let lastPhrasesAtQuit: Duration = .seconds(3)
+
+    /// Runs `work` and returns when it ends or after `limit`, whichever is
+    /// first.
+    private static func waitAtMost(_ limit: Duration, _ work: @escaping @Sendable () async -> Void) async {
+        let race = QuitRace<Void>()
+        _ = await withCheckedContinuation { (continuation: CheckedContinuation<Void?, Never>) in
+            race.begin(continuation)
+            Task {
+                await work()
+                race.resume(())
+            }
+            Task {
+                try? await Task.sleep(for: limit)
+                race.resume(nil)
+            }
+        }
+    }
 
     /// Runs `work`, or gives up as soon as the app quits (the work is left
     /// to end on its own; the process is exiting).
@@ -459,7 +482,12 @@ actor MeetingPipeline {
     private func finish() async {
         continuation.yield(.finishing(.transcribingLastPhrases))
         let pending = Array(lastTranscription.values)
-        _ = await untilQuit { for task in pending { await task.value } }
+        let lastPhrases: @Sendable () async -> Void = { for task in pending { await task.value } }
+        // Quit still gives the phrases already heard a short, bounded wait:
+        // nothing transcribes them after the app has gone.
+        if await untilQuit(lastPhrases) == nil {
+            await Self.waitAtMost(Self.lastPhrasesAtQuit, lastPhrases)
+        }
         try? recording.closeAll()
         var segments = finals.values.sorted { $0.start < $1.start || ($0.start == $1.start && $0.track == .microphone) }
         var mapping: [String: String] = [:]

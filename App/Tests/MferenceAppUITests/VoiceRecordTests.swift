@@ -169,8 +169,11 @@ final class FakeRecordingControls: LiveRecordingControls {
         await models.shutDownForQuit()
         #expect(controls.calls == ["saved"], "a finishing meeting is ended by the shutdown and saved")
         #expect(QuitConfirmation.copy(finishing: true).quit == "Quit")
-        #expect(QuitConfirmation.copy(finishing: true).message.hasSuffix("the next time you open it."),
-                "quit promises nothing inside the shutdown deadline; launch recovery finishes it")
+        // Quit waits a few seconds for the last phrases and keeps the live
+        // speaker labels; nothing transcribes after the app has gone.
+        #expect(QuitConfirmation.copy(finishing: true).message.hasSuffix("keeps the speaker labels it has so far."))
+        #expect(!QuitConfirmation.copy(finishing: true).message.contains("next time"))
+        #expect(!QuitConfirmation.copy(finishing: false).message.contains("next time"))
         #expect(QuitConfirmation.copy(finishing: false).title == "A meeting is recording")
         #expect(QuitConfirmation.copy(finishing: true) != QuitConfirmation.copy(finishing: false))
     }

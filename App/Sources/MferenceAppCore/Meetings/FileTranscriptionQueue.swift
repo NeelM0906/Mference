@@ -298,8 +298,7 @@ public final class FileTranscriptionQueue {
             // A file added during launch is already queued: leave it.
             guard let note = record.note, note.deletedAt == nil, let fileName = record.sourceFileName,
                   jobs[note.id] == nil else { continue }
-            let copy = speech.recordingsDirectory(for: note.id).appending(path: fileName)
-            guard FileManager.default.fileExists(atPath: copy.path) else {
+            guard let copy = Self.inputCopy(of: fileName, in: speech.recordingsDirectory(for: note.id)) else {
                 upsertRow(Row(noteID: note.id, fileName: fileName, phase: .queued, fraction: 0))
                 fail(note.id, message: MeetingCopy.fileGone)
                 continue
@@ -307,9 +306,31 @@ public final class FileTranscriptionQueue {
             let options = FileImportOptions(keepAudio: record.audioKept, summarize: record.summaryState == .pending)
             if await enqueue(copy, fileName: fileName, noteID: note.id, options: options, createNote: false) != nil {
                 requeued.append(note.id)
+                // The speech service copied it again for the new job.
+                if copy.lastPathComponent.hasPrefix(Self.importPrefix) { try? FileManager.default.removeItem(at: copy) }
             }
         }
         return requeued
+    }
+
+    private nonisolated static let importPrefix = "import-"
+
+    /// The speech service's copy of an imported file in the note's folder:
+    /// `import-<8 hex>-<name>` (what `transcribeFile` writes), or the name
+    /// itself. The newest wins when there are several.
+    nonisolated static func inputCopy(of fileName: String, in folder: URL) -> URL? {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        let copies = names.filter { name in
+            guard name.hasPrefix(importPrefix), name.hasSuffix("-" + fileName),
+                  name.count == importPrefix.count + 9 + fileName.count else { return name == fileName }
+            let tag = name.dropFirst(importPrefix.count).prefix(8)
+            return tag.allSatisfy(\.isHexDigit)
+        }
+        .map { folder.appending(path: $0) }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }
+        return copies.max { modified($0) < modified($1) }
     }
 
     // MARK: Helpers

@@ -160,15 +160,16 @@ enum QuitConfirmation {
     }
 
     static func copy(finishing: Bool) -> Copy {
-        // Quit stops capture and closes the audio files; what is still being
-        // transcribed or labelled is finished the next time Mference opens
-        // (launch recovery), so the copy promises nothing within the deadline.
+        // Quit stops capture and closes the audio files. Phrases already
+        // heard get a few seconds to finish; the final speaker pass is
+        // skipped (live labels stay) and kept audio converts at the next
+        // launch. The copy promises no more than that.
         finishing
             ? Copy(title: "A meeting is finishing",
-                   message: "Mference is still transcribing the last phrases and labelling speakers. If you quit now, it finishes them the next time you open it.",
+                   message: "Mference is still transcribing the last phrases and labelling speakers. If you quit now, it waits a few seconds for the last phrases and keeps the speaker labels it has so far.",
                    quit: "Quit", stay: "Keep Open")
             : Copy(title: "A meeting is recording",
-                   message: "Quitting stops the recording. The meeting note keeps what was transcribed, and Mference finishes the rest the next time you open it.",
+                   message: "Quitting stops the recording. The meeting note keeps what was transcribed.",
                    quit: "Stop and Quit", stay: "Keep Recording")
     }
 

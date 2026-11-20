@@ -166,6 +166,8 @@ actor SpeechCoordinator {
     }
     private var queue: [QueuedJob] = []
     private var running: (job: QueuedJob, task: Task<Void, Never>)?
+    /// Set by quit: a file job cancelled now keeps its input for the next launch.
+    private var shuttingDown = false
 
     private var activity = 0
     private var idleTask: Task<Void, Never>?
@@ -530,7 +532,9 @@ actor SpeechCoordinator {
             }
             finishJob(queued, .finished(result))
         } catch is CancellationError {
-            try? FileManager.default.removeItem(at: queued.file)
+            // A person's cancel drops the input; quit keeps it, so the
+            // queue can start the file again at the next launch.
+            if !shuttingDown { try? FileManager.default.removeItem(at: queued.file) }
             finishJob(queued, .cancelled)
         } catch {
             finishJob(queued, .failed(error as? SpeechError ?? .failed(String(describing: error))))
@@ -565,6 +569,7 @@ actor SpeechCoordinator {
     // MARK: Quit
 
     func shutdown() async {
+        shuttingDown = true
         for queued in queue { finishJob(queued, .cancelled) }
         let current = running
         current?.task.cancel()

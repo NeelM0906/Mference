@@ -244,7 +244,8 @@ import Testing
             if copy {
                 let folder = speech.recordingsDirectory(for: id)
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try Data([0]).write(to: folder.appending(path: fileName))
+                // The name SpeechService gives its copy.
+                try Data([0]).write(to: folder.appending(path: "import-0a1b2c3d-\(fileName)"))
             }
             return id
         }
@@ -254,6 +255,10 @@ import Testing
 
         let requeued = await h.queue.recoverInterruptedJobs()
         #expect(requeued == [kept])
+        #expect(speech.calls.contains { if case .transcribeFile("import-0a1b2c3d-kept.m4a", _) = $0 { true } else { false } })
+        #expect(h.queue.rows.first { $0.noteID == kept }?.fileName == "kept.m4a")
+        // The service copied it again for the new job; the old copy goes.
+        #expect(FileTranscriptionQueue.inputCopy(of: "kept.m4a", in: speech.recordingsDirectory(for: kept)) == nil)
         await h.queue.waitUntilIdle()
         #expect(h.note(kept)?.recording?.transcriptionState == .done)
         #expect(h.note(gone)?.recording?.transcriptionState == .failed)

@@ -531,7 +531,8 @@ import Testing
         let log = EventLog(meeting.events)
         let input = rig.root.appending(path: "queued.wav")
         try Self.writeWAV(input, parts: [(1, 0.2)])
-        let job = try await rig.service.transcribeFile(input, options: FileTranscriptionOptions(noteID: UUID()))
+        let fileNote = UUID()
+        let job = try await rig.service.transcribeFile(input, options: FileTranscriptionOptions(noteID: fileNote))
         let jobLog = EventLog(job.events)
         await rig.service.shutdown()
         #expect(await log.waitUntilFinished())
@@ -539,8 +540,30 @@ import Testing
         #expect(await jobLog.waitUntilFinished())
         #expect(await jobLog.events.last == .cancelled)
         #expect(mic.isStopped)
+        // The file's copy stays for the next launch (Codex review on #251),
+        // and the queue finds it under the name the service gave it.
+        let copy = try #require(FileTranscriptionQueue.inputCopy(of: "queued.wav",
+                                                                 in: rig.recordings.directory(for: fileNote)))
+        #expect(copy.lastPathComponent.hasPrefix("import-"))
         // Closed cleanly: nothing for the next launch to recover.
         #expect(await rig.service.recoverInterruptedRecordings().isEmpty)
+    }
+
+    @Test func quitWaitsBrieflyForAPhraseStillBeingRecognized() async throws {
+        // Codex review on #251: quitting mid-phrase must not drop the phrase.
+        let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(1, 0.2), (1, 0)]))
+        let rig = try Self.rig(sources: FakeAudioSourceFactory(microphone: mic),
+                               recognizer: AmplitudeTranscriber([(0.2, "Last words.")], delay: .milliseconds(500)))
+        defer { try? FileManager.default.removeItem(at: rig.root) }
+        let meeting = try await rig.service.startMeeting(MeetingOptions(noteID: UUID(), callAudio: .off))
+        let log = EventLog(meeting.events)
+        #expect(await log.wait { events in
+            events.contains { if case .segment(let segment) = $0 { !segment.isFinal } else { false } }
+        })
+        await rig.service.shutdown()
+        #expect(await log.waitUntilFinished())
+        let result = try #require(Self.result(await log.events))
+        #expect(result.segments.map(\.text) == ["Last words."])
     }
 
     @Test func removeRefusesWhileRecordingAndThenDeletes() async throws {
