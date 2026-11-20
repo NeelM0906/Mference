@@ -32,6 +32,11 @@ public final class VoiceModels {
     @ObservationIgnored public var meetingIsFinishing: (@MainActor () -> Bool)?
     /// Pause, resume and stop for the menu bar and quit (N4's `MeetingSession`).
     @ObservationIgnored public var recordingControls: (any LiveRecordingControls)?
+    /// The file queue the import sheet shows (N4's `FileTranscriptionQueue`
+    /// through an adapter); nil until wired.
+    @ObservationIgnored public var fileQueue: (any FileQueueModel)?
+    /// The import sheet (board 6).
+    public var showsImportSheet = false
     /// Shows a note in Notes (N1's navigation): the timer chip, Open note.
     @ObservationIgnored public var openNote: (@MainActor (UUID) -> Void)?
 
@@ -124,6 +129,34 @@ public final class VoiceModels {
     public func stopLiveSessions() async {
         if isMeetingActive { await recordingControls?.stopRecording() }
         await dictation.stop()
+    }
+
+    // MARK: Files (spec 4.6)
+
+    /// Transcribe file (⇧⌘O): the sheet, through the setup card on first use.
+    public func transcribeFiles() {
+        setup.require(.transcribeFiles) { [weak self] in self?.showsImportSheet = true }
+    }
+
+    /// Audio or video dropped on the Notes window or list (N1 calls this):
+    /// the audio and video files among them are queued with the remembered
+    /// options, and the sheet shows the queue. Returns false (the drop is
+    /// refused) when none qualifies or no queue is wired.
+    @discardableResult
+    public func transcribe(_ urls: [URL]) -> Bool {
+        let urls = TranscribeFilesSheet.acceptedFiles(urls)
+        guard !urls.isEmpty, fileQueue != nil else { return false }
+        setup.require(.transcribeFiles) { [weak self] in
+            guard let self else { return }
+            showsImportSheet = true
+            guard let queue = fileQueue else { return }
+            let preferences = self.preferences
+            Task {
+                await queue.add(urls, language: preferences.language, speakerLabels: preferences.fileSpeakerLabels,
+                                summary: preferences.fileSummary)
+            }
+        }
+        return true
     }
 
     /// The shell's hook: leaving Notes while dictating stops dictation first,

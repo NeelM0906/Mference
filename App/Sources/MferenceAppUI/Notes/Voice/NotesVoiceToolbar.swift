@@ -2,8 +2,8 @@ import MferenceAppCore
 import MferenceDesign
 import SwiftUI
 
-/// Notes' voice actions in the chrome (boards 1–3, 5–7): Record meeting
-/// with its popover (Transcribe file joins it with the import sheet). N1 puts it in Notes' `shellToolbar`
+/// Notes' voice actions in the chrome (boards 1–3, 5–7): Transcribe file
+/// with the import sheet, and Record meeting with its popover. N1 puts it in Notes' `shellToolbar`
 /// before New note. Both go through the setup card on first use. While a
 /// meeting records, Record meeting steps back (the red timer chip shows).
 public struct NotesVoiceToolbar: View {
@@ -13,6 +13,22 @@ public struct NotesVoiceToolbar: View {
 
     public var body: some View {
         HStack(spacing: MFSpacing.s) {
+            Button {
+                voice.transcribeFiles()
+            } label: {
+                Label("Transcribe file", systemImage: "doc.text")
+            }
+            .buttonStyle(.mfSecondary)
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+            .help("Transcribe audio files (⇧⌘O)")
+            .sheet(isPresented: $voice.showsImportSheet) {
+                TranscribeFilesSheet(queue: voice.fileQueue, preferences: voice.preferences,
+                                     onOpenNote: { noteID in
+                                         voice.showsImportSheet = false
+                                         voice.openNote?(noteID)
+                                     },
+                                     onClose: { voice.showsImportSheet = false })
+            }
             if voice.liveMeeting == nil {
                 Button {
                     voice.recordMeeting()
