@@ -202,6 +202,51 @@ struct LinkSecurityTests {
         #expect(differing == 7)
     }
 
+    /// The transcript behind the code carries both identity keys and both
+    /// ephemeral keys, each as its own length-prefixed part: changing any one
+    /// of them, or swapping two, changes the transcript and the code.
+    @Test func transcriptCarriesAllFourKeys() {
+        func key(_ byte: UInt8) -> Data { Data(repeating: byte, count: 32) }
+        let phone = LinkHello(role: .phone, deviceName: "iPhone", appVersion: "1.0",
+                              identityKey: key(1), ephemeralKey: key(2))
+        let mac = LinkHello(role: .mac, deviceName: "MacBook Pro", appVersion: "1.0",
+                            identityKey: key(3), ephemeralKey: key(4))
+        let parts = LinkKeySchedule.helloParts(phone: phone, mac: mac, version: 1)
+        for key in [phone.identityKey, phone.ephemeralKey, mac.identityKey, mac.ephemeralKey] {
+            #expect(parts.contains(key))
+        }
+        // Phone hello fields, then the Mac's, then the version.
+        #expect(parts.count == 2 * LinkKeySchedule.helloFields(phone).count + 1)
+        #expect(Array(parts[0..<6]) == LinkKeySchedule.helloFields(phone))
+
+        let secrets = Data(repeating: 7, count: 96)
+        func transcript(_ phone: LinkHello, _ mac: LinkHello) -> Data {
+            LinkKeySchedule.pairingTranscript(phone: phone, mac: mac, version: 1, phoneName: "iPhone",
+                                              macName: "MacBook Pro", commitment: key(5),
+                                              phoneNonce: key(6), macNonce: key(8))
+        }
+        let base = transcript(phone, mac)
+        let baseCode = LinkKeySchedule.pairingCode(secrets: secrets, transcript: base)
+        var variants: [(LinkHello, LinkHello)] = []
+        var changed = phone; changed.identityKey = key(9); variants.append((changed, mac))
+        changed = phone; changed.ephemeralKey = key(9); variants.append((changed, mac))
+        changed = mac; changed.identityKey = key(9); variants.append((phone, changed))
+        changed = mac; changed.ephemeralKey = key(9); variants.append((phone, changed))
+        // Swapped roles of two keys: the order is fixed, so this differs too.
+        changed = phone; changed.identityKey = key(2); changed.ephemeralKey = key(1); variants.append((changed, mac))
+        var other = mac; other.identityKey = key(1); changed = phone; changed.identityKey = key(3)
+        variants.append((changed, other))
+        for (phoneHello, macHello) in variants {
+            let changedTranscript = transcript(phoneHello, macHello)
+            #expect(changedTranscript != base)
+            #expect(LinkKeySchedule.pairingCode(secrets: secrets, transcript: changedTranscript) != baseCode)
+            #expect(LinkKeySchedule.sessionTranscript(phone: phoneHello, mac: macHello, version: 1)
+                != LinkKeySchedule.sessionTranscript(phone: phone, mac: mac, version: 1))
+            #expect(LinkKeySchedule.commitContext(phone: phoneHello, mac: macHello, version: 1, phoneName: "iPhone")
+                != LinkKeySchedule.commitContext(phone: phone, mac: mac, version: 1, phoneName: "iPhone"))
+        }
+    }
+
     /// An attacker posing as the Mac picks its key after it has seen the
     /// phone's key, aiming at the code the real Mac shows. It must commit
     /// before the phone reveals its nonce, so no choice of key helps: over
@@ -494,6 +539,48 @@ struct LinkSecurityTests {
         #expect(mac.receive(LinkFraming.frame(Data([0]) + json)).failure == .badKey)
     }
 
+    /// Every key and nonce in the handshake must be exactly 32 bytes; a
+    /// shorter or longer one ends the connection on the side that receives
+    /// it, which shows no code, and nothing is saved on either side.
+    @Test(arguments: LinkKeyField.allCases, [0, 31, 33, 64])
+    func wrongSizedKeyMaterialIsRefused(field: LinkKeyField, size: Int) throws {
+        let phoneStore = InMemoryLinkKeyStore()
+        let macStore = InMemoryLinkKeyStore()
+        var pipe = LinkPipe(phone: try LinkFixture.phone(phoneStore, intent: .pair, seed: 63),
+                            mac: try LinkFixture.mac(macStore, pairing: true, seed: 64))
+        let bad = Data(repeating: 0x5A, count: size)
+        pipe.intercept = { from, frame in
+            guard from == field.sender, let message = LinkFixture.plainMessage(frame) else { return [frame] }
+            let rewritten = try? LinkFixture.rewritePlain(frame) { envelope in
+                switch (field, message) {
+                case (.phoneIdentityKey, .hello(var hello)), (.macIdentityKey, .hello(var hello)):
+                    hello.identityKey = bad
+                    envelope.message = .hello(hello)
+                case (.phoneEphemeralKey, .hello(var hello)), (.macEphemeralKey, .hello(var hello)):
+                    hello.ephemeralKey = bad
+                    envelope.message = .hello(hello)
+                case (.commitment, .pairResponse(var response)):
+                    response.commitment = bad
+                    envelope.message = .pairResponse(response)
+                case (.phoneNonce, .pairNonce), (.macNonce, .pairNonce):
+                    envelope.message = .pairNonce(LinkPairNonce(nonce: bad))
+                default:
+                    break
+                }
+            }
+            return [rewritten ?? frame]
+        }
+        pipe.start()
+        let receiverEvents = field.sender == .phone ? pipe.macEvents : pipe.phoneEvents
+        #expect(receiverEvents.failure == field.expectedFailure)
+        // The receiver never shows a code. (A Mac whose nonce was tampered on
+        // the way has shown its own; the phone never answers it.)
+        #expect(receiverEvents.code == nil)
+        pipe.confirm(phone: true, mac: true)
+        #expect(pipe.phoneEvents.paired == nil && pipe.macEvents.paired == nil)
+        #expect(try phoneStore.peers().isEmpty && macStore.peers().isEmpty)
+    }
+
     @Test func allZeroPublicKeyIsRefused() throws {
         var mac = try LinkFixture.mac(InMemoryLinkKeyStore(), pairing: true, seed: 61)
         var phone = try LinkFixture.phone(InMemoryLinkKeyStore(), intent: .pair, seed: 62)
@@ -669,5 +756,24 @@ struct LinkSecurityTests {
         #expect(try store.peers() == [peer])
         try store.deletePeer(id: peer.id)
         #expect(try store.peer(id: peer.id) == nil)
+    }
+}
+
+/// The handshake's 32-byte values, by the side that sends them.
+enum LinkKeyField: String, CaseIterable, Sendable {
+    case phoneIdentityKey, phoneEphemeralKey, macIdentityKey, macEphemeralKey, commitment, phoneNonce, macNonce
+
+    var sender: LinkRole {
+        switch self {
+        case .phoneIdentityKey, .phoneEphemeralKey, .phoneNonce: .phone
+        case .macIdentityKey, .macEphemeralKey, .commitment, .macNonce: .mac
+        }
+    }
+
+    var expectedFailure: LinkFailure {
+        switch self {
+        case .phoneIdentityKey, .phoneEphemeralKey, .macIdentityKey, .macEphemeralKey: .badKey
+        case .commitment, .phoneNonce, .macNonce: .malformedFrame
+        }
     }
 }

@@ -146,6 +146,33 @@ enum LinkKeySchedule {
          field(hello.appVersion), hello.identityKey, hello.ephemeralKey]
     }
 
+    /// What every transcript starts with: each field of the phone's hello
+    /// (so its identity and ephemeral keys), then the Mac's, then the version
+    /// in use. One part per field, each length-prefixed by `transcriptHash`.
+    static func helloParts(phone: LinkHello, mac: LinkHello, version: Int) -> [Data] {
+        helloFields(phone) + helloFields(mac) + [field(version)]
+    }
+
+    /// The commitment's context: everything sent before the commitment.
+    static func commitContext(phone: LinkHello, mac: LinkHello, version: Int, phoneName: String) -> Data {
+        transcriptHash("commit context", helloParts(phone: phone, mac: mac, version: version) + [field(phoneName)])
+    }
+
+    /// A paired connection's transcript.
+    static func sessionTranscript(phone: LinkHello, mac: LinkHello, version: Int) -> Data {
+        transcriptHash("session", helloParts(phone: phone, mac: mac, version: version))
+    }
+
+    /// Every value the pairing exchanged, in one fixed order on both sides.
+    /// The Mac's name and nonce are fixed by the commitment before the phone's
+    /// nonce is known, so nothing here is left to choose after it.
+    static func pairingTranscript(phone: LinkHello, mac: LinkHello, version: Int, phoneName: String,
+                                  macName: String, commitment: Data, phoneNonce: Data, macNonce: Data) -> Data {
+        transcriptHash("pairing", helloParts(phone: phone, mac: mac, version: version) + [
+            field(phoneName), field(macName), commitment, phoneNonce, macNonce,
+        ])
+    }
+
     /// The three Diffie-Hellman results, in the same order on both sides:
     /// ephemeral-ephemeral, phone identity with Mac ephemeral, phone ephemeral
     /// with Mac identity.

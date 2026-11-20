@@ -455,14 +455,11 @@ public struct LinkConnection {
 
     // MARK: - Keys
 
-    /// The fields both sides agree on once the hellos are in: every field of
-    /// the phone's hello, then the Mac's, then the version in use. Each later
-    /// transcript starts with these.
-    private func helloTranscript() throws -> [Data] {
+    /// Both hellos by role, and the version in use: what every transcript
+    /// starts with.
+    private func hellos() throws -> (phone: LinkHello, mac: LinkHello, version: Int) {
         guard let localHello, let peerHello, let version else { throw LinkFailure.unexpectedMessage }
-        let (phone, mac) = role == .phone ? (localHello, peerHello) : (peerHello, localHello)
-        return LinkKeySchedule.helloFields(phone) + LinkKeySchedule.helloFields(mac)
-            + [LinkKeySchedule.field(version)]
+        return role == .phone ? (localHello, peerHello, version) : (peerHello, localHello, version)
     }
 
     /// SHA-256 over the Mac's ephemeral key, the phone's ephemeral key and the
@@ -472,8 +469,9 @@ public struct LinkConnection {
         guard let peerHello else { throw LinkFailure.unexpectedMessage }
         let macEphemeral = role == .mac ? ephemeral.publicKey : peerHello.ephemeralKey
         let phoneEphemeral = role == .phone ? ephemeral.publicKey : peerHello.ephemeralKey
-        let context = LinkKeySchedule.transcriptHash(
-            "commit context", try helloTranscript() + [LinkKeySchedule.field(pairRequestName)])
+        let hellos = try hellos()
+        let context = LinkKeySchedule.commitContext(phone: hellos.phone, mac: hellos.mac, version: hellos.version,
+                                                    phoneName: pairRequestName)
         return LinkKeySchedule.commitment(macEphemeral: macEphemeral, phoneEphemeral: phoneEphemeral,
                                           macNonce: macNonce, context: context)
     }
@@ -487,7 +485,9 @@ public struct LinkConnection {
 
     private func sessionKeys(pairingSecret: Data) throws -> LinkSessionKeys {
         guard pairingSecret.count == LinkProtocol.keyBytes else { throw LinkFailure.badKey }
-        let transcript = LinkKeySchedule.transcriptHash("session", try helloTranscript())
+        let hellos = try hellos()
+        let transcript = LinkKeySchedule.sessionTranscript(phone: hellos.phone, mac: hellos.mac,
+                                                           version: hellos.version)
         return LinkKeySchedule.sessionKeys(secrets: try handshakeSecrets(), pairingSecret: pairingSecret,
                                            transcript: transcript)
     }
@@ -495,13 +495,10 @@ public struct LinkConnection {
     private mutating func deriveFromPairing(into events: inout [Event]) throws {
         guard let peerHello else { throw LinkFailure.unexpectedMessage }
         let secrets = try handshakeSecrets()
-        // Every value the pairing exchanged, in one fixed order on both sides.
-        // The Mac's name and nonce were fixed by the commitment before the
-        // phone's nonce was known, so nothing here is left to choose after it.
-        let transcript = LinkKeySchedule.transcriptHash("pairing", try helloTranscript() + [
-            LinkKeySchedule.field(pairRequestName), LinkKeySchedule.field(pairResponseName), commitment,
-            phoneNonce, macNonce,
-        ])
+        let hellos = try hellos()
+        let transcript = LinkKeySchedule.pairingTranscript(
+            phone: hellos.phone, mac: hellos.mac, version: hellos.version, phoneName: pairRequestName,
+            macName: pairResponseName, commitment: commitment, phoneNonce: phoneNonce, macNonce: macNonce)
         let pairingSecret = LinkKeySchedule.pairingSecret(secrets: secrets, transcript: transcript)
         let keys = LinkKeySchedule.sessionKeys(secrets: secrets, pairingSecret: pairingSecret, transcript: transcript)
         outbound.key = keys.sending(as: role)
