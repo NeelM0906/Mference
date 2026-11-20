@@ -7,10 +7,15 @@ import SwiftUI
 /// library (`08b`) opens from Models. Later rows (errands,
 /// payments, other mail providers, iPhone) are shown as "Later".
 public struct SettingsView: View {
-    public enum Pane: String, CaseIterable, Identifiable, Hashable, Sendable {
+    public enum Pane: String, CaseIterable, Identifiable, Hashable, Comparable, Sendable {
         case models, memory, privacy, connections, speech, shortcuts, iPhone
 
         public var id: String { rawValue }
+
+        /// Page order, top to bottom.
+        public static func < (lhs: Pane, rhs: Pane) -> Bool {
+            allCases.firstIndex(of: lhs)! < allCases.firstIndex(of: rhs)!
+        }
 
         public var title: String {
             switch self {
@@ -37,6 +42,10 @@ public struct SettingsView: View {
     @State private var pendingDelete: MemoryEntry?
     @State private var showsAllMemories = false
     @Environment(\.mfRendersStatically) private var rendersStatically
+    /// Settings › Speech's model (team N3); nil shows the pane's "not available" state.
+    @Environment(VoiceModels.self) private var voice: VoiceModels?
+    /// The pane Settings opened at: a static render (snapshot) starts there.
+    private let initialPane: Pane
 
     /// A nil input shows that section's honest "not available yet" state.
     public init(library: (any ModelLibraryModel)? = nil, memory: (any MemoryListModel)? = nil,
@@ -45,6 +54,7 @@ public struct SettingsView: View {
         self.memory = memory
         self.settings = settings
         _position = State(initialValue: ScrollPosition(id: pane, anchor: .top))
+        initialPane = pane
         _showsLibrary = State(initialValue: showsLibrary)
     }
 
@@ -173,12 +183,15 @@ public struct SettingsView: View {
 
     private var sections: some View {
         VStack(alignment: .leading, spacing: SettingsMetrics.sectionSpacing) {
-            modelsSection.id(Pane.models)
-            memorySection.id(Pane.memory)
-            privacySection.id(Pane.privacy)
-            connectionsSection.id(Pane.connections)
-            speechSection.id(Pane.speech)
-            shortcutsSection.id(Pane.shortcuts)
+            // A static render cannot scroll, so it starts at the pane Settings
+            // opened at, as the scroll view would show it.
+            let first = rendersStatically ? initialPane : .models
+            if first <= .models { modelsSection.id(Pane.models) }
+            if first <= .memory { memorySection.id(Pane.memory) }
+            if first <= .privacy { privacySection.id(Pane.privacy) }
+            if first <= .connections { connectionsSection.id(Pane.connections) }
+            if first <= .speech { speechSection.id(Pane.speech) }
+            if first <= .shortcuts { shortcutsSection.id(Pane.shortcuts) }
             iPhoneSection.id(Pane.iPhone)
         }
         .scrollTargetLayout()
@@ -248,7 +261,11 @@ public struct SettingsView: View {
                 }
                 MFListRow("Speech · Fluid Speech Pro",
                           subtitle: "Dictation, meetings and audio files, transcribed on this Mac. Set up in Speech.") {
-                    MFBadge(.later)
+                    if let voice {
+                        MFBadge(voice.setup.modelState.isReady ? .installed : .custom("Not installed", .neutral))
+                    } else {
+                        MFBadge(.later)
+                    }
                 }
                 MFListRow("Text recognition · Apple Vision",
                           subtitle: "Built into macOS. Reads receipts, documents and tables for Scan. Nothing to download.") {
@@ -503,13 +520,14 @@ public struct SettingsView: View {
 
     // MARK: Later sections
 
-    /// Settings › Speech (Notes spec 4.8). Team N3 replaces this with
-    /// `SpeechSettingsView`; until then it says what the pane will hold.
+    /// Settings › Speech (Notes spec 4.8): N3's `SpeechSettingsView`.
     private var speechSection: some View {
-        section("Speech", "Dictation, meetings and audio files, transcribed on this Mac by Fluid Speech Pro.") {
-            MFCard {
-                MFListRow("Fluid Speech Pro", subtitle: "Being set up with Notes. Nothing is recorded today.") {
-                    MFBadge(.later)
+        section("Speech", "Dictation, meeting transcripts and audio files, all transcribed on this Mac.") {
+            if let voice {
+                SpeechSettingsView(model: voice.settings)
+            } else {
+                MFCard {
+                    MFListRow("Fluid Speech Pro", subtitle: "Not available in this build yet.")
                 }
             }
         }
