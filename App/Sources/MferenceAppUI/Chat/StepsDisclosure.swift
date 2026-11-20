@@ -18,7 +18,8 @@ struct StepsDisclosure: View {
         _isExpanded = State(initialValue: isExpanded)
     }
 
-    private var usedWeb: Bool { !steps.isEmpty }
+    private var usedWeb: Bool { steps.contains { $0.kind != .searchFiles } }
+    private var onlyFiles: Bool { !steps.isEmpty && !usedWeb }
 
     var body: some View {
         VStack(alignment: .leading, spacing: MFSpacing.s + MFSpacing.xxs) {
@@ -26,7 +27,7 @@ struct StepsDisclosure: View {
                 isExpanded.toggle()
             } label: {
                 HStack(spacing: MFSpacing.xs + 1) {
-                    Image(systemName: usedWeb ? "globe" : "sparkles")
+                    Image(systemName: onlyFiles ? "folder" : usedWeb ? "globe" : "sparkles")
                         .imageScale(.small)
                     Text(title)
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -105,6 +106,15 @@ struct StepsDisclosure: View {
             HStack(spacing: 0) {
                 Text("“\(step.query ?? "")”").font(MFFont.preview.monospaced())
                 Text(" · \(Self.results(step.resultCount ?? 0))").font(MFFont.preview)
+            }
+            .foregroundStyle(MFColor.secondary)
+            .lineLimit(1)
+            .accessibilityElement(children: .combine)
+        case .searchFiles:
+            HStack(spacing: 0) {
+                Text("Files: ").font(MFFont.preview)
+                Text("“\(step.query ?? "")”").font(MFFont.preview.monospaced())
+                Text(" · \(Self.results(step.resultCount ?? 0)) on this Mac").font(MFFont.preview)
             }
             .foregroundStyle(MFColor.secondary)
             .lineLimit(1)

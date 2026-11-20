@@ -13,8 +13,8 @@ final class AppRuntime {
     let chat: ChatViewModel
     let screenModels: ScreenModels
 
-    /// Quit steps, run in order: web answers (SearXNG) stop before the engine
-    /// shuts down (U3's notes).
+    /// Quit steps, run in order: web answers (SearXNG) and Find stop before
+    /// the engine shuts down (U3's notes).
     private let shutdownSteps: [@MainActor () async -> Void]
 
     /// One composition root for the whole app: every engine use (chat, model
@@ -22,7 +22,8 @@ final class AppRuntime {
     /// one engine host can hold a model. Chat goes through
     /// `services.chatEngine`, the same engine plus Apple's on-device model. Nothing here loads or warms a model;
     /// that happens only when the person picks a model or opens a chat.
-    init(services: AppServices = .live(presentPermissionReason: PermissionReasonAlert.present),
+    init(services: AppServices = .live(presentPermissionReason: PermissionReasonAlert.present,
+                                       findHelper: Bundle.main.executableURL),
          web: WebAnswers? = nil) {
         self.services = services
         // Web search follows Settings > Privacy (services.settings).
@@ -31,13 +32,19 @@ final class AppRuntime {
         chat = ChatViewModel(service: services.chatEngine,
                              store: ConversationStore(container: services.modelContainer),
                              tools: web,
+                             files: services.find,
                              defaultModel: { [settings = services.settings] in settings.defaultModel })
         screenModels = ScreenModels.live(services: services)
         let engine = services.engine
+        let find = services.find
         shutdownSteps = [
             { await web.shutdown() },
+            // Find frees its search model before the engine shuts down.
+            { await find?.shutdown() },
             { await engine.shutdown() },
         ]
+        // Find picks up where it left off (nothing runs while it is off).
+        Task { await find?.start() }
     }
 
     /// Runs every quit step in order.
@@ -70,6 +77,7 @@ enum PermissionReasonAlert {
         case .fullDiskAccess: "Mference needs Full Disk Access to read Mail"
         case .mailAutomation: "Mference would like to send through Mail"
         case .microphone: "Mference would like to use the microphone"
+        case .photos: "Mference would like to read your Photos library"
         }
     }
 }

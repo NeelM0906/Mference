@@ -114,7 +114,7 @@ public final class ShellModel {
         show(selection == .settings ? sectionBeforeSettings : .settings)
     }
 
-    /// The keyboard shortcut for a section: ⌘1-⌘6 for the pills, ⌘, for Settings.
+    /// The keyboard shortcut for a section: ⌘1-⌘7 for the pills, ⌘, for Settings.
     public static func shortcut(for section: AppSection) -> KeyEquivalent {
         if let index = AppSection.pills.firstIndex(of: section) {
             return KeyEquivalent(Character(String(index + 1)))

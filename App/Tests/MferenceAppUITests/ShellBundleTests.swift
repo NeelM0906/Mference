@@ -33,6 +33,7 @@ import Testing
             .camera: ["NSCameraUsageDescription"],
             .mailAutomation: ["NSAppleEventsUsageDescription"],
             .microphone: ["NSMicrophoneUsageDescription"],
+            .photos: ["NSPhotoLibraryUsageDescription"],
             .fullDiskAccess: [],
         ]
         #expect(Set(keys.keys) == Set(AppPermission.allCases), "every permission needs a usage-string decision")

@@ -28,6 +28,15 @@ into `include/`, SwiftPM's public-headers directory. Three files are generated
 from upstream's own `*.in` templates (version `1.0.0`, commit `b1b770d9`,
 build 0) and are marked `generated` in the manifest.
 
+The multimodal library (`tools/mtmd`, its public `mtmd.h` gathered into
+`include/`) is vendored without its helpers (`mtmd-helper*`): its callers
+decode images and audio themselves (Find uses Apple's frameworks) and hand
+over pixels and samples, so the helpers' decoders (stb_image, miniaudio,
+ffmpeg) are not needed. Every model graph upstream's `mtmd` target builds is
+included, because `mtmd.cpp` references them all. `mtmd-audio.cpp` declares a
+`constexpr bool DEBUG`, which collides with the `DEBUG=1` SwiftPM defines in
+debug builds, so the target's C++ flags add `-UDEBUG`.
+
 Files that are ours, not upstream's:
 
 - `include/module.modulemap`: exports the C headers to Swift as `LlamaCpp`.

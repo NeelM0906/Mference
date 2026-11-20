@@ -50,5 +50,7 @@
 	<string>To send a reply through Mail when you click Send.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>To take dictation on this Mac.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>To find photos and videos in your Photos library by what is in them, on this Mac.</string>
 </dict>
 </plist>

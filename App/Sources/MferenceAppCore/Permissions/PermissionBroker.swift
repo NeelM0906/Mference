@@ -13,6 +13,8 @@ public enum AppPermission: String, Sendable, Hashable, Codable, CaseIterable {
     case fullDiskAccess
     case mailAutomation
     case microphone
+    /// Find reads the Photos library (Settings › Find › Photos library).
+    case photos
 
     /// The one line shown before the system prompt.
     public var reason: String {
@@ -23,6 +25,7 @@ public enum AppPermission: String, Sendable, Hashable, Codable, CaseIterable {
         case .fullDiskAccess: "To read Apple Mail on this Mac. Mail never leaves this Mac."
         case .mailAutomation: "To send a reply through Mail when you click Send."
         case .microphone: "To take dictation on this Mac."
+        case .photos: "To find photos and videos in your Photos library by what is in them, on this Mac."
         }
     }
 }

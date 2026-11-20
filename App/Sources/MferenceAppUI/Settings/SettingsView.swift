@@ -8,13 +8,14 @@ import SwiftUI
 /// payments, other mail providers, iPhone) are shown as "Later".
 public struct SettingsView: View {
     public enum Pane: String, CaseIterable, Identifiable, Hashable, Sendable {
-        case models, memory, privacy, connections, dictation, shortcuts, iPhone
+        case models, find, memory, privacy, connections, dictation, shortcuts, iPhone
 
         public var id: String { rawValue }
 
         public var title: String {
             switch self {
             case .models: "Models"
+            case .find: "Find"
             case .memory: "Memory"
             case .privacy: "Privacy"
             case .connections: "Connections"
@@ -37,6 +38,7 @@ public struct SettingsView: View {
     @State private var pendingDelete: MemoryEntry?
     @State private var showsAllMemories = false
     @Environment(\.mfRendersStatically) private var rendersStatically
+    @Environment(FindService.self) private var find: FindService?
 
     /// A nil input shows that section's honest "not available yet" state.
     public init(library: (any ModelLibraryModel)? = nil, memory: (any MemoryListModel)? = nil,
@@ -174,6 +176,7 @@ public struct SettingsView: View {
     private var sections: some View {
         VStack(alignment: .leading, spacing: SettingsMetrics.sectionSpacing) {
             modelsSection.id(Pane.models)
+            FindSettingsSection(find: find).id(Pane.find)
             memorySection.id(Pane.memory)
             privacySection.id(Pane.privacy)
             connectionsSection.id(Pane.connections)

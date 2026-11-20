@@ -4,6 +4,7 @@ import CoreServices
 import EventKit
 import Foundation
 import os
+import Photos
 import Synchronization
 
 /// The real `PermissionBroker` (decision L6). It never prompts on its own:
@@ -22,7 +23,8 @@ import Synchronization
 /// The bundle's `Info.plist` must carry the usage strings
 /// (`NSCalendarsFullAccessUsageDescription`,
 /// `NSRemindersFullAccessUsageDescription`, `NSCameraUsageDescription`,
-/// `NSMicrophoneUsageDescription`, `NSAppleEventsUsageDescription`), or the
+/// `NSMicrophoneUsageDescription`, `NSAppleEventsUsageDescription`,
+/// `NSPhotoLibraryUsageDescription`), or the
 /// system refuses the request without asking.
 public struct LivePermissionBroker: PermissionBroker {
     /// Shows `permission.reason` and returns whether the person chose to go
@@ -60,6 +62,7 @@ public struct LivePermissionBroker: PermissionBroker {
                     case .microphone: LivePermissionBroker.state(AVCaptureDevice.authorizationStatus(for: .audio))
                     case .fullDiskAccess: LivePermissionBroker.fullDiskAccessState(homeDirectory: homeDirectory)
                     case .mailAutomation: await LivePermissionBroker.mailAutomationState(ask: false)
+                    case .photos: LivePermissionBroker.state(PHPhotoLibrary.authorizationStatus(for: .readWrite))
                     }
                 },
                 prompt: { permission in
@@ -69,6 +72,7 @@ public struct LivePermissionBroker: PermissionBroker {
                     case .camera: _ = await AVCaptureDevice.requestAccess(for: .video)
                     case .microphone: _ = await AVCaptureDevice.requestAccess(for: .audio)
                     case .mailAutomation: _ = await LivePermissionBroker.mailAutomationState(ask: true)
+                    case .photos: _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
                     case .fullDiskAccess: break
                     }
                 },
@@ -180,6 +184,18 @@ public struct LivePermissionBroker: PermissionBroker {
         }
     }
 
+    /// Photos: full or limited access both let Find read (limited reads only
+    /// the photos the person picked).
+    static func state(_ status: PHAuthorizationStatus) -> PermissionState {
+        switch status {
+        case .notDetermined: .notDetermined
+        case .authorized, .limited: .granted
+        case .denied: .needsSystemSettings
+        case .restricted: .denied
+        @unknown default: .denied
+        }
+    }
+
     /// `AEDeterminePermissionToAutomateTarget` results. Mail not running
     /// (`procNotFound`) leaves the answer open.
     static func automationState(_ status: OSStatus) -> PermissionState {
@@ -199,6 +215,7 @@ public struct LivePermissionBroker: PermissionBroker {
         case .microphone: "Privacy_Microphone"
         case .fullDiskAccess: "Privacy_AllFiles"
         case .mailAutomation: "Privacy_Automation"
+        case .photos: "Privacy_Photos"
         }
         return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!
     }

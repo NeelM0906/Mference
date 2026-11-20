@@ -19,6 +19,13 @@
 - **Chat** with a local model. Turn on web search and answers come back with
   numbered citations, through a search engine bundled inside the app. Offline
   mode turns off all network use.
+- **Find** files by what is in them: "the lease clause about pets", "that
+  screenshot with the wifi password". Word matches show as you type and
+  meaning matches follow, from any app with ⌥Space. Turn on photos, video and
+  audio to find "the zebra photo", the moment in a video, or the voice memo
+  about the plumber, in your folders and, if you allow it, your Photos
+  library. Chat can answer from your files with sources. The index
+  and its small search model stay on your Mac.
 - **Mail** reads your Apple Mail mailboxes and drafts replies in your voice.
   Nothing is sent until you press Send.
 - **Calendar and to-dos.** Day, week, month and year views of your calendars,

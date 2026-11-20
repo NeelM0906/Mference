@@ -122,6 +122,23 @@ checked against the Hugging Face LFS object ids (SHA-256) on 2026-11-18:
   model card declares `license: apache-2.0`, a quantization of Alibaba's
   [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B).
 
+The Mac app's Find (content search) downloads one more GGUF when the person
+turns Find on, and a second when they turn on Settings › Find › Photos, video
+and audio, both checked the same way on 2026-11-19:
+
+- Find's search model: `embeddinggemma-2-Q8_0.gguf` from revision
+  `6ea3e3a309d12a4779cfda98b8c19800d2d5da71` of
+  [`ggml-org/embeddinggemma-2-GGUF`](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF),
+  309,855,456 bytes, SHA-256
+  `2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135`. It is
+  the text part of Google's
+  [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), whose
+  model card and the GGUF repository both declare `license: apache-2.0`.
+- Find's image and audio encoders: `mmproj-embeddinggemma-2-Q8_0.gguf` from
+  the same revision of the same repository, 554,821,056 bytes, SHA-256
+  `0531309472a6bc6f4b146c3736eee7795ec9db1903c25490d3c937490cef6dd8`, the
+  vision and audio towers of the same model, under the same licence.
+
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of Mference releases.
 
