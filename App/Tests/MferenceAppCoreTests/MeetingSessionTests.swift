@@ -306,6 +306,106 @@ import Testing
             == ["Call audio stopped at 10:12, so only your microphone was recorded after that."])
     }
 
+    // MARK: The no-call-audio hint
+
+    static let silentCall = FakeSpeechService.MeetingScript(noCallAudioHeard: true, live: [
+        .segment(segment("Can you hear them?", 31, 33)),
+        .segment(segment("", 34, 35, speaker: "spk2", track: .call)),
+        .segment(segment("Sorry, I was on mute.", 40, 42, speaker: "spk2", track: .call)),
+    ], result: TranscriptResult(segments: [], speakers: [.you], duration: 42))
+
+    /// Nothing about the hint is written: no paragraph, segment or field holds it.
+    func expectHintNotStored(_ h: Harness, _ noteID: UUID, sourceLocation: SourceLocation = #_sourceLocation) {
+        let message = MeetingEvent.noCallAudioHeardMessage
+        let body = h.writer.body(of: noteID)
+        #expect(!body.paragraphs.contains { $0.contains("call audio") }, sourceLocation: sourceLocation)
+        #expect(h.recording(noteID)?.segments.contains { $0.text.contains(message) } != true,
+                sourceLocation: sourceLocation)
+        #expect(h.note(noteID)?.title.contains(message) != true, sourceLocation: sourceLocation)
+        #expect(h.note(noteID)?.searchText.contains(message) != true, sourceLocation: sourceLocation)
+        let json = h.note(noteID)?.bodyJSON.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        #expect(!json.contains(message), sourceLocation: sourceLocation)
+    }
+
+    @Test func theHintShowsWhileTheTapIsSilentAndClearsOnCallSpeech() async throws {
+        let speech = FakeSpeechService(meeting: Self.silentCall, stepped: true)
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions(callAudio: .allApps))
+        #expect(h.session.callAudioHint == nil)
+        speech.advance() // started, with call audio
+        await settle { h.session.callAudioAvailable }
+        speech.advance() // the hint
+        await settle { h.session.callAudioHint != nil }
+        #expect(h.session.callAudioHint == MeetingEvent.noCallAudioHeardMessage)
+        speech.advance() // your own speech: the hint stays
+        speech.advance() // an empty call segment: still silence
+        await settle { h.session.transcript?.segments.count == 2 }
+        #expect(h.session.callAudioHint != nil)
+        speech.advance() // the call track speaks: the hint goes
+        await settle { h.session.callAudioHint == nil }
+        expectHintNotStored(h, noteID)
+        await h.session.stop()
+        while speech.advance() {}
+        await h.session.waitUntilFinished()
+        expectHintNotStored(h, noteID)
+    }
+
+    @Test func theHintClearsWhenTheMeetingEndsOrIsDismissed() async throws {
+        let script = FakeSpeechService.MeetingScript(noCallAudioHeard: true,
+                                                     result: TranscriptResult(segments: [], speakers: [.you], duration: 40))
+        let speech = FakeSpeechService(meeting: script, stepped: true)
+        let h = try harness(speech)
+        var noteID = try await h.session.start(MeetingStartOptions(callAudio: .allApps))
+        speech.advance()
+        speech.advance()
+        await settle { h.session.callAudioHint != nil }
+        h.session.dismissCallAudioHint()
+        #expect(h.session.callAudioHint == nil)
+        await h.session.stop()
+        while speech.advance() {}
+        await h.session.waitUntilFinished()
+        expectHintNotStored(h, noteID)
+
+        // The next meeting starts without it, and its end clears it.
+        noteID = try await h.session.start(MeetingStartOptions(callAudio: .allApps))
+        #expect(h.session.callAudioHint == nil)
+        speech.advance()
+        speech.advance()
+        await settle { h.session.callAudioHint != nil }
+        await h.session.stop()
+        while speech.advance() {}
+        await h.session.waitUntilFinished()
+        #expect(h.session.phase == .idle)
+        #expect(h.session.callAudioHint == nil)
+        expectHintNotStored(h, noteID)
+    }
+
+    @Test func theHintNeverShowsWithoutCallAudioAndGivesWayToTheMicOnlyLine() async throws {
+        // Call audio off: the fake sends no hint, and a stray one is ignored.
+        let speech = ManualMeetingSpeech()
+        let h = try harness(speech)
+        let noteID = try await h.session.start(MeetingStartOptions(callAudio: .off))
+        speech.send(.started(callAudio: false))
+        speech.send(.noCallAudioHeard)
+        speech.send(.segment(Self.segment("Just me.", 0, 1)))
+        await settle { h.session.transcript?.segments.count == 1 }
+        #expect(h.session.callAudioHint == nil)
+        expectHintNotStored(h, noteID)
+
+        // Call audio on, then lost: the mic-only line replaces the hint.
+        let speech2 = ManualMeetingSpeech()
+        let h2 = try harness(speech2)
+        let noteID2 = try await h2.session.start(MeetingStartOptions(callAudio: .allApps))
+        speech2.send(.started(callAudio: true))
+        speech2.send(.noCallAudioHeard)
+        await settle { h2.session.callAudioHint != nil }
+        speech2.send(.callAudioUnavailable(.failed("tap")))
+        await settle { !h2.session.callAudioAvailable }
+        #expect(h2.session.callAudioHint == nil)
+        #expect(h2.writer.body(of: noteID2).paragraphs.count == 1, "only the call-audio-stopped line")
+        #expect(h2.writer.body(of: noteID2).paragraphs.first?.contains(MeetingEvent.noCallAudioHeardMessage) == false)
+    }
+
     // MARK: Options from Settings
 
     @Test func startOptionsComeFromTheSharedPreferences() {

@@ -57,6 +57,12 @@ public final class MeetingSession {
     public private(set) var marks: [TimeInterval] = []
     /// The last problem, as one line the UI can show.
     public private(set) var lastError: String?
+    /// A quiet hint while call audio is on but the tap has heard only
+    /// silence (`MeetingEvent.noCallAudioHeard`): the meeting screen and the
+    /// menu bar show it. Cleared once the call track carries speech, when
+    /// call audio stops, when dismissed, and when the meeting ends. Never
+    /// written into the note.
+    public private(set) var callAudioHint: String?
     /// The note of the meeting that ended last (the finished view opens it).
     public private(set) var lastEndedNoteID: UUID?
 
@@ -84,6 +90,8 @@ public final class MeetingSession {
     @ObservationIgnored private var quitting = false
     /// The mic-only line was written for the current meeting.
     @ObservationIgnored private var wroteCallAudioLine = false
+    /// The call track has carried speech in the current meeting.
+    @ObservationIgnored private var heardCallSpeech = false
     /// Finished notes' transcripts, so a rename shows everywhere at once.
     @ObservationIgnored private var transcripts: [UUID: TranscriptModel] = [:]
     @ObservationIgnored private var transcriptOrder: [UUID] = []
@@ -151,6 +159,8 @@ public final class MeetingSession {
         callLevel = nil
         callAudioAvailable = false
         wroteCallAudioLine = false
+        heardCallSpeech = false
+        callAudioHint = nil
         phase = .recording
         // The consumer works on this meeting's own note and model, so a late
         // event can never land in a later meeting; it stops at `.ended`.
@@ -162,6 +172,11 @@ public final class MeetingSession {
             self?.streamFinished(noteID: noteID, model: live)
         }
         return noteID
+    }
+
+    /// The hint's close button: hides it for this meeting.
+    public func dismissCallAudioHint() {
+        callAudioHint = nil
     }
 
     public func pause() async {
@@ -338,6 +353,8 @@ public final class MeetingSession {
             let wasRecordingCalls = callAudioAvailable
             callAudioAvailable = false
             callLevel = nil
+            // The mic-only line says more than the hint.
+            callAudioHint = nil
             if !wroteCallAudioLine {
                 wroteCallAudioLine = true
                 let line = wasRecordingCalls
@@ -346,9 +363,13 @@ public final class MeetingSession {
                 try? writer.appendParagraph(line, to: noteID)
             }
         case .noCallAudioHeard:
-            // A hint for the meeting screen (N3/N4); nothing to store.
-            break
+            // A hint for the meeting screen and the menu bar; nothing to store.
+            if callAudioAvailable && !heardCallSpeech { callAudioHint = MeetingEvent.noCallAudioHeardMessage }
         case .segment(let segment):
+            if segment.track == .call && !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                heardCallSpeech = true
+                callAudioHint = nil
+            }
             transcript.upsert(segment)
             if segment.isFinal { saveSegments(transcript, noteID: noteID) }
         case .segmentRemoved(let id):
@@ -436,6 +457,7 @@ public final class MeetingSession {
         transcript = nil
         micLevel = 0
         callLevel = nil
+        callAudioHint = nil
         phase = .idle
         lastEndedNoteID = endedNoteID
         quitting = false

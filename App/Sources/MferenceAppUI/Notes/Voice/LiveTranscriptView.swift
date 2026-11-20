@@ -155,4 +155,6 @@ enum LiveMetrics {
     static let meterHeights: [CGFloat] = [6, 10, 14, 16, 8]
     /// The dot while paused or finishing.
     static let dimmed: Double = 0.4
+    /// The call-audio hint's close button (a full hit target in a caption line).
+    static let hintClose: CGFloat = 28
 }
