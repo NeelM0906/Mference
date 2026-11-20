@@ -7,7 +7,7 @@ import SwiftUI
 /// window background.
 ///
 /// Each section routes to one view (`SectionContent`): Chat → `ChatView`
-/// (U3), Mail / Calendar / Scan → `MailView` / `CalendarView` / `ScanView`
+/// (U3), Find → `FindView`, Mail / Calendar / Scan → `MailView` / `CalendarView` / `ScanView`
 /// (U4), Settings → `SettingsView` (U1), Notes and Errands → `ComingLaterView`
 /// (Phase C).
 public struct RootView: View {
@@ -118,6 +118,7 @@ struct SectionContent: View {
                 } else {
                     SectionPlaceholderView(section: .chat)
                 }
+            case .find: FindView(openChat: openChatAbout, askAcross: askAcross)
             case .mail: MailView()
             case .calendar: CalendarView()
             case .scan: ScanView()
@@ -132,6 +133,18 @@ struct SectionContent: View {
         .id(section)
     }
 
+    /// Find's "Ask about this": a new chat about the file, with Files on.
+    private func openChatAbout(_ file: URL) {
+        chat?.startChat(about: file)
+        shell?.show(.chat)
+    }
+
+    /// Find's "Ask in Chat": a new chat with Files on, asking the search.
+    private func askAcross(_ question: String) {
+        chat?.startChat(question: question)
+        shell?.show(.chat)
+    }
+
     /// Where chat hands off: Settings (Memory, the model library) and other
     /// sections (suggestion chips such as "Scan a receipt").
     private var chatActions: ChatActions {
@@ -141,7 +154,7 @@ struct SectionContent: View {
     }
 }
 
-/// Menu commands: a Go menu with a shortcut per section (⌘1-⌘6), Settings
+/// Menu commands: a Go menu with a shortcut per section (⌘1-⌘7), Settings
 /// on ⌘, and search on ⌘K. They drive the same `ShellModel` as the pills.
 public struct ShellCommands: Commands {
     let model: ShellModel

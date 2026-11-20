@@ -23,8 +23,10 @@ public struct ChatCitation: Sendable, Hashable, Codable, Identifiable {
         self.snippet = snippet
     }
 
-    /// The chip label: host plus a short path ("oakline.example/sale").
+    /// The chip label: host plus a short path ("oakline.example/sale"), or
+    /// the file name for a file on this Mac (Find).
     public var label: String {
+        if url.isFileURL { return url.lastPathComponent }
         var host = url.host() ?? url.absoluteString
         if host.hasPrefix("www.") { host.removeFirst(4) }
         let path = url.path().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -43,6 +45,8 @@ public struct ChatStep: Sendable, Hashable, Codable {
         case readPage
         /// A tool that failed: `detail` says why.
         case failed
+        /// A `search_files` call (Find): `query`, `resultCount`.
+        case searchFiles
     }
 
     public var kind: Kind
@@ -66,6 +70,10 @@ public struct ChatStep: Sendable, Hashable, Codable {
         ChatStep(kind: .search, query: query, resultCount: results)
     }
 
+    public static func searchFiles(_ query: String, results: Int) -> ChatStep {
+        ChatStep(kind: .searchFiles, query: query, resultCount: results)
+    }
+
     public static func readPage(_ url: URL, title: String?) -> ChatStep {
         ChatStep(kind: .readPage, url: url, title: title)
     }
@@ -78,10 +86,15 @@ public enum ChatStepsSummary {
     public static func title(steps: [ChatStep], hasReasoning: Bool) -> String? {
         let searches = steps.filter { $0.kind == .search }.count
         let pages = steps.filter { $0.kind == .readPage }.count
+        let fileSearches = steps.filter { $0.kind == .searchFiles }.count
+        if fileSearches > 0, searches == 0, pages == 0 {
+            return fileSearches == 1 ? "Searched your files" : "Searched your files · \(fileSearches) searches"
+        }
         if searches > 0 || pages > 0 {
             var parts = ["Searched the web"]
             if searches > 0 { parts.append(searches == 1 ? "1 search" : "\(searches) searches") }
             if pages > 0 { parts.append(pages == 1 ? "1 page read" : "\(pages) pages read") }
+            if fileSearches > 0 { parts.append("your files") }
             return parts.joined(separator: " · ")
         }
         if !steps.isEmpty { return "Tried the web" }

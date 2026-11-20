@@ -7,7 +7,7 @@ import Testing
 @Suite struct ShellTests {
     @Test func sectionShortcuts() {
         let keys = AppSection.pills.map { String(ShellModel.shortcut(for: $0).character) }
-        #expect(keys == ["1", "2", "3", "4", "5", "6"])
+        #expect(keys == ["1", "2", "3", "4", "5", "6", "7"])
         #expect(ShellModel.shortcut(for: .settings).character == ",")
     }
 

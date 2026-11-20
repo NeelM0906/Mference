@@ -25,6 +25,9 @@ public final class AppServices {
     /// U4's Apple surfaces (Scan, Calendar, Mail, Connections); nil only in
     /// tests that build `AppServices` by hand.
     public let apple: AppleServices?
+    /// Find: content search over the person's folders; nil only in tests
+    /// that build `AppServices` by hand.
+    public let find: FindService?
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -39,6 +42,7 @@ public final class AppServices {
                 modelContainer: ModelContainer,
                 downloads: DownloadManager? = nil,
                 apple: AppleServices? = nil,
+                find: FindService? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
@@ -53,6 +57,7 @@ public final class AppServices {
         }
         self.downloads = downloads
         self.apple = apple
+        self.find = find
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -75,7 +80,10 @@ public final class AppServices {
     /// the engine until something asks for the catalog.
     /// `presentPermissionReason` shows a permission's one-line reason and returns
     /// whether the person went on; the system prompt follows only then (L6).
-    public static func live(presentPermissionReason: @escaping LivePermissionBroker.ReasonPresenter) -> AppServices {
+    /// `findHelper` is the executable that serves `--find-extract-worker`
+    /// (the app itself); nil reads files in this process.
+    public static func live(presentPermissionReason: @escaping LivePermissionBroker.ReasonPresenter,
+                            findHelper: URL? = nil) -> AppServices {
         let settings = AppSettings()
         let idleUnload = IdleUnloadControl(delay: settings.idleUnloadDelay)
         let container: ModelContainer
@@ -99,6 +107,8 @@ public final class AppServices {
                            downloads: downloads,
                            apple: AppleServices.live(engine: engine, broker: permissions, container: container,
                                                      useAppleModel: { await MainActor.run { settings.useAppleModel } }),
+                           find: FindService.live(settings: FindSettings(), engine: engine, helper: findHelper,
+                                                  permissions: permissions),
                            appleChat: FoundationChatModel(),
                            storeError: storeError,
                            idleUnload: idleUnload)
@@ -126,6 +136,7 @@ public final class AppServices {
                            modelContainer: container,
                            downloads: downloads,
                            apple: AppleServices.preview(engine: engine, container: container),
+                           find: FindService.preview(settings: FindSettings(store: InMemorySettingsStore())),
                            idleUnload: idleUnload)
     }
 

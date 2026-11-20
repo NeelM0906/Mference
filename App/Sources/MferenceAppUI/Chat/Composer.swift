@@ -23,6 +23,7 @@ struct Composer: View {
             HStack(spacing: MFSpacing.xs + MFSpacing.xxs) {
                 moreMenu
                 webChip
+                if model.offersFiles { filesChip }
                 Spacer(minLength: MFSpacing.s)
                 modelButton
                 sendButton
@@ -93,6 +94,32 @@ struct Composer: View {
         .accessibilityHint(blocked == nil ? "Searches go through SearXNG on this Mac; pages are fetched from this Mac"
                            : model.webBlockedByModel ? "Apple’s model answers without the web. Choose Quick or Deep to search"
                            : "Turn off offline mode in Settings to search the web")
+    }
+
+    /// Files: answer from this Mac's files with Find (per chat, like Web).
+    private var filesChip: some View {
+        let blocked = model.filesBlockedReason
+        let isOn = model.filesEnabled && blocked == nil
+        return Button {
+            model.setFilesEnabled(!model.filesEnabled)
+        } label: {
+            HStack(spacing: MFSpacing.xs + 1) {
+                Image(systemName: "folder").imageScale(.small)
+                Text(blocked ?? (isOn ? "Files on" : "Files off"))
+            }
+            .font(MFFont.chip)
+            .foregroundStyle(isOn ? MFColor.accent : (blocked == nil ? MFColor.secondary : MFColor.tertiary))
+            .padding(.horizontal, MFSpacing.s + 1)
+            .frame(height: ChatMetrics.controlHeight)
+            .background(isOn ? MFColor.accentFill : MFColor.fill, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(blocked != nil)
+        .accessibilityLabel("Answer from your files")
+        .accessibilityValue(blocked ?? (isOn ? "On" : "Off"))
+        .accessibilityHint(blocked == nil ? "Searches the files on this Mac with Find; nothing leaves this Mac"
+                           : "Turn on Find to answer from your files")
     }
 
     private var modelButton: some View {
