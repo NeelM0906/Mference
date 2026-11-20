@@ -135,6 +135,13 @@ public final class MeetingSummaries {
             statuses[noteID] = nil
             return
         }
+        // A body this build may not write: don't run Quick for nothing.
+        guard writer.canWrite(noteID) else {
+            first.summaryState = .failed
+            try? context.save()
+            statuses[noteID] = .failed(MeetingSummaryError.readOnlyNote.message)
+            return
+        }
         if engine.status.isGenerating {
             statuses[noteID] = .waitingForChat
             for await status in engine.statusUpdates() where !status.isGenerating { break }
