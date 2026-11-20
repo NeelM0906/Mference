@@ -8,6 +8,8 @@ struct ShellSearchPanel: View {
     @Bindable var model: ShellModel
     @Environment(ScreenModels.self) private var screens: ScreenModels?
     @State private var query = ""
+    /// Notes results, computed once per pause in typing (not per view pass).
+    @State private var noteHits: [NoteSearchHit] = []
     @FocusState private var focused: Bool
 
     private var matches: [AppSection] {
@@ -15,11 +17,6 @@ struct ShellSearchPanel: View {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return all }
         return all.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
-    }
-
-    /// Notes: titles first, then text, then transcript lines (Notes spec 6.6).
-    private var noteHits: [NoteSearchHit] {
-        screens?.notes?.searchHits(query) ?? []
     }
 
     var body: some View {
@@ -72,5 +69,15 @@ struct ShellSearchPanel: View {
         .padding(MFSpacing.m)
         .frame(width: ShellMetrics.searchPanelWidth)
         .onAppear { focused = true }
+        // Notes: titles first, then text, then transcript lines (Notes spec 6.6).
+        .task(id: query) {
+            guard let notes = screens?.notes, !NoteSearch.terms(query).isEmpty else {
+                noteHits = []
+                return
+            }
+            try? await Task.sleep(for: NotesModel.searchPause)
+            guard !Task.isCancelled else { return }
+            noteHits = notes.searchHits(query)
+        }
     }
 }
