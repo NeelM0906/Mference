@@ -155,10 +155,40 @@ final class FakeRecordingControls: LiveRecordingControls {
                 "paused time stands still")
     }
 
-    @Test func quitCopy() {
-        #expect(QuitConfirmation.title == "A meeting is recording")
-        #expect(QuitConfirmation.stopAndQuit == "Stop and Quit")
-        #expect(!QuitConfirmation.message.contains("["))
+    @Test func quitAsksWhileRecordingOrFinishing() async throws {
+        let models = voice(FakeSpeechService())
+        #expect(!models.isMeetingActive)
+        models.meetingIsActive = { true }
+        models.meetingIsFinishing = { true }
+        let controls = FakeRecordingControls()
+        models.recordingControls = controls
+        #expect(models.isMeetingActive && models.isMeetingFinishing, "finishing still counts as active")
+        await models.stopLiveSessions()
+        #expect(controls.calls == ["stop"], "quit lets the finishing meeting save")
+        #expect(QuitConfirmation.copy(finishing: true).quit == "Finish and Quit")
+        #expect(QuitConfirmation.copy(finishing: false).title == "A meeting is recording")
+        #expect(QuitConfirmation.copy(finishing: true) != QuitConfirmation.copy(finishing: false))
+    }
+
+    @Test func theRecordingRemembersWhatItStartedWith() async {
+        let preferences = SpeechPreferences(store: InMemorySettingsStore())
+        preferences.callAudio = .app(bundleID: "us.zoom.xos", name: "Zoom")
+        let models = voice(FakeSpeechService(), preferences: preferences)
+        models.startMeeting = { _ in UUID() }
+        #expect(await models.recordMeetingModel.startRecording())
+        preferences.callAudio = .allApps // changed in Settings mid-meeting
+        #expect(models.recordMeetingModel.lastStarted?.callAudio == .app(bundleID: "us.zoom.xos", name: "Zoom"))
+    }
+
+    @Test func speakerLabelsSwitchFollowsTheObservedStatus() async throws {
+        let speech = FakeSpeechService(status: SpeechStatus(speech: .ready, speakerLabels: .notInstalled))
+        let models = voice(speech)
+        models.setup.start()
+        defer { models.setup.stop() }
+        #expect(!models.recordMeetingModel.speakerLabelsAvailable)
+        try await speech.install(.speakerLabels)
+        for _ in 0..<200 where !models.recordMeetingModel.speakerLabelsAvailable { await Task.yield() }
+        #expect(models.recordMeetingModel.speakerLabelsAvailable)
     }
 
     // MARK: Renders

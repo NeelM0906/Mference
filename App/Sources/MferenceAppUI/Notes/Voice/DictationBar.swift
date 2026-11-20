@@ -20,7 +20,8 @@ public struct DictationBar: View {
                 Text(Self.title(controller.phase, error: controller.error))
                     .font(MFFont.rowTitle)
                     .foregroundStyle(controller.error == nil ? MFColor.ink : MFColor.danger)
-                Text(Self.detail(controller.phase, error: controller.error))
+                Text(Self.detail(controller.phase, error: controller.error,
+                                 cleanUpChanged: controller.cleanUpChangesNextTime))
                     .font(MFFont.caption)
                     .foregroundStyle(MFColor.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -70,33 +71,25 @@ public struct DictationBar: View {
         }
     }
 
-    static func detail(_ phase: DictationController.Phase, error: SpeechError?) -> String {
+    static func detail(_ phase: DictationController.Phase, error: SpeechError?, cleanUpChanged: Bool = false) -> String {
         if let error { return error.message }
-        return "Text lands after each pause"
+        return cleanUpChanged ? nextTimeLine : "Text lands after each pause"
     }
+
+    /// Said while the fillers chip differs from how this dictation started.
+    static let nextTimeLine = "Clean up applies from your next dictation"
 
     // MARK: Chips
 
+    /// The language Fluid Speech Pro detected ("English · auto"). It is
+    /// not a picker: this model detects the language itself and a pinned
+    /// language could only label, never steer, the transcription (spike S1).
     private var languageChip: some View {
-        Menu {
-            Button("Automatic") { Task { await controller.setLanguage(.automatic) } }
-            Divider()
-            ForEach(VoiceFormat.languages, id: \.code) { language in
-                Button(language.name) { Task { await controller.setLanguage(.fixed(language.code)) } }
-            }
-        } label: {
-            DictationChip(VoiceFormat.languageChip(controller.preferences.language,
-                                                   detected: controller.detectedLanguage),
-                          isOn: false)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .accessibilityLabel("Language")
-        .accessibilityValue(VoiceFormat.languageChip(controller.preferences.language,
-                                                     detected: controller.detectedLanguage))
-        .help("Pin a language, or go back to Automatic")
+        let text = VoiceFormat.languageChip(.automatic, detected: controller.detectedLanguage)
+        return DictationChip(text, isOn: false)
+            .accessibilityLabel("Language")
+            .accessibilityValue(controller.detectedLanguage == nil ? "Detected as you speak" : text)
+            .help("Detected as you speak, from 25 European languages")
     }
 
     private var cleanUpChip: some View {
@@ -108,8 +101,9 @@ public struct DictationBar: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Clean up fillers")
         .accessibilityValue(controller.preferences.cleanUpFillers ? "On" : "Off")
+        .accessibilityHint(controller.cleanUpChangesNextTime ? Self.nextTimeLine : "")
         .accessibilityAddTraits(.isToggle)
-        .help("Drops um, uh and repeated starts. Same switch as in Settings › Speech.")
+        .help("Drops um, uh and repeated starts. Same switch as in Settings › Speech; a change applies from your next dictation.")
     }
 }
 
