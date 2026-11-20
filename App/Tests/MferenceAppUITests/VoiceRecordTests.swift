@@ -166,7 +166,9 @@ final class FakeRecordingControls: LiveRecordingControls {
         #expect(models.isMeetingActive && models.isMeetingFinishing, "finishing still counts as active")
         await models.stopLiveSessions()
         #expect(controls.calls == ["stop"], "quit lets the finishing meeting save")
-        #expect(QuitConfirmation.copy(finishing: true).quit == "Finish and Quit")
+        #expect(QuitConfirmation.copy(finishing: true).quit == "Quit")
+        #expect(QuitConfirmation.copy(finishing: true).message.hasSuffix("the next time you open it."),
+                "quit promises nothing inside the shutdown deadline; launch recovery finishes it")
         #expect(QuitConfirmation.copy(finishing: false).title == "A meeting is recording")
         #expect(QuitConfirmation.copy(finishing: true) != QuitConfirmation.copy(finishing: false))
     }

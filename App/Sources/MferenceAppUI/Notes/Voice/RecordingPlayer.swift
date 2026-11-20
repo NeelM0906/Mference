@@ -49,6 +49,22 @@ public final class CompositionPlayback: AudioPlayback {
     /// The loaded composition's length (tests).
     private(set) var itemDuration: TimeInterval = 0
 
+    /// Silent playback for tests: nothing reaches the speakers.
+    var isMuted: Bool {
+        get { player.isMuted }
+        set { player.isMuted = newValue }
+    }
+
+    /// Waits until the item can seek and play (tests).
+    func waitUntilReady(timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if player.currentItem?.status == .readyToPlay { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return false
+    }
+
     public func load(tracks: [RecordedTrack], directory: URL) async throws -> TimeInterval {
         let composition = AVMutableComposition()
         var loaded = 0

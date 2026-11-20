@@ -29,6 +29,12 @@ struct MferenceMacApp: App {
                 .environment(delegate.runtime.services)
                 .environment(delegate.runtime.chat)
                 .environment(delegate.runtime.voice)
+                // ⌘W closes the window: a dictation stops (the microphone is
+                // released, its last phrase lands); a meeting keeps going (D7).
+                .onDisappear {
+                    let voice = delegate.runtime.voice
+                    Task { await voice.stopDictation() }
+                }
                 .onAppear {
                     // Leaving Notes mid-dictation: the last phrase lands first.
                     let voice = delegate.runtime.voice

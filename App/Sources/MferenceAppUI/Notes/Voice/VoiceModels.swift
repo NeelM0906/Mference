@@ -102,13 +102,24 @@ public final class VoiceModels {
         (focusedDictationNoteID != nil && focusedTarget != nil) || dictation.isActive
     }
 
-    /// ⇧⌘D from the menu: the focused editor, or stop when there is none.
+    /// ⇧⌘D from the menu, keyed on the dictation itself: while dictating
+    /// (into any note, even one not shown) it stops; otherwise it starts in
+    /// the focused editor. The menu title says the same ("Stop Dictating").
     public func toggleDictation() {
-        if let target = focusedDictationTarget {
-            toggleDictation(in: target)
-        } else if dictation.isActive {
+        if dictation.isActive {
             Task { await dictation.stop() }
+        } else if let target = focusedDictationTarget {
+            toggleDictation(in: target)
         }
+    }
+
+    /// Esc in the note editor (N1 forwards `cancelOperation`): stops
+    /// dictation, landing the last phrase. Returns whether it handled Esc.
+    @discardableResult
+    public func cancelDictation() -> Bool {
+        guard dictation.isActive else { return false }
+        Task { await dictation.stop() }
+        return true
     }
 
     // MARK: Meetings (spec 4.3, D7)
@@ -173,6 +184,12 @@ public final class VoiceModels {
     public func transcribe(_ urls: [URL]) -> Bool {
         let urls = TranscribeFilesSheet.acceptedFiles(urls)
         guard !urls.isEmpty, fileQueue != nil else { return false }
+        // Without the model the drop is refused (the setup card shows), so
+        // no file is taken and then lost if the person declines setup.
+        guard setup.modelState.isReady else {
+            transcribeFiles()
+            return false
+        }
         setup.require(.transcribeFiles) { [weak self] in
             guard let self else { return }
             showsImportSheet = true

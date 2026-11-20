@@ -1,0 +1,68 @@
+import Foundation
+import MferenceAppCore
+import SwiftUI
+
+/// The import sheet's view of N4's `FileTranscriptionQueue` (the one
+/// consumer of every `FileJob.events`). Reads its rows as they change and
+/// queues with the sheet's options plus the remembered Keep audio.
+@MainActor
+public final class FileQueueAdapter: FileQueueModel {
+    private let queue: FileTranscriptionQueue
+    private let preferences: SpeechPreferences
+
+    public init(queue: FileTranscriptionQueue, preferences: SpeechPreferences) {
+        self.queue = queue
+        self.preferences = preferences
+    }
+
+    /// Observed through the queue's own `rows`, so the sheet updates.
+    public var rows: [FileQueueRow] { queue.rows.map(Self.row) }
+
+    public func add(_ urls: [URL], language: SpeechLanguage, speakerLabels: Bool, summary: Bool) async {
+        let options = FileImportOptions(language: language, speakerLabels: speakerLabels,
+                                        keepAudio: preferences.keepAudio == .keep,
+                                        summarize: summary && preferences.summaryModel != .off)
+        _ = await queue.add(urls, options: options)
+    }
+
+    public func cancel(_ id: UUID) {
+        Task { [queue] in await queue.cancel(id) }
+    }
+
+    static func row(_ row: FileTranscriptionQueue.Row) -> FileQueueRow {
+        FileQueueRow(id: row.noteID, noteID: row.noteID, fileName: row.fileName, duration: row.duration,
+                     languageCode: row.languageCode, speakerCount: row.speakerCount, fraction: row.fraction,
+                     remaining: row.remaining, phase: phase(row.phase))
+    }
+
+    static func phase(_ phase: FileTranscriptionQueue.Row.Phase) -> FileQueueRow.Phase {
+        switch phase {
+        case .queued: .queued
+        case .running: .running
+        case .paused: .paused
+        case .done: .done
+        case .failed(let reason): .failed(reason)
+        }
+    }
+}
+
+extension VoiceModels {
+    /// Connects the import sheet to N4's file queue (the app calls it once).
+    public func connect(files: FileTranscriptionQueue) {
+        fileQueue = FileQueueAdapter(queue: files, preferences: preferences)
+    }
+}
+
+extension VoiceModels {
+    /// Connects Notes' voice buttons (N1's `NotesVoiceActions`) to these
+    /// models: Transcribe file, Record meeting, and the voice toolbar in the
+    /// shell bar. N1's Dictate button and `openNote` are wired with its editor.
+    public func connect(notes: NotesModel) {
+        notes.voice.transcribeFile = { [weak self] in self?.transcribeFiles() }
+        notes.voice.recordMeeting = { [weak self] in self?.recordMeeting() }
+        notes.voice.toolbar = { [weak self] in
+            guard let self else { return AnyView(EmptyView()) }
+            return AnyView(NotesVoiceToolbar(voice: self))
+        }
+    }
+}

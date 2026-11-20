@@ -61,3 +61,28 @@ import Testing
         #expect(player.hasAudio == false && player.loadError == nil, "reads as deleted, not as broken")
     }
 }
+
+extension CompositionPlaybackTests {
+    @Test func seekMovesThePositionAndTheEndIsReported() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try Self.writeTone(folder.appending(path: "mic-1.caf"), seconds: 1, frequency: 440)
+        let playback = CompositionPlayback()
+        playback.isMuted = true
+        _ = try await playback.load(tracks: [RecordedTrack(fileName: "mic-1.caf", kind: .microphone,
+                                                           startOffset: 0, duration: 1)], directory: folder)
+        #expect(await playback.waitUntilReady())
+        playback.seek(to: 0.5)
+        for _ in 0..<100 where abs(playback.currentTime - 0.5) > 0.02 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(abs(playback.currentTime - 0.5) < 0.02, "seek lands where asked")
+        // The real end of the item: play the last 0.3 s silently at 2×.
+        playback.seek(to: 0.7)
+        var ended = false
+        playback.onEnded = { ended = true }
+        playback.rate = 2
+        playback.play()
+        for _ in 0..<300 where !ended { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(ended, "AVPlayerItemDidPlayToEndTime reaches onEnded")
+        playback.pause()
+    }
+}

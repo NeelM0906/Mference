@@ -18,21 +18,33 @@ public struct VoiceCommands: Commands {
     public var body: some Commands {
         CommandGroup(after: .textEditing) {
             Divider()
-            Button(voice.dictation.isActive ? "Stop Dictating" : "Dictate") { voice.toggleDictation() }
-                .keyboardShortcut("d", modifiers: [.command, .shift])
-                .disabled(!voice.canToggleDictation)
-            Button("Mark Moment") { voice.markMoment() }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
-                .disabled(!voice.canMarkMoment)
-            Button("Record Meeting…") {
-                shell.show(.notes)
-                voice.recordMeeting()
-            }
-            .keyboardShortcut("r", modifiers: [.command, .shift])
-            .disabled(!voice.canRecordMeeting)
-            Button("Transcribe Audio File…") { voice.transcribeFiles() }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
-                .disabled(shell.selection != .notes)
+            VoiceMenuItems(voice: voice, shell: shell)
         }
+    }
+}
+
+/// The voice menu items, as a view so they observe `VoiceModels` like any
+/// view (focus moving into a note re-enables Dictate) and can be rendered
+/// in tests.
+struct VoiceMenuItems: View {
+    let voice: VoiceModels
+    let shell: ShellModel
+
+    var body: some View {
+        Button(voice.dictation.isActive ? "Stop Dictating" : "Dictate") { voice.toggleDictation() }
+            .keyboardShortcut("d", modifiers: [.command, .shift])
+            .disabled(!voice.canToggleDictation)
+        Button("Mark Moment") { voice.markMoment() }
+            .keyboardShortcut("m", modifiers: [.command, .shift])
+            .disabled(!voice.canMarkMoment)
+        Button("Record Meeting…") {
+            shell.show(.notes)
+            voice.recordMeeting()
+        }
+        .keyboardShortcut("r", modifiers: [.command, .shift])
+        .disabled(!voice.canRecordMeeting)
+        Button("Transcribe Audio File…") { voice.transcribeFiles() }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
+            .disabled(shell.selection != .notes)
     }
 }
