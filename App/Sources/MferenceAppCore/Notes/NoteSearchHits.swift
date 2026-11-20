@@ -46,8 +46,11 @@ extension NoteStore {
         var bodies: [NoteSearchHit] = []
         var transcripts: [NoteSearchHit] = []
         for note in try notes(in: .all, matching: query) {
-            let title = displayTitle(of: note)
+            // Enough title matches: nothing later can outrank them.
+            if titles.count >= limit { break }
             let document = document(of: note)
+            let first = document.firstLine
+            let title = note.title.isEmpty ? (first.isEmpty ? "New note" : first) : note.title
             if NoteSearch.matches(unfolded: title, terms: terms) {
                 titles.append(NoteSearchHit(noteID: note.id, title: title, kind: note.kind, match: .title,
                                             snippet: document.previewLine))

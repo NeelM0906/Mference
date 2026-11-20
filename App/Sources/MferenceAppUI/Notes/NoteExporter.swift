@@ -37,6 +37,8 @@ enum NoteExporter {
     /// Writes `note` to `url` as `format`.
     static func write(_ note: Note, store: NoteStore, format: NoteExportFormat, to url: URL) throws {
         let document = store.document(of: note)
+        // A body that could not be read would export as nothing.
+        if document.readOnlyReason == .damaged { throw NoteExportError.unreadable }
         let times = segmentTimes(note)
         switch format {
         case .markdown:
@@ -60,6 +62,8 @@ enum NoteExporter {
         do {
             try write(note, store: store, format: format, to: url)
             return nil
+        } catch NoteExportError.unreadable {
+            return "This note couldn't be read fully, so it can't be exported. Nothing in it was deleted."
         } catch {
             return "Couldn't export the note. \(error.localizedDescription)"
         }
@@ -75,19 +79,19 @@ enum NoteExporter {
         view.textContainerInset = .zero
         view.mappingContext = NoteTextMapping.Context(attachmentURL: { attachments.url(of: $0, in: noteID) },
                                                       segmentTime: { segmentTimes[$0] })
-        view.frame = CGRect(x: 0, y: 0, width: page.width - 2 * margin, height: page.height)
+        let width = page.width - 2 * margin
+        view.frame = CGRect(x: 0, y: 0, width: width, height: page.height)
+        // The view grows to the whole note; pages are cut from it.
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        view.textContainer?.widthTracksTextView = true
+        view.textContainer?.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
         view.appearance = NSAppearance(named: .aqua)
         view.load(document)
         if let manager = view.textLayoutManager {
             manager.ensureLayout(for: manager.documentRange)
-            view.sizeToFit()
-            var height: CGFloat = 0
-            manager.enumerateTextLayoutFragments(from: manager.documentRange.endLocation,
-                                                 options: [.reverse, .ensuresLayout]) { fragment in
-                height = fragment.layoutFragmentFrame.maxY
-                return false
-            }
-            view.frame.size.height = max(height, page.height - 2 * margin)
+            let used = manager.usageBoundsForTextContainer.maxY
+            view.frame.size.height = max(ceil(used), page.height - 2 * margin)
         }
         let info = NSPrintInfo()
         info.paperSize = page
@@ -97,16 +101,26 @@ enum NoteExporter {
         info.rightMargin = margin
         info.horizontalPagination = .fit
         info.verticalPagination = .automatic
-        let data = NSMutableData()
-        let operation = NSPrintOperation.pdfOperation(with: view, inside: view.bounds, to: data, printInfo: info)
+        // A normal print job saved to a file paginates (a PDF operation into
+        // data makes one tall page).
+        let file = FileManager.default.temporaryDirectory.appending(path: "mference-note-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: file) }
+        info.jobDisposition = .save
+        info.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = file
+        let operation = NSPrintOperation(view: view, printInfo: info)
         operation.showsPrintPanel = false
         operation.showsProgressPanel = false
         guard operation.run() else { throw CocoaError(.fileWriteUnknown) }
-        return data as Data
+        return try Data(contentsOf: file)
     }
 
     static func segmentTimes(_ note: Note) -> [UUID: TimeInterval] {
         Dictionary(NoteSearch.transcript(note.recording?.transcriptJSON).map { ($0.id, $0.start) },
                    uniquingKeysWith: { first, _ in first })
     }
+}
+
+enum NoteExportError: Error {
+    /// The stored body is damaged.
+    case unreadable
 }

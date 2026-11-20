@@ -66,6 +66,44 @@ import Testing
         #expect(document.string?.contains("Renew travel insurance") == true)
     }
 
+    @Test func aDamagedNoteIsNotExportedAsAnEmptyFile() throws {
+        let model = try NotesFixtures.model()
+        let note = try model.store.createNote()
+        note.bodyJSON = Data("{\"v\":1,\"blocks\":[".utf8)
+        let file = FileManager.default.temporaryDirectory.appending(path: "mference-damaged-\(UUID().uuidString).md")
+        #expect(throws: NoteExportError.self) { try NoteExporter.write(note, store: model.store, format: .markdown, to: file) }
+        #expect(!FileManager.default.fileExists(atPath: file.path(percentEncoded: false)))
+    }
+
+    @Test func aLongNoteMakesSeveralPDFPages() throws {
+        let model = try NotesFixtures.model()
+        let note = try model.store.createNote()
+        let lines = (1...160).map { NoteDocument.Block.paragraph(runs: [TextRun("Line \($0) of the long note")]) }
+        try model.store.save(NoteDocument(blocks: [.heading(level: .title, runs: [TextRun("Long")])] + lines), to: note)
+        let file = FileManager.default.temporaryDirectory.appending(path: "mference-long-\(UUID().uuidString).pdf")
+        try NoteExporter.write(note, store: model.store, format: .pdf, to: file)
+        let pdf = try #require(PDFDocument(url: file))
+        #expect(pdf.pageCount >= 3)
+        #expect(pdf.page(at: pdf.pageCount - 1)?.string?.contains("Line 160 of the long note") == true)
+        #expect(pdf.page(at: 0)?.string?.contains("Long") == true)
+    }
+
+    @Test func aTranscriptHitWaitsForTheEditorToShowItsNote() throws {
+        let store = NoteStore(container: try AppModelContainer.inMemory(), attachments: .temporary(),
+                              speech: FakeSpeechService())
+        let note = try store.createNote(kind: .meeting)
+        let segment = UUID()
+        try store.save(NoteDocument(blocks: [.heading(level: .title, runs: [TextRun("Sync")])]
+            + (1...40).map { .paragraph(runs: [TextRun("Line \($0)")]) } + [.transcriptAnchor(segmentID: segment)]), to: note)
+        let controller = NoteEditorController(store: store)
+        // ⌘K from another section: no editor view yet.
+        controller.open(note)
+        controller.reveal(segmentID: segment)
+        let h = NoteEditorTests.Harness()
+        controller.attach(h.view)
+        #expect(h.view.selectedRange().location == (h.view.string as NSString).length - 1)
+    }
+
     @Test func shareTextIsMarkdown() throws {
         let model = try NotesFixtures.model()
         let h = NoteEditorTests.Harness()

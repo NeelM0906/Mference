@@ -31,7 +31,7 @@ public enum NoteExport {
                 let hashes = String(repeating: "#", count: level.rawValue)
                 lines.append("\(hashes) \(inline(runs))")
             case .paragraph(let runs):
-                lines.append(inline(runs))
+                lines.append(escapeLineStart(inline(runs)))
             case .bullet(let runs, let indent):
                 lines.append(pad(indent) + "- " + inline(runs))
             case .numbered(let runs, let indent):
@@ -75,7 +75,7 @@ public enum NoteExport {
             if run.underline { text = "<u>\(text)</u>" }
             if run.italic { text = "*\(text)*" }
             if run.bold { text = "**\(text)**" }
-            if let link = run.link { text = "[\(text)](\(link.absoluteString))" }
+            if let link = run.link { text = "[\(text)](\(escapeURL(link)))" }
             return leading + text + trailing
         }.joined()
     }
@@ -123,24 +123,28 @@ public enum NoteExport {
         return name.isEmpty ? "Note" : String(name.prefix(120))
     }
 
-    /// Writes `<file>.md` and, when the note has attachments, the folder
-    /// "`<file> attachments`" beside it with copies of them. Returns the
-    /// files written.
+    /// Writes `<file>.md` and, when the note has attachments, a new folder
+    /// "`<file> attachments`" beside it with copies of them. An existing
+    /// folder of that name is never touched: the new one is numbered
+    /// ("… attachments 2"). Returns the files written.
     @discardableResult
     public static func writeMarkdown(_ document: NoteDocument, noteID: UUID, attachments: NoteAttachments,
                                      to file: URL, segmentTimes: SegmentTimes = [:]) throws -> [URL] {
         let base = file.deletingPathExtension().lastPathComponent
-        let folderName = "\(base) attachments"
+        let parent = file.deletingLastPathComponent()
+        var folderName = "\(base) attachments"
+        var number = 2
+        while FileManager.default.fileExists(atPath: parent.appending(path: folderName).path(percentEncoded: false)) {
+            folderName = "\(base) attachments \(number)"
+            number += 1
+        }
         let ids = document.attachmentIDs.filter {
             FileManager.default.fileExists(atPath: attachments.url(of: $0, in: noteID).path(percentEncoded: false))
         }
         var written: [URL] = []
         if !ids.isEmpty {
-            let folder = file.deletingLastPathComponent().appending(path: folderName, directoryHint: .isDirectory)
-            if FileManager.default.fileExists(atPath: folder.path(percentEncoded: false)) {
-                try FileManager.default.removeItem(at: folder)
-            }
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let folder = parent.appending(path: folderName, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
             for id in ids {
                 let target = folder.appending(path: id)
                 try FileManager.default.copyItem(at: attachments.url(of: id, in: noteID), to: target)
@@ -182,5 +186,22 @@ public enum NoteExport {
             out.append(character)
         }
         return out
+    }
+
+    /// A line that would read as a list, quote or rule ("1986. was…",
+    /// "- x", "+ x", "> x") keeps its text: its marker is escaped.
+    static func escapeLineStart(_ line: String) -> String {
+        if let first = line.first, "-+>".contains(first), line.dropFirst().first == " " { return "\\" + line }
+        let digits = line.prefix { $0.isNumber }
+        if !digits.isEmpty, let after = line.dropFirst(digits.count).first, after == "." || after == ")" {
+            return digits + "\\" + line.dropFirst(digits.count)
+        }
+        return line
+    }
+
+    /// A link target safe inside `( )`.
+    static func escapeURL(_ url: URL) -> String {
+        url.absoluteString.replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29")
+            .replacingOccurrences(of: " ", with: "%20")
     }
 }

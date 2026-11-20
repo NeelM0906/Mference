@@ -103,7 +103,10 @@ public final class NotesModel {
         var deletedAt: Date?
     }
 
-    public init(store: NoteStore, speech: any SpeechServicing, searchDelay: Duration = .milliseconds(150),
+    /// The pause in typing before a search runs.
+    public static let searchPause: Duration = .milliseconds(150)
+
+    public init(store: NoteStore, speech: any SpeechServicing, searchDelay: Duration = NotesModel.searchPause,
                 now: @escaping () -> Date = Date.init) {
         self.store = store
         self.editor = NoteEditorController(store: store)
@@ -264,6 +267,7 @@ public final class NotesModel {
     // MARK: Selection
 
     public func select(_ note: Note?) {
+        if note?.id != selectedNoteID { revealedSegmentID = nil }
         selectedNoteID = note?.id
         editor.open(note)
     }
@@ -478,7 +482,7 @@ public final class NotesModel {
     /// Asks where, then exports `note` (Markdown with an attachments folder,
     /// plain text, or PDF).
     public func export(_ note: Note, as format: NoteExportFormat) {
-        if note.id == selectedNoteID { editor.saveNow() }
+        if note.id == selectedNoteID { editor.saveNow(force: true) }
         if let message = NoteExporter.export(note, store: store, format: format) { errorMessage = message }
     }
 

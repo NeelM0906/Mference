@@ -80,6 +80,44 @@ import Testing
         #expect(NoteExport.plainText(document) == "Keep *this*\n")
     }
 
+    @Test func anExistingAttachmentsFolderIsNeverTouched() throws {
+        let attachments = NoteAttachments.temporary()
+        let noteID = UUID()
+        let id = try attachments.write(Data([1]), fileExtension: "png", into: noteID)
+        let document = NoteDocument(blocks: [.image(attachmentID: id)])
+        let folder = FileManager.default.temporaryDirectory.appending(path: "mference-export-\(UUID().uuidString)")
+        let theirs = folder.appending(path: "Trip attachments")
+        try FileManager.default.createDirectory(at: theirs, withIntermediateDirectories: true)
+        try Data("keep".utf8).write(to: theirs.appending(path: "mine.txt"))
+        try NoteExport.writeMarkdown(document, noteID: noteID, attachments: attachments, to: folder.appending(path: "Trip.md"))
+        #expect(try String(contentsOf: theirs.appending(path: "mine.txt"), encoding: .utf8) == "keep")
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: "Trip attachments 2/\(id)").path(percentEncoded: false)))
+        #expect(try String(contentsOf: folder.appending(path: "Trip.md"), encoding: .utf8).contains("<Trip attachments 2/\(id)>"))
+    }
+
+    @Test func lineStartsAndLinkTargetsAreEscaped() {
+        let document = NoteDocument(blocks: [
+            .paragraph(runs: [TextRun("1986. A good year")]),
+            .paragraph(runs: [TextRun("- not a list")]),
+            .paragraph(runs: [TextRun("wiki", link: URL(string: "https://en.wikipedia.org/wiki/Swift_(language)"))]),
+        ])
+        #expect(NoteExport.markdown(document) == """
+        1986\\. A good year
+
+        \\- not a list
+
+        [wiki](https://en.wikipedia.org/wiki/Swift_%28language%29)
+
+        """)
+    }
+
+    @Test func searchStopsOnceEnoughTitlesMatch() throws {
+        let store = NoteStore(container: try AppModelContainer.inMemory(), attachments: .temporary(),
+                              speech: FakeSpeechService())
+        for index in 0..<20 { try store.createNote(title: "Budget \(index)") }
+        #expect(try store.searchHits("budget", limit: 5).count == 5)
+    }
+
     @Test func fileNamesAreSafe() {
         #expect(NoteExport.fileName(for: "Q3: plan / budget?") == "Q3- plan - budget-")
         #expect(NoteExport.fileName(for: "   ") == "Note")

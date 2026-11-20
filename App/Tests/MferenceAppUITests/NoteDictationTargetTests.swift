@@ -94,8 +94,12 @@ import Testing
         recording.transcriptJSON = try JSONEncoder().encode([segment])
         let target: any MeetingNoteTarget = controller
         h.view.setSelectedRange(NSRange(location: 0, length: 0))
-        target.insertMarker(time: 90)
-        target.insertTranscriptAnchor(segmentID: segment.id)
+        // Another note's mark never lands here.
+        #expect(!target.insertMarker(time: 30, in: UUID()))
+        #expect(!target.insertTranscriptAnchor(segmentID: segment.id, in: UUID()))
+        #expect(target.insertMarker(time: 90, in: note.id))
+        #expect(target.insertTranscriptAnchor(segmentID: segment.id, in: note.id))
+        #expect(!h.view.document.blocks.contains(.marker(time: 30)))
         let blocks = h.view.document.blocks
         #expect(blocks.contains(.marker(time: 90)))
         #expect(blocks.contains(.transcriptAnchor(segmentID: segment.id)))
