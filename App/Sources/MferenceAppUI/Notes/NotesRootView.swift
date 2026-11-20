@@ -34,6 +34,8 @@ enum NotesMetrics {
     static let separatorHeight: CGFloat = 18
     /// `.rec` dot on Record meeting.
     static let recordDot: CGFloat = 9
+    /// The transcript under a finished meeting's note before it scrolls.
+    static let transcriptMaxHeight: CGFloat = 260
     /// Empty states are at most this wide.
     static let emptyStateWidth: CGFloat = 320
     static let emptyStateIcon: CGFloat = 24
@@ -64,17 +66,20 @@ public struct NotesRootView: View {
 
 struct NotesScreen: View {
     @Bindable var model: NotesModel
+    @Environment(VoiceModels.self) private var voice: VoiceModels?
 
     var body: some View {
-        HStack(spacing: 0) {
-            NotesSidebar(model: model)
-                .frame(width: NotesMetrics.sidebarWidth)
-            Divider().overlay(MFColor.chromeDivider)
-            NotesList(model: model)
-                .frame(width: NotesMetrics.listWidth)
-            Divider().overlay(MFColor.chromeDivider)
-            NoteEditorPane(model: model)
-                .frame(maxWidth: .infinity)
+        Group {
+            if model.showsMeetingLayout, let session = model.meetings, let voice {
+                // Board 4: the recording bar, the note beside the live transcript.
+                MeetingLayoutView(session: session, voice: voice,
+                                  onShowSidebar: { model.showsPanesDuringMeeting = true }) { onTimeChip in
+                    NoteEditorView(controller: model.editor, dateLine: "")
+                        .onAppear { model.editor.onTimeChipClick = onTimeChip }
+                }
+            } else {
+                panes
+            }
         }
         .background(MFColor.surface)
         // Audio or video dropped anywhere on Notes becomes transcribed notes
@@ -86,6 +91,38 @@ struct NotesScreen: View {
             await model.purgeExpired()
             model.selectFirstIfNeeded()
         }
+        .confirmationDialog("Write the summary again?",
+                            isPresented: Binding(get: { model.summaries?.redoConfirmation != nil },
+                                                 set: { if !$0 { model.summaries?.cancelRedo() } }),
+                            titleVisibility: .visible) {
+            Button("Redo") { model.summaries?.confirmRedo() }
+            Button("Cancel", role: .cancel) { model.summaries?.cancelRedo() }
+        } message: {
+            Text("The summary, decisions and action items are replaced. Your own notes stay.")
+        }
+        .modifier(NotesScreenChrome(model: model))
+    }
+
+    private var panes: some View {
+        HStack(spacing: 0) {
+            NotesSidebar(model: model)
+                .frame(width: NotesMetrics.sidebarWidth)
+            Divider().overlay(MFColor.chromeDivider)
+            NotesList(model: model)
+                .frame(width: NotesMetrics.listWidth)
+            Divider().overlay(MFColor.chromeDivider)
+            NoteEditorPane(model: model)
+                .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+/// The Notes screen's toolbar items and dialogs.
+private struct NotesScreenChrome: ViewModifier {
+    @Bindable var model: NotesModel
+
+    func body(content: Content) -> some View {
+        content
         .shellToolbar(id: "notes.actions") { NotesToolbarActions(model: model) }
         .confirmationDialog(model.pendingDeletion?.title ?? "",
                             isPresented: Binding(get: { model.pendingDeletion != nil },

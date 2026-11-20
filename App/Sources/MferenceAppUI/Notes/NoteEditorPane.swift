@@ -9,6 +9,14 @@ import UniformTypeIdentifiers
 struct NoteEditorPane: View {
     @Bindable var model: NotesModel
     @Environment(VoiceModels.self) private var voice: VoiceModels?
+    /// The finished recording's player and transcript for the open note.
+    @State private var recording: RecordingViewState?
+
+    struct RecordingViewState {
+        var noteID: UUID
+        var transcript: TranscriptModel
+        var player: RecordingPlayerModel
+    }
     @State private var importingAttachment = false
 
     var body: some View {
@@ -34,6 +42,10 @@ struct NoteEditorPane: View {
                 Divider().overlay(MFColor.chromeDivider)
                 // A newer or damaged body explains itself in the editor.
                 if note.deletedAt != nil { deletedBanner(note) }
+                if let recording, recording.noteID == note.id {
+                    NoteRecordingHeader(model: model, note: note, transcript: recording.transcript,
+                                        player: recording.player)
+                }
                 NoteEditorView(controller: model.editor,
                                dateLine: Self.dateLine(note.updatedAt, locale: model.locale, calendar: model.calendar),
                                bottomInset: showsDictationBar ? NoteEditorMetrics.dictationBarInset : 0)
@@ -46,10 +58,16 @@ struct NoteEditorPane: View {
                                 .padding(.bottom, MFSpacing.m)
                         }
                     }
+                if let recording, recording.noteID == note.id {
+                    Divider().overlay(MFColor.chromeDivider)
+                    NoteRecordingFooter(transcript: recording.transcript, player: recording.player)
+                }
                 Divider().overlay(MFColor.chromeDivider)
                 footer(note)
             }
             .background(MFColor.surface)
+            .task(id: note.id) { await loadRecording(for: note) }
+            .onDisappear { recording?.player.pause() }
             .fileImporter(isPresented: $importingAttachment, allowedContentTypes: [.image, .audio],
                           allowsMultipleSelection: true) { result in
                 guard case .success(let urls) = result else { return }
@@ -69,6 +87,25 @@ struct NoteEditorPane: View {
     private var showsDictationBar: Bool {
         guard let voice else { return false }
         return voice.dictation.isActive || voice.dictation.error != nil
+    }
+
+    /// A finished meeting or file note gets its player and transcript; a
+    /// live meeting, a typed note or a build without meetings gets none.
+    private func loadRecording(for note: Note) async {
+        recording?.player.pause()
+        guard let meetings = model.meetings, note.recording != nil, model.liveMeetingNoteID != note.id,
+              let transcript = meetings.transcript(for: note.id) else {
+            recording = nil
+            model.editor.onTimeChipClick = nil
+            return
+        }
+        let audio = meetings.audio(for: note.id)
+        let player = RecordingPlayerModel(tracks: audio?.tracks ?? [], directory: audio?.directory,
+                                          duration: audio?.duration ?? note.recording?.duration ?? 0)
+        recording = RecordingViewState(noteID: note.id, transcript: transcript, player: player)
+        // A time chip in the note plays from there.
+        model.editor.onTimeChipClick = { [weak player] time in player?.play(from: time) }
+        await player.load()
     }
 
     /// "19 November 2026 at 11:40".
@@ -139,6 +176,17 @@ struct NoteEditorPane: View {
             .accessibilityHint("Shift Command D")
 
             Spacer(minLength: MFSpacing.s)
+
+            if model.liveMeetingNoteID == note.id, model.showsPanesDuringMeeting {
+                // Back to the meeting layout (board 4).
+                Button {
+                    model.showsPanesDuringMeeting = false
+                } label: {
+                    Label("Meeting", systemImage: "waveform")
+                }
+                .buttonStyle(.mfSecondary)
+                .help("Show the live meeting")
+            }
 
             iconButton(note.isPinned ? "pin.fill" : "pin", label: note.isPinned ? "Unpin" : "Pin",
                        help: note.isPinned ? "Unpin" : "Pin") { model.togglePin(note) }

@@ -101,6 +101,16 @@ public final class NotesModel {
     public var calendar = Calendar.current
     public var locale = Locale.current
 
+    /// N4's meeting session and summaries (nil in previews without them):
+    /// the live meeting layout and the finished-meeting views read them.
+    @ObservationIgnored public var meetings: MeetingSession?
+    @ObservationIgnored public var summaries: MeetingSummaries?
+    /// Awaited before any purge: launch recovery closes interrupted
+    /// meetings and files first (spec 6.3).
+    @ObservationIgnored public var waitForLaunchRecovery: (() async -> Void)?
+    /// The person opened the sidebar and list during a live meeting.
+    public var showsPanesDuringMeeting = false
+
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private let searchDelay: Duration
@@ -151,8 +161,23 @@ public final class NotesModel {
         editor.onMediaDropped = { [weak self] urls in self?.voice.transcribe?(urls) ?? false }
     }
 
-    public convenience init(services: AppServices) {
-        self.init(store: services.notes, speech: services.speech)
+    public convenience init(services: AppServices, now: @escaping () -> Date = Date.init) {
+        self.init(store: services.notes, speech: services.speech, now: now)
+        meetings = services.meetings
+        summaries = services.summaries
+        waitForLaunchRecovery = { [weak services] in await services?.launchRecovery?.value }
+    }
+
+    /// The live meeting's note when it is the one selected (board 4 shows
+    /// the meeting layout for it).
+    public var liveMeetingNoteID: UUID? {
+        guard let meetings, meetings.isActive, let id = meetings.noteID else { return nil }
+        return id
+    }
+
+    /// Whether the screen shows the meeting layout instead of the panes.
+    public var showsMeetingLayout: Bool {
+        liveMeetingNoteID != nil && liveMeetingNoteID == selectedNoteID && !showsPanesDuringMeeting
     }
 
     isolated deinit {
@@ -304,6 +329,7 @@ public final class NotesModel {
 
     public func select(_ note: Note?) {
         if note?.id != selectedNoteID {
+            showsPanesDuringMeeting = false
             revealedSegmentID = nil
             // Dictating into the note being left: stop; its last phrase still
             // lands there (the editor keeps it with its note).
@@ -331,6 +357,8 @@ public final class NotesModel {
         commitQuery()
         let target: NoteScope = note.deletedAt != nil ? .recentlyDeleted : .all
         if scope != target, !notes.contains(where: { $0.id == noteID }) { scope = target }
+        // The timer chip opens the live meeting in its layout.
+        showsPanesDuringMeeting = false
         select(note)
     }
 
@@ -458,6 +486,7 @@ public final class NotesModel {
 
     /// Purges notes deleted 30 days ago (when Notes opens).
     public func purgeExpired() async {
+        await waitForLaunchRecovery?()
         await performAsync { _ = try await store.purgeExpired(now: now()) }
     }
 
