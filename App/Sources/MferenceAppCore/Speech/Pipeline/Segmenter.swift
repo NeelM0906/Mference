@@ -194,14 +194,15 @@ actor TrackSegmenter {
     /// Ends the open phrase with what is buffered (stop, sleep, end of file).
     func flush() -> [SegmenterEvent] {
         var events: [SegmenterEvent] = []
-        if !pending.isEmpty, segmenter.isInSpeech {
+        if !pending.isEmpty {
             // A partial frame inside a phrase counts as speech so the last
-            // words are kept.
+            // words are kept; outside one it is silence, still counted so
+            // the clock keeps step with the recording (pause and resume).
             let frame = pending
             pending = []
-            events += segmenter.process(frame: frame, probability: segmenter.configuration.threshold)
+            let probability: Float = segmenter.isInSpeech ? segmenter.configuration.threshold : 0
+            events += segmenter.process(frame: frame, probability: probability)
         }
-        pending = []
         return events + segmenter.flush()
     }
 

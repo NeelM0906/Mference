@@ -108,11 +108,7 @@ public final class SpeechService: SpeechServicing {
     public func recordingsSize() async -> Int64 { recordings.totalSize() }
 
     public func deleteRecordings(for noteID: UUID) async throws {
-        do {
-            try recordings.delete(noteID: noteID)
-        } catch {
-            throw SpeechError.failed(error.localizedDescription)
-        }
+        try await coordinator.deleteRecordings(for: noteID)
     }
 
     public func recordingsDirectory(for noteID: UUID) -> URL { recordings.directory(for: noteID) }
@@ -564,6 +560,24 @@ actor SpeechCoordinator {
         startNextJob()
         let offset = running == nil ? 0 : 1
         for (index, waiting) in queue.enumerated() { waiting.continuation.yield(.queued(position: index + offset)) }
+    }
+
+    // MARK: Recordings
+
+    /// Deletes a note's recordings, refused while a meeting records into
+    /// them or a file job reads them (deleting a note for good mid-meeting).
+    func deleteRecordings(for noteID: UUID) throws {
+        if case .meeting(_, let pipeline)? = live, pipeline.options.noteID == noteID {
+            throw SpeechError.busy(.meeting)
+        }
+        if running?.job.options.noteID == noteID || queue.contains(where: { $0.options.noteID == noteID }) {
+            throw SpeechError.failed("The file is still being transcribed.")
+        }
+        do {
+            try dependencies.recordings.delete(noteID: noteID)
+        } catch {
+            throw SpeechError.failed(error.localizedDescription)
+        }
     }
 
     // MARK: Quit

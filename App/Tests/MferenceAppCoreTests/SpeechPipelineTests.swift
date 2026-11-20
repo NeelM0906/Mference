@@ -99,6 +99,18 @@ import Testing
         #expect(Self.phrases(events).first?.track == .call)
     }
 
+    @Test func flushingBufferedSilenceKeepsTheClock() async throws {
+        // Codex review on #251: pause flushes a partial silent frame; the
+        // clock must still count it, as the recording does.
+        let voice = ScriptedVoiceActivity(frameLength: 4_096)
+        let segmenter = TrackSegmenter(track: .microphone, detector: try await voice.makeStream(),
+                                       frameLength: voice.frameLength, configuration: .init())
+        _ = try await segmenter.feed([Float](repeating: 0, count: 5_000))
+        #expect(abs(await segmenter.position - 0.3125) < 1e-9)
+        _ = await segmenter.flush()
+        #expect(abs(await segmenter.position - 0.3125) < 1e-9)
+    }
+
     @Test func trackSegmenterFramesChunksOfAnySize() async throws {
         let voice = ScriptedVoiceActivity(frameLength: 1_600)
         let segmenter = TrackSegmenter(track: .microphone, detector: try await voice.makeStream(),

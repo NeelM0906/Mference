@@ -549,6 +549,30 @@ import Testing
         #expect(await rig.service.recoverInterruptedRecordings().isEmpty)
     }
 
+    @Test func recordingsAreNotDeletedWhileAMeetingRecordsIntoThem() async throws {
+        // Codex review on #251: deleting the note for good mid-meeting.
+        let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(1, 0.2), (1, 0)]))
+        let rig = try Self.rig(sources: FakeAudioSourceFactory(microphone: mic),
+                               recognizer: AmplitudeTranscriber([(0.2, "Hi.")]))
+        defer { try? FileManager.default.removeItem(at: rig.root) }
+        let note = UUID()
+        let folder = rig.recordings.directory(for: note)
+        let meeting = try await rig.service.startMeeting(MeetingOptions(noteID: note, callAudio: .off))
+        let log = EventLog(meeting.events)
+        await #expect(throws: SpeechError.busy(.meeting)) { try await rig.service.deleteRecordings(for: note) }
+        #expect(FileManager.default.fileExists(atPath: folder.path))
+        await meeting.stop()
+        #expect(await log.waitUntilFinished())
+        // Once the meeting has let go of the folder, it deletes.
+        var deleted = false
+        for _ in 0..<200 where !deleted {
+            deleted = (try? await rig.service.deleteRecordings(for: note)) != nil
+            if !deleted { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(deleted)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+    }
+
     @Test func quitWaitsBrieflyForAPhraseStillBeingRecognized() async throws {
         // Codex review on #251: quitting mid-phrase must not drop the phrase.
         let mic = FakeAudioSource(track: .microphone, chunks: Self.chunks([(1, 0.2), (1, 0)]))
