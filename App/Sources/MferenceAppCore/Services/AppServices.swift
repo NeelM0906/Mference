@@ -103,6 +103,7 @@ public final class AppServices {
             if summarize { summaries?.summarize(noteID) }
         }
         files.afterTranscript = { [weak summaries] noteID in summaries?.summarize(noteID) }
+        files.transcriptSaved = { [weak meetings] noteID in meetings?.transcriptDidChange(for: noteID) }
         self.meetings = meetings
         self.summaries = summaries
         self.files = files
