@@ -82,10 +82,15 @@ extension MeetingSession: LiveRecordingControls {
     public func resumeRecording() async { await resume() }
     public func markMomentInRecording() async { await markMoment() }
 
-    /// Stops and waits until the transcript is saved (quit waits on it).
+    /// Stops and waits until the transcript is saved (quit waits on it,
+    /// before the speech service shuts down): N4's `stopForQuit`, which also
+    /// waits for a meeting that is already finishing.
     public func stopRecording() async {
-        await stop()
-        await waitUntilFinished()
+        if case .finishing = phase {
+            await waitUntilFinished()
+        } else {
+            await stopForQuit()
+        }
     }
 }
 

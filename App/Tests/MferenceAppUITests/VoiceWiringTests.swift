@@ -54,17 +54,48 @@ import Testing
         #expect(FileQueueAdapter.phase(.failed("x")) == .failed("x"))
     }
 
-    @Test func notesButtonsReachTheVoiceModels() throws {
+    @Test func everyNotesVoiceHookIsSet() async throws {
+        let services = AppServices.preview(speech: FakeSpeechService(stepped: true))
+        let voice = VoiceModels.live(services: services)
+        defer { voice.setup.stop() }
+        let notes = NotesModel(store: services.notes, speech: services.speech)
+        voice.connect(notes: notes)
+        let hooks = notes.voice
+        #expect(hooks.transcribeFile != nil && hooks.recordMeeting != nil && hooks.toolbar != nil
+                && hooks.toggleDictation != nil && hooks.isDictating != nil && hooks.stopDictation != nil
+                && hooks.editorFocusChanged != nil && hooks.escape != nil && hooks.transcribe != nil,
+                "N1 defines and calls them; N3 sets every one")
+        hooks.transcribeFile?()
+        #expect(voice.showsImportSheet)
+        hooks.recordMeeting?()
+        #expect(voice.showsRecordPopover)
+
+        // The editor's focus feeds ⇧⌘D; Dictate and "Dictating" follow the dictation.
+        let note = try services.notes.createNote(title: "Dentist questions")
+        notes.open(noteID: note.id)
+        #expect(notes.selectedNoteID == note.id)
+        hooks.editorFocusChanged?(notes.editor)
+        #expect(voice.canToggleDictation && voice.focusedDictationNoteID == note.id)
+        hooks.toggleDictation?(notes.editor)
+        await waitUntil("dictation into the note") { voice.dictation.isDictating(into: note.id) }
+        #expect(hooks.isDictating?(note.id) == true)
+        #expect(hooks.escape?() == true, "Esc stops a dictation")
+        await waitUntil("dictation to stop") { !voice.dictation.isActive }
+        #expect(hooks.escape?() == false, "otherwise Esc is the editor's")
+        hooks.editorFocusChanged?(nil)
+        #expect(!voice.canToggleDictation)
+        #expect(hooks.transcribe?([URL(fileURLWithPath: "/tmp/slides.pdf")]) == false)
+    }
+
+    @Test func openNoteShowsTheNoteInNotes() throws {
         let services = AppServices.preview(speech: FakeSpeechService())
         let voice = VoiceModels.live(services: services)
         defer { voice.setup.stop() }
         let notes = NotesModel(store: services.notes, speech: services.speech)
         voice.connect(notes: notes)
-        notes.voice.transcribeFile?()
-        #expect(voice.showsImportSheet)
-        notes.voice.recordMeeting?()
-        #expect(voice.showsRecordPopover)
-        #expect(notes.voice.toolbar != nil, "the shell bar hosts NotesVoiceToolbar")
+        let note = try services.notes.createNote(kind: .meeting, title: "Design review")
+        voice.openNote?(note.id)
+        #expect(notes.selectedNoteID == note.id, "the timer chip and Open note select it")
     }
 
     // MARK: The shell's wait before leaving Notes

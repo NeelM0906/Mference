@@ -54,9 +54,10 @@ extension VoiceModels {
 }
 
 extension VoiceModels {
-    /// Connects Notes' voice buttons (N1's `NotesVoiceActions`) to these
-    /// models: Transcribe file, Record meeting, and the voice toolbar in the
-    /// shell bar. N1's Dictate button and `openNote` are wired with its editor.
+    /// Connects Notes (N1's `NotesModel`) and the voice models: every
+    /// `NotesVoiceActions` field (N1 defines and calls them, N3 sets them),
+    /// and opening a note by id for the timer chip, the menu bar and the
+    /// import queue's Open note.
     public func connect(notes: NotesModel) {
         notes.voice.transcribeFile = { [weak self] in self?.transcribeFiles() }
         notes.voice.recordMeeting = { [weak self] in self?.recordMeeting() }
@@ -64,5 +65,12 @@ extension VoiceModels {
             guard let self else { return AnyView(EmptyView()) }
             return AnyView(NotesVoiceToolbar(voice: self))
         }
+        notes.voice.toggleDictation = { [weak self] editor in self?.toggleDictation(in: editor) }
+        notes.voice.isDictating = { [weak self] noteID in self?.dictation.isDictating(into: noteID) ?? false }
+        notes.voice.stopDictation = { [weak self] in await self?.stopDictation() }
+        notes.voice.editorFocusChanged = { [weak self] editor in self?.focusedDictationTarget = editor }
+        notes.voice.escape = { [weak self] in self?.cancelDictation() ?? false }
+        notes.voice.transcribe = { [weak self] urls in self?.transcribe(urls) ?? false }
+        openNote = { [weak notes] noteID in notes?.open(noteID: noteID) }
     }
 }
