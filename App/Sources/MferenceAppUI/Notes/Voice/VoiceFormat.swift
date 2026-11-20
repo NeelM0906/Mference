@@ -14,6 +14,14 @@ enum VoiceFormat {
         return (Double(bytes) / 1_000_000_000).formatted(.number.precision(.fractionLength(1))) + " GB"
     }
 
+    /// The recording time the timer chip and the recording bar show at
+    /// `date`: taken at the whole second since the status's update, so the
+    /// two clocks (their own TimelineViews) always read the same second.
+    static func liveTime(_ live: LiveSessionStatus, at date: Date) -> TimeInterval {
+        let since = max(0, date.timeIntervalSince(live.updatedAt)).rounded(.down)
+        return live.recordedTime(at: live.updatedAt.addingTimeInterval(since))
+    }
+
     /// Meeting time as "mm:ss", or "h:mm:ss" from an hour.
     static func clock(_ time: TimeInterval) -> String {
         let total = max(0, Int(time.rounded(.down)))

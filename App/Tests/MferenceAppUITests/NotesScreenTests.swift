@@ -382,7 +382,9 @@ enum NotesFixtures {
 /// framing, size and scale as `Snapshot.render`, same output folder.
 @MainActor
 enum HostedSnapshot {
-    static func render<V: View>(_ view: V, name: String, colorScheme: ColorScheme = .light) async throws -> URL {
+    /// `prepare` runs once the view is built, before more layout passes and the capture.
+    static func render<V: View>(_ view: V, name: String, colorScheme: ColorScheme = .light,
+                                prepare: @MainActor () -> Void = {}) async throws -> URL {
         MFFontRegistry.registerBundledFonts()
         let canvas = Snapshot.canvas
         let content = Snapshot.framed(view, framing: .mockup, canvas: canvas)
@@ -395,6 +397,11 @@ enum HostedSnapshot {
         window.contentView = hosting
         // Let SwiftUI build the AppKit views and the editor load its note.
         for _ in 0..<5 {
+            hosting.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        prepare()
+        for _ in 0..<3 {
             hosting.layoutSubtreeIfNeeded()
             try await Task.sleep(for: .milliseconds(40))
         }

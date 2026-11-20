@@ -18,13 +18,14 @@ public struct RecordingTimerChip: View {
 
     public var body: some View {
         Button(action: onOpen) {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+            // Ticks in phase with the recording bar's clock (same anchor), so both read the same second.
+            TimelineView(.periodic(from: live.updatedAt, by: 1)) { context in
                 HStack(spacing: RecordingChipMetrics.gap) {
                     Circle()
                         .fill(MFColor.danger)
                         .frame(width: RecordingChipMetrics.dot, height: RecordingChipMetrics.dot)
                         .opacity(live.isPaused ? 0.4 : 1)
-                    Text(VoiceFormat.clock(live.recordedTime(at: rendersStatically ? live.updatedAt : context.date)))
+                    Text(VoiceFormat.clock(VoiceFormat.liveTime(live, at: rendersStatically ? live.updatedAt : context.date)))
                         .font(MFFont.calloutSemibold)
                         .monospacedDigit()
                     if live.isPaused {

@@ -306,8 +306,10 @@ public struct TranscriptSection: View {
     }
 
     public var body: some View {
+        // Read once per transcript change: the rows read the player's time
+        // themselves, so the section is not rebuilt on every tick.
         let segments = transcript.finalSegments
-        let playing = player.playingSegment(in: segments)
+        let shown = showsAll ? segments : Array(segments.prefix(previewCount))
         VStack(alignment: .leading, spacing: MFSpacing.s) {
             HStack(alignment: .firstTextBaseline, spacing: MFSpacing.compact) {
                 Text("Transcript")
@@ -332,8 +334,13 @@ public struct TranscriptSection: View {
                     .font(MFFont.body)
                     .foregroundStyle(MFColor.tertiary)
             }
-            ForEach(showsAll ? segments : Array(segments.prefix(previewCount))) { segment in
-                row(segment, isPlaying: segment.id == playing)
+            // Lazy: "Show all" on a long meeting builds only the rows in view.
+            LazyVStack(alignment: .leading, spacing: MFSpacing.s) {
+                ForEach(Array(shown.enumerated()), id: \.element.id) { index, segment in
+                    // `shown` is a prefix of `segments`: the next line may be hidden.
+                    TranscriptRow(segment: segment, nextStart: index + 1 < segments.count ? segments[index + 1].start : nil,
+                                  speaker: transcript.speaker(for: segment), player: player)
+                }
             }
         }
     }
@@ -341,9 +348,27 @@ public struct TranscriptSection: View {
     static func showAllTitle(duration: TimeInterval) -> String {
         "Show all (\(VoiceFormat.length(duration)))"
     }
+}
 
-    private func row(_ segment: TranscriptSegment, isPlaying: Bool) -> some View {
-        let speaker = transcript.speaker(for: segment)
+/// One transcript line; it alone follows the player's time (the line
+/// playing is highlighted), so a tick rebuilds only the rows in view.
+struct TranscriptRow: View {
+    let segment: TranscriptSegment
+    /// The next shown line's start: this one plays until then.
+    let nextStart: TimeInterval?
+    let speaker: SpeakerInfo
+    let player: RecordingPlayerModel
+
+    /// The same line `RecordingPlayerModel.playingSegment(in:)` picks.
+    static func isPlaying(start: TimeInterval, nextStart: TimeInterval?, time: TimeInterval, playing: Bool) -> Bool {
+        guard playing || time > 0 else { return false }
+        let now = time + 0.05
+        return start <= now && (nextStart.map { $0 > now } ?? true)
+    }
+
+    var body: some View {
+        let isPlaying = Self.isPlaying(start: segment.start, nextStart: nextStart, time: player.currentTime,
+                                       playing: player.isPlaying)
         return HStack(alignment: .firstTextBaseline, spacing: MFSpacing.m) {
             Button {
                 player.play(from: segment.start)
