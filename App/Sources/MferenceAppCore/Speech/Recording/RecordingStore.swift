@@ -217,10 +217,11 @@ final class RecordingSession: @unchecked Sendable {
     /// kept, or deletes it. The manifest is saved after each track. A track
     /// that fails to convert stays as its CAF (it plays too) and the failure
     /// is returned. When `stopEarly` says so (the app is quitting, spec 6.1)
-    /// the remaining tracks are left as CAF and the folder is marked
-    /// `converting`: `recoverInterrupted()` converts them at the next launch,
-    /// and the returned tracks already name the `.m4a` files they will be.
-    func finish(keepAudio: Bool, stopEarly: @Sendable () async -> Bool = { false }) async
+    /// the remaining tracks, and one being converted, are left as CAF and the
+    /// folder is marked `converting`: `recoverInterrupted()` converts them at
+    /// the next launch, and the returned tracks already name the `.m4a`
+    /// files they will be.
+    func finish(keepAudio: Bool, stopEarly: @escaping @Sendable () async -> Bool = { false }) async
         -> (tracks: [RecordedTrack], failure: SpeechError?) {
         var failure: SpeechError?
         do {
@@ -243,7 +244,10 @@ final class RecordingSession: @unchecked Sendable {
             if deferred { continue }
             do {
                 let url = directory.appending(path: track.fileName)
-                manifest.tracks[index].fileName = try await AudioFileConverter.convertToM4A(url).lastPathComponent
+                manifest.tracks[index].fileName = try await AudioFileConverter.convertToM4A(url, stopEarly: stopEarly)
+                    .lastPathComponent
+            } catch is AudioFileConverter.Stopped {
+                deferred = true
             } catch {
                 failure = failure ?? .failed("converting \(track.fileName): \(error.localizedDescription)")
             }
@@ -268,33 +272,55 @@ final class RecordingSession: @unchecked Sendable {
 /// AAC conversion of a finished track, read and written in bounded chunks.
 enum AudioFileConverter {
     static let chunkFrames: AVAudioFrameCount = 16_000
+    /// How many chunks are converted between two `stopEarly` checks.
+    static let chunksPerCheck = 8
 
-    /// Writes `<name>.m4a` next to `caf`, then deletes `caf`. Returns the new file.
-    static func convertToM4A(_ caf: URL) async throws -> URL {
+    /// `stopEarly` said stop (the app is quitting): the CAF is kept and the
+    /// partial `.m4a` removed.
+    struct Stopped: Error {}
+
+    /// Writes `<name>.m4a` next to `caf`, then deletes `caf`. Returns the new
+    /// file. Stops between chunks when the calling task is cancelled
+    /// (`CancellationError`) or `stopEarly` says so (`Stopped`); either way
+    /// the CAF stays and no partial `.m4a` is left.
+    static func convertToM4A(_ caf: URL, stopEarly: @escaping @Sendable () async -> Bool = { false }) async throws -> URL {
         let output = caf.deletingPathExtension().appendingPathExtension("m4a")
-        try await Task.detached {
+        let conversion = Task.detached {
             try? FileManager.default.removeItem(at: output)
-            let input = try AVAudioFile(forReading: caf)
-            let format = input.processingFormat
-            let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC,
-                                           AVSampleRateKey: format.sampleRate,
-                                           AVNumberOfChannelsKey: format.channelCount,
-                                           AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue]
             do {
-                let writer = try AVAudioFile(forWriting: output, settings: settings,
-                                             commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkFrames) else {
-                    throw SpeechError.failed("cannot allocate a conversion buffer")
+                let input = try AVAudioFile(forReading: caf)
+                let format = input.processingFormat
+                let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC,
+                                               AVSampleRateKey: format.sampleRate,
+                                               AVNumberOfChannelsKey: format.channelCount,
+                                               AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue]
+                do {
+                    let writer = try AVAudioFile(forWriting: output, settings: settings,
+                                                 commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+                    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkFrames) else {
+                        throw SpeechError.failed("cannot allocate a conversion buffer")
+                    }
+                    var chunks = 0
+                    while input.framePosition < input.length {
+                        try Task.checkCancellation()
+                        if chunks % chunksPerCheck == 0, await stopEarly() { throw Stopped() }
+                        chunks += 1
+                        try input.read(into: buffer, frameCount: chunkFrames)
+                        if buffer.frameLength == 0 { break }
+                        try writer.write(from: buffer)
+                    }
                 }
-                while input.framePosition < input.length {
-                    try Task.checkCancellation()
-                    try input.read(into: buffer, frameCount: chunkFrames)
-                    if buffer.frameLength == 0 { break }
-                    try writer.write(from: buffer)
-                }
+            } catch {
+                try? FileManager.default.removeItem(at: output)
+                throw error
             }
             try FileManager.default.removeItem(at: caf)
-        }.value
+        }
+        try await withTaskCancellationHandler {
+            try await conversion.value
+        } onCancel: {
+            conversion.cancel()
+        }
         return output
     }
 }

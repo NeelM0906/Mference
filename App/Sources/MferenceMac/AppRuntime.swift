@@ -15,8 +15,9 @@ final class AppRuntime {
     /// Team N3's voice models: the speech setup card and Settings › Speech.
     let voice: VoiceModels
 
-    /// Quit steps, run in order: web answers (SearXNG) stop before the engine
-    /// shuts down (U3's notes).
+    /// Quit steps, run in order: speech first (a recording ends and its
+    /// files close, Notes spec 6.1), then web answers (SearXNG), then the
+    /// engine (U3's notes).
     private let shutdownSteps: [@MainActor () async -> Void]
 
     /// One composition root for the whole app: every engine use (chat, model
