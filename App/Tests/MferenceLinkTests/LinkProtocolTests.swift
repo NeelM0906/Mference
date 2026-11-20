@@ -125,6 +125,52 @@ struct LinkProtocolTests {
         }
     }
 
+    /// One sample per `LinkJobEvent.Kind`, with its wire JSON written out by
+    /// hand. `kindName` has no default case, so a new kind does not compile
+    /// until it has a sample here.
+    static let jobEventKinds: [(kind: LinkJobEvent.Kind, json: String)] = [
+        (.started, #"{"type":"started"}"#),
+        (.token(text: "Hel"), #"{"type":"token","body":{"text":"Hel"}}"#),
+        (.step(text: "Read 40 PDFs"), #"{"type":"step","body":{"text":"Read 40 PDFs"}}"#),
+        (.finished(result: LinkJobResult(text: "| a |", modelTitle: "Deep 27B", promptTokens: 10,
+                                         completionTokens: 3)),
+         #"{"type":"finished","body":{"text":"| a |","modelTitle":"Deep 27B","promptTokens":10,"completionTokens":3}}"#),
+        (.failed(error: LinkError(code: .busy, message: "Busy")),
+         #"{"type":"failed","body":{"code":"busy","message":"Busy"}}"#),
+        (.cancelled, #"{"type":"cancelled"}"#),
+    ]
+
+    static func kindName(_ kind: LinkJobEvent.Kind) -> String {
+        switch kind {
+        case .started: "started"
+        case .token: "token"
+        case .step: "step"
+        case .finished: "finished"
+        case .failed: "failed"
+        case .cancelled: "cancelled"
+        }
+    }
+
+    @Test func jobEventSamplesCoverEveryKind() {
+        let names = Set(Self.jobEventKinds.map { Self.kindName($0.kind) })
+        #expect(names == ["started", "token", "step", "finished", "failed", "cancelled"])
+    }
+
+    /// Every kind decodes from its wire JSON, and encodes and decodes back to
+    /// the same value on its own (not only inside an envelope).
+    @Test(arguments: jobEventKinds.indices)
+    func jobEventDecodesEveryKind(_ index: Int) throws {
+        let (kind, json) = Self.jobEventKinds[index]
+        let wire = Data(#"{"jobID":"\#(Self.id.uuidString)","kind":\#(json)}"#.utf8)
+        let decoded = try JSONDecoder().decode(LinkJobEvent.self, from: wire)
+        #expect(decoded == LinkJobEvent(jobID: Self.id, kind: kind))
+        #expect(decoded.kind.type == Self.kindName(kind))
+
+        let event = LinkJobEvent(jobID: Self.id, kind: kind)
+        let roundTripped = try JSONDecoder().decode(LinkJobEvent.self, from: try JSONEncoder().encode(event))
+        #expect(roundTripped == event)
+    }
+
     @Test func unknownTypeFailsToDecode() {
         let data = Data(#"{"type":"teleport","body":{}}"#.utf8)
         #expect(throws: DecodingError.self) {
