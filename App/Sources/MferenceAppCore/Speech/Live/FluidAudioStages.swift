@@ -17,7 +17,8 @@ struct FluidModelLoader: SpeechModelLoading {
     var speakerLabels: SpeechModelPackage = SpeechModelPins.speakerLabels
 
     static let vadModelName = "silero-vad-unified-256ms-v6.2.1.mlmodelc"
-    static let liveDiarizerModel = "AMI/ls_eend_ami_step.mlmodelc"
+    /// The LS-EEND variant live meetings use (meeting-room audio).
+    static let liveVariant = ModelNames.LSEEND.Variant.ami
 
     func folder(_ root: URL, _ package: SpeechModelPackage, repoSuffix: String) throws -> URL {
         guard let source = package.sources.first(where: { $0.repo.hasSuffix(repoSuffix) }) else {
@@ -45,9 +46,53 @@ struct FluidModelLoader: SpeechModelLoading {
 
     func loadSpeakerLabels(from root: URL) async throws -> any SpeakerDiarizing {
         let offlineFolder = try folder(root, speakerLabels, repoSuffix: "/speaker-diarization-coreml")
-        let liveURL = try folder(root, speakerLabels, repoSuffix: "/ls-eend-coreml").appending(path: Self.liveDiarizerModel)
         let models = try await Self.offPool { try FluidDiarizer.offlineModels(offlineFolder) }
-        return FluidDiarizer(offline: models, liveModelURL: liveURL)
+        return FluidDiarizer(offline: models, liveModelURL: liveDiarizerModel(root))
+    }
+
+    /// The pinned LS-EEND compiled model, in the layout FluidAudio 0.18.4's
+    /// `LSEENDModel` loads: `<repo subpath>/<step>/<name>_<step>.mlmodelc`
+    /// (`optimized/ami/100ms/ls_eend_ami_100ms.mlmodelc`), its config
+    /// embedded in the model's metadata. FluidAudio's default step (100 ms,
+    /// the one pinned) wins, then the shortest other pinned step. Nil
+    /// when the pins hold another export (the older `AMI/ls_eend_ami_step`
+    /// one has no embedded config and other state tensors): live labels are
+    /// then unavailable, and the final speaker pass still runs.
+    func liveDiarizerModel(_ root: URL) -> URL? {
+        guard let source = speakerLabels.sources.first(where: { $0.repo.hasSuffix("/ls-eend-coreml") }) else { return nil }
+        let prefix = Self.liveVariant.repo.subPath.map { "\($0)/" } ?? ""
+        let preferred = ModelNames.LSEEND.defaultStep
+        for step in [preferred] + ModelNames.LSEEND.StepSize.allCases.filter({ $0 != preferred }) {
+            let model = prefix + Self.liveVariant.fileName(forStep: step)
+            if source.files.contains(where: { $0.repoPath.hasPrefix(model + "/") }) {
+                return root.appending(path: SpeechModelInstaller.installPrefix(of: source), directoryHint: .isDirectory)
+                    .appending(path: model, directoryHint: .isDirectory)
+            }
+        }
+        return nil
+    }
+
+    /// The config `LSEENDModel` reads from the model's creator metadata
+    /// (`userDefinedMetadata.config` in the compiled model's
+    /// `metadata.json`), checked before the model is compiled so a wrong
+    /// export fails at once with a clear reason.
+    static func liveDiarizerConfig(_ model: URL) throws -> LSEENDMetadata {
+        let name = model.lastPathComponent
+        guard let data = try? Data(contentsOf: model.appending(path: "metadata.json")),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            throw SpeechError.failed("live speaker labels: \(name) has no readable metadata.json")
+        }
+        let entry = (object as? [[String: Any]])?.first ?? (object as? [String: Any])
+        guard let user = entry?["userDefinedMetadata"] as? [String: Any], let config = user["config"] as? String else {
+            throw SpeechError.failed("live speaker labels: \(name) has no embedded config, so it is not an LS-EEND export FluidAudio loads")
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        do {
+            return try decoder.decode(LSEENDMetadata.self, from: Data(config.utf8))
+        } catch {
+            throw SpeechError.failed("live speaker labels: the config embedded in \(name) does not decode (\(error))")
+        }
     }
 
     /// Runs blocking work (a Core ML compile) on its own thread.
@@ -102,9 +147,10 @@ final class FluidVoiceActivity: VoiceActivityDetecting {
 /// LS-EEND live, the offline community-1 pipeline for the final pass.
 final class FluidDiarizer: SpeakerDiarizing, @unchecked Sendable {
     let offline: OfflineDiarizerModels
-    let liveModelURL: URL
+    /// Nil when no LS-EEND model in FluidAudio's layout is pinned.
+    let liveModelURL: URL?
 
-    init(offline: OfflineDiarizerModels, liveModelURL: URL) {
+    init(offline: OfflineDiarizerModels, liveModelURL: URL?) {
         self.offline = offline
         self.liveModelURL = liveModelURL
     }
@@ -140,7 +186,10 @@ final class FluidDiarizer: SpeakerDiarizing, @unchecked Sendable {
     }
 
     func makeLiveSession() async throws -> any LiveDiarizing {
-        let url = liveModelURL
+        guard let url = liveModelURL else {
+            throw SpeechError.failed("live speaker labels: no pinned LS-EEND model in the layout FluidAudio loads")
+        }
+        _ = try FluidModelLoader.liveDiarizerConfig(url)
         let model = try await FluidModelLoader.offPool { try UncheckedBox(LSEENDModel(modelURL: url, computeUnits: .cpuOnly)) }
         return try FluidLiveDiarizer(model: model.value)
     }
