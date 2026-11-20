@@ -78,6 +78,56 @@ import Testing
         #expect(stopped == 1)
     }
 
+    @Test func aDictationKeepsWritingIntoTheNoteItBeganIn() throws {
+        let model = try Self.smallModel()
+        let h = NoteEditorTests.Harness()
+        model.editor.attach(h.view)
+        let lisbon = try #require(model.selectedNote)
+        h.view.setSelectedRange(NSRange(location: (h.view.string as NSString).length, length: 0))
+        let target: any DictationInsertionTarget = model.editor
+        let first = UUID()
+        target.beginPhrase(first)                               // dictation binds to Lisbon
+        model.selectAdjacent(1)                                 // the person clicks the other note
+        let dentist = try #require(model.selectedNote)
+        #expect(dentist.id != lisbon.id)
+        #expect(target.noteID == lisbon.id)
+        // A phrase that starts after the switch, and both finishes, go to Lisbon.
+        let second = UUID()
+        target.beginPhrase(second)
+        target.finishPhrase(first, text: "booked.")
+        target.finishPhrase(second, text: "hotel next.")
+        // One whose start was missed too.
+        target.finishPhrase(UUID(), text: "And the train")
+        #expect(model.store.document(of: lisbon).blocks.first
+                == .heading(level: .title, runs: [TextRun("Lisbon trip, March booked. Hotel next. And the train")]))
+        #expect(model.store.document(of: dentist).plainText == "Dentist questions\nAsk about the guard.")
+        #expect(h.view.document == model.store.document(of: dentist))
+        #expect(lisbon.hasDictation && !dentist.hasDictation)
+        // The dictation ends: the next one binds to the note shown.
+        target.dropAllPhrases()
+        #expect(target.noteID == dentist.id)
+    }
+
+    @Test func leavingNotesClearsTheFocusedEditor() throws {
+        let model = try Self.smallModel()
+        var focused: [NoteEditorController?] = []
+        model.voice.editorFocusChanged = { focused.append($0) }
+        let h = NoteEditorTests.Harness()
+        model.editor.attach(h.view)
+        focused.removeAll()
+        model.editor.detach(h.view)
+        #expect(focused.count == 1 && focused[0] == nil)
+    }
+
+    @Test func theSetupCardTakesFocusFromTheHiddenNote() throws {
+        let model = try Self.smallModel()
+        let h = NoteEditorTests.Harness()
+        model.editor.attach(h.view)
+        #expect(h.window.firstResponder === h.view)
+        model.editor.resignFocus()
+        #expect(h.window.firstResponder !== h.view)
+    }
+
     @Test func openNoteShowsTheNoteWhereverTheListWas() throws {
         let model = try Self.smallModel()
         let dentist = try #require(model.notes.first { model.title(of: $0) == "Dentist questions" })

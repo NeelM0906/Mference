@@ -25,6 +25,13 @@ public final class NoteEditorController {
     @ObservationIgnored private var loadedBody: Data?
     /// An outside write arrived while an input method was composing.
     @ObservationIgnored private var absorbWhenComposed = false
+    /// The note the running dictation writes into: the note shown when its
+    /// first phrase began. Every later phrase goes there too, shown or not,
+    /// until the dictation ends (`dropAllPhrases`).
+    @ObservationIgnored private var dictationNote: Note?
+    /// Where the caret was in each note when it was left (a phrase for a
+    /// note not shown starts there).
+    @ObservationIgnored private var lastCaret: [UUID: Int] = [:]
     /// A ⌘K transcript hit waiting for the editor to show its note.
     @ObservationIgnored private var pendingReveal: UUID?
     /// Phrases still being transcribed when their note left the editor
@@ -131,6 +138,7 @@ public final class NoteEditorController {
     public func open(_ note: Note?) {
         guard note?.id != self.note?.id || note == nil else { return }
         pendingReveal = nil
+        if let current = self.note, let textView { lastCaret[current.id] = textView.selectedRange().location }
         saveNow(force: true)
         detachPendingPhrases(from: textView)
         self.note = note
@@ -175,8 +183,11 @@ public final class NoteEditorController {
     func detach(_ textView: NoteTextView) {
         guard self.textView === textView else { return }
         saveNow(force: true)
+        if let note { lastCaret[note.id] = textView.selectedRange().location }
         detachPendingPhrases(from: textView)
         self.textView = nil
+        // No editor shows any more: it is no longer a place to dictate into.
+        onFocusChange?(false)
     }
 
     /// Moves the phrases waiting in `view` (the open note, just saved) to an
@@ -368,7 +379,33 @@ public final class NoteEditorController {
     // MARK: Dictation and meetings
 
     /// Holds the caret's place for a dictated phrase.
-    public func beginPhrase(_ id: UUID) { textView?.beginPhrase(id) }
+    public func beginPhrase(_ id: UUID) {
+        if dictationNote == nil { dictationNote = note }
+        guard let target = dictationNote else { return }
+        if target.id == note?.id, let textView {
+            textView.beginPhrase(id)
+        } else {
+            // The person moved to another note: the phrase still belongs to
+            // the note the dictation began in.
+            let holder = holder(for: target)
+            holder.view.beginPhrase(id)
+            detached[id] = holder
+        }
+    }
+
+    /// The off-screen copy of `note` that phrases for it wait in: the one
+    /// already holding its phrases, else a new one at its last caret.
+    private func holder(for note: Note) -> DetachedNote {
+        if let existing = detached.values.first(where: { $0.note.id == note.id }) { return existing }
+        let stored = store.document(of: note)
+        let view = NoteTextView(usingTextLayoutManager: true)
+        view.configure()
+        view.mappingContext = textView?.mappingContext ?? NoteTextMapping.Context()
+        view.load(stored)
+        let length = (view.string as NSString).length
+        view.setSelectedRange(NSRange(location: min(lastCaret[note.id] ?? length, length), length: 0))
+        return DetachedNote(note: note, view: view, snapshot: stored)
+    }
 
     /// Inserts a phrase where it began, in the note it began in; marks that
     /// note as dictated.
@@ -389,10 +426,22 @@ public final class NoteEditorController {
             do {
                 try store.save(holder.view.document, to: holder.note)
                 holder.snapshot = store.document(of: holder.note)
+                // The next phrase for this note follows this one.
+                lastCaret[holder.note.id] = holder.view.selectedRange().location
                 try store.markDictated(holder.note)
             } catch {
                 saveState = .failed(String(describing: error))
             }
+            return
+        }
+        // A phrase never begun (its start was missed) still goes to the
+        // dictation's note, not to whichever note shows.
+        if let target = dictationNote, target.id != note?.id || textView == nil,
+           textView?.pendingPhraseIDs.contains(id) != true {
+            let holder = holder(for: target)
+            holder.view.beginPhrase(id)
+            detached[id] = holder
+            finishPhrase(id, text: text)
             return
         }
         guard let textView, let note else { return }
@@ -406,9 +455,18 @@ public final class NoteEditorController {
         textView?.dropPhrase(id)
     }
 
+    /// The dictation ended or failed: its waiting phrases are forgotten and
+    /// the next dictation binds to the note shown then.
     public func dropAllPhrases() {
         detached.removeAll()
         textView?.dropAllPhrases()
+        dictationNote = nil
+    }
+
+    /// Gives up keyboard focus (the setup card covers the editor).
+    public func resignFocus() {
+        guard let textView, textView.window?.firstResponder === textView else { return }
+        textView.window?.makeFirstResponder(nil)
     }
 
     /// "Mark moment" in a meeting note.
@@ -445,7 +503,11 @@ public final class NoteEditorController {
 extension NoteEditorController: DictationInsertionTarget, MeetingNoteTarget {
     /// The open note; a fixed nil UUID while none is open (dictation is only
     /// offered with a note open).
-    public var noteID: UUID { note?.id ?? UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) }
+    /// While dictating: the note the dictation writes into (it may no
+    /// longer be the one shown). Otherwise the open note.
+    public var noteID: UUID {
+        dictationNote?.id ?? note?.id ?? UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    }
 }
 
 /// The text style menu's choices.

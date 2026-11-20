@@ -20,6 +20,8 @@ struct NoteEditorPane: View {
                     SpeechSetupCard(model: voice.setup)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(MFColor.surface)
+                        // The hidden note must not take typing or Esc.
+                        .onAppear { model.editor.resignFocus() }
                 }
             }
     }
