@@ -80,6 +80,8 @@ public final class MeetingSession {
     @ObservationIgnored private var consumer: Task<Void, Never>?
     @ObservationIgnored private var options = MeetingStartOptions()
     @ObservationIgnored private var didRecover = false
+    /// Quitting: the meeting's end is saved but its summary waits for the next launch.
+    @ObservationIgnored private var quitting = false
     /// The mic-only line was written for the current meeting.
     @ObservationIgnored private var wroteCallAudioLine = false
     /// Finished notes' transcripts, so a rename shows everywhere at once.
@@ -190,11 +192,17 @@ public final class MeetingSession {
         await recording.stop()
     }
 
-    /// Quit (spec 6.1): stops a meeting being recorded and waits until its
-    /// last phrases and transcript are saved. Does nothing when idle.
+    /// Quit (spec 6.1): ends a meeting that is recording, paused or already
+    /// finishing within the quit deadline. It never does the normal stop
+    /// (last phrases, speaker pass, conversion, which can take minutes):
+    /// `speech.shutdown()` stops capture and closes the files, the meeting's
+    /// quick `.ended` is saved, and conversion runs at the next launch. The
+    /// summary is not started now; `MeetingSummaries.resumePending()` runs it
+    /// at the next launch. Does nothing when idle.
     public func stopForQuit() async {
         guard isActive else { return }
-        await stop()
+        quitting = true
+        await speech.shutdown()
         await waitUntilFinished()
     }
 
@@ -380,6 +388,8 @@ public final class MeetingSession {
         // off) waited for the transcript: it runs now.
         let summarize = options.summaryWhenStopped || fetchNote(noteID)?.recording?.summaryState == .pending
         reset(endedNoteID: noteID)
+        // At quit nothing may load a model: the summary stays pending.
+        guard !quitting else { return }
         afterMeeting?(noteID, summarize)
     }
 
