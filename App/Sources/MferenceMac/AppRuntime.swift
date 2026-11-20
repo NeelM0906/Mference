@@ -12,6 +12,8 @@ final class AppRuntime {
     let web: WebAnswers
     let chat: ChatViewModel
     let screenModels: ScreenModels
+    /// Team N3's voice models: the speech setup card and Settings › Speech.
+    let voice: VoiceModels
 
     /// Quit steps, run in order: web answers (SearXNG) stop before the engine
     /// shuts down (U3's notes).
@@ -33,6 +35,7 @@ final class AppRuntime {
                              tools: web,
                              defaultModel: { [settings = services.settings] in settings.defaultModel })
         screenModels = ScreenModels.live(services: services)
+        voice = VoiceModels.live(services: services)
         let engine = services.engine
         shutdownSteps = [
             { await web.shutdown() },
