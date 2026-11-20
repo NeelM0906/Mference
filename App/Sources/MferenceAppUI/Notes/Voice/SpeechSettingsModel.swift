@@ -15,6 +15,9 @@ public final class SpeechSettingsModel {
     public private(set) var apps: [RunningAudioApp] = []
     public private(set) var microphonePermission: PermissionState = .notDetermined
     public private(set) var callAudioPermission: PermissionState = .notDetermined
+    /// Whether a meeting's tap has heard other apps: until then a granted
+    /// call-audio permission shows as asked, not allowed.
+    public private(set) var callAudioHeard = false
     public private(set) var recordingsBytes: Int64 = 0
     /// Set while Remove runs, and when it failed.
     public private(set) var isRemoving = false
@@ -44,6 +47,7 @@ public final class SpeechSettingsModel {
         apps = await speech.runningAudioApps()
         microphonePermission = await permissions.state(of: .microphone)
         callAudioPermission = await permissions.state(of: .systemAudio)
+        callAudioHeard = speech.hasHeardCallAudio
         recordingsBytes = await speech.recordingsSize()
     }
 
@@ -147,11 +151,14 @@ public final class SpeechSettingsModel {
     }
 
     /// "System audio recording · allowed", and so on (board 8).
-    public var callAudioLine: String { Self.callAudioLine(callAudioPermission) }
+    public var callAudioLine: String { Self.callAudioLine(callAudioPermission, heard: callAudioHeard) }
 
-    static func callAudioLine(_ state: PermissionState) -> String {
+    /// macOS can't be asked whether call audio was allowed (a refused tap
+    /// only hears silence), so granted reads "asked" until a meeting has
+    /// heard other apps, then "allowed". It never shows a denial it guessed.
+    static func callAudioLine(_ state: PermissionState, heard: Bool) -> String {
         switch state {
-        case .granted: "System audio recording · allowed"
+        case .granted: heard ? "System audio recording · allowed" : "System audio recording · asked"
         case .notDetermined: "System audio recording · asked at your first meeting"
         case .denied, .needsSystemSettings: "System audio recording · off. Meetings record your microphone only."
         }

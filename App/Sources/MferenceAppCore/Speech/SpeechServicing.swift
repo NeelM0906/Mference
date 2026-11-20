@@ -65,6 +65,12 @@ public protocol SpeechServicing: AnyObject, Sendable {
     func inputDevices() async -> [AudioInputDevice]
     /// Running apps that can be chosen as the call-audio source.
     func runningAudioApps() async -> [RunningAudioApp]
+    /// Whether a meeting's call tap has ever heard other apps. The call-audio
+    /// permission reads `.granted` once it was asked, because macOS can't be
+    /// asked whether it was allowed (a refused tap only hears silence), so
+    /// until this is true Settings shows call audio as asked, not allowed.
+    /// Never prompts; never means denied.
+    var hasHeardCallAudio: Bool { get }
     /// Bytes used by kept recordings (Settings › Speech › Recordings).
     func recordingsSize() async -> Int64
     /// Deletes a note's recordings folder (purge, or "Delete after transcribing").
@@ -186,6 +192,12 @@ public enum MeetingEvent: Sendable, Hashable {
     case started(callAudio: Bool)
     /// Call audio was denied or failed: the recording continues on the mic.
     case callAudioUnavailable(SpeechError)
+    /// A hint, at most once per meeting: call audio is on, but 30 s of
+    /// recording in, the tap has heard only silence while other apps were
+    /// playing sound (`noCallAudioHeardMessage`). A refused permission sounds
+    /// like this, so does a call that is muted or not started; the meeting
+    /// keeps recording both tracks and nothing is stored as denied.
+    case noCallAudioHeard
     /// A new or updated segment (the one still being spoken has `isFinal == false`).
     case segment(TranscriptSegment)
     /// A mic segment dropped as an echo of a call segment (spec 6.3).
@@ -205,6 +217,12 @@ public enum MeetingEvent: Sendable, Hashable {
     /// they had live (only `speakerID` may change); `speakerMapping` maps
     /// live speaker ids to final ones.
     case ended(TranscriptResult)
+}
+
+extension MeetingEvent {
+    /// The copy for `.noCallAudioHeard`.
+    public static let noCallAudioHeardMessage =
+        "No call audio yet. If the other side is talking, check Call audio in System Settings."
 }
 
 public enum MeetingFinishStep: Sendable, Hashable {

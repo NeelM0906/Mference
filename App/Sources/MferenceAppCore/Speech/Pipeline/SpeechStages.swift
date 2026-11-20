@@ -59,6 +59,10 @@ public protocol AudioSourceFactory: Sendable {
     func call(_ source: CallAudioSource) throws -> any AudioSource
     func inputDevices() async -> [AudioInputDevice]
     func runningAudioApps() async -> [RunningAudioApp]
+    /// Whether the apps `source` taps are playing sound right now (any app
+    /// but this one for `.allApps`); nil when that can't be read. Read by a
+    /// meeting whose tap has heard only silence (`MeetingEvent.noCallAudioHeard`).
+    func isPlayingOutput(_ source: CallAudioSource) async -> Bool?
 }
 
 // MARK: Voice activity

@@ -99,6 +99,7 @@ extension SpeechService {
             sources: LiveAudioSourceFactory(onCallAudioHeard: { systemAudio.heardCallAudio() }),
             recordings: RecordingStore(),
             power: WorkspacePowerEvents(),
-            callAudioAllowed: { [.notDetermined, .granted].contains(systemAudio.state) }))
+            callAudioAllowed: { [.notDetermined, .granted].contains(systemAudio.state) },
+            callAudioHeard: { systemAudio.hasHeardCallAudio }))
     }
 }

@@ -128,14 +128,20 @@ import Testing
         await models.settings.refresh()
         #expect(models.settings.devices.map(\.name) == ["MacBook Pro Microphone"])
         #expect(models.settings.apps.map(\.name) == ["zoom.us"])
+        #expect(models.settings.callAudioLine == "System audio recording · asked", "granted, nothing heard yet")
+        speech.setHasHeardCallAudio(true)
+        await models.settings.refresh()
         #expect(models.settings.callAudioLine == "System audio recording · allowed")
         #expect(models.settings.spaceUsedLine == "1.2 GB on this Mac")
         #expect(!broker.calls.contains { if case .request = $0 { true } else { false } }, "never prompts (L6)")
     }
 
     @Test func callAudioLineAndSystemSettingsButton() async {
-        #expect(SpeechSettingsModel.callAudioLine(.notDetermined) == "System audio recording · asked at your first meeting")
-        #expect(SpeechSettingsModel.callAudioLine(.denied).hasPrefix("System audio recording · off"))
+        #expect(SpeechSettingsModel.callAudioLine(.notDetermined, heard: false)
+                == "System audio recording · asked at your first meeting")
+        #expect(SpeechSettingsModel.callAudioLine(.granted, heard: false) == "System audio recording · asked")
+        #expect(SpeechSettingsModel.callAudioLine(.granted, heard: true) == "System audio recording · allowed")
+        #expect(SpeechSettingsModel.callAudioLine(.denied, heard: false).hasPrefix("System audio recording · off"))
         let broker = FakePermissionBroker(states: [.systemAudio: .denied, .microphone: .needsSystemSettings])
         let models = voice(FakeSpeechService(), broker: broker)
         await models.settings.refresh()

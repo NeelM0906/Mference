@@ -345,6 +345,9 @@ public final class MeetingSession {
                     : MeetingCopy.micOnly
                 try? writer.appendParagraph(line, to: noteID)
             }
+        case .noCallAudioHeard:
+            // A hint for the meeting screen (N3/N4); nothing to store.
+            break
         case .segment(let segment):
             transcript.upsert(segment)
             if segment.isFinal { saveSegments(transcript, noteID: noteID) }
