@@ -2,8 +2,8 @@ import MferenceAppCore
 import MferenceDesign
 import SwiftUI
 
-/// The honest screen for a Phase C section (Notes, Errands; P3, P7): what it
-/// will do, and that nothing of it runs today.
+/// The honest screen for a section that is not built yet (Errands, P7): what
+/// it will do, and that nothing of it runs today.
 public struct ComingLaterView: View {
     let section: AppSection
 
@@ -17,10 +17,6 @@ public struct ComingLaterView: View {
 
     static func copy(for section: AppSection) -> Copy {
         switch section {
-        case .notes:
-            Copy(headline: "Meeting notes and dictation",
-                 detail: "Take notes and dictate into any app, transcribed on this Mac. This arrives in a later version.",
-                 promise: "Nothing is recorded or transcribed today.")
         case .errands:
             Copy(headline: "Errands, with your approval",
                  detail: "Hand off bookings, orders and forms to an assistant working in its own browser window. This arrives in a later version.",

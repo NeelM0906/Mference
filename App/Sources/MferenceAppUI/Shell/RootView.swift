@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// Each section routes to one view (`SectionContent`): Chat → `ChatView`
 /// (U3), Mail / Calendar / Scan → `MailView` / `CalendarView` / `ScanView`
-/// (U4), Settings → `SettingsView` (U1), Notes and Errands → `ComingLaterView`
+/// (U4), Settings → `SettingsView` (U1), Notes → `NotesRootView` (N1), Errands → `ComingLaterView`
 /// (Phase C).
 public struct RootView: View {
     /// Where the chrome is drawn.
@@ -125,7 +125,8 @@ struct SectionContent: View {
                 SettingsView(library: screenModels?.library, memory: screenModels?.memory,
                              settings: screenModels?.settings, pane: shell?.settingsPane ?? .models,
                              showsLibrary: shell?.settingsShowsLibrary ?? false)
-            case .notes, .errands: ComingLaterView(section: section)
+            case .notes: NotesRootView()
+            case .errands: ComingLaterView(section: section)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
