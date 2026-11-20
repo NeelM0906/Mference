@@ -11,11 +11,14 @@ public final class ScreenModels {
     public var library: (any ModelLibraryModel)?
     public var memory: (any MemoryListModel)?
     public var settings: (any AppSettingsModel)?
+    /// The Notes screen (N1); nil shows Notes' starting state.
+    public var notes: NotesModel?
 
     public init(library: (any ModelLibraryModel)? = nil, memory: (any MemoryListModel)? = nil,
-                settings: (any AppSettingsModel)? = nil) {
+                settings: (any AppSettingsModel)? = nil, notes: NotesModel? = nil) {
         self.library = library
         self.memory = memory
         self.settings = settings
+        self.notes = notes
     }
 }
