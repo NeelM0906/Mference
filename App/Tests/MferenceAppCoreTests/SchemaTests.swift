@@ -49,6 +49,8 @@ import Testing
         let recording = NoteRecording(sourceFileName: nil)
         recording.transcriptJSON = Data("[]".utf8)
         recording.summaryState = .pending
+        recording.transcriptionState = .live
+        recording.gapsJSON = Data("[]".utf8)
         meeting.recording = recording
         context.insert(meeting)
         context.insert(Note(title: "Groceries"))
@@ -58,6 +60,8 @@ import Testing
         #expect(notes.map(\.title) == ["Design review", "Groceries"])
         #expect(notes[0].kind == .meeting && notes[0].folder?.name == "Work")
         #expect(notes[0].recording?.summaryState == .pending)
+        #expect(notes[0].recording?.transcriptionState == .live)
+        #expect(notes[0].recording?.transcriptJSON == Data("[]".utf8))
         #expect(notes[1].kind == .note && notes[1].recording == nil && notes[1].deletedAt == nil)
         #expect(folder.notes.count == 1)
     }
@@ -97,6 +101,8 @@ import Testing
         #expect(NoteKind(rawValue: "meeting") == .meeting)
         #expect(NoteKind.allCases.map(\.rawValue) == ["note", "meeting", "file"])
         #expect(RecordingSummaryState.allCases.map(\.rawValue) == ["none", "pending", "written", "failed"])
+        #expect(TranscriptionState.allCases.map(\.rawValue) == ["none", "queued", "running", "live", "done", "failed"])
+        #expect(NoteRecording().transcriptionState == .none)
     }
 
     /// A store written by the V1 app opens with V2: nothing lost, notes added.

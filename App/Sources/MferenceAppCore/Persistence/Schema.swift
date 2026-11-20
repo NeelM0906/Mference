@@ -186,6 +186,13 @@ public enum MferenceSchemaV1: VersionedSchema {
 /// only). Rich note values (the `NoteDocument` body, transcript segments,
 /// speakers, track lists) are Codable types owned by `Notes/`, `Speech/` and
 /// `Meetings/`, stored as `Data`.
+///
+/// V1 and V2 classes are FROZEN once released: SwiftData recognises an
+/// existing store by each version's model hashes, and V2 reuses the V1
+/// classes. Editing any class here in place changes those hashes, existing
+/// stores then match no version, and the app falls back to an in-memory
+/// store. To change a model, copy the classes into a new `MferenceSchemaV3`
+/// and add a migration stage.
 public enum MferenceSchemaV2: VersionedSchema {
     public static let versionIdentifier = Schema.Version(2, 0, 0)
 
@@ -216,11 +223,13 @@ public enum MferenceSchemaV2: VersionedSchema {
     /// One note: typed, dictated, a meeting, or a transcribed file.
     @Model
     public final class Note {
+        #Index<Note>([\.updatedAt], [\.deletedAt])
+
         @Attribute(.unique) public var id: UUID
         /// The title the person gave it; empty means the list shows the first line.
         public var title: String
         /// JSON `NoteDocument` (block list, versioned; owned by Notes, N1).
-        public var bodyJSON: Data?
+        @Attribute(.externalStorage) public var bodyJSON: Data?
         /// Title, body text and transcript text, flattened for search
         /// (spec 6.6); rewritten on every save.
         public var searchText: String
@@ -277,9 +286,15 @@ public enum MferenceSchemaV2: VersionedSchema {
         /// JSON `[RecordedTrack]`: file name, track kind, start offset (Speech, N2).
         public var tracksJSON: Data?
         /// JSON `[TranscriptSegment]` (Speech contract; Meetings, N4).
-        public var transcriptJSON: Data?
+        /// Rewritten as segments arrive; large, so kept outside the database.
+        @Attribute(.externalStorage) public var transcriptJSON: Data?
         /// JSON `[SpeakerInfo]`: id, name, colour index.
         public var speakersJSON: Data?
+        /// JSON `[RecordingGap]`: stretches with no capture (Mac asleep).
+        public var gapsJSON: Data?
+        /// `TranscriptionState.rawValue`: where transcribing stands, so a
+        /// relaunch can resume or fail a file job the app quit in.
+        public var transcriptionStateRawValue: String
         /// `RecordingSummaryState.rawValue`.
         public var summaryStateRawValue: String
         /// The audio files are kept (Settings › Speech › Keep audio, D4).
@@ -295,6 +310,7 @@ public enum MferenceSchemaV2: VersionedSchema {
             self.startedAt = startedAt
             self.duration = 0
             self.summaryStateRawValue = RecordingSummaryState.none.rawValue
+            self.transcriptionStateRawValue = TranscriptionState.none.rawValue
             self.audioKept = audioKept
             self.sourceFileName = sourceFileName
         }
@@ -302,6 +318,11 @@ public enum MferenceSchemaV2: VersionedSchema {
         public var summaryState: RecordingSummaryState {
             get { RecordingSummaryState(rawValue: summaryStateRawValue) ?? .none }
             set { summaryStateRawValue = newValue.rawValue }
+        }
+
+        public var transcriptionState: TranscriptionState {
+            get { TranscriptionState(rawValue: transcriptionStateRawValue) ?? .none }
+            set { transcriptionStateRawValue = newValue.rawValue }
         }
     }
 }
@@ -314,6 +335,12 @@ public enum NoteKind: String, Sendable, Hashable, Codable, CaseIterable {
     case meeting
     /// Made from an audio or video file.
     case file
+}
+
+/// Where a recording's transcription stands. Meetings go live → done;
+/// file notes go queued → running → done or failed.
+public enum TranscriptionState: String, Sendable, Hashable, Codable, CaseIterable {
+    case none, queued, running, live, done, failed
 }
 
 /// Where a recording's summary stands (spec 4.5, 6.5).
