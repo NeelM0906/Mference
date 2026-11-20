@@ -9,7 +9,7 @@ import Testing
     @Test func dictationPlaysPhrasesInOrderAndEnds() async throws {
         let speech = FakeSpeechService(dictation: .saying("Hello there.", "Second phrase."))
         let session = try await speech.startDictation(DictationOptions())
-        #expect(speech.status.liveSession == .dictation)
+        #expect(speech.status.liveSession?.kind == .dictation)
         await session.stop()
         var texts: [String] = []
         var started = 0
