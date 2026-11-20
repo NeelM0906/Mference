@@ -25,6 +25,9 @@ public final class AppServices {
     /// U4's Apple surfaces (Scan, Calendar, Mail, Connections); nil only in
     /// tests that build `AppServices` by hand.
     public let apple: AppleServices?
+    /// Dictation, meetings and file transcription (Notes spec 6.2). The UI
+    /// and Notes talk only to this protocol.
+    public let speech: any SpeechServicing
     /// Set when the on-disk store could not be opened and the app runs on an
     /// in-memory store: nothing is saved this session. The UI says so.
     public let storeError: String?
@@ -39,6 +42,7 @@ public final class AppServices {
                 modelContainer: ModelContainer,
                 downloads: DownloadManager? = nil,
                 apple: AppleServices? = nil,
+                speech: (any SpeechServicing)? = nil,
                 appleChat: (any AppleChatModeling)? = nil,
                 storeError: String? = nil,
                 idleUnload: IdleUnloadControl? = nil) {
@@ -53,6 +57,7 @@ public final class AppServices {
         }
         self.downloads = downloads
         self.apple = apple
+        self.speech = speech ?? UnavailableSpeechService()
         self.settings = settings
         self.permissions = permissions
         self.modelContainer = modelContainer
@@ -112,6 +117,7 @@ public final class AppServices {
                                journal: FakeEngineJournal = FakeEngineJournal(),
                                settings: AppSettings? = nil,
                                permissions: any PermissionBroker = FakePermissionBroker(),
+                               speech: any SpeechServicing = FakeSpeechService(),
                                idleUnload: IdleUnloadControl = IdleUnloadControl(delay: nil)) -> AppServices {
         let settings = settings ?? AppSettings(store: InMemorySettingsStore())
         let engine = fakeEngine(installed: installed, scripts: scripts, journal: journal, idleUnload: idleUnload)
@@ -126,6 +132,7 @@ public final class AppServices {
                            modelContainer: container,
                            downloads: downloads,
                            apple: AppleServices.preview(engine: engine, container: container),
+                           speech: speech,
                            idleUnload: idleUnload)
     }
 
