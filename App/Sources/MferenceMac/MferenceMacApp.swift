@@ -37,13 +37,6 @@ struct MferenceMacApp: App {
                     }
                     // Calendar's "Open Settings" goes to Settings > Connections.
                     let shell = shell
-                    // The timer chip, Open note in the file queue and a started
-                    // meeting show their note in Notes (N1).
-                    let screens = delegate.runtime.screenModels
-                    voice.openNote = { noteID in
-                        shell.show(.notes)
-                        screens.notes?.open(noteID: noteID)
-                    }
                     delegate.runtime.services.apple?.calendar.openSettings = {
                         shell.openSettings(.connections)
                     }

@@ -21,25 +21,32 @@ public struct NotesVoiceActions {
     /// Whether dictation is going into the note (the Dictate button shows
     /// "Dictating").
     public var isDictating: ((UUID) -> Bool)?
-    /// Stops dictation (switching notes: its last phrase lands in its note).
-    public var stopDictation: (() -> Void)?
+    /// Stops dictation and returns once its last phrase is in (switching
+    /// notes; the editor keeps that phrase with the note it began in).
+    public var stopDictation: (() async -> Void)?
     /// The note editor gained (the controller) or lost (nil) keyboard focus:
     /// ⇧⌘D dictates into the focused one.
-    public var editorFocus: ((NoteEditorController?) -> Void)?
+    public var editorFocusChanged: ((NoteEditorController?) -> Void)?
+    /// Esc in the editor; returns true when it handled it (a dictation
+    /// stopped). Otherwise Esc is the text view's own.
+    public var escape: (() -> Bool)?
     /// Audio or video files dropped on Notes: queued for transcription.
     public var transcribe: (([URL]) -> Bool)?
 
+    // N1 defines and calls these; N3 sets them (`VoiceModels.connect(notes:)`).
     public init(transcribeFile: (() -> Void)? = nil, recordMeeting: (() -> Void)? = nil,
                 toggleDictation: ((NoteEditorController) -> Void)? = nil, toolbar: (() -> AnyView)? = nil,
-                isDictating: ((UUID) -> Bool)? = nil, stopDictation: (() -> Void)? = nil,
-                editorFocus: ((NoteEditorController?) -> Void)? = nil, transcribe: (([URL]) -> Bool)? = nil) {
+                isDictating: ((UUID) -> Bool)? = nil, stopDictation: (() async -> Void)? = nil,
+                editorFocusChanged: ((NoteEditorController?) -> Void)? = nil, escape: (() -> Bool)? = nil,
+                transcribe: (([URL]) -> Bool)? = nil) {
         self.transcribeFile = transcribeFile
         self.recordMeeting = recordMeeting
         self.toggleDictation = toggleDictation
         self.toolbar = toolbar
         self.isDictating = isDictating
         self.stopDictation = stopDictation
-        self.editorFocus = editorFocus
+        self.editorFocusChanged = editorFocusChanged
+        self.escape = escape
         self.transcribe = transcribe
     }
 }
@@ -134,6 +141,13 @@ public final class NotesModel {
                 self?.speechStatus = status
             }
         }
+        // The editor publishes itself to the voice side when it gains or
+        // loses focus, and offers Esc to it first.
+        let editor = self.editor
+        editor.onFocusChange = { [weak self, weak editor] focused in
+            self?.voice.editorFocusChanged?(focused ? editor : nil)
+        }
+        editor.onCancel = { [weak self] in self?.voice.escape?() ?? false }
     }
 
     public convenience init(services: AppServices) {
@@ -292,7 +306,9 @@ public final class NotesModel {
             revealedSegmentID = nil
             // Dictating into the note being left: stop; its last phrase still
             // lands there (the editor keeps it with its note).
-            if let current = selectedNoteID, voice.isDictating?(current) == true { voice.stopDictation?() }
+            if let current = selectedNoteID, voice.isDictating?(current) == true, let stop = voice.stopDictation {
+                Task { await stop() }
+            }
         }
         selectedNoteID = note?.id
         editor.open(note)

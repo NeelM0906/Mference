@@ -4,12 +4,15 @@ import MferenceAppCore
 import SwiftUI
 import Testing
 
-/// Notes wired to the voice team's models (N3): Dictate, ⇧⌘D's focused
-/// editor, Esc, note switches, Open note, the toolbar. FakeSpeechService.
+/// The Notes side of the voice seams (N3 sets the hooks in
+/// `VoiceModels.connect(notes:)`): Notes calls them at the right moments
+/// and hosts the voice views. Spies stand in for N3's models; no dictation
+/// session runs.
 @MainActor
 @Suite(.serialized) struct NotesVoiceWiringTests {
-    /// A small store (two notes, one folder): these tests need little data.
-    static func smallModel(speech: FakeSpeechService) throws -> NotesModel {
+    /// A small store (two notes, one folder).
+    static func smallModel() throws -> NotesModel {
+        let speech = FakeSpeechService()
         let store = NoteStore(container: try AppModelContainer.inMemory(), attachments: .temporary(), speech: speech)
         let work = try store.createFolder(named: "Work")
         let dentist = try store.createNote(now: NotesFixtures.date(11, 16))
@@ -22,62 +25,61 @@ import Testing
         return model
     }
 
-    func setUp() throws -> (NotesModel, VoiceModels, NoteEditorTests.Harness) {
-        let speech = FakeSpeechService(dictation: .saying("then the hotel."))
-        let model = try Self.smallModel(speech: speech)
-        let voice = VoiceModels(speech: speech,
-                                permissions: FakePermissionBroker(states: [.microphone: .granted]),
-                                preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
-        model.connect(voice)
+    @Test func theEditorPublishesItselfWhenItGainsAndLosesFocus() throws {
+        let model = try Self.smallModel()
+        var focused: [NoteEditorController?] = []
+        model.voice.editorFocusChanged = { focused.append($0) }
         let h = NoteEditorTests.Harness()
         model.editor.attach(h.view)
-        return (model, voice, h)
-    }
-
-    @Test func theFocusedEditorIsWhereShiftCommandDDictates() throws {
-        let (model, voice, h) = try setUp()
-        h.window.makeFirstResponder(nil)
+        h.window.makeFirstResponder(nil)          // the harness had focused it
+        focused.removeAll()
         h.window.makeFirstResponder(h.view)
-        #expect(voice.focusedDictationTarget === model.editor)
-        #expect(voice.focusedDictationNoteID == model.selectedNoteID)
         h.window.makeFirstResponder(nil)
-        #expect(voice.focusedDictationTarget == nil)
+        #expect(focused.count == 2)
+        #expect(focused.first.flatMap { $0 } === model.editor)
+        #expect(focused.last.flatMap { $0 } == nil)
+        // The editor carries its note id for the voice side.
+        #expect(model.editor.noteID == model.selectedNoteID)
     }
 
-    // These tests start no dictation session: dictation end to end is
-    // covered by NoteDictationTargetTests (the editor) and N3's controller
-    // tests; running sessions here made N3's timing-sensitive setup test flaky.
-
-    @Test func dictateGoesThroughTheVoiceModels() throws {
-        let speech = FakeSpeechService.notInstalled()
-        let model = try Self.smallModel(speech: speech)
-        let voice = VoiceModels(speech: speech, permissions: FakePermissionBroker(),
-                                preferences: SpeechPreferences(store: InMemorySettingsStore()), isOffline: { false })
-        model.connect(voice)
-        // Not installed yet: the Dictate button brings up the setup card.
-        model.voice.toggleDictation?(model.editor)
-        #expect(voice.setup.pendingAction == .dictate)
-        #expect(model.voice.isDictating?(try #require(model.selectedNoteID)) == false)
-        // Esc without dictation is the text view's own.
+    @Test func escGoesToTheVoiceSideFirst() throws {
+        let model = try Self.smallModel()
+        let h = NoteEditorTests.Harness()
+        model.editor.attach(h.view)
+        var asked = 0
+        model.voice.escape = { asked += 1; return true }
+        h.view.cancelOperation(nil)
+        #expect(asked == 1)
+        model.voice.escape = { asked += 1; return false }
         #expect(model.editor.onCancel?() == false)
+        #expect(asked == 2)
     }
 
-    @Test func switchingNotesStopsDictationIntoTheNoteLeft() throws {
-        let (model, _, _) = try setUp()
+    @Test func dictateCallsTheHookWithTheEditor() throws {
+        let model = try Self.smallModel()
+        var targets: [NoteEditorController] = []
+        model.voice.toggleDictation = { targets.append($0) }
+        model.voice.toggleDictation?(model.editor)
+        #expect(targets.count == 1 && targets[0] === model.editor)
+    }
+
+    @Test func switchingNotesStopsDictationIntoTheNoteLeft() async throws {
+        let model = try Self.smallModel()
         let first = try #require(model.selectedNoteID)
         var stopped = 0
         model.voice.isDictating = { $0 == first }
         model.voice.stopDictation = { stopped += 1 }
         model.selectAdjacent(1)
         #expect(model.selectedNoteID != first)
-        #expect(stopped == 1)
+        #expect(await eventually { stopped == 1 })
         // Moving on from a note not being dictated into stops nothing.
         model.selectAdjacent(-1)
+        try await Task.sleep(for: .milliseconds(20))
         #expect(stopped == 1)
     }
 
     @Test func openNoteShowsTheNoteWhereverTheListWas() throws {
-        let (model, _, _) = try setUp()
+        let model = try Self.smallModel()
         let dentist = try #require(model.notes.first { model.title(of: $0) == "Dentist questions" })
         let work = try #require(model.folders.first { $0.name == "Work" })
         model.scope = .folder(work.id)
@@ -90,10 +92,12 @@ import Testing
     }
 
     @Test func theShellBarHostsTheVoiceToolbar() throws {
-        let (model, _, _) = try setUp()
-        #expect(model.voice.toolbar != nil)
+        let model = try Self.smallModel()
+        var built = 0
+        model.voice.toolbar = { built += 1; return AnyView(Text("Voice toolbar")) }
         let root = RootView(model: ShellModel(selection: .notes, defaults: nil), chrome: .inline)
             .environment(ScreenModels(notes: model))
         #expect(ImageRenderer(content: root.frame(width: 1200, height: 748)).cgImage != nil)
+        #expect(built > 0)
     }
 }
