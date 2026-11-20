@@ -38,6 +38,13 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "Mference", path: ".."),
+        // Speech for Notes (Notes spec 3, 5.4; spike S1 2026-11-20): upstream
+        // FluidAudio loads Fluid Speech Pro as `.v3` from a local folder.
+        // Pinned exactly. Traits: ASR, VAD and diarization only; no TTS and
+        // no prebuilt NemoTextProcessing binary. Only MferenceAppCore/Speech
+        // imports it, and only `loadLocal`-style APIs that never download.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.18.4",
+                 traits: ["Diarizer"]),
     ],
     targets: [
         .target(
@@ -48,6 +55,7 @@ let package = Package(
             dependencies: [
                 .product(name: "MferenceEngine", package: "Mference"),
                 .product(name: "Mference", package: "Mference"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             // Versioned web-answer prompt and tool schemas (spec 4.5.3), U3.
             resources: [.process("Web/Resources")],
